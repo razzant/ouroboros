@@ -23,6 +23,7 @@ from typing import Any
 
 from devtools.benchmarks.cybergym.cybergym_dispatch import (  # noqa: F401
     GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
+    BudgetCapReached,
     GatewayCircuitOpen,
     run_dispatched,
 )
@@ -1255,7 +1256,14 @@ def settle_finished_attempt(
     *,
     before_write: Callable[[BudgetOverspend | None], None] | None = None,
 ) -> None:
-    """Settle a finished attempt's claim from its outcome, or mark it unresolved."""
+    """Settle a finished attempt's claim from its outcome.
+
+    Three dispositions: a known actual settles exactly; an outcome with
+    measured but non-final/unattested cost evidence is marked unresolved at
+    its measured bound for reconcile; an outcome with NO cost evidence at
+    all (transport/custody loss) settles terminally at its reservation so
+    the cap projection cannot leak phantom liability.
+    """
     projected = dict(outcome)
     accounting = _terminal_gateway_accounting(outcome.get("runtime_result"))
     if accounting:
@@ -1263,6 +1271,25 @@ def settle_finished_attempt(
     actual = _finished_attempt_actual_usd(projected)
     if actual is not None:
         ledger.settle(str(attempt_id), actual, before_write=before_write)
+    elif not accounting and all(
+        projected.get(key) is None
+        for key in ("cost_usd", "cost_upper_bound_usd", "unresolved_upper_bound_usd")
+    ):
+        # No terminal gateway frame and NO measured cost evidence at all:
+        # the attempt was dispatched but its actual spend is unknowable from
+        # here (transport died, custody was lost).  Settle at the attempt's
+        # current liability — the reservation upper bound — so the cap
+        # projection becomes terminal and honest instead of holding an
+        # eternal unresolved liability that nothing inside the run would
+        # ever resolve (run 20260907T233516Z leaked 129 x $20 this way and
+        # tripped the cap on phantom spend).  Settling at exactly the held
+        # liability is projection-neutral and cannot overspend.
+        # A row carrying ANY measured cost (final or not, attested or not)
+        # keeps the unresolved path below: the measured bound is terminal
+        # evidence reconcile can settle exactly, and a partial measurement
+        # must never be floored up to the reservation.
+        bound = _active_attempt_liability(ledger.events(), str(attempt_id))
+        ledger.settle(str(attempt_id), bound, before_write=before_write)
     else:
         upper_bound = projected.get("cost_upper_bound_usd")
         if upper_bound is None:
@@ -1470,6 +1497,14 @@ def run_campaign(
                 else (contract if isinstance(contract, Mapping) else None),
                 attempt_id=str(claim["attempt_id"]) if claim else "",
             )
+        except BudgetRefused:
+            # Claim-time refusal: no ledger event exists and the task was
+            # never dispatched, so it must NOT become an infra row.  The
+            # dispatch engine pauses admission, waits for in-flight
+            # settlements to free headroom, and either resumes or ends the
+            # campaign with BudgetCapReached (run 20260907T233516Z flushed
+            # 1145 undispatched tasks into infra rows here).
+            raise
         except Exception as exc:
             if claim is not None:
                 terminal_accounting = _terminal_gateway_accounting(
@@ -1583,6 +1618,30 @@ def run_campaign(
     gateway_probe = getattr(dispatch_owner, "probe_gateway_alive", None)
     if not callable(gateway_probe):
         gateway_probe = None
+
+    def _budget_probe() -> bool:
+        """Read-only replay of the claim admission check.
+
+        The dispatch engine calls this after each in-flight settlement while
+        admission is paused on a budget refusal; True means a fresh per-task
+        reservation would fit the cap right now.  It never writes an event.
+        """
+        try:
+            estimate = _money(
+                estimated_cost_usd, field="estimated_cost_usd", allow_none=True
+            )
+            if estimate is None or estimate <= 0:
+                return False
+            projection = ledger.projection()
+        except LedgerError:
+            return False
+        if not projection.can_dispatch:
+            return False
+        if ledger.cap_usd is None:
+            return True
+        # can_dispatch under a cap implies a numeric projection.
+        return projection.projected_usd + estimate <= ledger.cap_usd
+
     dispatch_events_path = root / "dispatch_events.jsonl"
 
     def _record_dispatch_event(event: Mapping[str, Any]) -> None:
@@ -1605,5 +1664,6 @@ def run_campaign(
             threshold=gateway_circuit_threshold,
             on_row=_land_and_settle,
             gateway_probe=gateway_probe,
+            budget_probe=_budget_probe,
             on_event=_record_dispatch_event,
         )

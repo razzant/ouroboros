@@ -973,8 +973,70 @@ class _DockerRuntimeMixin:
             self._unresolved_workspace_custody[container_name] = failure_reason
         return False
 
+    def _heal_unresolved_workspace_custody(self) -> None:
+        """Best-effort release of provably-terminal unresolved custody entries.
+
+        A single container whose startup custody could not be proven (for
+        example a daemon hiccup that left it in ``Created``) must not poison
+        every later lane for the rest of the campaign — run 20260907T233516Z
+        burned 107 tasks on one such entry.  For each recorded name:
+        re-inspect; if the object is gone, drop the entry; if it is provably
+        owned by this campaign and in a removable terminal state
+        (``created``/``exited``/``dead``), remove it by exact id and drop the
+        entry.  A running container, a daemon that cannot be read, or failed
+        ownership proof keeps its entry latched — nothing is ever removed on
+        a guess.  Safe under concurrent lanes: names are per-attempt opaque
+        and removal is idempotent.
+        """
+        with self._registry_condition:
+            pending = sorted(self._unresolved_workspace_custody)
+        for container_name in pending:
+            try:
+                observed = self._inspect_optional("container", container_name)
+            except Exception:  # noqa: BLE001 - unreadable daemon keeps the latch
+                continue
+            if observed is None:
+                with self._registry_condition:
+                    self._unresolved_workspace_custody.pop(container_name, None)
+                continue
+            observed_id = str(observed.get("Id") or "").strip()
+            actual_name = str(observed.get("Name") or "").lstrip("/")
+            config = observed.get("Config")
+            labels = config.get("Labels", {}) if isinstance(config, Mapping) else {}
+            state = observed.get("State")
+            status = (
+                str(state.get("Status") or "").strip().lower()
+                if isinstance(state, Mapping)
+                else ""
+            )
+            owned = (
+                bool(observed_id)
+                and actual_name == container_name
+                and isinstance(labels, Mapping)
+                and labels.get("com.ouroboros.campaign") == self.config.campaign_id
+                and labels.get("com.ouroboros.role") == "workspace"
+            )
+            if not owned or status not in {"created", "exited", "dead"}:
+                continue
+            try:
+                result = self._docker("rm", "--force", observed_id, timeout=60)
+                if result.returncode not in {0, 1}:
+                    continue
+                if self._inspect_optional("container", observed_id) is not None:
+                    continue
+            except Exception:  # noqa: BLE001 - a failed removal keeps the latch
+                continue
+            with self._registry_condition:
+                self._task_containers.pop(container_name, None)
+                self._workspace_observations.pop(container_name, None)
+                self._unresolved_workspace_custody.pop(container_name, None)
+
     def _workspace(self, task: TaskSpec, task_dir: pathlib.Path, plan: NetworkPlan) -> str:
         container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
+        with self._registry_condition:
+            heal_needed = bool(self._unresolved_workspace_custody)
+        if heal_needed:
+            self._heal_unresolved_workspace_custody()
         with self._registry_condition:
             if self._unresolved_workspace_custody:
                 names = ", ".join(sorted(self._unresolved_workspace_custody))
@@ -1350,6 +1412,10 @@ class _DockerRuntimeMixin:
         with self._registry_condition:
             if self._workspace_starting:
                 raise ExecutorFailure("cleanup custody is pending workspace startup")
+            heal_needed = bool(self._unresolved_workspace_custody)
+        if heal_needed:
+            self._heal_unresolved_workspace_custody()
+        with self._registry_condition:
             if self._unresolved_workspace_custody:
                 names = ", ".join(sorted(self._unresolved_workspace_custody))
                 raise ExecutorFailure(f"cleanup custody is unresolved for workspace names: {names}")

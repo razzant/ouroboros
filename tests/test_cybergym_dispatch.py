@@ -5,6 +5,13 @@ launcher kept dispatching into the dead gateway, burning 234 tasks into
 ``ExecutorFailure: HTTP GET transport failed`` rows.  These tests pin the
 breaker: N consecutive transport-class failures stop admission, in-flight
 tasks settle, and the campaign fails fast with a typed outcome.
+
+The second half pins the budget gate (run 20260907T233516Z flushed 1145
+never-dispatched tasks into ``infra_failed`` rows on claim refusals): a
+claim-time ``BudgetRefused`` now pauses admission, in-flight settlements are
+probed for freed headroom, and only a drained pool with the cap still
+refusing ends the campaign with ``BudgetCapReached`` — undispatched tasks
+stay row-free for a later resume campaign.
 """
 
 from __future__ import annotations
@@ -12,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -141,7 +149,11 @@ def test_consecutive_transport_failures_open_circuit_and_skip_remaining(tmp_path
         assert not safe_task_path(root, task_id).exists()
     projection = BudgetLedger(root / "claims.jsonl", cap_usd=10).projection()
     assert projection.reserved_usd == 0
-    assert projection.unresolved_upper_bound_usd == 3
+    # Transport-dead attempts have no terminal frame, so each claim settles
+    # terminally at its reservation instead of leaking an eternal unresolved
+    # liability (run 20260907T233516Z tripped the cap on such phantom spend).
+    assert projection.settled_usd == 3
+    assert projection.unresolved_upper_bound_usd == 0
     assert projection.projected_usd == 3
     assert projection.can_dispatch is True
 
@@ -787,5 +799,390 @@ def test_launcher_finalizes_gateway_unreachable_when_circuit_opens(monkeypatch, 
     assert extra["rows_written"] == 2
     assert extra["completed_count"] == 1
     assert extra["infra_count"] == 1
+    assert extra["close_skipped"] is False
+    assert extra["server_cleanup"]["status"] == "closed"
+
+
+def test_budget_refusal_name_is_pinned_and_overspend_never_trips_the_gate():
+    from devtools.benchmarks.cybergym.cybergym_adapter import (
+        BudgetOverspend,
+        BudgetRefused,
+    )
+    from devtools.benchmarks.cybergym.cybergym_dispatch import (
+        BUDGET_REFUSED_ERROR_NAME,
+        _is_budget_refusal,
+    )
+
+    assert BUDGET_REFUSED_ERROR_NAME == BudgetRefused.__name__
+    assert _is_budget_refusal(BudgetRefused("reservation would exceed cap"))
+    # The settlement-time subclass already has a row path through
+    # ``_run_one``; it must never be re-queued as a claim-time refusal.
+    assert issubclass(BudgetOverspend, BudgetRefused)
+    assert not _is_budget_refusal(BudgetOverspend("settlement overspend"))
+    assert not _is_budget_refusal(ExecutorFailure("workspace failed"))
+
+
+def test_budget_refusal_pauses_and_settlement_frees_headroom(tmp_path):
+    """A refused claim pauses admission; a cheap settlement resumes it.
+
+    Run 20260907T233516Z burned 1145 never-dispatched tasks into infra rows
+    here.  Now the refused task is re-queued without a row, and once the
+    in-flight attempt settles below its reservation the probe sees headroom
+    and admission resumes.
+    """
+
+    root = tmp_path / "budget-resume"
+    events_path = root / "dispatch_events.jsonl"
+
+    def callback(task, task_dir):
+        if task.task_id == "arvo:1":
+            # Hold the reservation until the second claim has been refused
+            # and the gate paused; the dispatcher writes the pause event
+            # synchronously before waiting on the in-flight lane.
+            deadline = time.monotonic() + 30
+            while True:
+                if (
+                    events_path.exists()
+                    and '"budget_pause"' in events_path.read_text(encoding="utf-8")
+                ):
+                    break
+                if time.monotonic() > deadline:
+                    raise AssertionError("budget pause was never recorded")
+                time.sleep(0.01)
+            outcome = _completed(task, task_dir)
+            outcome["cost_usd"] = 5.0
+            return outcome
+        return _completed(task, task_dir)
+
+    rows = run_campaign(
+        ["arvo:1", "arvo:2"],
+        run_root=root,
+        executor=callback,
+        estimated_cost_usd=20,
+        budget_cap_usd=25,
+        max_workers=2,
+    )
+
+    assert [row["task_id"] for row in rows] == ["arvo:1", "arvo:2"]
+    assert all(row["status"] == "completed" for row in rows)
+    assert {row["task_id"] for row in _result_index(root)} == {"arvo:1", "arvo:2"}
+    logged = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    names = [entry["event"] for entry in logged]
+    assert "budget_pause" in names
+    assert names[-1] == "budget_resume"
+    assert names.index("budget_pause") < names.index("budget_resume")
+    projection = BudgetLedger(root / "claims.jsonl", cap_usd=25).projection()
+    assert projection.settled_usd == pytest.approx(5.1)
+    assert projection.reserved_usd == 0
+    assert projection.can_dispatch is True
+
+
+def test_budget_cap_reached_leaves_undispatched_tasks_row_free(tmp_path):
+    """When no settlement frees headroom the campaign stops, row-free."""
+
+    def callback(task, task_dir):
+        outcome = _completed(task, task_dir)
+        outcome["cost_usd"] = 20.0
+        return outcome
+
+    root = tmp_path / "budget-cap"
+    from devtools.benchmarks.cybergym.cybergym_dispatch import BudgetCapReached
+
+    with pytest.raises(BudgetCapReached) as excinfo:
+        run_campaign(
+            ["arvo:1", "arvo:2", "arvo:3"],
+            run_root=root,
+            executor=callback,
+            estimated_cost_usd=20,
+            budget_cap_usd=20,
+            max_workers=2,
+        )
+
+    exc = excinfo.value
+    assert isinstance(exc, CyberGymError)
+    assert [row["task_id"] for row in exc.rows] == ["arvo:1"]
+    assert exc.remaining_task_ids == ["arvo:2", "arvo:3"]
+    payload = exc.as_dict()
+    assert payload["outcome"] == "budget_cap_reached"
+    assert payload["dispatched_rows"] == 1
+    assert payload["pause"]["refusals"] >= 1
+    # Never-dispatched tasks leave no row and no task directory, so a later
+    # resume campaign re-runs them without any retry flag.
+    assert [row["task_id"] for row in _result_index(root)] == ["arvo:1"]
+    for task_id in ("arvo:2", "arvo:3"):
+        assert not safe_task_path(root, task_id).exists()
+    projection = BudgetLedger(root / "claims.jsonl", cap_usd=20).projection()
+    assert projection.settled_usd == pytest.approx(20)
+    assert projection.reserved_usd == 0
+    logged = (root / "dispatch_events.jsonl").read_text(encoding="utf-8")
+    assert '"budget_pause"' in logged
+    assert '"budget_gate_closed"' in logged
+    assert '"cap_exhausted"' in logged
+
+
+def test_budget_refusal_in_a_serial_lane_ends_the_campaign_cleanly(tmp_path):
+    """A serial lane holds no in-flight work that could free headroom."""
+
+    def callback(task, task_dir):
+        outcome = _completed(task, task_dir)
+        outcome["cost_usd"] = 20.0
+        return outcome
+
+    from devtools.benchmarks.cybergym.cybergym_dispatch import BudgetCapReached
+
+    root = tmp_path / "budget-serial"
+    with pytest.raises(BudgetCapReached) as excinfo:
+        run_campaign(
+            ["arvo:1", "arvo:2", "arvo:3"],
+            run_root=root,
+            executor=callback,
+            estimated_cost_usd=20,
+            budget_cap_usd=20,
+            max_workers=1,
+        )
+
+    assert [row["task_id"] for row in excinfo.value.rows] == ["arvo:1"]
+    assert excinfo.value.remaining_task_ids == ["arvo:2", "arvo:3"]
+    assert [row["task_id"] for row in _result_index(root)] == ["arvo:1"]
+
+
+def test_budget_gate_without_probe_closes_on_first_refusal(tmp_path):
+    """Without a probe the first refusal is terminal; in-flight rows land."""
+
+    from devtools.benchmarks.cybergym.cybergym_adapter import BudgetRefused
+    from devtools.benchmarks.cybergym.cybergym_dispatch import (
+        BudgetCapReached,
+        run_dispatched,
+    )
+
+    second_refused = threading.Event()
+
+    def run_one(task):
+        if task.task_id == "arvo:1":
+            assert second_refused.wait(timeout=30)
+            return {"task_id": task.task_id, "status": "completed"}
+        if task.task_id == "arvo:2":
+            second_refused.set()
+            raise BudgetRefused("reservation would exceed campaign budget cap")
+        raise AssertionError(f"{task.task_id} must never be dispatched")
+
+    events: list[dict] = []
+    with pytest.raises(BudgetCapReached) as excinfo:
+        run_dispatched(
+            [_Task(f"arvo:{index}") for index in range(1, 4)],
+            run_one,
+            max_workers=2,
+            budget_probe=None,
+            on_event=events.append,
+        )
+
+    exc = excinfo.value
+    assert [row["task_id"] for row in exc.rows] == ["arvo:1"]
+    assert exc.remaining_task_ids == ["arvo:2", "arvo:3"]
+    assert exc.as_dict()["pause"]["refusals"] == 1
+    assert [event["event"] for event in events] == ["budget_gate_closed"]
+    assert events[0]["reason"] == "no_probe"
+
+
+def test_budget_overspend_is_not_a_claim_refusal(tmp_path):
+    """The settlement-time subclass propagates; it never re-queues a task."""
+
+    from devtools.benchmarks.cybergym.cybergym_adapter import BudgetOverspend
+    from devtools.benchmarks.cybergym.cybergym_dispatch import run_dispatched
+
+    def run_one(task):
+        raise BudgetOverspend("measured settlement exceeds campaign budget cap")
+
+    with pytest.raises(BudgetOverspend):
+        run_dispatched(
+            [_Task("arvo:1"), _Task("arvo:2")],
+            run_one,
+            max_workers=2,
+        )
+
+
+def test_launcher_finalizes_budget_cap_reached(monkeypatch, tmp_path):
+    """Pin the launcher branch that finalizes a budget-stopped campaign.
+
+    ``run_campaign`` raising ``BudgetCapReached`` must still produce a
+    finalized manifest: the rows that landed stay accounted, the
+    undispatched tasks are named under ``extra.budget_cap`` and the run
+    records outcome ``budget_cap_reached`` with exit code 2.
+    """
+    from types import SimpleNamespace
+
+    import devtools.benchmarks.cybergym.run_cybergym as launcher
+    from devtools.benchmarks.cybergym.cybergym_dispatch import BudgetCapReached
+
+    repo = tmp_path / "seed"
+    source = tmp_path / "cybergym-source"
+    data = tmp_path / "cybergym-data"
+    tasks = tmp_path / "tasks.json"
+    mask_map = tmp_path / "mask-map.json"
+    settings_template = tmp_path / "settings.json"
+    server_root = tmp_path / "server-root"
+    binary_dir = server_root / "bin"
+    for directory in (repo, source, data, server_root, binary_dir):
+        directory.mkdir(parents=True)
+    tasks.write_text("{}", encoding="utf-8")
+    mask_map.write_text("{}", encoding="utf-8")
+    settings_template.write_text("{}", encoding="utf-8")
+    applied = tmp_path / "run" / "settings_applied.json"
+    expected_commit = "a" * 40
+    task_ids = ["arvo:1", "arvo:2", "arvo:3", "arvo:4"]
+    events: list[str] = []
+
+    class FakeServer:
+        base_url = "http://127.0.0.1:18181"
+        attestation = {"repo_head": expected_commit}
+
+        def close(self):
+            events.append("server.close")
+
+    class FakeExecutor:
+        def prepare(self):
+            events.append("executor.prepare")
+            return {"prepared": True}
+
+        def close(self):
+            events.append("executor.close")
+            return {"ok": True, "status": "closed"}
+
+    def fake_prepare(_template, _out_root, _args):
+        applied.parent.mkdir(parents=True, exist_ok=True)
+        applied.write_text("{}", encoding="utf-8")
+        return applied, {
+            "model": OFFICIAL_MODEL,
+            "model_slots": {"OUROBOROS_MODEL": OFFICIAL_MODEL},
+            "provider_credentials": {},
+        }
+
+    args = SimpleNamespace(
+        repo_dir=repo,
+        source_root=source,
+        data_root=data,
+        tasks_file=tasks,
+        task_id=list(task_ids),
+        server="http://cybergym-internal:8666",
+        ouroboros_url="",
+        docker_host="unix:///run/user/1006/docker.sock",
+        server_image="cybergym-server",
+        server_image_digest="sha256:" + "b" * 64,
+        workspace_image="ouroboros-workspace",
+        workspace_image_digest="sha256:" + "c" * 64,
+        server_root=server_root,
+        binary_dir=binary_dir,
+        cybergym_api_key_env="CYBERGYM_API_KEY",
+        mask_map=mask_map,
+        difficulty=DEFAULT_LEVEL,
+        model=OFFICIAL_MODEL,
+        settings_path=settings_template,
+        out_dir=tmp_path / "run",
+        run_id="",
+        budget_usd=2.0,
+        per_task_cost_usd=1.0,
+        per_task_estimate_usd=1.0,
+        timeout_sec=1,
+        workers=1,
+        executor="",
+        dry_run=False,
+        allow_dirty_seed=False,
+        expected_source_sha256="",
+        expected_data_sha256="a" * 64,
+        expected_binary_sha256="b" * 64,
+        expected_tasks_sha256="",
+        expected_mask_sha256="mask-digest",
+        cybergym_python="python3",
+        provider_only=["provider-a"],
+        provider_order=["provider-a"],
+    )
+    monkeypatch.setattr(launcher, "parse_args", lambda _argv=None: args)
+    monkeypatch.setattr(launcher, "pre_admission_report", lambda **_kwargs: {"ok": True, "reasons": []})
+    monkeypatch.setattr(
+        launcher,
+        "admit_benchmark_run",
+        lambda _path, **_kwargs: {
+            "source": {"head": expected_commit},
+            "extra": dict(_kwargs.get("extra") or {}),
+            "harness": {},
+            "output_paths": {},
+        },
+    )
+    monkeypatch.setattr(launcher, "verify_source_checkout", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(launcher, "source_tree_digest", lambda *_args, **_kwargs: "source-digest")
+    monkeypatch.setattr(
+        launcher,
+        "verify_mask_map",
+        lambda *_args, **_kwargs: {"sha256": "mask-digest"},
+    )
+    monkeypatch.setattr(
+        launcher,
+        "load_task_catalog",
+        lambda *_args, **_kwargs: {"task_ids": list(task_ids)},
+    )
+    monkeypatch.setattr(launcher, "_prepare_applied_settings", fake_prepare)
+    monkeypatch.setattr(
+        launcher,
+        "_start_isolated_ouroboros_server",
+        lambda *_args, **_kwargs: FakeServer(),
+    )
+    monkeypatch.setattr(launcher, "_build_default_executor", lambda *_args, **_kwargs: FakeExecutor())
+    monkeypatch.setattr(
+        launcher,
+        "_validate_paid_observations",
+        lambda *_args, **_kwargs: (
+            {"status": "passed", "model": OFFICIAL_MODEL},
+            {"sha256": "a" * 64},
+            {"sha256": "b" * 64},
+            0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "_record_provider_probe_cost",
+        lambda *_args, **_kwargs: {"attempt_id": "campaign-overhead-provider_probe"},
+    )
+
+    landed_rows = [
+        {
+            "task_id": "arvo:1",
+            "status": "completed",
+            "final_submission_success": True,
+        },
+    ]
+    dispatched: list[str] = []
+
+    def cap_reached(specs, **_kwargs):
+        dispatched.extend(spec.task_id for spec in specs)
+        raise BudgetCapReached(
+            rows=landed_rows,
+            remaining=task_ids[1:],
+            pause={"refusals": 1, "probes": 2, "pauses": []},
+        )
+
+    monkeypatch.setattr(launcher, "run_campaign", cap_reached)
+    rc = launcher.main()
+
+    assert rc == 2
+    assert dispatched == task_ids
+    assert events == ["executor.prepare", "executor.close", "server.close"]
+    manifest = json.loads((tmp_path / "run" / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["requested_task_ids"] == task_ids
+    extra = manifest["extra"]
+    assert extra["outcome"] == "budget_cap_reached"
+    assert extra["exit_code"] == 2
+    assert extra["budget_cap"] == {
+        "outcome": "budget_cap_reached",
+        "dispatched_rows": 1,
+        "remaining_task_ids": ["arvo:2", "arvo:3", "arvo:4"],
+        "pause": {"refusals": 1, "probes": 2, "pauses": []},
+    }
+    # Rows that landed before the cap stopped admission stay accounted.
+    assert extra["rows_written"] == 1
+    assert extra["completed_count"] == 1
     assert extra["close_skipped"] is False
     assert extra["server_cleanup"]["status"] == "closed"

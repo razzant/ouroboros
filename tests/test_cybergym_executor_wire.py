@@ -1022,8 +1022,10 @@ def test_post_admission_status_error_is_not_reclassified_as_zero_cost(
     assert rows[0]["status"] == "infra_failed"
     assert rows[0]["cost_usd"] is None
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=2).projection()
-    assert projection.settled_usd == 0
-    assert projection.unresolved_upper_bound_usd == pytest.approx(1)
+    # No terminal gateway frame and no measured spend: the claim settles
+    # terminally at its reservation instead of staying unresolved forever.
+    assert projection.settled_usd == pytest.approx(1)
+    assert projection.unresolved_upper_bound_usd == 0
     assert projection.projected_usd == pytest.approx(1)
     assert projection.can_dispatch is True
 
@@ -1573,9 +1575,28 @@ def test_fair_completion_execution_ok_and_agent_attributable_tool_errors():
             _tool_error("edit_text", "⚠️ STR_REPLACE_ERROR: old_str not found in sweep.py."),
             _tool_error("list_files", "⚠️ LIST_FILES_ERROR: Directory not found: tmp"),
             _tool_error("run_command", "⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of 900s", status="timeout"),
+            # full1507 arvo:1461 (2026-09-08): the model hallucinated a `bash`
+            # tool after twenty successful run_command calls and finalized
+            # without a marker — the model's own defect, fair completion.
+            _tool_error("bash", "⚠️ Unknown tool: bash. Available: apply_patch, run_command, ...", status="unknown_tool"),
         ]},
     })
     assert _gateway_fair_completion(degraded) == (True, "agent_attributable_tool_errors")
+
+
+def test_fair_completion_dead_extension_unknown_tool_text_stays_infra():
+    from devtools.benchmarks.cybergym.cybergym_wire import _gateway_fair_completion
+
+    # A dead extension composes the SAME "Unknown tool:" sentence but with the
+    # typed status `unavailable`: that is the substrate's answer, not the
+    # model's hallucination, so the run keeps the infrastructure verdict.
+    degraded = _envelope({
+        "status": "degraded", "reason_code": "tool_failure",
+        "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": [
+            _tool_error("ext_nmap", "⚠️ Unknown tool: ext_nmap. Available: apply_patch, run_command, ...", status="unavailable"),
+        ]},
+    })
+    assert _gateway_fair_completion(degraded) == (False, "degraded_runtime_tool_error")
 
 
 @pytest.mark.parametrize("execution, basis", [

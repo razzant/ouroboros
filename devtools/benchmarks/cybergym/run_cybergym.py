@@ -52,6 +52,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     OFFICIAL_MODEL,
     OFFICIAL_SOURCE_PIN,
     OFFICIAL_TASKS_SHA256,
+    BudgetCapReached,
     BudgetLedger,
     CyberGymError,
     CyberGymIntegrationUnavailable,
@@ -1357,6 +1358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             final.checkpoint("settings_applied")
 
             circuit: GatewayCircuitOpen | None = None
+            budget_stop: BudgetCapReached | None = None
             if args.dry_run:
                 rows = _write_planned_rows(
                     out_root, task_ids, level=DEFAULT_LEVEL, contract=contract
@@ -1488,6 +1490,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     except GatewayCircuitOpen as exc:
                         circuit, rows = exc, list(exc.rows)
                         manifest["extra"]["gateway_circuit"] = exc.as_dict()
+                    except BudgetCapReached as exc:
+                        # The cap refused further claims and no in-flight
+                        # settlement freed headroom.  Undispatched tasks have
+                        # no rows, so a resume campaign re-runs them cleanly.
+                        budget_stop, rows = exc, list(exc.rows)
+                        manifest["extra"]["budget_cap"] = exc.as_dict()
                 finally:
                     _cleanup_execution_resources(executor, isolated_server, manifest)
 
@@ -1500,9 +1508,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest["extra"].update(_row_counts(rows))
             custody_pending = bool(manifest.get("extra", {}).get("close_skipped"))
             all_completed = args.dry_run or all(row.get("status") == "completed" for row in rows)
-            code = 2 if custody_pending or circuit is not None or not all_completed else 0
+            code = (
+                2
+                if custody_pending or circuit is not None or budget_stop is not None or not all_completed
+                else 0
+            )
             if circuit is not None:
                 final.update({"outcome": "gateway_unreachable", "exit_code": 2})
+            elif budget_stop is not None:
+                final.update({"outcome": "budget_cap_reached", "exit_code": 2})
             elif custody_pending:
                 final.update({"outcome": "custody_pending", "exit_code": code})
             elif code:

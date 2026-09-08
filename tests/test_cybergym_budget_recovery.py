@@ -25,5 +25,9 @@ def test_nonfinal_measured_spend_above_reservation_is_a_liability_floor(tmp_path
     )
 
     projection = BudgetLedger(root / "claims.jsonl", cap_usd=5).projection()
+    # A measured non-final spend is terminal evidence reconcile can settle
+    # exactly, so the claim stays unresolved at the measured bound — only
+    # attempts with NO measured cost evidence settle at their reservation
+    # (run 20260907T233516Z phantom-liability fix).
     assert projection.unresolved_upper_bound_usd == pytest.approx(3)
     assert projection.projected_usd == pytest.approx(3)

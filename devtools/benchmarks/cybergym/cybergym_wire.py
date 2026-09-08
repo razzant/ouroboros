@@ -452,6 +452,14 @@ _AGENT_ATTRIBUTABLE_TOOL_ERROR_PREFIXES = (
     "LIST_FILES_ERROR",
     "TOOL_TIMEOUT",
 )
+# A bare ``unknown_tool`` status is the same class keyed on the typed field
+# rather than text: the model called a name that was never registered (a
+# hallucinated ``bash`` after twenty successful ``run_command`` calls —
+# full1507 arvo:1461, 2026-09-08). The shared "Unknown tool:" sentence cannot
+# be the key because a DEAD EXTENSION composes the identical text with status
+# ``unavailable``, and that one is the substrate's answer, which must keep the
+# infrastructure classification.
+_AGENT_ATTRIBUTABLE_TOOL_ERROR_STATUSES = frozenset({"unknown_tool"})
 
 
 def _gateway_fair_completion(payload: Mapping[str, Any]) -> tuple[bool, str]:
@@ -459,7 +467,8 @@ def _gateway_fair_completion(payload: Mapping[str, Any]) -> tuple[bool, str]:
 
     ``("execution_ok")`` is the plain case. A run the runtime marked
     ``degraded`` solely because of agent-attributable tool errors (see
-    ``_AGENT_ATTRIBUTABLE_TOOL_ERROR_PREFIXES``) is fair as well, basis
+    ``_AGENT_ATTRIBUTABLE_TOOL_ERROR_PREFIXES`` and the status-keyed
+    ``_AGENT_ATTRIBUTABLE_TOOL_ERROR_STATUSES``) is fair as well, basis
     ``agent_attributable_tool_errors``: CyberGym r9 (2026-09-04) recorded nine
     tasks as infrastructure ``FinalPocRefused`` whose runs had finished under
     their own steam, 40-90 minutes before the deadline, with a final message
@@ -483,6 +492,8 @@ def _gateway_fair_completion(payload: Mapping[str, Any]) -> tuple[bool, str]:
     for entry in errors:
         if not isinstance(entry, Mapping):
             return False, "degraded_untyped_tool_error"
+        if str(entry.get("status") or "") in _AGENT_ATTRIBUTABLE_TOOL_ERROR_STATUSES:
+            continue
         text = str(entry.get("result") or "").lstrip().lstrip("⚠️❌").strip()
         if not text.startswith(_AGENT_ATTRIBUTABLE_TOOL_ERROR_PREFIXES):
             return False, "degraded_runtime_tool_error"

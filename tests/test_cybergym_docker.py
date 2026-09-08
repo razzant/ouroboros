@@ -24,7 +24,11 @@ from devtools.benchmarks.cybergym.cybergym_executor import (
     CyberGymExecutor,
     ExecutorFailure,
 )
-from tests.test_cybergym_executor import _config, dataclasses_replace
+from tests.test_cybergym_executor import (
+    _config,
+    _requires_posix_mount_paths,
+    dataclasses_replace,
+)
 
 
 def test_post_create_timeout_preserves_workspace_custody(tmp_path, monkeypatch):
@@ -76,7 +80,11 @@ def test_post_create_timeout_preserves_workspace_custody(tmp_path, monkeypatch):
     assert len(executor._task_containers) == 2
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=5).projection()
     assert projection.reserved_usd == pytest.approx(0)
-    assert projection.unresolved_upper_bound_usd == pytest.approx(2)
+    # Post-dispatch poll timeouts have no terminal frame: both claims settle
+    # terminally at their reservation rather than holding an unresolved
+    # liability open until reconcile.
+    assert projection.settled_usd == pytest.approx(2)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
     assert projection.can_dispatch is True
 
 
@@ -705,3 +713,206 @@ def test_adopt_campaign_rejects_foreign_server_container(tmp_path, monkeypatch):
     with pytest.raises(ExecutorFailure, match="ownership attestation"):
         executor.adopt_campaign()
     assert executor.started is False
+
+
+def _custody_observed(config, name, container_id, *, status, campaign=None):
+    """One ``docker inspect`` body for the custody-heal matrix."""
+    return {
+        "Id": container_id,
+        "Name": "/" + name,
+        "Config": {
+            "Labels": {
+                "com.ouroboros.campaign": campaign or config.campaign_id,
+                "com.ouroboros.role": "workspace",
+            }
+        },
+        "State": {"Status": status},
+    }
+
+
+def test_heal_drops_custody_entry_when_container_is_gone(tmp_path, monkeypatch):
+    config = _config(tmp_path, provider_probe=False)
+    executor = CyberGymExecutor(config)
+    executor._unresolved_workspace_custody["cybergym-workspace-gone"] = "inspect failed"
+    monkeypatch.setattr(executor, "_inspect_optional", lambda _kind, _name: None)
+
+    executor._heal_unresolved_workspace_custody()  # noqa: SLF001 - heal seam
+
+    assert executor._unresolved_workspace_custody == {}
+
+
+def test_heal_removes_terminal_owned_container(tmp_path, monkeypatch):
+    """A provably owned container in a removable terminal state is released."""
+    config = _config(tmp_path, provider_probe=False)
+    executor = CyberGymExecutor(config)
+    name = "cybergym-workspace-stuck"
+    container_id = "e" * 64
+    executor._unresolved_workspace_custody[name] = "post-start inspect failed"
+    executor._task_containers[name] = container_id
+    observed = _custody_observed(config, name, container_id, status="created")
+    removed: list[str] = []
+
+    def fake_inspect(_kind, target):
+        if target in removed:
+            return None
+        return observed
+
+    def fake_docker(*args, timeout=60):
+        assert args[0] == "rm"
+        removed.append(args[-1])
+        return CommandResult(0, "", "")
+
+    monkeypatch.setattr(executor, "_inspect_optional", fake_inspect)
+    monkeypatch.setattr(executor, "_docker", fake_docker)
+
+    executor._heal_unresolved_workspace_custody()  # noqa: SLF001 - heal seam
+
+    assert removed == [container_id]
+    assert executor._unresolved_workspace_custody == {}
+    assert name not in executor._task_containers
+
+
+def test_heal_keeps_running_container_latched(tmp_path, monkeypatch):
+    """A live container is never removed on a guess."""
+    config = _config(tmp_path, provider_probe=False)
+    executor = CyberGymExecutor(config)
+    name = "cybergym-workspace-live"
+    executor._unresolved_workspace_custody[name] = "post-start inspect failed"
+    observed = _custody_observed(config, name, "1" * 64, status="running")
+
+    def fake_docker(*args, timeout=60):
+        raise AssertionError(f"no removal is allowed for a running container: {args}")
+
+    monkeypatch.setattr(executor, "_inspect_optional", lambda _kind, _name: observed)
+    monkeypatch.setattr(executor, "_docker", fake_docker)
+
+    executor._heal_unresolved_workspace_custody()  # noqa: SLF001 - heal seam
+
+    assert executor._unresolved_workspace_custody == {name: "post-start inspect failed"}
+
+
+def test_heal_keeps_unproven_ownership_latched(tmp_path, monkeypatch):
+    config = _config(tmp_path, provider_probe=False)
+    executor = CyberGymExecutor(config)
+    name = "cybergym-workspace-foreign"
+    executor._unresolved_workspace_custody[name] = "post-start inspect failed"
+    observed = _custody_observed(
+        config, name, "2" * 64, status="exited", campaign="another-campaign"
+    )
+
+    def fake_docker(*args, timeout=60):
+        raise AssertionError(f"no removal is allowed without ownership proof: {args}")
+
+    monkeypatch.setattr(executor, "_inspect_optional", lambda _kind, _name: observed)
+    monkeypatch.setattr(executor, "_docker", fake_docker)
+
+    executor._heal_unresolved_workspace_custody()  # noqa: SLF001 - heal seam
+
+    assert executor._unresolved_workspace_custody == {name: "post-start inspect failed"}
+
+
+def test_heal_keeps_latch_when_daemon_is_unreadable(tmp_path, monkeypatch):
+    config = _config(tmp_path, provider_probe=False)
+    executor = CyberGymExecutor(config)
+    name = "cybergym-workspace-unknown"
+    executor._unresolved_workspace_custody[name] = "post-start inspect failed"
+
+    def unreadable(_kind, _name):
+        raise ExecutorFailure("docker inspect failed for container")
+
+    monkeypatch.setattr(executor, "_inspect_optional", unreadable)
+
+    executor._heal_unresolved_workspace_custody()  # noqa: SLF001 - heal seam
+
+    assert executor._unresolved_workspace_custody == {name: "post-start inspect failed"}
+
+
+@_requires_posix_mount_paths
+def test_workspace_heals_terminal_custody_entry_instead_of_latching(tmp_path):
+    """Run 20260907T233516Z: one stuck ``Created`` container poisoned 107 lanes.
+
+    The next lane's ``_workspace`` re-inspects the recorded name, removes the
+    provably owned terminal container, and proceeds with its own start
+    instead of failing every later task on the poisoned latch.
+    """
+    config = _config(tmp_path)
+    executor = CyberGymExecutor(config)
+    executor.network_id = "network-id"
+    stuck_name = "cybergym-workspace-stuck"
+    stuck_id = "f" * 64
+    executor._unresolved_workspace_custody[stuck_name] = "post-start inspect failed"
+    stuck = _custody_observed(config, stuck_name, stuck_id, status="created")
+
+    agent_id = "agent-" + "d" * 24
+    plan = executor._task_network_plan("task-d", agent_id)  # noqa: SLF001
+    name = "cybergym-workspace-" + agent_id
+    container_id = "d" * 64
+    observed = {
+        "Id": container_id,
+        "Name": "/" + name,
+        "Config": {
+            "Image": config.workspace_image_digest,
+            "Labels": {
+                "com.ouroboros.campaign": config.campaign_id,
+                "com.ouroboros.role": "workspace",
+                "com.ouroboros.agent_id": plan.opaque_agent_id,
+            },
+        },
+        "NetworkSettings": {
+            "Networks": {"cybergym-internal": {"NetworkID": executor.network_id}}
+        },
+    }
+
+    removed: list[str] = []
+
+    def command(argv, *, cwd=None, env=None, timeout=None):
+        if "inspect" in argv and "container" in argv:
+            target = argv[-1]
+            if target in removed:
+                return CommandResult(1, "", f"Error: No such container: {target}")
+            if target in {stuck_name, stuck_id}:
+                return CommandResult(0, json.dumps([stuck]), "")
+            if target in {name, container_id}:
+                return CommandResult(0, json.dumps([observed]), "")
+        if "rm" in argv and stuck_id in argv:
+            removed.extend([stuck_id, stuck_name])
+            return CommandResult(0, "", "")
+        if "run" in argv and name in argv:
+            return CommandResult(0, container_id + "\n", "")
+        raise AssertionError(argv)
+
+    executor.config = dataclasses_replace(config, command_runner=command)
+
+    started = executor._workspace(  # noqa: SLF001 - heal-through-start assertion
+        type("Task", (), {"task_id": "task-d"})(),
+        config.run_root / "task-d",
+        plan,
+    )
+
+    assert started == name
+    assert stuck_id in removed
+    assert executor._unresolved_workspace_custody == {}
+    assert executor._task_containers[name] == container_id
+
+
+@_requires_posix_mount_paths
+def test_workspace_keeps_failing_while_custody_is_genuinely_unresolved(tmp_path, monkeypatch):
+    """A running container keeps the latch: the next lane still fails closed."""
+    config = _config(tmp_path)
+    executor = CyberGymExecutor(config)
+    executor.network_id = "network-id"
+    name = "cybergym-workspace-running"
+    executor._unresolved_workspace_custody[name] = "post-start inspect failed"
+    running = _custody_observed(config, name, "1" * 64, status="running")
+    monkeypatch.setattr(executor, "_inspect_optional", lambda _kind, _name: running)
+
+    agent_id = "agent-" + "e" * 24
+    plan = executor._task_network_plan("task-e", agent_id)  # noqa: SLF001
+    with pytest.raises(ExecutorFailure, match="workspace startup custody is unresolved"):
+        executor._workspace(  # noqa: SLF001 - latch assertion
+            type("Task", (), {"task_id": "task-e"})(),
+            config.run_root / "task-e",
+            plan,
+        )
+
+    assert executor._unresolved_workspace_custody == {name: "post-start inspect failed"}

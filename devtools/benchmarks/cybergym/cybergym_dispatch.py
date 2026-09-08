@@ -86,6 +86,53 @@ def is_gateway_transport_row(row: Mapping[str, Any]) -> bool:
     )
 
 
+# ``run_one`` signals a claim-time budget refusal by raising; the adapter's
+# ledger error class is pinned by name for the same import-cycle reason as
+# GATEWAY_TRANSPORT_INFRA_REASON (wire <- adapter <- this module).  A test
+# pins this string to ``cybergym_adapter.BudgetRefused.__name__``.  The exact
+# class name is matched, so the ``BudgetOverspend`` subclass — a settlement
+# condition that already has a row path — never trips this gate.
+BUDGET_REFUSED_ERROR_NAME = "BudgetRefused"
+
+
+class BudgetCapReached(CyberGymError):
+    """Dispatch halted: the budget projection refuses every further claim.
+
+    Raised only after admission paused on a claim refusal and no in-flight
+    settlement freed enough headroom for the next reservation (or the caller
+    supplied no probe at all).  Carries every row that landed before the stop
+    so the launcher can still account for each dispatched task;
+    never-dispatched tasks are named in ``remaining_task_ids`` and
+    deliberately have no result row, so a later resume campaign re-runs them
+    without any retry flag.
+    """
+
+    def __init__(
+        self,
+        *,
+        rows: Sequence[Mapping[str, Any]],
+        remaining: Sequence[str],
+        pause: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.rows = [dict(row) for row in rows]
+        self.remaining_task_ids = [str(task_id) for task_id in remaining]
+        self.pause = dict(pause or {})
+        super().__init__(
+            "campaign budget cap reached: "
+            f"{len(self.remaining_task_ids)} task(s) not dispatched"
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {
+            "outcome": "budget_cap_reached",
+            "dispatched_rows": len(self.rows),
+            "remaining_task_ids": list(self.remaining_task_ids),
+        }
+        if self.pause:
+            payload["pause"] = dict(self.pause)
+        return payload
+
+
 class _Breaker:
     """Transport-failure streak -> pause-and-probe -> open, under one lock."""
 
@@ -220,6 +267,137 @@ class _Breaker:
             }
 
 
+class _BudgetGate:
+    """Claim refusal -> pause-and-probe -> closed, under one lock.
+
+    Unlike the transport breaker there is no backoff clock: the only event
+    that can free headroom is an in-flight attempt settling below its
+    reservation, so probes run exactly after settlements (and once more when
+    the pool has drained) instead of on a timer.  Without a probe the first
+    refusal closes the gate terminally — admission stops, in-flight work
+    still drains, and the campaign ends with ``BudgetCapReached``.
+    """
+
+    def __init__(
+        self,
+        *,
+        probe: Callable[[], bool] | None,
+        clock: Callable[[], float],
+        on_event: Callable[[Mapping[str, Any]], None] | None,
+    ) -> None:
+        self.probe = probe
+        self.clock = clock
+        self.on_event = on_event
+        self.lock = threading.Lock()
+        self.paused_since: float | None = None
+        self.closed = False
+        self.refusals = 0
+        self.probes = 0
+        self.pauses: list[dict[str, Any]] = []
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(dict(event))
+        except Exception:  # noqa: BLE001 - observers never steer dispatch
+            pass
+
+    @property
+    def paused(self) -> bool:
+        return self.paused_since is not None and not self.closed
+
+    def admission_allowed(self) -> bool:
+        with self.lock:
+            return not self.closed and self.paused_since is None
+
+    def record_refusal(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.refusals += 1
+            if self.probe is None:
+                self.closed = True
+                event = {
+                    "event": "budget_gate_closed",
+                    "reason": "no_probe",
+                    "refusals": self.refusals,
+                }
+            elif self.paused_since is None:
+                self.paused_since = self.clock()
+                event = {"event": "budget_pause", "refusals": self.refusals}
+            else:
+                # Already paused; further refusals just re-queue the task.
+                return
+        self._emit(event)
+
+    def probe_now(self) -> None:
+        """Probe after a settlement; resume admission when headroom reappeared."""
+
+        with self.lock:
+            if self.closed or self.paused_since is None:
+                return
+            probe = self.probe
+        freed = False
+        try:
+            freed = bool(probe()) if probe is not None else False
+        except Exception:  # noqa: BLE001 - a raising probe is not freed budget
+            freed = False
+        with self.lock:
+            if self.closed or self.paused_since is None:
+                return
+            self.probes += 1
+            if freed:
+                event = {
+                    "event": "budget_resume",
+                    "paused_sec": round(self.clock() - self.paused_since, 3),
+                    "probes": self.probes,
+                    "refusals": self.refusals,
+                }
+                self.pauses.append({k: v for k, v in event.items() if k != "event"})
+                self.paused_since = None
+            else:
+                event = {
+                    "event": "budget_probe_waiting",
+                    "probes": self.probes,
+                    "refusals": self.refusals,
+                }
+        self._emit(event)
+
+    def close(self) -> None:
+        """Terminally close once the pool drained with the cap still refusing."""
+
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            event: dict[str, Any] = {
+                "event": "budget_gate_closed",
+                "reason": "cap_exhausted",
+                "refusals": self.refusals,
+                "probes": self.probes,
+            }
+            if self.paused_since is not None:
+                event["paused_sec"] = round(self.clock() - self.paused_since, 3)
+                self.pauses.append({k: v for k, v in event.items() if k != "event"})
+                self.paused_since = None
+        self._emit(event)
+
+    def pause_summary(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "pauses": [dict(item) for item in self.pauses],
+                "refusals": self.refusals,
+                "probes": self.probes,
+            }
+
+
+def _is_budget_refusal(exc: BaseException) -> bool:
+    """True for the adapter's claim-time budget refusal, matched by exact name."""
+
+    return type(exc).__name__ == BUDGET_REFUSED_ERROR_NAME
+
+
 def run_dispatched(
     tasks: Sequence[Any],
     run_one: Callable[[Any], dict[str, Any]],
@@ -228,6 +406,7 @@ def run_dispatched(
     threshold: int = GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
     on_row: Callable[[Mapping[str, Any]], None] | None = None,
     gateway_probe: Callable[[], bool] | None = None,
+    budget_probe: Callable[[], bool] | None = None,
     pause_budget_sec: float = GATEWAY_PAUSE_BUDGET_SEC,
     probe_backoff_sec: Sequence[float] = GATEWAY_PROBE_BACKOFF_SEC,
     on_event: Callable[[Mapping[str, Any]], None] | None = None,
@@ -247,6 +426,14 @@ def run_dispatched(
     ``GatewayCircuitOpen``.  ``on_row`` runs in completion order so its caller
     can durably settle a finished attempt before another task is admitted.
     The returned rows retain source order for reproducible reporting.
+
+    A claim-time budget refusal raised by ``run_one`` is the second stop
+    class: the task was never dispatched, so it gets no row and is re-queued.
+    Admission then pauses while in-flight attempts settle below their
+    reservations; ``budget_probe`` runs after each settlement and resumes
+    admission once a further claim fits the cap.  When the pool has drained
+    and the probe still refuses, the campaign ends with ``BudgetCapReached``
+    and the undispatched ids stay row-free for a later resume campaign.
     """
 
     breaker = _Breaker(
@@ -257,14 +444,28 @@ def run_dispatched(
         clock=clock,
         on_event=on_event,
     )
+    gate = _BudgetGate(probe=budget_probe, clock=clock, on_event=on_event)
+    refused: list[int] = []
+
+    def remaining_ids(submitted: int) -> list[str]:
+        return [str(tasks[position].task_id) for position in sorted(refused)] + [
+            str(task.task_id) for task in tasks[submitted:]
+        ]
 
     def settle(rows: list[dict[str, Any]], submitted: int) -> list[dict[str, Any]]:
+        if gate.closed:
+            summary = gate.pause_summary()
+            raise BudgetCapReached(
+                rows=rows,
+                remaining=remaining_ids(submitted),
+                pause=summary if summary["refusals"] else None,
+            )
         if breaker.open:
             summary = breaker.pause_summary()
             raise GatewayCircuitOpen(
                 rows=rows,
                 threshold=threshold,
-                remaining=[str(task.task_id) for task in tasks[submitted:]],
+                remaining=remaining_ids(submitted),
                 pause=summary if summary["pauses"] else None,
             )
         return rows
@@ -286,9 +487,18 @@ def run_dispatched(
         for task in tasks:
             if breaker.paused:
                 wait_out_pause()
-            if breaker.open:
+            if breaker.open or gate.closed:
                 break
-            row = run_one(task)
+            try:
+                row = run_one(task)
+            except Exception as exc:
+                if not _is_budget_refusal(exc):
+                    raise
+                # A serial lane holds no in-flight work whose settlement
+                # could free headroom later, so a refusal is terminal here.
+                gate.record_refusal()
+                gate.close()
+                break
             breaker.record(row)
             if on_row is not None:
                 on_row(row)
@@ -308,15 +518,32 @@ def run_dispatched(
             # lane: counting them made every window of ``max_workers`` tasks
             # wait for its slowest member (a 2 h deadline task idled 63 lanes
             # for up to 2 h — r7/r8 ran near single-digit effective
-            # concurrency for long stretches).
+            # concurrency for long stretches).  Budget-refused positions are
+            # re-admitted before fresh ones so a pause never reorders work.
             while (
                 breaker.admission_allowed()
+                and gate.admission_allowed()
                 and len(in_flight) < max_workers
-                and submitted < len(tasks)
+                and (refused or submitted < len(tasks))
             ):
-                in_flight[pool.submit(run_one, tasks[submitted])] = submitted
-                submitted += 1
+                if refused:
+                    position = refused.pop(0)
+                else:
+                    position = submitted
+                    submitted += 1
+                in_flight[pool.submit(run_one, tasks[position])] = position
             if not in_flight:
+                if gate.paused:
+                    # Nothing in flight can free headroom any more: one final
+                    # probe decides between resume and a terminal stop.
+                    gate.probe_now()
+                    if gate.paused:
+                        gate.close()
+                        break
+                    refused.sort()
+                    continue
+                if gate.closed:
+                    break
                 if breaker.paused and not breaker.open and submitted < len(tasks):
                     wait_out_pause()
                     continue
@@ -328,7 +555,17 @@ def run_dispatched(
             newly_completed: list[dict[str, Any]] = []
             for future in done:
                 position = in_flight.pop(future)
-                row = future.result()
+                try:
+                    row = future.result()
+                except Exception as exc:
+                    if not _is_budget_refusal(exc):
+                        raise
+                    # Claim refused before dispatch: the task was never
+                    # attempted, gets no row, and is re-admitted once a
+                    # settlement frees headroom under the cap.
+                    refused.append(position)
+                    gate.record_refusal()
+                    continue
                 # The breaker sees rows as they settle, so a transport failure
                 # pauses admission immediately instead of waiting behind an
                 # earlier long-running position.
@@ -343,6 +580,12 @@ def run_dispatched(
             if on_row is not None:
                 for row in newly_completed:
                     on_row(row)
+            # Settlements are the only event that can free budget headroom,
+            # so the budget probe runs exactly here instead of on a timer.
+            if gate.paused:
+                gate.probe_now()
+                if not gate.paused:
+                    refused.sort()
             # Source order remains a reporting/provenance property.  The
             # caller receives a stable ordered sequence after all completed
             # rows have already been settled.
