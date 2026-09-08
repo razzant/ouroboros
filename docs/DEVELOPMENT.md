@@ -567,7 +567,11 @@ Every new or changed continuity surface is reviewed as one narrow chain:
 - Every over-limit tool result persists its exact source; there is no per-tool
   exemption, because the DECIDER must be able to resolve what the actor could
   page. A bounded row whose exact source is durable and referenced is an
-  omission for the acceptance panel, and only `source_unavailable` — no
+  omission for the acceptance panel. If its primary handle fails, a verified
+  matching redacted tool projection may recover the recorded pre-truncation
+  result through the existing source writer. Preserve complete inline evidence
+  on publication failure; a later cut or whole-row omission must not reuse the failed handle or the
+  original partial corpus. Only `source_unavailable` — no
   actor-resolvable source at all — is an unresolved partial that withholds
   dispatch. An `api_chat` acceptance reviewer has no tools and cannot resolve
   `repo_diff_source_ref`, so a criterion that depends on the unseen part of the

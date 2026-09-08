@@ -636,18 +636,20 @@ def _accept_trajectory(tool_calls: list, drive_root: Any = None, task_id: str = 
     out, unresolved = [], []
     for c in kept:
         tool = str(c.get("tool") or "")
-        result_value, result_complete, issue = materialize_tool_result_source(
+        result_value, result_complete, metadata = materialize_tool_result_source(
             drive_root, task_id, c,
         )
         legacy_envelope = ""
-        if issue.get("reason") == "legacy_actor_truncation_without_source_ref":
+        if metadata.get("reason") == "legacy_actor_truncation_without_source_ref":
             result_text = str(result_value)
             legacy_envelope = result_text[result_text.rfind("\n... (truncated from "):]
-        if issue:
-            unresolved.append(issue)
+        if not result_complete:
+            unresolved.append(metadata)
         result_cap = TOOL_RESULT_LIMITS.get(tool, _ACCEPT_RESULT_CAP)
-        source_ref = c.get("result_source_ref") if isinstance(c.get("result_source_ref"), dict) else {}
-        if c.get("result_partial") or not result_complete:
+        source_ref = metadata.get("source_ref", c.get("result_source_ref"))
+        source_ref = source_ref if isinstance(source_ref, dict) else {}
+        materialized = c.get("result_partial") or not result_complete or "source_ref" in metadata
+        if materialized:
             result_cap = max(result_cap, len(str(result_value)))
         row = {
             "tool": tool,
@@ -656,7 +658,7 @@ def _accept_trajectory(tool_calls: list, drive_root: Any = None, task_id: str = 
             "args": _accept_redact_cap(c.get("args"), _ACCEPT_ARGS_CAP) if c.get("args") not in (None, "", {}) else "",
             "result": _accept_redact_cap(result_value, result_cap, legacy_envelope) if result_value not in (None, "") else "",
         }
-        if c.get("result_partial") or not result_complete:
+        if materialized:
             row.update(result_complete=result_complete, result_source_ref=source_ref)
         if legacy_envelope:
             row["_legacy_projection_envelope"] = legacy_envelope
@@ -761,17 +763,21 @@ def _accept_enforce_budget(ev: Dict[str, Any], *, budget: int = 0) -> Dict[str, 
     notes: List[str] = []
     original_partials = list(ev.get("__unresolved_partial_artifacts__") or [])
 
+    def _partial_source(row: Dict[str, Any]) -> Dict[str, Any]:
+        # Explicit absence cannot borrow a corpus containing the original partial result.
+        source_ref = row.get("result_source_ref", ev.get("tool_trajectory_source_ref") or {})
+        return {
+            "tool": str(row.get("tool") or ""),
+            "status": "not_materialized_for_reviewer" if source_ref else "source_unavailable",
+            "source_ref": source_ref,
+        }
+
     def _sync_annotations() -> None:
         # These rows are part of the actual wire packet. Measuring before adding
         # them let a fitting intermediate view overflow without an overflow flag.
         trajectory_source_ref = ev.get("tool_trajectory_source_ref") or {}
-        unresolved_partials = [{
-            "tool": str(row.get("tool") or ""),
-            "status": ("not_materialized_for_reviewer"
-                       if row.get("result_source_ref") or trajectory_source_ref else "source_unavailable"),
-            "source_ref": row.get("result_source_ref") or trajectory_source_ref,
-        } for row in (ev.get("tool_trajectory") or [])
-            if isinstance(row, dict) and row.get("result_complete") is False]
+        unresolved_partials = [_partial_source(row) for row in (ev.get("tool_trajectory") or [])
+                               if isinstance(row, dict) and row.get("result_complete") is False]
         if int(ev.get("tool_trajectory_omitted_leading", 0) or 0) > 0:
             unresolved_partials.append({
                 "tool": "tool_trajectory", "status": ("not_materialized_for_reviewer"
@@ -818,6 +824,12 @@ def _accept_enforce_budget(ev: Dict[str, Any], *, budget: int = 0) -> Dict[str, 
     traj = ev.get("tool_trajectory")
     if _size() > budget and isinstance(traj, list) and len(traj) > 20:
         dropped = len(traj) - 20
+        # Materialization failures already survive in original_partials.
+        original_partials.extend(
+            _partial_source(row) for row in traj[:dropped]
+            if (isinstance(row, dict) and "result_source_ref" in row
+                and row.get("result_complete") is not False)
+        )
         ev["tool_trajectory"] = traj[-20:]
         ev["tool_trajectory_omitted_leading"] = int(ev.get("tool_trajectory_omitted_leading", 0) or 0) + dropped
         ev["tool_trajectory_complete"] = False

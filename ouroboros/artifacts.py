@@ -890,7 +890,8 @@ def materialize_repo_diff_evidence(
 def materialize_tool_result_source(
     drive_root: Union[pathlib.Path, str], task_id: str, call: Dict[str, Any],
 ) -> tuple[Any, bool, Dict[str, Any]]:
-    """Return the exact result behind a partial task trace, or a typed gap."""
+    """Materialize a result under existing redaction; metadata carries its source or gap."""
+    from ouroboros.observability import read_blob_ref
 
     result = call.get("result")
     legacy_match = (
@@ -905,23 +906,31 @@ def materialize_tool_result_source(
     if not call.get("result_partial") and not legacy_partial:
         return result, True, {}
     ref = call.get("result_source_ref") if isinstance(call.get("result_source_ref"), dict) else {}
+    gap = {
+        "tool_call_id": str(call.get("tool_call_id") or ""), "tool": str(call.get("tool") or ""),
+        "status": "source_unavailable", "source_ref": ref,
+    }
     if legacy_partial:
-        return result, False, {
-            "tool_call_id": str(call.get("tool_call_id") or ""),
-            "tool": str(call.get("tool") or ""), "status": "source_unavailable",
-            "reason": "legacy_actor_truncation_without_source_ref", "source_ref": {},
-        }
+        gap.update(reason="legacy_actor_truncation_without_source_ref", source_ref={})
+    else:
+        try:
+            return read_actor_source_bytes(drive_root, task_id, ref).decode("utf-8"), True, {}
+        except (OSError, UnicodeError, TypeError, ValueError) as exc:
+            gap.update(reason=f"{type(exc).__name__}: {exc}",
+                       declared_status=str(call.get("result_source_status") or ""))
     try:
-        return read_actor_source_bytes(drive_root, task_id, ref).decode("utf-8"), True, {}
-    except (OSError, UnicodeError, TypeError, ValueError) as exc:
-        return result, False, {
-            "tool_call_id": str(call.get("tool_call_id") or ""),
-            "tool": str(call.get("tool") or ""),
-            "status": "source_unavailable",
-            "declared_status": str(call.get("result_source_status") or ""),
-            "reason": f"{type(exc).__name__}: {exc}",
-            "source_ref": ref,
-        }
+        payload = read_blob_ref(pathlib.Path(drive_root), call["trace_ref"]["redacted_projection_ref"])
+        if (isinstance(payload, dict) and isinstance(payload.get("result"), str)
+                and all(isinstance(call.get(key), str) and call[key] and payload.get(key) == call[key]
+                        for key in ("tool_call_id", "tool"))):
+            text = payload["result"]
+            _, recovered_ref, issue = persist_exact_text_source(
+                drive_root, task_id, source_id=call["tool_call_id"], text=text,
+            )
+            return text, True, {"source_ref": {} if issue else recovered_ref}
+    except Exception:
+        pass  # A missing or corrupt projection preserves the primary-source failure.
+    return result, False, gap
 
 
 def store_chat_media_bytes(
