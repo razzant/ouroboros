@@ -8,7 +8,7 @@ Architecture: agent.py (orchestrator), tools/ (plugin tools),
 """
 
 # IMPORTANT: Do NOT import agent/loop/llm/etc here!
-# Eager imports here persist in forked worker processes as stale code,
+# Eager imports here persist in worker processes as stale code,
 # preventing hot-reload. Workers import make_agent directly.
 
 __all__ = ['agent', 'tools', 'llm', 'memory', 'review', 'utils']
