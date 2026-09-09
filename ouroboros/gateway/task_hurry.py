@@ -22,6 +22,7 @@ from starlette.responses import JSONResponse
 
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
 from ouroboros.task_results import resolve_task_lineage, validate_task_id
+from ouroboros.task_runtime import supports_native_task_controls
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -74,6 +75,8 @@ def _admit_hurry_locked(task_id: str) -> Tuple[Optional[Dict[str, Any]], str, in
             task = direct_chat_turn(task_id)
         if task is None:
             return None, "task_not_live", attempt
+        if not supports_native_task_controls(task):
+            return None, "runtime_control_unsupported_use_stop_now", attempt
         lineage = resolve_task_lineage(
             task_id,
             metadata=task.get("metadata"),

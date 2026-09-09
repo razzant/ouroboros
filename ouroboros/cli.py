@@ -223,6 +223,9 @@ def _run_command(args: argparse.Namespace) -> int:
     }
     if disabled_tools:
         body["disabled_tools"] = list(dict.fromkeys(disabled_tools))
+    for field in ("execution_backend", "copilot_model", "copilot_permission_policy"):
+        if getattr(args, field, None) is not None:
+            body[field] = getattr(args, field)
     if float(args.timeout or 0) > 0:
         body["timeout_sec"] = float(args.timeout or 0)
     created = client.request("POST", "/api/tasks", body)
@@ -517,6 +520,9 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run a managed headless task")
     run.add_argument("--start", action="store_true", help="start a local server if attach fails")
     run.add_argument("--workspace", default="", help="external workspace root")
+    run.add_argument("--backend", dest="execution_backend", choices=["native", "copilot_acp"], help="whole-task runtime (default: saved task backend)")
+    run.add_argument("--copilot-model", default=None, help="Copilot CLI model id; empty uses its default, not a native model slot")
+    run.add_argument("--copilot-permissions", dest="copilot_permission_policy", choices=["read_only", "workspace"], help="Copilot one-shot permission policy; workspace includes shell access as the local user")
     run.add_argument("--project-id", default="", help="per-project facts scope id (else derived from the workspace path)")
     run.add_argument("--title", default="", help="owner-facing task name (else derived from the prompt's first line)")
     run.add_argument("--memory-mode", choices=["shared", "forked", "empty"], default="")

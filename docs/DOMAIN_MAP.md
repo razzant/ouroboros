@@ -8,13 +8,13 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 
 | domain | name | modules | proposed |
 |---|---|---:|---:|
-| D01 | Agent core & main loop | 30 | 0 |
+| D01 | Agent core & main loop | 31 | 0 |
 | D02 | LLM client, routing & providers | 35 | 0 |
 | D03 | Context assembly, fit & compaction | 11 | 0 |
 | D04 | Tool execution: registry, access & typed results | 20 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 28 | 0 |
 | D06 | Review stack | 63 | 0 |
-| D07 | Delegation, subagents & Claudexor | 48 | 0 |
+| D07 | Delegation, subagents & Claudexor | 51 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 44 | 0 |
 | D09 | Cancellation, owner control & process custody | 13 | 0 |
 | D10 | Git, update & release machinery | 28 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 12 | 0 |
 | D19 | Frozen contracts (ABI) | 10 | 0 |
 | D20 | Presence | 9 | 0 |
-| **total** | | **528** | **0** |
+| **total** | | **532** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -203,6 +203,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/synthesis_cost_text.py`
 - `ouroboros/task_finalization.py`
 - `ouroboros/task_pacing.py`
+- `ouroboros/task_runtime.py`
 
 ### D02 — LLM client, routing & providers
 
@@ -381,6 +382,8 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/claudexor_daemon.py`
 - `ouroboros/claudexor_runtime.py`
 - `ouroboros/configured_subagents.py`
+- `ouroboros/copilot_acp_events.py`
+- `ouroboros/copilot_acp_policy.py`
 - `ouroboros/delegate_containment.py`
 - `ouroboros/delegate_custody.py`
 - `ouroboros/delegate_custody_reconcile.py`
@@ -403,6 +406,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/depth_evidence.py`
 - `ouroboros/gateways/__init__.py`
 - `ouroboros/gateways/claudexor.py`
+- `ouroboros/gateways/copilot_acp.py`
 - `ouroboros/nanny_pacing.py`
 - `ouroboros/subagent_bootstrap.py`
 - `ouroboros/subagent_dispatch_notes.py`

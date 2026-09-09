@@ -17,6 +17,7 @@ from ouroboros.outcomes import (
     EXECUTION_INFRA_FAILED,
     terminal_outcome_axes,
 )
+from ouroboros.task_runtime import supports_native_task_controls
 from supervisor.queue import _queue_lock
 
 
@@ -230,7 +231,7 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
                     crash_signal = -exitcode if is_crash_signal else None
                     chat_id = _pool().coerce_chat_identity(task.get("chat_id"), 0)
                     attempt = int(task.get("_attempt") or 1)
-                    replay_unsafe = (not getattr(w, "active_capacity", True)
+                    replay_unsafe = (not supports_native_task_controls(task) or not getattr(w, "active_capacity", True)
                                      or has_owner_wait_checkpoint(meta, attempt))
                     # Reconstruct cost/rounds from durable llm_usage for any
                     # abnormal-termination rollup below (worker died pre-finalize,
@@ -264,10 +265,11 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
                         deep = task_type == "deep_self_review"
                         if replay_unsafe:
                             result_text = (
-                                "Worker process died after an owner-wait checkpoint. The continuation "
-                                "source is retained; completed actions were not retried."
+                                "Worker process died after an owner-wait checkpoint. The continuation source is retained; completed actions were not retried."
+                                if supports_native_task_controls(task) else
+                                "External task worker died. Inspect its retained protocol records and workspace; work was not retried."
                             )
-                            reason_code = "worker_crash_owner_wait"
+                            reason_code = "worker_crash_owner_wait" if supports_native_task_controls(task) else "worker_crash_external_runtime"
                         elif is_crash_signal:
                             log.warning(
                                 "Task %s worker crashed with signal %s — terminal (no retry)",

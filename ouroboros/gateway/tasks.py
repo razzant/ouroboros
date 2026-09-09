@@ -156,6 +156,15 @@ def _fold_contract_policies(body: Dict[str, Any], raw_metadata: Dict[str, Any], 
     metadata (extracted from api_tasks_create for the function-size gate; pure).
     Returns (allowed_resources, resource_policy, disabled_tools, acceptance_claims,
     error) — error is non-empty for an invalid service_teardown."""
+    from ouroboros.config import load_settings
+    from ouroboros.copilot_acp_policy import runtime_options, validate_runtime_task
+
+    try:
+        options = runtime_options(body, load_settings())
+        validate_runtime_task({**body, **options})
+        metadata.update(options)
+    except ValueError as exc:
+        return {}, {}, [], [], str(exc)
     allowed_resources = normalize_allowed_resources(body.get("allowed_resources") or raw_metadata.get("allowed_resources") or {})
     if allowed_resources:
         metadata["allowed_resources"] = allowed_resources
@@ -539,7 +548,7 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
         return json_error("delegation_role=subagent is only allowed through the internal schedule_subagent tool", 400)
     if str(body.get("parent_task_id") or "").strip() or str(body.get("root_task_id") or "").strip():
         return json_error("parent_task_id and root_task_id are internal lineage fields; external tasks must start as roots", 400)
-    for _top_level_only in ("project_id", "title"):
+    for _top_level_only in ("project_id", "title", "execution_backend", "copilot_model", "copilot_permission_policy", "runtime_execution"):
         # Top-level fields; silently dropping either from metadata would let a
         # caller believe isolation is active, or a name was accepted, when it was not.
         if _top_level_only in raw_metadata:
@@ -1065,6 +1074,10 @@ async def _graceful_stop_acknowledgement(task_id: str, *, cascade: bool) -> JSON
     live_own = await asyncio.to_thread(_live_ownership, task_id)
     if not live_own and not await asyncio.to_thread(_live_check, task_id):
         return json_error("task not found or not active", 404, task_id=task_id)
+    from ouroboros.task_runtime import supports_native_task_controls
+    task = await asyncio.to_thread(load_task_result, _drive_root, task_id)
+    if isinstance(task, dict) and not supports_native_task_controls(task):
+        return json_error("This task runtime supports Stop now, not Wrap up.", 409, task_id=task_id, reason_code="runtime_control_unsupported_use_stop_now")
     observation = await asyncio.to_thread(observe_cancellation_target, _drive_root, task_id, request_origin={"kind": "http_client", "source": "http_graceful"})
     try:
         intent = await asyncio.to_thread(functools.partial(

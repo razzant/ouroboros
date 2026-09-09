@@ -103,7 +103,7 @@ test('the update letter typedef promises exactly the fields the projection emits
 test('the live progress path forwards every progress field the endpoint emits and the chat UI consumes', () => {
     const emitted = pythonTupleNames(repoFile('ouroboros/gateway/history.py'), '_PROGRESS_META_FIELDS');
     for (const field of ['executor_route', 'model_lane', 'status', 'subagent_event',
-        'execution_evidence', 'actual_substrate']) {
+        'execution_evidence', 'actual_substrate', 'execution_backend', 'acp_update_type', 'execution_id', 'sequence']) {
         assert.ok(emitted.has(field), `${field} is no longer emitted by the history endpoint`);
     }
     // executor_route drives the executor chip in log_events.js; it must reach the
@@ -123,9 +123,17 @@ test('the live progress path forwards every progress field the endpoint emits an
     assert.ok(whitelists.length > 0, 'no enumerated live call site found — update this test');
     for (const chunk of whitelists) {
         const forwarded = new Set([...chunk.matchAll(/^\s+([a-z_]+):/gm)].map((m) => m[1]));
+        for (const match of chunk.matchAll(/Object\.fromEntries\(\[([\s\S]*?)\]\.map/g)) {
+            for (const key of match[1].matchAll(/'([a-z_]+)'/g)) forwarded.add(key[1]);
+        }
         for (const key of DELEGATION_KEYS) {
             assert.ok(forwarded.has(key),
                 `a chat.js live whitelist drops ${key}: the chip only tells the truth after a reload`);
+        }
+        if (chunk.includes('msg?.content')) {
+            for (const key of ['execution_backend', 'acp_update_type', 'execution_id', 'sequence']) {
+                assert.ok(forwarded.has(key), `root progress drops the external runtime field ${key}`);
+            }
         }
     }
     // The SECOND whitelist of the same class: routeSubagentTerminalToCard

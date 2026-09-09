@@ -2221,17 +2221,15 @@ export function createChatInstance({
             type: 'send_message',
             is_progress: true,
             content: msg?.content || msg?.text || '',
-            text: msg?.content || msg?.text || '',
             task_id: taskId,
             ...Object.fromEntries(['subagent_event', 'subagent_task_id', 'root_task_id',
                 'parent_task_id', 'delegation_role', 'subagent_role', 'status', 'result',
-                'trace_summary', 'error', 'artifact_status'].map((key) => [key, msg?.[key] || ''])),
+                'trace_summary', 'error', 'artifact_status', 'execution_backend', 'acp_update_type', 'execution_id', 'sequence'].map((key) => [key, msg?.[key] || ''])),
             // Delegation trio: a forgotten key freezes the chip
             // (wire_contract.test.js pins all three).
             executor_route: msg?.executor_route || '',
             execution_evidence: msg?.execution_evidence,
             actual_substrate: msg?.actual_substrate || '',
-            ...costMetaKeys(msg),
             lifecycle: msg?.lifecycle || null,
         });
         if (!summary) return changed;

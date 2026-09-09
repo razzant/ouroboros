@@ -543,6 +543,12 @@ export function summarizeLogEvent(evt) {
     });
     const taskMeta = (...items) => [evt.task_id ? `task=${evt.task_id}` : '', ...items];
 
+    if (t === 'task_runtime_update') {
+        return view(evt.acp_update_type === 'error' ? 'error' : 'progress', `Copilot ACP · ${evt.acp_update_type || 'activity'}`, {
+            body: shortText(evt.text, 260), meta: taskMeta('external subscription'),
+        });
+    }
+
     if (evt.is_progress || t === 'send_message') {
         if (isSubagentEvent(evt)) {
             const sid = subagentId(evt);
@@ -932,6 +938,19 @@ export function summarizeChatLiveEvent(evt) {
     const groupId = getLogTaskGroupId(evt);
     const progressText = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240, { markdown: true });
     const key = (...parts) => [t, groupId, ...parts].join(':');
+
+    if (t === 'task_runtime_protocol') return chatView({ visible: false, dedupeKey: key(evt.sequence) });
+    if (t === 'task_runtime_update' || (evt.is_progress && evt.execution_backend === 'copilot_acp' && evt.acp_update_type)) {
+        return chatView({
+            phase: evt.acp_update_type === 'error' ? 'tool_error' : 'working',
+            headline: `Copilot ACP · ${evt.acp_update_type || 'activity'}`,
+            body: progressText.preview, fullBody: progressText.full,
+            activityPreview: progressText.preview, visible: true, promote: true,
+            human: true, terminal: false,
+            chip: { harness: 'copilot', label: 'Copilot ACP', title: 'External task runtime; task details retain actual dispatch and completion evidence.' },
+            dedupeKey: key(evt.execution_id || '', evt.sequence || '', evt.acp_update_type || '', progressText.full),
+        });
+    }
 
     if (t === 'owner_hurry') {
         // S3 (HQ1) EXPLICIT hide branch: the typed hurry control family never

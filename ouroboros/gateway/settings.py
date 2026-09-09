@@ -1148,6 +1148,12 @@ def _api_settings_post_sync(request: Request, body: Any) -> JSONResponse:
     # that, so the whole body holds the seam-wide document lock — the
     # single-decision endpoints hold the same lock, and the loop itself stays
     # free to serve everything else.
+    from ouroboros.copilot_acp_policy import validate_runtime_settings
+    if isinstance(body, dict):
+        try:
+            validate_runtime_settings(body)
+        except ValueError as exc:
+            return unsaved_error(str(exc), 400)
     with settings_document_mutation():
         return _api_settings_post_locked(request, body)
 

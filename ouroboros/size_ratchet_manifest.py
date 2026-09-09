@@ -230,6 +230,7 @@ BAND_PATHS = {
     "web/modules/review_presentation.js": "Review Checkpoint read-side grouping, lifecycle/verdict separation, and keyed disclosure reconciliation remain one pure adapter below the 1500-line band cap.",
     "web/modules/reviewer_slots.js": "Owner-approved 5A editor: per-row Direct model / Configured subagent source picker with read-only derived disclosure replaces the legacy Claude-SDK advisory input in the same module that owns reviewer-row editing.",
     "web/modules/settings.js": None,
+    "web/modules/settings_ui.js": "The existing shared Settings markup owns the additive managed-task runtime controls; keeping these controls beside existing agent settings avoids another renderer and settings authority.",
     "web/modules/widgets.js": None,
     "web/tests/chat_instance_dom.test.js": "Entered the band from 1000 lines with the alias-free subagent cost pin (stage-2 fix wave): that regression reproduces only through the real createChatInstance card path, and this file owns the DOM harness that drives it; split when the next createChatInstance face lands.",
     "web/tests/harness_login_cards.test.js": "Login-card suite grew past 1000 lines with the name-the-account face cases (agy pickup, issue #232); split when the next face lands.",
@@ -247,5 +248,5 @@ BYTE_BASELINE_DEBT = {
 
 BYTE_DEBT = {
     "tests/test_devtools_benchmarks.py": 327840,
-    "web/modules/chat.js": 205980,
+    "web/modules/chat.js": 205963,
 }

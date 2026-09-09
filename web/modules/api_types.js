@@ -901,6 +901,9 @@
 /**
  * @typedef {Object} TaskCreateRequest
  * @property {string} description
+ * @property {"native"|"copilot_acp"=} execution_backend Whole managed-task runtime, not a model provider.
+ * @property {string=} copilot_model
+ * @property {"read_only"|"workspace"=} copilot_permission_policy
  * @property {string=} task_id
  * @property {string=} type
  * @property {string=} title Owner-facing run name; omitted, admission derives one from the description's first line.

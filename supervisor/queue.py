@@ -221,6 +221,16 @@ def enqueue_task(
         if admission_token and reserved_token != admission_token:
             t["_admission_blocked"] = "admission_reservation_lost"
             return t
+        from ouroboros.copilot_acp_policy import runtime_options
+        try:
+            options = runtime_options(t, {} if restoring_snapshot else None)
+        except ValueError as exc:
+            t.update(_admission_blocked="task_runtime_invalid", _admission_detail=str(exc))
+            if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
+                ADMISSION_RESERVATIONS.pop(task_id, None)
+            return t
+        t.update(options)
+        t["metadata"] = {**(t.get("metadata") or {}), **options}
         project_id = str(t.get("project_id") or "").strip()
         if project_id:
             try:
