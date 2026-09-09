@@ -131,6 +131,31 @@ def test_keyless_task_records_unknown_usage_and_replayable_protocol(runtime):
     assert [row["phase"] for row in operations] == ["started", "finished"]
 
 
+def test_forked_task_activity_has_one_canonical_replay_source(runtime):
+    child = runtime.data / "state" / "headless_tasks" / "acp-task" / "data"
+    child.mkdir(parents=True)
+    runtime.ctx.drive_root = child
+    runtime.ctx.budget_drive_root = str(runtime.data)
+    runtime.task.update(drive_root=str(child), budget_drive_root=str(runtime.data), memory_mode="forked")
+    runtime.state["frames"] = [
+        update("plan", entries=[{"content": "Inspect", "status": "in_progress"}]),
+        update("tool_call", toolCallId="edit", kind="edit", status="pending", rawInput={"path": "tracked.txt"}),
+        update("tool_call_update", toolCallId="edit", status="completed", content=[
+            {"type": "diff", "path": "tracked.txt", "oldText": "old", "newText": "fixed"},
+        ]),
+        text("Verified result"), {"result": {"stopReason": "end_turn"}},
+    ]
+    run(runtime)
+    progress = [json.loads(line) for line in (runtime.data / "logs" / "progress.jsonl").read_text().splitlines()]
+    tools = [json.loads(line) for line in (runtime.data / "logs" / "tools.jsonl").read_text().splitlines()]
+    assert {"plan", "diff", "agent_message_chunk"} <= {row["acp_update_type"] for row in progress}
+    assert [row["type"] for row in tools] == ["tool_call_started", "tool_call_finished"]
+    assert all(row["task_id"] == "acp-task" and row["chat_id"] == 0 for row in [*progress, *tools])
+    assert not (child / "logs" / "progress.jsonl").exists()
+    assert not (child / "logs" / "tools.jsonl").exists()
+    assert load_task_result(child, "acp-task")["runtime_execution"]["state"] == "completed"
+
+
 def test_native_loop_contract_is_byte_for_byte_unchanged(runtime):
     runtime.task["execution_backend"] = "native"
     runtime.task.pop("copilot_permission_policy")

@@ -170,6 +170,19 @@ class CopilotPermissions:
         paths.extend(extra)
         if call.get("kind") == "edit" and not paths:
             return denied
+        if call["kind"] == "execute" and not (
+            isinstance(raw.get("command"), str) and raw["command"].strip()
+        ):
+            return denied
+        if call["kind"] in {"read", "search"} and not paths and not (
+            isinstance(raw.get("pattern"), str) and raw["pattern"].strip()
+        ):
+            return denied
+        # ACP session/new supplies cwd. Copilot's bash/glob/grep requests may
+        # omit a path; that means the already-bound session workspace, not a
+        # request for an arbitrary root. Shell effects still are not sandboxed.
+        if not paths:
+            paths.append(str(self.workspace))
         for value in paths:
             if not isinstance(value, str) or not value.strip():
                 return denied

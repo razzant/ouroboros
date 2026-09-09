@@ -124,7 +124,7 @@ class _ACPTaskRun:
             "protocol_ref": self.last_ref, **event,
         }).value
         log_name = "tools.jsonl" if row["type"].startswith("tool_call_") else "progress.jsonl"
-        if not append_jsonl(pathlib.Path(self.ctx.drive_root) / "logs" / log_name, row):
+        if not append_jsonl(self.root / "logs" / log_name, row):
             raise ACPError("ACP task activity could not be persisted.", "acp_custody_unavailable")
         if row["type"] == "tool_call_finished":
             self.trace["tool_calls"].append({

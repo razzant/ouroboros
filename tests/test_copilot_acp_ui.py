@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,7 @@ def test_copilot_settings_save_and_task_activity_replay(direct_server_with_data,
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
     from ouroboros.task_results import write_task_result
+    from ouroboros.task_runtime import _ACPTaskRun
     from ouroboros.utils import append_jsonl, utc_now_iso
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 
@@ -59,7 +61,9 @@ def test_copilot_settings_save_and_task_activity_replay(direct_server_with_data,
                         capture_output=True, text=True, check=True,
                     ).stdout
                     pattern = f"**/static/modules/{name}"
-                    page.route(pattern, lambda route, _request, source=source: route.fulfill(body=source, content_type="text/javascript"))
+                    page.route(pattern, lambda route, _request, source=source: route.fulfill(
+                        body=source, content_type="text/javascript", headers={"Cache-Control": "no-store"},
+                    ))
                     routes.append(pattern)
                 page.goto(url, wait_until="domcontentloaded")
                 ready()
@@ -71,6 +75,10 @@ def test_copilot_settings_save_and_task_activity_replay(direct_server_with_data,
                 page.screenshot(path=str(evidence / "copilot-settings-before.png"))
                 for pattern in routes:
                     page.unroute(pattern)
+                page.close()
+                page = browser.new_page(viewport={"width": 1440, "height": 1000})
+                page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+                page.on("pageerror", lambda error: page_errors.append(str(error)))
             page.goto(url, wait_until="domcontentloaded")
             ready()
             page.click('[data-nav-page="settings"]')
@@ -85,6 +93,7 @@ def test_copilot_settings_save_and_task_activity_replay(direct_server_with_data,
             ) as saved:
                 page.click("#btn-save-settings")
             assert saved.value.status == 200, saved.value.text()
+            assert saved.value.request.post_data_json["OUROBOROS_TASK_BACKEND"] == "copilot_acp"
             settings = page.request.get(f"{url}/api/settings").json()
             assert settings["OUROBOROS_TASK_BACKEND"] == "copilot_acp"
             assert settings["OUROBOROS_COPILOT_PERMISSION_POLICY"] == "workspace"
@@ -122,9 +131,15 @@ def test_copilot_settings_save_and_task_activity_replay(direct_server_with_data,
             assert "Copilot ACP" in card.inner_text()
             assert "tracked.txt" in card.inner_text()
             page.screenshot(path=str(evidence / "copilot-task-live.png"))
+            child = data / "state" / "headless_tasks" / task_id / "data"
+            child.mkdir(parents=True)
+            runtime = _ACPTaskRun({"root_task_id": task_id}, SimpleNamespace(
+                task_id=task_id, drive_root=child, budget_drive_root=str(data),
+                current_chat_id=WEB_UI_CHAT_ID,
+            ))
             for row in rows:
-                log_name = "tools.jsonl" if row["type"].startswith("tool_call_") else "progress.jsonl"
-                append_jsonl(data / "logs" / log_name, row)
+                runtime.emit(row)
+            assert not (child / "logs" / "progress.jsonl").exists()
             write_task_result(
                 data, task_id, "completed", chat_id=WEB_UI_CHAT_ID,
                 title="Copilot ACP fixture", execution_backend="copilot_acp",

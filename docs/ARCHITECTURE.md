@@ -1143,8 +1143,10 @@ tools, malformed protocol or another stop reason is an explicit failed task.
 `copilot_acp_policy.CopilotPermissions` supplies a fixed CLI tool-availability
 envelope. Read-only exposes read/search tools; the opt-in workspace policy
 also exposes editing and shell tools. ACP permission requests select only
-`allow_once` for understood operations with declared paths inside the resolved
-workspace; unknown kinds, escaping paths, writes without targets, mismatched
+`allow_once` for understood operations bound to the resolved workspace. Declared
+paths must stay inside it; pathless bash commands and glob/grep patterns use the
+cwd already established by ACP session/new. Opaque execute requests without a
+command, unknown kinds, escaping paths, writes without targets, mismatched
 sessions and requests offering only blanket approval are denied. No `--allow-all*`
 flag is used; automatic system-temporary-directory access is disabled.
 **This is approval policy, not an OS sandbox:** an approved shell runs as the
@@ -1176,9 +1178,11 @@ unconfirmed cleanup is a failure, never a successful completion.
 Observability uses existing private CAS call manifests, not a second transcript
 ledger: every sent/received frame is persisted before projection and indexed by
 `task_runtime_protocol` rows in canonical `logs/events.jsonl` with execution id,
-sequence and `protocol_ref`. `task_runtime_update` rows in `logs/progress.jsonl`
+sequence and `protocol_ref`. `task_runtime_update` rows in canonical `logs/progress.jsonl`
 carry messages, plans, diffs and permission decisions; tools use the ordinary
-`tool_call_started` / `tool_call_finished` vocabulary and `logs/tools.jsonl`.
+`tool_call_started` / `tool_call_finished` vocabulary and canonical `logs/tools.jsonl`.
+Forked task drives do not keep duplicate activity logs: the canonical source is
+what both ordinary chat history and Dashboard Logs replay after child-drive GC.
 The existing worker log sink, WebSocket, task SSE/history and shared
 `log_events.js` task-card renderer carry them live and on replay. No extra
 socket, poller, task list or page exists. The task result's `runtime_execution`

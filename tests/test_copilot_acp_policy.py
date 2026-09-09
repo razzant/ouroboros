@@ -22,6 +22,15 @@ def test_workspace_policy_allows_scoped_edits_and_explicit_shell(tmp_path):
     assert policy.decide(permission("read", path=str(tmp_path / "new.py")))["outcome"]["outcome"] == "selected"
 
 
+def test_session_cwd_is_the_binding_for_pathless_bash_and_search(tmp_path):
+    policy = CopilotPermissions(tmp_path, "workspace")
+    assert policy.decide(permission("execute", command="pytest -q"))["outcome"]["optionId"] == "once"
+    assert policy.decide(permission("read", pattern="**/*.py"))["outcome"]["optionId"] == "once"
+    assert policy.decide(permission("search", pattern="regression"))["outcome"]["optionId"] == "once"
+    for request in (permission("execute"), permission("read"), permission("search"), permission("execute", command=[])):
+        assert policy.decide(request)["outcome"]["outcome"] == "cancelled"
+
+
 @pytest.mark.parametrize("permission_params", [
     {}, {"toolCall": []}, permission([], path="file.py"), permission(path="../outside.py"),
     permission(path=""), permission(paths=[None]), permission(paths=42),
