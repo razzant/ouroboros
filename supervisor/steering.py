@@ -15,6 +15,8 @@ import pathlib
 import uuid
 from typing import Any, Dict
 
+from ouroboros.task_runtime import supports_native_task_controls
+
 log = logging.getLogger(__name__)
 
 
@@ -172,6 +174,10 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
             except Exception:
                 log.debug("steer_task stale-target notice failed", exc_info=True)
         log.info("steer_task: stale/invalid target %s for chat %s", target, chat_id)
+        return
+    if not supports_native_task_controls(task):
+        _emit_routing_receipt(ctx, evt, action="steer_task", target=target, target_label=target_label,
+                              status="rejected", reason="runtime_steering_unsupported")
         return
     # Idempotent delivery: a stable msg_id from client_message_id+target dedups
     # retries; without a client id use a unique id (avoid false dedup/collision).

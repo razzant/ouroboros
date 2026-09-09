@@ -50,6 +50,7 @@ _ARCHIVE_BACKFILL_CAP = 3
 
 
 _PROGRESS_META_FIELDS = (
+    "execution_backend", "acp_update_type", "execution_id", "sequence",
     "ephemeral_decision",
     "subagent_event",
     "subagent_task_id",

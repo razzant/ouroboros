@@ -26,6 +26,8 @@ from ouroboros.platform_layer import pid_lock_acquire as _compat_pid_lock_acquir
 from ouroboros.provider_models import compute_direct_review_models_fallback, fallback_candidate_targets, local_only_review_route_env, migrate_model_value, resolve_model_target, review_model_uses_local as review_model_uses_local  # noqa: F401
 from ouroboros.secret_masking import strip_masked_secrets
 from ouroboros.settings_defaults import (
+    COPILOT_ACP_STARTUP_TIMEOUT_SEC, COPILOT_ACP_SHUTDOWN_TIMEOUT_SEC,  # noqa: F401
+    COPILOT_PERMISSION_POLICIES, TASK_EXECUTION_BACKENDS,  # noqa: F401
     CLAUDEXOR_STARTUP_WAIT_SEC,  # noqa: F401
     CLAUDEXOR_STARTUP_POLL_SEC,  # noqa: F401
     CLAUDEXOR_ADMISSION_WAIT_SEC,  # noqa: F401

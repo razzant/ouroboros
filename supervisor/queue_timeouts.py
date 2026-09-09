@@ -15,6 +15,7 @@ import time
 import uuid
 from typing import Any, Dict
 
+from ouroboros.task_runtime import supports_native_task_controls
 from supervisor.cognitive_operations import _active_operation_progressing
 from supervisor.task_model_wait import model_waiting, quota_waited_seconds
 from supervisor.task_reaper import (
@@ -373,7 +374,7 @@ def _enforce_task_timeouts_locked(
             and not deadline_reached
             and not ceiling_reached
             and not orchestrator
-            and not has_owner_wait_checkpoint(meta, attempt)
+            and not has_owner_wait_checkpoint(meta, attempt) and supports_native_task_controls(task)
         )
         # A stopped evolution campaign breaks the auto-retry chain. `st` is the live state
         # loaded this tick, so this reflects the current owner decision.

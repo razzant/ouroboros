@@ -34,6 +34,8 @@ const INPUT_FIELDS = [
     ['s-gigachat-scope', 'GIGACHAT_SCOPE'], ['s-gigachat-user', 'GIGACHAT_USER'], ['s-gigachat-base-url', 'GIGACHAT_BASE_URL'], ['s-gigachat-verify-ssl', 'GIGACHAT_VERIFY_SSL_CERTS'],
     ['s-minimax-region', 'MINIMAX_REGION'],
     ['s-server-host', 'OUROBOROS_SERVER_HOST', '127.0.0.1'],
+    ['s-copilot-bin', 'OUROBOROS_COPILOT_BIN', 'copilot'],
+    ['s-copilot-model', 'OUROBOROS_COPILOT_MODEL'],
     // 6.1: OUROBOROS_REVIEW_MODELS / OUROBOROS_SCOPE_REVIEW_MODELS are no
     // longer authored here — the Review lanes section composes the ONE
     // structured setting; the comma keys stay a backend-derived projection.
@@ -48,6 +50,8 @@ const INPUT_FIELDS = [
     ['s-evo-objective', 'OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE', ''],
 ];
 const VALUE_FIELDS = [
+    ['s-task-backend', 'OUROBOROS_TASK_BACKEND', 'native'],
+    ['s-copilot-permissions', 'OUROBOROS_COPILOT_PERMISSION_POLICY', 'read_only'],
     // 6.3: Review / Scope Review efforts are per-slot rows in Agents → Review
     // lanes now; their global keys remain backend defaults, no longer UI-authored.
     ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'],

@@ -24,6 +24,9 @@ CLAUDEXOR_STARTUP_POLL_SEC = 0.25
 CLAUDEXOR_ADMISSION_WAIT_SEC = 5.0
 CLAUDEXOR_ADMISSION_POLL_SEC = 0.15
 
+TASK_EXECUTION_BACKENDS = ("native", "copilot_acp")
+COPILOT_PERMISSION_POLICIES = ("read_only", "workspace")
+COPILOT_ACP_STARTUP_TIMEOUT_SEC, COPILOT_ACP_SHUTDOWN_TIMEOUT_SEC = 60.0, 5.0
 
 # Shipped router profile. Keeping the root-loop role policy beside the direct
 # provider profiles gives onboarding, runtime defaults, and tests one vocabulary
@@ -79,6 +82,11 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_SERVER_HOST": "127.0.0.1",
     "OUROBOROS_HOST_SERVICE_PORT": 8767,
     "OUROBOROS_MODEL": OPENROUTER_DEFAULTS["main"],
+    # Whole managed-task execution, deliberately separate from model roles.
+    "OUROBOROS_TASK_BACKEND": "native",
+    "OUROBOROS_COPILOT_BIN": "copilot",
+    "OUROBOROS_COPILOT_MODEL": "",
+    "OUROBOROS_COPILOT_PERMISSION_POLICY": "read_only",
     # Role-owned choices; empty account and zero window mean Auto, not healthy/known.
     "OUROBOROS_MODEL_ACCOUNTS": "{}",
     "OUROBOROS_MODEL_CONTEXT_WINDOWS": "{}",

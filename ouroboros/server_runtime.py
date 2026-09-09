@@ -464,14 +464,15 @@ def needs_local_model_autostart(settings: dict) -> bool:
 
 
 def has_startup_ready_provider(settings: dict) -> bool:
-    """Return True when the runtime has enough provider config to serve chat.
+    """Return True when native models or an external managed-task runtime are configured.
 
     Used both by startup/onboarding gating and by the supervisor-start gate.
     A local model source alone is not enough unless at least one lane is
     routed to that local runtime. (The packaged launcher imports this name —
     keep it stable.)
     """
-    return has_remote_provider(settings) or has_local_routing(settings)
+    return (has_remote_provider(settings) or has_local_routing(settings)
+            or settings.get("OUROBOROS_TASK_BACKEND") == "copilot_acp")
 
 
 _LOCAL_LANE_FLAG_FOR_SLOT = {

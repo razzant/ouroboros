@@ -371,6 +371,45 @@ export function renderSettingsPage() {
                 </section>
 
                 <section class="settings-panel" data-settings-panel="agents">
+                    <div class="form-section">
+                        <h3>Managed task runtime</h3>
+                        <div class="settings-section-copy">
+                            Delegate a complete external-workspace task to the local Copilot CLI using your
+                            existing subscription, without an API key. Native chat, reviews and self-evolution
+                            retain their model roles; Copilot is not a chat-completions provider.
+                        </div>
+                        <div class="form-grid two">
+                            <div class="form-field">
+                                <label for="s-task-backend">Task backend</label>
+                                <select id="s-task-backend">
+                                    <option value="native">Native Ouroboros</option>
+                                    <option value="copilot_acp">Copilot ACP</option>
+                                </select>
+                            </div>
+                            <div class="form-field">
+                                <label for="s-copilot-permissions">Copilot permissions</label>
+                                <select id="s-copilot-permissions">
+                                    <option value="read_only">Read-only tools</option>
+                                    <option value="workspace">Workspace tools and shell</option>
+                                </select>
+                            </div>
+                            <div class="form-field">
+                                <label for="s-copilot-bin">Copilot executable</label>
+                                <input id="s-copilot-bin" placeholder="copilot" spellcheck="false">
+                            </div>
+                            <div class="form-field">
+                                <label for="s-copilot-model">Copilot model</label>
+                                <input id="s-copilot-model" placeholder="CLI default" spellcheck="false">
+                            </div>
+                        </div>
+                        <div class="settings-inline-note">
+                            Requires a local authenticated <code>copilot --acp</code>. Changes apply to new
+                            managed tasks; <code>ouroboros run --backend copilot_acp --workspace …</code>
+                            can override the default. Workspace approval is not an OS sandbox: shell tools
+                            run as your user. No automatic retry, API fallback, native review or token-cost
+                            accounting. Restricted resource contracts and attachments require Native.
+                        </div>
+                    </div>
                     <div class="settings-section-copy">
                         Configure the subagents and reviewers Ouroboros works with. Subscriptions and
                         API keys are in Accounts; global model roles are in Models.

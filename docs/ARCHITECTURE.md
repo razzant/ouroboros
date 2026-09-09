@@ -80,6 +80,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── packaged_cli.py      ← Packaged desktop CLI bridge: resolves bundle roots, bootstraps the launcher-managed repo, delegates to cli.py
       ├── packaged_cli_install.py ← Packaged CLI installer planning/execution for user-local command shims
       ├── agent.py             ← Task orchestrator; the dispatch-note pair lives in `subagent_dispatch_notes.py` (same-name re-exports)
+      ├── task_runtime.py      ← Whole managed-task execution seam: native ReAct or one external ACP work order; shared context/results/custody, no raw-model adapter (§6 Copilot ACP tasks)
+      ├── copilot_acp_policy.py ← Copilot launch/environment and one-shot permission policy; snapshots task runtime options and refuses unsupported resource contracts
+      ├── copilot_acp_events.py ← ACP session/update → existing task/tool activity, complete plan/diff projection and root final-answer extraction
       ├── agent_startup_checks.py ← Worker-boot verification: dirty repo, version sync, budget, memory files, health checks
       ├── agent_task_pipeline.py ← Task execution pipeline orchestration; freezes one shared non-final subtree-cost snapshot for summary/reflection before the terminal checkpoint records final spend; hands the summary and reflection prompts the commit/advisory review lens PLUS the task's own acceptance-panel projection, and an absence statement names the lens it describes; calls the swarm-efficiency rollup owned by task_finalization.py at pipeline end
       ├── agent_dispatch.py, post_task_synthesis.py ← The agent's delegated-child dispatch seam, and the post-task synthesis workers the pipeline runs after a terminal result
@@ -330,7 +333,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── schema_versions.py ← Opt-in `_schema_version` stamping helpers (§11.2)
       │   └── plugin_api.py    ← PluginAPI, ExtensionRegistrationError, FORBIDDEN_SKILL_SETTINGS, VALID_EXTENSION_PERMISSIONS, VALID_EXTENSION_ROUTE_METHODS
       ├── gateways/            ← Thin outbound transport adapters; no business logic
-      │   └── claudexor.py     ← Loopback daemon client: discovery (`discover_daemon_at` reads `<config_dir>/daemon/control-api.json`), handshake, runs, cached quota GET + explicit quota POST; the token stays inside; account-surface translations are read-only; prefers the OWNED daemon via `claudexor_daemon.owned_daemon_provisioned`
+      │   ├── claudexor.py     ← Loopback daemon client: discovery (`discover_daemon_at` reads `<config_dir>/daemon/control-api.json`), handshake, runs, cached quota GET + explicit quota POST; the token stays inside; account-surface translations are read-only; prefers the OWNED daemon via `claudexor_daemon.owned_daemon_provisioned`
+      │   └── copilot_acp.py   ← Bounded NDJSON JSON-RPC transport and pipe-preserving Python guardian; existing process container, custody ledger and parent lifeline (§6 Copilot ACP tasks)
       ├── claudexor_runtime.py ← Reviewed engine pin (version/SHA/URL/SHA-256/size/protocol/Node/entrypoints, nullable CLI): seed-or-download, verify + staged extract + probe + atomic promote under `data/state/cx`; no mutable `current` pointer or background updater — the reviewed pin IS the next-spawn selection, and a `null` CLI honestly identifies a pre-CLI closure; read-only resolvers; `OUROBOROS_CLAUDEXOR_BIN` stays an explicit operator override
       ├── claudexor_daemon.py  ← Owned-daemon lifecycle over `data/claudexor` as `CLAUDEXOR_CONFIG_DIR`: installation-scoped supervision via `process_custody.spawn_supervised` from whichever process first needs the daemon (a task worker included) — every worker tree-kill spares the ledger's live daemon roots and both server sweeps retain fingerprint-matching legacy session records by the owner-defined `CUSTODY_PURPOSE`, ATTACH-IF-ALIVE, STOP-ONLY-WHAT-IS-PROVABLY-OURS (`stop` and its typed `stop_outcome` — `stopped`, `nothing_to_stop`, or an already disclosed `unconfirmed` — the call Panic, the owner's manual Restart and a planned restart with a changed engine pin make: the self-started child plus attached roots proven by the owned marker and exact measured ledger identity, plus an authenticated endpoint, a typed transport failure, or a genuinely absent descriptor for a marked own startup; received refusals and invalid discovery grant no fallback, and exit is confirmed before custody removal), `ensure_owned_gateway` as the one seam (independent caller startup/admission waits, configured defaults in `config`; `daemon_starting` preserves live startup custody across managers and processes, and a fresh recheck after runtime preparation joins an existing owner), metadata-only runtime status (no launch-command resolution or executable probe), ownership marker `ouroboros-owned.json`; liveness is an AUTHENTICATED handshake — the bearer token is the identity proof, so a live responder refusing the token is a foreign daemon on a recycled port (typed `foreign_daemon`, disclosed, never killed), and a foreign or invalid existing ownership marker is refused before attach or spawn; a successful authenticated attach or our own spawn publishes a missing marker atomically through `update_json_locked` after revalidating the home under its lock, preserving existing markers; runtime preparation and network/exit waits stay outside the short manager lock, and Stop retires in-flight callers before any delayed spawn; failure diagnostics name the current PID/build and shared-log byte interval without quoting an older tail as cause; `servingMode` handshake-before-admission (so the spawn-wait predicate stays reachable), 503 `daemon_recovery_only`, bounded admission wait (~150 ms poll, ~5 s deadline, `admission_wait_sec` opt-down); `warm_owned_daemon` is the one background `ensure_owned_gateway` the server lifespan makes at start for an already provisioned home (no mechanism of its own: a Stop retires it through the start generation); owns `install_missing_harness_cli`
       ├── gateway/             ← Gateway Boundary v1: browser-facing route ownership + frontend contract SSOT (see below)
@@ -475,7 +479,7 @@ Frontend calls go through `web/modules/api_client.js` with the JSDoc mirror `web
 
 ### CLI / Headless Boundary
 
-`ouroboros.cli` is a client of the same gateway/queue — no second task engine. Its parser is the command-surface SSOT (server, run, tasks, chat, logs, evolve, schedule, settings, skills, marketplace, local-model, MCP); streaming commands reserve stdout for the final answer/patch/result/JSONL and send progress to stderr.
+`ouroboros.cli` is a client of the same gateway/queue — no second task engine. Its parser is the command-surface SSOT (server, run, tasks, chat, logs, evolve, schedule, settings, skills, marketplace, local-model, MCP); streaming commands reserve stdout for the final answer/patch/result/JSONL and send progress to stderr. `run --backend` selects whole-task execution independently of model roles; Copilot's model and permission flags map to the additive `TaskCreateRequest` fields (§6 Copilot ACP tasks).
 
 `POST /api/tasks` creates an ordinary managed root; `GET /api/tasks` is a non-materializing list; `GET /api/tasks/<id>` returns the effective durable result; `/events` is the archive-aware SSE stream (§3 Chat); `/artifacts/<name>` serves simple filenames confined to `data/task_results/artifacts/<task_id>/` — a stored arbitrary path is not a download capability. The CLI refuses any `delegation_role` other than `root`, the gateway rejects caller lineage/subagent labels, and only `schedule_subagent` creates children. Reserved service metadata is written after caller metadata. Admission reserves the task id plus a worker-pool slot under one queue lock; a failure rolls back only the token-owned row with a loud typed refusal. The parsed request's complete admission and attachment staging run off the HTTP event loop through `gateway._helpers.run_sync_to_completion`; a cancelled HTTP waiter retains that worker until durable admission or rollback settles, without cancelling the admitted task. Detail reads and SSE terminal materialization use the same settled wait, and v2 closes its row iterator only after the outstanding read finishes. Attachments are copied into the effective task drive before enqueue; artifact-store references are not host-path authority.
 
@@ -630,7 +634,7 @@ Packaged startup is an ordered ownership transaction. The launcher prepares the 
 
 Onboarding runs after the gateway because connecting an agent subscription is a live `/api/*` conversation, not a form field — and a gateway without a supervisor is exactly what the readiness predicate produces, so no second server, mode, or onboarding state machine exists. `ouroboros/launcher_onboarding.py` owns the presentation (readiness decision, setup window, window-lifecycle bridge); when completion reports a boot-pinned value changed, the launcher recycles the managed server rather than counting the exit as a crash. Neither launcher nor server boot normalization may CREATE `settings.json` (the install-time latches below are gated on its absence).
 
-`has_startup_ready_provider()` is a structural gate, not a network, credential, entitlement, model, or local-process probe: any non-empty recognized remote configuration (including DeepSeek) or active task-capable local routing flag passes (key list: `server_runtime.has_startup_ready_provider`; `USE_LOCAL_HEAVY` is legacy migration input only, `LOCAL_MODEL_SOURCE` alone insufficient). When the gate is false the server marks startup complete without workers so the web UI serves the blocking onboarding overlay; a later successful settings save hot-starts the supervisor.
+`has_startup_ready_provider()` is a structural gate, not a network, credential, entitlement, model, or local-process probe: any non-empty recognized remote configuration (including DeepSeek), active task-capable local routing flag, or explicitly selected `OUROBOROS_TASK_BACKEND=copilot_acp` passes (key list: `server_runtime.has_startup_ready_provider`; `USE_LOCAL_HEAVY` is legacy migration input only, `LOCAL_MODEL_SOURCE` alone insufficient). Copilot-only readiness enables managed external-workspace tasks, not native chat/review/consciousness model roles. When the gate is false the server marks startup complete without workers so the web UI serves the blocking onboarding overlay; a later successful settings save hot-starts the supervisor.
 
 Every host renders one served page: `GET /onboarding` returns `onboarding_template.html` with the `settings_setup_contract` bootstrap injected, linking wizard CSS and `web/modules/onboarding_wizard.js` as static assets so steps import the same modules as the rest of the UI — an inlined `srcdoc` string cannot. The desktop setup window opens that URL, the blocking overlay frames it, a browser owner opens it directly; `GET /api/onboarding` is the readiness probe (204 once the gate passes, otherwise the page). Steps: Accounts, Models, Review, Budget, Summary; context mode remains outside this wizard. Accounts includes optional agent connections and mounts the shared login cards in `full` mode because `compact` omits the paste-code entry a Claude login needs when its localhost callback cannot complete; its account facts come from the shared Claudexor status store and become the completion payload's `subscriptionsConnected` declaration — a request to look at the daemon, never an authority.
 
@@ -1023,7 +1027,7 @@ The bridge recognizes `/panic`, `/restart`, `/review`, `/evolve [on|off]`, `/bg 
 
 ### Task lifecycle
 
-A queued user task enters through a reviewed transport, is admitted by the supervisor queue, and runs in `OuroborosAgent`; each direct-chat turn runs on its own in-process agent, while an explicit Swarm routing turn retains the ephemeral contract; both are tracked by the process-local `DirectActivityRegistry` and create no `PENDING`/`RUNNING` queue record (§3). The root pipeline captures the task contract and immutable context core, executes the LLM/tool loop, preserves a delivery candidate, stores the result and artifacts, emits lifecycle and usage evidence, performs the root-only post-task work, and publishes the typed outcome. Queue admission proves only that asynchronous work was durably accepted; completion, objective satisfaction, artifact finality, verification, and review acceptance remain separate facts.
+A queued user task enters through a reviewed transport, is admitted by the supervisor queue, and runs in `OuroborosAgent`; each direct-chat turn runs on its own in-process agent, while an explicit Swarm routing turn retains the ephemeral contract; both are tracked by the process-local `DirectActivityRegistry` and create no `PENDING`/`RUNNING` queue record (§3). The root pipeline captures the task contract and immutable context core, dispatches the selected task runtime, stores the result and artifacts, emits lifecycle and usage evidence, and publishes the typed outcome. Native execution owns the LLM/tool loop, delivery candidate and root-only post-task cognition; the explicit external task path is described under Copilot ACP tasks. Queue admission proves only that asynchronous work was durably accepted; completion, objective satisfaction, artifact finality, verification, and review acceptance remain separate facts.
 
 `DeliveryCandidate` is retained before verification or review so a later notice, reviewer failure, deadline, or provider outage cannot erase a useful answer. `outcomes.py` combines execution, objective, review, artifact, and child-absorption axes without converting one axis into another — the terminal custody overlay (`outcomes.custody_debt_axes`) is an instance of that rule, not an exception to it; verify-before-done receipts and exact artifact references are host-attested evidence — declarations and answer prose are not substitutes. A forced exit may publish the best current candidate only with its typed rail and evidence-freshness disclosure, and lifecycle may remain `completed` while the objective or review axis records a best-effort or unaccepted result.
 
@@ -1074,6 +1078,128 @@ A forced turn sends the round's exact tool envelope — the same schemas and the
 Finalization controls are typed owner-mailbox entries rather than injected owner prose. The supervisor may request one bounded tool-less answer, salvage the last persisted assistant text, and retain a full canonical copy when a preview would truncate it. A grace episode has one durable control and can be revoked atomically when the task itself resumes; descendant activity does not count as the task's own progress. A process that cannot be killed remains visibly running, and custody checks prevent another runtime instance from reaping work it does not own.
 
 Disclosed cancel-lifecycle residuals (deliberate): a cascade over a tree with no resolvable lineage chat whose typed handoff-row append ALSO fails still settles; an empty-intent release can add liveness noise to a foreign claim's forensic trail (bounded by the generation fences); cascade postcondition timing can flake under heavy load (the watchdog re-feeds — one retry, never a lost teardown); and the cost projection of a task whose delegated runs stayed open may read `cost_usd=0`/`cost_final=true` while a run is still live — the disclosure line names the open runs.
+
+### Copilot ACP tasks
+
+`task_runtime.run_task_loop` is the narrow whole-task execution seam beside
+`loop.run_llm_loop`, not an LLM provider or a generic runtime plugin framework.
+Its Native branch forwards the original loop call unchanged. Its Copilot ACP
+branch gives one complete work order to the local `copilot --acp` agent, which
+plans, reads, edits and runs its own tools. Replacing a completion provider
+would instead nest two agents' loops and lose these effects.
+
+Selection is explicit: Settings → Agents → Managed task runtime, or
+`ouroboros run --backend copilot_acp`. `POST /api/tasks` accepts
+`execution_backend` (`native` / `copilot_acp`), `copilot_model` (empty uses
+the CLI default), and `copilot_permission_policy` (`read_only` / `workspace`).
+Admission snapshots these choices in ordinary task metadata, so a later
+Settings change cannot silently change an admitted task. Provider model slots,
+account pins, fallback chains and Claudexor remain independent.
+
+For an installation with no model API key, start the normal gateway with the
+external task default, then submit a workspace task through the same CLI:
+
+```bash
+OUROBOROS_TASK_BACKEND=copilot_acp ouroboros server --no-ui
+# In another terminal; the workspace must be an external Git worktree root:
+ouroboros run --backend copilot_acp --workspace /path/to/project \
+  --copilot-permissions workspace \
+  "Investigate the regression, implement a fix, and report the tests."
+```
+
+Authenticate the installed CLI with `copilot login` first; a valid GitHub
+Copilot subscription is required. Authentication, entitlements, quota and
+CLI upgrades remain Copilot's responsibility. The child uses stored CLI/gh
+login discovery, or an explicit `COPILOT_GITHUB_TOKEN`. Ambient `GITHUB_TOKEN`
+and `GH_TOKEN`, host API keys, parent session/permission variables and Copilot
+BYOK overrides are not forwarded. OS discovery, enterprise host, proxy and
+CA settings are retained. No auth-store copying or private model API is used.
+
+The implementation is a managed-root, external-workspace, single-turn runtime.
+Direct Main/Project chat, Presence, subagents, native review and self-evolution
+keep their existing native routes and still need their own model configuration.
+Copilot tasks require the existing disjoint Git workspace admission; they
+cannot target the installed Ouroboros repository or data root. Attachments,
+executor mappings, structured resource restrictions, disabled native tools,
+force-plan and keep-service contracts are refused rather than silently ignored.
+Live steering and native Hurry/Wrap up controls are explicitly refused (Stop now
+remains available); crash/timeout recovery does not automatically
+re-execute external work, and a durable invocation fence also rejects replay.
+Starting a new task after inspecting the retained result is an explicit owner
+decision; session loading, cross-task resumption and fallback are not provided.
+
+The shared context builder still captures the constitutional/identity/memory
+core and the owner-selected Architecture projection. Complete text sections
+are forwarded with an explicit external-execution contract, not exposed as
+host tool APIs. Copilot performs no Ouroboros native plan, acceptance or
+commit review, and no native post-task summary/reflection/consolidation call
+runs afterward. These limits are separate `terminal_host_notice` and
+`runtime_execution` facts; review stays skipped with zero runs, objective
+satisfaction stays unjudged, and the ordinary outcome/finalization pipeline
+retains terminal delivery, workspace patches, artifacts and child-drive promotion.
+An ACP `end_turn` is necessary but not sufficient: an empty answer, unfinished
+tools, malformed protocol or another stop reason is an explicit failed task.
+
+`copilot_acp_policy.CopilotPermissions` supplies a fixed CLI tool-availability
+envelope. Read-only exposes read/search tools; the opt-in workspace policy
+also exposes editing and shell tools. ACP permission requests select only
+`allow_once` for understood operations with declared paths inside the resolved
+workspace; unknown kinds, escaping paths, writes without targets, mismatched
+sessions and requests offering only blanket approval are denied. No `--allow-all*`
+flag is used; automatic system-temporary-directory access is disabled.
+**This is approval policy, not an OS sandbox:** an approved shell runs as the
+local user and can have effects beyond its cwd. Use only trusted workspaces and
+instructions; a contract requiring stronger isolation must use another supported
+execution path. Unadvertised client filesystem/terminal RPCs return method-not-found.
+
+The outbound adapter implements ACP v1's initialize → session/new →
+session/prompt NDJSON JSON-RPC exchange with interleaved notifications and
+permission requests. Each frame is bounded to 8 MiB before parsing, the receive
+queue holds at most 16 frames, and stderr is independently drained with a
+64 KiB retained prefix and an overflow flag. An oversized final-answer candidate
+fails explicitly; already received full frames remain in observability. The
+CLI's first tool-filter information chunk is retained as configuration activity,
+not prepended to the final answer. Unknown preview updates remain exact protocol
+evidence without acquiring result or permission semantics.
+
+One Python guardian inherits protocol pipes without relaying their contents.
+It adopts the spawning server's custody session, uses the existing parent
+lifeline, and spawns Copilot in the guardian's group through `spawn_supervised`.
+The guardian itself uses `ProcessContainer.spawn` plus immediate `record_process`;
+both records have task scope and the same canonical data root/owner. Normal
+close sends session/cancel for unfinished work, closes stdin, waits, reaps the
+owned container and joins drainers. Parent death, Panic and startup orphan
+reaping use the existing lifeline, Job Object and exact-identity custody rails.
+The shared POSIX detached-descendant and spawn-to-record residuals still apply;
+unconfirmed cleanup is a failure, never a successful completion.
+
+Observability uses existing private CAS call manifests, not a second transcript
+ledger: every sent/received frame is persisted before projection and indexed by
+`task_runtime_protocol` rows in canonical `logs/events.jsonl` with execution id,
+sequence and `protocol_ref`. `task_runtime_update` rows in `logs/progress.jsonl`
+carry messages, plans, diffs and permission decisions; tools use the ordinary
+`tool_call_started` / `tool_call_finished` vocabulary and `logs/tools.jsonl`.
+The existing worker log sink, WebSocket, task SSE/history and shared
+`log_events.js` task-card renderer carry them live and on replay. No extra
+socket, poller, task list or page exists. The task result's `runtime_execution`
+retains dispatch/completion state, requested versus CLI-reported session model,
+agent version and protocol-record count; a reported session model is not
+per-generation model/effort evidence.
+
+Immediately before the prompt, `record_unmetered_external_dispatch` records one
+idempotent physical-dispatch receipt in the existing monetary ledger. Cost
+remains `None`, `cost_final=false`, `unknown_unmetered=1`; absent token/quota
+telemetry is not fabricated. Ouroboros API dollar caps cannot meter Copilot
+subscription usage. The existing task deadline/absolute ceiling, cancellation
+and cognitive-operation lifecycle still apply. Tests in
+`test_copilot_acp_client.py`, `test_copilot_acp_events.py`,
+`test_copilot_acp_policy.py` and `test_copilot_task_runtime.py` require no live
+Copilot service; `test_copilot_acp_lifecycle.py` exercises real guardian/agent
+pipes against a local fake. `web/tests/copilot_acp.test.js` and the shared
+wire-contract tests cover UI projection; the opt-in `test_copilot_acp_ui.py`
+exercises Settings save/reload and actual live/history rendering. The history
+and chat progress projections retain backend, ACP kind, execution id and
+sequence rather than reducing runtime identity to unlabelled narration.
 
 ### Tool capability and execution
 
@@ -1768,6 +1894,10 @@ A registry of `config.SETTINGS_DEFAULTS` (exact defaults stay canonical in `conf
 | OUROBOROS_RESCUE_GIT_TIMEOUT_SEC | 300 | Per-process ceiling on rescue Git commands |
 | OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD | unset | Env-only: `1` permits saving a non-loopback bind without a password |
 | OUROBOROS_MODEL | google/gemini-3.8-flash | Main model |
+| OUROBOROS_TASK_BACKEND | native | Whole managed-task runtime: native or copilot_acp; independent of model slots |
+| OUROBOROS_COPILOT_BIN | copilot | Local Copilot executable name/path; no managed installation or version pin |
+| OUROBOROS_COPILOT_MODEL | "" | Requested CLI model; empty retains Copilot's own default |
+| OUROBOROS_COPILOT_PERMISSION_POLICY | read_only | ACP one-shot policy: read_only or opt-in workspace tools/shell (§6) |
 | OUROBOROS_MODEL_HEAVY | "" | Legacy slot: readable for migration/history only, out of active routing |
 | OUROBOROS_MODEL_LIGHT | openai/gpt-5.6-luna | Light model |
 | OUROBOROS_MODEL_ACCOUNTS | "{}" | Role-owned managed account pins; empty means Auto, fallback entries retain order |

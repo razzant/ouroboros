@@ -33,6 +33,7 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
 from ouroboros.loop import run_llm_loop
+from ouroboros.task_runtime import run_task_loop
 from ouroboros.config import EFFORT_SCALE, resolve_effort  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
 from ouroboros.agent_startup_checks import (
     persist_early_origin_stub as _persist_early_origin_stub_impl,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
@@ -898,7 +899,7 @@ class OuroborosAgent:
                     if task.get("_is_direct_chat") and not task.get("_ephemeral_turn"):
                         self._accepting_owner_messages = True
                 try:
-                    text, usage, llm_trace = run_llm_loop(
+                    text, usage, llm_trace = run_task_loop(run_llm_loop, task=task,
                         messages=messages,
                         tools=self.tools,
                         llm=self.llm,
