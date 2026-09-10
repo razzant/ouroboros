@@ -514,6 +514,7 @@ def _handle_prompt_signals(
         # status and every one that applies is rendered. Fails CLOSED either way.
         token_count = context_status.token_count
         cause, remedy = _ladder_terminal_cause(context_status, input_limit, managed=managed)
+        log.warning("Scope review pack did not assemble: %s (fail-closed).", cause)
         return ScopeReviewResult(
             blocked=True,
             status="fixed_overflow", failure_phase="context", failure_code="fixed_overflow",

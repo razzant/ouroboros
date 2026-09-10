@@ -503,10 +503,11 @@ def prepare_scope_review(
 
     # Pack-budget signals belong to an ASSEMBLED pack: a session assembles none, so its
     # context_status is None and this returns None by construction — no route branch.
+    input_limit = sr._effective_scope_input_limit(
+        scope_model=scope_model_id, window_binding=window_binding)
     signal_result = sr._handle_prompt_signals(
         prompt, context_status, scope_model=scope_model_id,
-        input_limit=sr._effective_scope_input_limit(scope_model=scope_model_id, window_binding=window_binding),
-        window_binding=window_binding,
+        input_limit=input_limit, window_binding=window_binding,
         managed=subject is not None,
     )
     if signal_result is not None:
@@ -527,6 +528,22 @@ def prepare_scope_review(
                 f"{signal_result.block_message}\n"
                 f"{MANAGED_SPLIT_IMPOSSIBLE} {MANAGED_OVERSIZE_GUIDANCE}"
             )
+        if signal_result.blocked and signal_result.status in SCOPE_FIT_BLOCK_STATUSES:
+            # Row-local preparation evidence; the panel may still yield this seat.
+            try:
+                sr.append_jsonl(ctx.drive_logs() / "events.jsonl", {
+                    "ts": sr.utc_now_iso(), "type": "scope_review_pack_unassembled",
+                    "task_id": getattr(ctx, "task_id", "") or "", "slot_id": slot_id,
+                    "model": scope_model_id, "status": signal_result.status,
+                    "prompt_tokens": context_status.token_count,
+                    "prompt_tokens_source": "estimated",
+                    "prompt_tokens_budget": input_limit,
+                    "headroom_tokens": input_limit - context_status.token_count,
+                    "unassembled_required": list(context_status.unassembled_required),
+                    "atlas_overflowed": context_status.atlas_overflowed,
+                })
+            except Exception:
+                pass
         return None, signal_result
 
     return {
