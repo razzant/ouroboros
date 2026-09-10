@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
@@ -27,6 +28,10 @@ log = logging.getLogger(__name__)
 BLOCK_SIZE = 100                          # Messages per consolidation block
 MAX_SUMMARY_BLOCKS = 10                   # Compress into era when exceeded
 ERA_COMPRESS_COUNT = 4                    # Oldest blocks to compress per era
+BLOCK_SUMMARY_MAX_CHARS = 24_000         # ibl-local consolidator: per-block byte cap (BIBLE P1)
+_ENTRY_TEXT_PRETRUNCATE_LIMIT = 2_000     # ibl-local consolidator: producer-side cap on per-entry text passed to the LLM (drops bulk tool output / dumps before the prompt can reproduce them)
+ERA_SUMMARY_MAX_CHARS = 96_000           # ibl-local consolidator: per-era byte cap (4× block cap)
+PENDING_BYTES_TRIGGER = 50_000           # ibl-local consolidator: byte-aware consolidation trigger
 
 
 def _consolidation_route() -> Tuple[str, bool]:
@@ -96,6 +101,46 @@ def _resolve_generation_segments(
     return [source_path], 0, True
 
 
+def _pending_bytes(segments: List[pathlib.Path], last_offset: int) -> int:
+    """Approximate pending bytes across the resolved segments chain starting at last_offset (chain-position).
+
+    Walks segments in order. While ``last_offset`` exceeds a segment's line
+    count, the segment is fully consumed and we advance past it. The segment
+    in which the cursor lands contributes a proportional share of its bytes
+    (uniform-line-size approximation). All segments AFTER the cursor segment
+    are entirely pending. Returns 0 for empty / missing segments, or when the
+    cursor is at or past the chain tail.
+
+    Closes ibl-f60344038572: the trigger must look at PENDING bytes, not the
+    cumulative st_size of every segment (which would falsely trip once the
+    archived chain alone exceeds PENDING_BYTES_TRIGGER and recompute O(history)
+    work every tick). Mirrors the existing line-count semantics:
+        pending_lines = total_lines - last_offset
+    """
+    if not segments:
+        return 0
+    pending = 0
+    remaining = last_offset
+    for path in segments:
+        if not path.exists():
+            continue
+        size = path.stat().st_size
+        seg_lines = _count_lines(path)
+        if seg_lines <= 0:
+            continue
+        if remaining >= seg_lines:
+            remaining -= seg_lines
+            continue
+        # Cursor lands within this segment OR at/before its start.
+        if remaining <= 0:
+            pending += size
+        else:
+            proportion = (seg_lines - remaining) / seg_lines
+            pending += int(size * proportion)
+        remaining = 0  # subsequent segments are fully pending
+    return pending
+
+
 def should_consolidate(
     meta_path: pathlib.Path,
     chat_path: pathlib.Path,
@@ -109,10 +154,26 @@ def should_consolidate(
         # run regardless of pending volume: the run appends the one durable gap
         # block and rebases the cursor even below BLOCK_SIZE.
         return True
-    total = sum(_count_lines(path) for path in segments if path.exists())
-    if last_offset > total:
-        return _count_lines(chat_path) >= BLOCK_SIZE
-    return (total - last_offset) >= BLOCK_SIZE
+    total_lines = sum(_count_lines(path) for path in segments if path.exists())
+    if last_offset > total_lines:
+        # Cursor past total — fall back to live-only heuristic. Line count is
+        # the primary trigger; the byte threshold (PENDING_BYTES_TRIGGER) is a
+        # SECONDARY safety net for pathological long-message cases where message
+        # count stays under BLOCK_SIZE but raw bytes are already bloating.
+        live_lines = _count_lines(chat_path)
+        if live_lines >= BLOCK_SIZE:
+            return True
+        return _pending_bytes(segments, last_offset) >= PENDING_BYTES_TRIGGER
+    pending_lines = total_lines - last_offset
+    if pending_lines >= BLOCK_SIZE:
+        return True
+    # Byte-aware secondary trigger (ibl-local consolidator, ibl-f60344038572):
+    # a single pathological long-message run can accumulate 50K chars across
+    # well under 100 messages. The trigger computes pending bytes from
+    # segments starting at last_offset — NOT the cumulative st_size of every
+    # segment (which would falsely trip once the archived chain alone
+    # exceeded PENDING_BYTES_TRIGGER).
+    return _pending_bytes(segments, last_offset) >= PENDING_BYTES_TRIGGER
 
 
 def consolidate(
@@ -358,7 +419,55 @@ def _run_block_consolidation(
     return total_usage
 
 
-def _call_consolidation_llm(llm_client: Any, prompt: str, label: str) -> Tuple[str, Dict[str, Any]]:
+def _strip_think_blocks(raw: str) -> str:
+    """Strip ``...`` blocks from LLM output before storing.
+
+    Models like minimax/M2.7-highspeed emit `` reasoning regardless of
+    `reasoning_effort="low"`. Storing those sections inflates dialogue_blocks.json
+    (45.8% of current content per cycle-54 measurement, observed range
+    0–95% per block) and bloats downstream scratchpad rendering. We strip them
+    AFTER the call — the model still thinks, the stored memory only carries
+    the answer. Conservative: only strips WELL-FORMED closing tags; an unclosed
+    `` tag fails safe (no strip) so partial responses are preserved
+    verbatim and surfaced to the cursor advance / retry path."""
+    if not raw:
+        return ""
+    stripped = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL)
+    return stripped.strip()
+
+
+def _truncate_with_marker(content: str, max_chars: int, span_label: str) -> Tuple[str, bool]:
+    """Bound stored content at ``max_chars`` and append an honest truncation marker.
+
+    Returns ``(content, was_truncated)``. When content fits within the cap
+    the original is returned unchanged with ``False``; when content exceeds
+    the cap the bounded prefix plus marker is returned with ``True``. The
+    typed ``was_truncated`` lets callers record the cut as a durable fact
+    rather than infer it from content shape.
+
+    BIBLE P1: a content cap that silently loses the tail is NOT acceptable —
+    the marker is a durable, visible fact that the stored span is bounded.
+    Cursor and span_label are recorded so a reader can correlate the truncation
+    back to the generation that produced it.
+    """
+    if len(content) <= max_chars:
+        return content, False
+    kept = content[:max_chars].rstrip()
+    marker = (
+        f"\n\n[...truncated at {max_chars} chars (original ~{len(content)} chars); "
+        f"span: {span_label} — single-block byte cap prevents dialogue_blocks.json bloat]..."
+    )
+    return kept + marker, True
+
+
+def _call_consolidation_llm(
+    llm_client: Any,
+    prompt: str,
+    label: str,
+    *,
+    max_chars: int = BLOCK_SUMMARY_MAX_CHARS,
+    span_label: str = "consolidation",
+) -> Tuple[str, Dict[str, Any]]:
     try:
         model, use_local = _consolidation_route()
         msg, usage = llm_client.chat(
@@ -370,7 +479,15 @@ def _call_consolidation_llm(llm_client: Any, prompt: str, label: str) -> Tuple[s
             max_tokens=16384,
             use_local=use_local,
         )
-        return msg.get("content", ""), usage
+        raw = msg.get("content", "")
+        stripped = _strip_think_blocks(raw)
+        bounded, was_truncated = _truncate_with_marker(stripped, max_chars, span_label)
+        if was_truncated and len(bounded) > max_chars + 200:  # marker overhead capped ~200 chars
+            log.warning(
+                "Consolidation output for %s exceeded byte cap %d (stripped %d chars, truncated to %d)",
+                span_label, max_chars, len(stripped), max_chars,
+            )
+        return bounded, usage
     except Exception as e:
         from ouroboros.llm_claudexor import propagate_model_error
         propagate_model_error(e)
@@ -395,22 +512,50 @@ def _create_block_summary(
         identity_section = f"\n## Identity context\n{identity_text}\n"
 
     prompt = f"""You are a memory consolidator for Ouroboros, a self-modifying AI agent.
-Create a detailed episodic memory entry from these {message_count} messages.
+Create a CONCISE episodic memory entry from these {message_count} messages.
 
-## Rules
-1. Header: ### Block: {first_date} {first_time} - {last_time}
-2. Preserve: decisions, agreements, technical discoveries, emotional moments, task outcomes, what worked/failed
-3. Compress: routine tool calls, repetitive back-and-forth
-4. Quote key phrases directly when important
-5. First person as Ouroboros: "I did...", "the user asked..."
-6. Length: 200-500 words depending on content density
-7. Include task_ids when referencing specific tasks
+## Header
+### Block: {first_date} {first_time} - {last_time}
+
+## Hard target
+- Output must stay below ~2,500 characters total (about 500 words).
+- When the input is large, the OUTPUT must be DRAMATICALLY shorter than the input. Compress hard.
+- Do NOT reproduce verbatim source text (raw tool output, JSON dumps, repeated markdown headers, code blocks).
+
+## PRESERVE — non-negotiable
+- Decisions and agreements ("we decided X")
+- State changes (code changed, env changed, identity/state changed)
+- Lessons learned (what worked, what failed)
+- Unresolved questions (open threads, pending items)
+- Task ids when the message references a specific task
+
+## DROP — noise for an episodic memory block
+- Routine tool calls that succeed without commentary
+- Tool-result JSON payloads (already in chat.jsonl, durable)
+- Repeated stack traces and debug output
+- Verbatim dialogue longer than 2 lines from a single exchange
+- Source markdown tables — paraphrase the cell content instead of copying
+- Source code blocks — describe the change instead of copying
+
+## Hard prohibitions
+- Do NOT preserve markdown headers from the source verbatim (#, ##, ### at column 0)
+- Do NOT include model banners like "Sure, here is..." or "I will..."
+- Do NOT pad the entry — say what happened, stop
+
+## Voice
+First person as Ouroboros: "I did...", "I learned...", "the user asked..."
 {identity_section}
 ## Messages to summarize
 {messages_text}
 """
 
-    return _call_consolidation_llm(llm_client, prompt, "Block summary LLM call")
+    return _call_consolidation_llm(
+        llm_client,
+        prompt,
+        "Block summary LLM call",
+        max_chars=BLOCK_SUMMARY_MAX_CHARS,
+        span_label=f"block {first_date} {first_time}-{last_time}",
+    )
 
 
 def _compress_blocks_to_era(
@@ -441,7 +586,13 @@ Write as Ouroboros (first person). Aim for 30-40% of original length.
 {combined}
 """
 
-    content, usage = _call_consolidation_llm(llm_client, prompt, "Era compression")
+    content, usage = _call_consolidation_llm(
+        llm_client,
+        prompt,
+        "Era compression",
+        max_chars=ERA_SUMMARY_MAX_CHARS,
+        span_label=f"era {start_date}-{end_date}",
+    )
     if not content or not content.strip():
         log.warning("Era compression returned empty — keeping original blocks (Bible P1)")
         return None, usage
@@ -472,6 +623,13 @@ def _format_entries_for_block(entries: List[Dict[str, Any]]) -> str:
 
             author = dialogue_author(e)
         text = str(e.get("text", ""))
+        if len(text) > _ENTRY_TEXT_PRETRUNCATE_LIMIT:
+            # Producer-side pre-truncation. The LLM cannot reproduce verbatim
+            # content that no longer exists in its input. Reasoning / decisions
+            # / outcomes remain untouched (they are not in tool output JSON);
+            # chat.jsonl is the durable source so the cut is reversible for
+            # forensics (BIBLE P1 boundary on dialogue_blocks.json is preserved).
+            text = f"[TEXT TRUNCATED: original ~{len(text)} chars, see chat.jsonl]"
         lines.append(f"[{ts}] {direction_prefix}{author}: {text}")
     return "\n\n".join(lines)
 
