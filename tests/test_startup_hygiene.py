@@ -508,3 +508,39 @@ def test_check_uncommitted_changes_never_commits_even_when_launcher_managed(monk
     assert result["auto_committed"] is False
     assert result["auto_rescue_skipped"] == "supervisor_side_rescue_owns_this"
     assert calls == [["git", "status", "--porcelain"]]
+
+
+def _sparse_json(path: pathlib.Path, size_bytes: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.truncate(size_bytes)
+
+
+def test_hot_store_growth_notes_warns_when_task_results_dir_exceeds_threshold(tmp_path):
+    from ouroboros.context_budget import TASK_RESULTS_DIR_WARN_BYTES
+
+    per_file = TASK_RESULTS_DIR_WARN_BYTES // 3  # 4 files -> ~1.33x threshold
+    for i in range(4):
+        _sparse_json(tmp_path / "task_results" / f"t{i}.json", per_file)
+
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel, drive_root=tmp_path)
+    notes = startup_mod.hot_store_growth_notes(env)
+
+    hit = [n for n in notes if "task_results/*.json totals" in n]
+    assert len(hit) == 1
+    assert "across 4 files" in hit[0]
+    assert "prune_task_results" in hit[0]
+    assert "do NOT shorten the GC retention" in hit[0]
+
+
+def test_hot_store_growth_notes_silent_when_task_results_dir_below_threshold(tmp_path):
+    from ouroboros.context_budget import TASK_RESULTS_DIR_WARN_BYTES
+
+    per_file = TASK_RESULTS_DIR_WARN_BYTES // 4  # 3 files -> 0.75x threshold
+    for i in range(3):
+        _sparse_json(tmp_path / "task_results" / f"t{i}.json", per_file)
+
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel, drive_root=tmp_path)
+    notes = startup_mod.hot_store_growth_notes(env)
+
+    assert not [n for n in notes if "task_results/*.json" in n]

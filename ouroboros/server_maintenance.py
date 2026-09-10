@@ -39,13 +39,37 @@ def _installed_skill_names():
 
 
 _LAST_CANCEL_INTENT_SWEEP = [0.0]
+_LAST_STORE_GC = [0.0]
+_STORE_GC_INTERVAL_SEC = 6 * 3600
+
+
+def _periodic_store_gc() -> None:
+    """Every ~6h: keep ``data/task_results/`` bounded without a restart
+    (razzant/ouroboros#139). ``_startup_prune_sweeps`` does the same on boot; a
+    long-lived supervisor needs it on a cadence too."""
+    if time.time() - _LAST_STORE_GC[0] < _STORE_GC_INTERVAL_SEC:
+        return
+    _LAST_STORE_GC[0] = time.time()
+    try:
+        from ouroboros.headless import prune_task_results
+
+        report = prune_task_results(DATA_DIR)
+        if report.get("pruned") or report.get("errors"):
+            from supervisor.state import append_jsonl
+
+            append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "periodic_store_gc", "task_results": report,
+            })
+    except Exception:
+        log.debug("Periodic store GC failed", exc_info=True)
 
 
 def _periodic_supervisor_maintenance(last_custody_reap: list, last_review_reconcile: list) -> None:
     """Throttled periodic upkeep extracted from the supervisor loop: cancel-intent
     watchdog and pending child-ref promotion replay (every 20s), custody reap of
     orphaned task-scoped processes (every 600s) + review-job zombie reconcile
-    (every 300s). Each cadence gates itself via its own last-run marker."""
+    (every 300s) + task_results store GC (every ~6h). Each cadence gates itself
+    via its own last-run marker."""
     if time.time() - _LAST_CANCEL_INTENT_SWEEP[0] > 20:
         _LAST_CANCEL_INTENT_SWEEP[0] = time.time()
         try:
@@ -101,6 +125,7 @@ def _periodic_supervisor_maintenance(last_custody_reap: list, last_review_reconc
     if time.time() - last_review_reconcile[0] > 300:
         last_review_reconcile[0] = time.time()
         _periodic_zombie_reconcile()
+    _periodic_store_gc()
 
 
 def _reconcile_delegated_runs(running_task_ids: set) -> None:
@@ -276,13 +301,18 @@ def _startup_prune_sweeps() -> None:
     from supervisor.state import append_jsonl
 
     try:
-        from ouroboros.headless import prune_headless_task_drives, prune_task_drives, prune_task_trees
+        from ouroboros.headless import (
+            prune_headless_task_drives, prune_task_drives, prune_task_results, prune_task_trees,
+        )
         from ouroboros.utils import sweep_stale_temp_files
 
         prune_report = prune_headless_task_drives(DATA_DIR)
         task_drive_report = prune_task_drives(DATA_DIR)
         # Ephemeral task-tree coordination ledgers age out with their terminal root.
         prune_task_trees(DATA_DIR)
+        # task_results/<id>.json + artifacts/<id>/ — glob-parsed on every
+        # /api/tasks request and SSE tick, previously never pruned (#139).
+        task_results_report = prune_task_results(DATA_DIR)
         # Reap orphaned atomic-write temp files (.*.tmp.*) left by a hard kill.
         sweep_stale_temp_files(DATA_DIR)
         if (
@@ -290,12 +320,15 @@ def _startup_prune_sweeps() -> None:
             or prune_report.get("errors")
             or task_drive_report.get("pruned")
             or task_drive_report.get("errors")
+            or task_results_report.get("pruned")
+            or task_results_report.get("errors")
         ):
             append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "headless_task_drive_prune",
                 "report": prune_report,
                 "task_drives": task_drive_report,
+                "task_results": task_results_report,
             })
     except Exception:
         log.debug("Headless task drive prune failed", exc_info=True)

@@ -854,6 +854,32 @@ def hot_store_growth_notes(env: Any) -> list:
             "replay scans this chain on ownership questions. Investigate chain "
             "indexing/compaction; archives are durable history and are never deleted."
         )
+    # Mirror for ``task_results/<id>.json``: glob-walked on every /api/tasks
+    # request and every SSE child re-discovery tick (razzant/ouroboros#139).
+    # ``prune_task_results`` bounds it via the GC retention window — this is a
+    # pre-degradation tripwire, not a retention preference. Remediation points
+    # at prune + discovery bounding, never at shortening the retention window.
+    try:
+        task_results_dir_path = drive_root / "task_results"
+        task_results_count = 0
+        task_results_bytes = 0
+        if task_results_dir_path.is_dir():
+            for path in task_results_dir_path.glob("*.json"):
+                if path.is_file():
+                    task_results_count += 1
+                    task_results_bytes += path.stat().st_size
+    except OSError:
+        task_results_bytes = 0
+        task_results_count = 0
+    from ouroboros.context_budget import TASK_RESULTS_DIR_WARN_BYTES
+    if task_results_bytes > TASK_RESULTS_DIR_WARN_BYTES:
+        notes.append(
+            "WARNING: HOT STORE GROWTH — task_results/*.json totals "
+            f"{task_results_bytes / 1_000_000:.1f} MB across {task_results_count} files "
+            f"(threshold {TASK_RESULTS_DIR_WARN_BYTES // 1_000_000} MB). The directory is "
+            "glob-walked on every /api/tasks request and SSE tick. Bound with "
+            "prune_task_results or bounded discovery — do NOT shorten the GC retention."
+        )
     return notes
 
 

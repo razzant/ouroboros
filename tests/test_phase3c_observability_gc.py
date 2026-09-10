@@ -808,3 +808,72 @@ def test_periodic_maintenance_invokes_pending_ref_promotion_sweep(
     server_maintenance._periodic_supervisor_maintenance([10_000.0], [10_000.0])
 
     assert calls == [tmp_path]
+
+
+def test_prune_task_results_removes_old_terminal_json_and_artifacts(tmp_path):
+    """razzant/ouroboros#139: bound task_results/. Old terminal results and
+    their artifact subtree go; young / non-terminal / open-review-continuation
+    results stay.
+    """
+    import time
+
+    from ouroboros.headless import prune_task_results
+    from ouroboros.task_continuation import ReviewContinuation, save_review_continuation
+
+    data = tmp_path / "data"
+    (data / "task_results").mkdir(parents=True)
+    now = _future_now()
+    old_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 30 * 86400))
+    fresh_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now))
+
+    write_task_result(data, "oldterminal", STATUS_COMPLETED, result="done", ts=old_iso)
+    write_task_result(data, "oldrunning", "running", result="working", ts=old_iso)
+    write_task_result(data, "freshterminal", STATUS_COMPLETED, result="done", ts=fresh_iso)
+    write_task_result(data, "oldbutreviewed", STATUS_COMPLETED, result="done", ts=old_iso)
+
+    art = data / "task_results" / "artifacts" / "oldterminal"
+    art.mkdir(parents=True)
+    (art / "patch.diff").write_text("diff", encoding="utf-8")
+
+    # An open review continuation pins oldbutreviewed's result.
+    save_review_continuation(
+        data,
+        ReviewContinuation(
+            task_id="oldbutreviewed", source="blocked_review", stage="preflight",
+            tool_name="commit_reviewed",
+        ),
+    )
+
+    report = prune_task_results(data, retention_days=7, now=now)
+
+    assert [item["task_id"] for item in report["pruned"]] == ["oldterminal"]
+    assert not (data / "task_results" / "oldterminal.json").exists()
+    assert not art.exists()
+    assert (data / "task_results" / "freshterminal.json").exists()
+    assert (data / "task_results" / "oldrunning.json").exists()
+    assert (data / "task_results" / "oldbutreviewed.json").exists()
+    reasons = {item["task_id"]: item["reason"] for item in report["skipped"]}
+    assert reasons["oldrunning"] == "task_not_terminal"
+    assert reasons["freshterminal"] == "younger_than_retention"
+    assert reasons["oldbutreviewed"] == "open_review_continuation"
+
+
+def test_prune_task_results_fails_closed_when_continuations_unreadable(tmp_path, monkeypatch):
+    """If the open-review-continuation set can't be read, prune NOTHING."""
+    import ouroboros.task_continuation as tc
+    from ouroboros.headless import prune_task_results
+
+    data = tmp_path / "data"
+    (data / "task_results").mkdir(parents=True)
+    write_task_result(data, "oldterminal", STATUS_COMPLETED, result="done",
+                      ts="2020-01-01T00:00:00+00:00")
+
+    monkeypatch.setattr(
+        tc, "list_review_continuations",
+        lambda _root: (_ for _ in ()).throw(RuntimeError("continuation store corrupt")),
+    )
+    report = prune_task_results(data, retention_days=7, now=_future_now())
+
+    assert report["pruned"] == []
+    assert report["errors"] and report["errors"][0]["task_id"] == "*"
+    assert (data / "task_results" / "oldterminal.json").exists()

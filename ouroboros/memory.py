@@ -870,11 +870,12 @@ class Memory:
         log_name: str,
         max_entries: Optional[int] = None,
         exclude_a2a: bool = False,
+        tail_bytes: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         path = self.logs_path(log_name)
         try:
             def _rows(source, cap):
-                return [e for e in iter_jsonl_objects(source, max_entries=cap)
+                return [e for e in iter_jsonl_objects(source, max_entries=cap, tail_bytes=tail_bytes)
                         if not (exclude_a2a and is_a2a_chat_id(e.get("chat_id")))]
 
             entries = _rows(path, max_entries)
@@ -893,8 +894,14 @@ class Memory:
             log.warning("Failed to read JSONL entries from %s", log_name, exc_info=True)
             return []
 
-    def read_jsonl_tail(self, log_name: str, max_entries: int = 100) -> List[Dict[str, Any]]:
-        return self._read_jsonl_entries(log_name, max_entries=max_entries)
+    def read_jsonl_tail(
+        self, log_name: str, max_entries: int = 100, *, tail_bytes: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        # ``tail_bytes`` (razzant/ouroboros#131): seek to the last N bytes of an
+        # unbounded log instead of streaming the whole file to keep only
+        # ``max_entries``. A pathological giant-row log degrades to fewer rows
+        # rather than a full read.
+        return self._read_jsonl_entries(log_name, max_entries=max_entries, tail_bytes=tail_bytes)
 
     def read_jsonl_tail_after_offset(
         self,
