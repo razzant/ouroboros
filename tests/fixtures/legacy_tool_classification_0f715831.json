@@ -1051,6 +1051,14 @@
    "is_error": false,
    "status": "ok"
   },
+  "ident:IDENTITY_WRITE_CORRUPTED:named": {
+    "is_error": true,
+    "status": "error"
+  },
+  "ident:IDENTITY_WRITE_CORRUPTED:plain": {
+    "is_error": true,
+    "status": "error"
+  },
   "ident:IMAGE_UNDECODABLE:named": {
    "is_error": false,
    "status": "ok"

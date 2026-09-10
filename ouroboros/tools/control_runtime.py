@@ -277,8 +277,70 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
         except Exception:
             pass
 
+    expected_sha = sha256(content.encode("utf-8")).hexdigest()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+    # POST-WRITE VERIFY (ibl-local-f3628ac3c9a0): the trust boundary is
+    # ``path.write_text`` itself — re-read and confirm the bytes round-trip.
+    # Twice in 2 days the bytes actually written diverged from the input past
+    # ~byte 4648 (single continuous corruption run, not truncation) and the tool
+    # reported OK; the handler code is clean, so the guard is the only place the
+    # failure can be caught from inside the tool.
+    try:
+        written = path.read_text(encoding="utf-8")
+        written_sha = sha256(written.encode("utf-8")).hexdigest()
+    except Exception:
+        written, written_sha = "", ""
+
+    if written_sha != expected_sha:
+        if old_content:
+            try:
+                path.write_text(old_content, encoding="utf-8")
+            except Exception:
+                pass
+        # First-divergence offset is computed in BYTES (the IBL describes "past
+        # ~byte 4648"); for non-ASCII content the char index diverges from the
+        # byte offset, so compare the utf-8 byte arrays directly.
+        content_bytes = content.encode("utf-8")
+        written_bytes = written.encode("utf-8") if written else b""
+        min_len_bytes = min(len(content_bytes), len(written_bytes))
+        first_div = -1
+        for i in range(min_len_bytes):
+            if content_bytes[i] != written_bytes[i]:
+                first_div = i
+                break
+        if first_div == -1 and len(content_bytes) != len(written_bytes):
+            first_div = min_len_bytes
+        try:
+            append_jsonl(mem.identity_journal_path(), {
+                "ts": utc_now_iso(),
+                "task_id": str(getattr(ctx, "task_id", "") or ""),
+                "source_type": str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role", "task")) if isinstance(getattr(ctx, "task_metadata", {}), dict) else "task",
+                "old_len": len(old_content),
+                "new_len": len(content),
+                "content_byte_length": len(content_bytes),
+                "written_byte_length": len(written_bytes),
+                "old_sha256": sha256(old_content.encode("utf-8")).hexdigest() if old_content else "",
+                "expected_sha256": expected_sha,
+                "written_sha256": written_sha,
+                "first_divergence_offset": first_div,
+                "verify_failed": True,
+                # Full content stored (no [:N] preview) — identity_journal is the
+                # only place the agent's intended new identity survives when the
+                # file write was corrupt.
+                "old_content": old_content,
+                "expected_content": content,
+                "corrupt_written": written,
+            })
+        except Exception:
+            pass
+        return (
+            f"⚠️ IDENTITY_WRITE_CORRUPTED: wrote {len(written_bytes)} bytes, "
+            f"sha {written_sha[:12]}… != input sha {expected_sha[:12]}…; "
+            f"first divergence at byte {first_div}; "
+            f"identity.md {'restored to prior content' if old_content else 'no prior content to restore'}"
+        )
 
     append_jsonl(mem.identity_journal_path(), {
         "ts": utc_now_iso(),
@@ -287,7 +349,7 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
         "old_len": len(old_content),
         "new_len": len(content),
         "old_sha256": sha256(old_content.encode("utf-8")).hexdigest() if old_content else "",
-        "new_sha256": sha256(content.encode("utf-8")).hexdigest(),
+        "new_sha256": expected_sha,
         "old_content": old_content,
         "new_content": content,
         "old_preview": old_content[:500],
