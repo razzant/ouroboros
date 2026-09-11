@@ -21,13 +21,13 @@ if TYPE_CHECKING:
 
 from ouroboros.config import get_consciousness_model, resolve_effort
 from ouroboros.context import (
+    _drive_state_section,
     build_governance_sections,
     build_health_invariants,
     build_knowledge_sections,
     build_memory_sections,
     build_recent_sections,
     build_runtime_section,
-    safe_read,
 )
 from ouroboros.context_budget import (
     BG_CONTEXT_MAX_CHARS,
@@ -1034,6 +1034,18 @@ class BackgroundConsciousness:
             return read_text(prompt_path)
         return "You are Ouroboros in background consciousness mode. Think."
 
+    # Drop-priority constants for graceful degradation on overflow (lower =
+    # dropped first). P1 tier-0 cognitive artifacts (BIBLE.md, identity,
+    # scratchpad, knowledge index, Pattern Register, dialogue horizon,
+    # ARCHITECTURE, drive state, bg_prompt, health invariants) carry P1=0 and
+    # are NEVER dropped — BIBLE P1 (Continuity): "the tier-0 core ... stays
+    # always-loaded in full." Non-P1 diagnostics drop in a fixed order instead
+    # of the whole cycle skipping.
+    _CTX_P1 = 0
+    _CTX_DROP_FIRST = 10   # backlog digest, non-chat recent sections, observations
+    _CTX_DROP_MID = 20     # runtime section (scheduled tasks digest)
+    _CTX_DROP_LATE = 30    # recent chat tail — heaviest single section, drops last
+
     def _build_context(
         self,
         *,
@@ -1049,29 +1061,29 @@ class BackgroundConsciousness:
         self._identity_source_reads = {}
         self._identity_unresolved_sources = set()
 
-        parts = [self._load_bg_prompt()]
+        P1 = self._CTX_P1
+        sections: List[Any] = [("bg_prompt", self._load_bg_prompt(), P1)]
 
         if not (self._repo_dir / "docs" / "ARCHITECTURE.md").is_file():
             logging.getLogger(__name__).warning(
                 "consciousness: docs/ARCHITECTURE.md not found or empty"
             )
-        parts.extend(build_governance_sections(env, warn_large=True, warn_label="consciousness"))
+        for idx, g in enumerate(build_governance_sections(env, warn_large=True, warn_label="consciousness")):
+            sections.append((f"governance[{idx}]", g, P1))
 
         durable_dialogue_gaps: List[Dict[str, Any]] = []
-        parts.extend(build_memory_sections(
+        for idx, m in enumerate(build_memory_sections(
             memory, durable_dialogue_gaps_out=durable_dialogue_gaps,
-        ))
+        )):
+            sections.append((f"memory[{idx}]", m, P1))
         for gap in durable_dialogue_gaps:
             gap_id = str(gap.get("gap_id") or f"block-{gap.get('block_index', '?')}")
             self._identity_unresolved_sources.add(f"dialogue-gap:{gap_id}")
 
-        parts.extend(
-            build_knowledge_sections(
-                env,
-                warn_large=True,
-                pattern_header="## Pattern Register",
-            )
-        )
+        for idx, k in enumerate(build_knowledge_sections(
+            env, warn_large=True, pattern_header="## Pattern Register",
+        )):
+            sections.append((f"knowledge[{idx}]", k, P1))
 
         try:
             from ouroboros.improvement_backlog import (
@@ -1098,7 +1110,7 @@ class BackgroundConsciousness:
                         "and receive the complete current record before update_identity; "
                         "if unavailable, abstain from that rewrite"
                     )
-                parts.append(backlog_digest)
+                sections.append(("backlog_digest", backlog_digest, self._CTX_DROP_FIRST))
         except Exception:
             try:
                 from ouroboros.improvement_backlog import backlog_path
@@ -1106,40 +1118,52 @@ class BackgroundConsciousness:
                 path = backlog_path(self._drive_root)
                 if path.exists():
                     self._identity_source_requirements["improvement-backlog"] = path
-                    parts.append(
+                    sections.append((
+                        "backlog_digest_unavailable",
                         "## Improvement Backlog — source unavailable\n\n"
                         "The named current source could not be materialized. "
-                        "Abstain from update_identity in this cycle."
-                    )
+                        "Abstain from update_identity in this cycle.",
+                        P1,
+                    ))
             except Exception:
                 pass
             log.debug("Failed to include improvement backlog in consciousness context", exc_info=True)
 
         health_section = build_health_invariants(env)
         if health_section:
-            parts.append(health_section)
+            sections.append(("health_invariants", health_section, P1))
 
-        # Full drive state: no clip_text here.
-        state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
-        if len(state_json) > BG_STATE_JSON_WARN_CHARS:
-            log.warning(
-                "consciousness: drive state JSON is large (%d chars)", len(state_json)
-            )
-        parts.append("## Drive state\n\n" + state_json)
+        # Typed, disclosed projection (ibl: consciousness context overflow) —
+        # NOT a raw dump. _drive_state_section already excludes usage_accounting
+        # (the unbounded by_root map, which state.json embeds whenever the owner
+        # sets a total budget limit) and discloses every omitted key with an
+        # on-demand read_file pointer, matching the foreground chat path exactly
+        # (BIBLE P1: "No silent truncation ... relocation to on-demand reads with
+        # a visible pointer"). Small and typed, so it stays P1 — but still
+        # warned if the fixed key set itself somehow grows large.
+        drive_state = _drive_state_section(env)
+        if len(drive_state) > BG_STATE_JSON_WARN_CHARS:
+            log.warning("consciousness: drive state section is large (%d chars)", len(drive_state))
+        sections.append(("drive_state", drive_state, P1))
 
         scheduled_tasks_digest: Dict[str, Any] = {}
-        parts.append(build_runtime_section(
+        runtime_section = build_runtime_section(
             env, bg_task, scheduled_tasks_digest_out=scheduled_tasks_digest,
-        ))
+        )
+        sections.append(("runtime", runtime_section, self._CTX_DROP_MID))
         if int(scheduled_tasks_digest.get("omitted_count") or 0) > 0:
             self._identity_unresolved_sources.add("scheduled-tasks")
 
         # Empty task_id includes recent sections across tasks.  The typed facts
         # below are the exact same facts rendered into the decision envelope.
         recent_chat_coverage: Dict[str, Any] = {}
-        parts.extend(build_recent_sections(
+        for idx, r in enumerate(build_recent_sections(
             memory, env, task_id="", chat_coverage_out=recent_chat_coverage,
-        ))
+        )):
+            # Recent chat tail is the heaviest single section — drops only in
+            # extreme overflows, after backlog/runtime/other recent sections.
+            priority = self._CTX_DROP_LATE if r.startswith("## Recent chat") else self._CTX_DROP_FIRST
+            sections.append((f"recent[{idx}]", r, priority))
         if (
             recent_chat_coverage.get("gaps")
             or int(recent_chat_coverage.get("omitted_matching_rows") or 0) > 0
@@ -1168,45 +1192,97 @@ class BackgroundConsciousness:
                 self._identity_unresolved_sources.add("background-observations")
 
         if self._identity_unresolved_sources:
-            parts.append(
+            sections.append((
+                "identity_update_completeness",
                 "## Identity update completeness\n\n"
                 "Named unresolved source(s): "
                 + ", ".join(sorted(self._identity_unresolved_sources))
                 + ". Existing readers may inspect surviving data, but this cycle cannot "
-                "prove complete unchanged sources; direct update_identity must abstain."
-            )
+                "prove complete unchanged sources; direct update_identity must abstain.",
+                P1,
+            ))
 
         if observation_rendered:
-            parts.append(observation_rendered)
+            sections.append(("observations", observation_rendered, self._CTX_DROP_FIRST))
 
         bg_info_lines = [
             f"BG budget spent: ${self._bg_spent_usd:.4f}",
             f"Current wakeup interval: {self._next_wakeup_sec}s",
             f"Current model: {self._model}",
         ]
-        parts.append("## Background consciousness info\n\n" + "\n".join(bg_info_lines))
+        sections.append((
+            "bg_consciousness_info",
+            "## Background consciousness info\n\n" + "\n".join(bg_info_lines),
+            P1,
+        ))
 
-        # P1 guard: warn when large, fail the wakeup instead of truncating artifacts.
+        # P1 guard: warn when large, degrade gracefully instead of skipping the
+        # whole cycle (structural fix — a raw drive-state dump plus an
+        # all-or-nothing skip used to leave background consciousness dead for
+        # hours once state.json crossed this limit). Only non-P1 sections are
+        # ever dropped; if the P1 core alone still overflows, that is a real
+        # emergency and the cycle is skipped exactly as before.
         _BG_TOTAL_WARN_CHARS = BG_CONTEXT_WARN_CHARS   # ~150K tokens — warn but proceed
         _BG_TOTAL_MAX_CHARS = BG_CONTEXT_MAX_CHARS  # ~300K tokens — fail fast (P1 compliance)
-        full_text = "\n\n".join(parts)
+        full_text, dropped = self._graceful_assemble(sections, _BG_TOTAL_MAX_CHARS)
+        if dropped:
+            # BIBLE P1 "Provenance matters": the degradation itself must be
+            # visible to the reasoning model, not only to an external log
+            # reader — a cycle that silently thinks with fewer inputs than it
+            # had is exactly the "no silent context drops" this module's own
+            # docstring forbids.
+            full_text += (
+                "\n\n## Context degradation\n\n"
+                f"{len(dropped)} section(s) dropped this cycle due to context overflow: "
+                f"{', '.join(dropped)}. Groom memory (knowledge, patterns, scratchpad) to "
+                "reduce size and avoid future drops."
+            )
         if len(full_text) > _BG_TOTAL_MAX_CHARS:
             log.warning(
-                "consciousness: context too large (%d chars > %d limit) — "
-                "skipping wakeup cycle; groom memory (knowledge, patterns, scratchpad) "
-                "to reduce size",
-                len(full_text), _BG_TOTAL_MAX_CHARS,
+                "consciousness: context too large (%d chars > %d limit) even after "
+                "dropping %d non-P1 section(s) — skipping wakeup cycle; groom memory "
+                "(knowledge, patterns, scratchpad) to reduce size",
+                len(full_text), _BG_TOTAL_MAX_CHARS, len(dropped),
             )
             raise OverflowError(
-                f"Background consciousness context too large ({len(full_text):,} chars). "
-                "Groom memory to continue."
+                f"Background consciousness context too large ({len(full_text):,} chars) "
+                f"even after dropping {len(dropped)} non-P1 section(s). Groom memory to continue."
             )
         if len(full_text) > _BG_TOTAL_WARN_CHARS:
             log.warning(
-                "consciousness: context is large (%d chars) — consider grooming memory",
-                len(full_text),
+                "consciousness: context is large (%d chars, dropped=%d section(s)) — "
+                "consider grooming memory",
+                len(full_text), len(dropped),
             )
         return full_text
+
+    @staticmethod
+    def _graceful_assemble(
+        sections: List[Any], max_chars: int,
+    ) -> "tuple[str, List[str]]":
+        """Join (name, text, priority) sections; if over budget, drop the
+        LARGEST non-P1 (priority > 0) section repeatedly until it fits or only
+        P1 sections remain. Returns (full_text, dropped_names) — the caller
+        decides whether a still-over-budget P1-only result is an emergency.
+        """
+        keep = list(sections)
+        dropped: List[str] = []
+        while True:
+            full_text = "\n\n".join(text for _, text, _ in keep)
+            if len(full_text) <= max_chars:
+                return full_text, dropped
+            droppable = [i for i, (_, _, priority) in enumerate(keep) if priority > 0]
+            if not droppable:
+                return full_text, dropped
+            idx = max(droppable, key=lambda i: len(keep[i][1]))
+            name, text, priority = keep[idx]
+            log.info(
+                "consciousness: dropping %s (%d chars, priority=%d) — overflow "
+                "graceful degradation",
+                name, len(text), priority,
+            )
+            keep.pop(idx)
+            dropped.append(name)
 
     _BG_TOOL_WHITELIST = frozenset({
         "send_user_message", "update_scratchpad",
