@@ -888,6 +888,57 @@ def consolidate_scratchpad(
     return _consolidate_scratchpad_blocks(memory, blocks, knowledge_dir, llm_client, identity_text)
 
 
+def _try_extract_embedded_json(raw: str) -> Optional[Dict[str, Any]]:
+    """One bounded recovery: a model reply that wraps JSON inside prose or fences.
+
+    Finds the FIRST ``{`` and the matching LAST ``}`` (counting nested braces so
+    prose after the JSON does not truncate it), then parses the slice. Returns
+    ``None`` when no balanced ``{...}`` slice parses as a dict — caller defers.
+    """
+    if not raw:
+        return None
+    first = raw.find("{")
+    if first < 0:
+        return None
+    last = raw.rfind("}")
+    if last <= first:
+        return None
+    depth = 0
+    end = -1
+    in_string = False
+    escape = False
+    for idx in range(first, len(raw)):
+        ch = raw[idx]
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx
+                break
+    if end < 0:
+        return None
+    candidate = raw[first : end + 1]
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _consolidate_scratchpad_blocks(
     memory: Any,
     blocks: List[Dict[str, Any]],
@@ -948,7 +999,27 @@ Respond with JSON only (no fences):
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-        result = json.loads(raw)
+        # BIBLE P1 — gap-not-lost: an empty/non-JSON model reply is a recoverable
+        # transient (e.g. 429-rate-limited fallback returning ""), NOT a fatal
+        # consolidation error. Defer cleanly with usage so the next pass retries;
+        # the broad outer except stays for genuinely unexpected failures (lock /
+        # IO), but a transient bad model reply must NEVER reach it.
+        if not raw:
+            log.warning("Scratchpad block consolidation: model returned empty response, deferring")
+            return usage
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            # One bounded recovery: fenced/embedded JSON inside prose (find first
+            # `{` and the matching last `}`). If even that fails, defer cleanly.
+            recovered = _try_extract_embedded_json(raw)
+            if recovered is None:
+                log.warning(
+                    "Scratchpad block consolidation: non-JSON model response, deferring: %s",
+                    raw[:120],
+                )
+                return usage
+            result = recovered
 
         compressed_text = result.get("compressed_block", "")
         if not compressed_text or not compressed_text.strip():
