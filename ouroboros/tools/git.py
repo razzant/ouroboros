@@ -1125,6 +1125,26 @@ def _publish_reviewed_commit(
     return result + ci_note
 
 
+def _sync_current_sha_after_commit(commit_sha: str) -> None:
+    """Synchronous state.current_sha write right after a commit lands.
+
+    ``worker_pool_lifecycle``'s ``worker_sha_verify`` reads this on every
+    worker respawn (crash detector, manual restart — not only managed-update)
+    to check a booting worker's actual ``git_sha`` against it. Without this
+    write, ``current_sha`` in state.json is only ever refreshed by the
+    managed-update checkout / rollback paths — an ordinary commit_reviewed
+    commit here leaves it stale until the next such event, so any worker
+    crash-respawn after a plain commit produces a false "Worker SHA mismatch
+    after spawn" alert. ``update_state()`` holds STATE_LOCK for the whole
+    read-modify-write, so a concurrent writer cannot lose this update.
+    """
+    try:
+        from supervisor.state import update_state
+        update_state(lambda st: st.__setitem__("current_sha", commit_sha))
+    except Exception:
+        log.debug("synchronous state.current_sha write after commit failed", exc_info=True)
+
+
 def _repo_commit_push(ctx: ToolContext, commit_message: str,
                        paths: Optional[List[str]] = None,
                        skip_tests: bool = False,
@@ -1269,6 +1289,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
             commit_sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip()
+            _sync_current_sha_after_commit(commit_sha)
         except Exception as e:
             err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
             if _managed_tx:
