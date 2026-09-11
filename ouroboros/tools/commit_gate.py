@@ -770,6 +770,7 @@ def _invalidate_advisory(
             mutation_root=mutation_root or pathlib.Path(ctx.repo_dir),
             changed_paths=changed_paths,
             source_tool=source_tool or _current_review_tool_name(ctx),
+            mutating_task_id=str(getattr(ctx, "task_id", "") or ""),
         )
     except Exception:
         pass

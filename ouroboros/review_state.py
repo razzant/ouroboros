@@ -236,6 +236,7 @@ def _load_state_unlocked(
         last_stale_from_edit_ts=str(data.get("last_stale_from_edit_ts", "")),
         last_stale_reason=str(data.get("last_stale_reason", "")),
         last_stale_repo_key=str(data.get("last_stale_repo_key", "")),
+        last_stale_task_id=str(data.get("last_stale_task_id", "")),
     )
 
     state.attempts.sort(key=_attempt_order_key)
@@ -349,6 +350,7 @@ def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -
         "last_stale_from_edit_ts": state.last_stale_from_edit_ts,
         "last_stale_reason": state.last_stale_reason,
         "last_stale_repo_key": state.last_stale_repo_key,
+        "last_stale_task_id": state.last_stale_task_id,
         "saved_at": _utc_now(),
     }
     atomic_write_json(path, data)
@@ -534,6 +536,7 @@ def invalidate_advisory_after_mutation(
     mutation_root: pathlib.Path | None = None,
     changed_paths: Optional[List[str]] = None,
     source_tool: str = "",
+    mutating_task_id: str = "",
 ) -> None:
     """Invalidate advisory freshness after mutation; ambiguous repo scope stales all."""
     try:
@@ -544,13 +547,17 @@ def invalidate_advisory_after_mutation(
 
         def _mutate(state: AdvisoryReviewState) -> None:
             if not resolved_repo_keys or len(resolved_repo_keys) != 1:
-                state.mark_repo_stale(repo_key="", reason_ts=reason_ts, reason=reason, stale_repo_key="")
+                state.mark_repo_stale(
+                    repo_key="", reason_ts=reason_ts, reason=reason, stale_repo_key="",
+                    stale_task_id=mutating_task_id,
+                )
                 return
             state.mark_repo_stale(
                 repo_key=resolved_repo_keys[0],
                 reason_ts=reason_ts,
                 reason=reason,
                 stale_repo_key=resolved_repo_keys[0],
+                stale_task_id=mutating_task_id,
             )
 
         update_state(drive_root, _mutate)
