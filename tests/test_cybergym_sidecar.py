@@ -184,6 +184,25 @@ def test_server_and_workspace_argv_preserve_socket_boundary():
     assert "CYBERGYM_TASK_ID" not in " ".join(workspace_argv)
     assert plan.task_id not in " ".join(workspace_argv)
     assert all("real-secret" not in item for item in server_argv + workspace_argv)
+    external_binary_server = sidecar.SidecarCommandSpec(
+        host,
+        plan,
+        "cyber/server@sha256:" + "a" * 64,
+        "cyber-external-binaries",
+        read_only_mounts={"/srv/cybergym-binaries": "/srv/cybergym-binaries"},
+    )
+    assert "type=bind,src=/srv/cybergym-binaries,dst=/srv/cybergym-binaries,readonly" in sidecar.build_sidecar_argv(external_binary_server)
+    runtime_workspace = sidecar.WorkspaceCommandSpec(
+        host,
+        plan,
+        "cyber/worker:pin",
+        "cyber-runtime-workspace",
+        "/tmp/cyber-task",
+        vulnerable_runtime_host_path="/tmp/cyber-vul",
+    )
+    runtime_argv = sidecar.build_workspace_argv(runtime_workspace)
+    assert "type=bind,src=/tmp/cyber-vul,dst=/workspace/.cybergym-runtime,readonly" in runtime_argv
+    assert "CYBERGYM_VULNERABLE_RUNTIME=/workspace/.cybergym-runtime" in runtime_argv
     exec_server = sidecar.SidecarCommandSpec(
         host,
         plan,

@@ -49,7 +49,6 @@ from devtools.benchmarks.cybergym.cybergym_wire import (
     urllib_json,
 )
 
-
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -691,19 +690,52 @@ class _DockerRuntimeMixin:
                 result["Config"] = config_copy
         return result
 
+    def _reap_empty_stale_campaign_network(self) -> None:
+        """Remove a leftover host-wide ``cybergym-internal`` only when empty.
+
+        The name is a singleton. A prior campaign that exited
+        ``custody_pending`` keeps the network; the next admission then dies
+        after the paid provider probe. An empty leftover is the same corpse
+        class as a leftover reservation: it must not claim the next run.
+        Attached containers stay fail-closed. Parallel campaigns on one
+        daemon remain unsupported because the name is shared.
+        """
+        existing = self._inspect_optional("network", "cybergym-internal")
+        if existing is None:
+            return
+        observed_id = str(existing.get("Id") or "").strip()
+        if not observed_id:
+            raise ExecutorFailure("stale cybergym-internal has no inspectable id")
+        attached = existing.get("Containers")
+        if isinstance(attached, Mapping) and attached:
+            raise ExecutorFailure(
+                "cybergym-internal is leftover and still has attached containers"
+            )
+        result = self.config.command_runner(
+            ("docker", "--host", self.host.value, "network", "rm", observed_id),
+            cwd=self.config.run_root,
+            env=_minimal_child_env(self.host),
+            timeout=60,
+        )
+        if result.returncode not in {0, 1} or self._inspect_optional("network", observed_id) is not None:
+            raise ExecutorFailure("stale empty cybergym-internal could not be removed")
+
     def _network(self) -> None:
         argv = build_network_create_argv(self.host, self._network_plan("campaign"))
         result = self.config.command_runner(
             argv, cwd=self.config.run_root, env=_minimal_child_env(self.host), timeout=60
         )
+        if result.returncode != 0:
+            # Reap an empty leftover, then create once. Never attach to a
+            # pre-existing network: reuse is ambiguous even when labels match.
+            self._reap_empty_stale_campaign_network()
+            result = self.config.command_runner(
+                argv, cwd=self.config.run_root, env=_minimal_child_env(self.host), timeout=60
+            )
         if result.returncode == 0:
             self.network_id = result.stdout.strip()
             self._network_created = True
         else:
-            # A campaign always owns a fresh network.  Reusing a same-named
-            # network is ambiguous (and breaks parallel campaigns), even when
-            # its labels happen to look compatible; leave it for an explicit
-            # operator cleanup instead of attaching to stale containers.
             raise ExecutorFailure(
                 "cybergym-internal already exists or could not be created; a fresh campaign network is required"
             )
@@ -941,8 +973,83 @@ class _DockerRuntimeMixin:
             self._unresolved_workspace_custody[container_name] = failure_reason
         return False
 
+    def _heal_unresolved_workspace_custody(self) -> None:
+        """Best-effort release of provably-terminal unresolved custody entries.
+
+        A single container whose startup custody could not be proven (for
+        example a daemon hiccup that left it in ``Created``) must not poison
+        every later lane for the rest of the campaign — run 20260907T233516Z
+        burned 107 tasks on one such entry.  For each recorded name:
+        re-inspect; if the object is gone, drop the entry; if it is provably
+        owned by this campaign and in a removable terminal state
+        (``created``/``exited``/``dead``), remove it by exact id and drop the
+        entry.  A running container, a daemon that cannot be read, or failed
+        ownership proof keeps its entry latched — nothing is ever removed on
+        a guess.  Safe under concurrent lanes: names are per-attempt opaque
+        and removal is idempotent.
+        """
+        with self._registry_condition:
+            pending = sorted(self._unresolved_workspace_custody)
+        for container_name in pending:
+            try:
+                observed = self._inspect_optional("container", container_name)
+            except Exception:  # noqa: BLE001 - unreadable daemon keeps the latch
+                continue
+            if observed is None:
+                with self._registry_condition:
+                    self._unresolved_workspace_custody.pop(container_name, None)
+                continue
+            observed_id = str(observed.get("Id") or "").strip()
+            actual_name = str(observed.get("Name") or "").lstrip("/")
+            config = observed.get("Config")
+            labels = config.get("Labels", {}) if isinstance(config, Mapping) else {}
+            state = observed.get("State")
+            status = (
+                str(state.get("Status") or "").strip().lower()
+                if isinstance(state, Mapping)
+                else ""
+            )
+            owned = (
+                bool(observed_id)
+                and actual_name == container_name
+                and isinstance(labels, Mapping)
+                and labels.get("com.ouroboros.campaign") == self.config.campaign_id
+                and labels.get("com.ouroboros.role") == "workspace"
+            )
+            if not owned or status not in {"created", "exited", "dead"}:
+                continue
+            try:
+                result = self._docker("rm", "--force", observed_id, timeout=60)
+                if result.returncode not in {0, 1}:
+                    continue
+                if self._inspect_optional("container", observed_id) is not None:
+                    continue
+            except Exception:  # noqa: BLE001 - a failed removal keeps the latch
+                continue
+            with self._registry_condition:
+                self._task_containers.pop(container_name, None)
+                self._workspace_observations.pop(container_name, None)
+                self._unresolved_workspace_custody.pop(container_name, None)
+
     def _workspace(self, task: TaskSpec, task_dir: pathlib.Path, plan: NetworkPlan) -> str:
         container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
+        with self._registry_condition:
+            heal_needed = bool(self._unresolved_workspace_custody)
+        if heal_needed:
+            self._heal_unresolved_workspace_custody()
+        with self._registry_condition:
+            if self._unresolved_workspace_custody:
+                names = ", ".join(sorted(self._unresolved_workspace_custody))
+                raise ExecutorFailure(f"workspace startup custody is unresolved: {names}")
+        runtime_dir: pathlib.Path | None = None
+        if self.config.expose_vulnerable_runtime:
+            if self.config.binary_dir is None:
+                raise ExecutorFailure("vulnerable runtime exposure requires binary_dir")
+            project, instance = task.task_id.split(":", 1)
+            candidate = self.config.binary_dir / project / instance / "vul"
+            if not candidate.is_dir():
+                raise ExecutorFailure("vulnerable runtime is unavailable for this task")
+            runtime_dir = candidate
         spec = WorkspaceCommandSpec(
             self.host,
             plan,
@@ -950,6 +1057,7 @@ class _DockerRuntimeMixin:
             container_name,
             str(task_dir),
             command=self.config.command,
+            vulnerable_runtime_host_path=str(runtime_dir) if runtime_dir is not None else None,
             labels={"com.ouroboros.image_digest": self.config.workspace_image_digest},
         )
         # A container is attached before ``docker run`` returns its id.  Mark
@@ -997,7 +1105,26 @@ class _DockerRuntimeMixin:
                 with self._registry_lock:
                     has_exact_id = bool(self._task_containers.get(container_name))
                 if not has_exact_id:
-                    self._recover_workspace_custody(container_name, plan, type(exc).__name__)
+                    has_exact_id = self._recover_workspace_custody(
+                        container_name, plan, type(exc).__name__
+                    )
+                if has_exact_id:
+                    # Failed attempt after create: release the docker slot.
+                    # Logs/checkpoints remain custody, not a live container.
+                    report = (
+                        self.config.run_root
+                        / "workspaces"
+                        / f"{container_name}.startup_cleanup.json"
+                    )
+                    try:
+                        self._cleanup_workspace_container(
+                            container_name,
+                            str(getattr(task, "task_id", "") or "startup"),
+                            "startup",
+                            report,
+                        )
+                    except Exception:
+                        pass
                 raise
         finally:
             with self._registry_condition:
@@ -1214,9 +1341,9 @@ class _DockerRuntimeMixin:
         The campaign network and server remain shared by other lanes, so this
         deliberately does not call the broader ``CleanupPlan``.  It performs
         the same ownership checks locally: inspect the stored id, reject a
-        name replacement, remove the exact id, and inspect again.  An
-        unresolved gateway attempt never reaches this method and is retained
-        for late-result custody.
+        name replacement, remove the exact id, and inspect again.  A finished
+        or failed attempt must release this slot; logs and result_index are
+        the custody surface, not a live container.
         """
         with self._registry_lock:
             container_id = str(self._task_containers.get(container_name) or "").strip()
@@ -1285,9 +1412,15 @@ class _DockerRuntimeMixin:
         with self._registry_condition:
             if self._workspace_starting:
                 raise ExecutorFailure("cleanup custody is pending workspace startup")
+            heal_needed = bool(self._unresolved_workspace_custody)
+        if heal_needed:
+            self._heal_unresolved_workspace_custody()
+        with self._registry_condition:
             if self._unresolved_workspace_custody:
                 names = ", ".join(sorted(self._unresolved_workspace_custody))
                 raise ExecutorFailure(f"cleanup custody is unresolved for workspace names: {names}")
+            if self._terminal_uncommitted_workspaces:
+                raise ExecutorFailure("cleanup custody has terminal workspaces awaiting durability")
             workspace_items = tuple(self._task_containers.items())
         workspace_ids = tuple(container_id for _name, container_id in workspace_items)
         if not self.network_id and not self.server_id and not workspace_ids:
