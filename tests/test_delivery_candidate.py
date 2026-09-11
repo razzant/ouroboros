@@ -914,3 +914,72 @@ def test_forced_fallback_rejects_stale_delivery_candidate(tmp_path, monkeypatch)
         hashlib.sha256(text.encode("utf-8")).hexdigest()
     )
     assert returned_trace["forced_finalization"]["source"] == "host_fallback"
+
+
+def test_recovered_tool_error_then_prose_does_not_degrade_to_delivery_control(
+    tmp_path, monkeypatch,
+):
+    """ibl-local-05b94950560c e2e: a code-change task whose run produced one
+    tool error (recovered) and then a normal final prose message must finalize
+    as EXECUTION_OK / REASON_FINAL_MESSAGE — NOT delivery_control_degraded.
+
+    The latch is armed via a child-handoff service notice (same lane the real
+    code-change tasks trigger). First response after arming is invalid
+    delivery-control JSON (repair round, status=retry). Second response is
+    substantive prose — the fix must accept it as a fresh resolved candidate
+    rather than degrading to the prior retained answer.
+    """
+    from ouroboros.outcomes import derive_loop_outcome
+
+    original = "Original complete answer covering the child conclusions."
+    # >= _DELIVERY_PROSE_MIN_CHARS (200) and >= len(original): a genuine
+    # "here is my complete result" reply, not a terse notice.
+    final_prose = (
+        "Implementation complete. The fix adds `_is_substantive_final_prose` to "
+        "ouroboros/loop.py and rewires the `_resolve_delivery_control` "
+        "repair-failed branch so a real prose final answer is accepted rather "
+        "than degraded. All touched regression tests pass; no further action is "
+        "required and nothing else in the delivery-control contract changes."
+    )
+    invalid_json = json.dumps({"delivery_control": "finalize"})
+    result, usage, trace, calls = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [original, invalid_json, final_prose],
+        child=True,
+        bind_child_before_second=True,
+    )
+
+    assert len(calls) == 3
+    # The substantive prose is delivered, NOT the prior retained answer.
+    assert result == final_prose
+    assert trace["delivery_candidate"]["degraded"] is False
+    assert trace["delivery_candidate"]["finalization_control"] == "candidate"
+    # Clean execution axis — not delivery_control_degraded.
+    outcome = derive_loop_outcome(result, usage, trace)
+    execution = outcome["outcome_axes"]["execution"]
+    assert execution["status"] == "ok", (
+        f"recovered tool error + substantive prose final must finalize OK, got {execution}"
+    )
+    assert execution["reason_code"] != "delivery_control_degraded"
+
+
+def test_short_prose_after_repair_still_degrades_and_preserves_candidate(
+    tmp_path, monkeypatch,
+):
+    """Complement: a SHORT prose reply in the repair-failed branch (service
+    notice, ack) must NOT erase the retained answer — it still degrade-preserves.
+    Pins the ``_is_substantive_final_prose`` discriminator.
+    """
+    original = "Original complete answer with every implementation and verification detail."
+    result, _usage, trace, calls = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [original, "service notice: child refreshed", "still just a short notice"],
+        child=True,
+        bind_child_before_second=True,
+    )
+    assert len(calls) == 3
+    assert result == original
+    assert trace["delivery_candidate"]["degraded"] is True
+    assert trace["delivery_candidate"]["finalization_control"] == "degraded_preserve"

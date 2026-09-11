@@ -1688,6 +1688,89 @@ def test_nonforced_resolver_treats_unknown_verb_object_as_protocol_not_prose(tmp
     assert "delivery_control" not in text2
 
 
+def test_nonforced_resolver_recovers_with_prose_after_repair_attempt(tmp_path):
+    """ibl-local-05b94950560c: a recovered tool error must NOT by itself degrade
+    the delivery outcome.
+
+    Sequence that triggers the bug: an owner-revision latch was armed (typically
+    by a tool error/recovery round that left the latch set), the model answered
+    the first repair with an unknown-verb JSON, then on the second round the
+    model produced SUBSTANTIVE PROSE (not JSON). The previous code degraded the
+    candidate and returned the stale prior text — the model's real answer was
+    discarded. After the fix: the prose is accepted as a fresh candidate, the
+    candidate is NOT degraded, and the resolver returns ("resolved", prose_text).
+    """
+    loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
+    candidate = loop._replace_delivery_candidate(
+        registry, limit_ctx, trace, "Retained complete answer.", control="candidate",
+    )
+    candidate.finalization_control = "owner_revision_required"
+    registry._ctx._delivery_control_required = False
+    unknown_verb = json.dumps({"delivery_control": "finalize"})
+
+    # Round 1: bad JSON. Repair kicks in; returns ("retry", "").
+    status1, text1 = loop._resolve_delivery_control(
+        unknown_verb, registry, limit_ctx, trace,
+    )
+    assert status1 == "retry"
+    assert text1 == ""
+    assert candidate.repair_attempted is True
+
+    # Round 2: the model abandoned the protocol and produced a real final
+    # answer in plain prose. BEFORE the fix, this returned ("degraded",
+    # prior_text) and degraded=True. AFTER the fix, this returns
+    # ("resolved", prose_text) and the new candidate has degraded=False.
+    prose = "Here is the actual final answer in plain English, no JSON."
+    status2, text2 = loop._resolve_delivery_control(
+        prose, registry, limit_ctx, trace,
+    )
+    assert status2 == "resolved"
+    assert text2 == prose
+    new_candidate = registry._ctx._delivery_candidate
+    assert new_candidate.full_text == prose
+    assert new_candidate.degraded is False
+    assert new_candidate.degraded_reason == ""
+    assert new_candidate.finalization_control == "candidate"
+    # delivery_candidate projection in the trace mirrors candidate fields.
+    assert trace["delivery_candidate"]["degraded"] is False
+    assert trace["delivery_candidate"]["degraded_reason"] == ""
+
+
+def test_nonforced_resolver_still_degrades_on_genuine_protocol_violation(tmp_path):
+    """Anti-regression: when the repair-failed branch sees a real JSON-shaped
+    protocol attempt (unknown verb, duplicate key), the genuine-failure path
+    must STILL degrade. The fix only relaxes the prose-not-JSON case; it does
+    NOT relax the protocol-violation case.
+    """
+    loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
+    candidate = loop._replace_delivery_candidate(
+        registry, limit_ctx, trace, "Retained complete answer.", control="candidate",
+    )
+    candidate.finalization_control = "owner_revision_required"
+    registry._ctx._delivery_control_required = False
+    unknown_verb = json.dumps({"delivery_control": "finalize"})
+
+    # Two rounds of the same mangled JSON: round 1 = retry, round 2 = degraded.
+    status1, _text1 = loop._resolve_delivery_control(
+        unknown_verb, registry, limit_ctx, trace,
+    )
+    assert status1 == "retry"
+
+    status2, text2 = loop._resolve_delivery_control(
+        unknown_verb, registry, limit_ctx, trace,
+    )
+    assert status2 == "degraded"
+    assert text2 == candidate.full_text
+    # The genuine-failure path is preserved: degraded=True, degraded_reason set.
+    final_candidate = registry._ctx._delivery_candidate
+    assert final_candidate.degraded is True
+    assert final_candidate.degraded_reason == "invalid_delivery_control_after_repair"
+    assert final_candidate.finalization_control == "degraded_preserve"
+    assert trace["delivery_candidate"]["degraded"] is True
+    assert trace["delivery_candidate"]["degraded_reason"] == (
+        "invalid_delivery_control_after_repair"
+    )
+
 # ---------------------------------------------------------------------------
 # D2c (custody-absorption sprint, owner Q4=A): protocol-intent containment.
 # Both latch-gated resolvers share one fence-strip normalization with

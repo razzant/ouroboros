@@ -746,6 +746,40 @@ def _parse_delivery_control_body(
     return None, False, False
 
 
+# Floor that rejects a trivial ack ("Review completed.", "service notice ...") as
+# a "final answer" in the repair-failed branch (ibl-local-05b94950560c). The real
+# guard is the no-shorter-than-retained check below; this only screens out
+# one-liners.
+_DELIVERY_PROSE_MIN_CHARS = 40
+
+
+def _is_substantive_final_prose(raw_text: str, retained_text: str) -> bool:
+    """True when a repair-failed reply is a genuine complete final answer.
+
+    The delivery-control repair-failed branch preserves the retained candidate and
+    degrades. But a code-change task that hit ONE recovered mid-run tool error can
+    reach this branch with the latch still armed while the model has actually
+    produced its real final answer in prose — degrading that is wrong
+    (ibl-local-05b94950560c).
+
+    The discriminator must NOT let a short service notice / mutating-tool
+    acknowledgement erase a full retained answer (the
+    ``*_cannot_erase_full_candidate`` contract). A real final answer here is:
+
+    * not JSON-shaped (a leading ``{`` / ``[`` is a mangled protocol attempt —
+      still degrade), and
+    * past the one-liner floor, and
+    * no shorter than the answer it would replace — a genuine "here is my complete
+      result" is never a terse fragment relative to what was already retained.
+    """
+    text = str(raw_text or "").strip()
+    if not text or text[0] in "{[":
+        return False
+    if len(text) < _DELIVERY_PROSE_MIN_CHARS:
+        return False
+    return len(text) >= len(str(retained_text or "").strip())
+
+
 def _resolve_delivery_control(
     content: Any,
     tools: ToolRegistry,
@@ -850,6 +884,25 @@ def _resolve_delivery_control(
         candidate.control_episode_seen = True
         _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
         return "retry", ""
+
+    # (b) Raw was substantive prose — the model produced a real final answer
+    #     while the control latch was still armed (typical after a recovered
+    #     tool error). Accept it as a fresh candidate rather than degrading
+    #     (ibl-local-05b94950560c). A prose reply that still ENDS with a
+    #     balanced protocol object has ``is_control_intent`` set and falls
+    #     through to degraded-preserve.
+    if _is_substantive_final_prose(raw, candidate.full_text) and not is_control_intent:
+        ctx.messages.append({"role": "assistant", "content": raw})
+        tools._ctx._delivery_control_required = False
+        updated = _loop()._replace_delivery_candidate(
+            tools, ctx, llm_trace, raw, control="candidate",
+        )
+        llm_trace["reasoning_notes"].append(
+            "Delivery-control latch was still armed when the model produced a substantive "
+            "prose final answer (>= the retained candidate); accepted the prose rather than "
+            "degrading (one recovered tool error must not by itself degrade delivery)."
+        )
+        return "resolved", updated.full_text
 
     tools._ctx._delivery_control_required = False
     candidate.degraded = True
