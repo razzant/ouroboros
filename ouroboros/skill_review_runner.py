@@ -538,6 +538,92 @@ def mark_stale_review_job_interrupted(
     )
 
 
+def _mark_pending_review_zombie_interrupted(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    *,
+    current_content_hash: str = "",
+    stale_after_sec: int = _STALE_REVIEW_JOB_SEC,
+) -> bool:
+    """Heal a pending-forever review_job.json (ibl-f334f2324443).
+
+    A ``review_job.json`` may stay at ``status=pending`` forever when its
+    lifecycle dispatch never reached ``_on_started`` (e.g. a duplicate
+    ``dedupe_key`` collision against an earlier stuck job, a worker that
+    died before acquiring the lifecycle file lock, or an infra failure
+    that aborted before the heartbeat). The existing
+    ``mark_stale_review_job_interrupted`` only catches the
+    ``status=running`` case (pid-dead or heartbeat-stale), so these pending
+    zombies silently block every retry: a fresh dispatch hits the duplicate
+    payload and stays pending too, accumulating across runs until the user
+    manually rewrites the file.
+
+    Detection: ``status=pending`` AND age (from ``started_at`` /
+    ``created_at`` / file mtime, in that order) greater than the stale
+    threshold AND no live pid. The fix transitions the file to
+    ``status=interrupted`` with reason ``pending_zombie_never_started`` so
+    a retry can acquire a fresh lifecycle lease. Returns True iff a
+    transition happened.
+    """
+    path = review_job_state_path(drive_root, skill_name)
+    data = _read_review_job(path)
+    if str(data.get("status") or "") != "pending":
+        return False
+    pid = int(data.get("pid") or 0)
+    if pid and _pid_alive(pid):
+        return False
+    ts_candidate = (
+        str(data.get("started_at") or "")
+        or str(data.get("created_at") or "")
+        or str(data.get("last_heartbeat_at") or "")
+    )
+    age = _iso_age_sec(ts_candidate) if ts_candidate else 0.0
+    if not age:
+        try:
+            age = max(0.0, time.time() - path.stat().st_mtime)
+        except OSError:
+            age = 0.0
+    if age < stale_after_sec:
+        return False
+    now = utc_now_iso()
+    payload = {
+        **data,
+        "status": "interrupted",
+        "lifecycle_status": "interrupted",
+        "finished_at": now,
+        "interrupted_at": now,
+        "interrupt_reason": "pending_zombie_never_started",
+        "content_hash": data.get("content_hash") or current_content_hash,
+    }
+    payload["terminal_reason"] = payload["interrupt_reason"]
+    atomic_write_json(path, payload, trailing_newline=True)
+    _append_terminal_history(
+        drive_root,
+        skill_name,
+        payload,
+        status="interrupted",
+        terminal_reason=str(payload["interrupt_reason"]),
+        ts=now,
+    )
+    _append_review_chat_summary(
+        drive_root, skill_name, payload, status="interrupted", ts=now,
+    )
+    _append_interrupted_review_progress(drive_root, skill_name, payload, ts=now)
+    append_jsonl(
+        _events_path(drive_root),
+        {
+            "ts": now,
+            "type": "skill_review_pending_zombie_healed",
+            "skill": skill_name,
+            "content_hash": payload.get("content_hash", ""),
+            "job_id": payload.get("job_id", ""),
+            "age_sec": round(age, 3),
+            "reason": payload["interrupt_reason"],
+        },
+    )
+    return True
+
+
 def reconcile_stale_review_jobs(
     drive_root: pathlib.Path,
     *,
@@ -557,14 +643,23 @@ def reconcile_stale_review_jobs(
         if skill_name in collision_names:
             continue
         before = _read_review_job(path)
-        if str(before.get("status") or "") != "running":
+        status_before = str(before.get("status") or "")
+        if status_before == "running":
+            mark_stale_review_job_interrupted(
+                pathlib.Path(drive_root),
+                skill_name,
+                current_content_hash=str(before.get("content_hash") or ""),
+                stale_after_sec=stale_after_sec,
+            )
+        elif status_before == "pending":
+            _mark_pending_review_zombie_interrupted(
+                pathlib.Path(drive_root),
+                skill_name,
+                current_content_hash=str(before.get("content_hash") or ""),
+                stale_after_sec=stale_after_sec,
+            )
+        else:
             continue
-        mark_stale_review_job_interrupted(
-            pathlib.Path(drive_root),
-            skill_name,
-            current_content_hash=str(before.get("content_hash") or ""),
-            stale_after_sec=stale_after_sec,
-        )
         after = _read_review_job(path)
         if str(after.get("status") or "") == "interrupted":
             count += 1

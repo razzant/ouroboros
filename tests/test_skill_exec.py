@@ -26,6 +26,7 @@ from ouroboros.skill_loader import (
 from ouroboros.tools import skill_exec as skill_exec_mod
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.contracts.task_constraint import TaskConstraint
+from ouroboros.utils import utc_now_iso
 
 
 from tests._shared import clean_extension_runtime_state
@@ -1481,6 +1482,80 @@ def test_reconcile_stale_review_jobs_heals_dead_running_job(tmp_path, monkeypatc
     data = json.loads(job_path.read_text(encoding="utf-8"))
     assert data["status"] == "interrupted"
     assert data["interrupt_reason"] == "owner_process_exited"
+
+
+def test_reconcile_stale_review_jobs_heals_pending_zombie(tmp_path, monkeypatch):
+    # ibl-f334f2324443: review_job.json stuck at status=pending forever (the
+    # lifecycle dispatch never reached _on_started — duplicate dedupe collision
+    # or worker died before file-lock). mark_stale_review_job_interrupted only
+    # catches status=running; pending zombies silently block every retry. The
+    # fix detects pending + old + no live pid and transitions to interrupted.
+    from ouroboros.skill_review_runner import (
+        reconcile_stale_review_jobs,
+        review_job_state_path,
+    )
+
+    ctx = _make_ctx(tmp_path)
+    job_path = review_job_state_path(ctx.drive_root, "gamma")
+    job_path.parent.mkdir(parents=True, exist_ok=True)
+    job_path.write_text(
+        json.dumps(
+            {
+                "status": "pending",
+                "skill": "gamma",
+                "content_hash": "h2",
+                "job_id": "skill-job-pending",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "pid": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ouroboros.skill_review_runner._pid_alive", lambda _pid: False)
+
+    healed = reconcile_stale_review_jobs(ctx.drive_root)
+
+    assert healed == 1
+    data = json.loads(job_path.read_text(encoding="utf-8"))
+    assert data["status"] == "interrupted"
+    assert data["interrupt_reason"] == "pending_zombie_never_started"
+    events_text = (ctx.drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8")
+    assert "skill_review_pending_zombie_healed" in events_text
+
+
+def test_reconcile_stale_review_jobs_skips_fresh_pending(tmp_path, monkeypatch):
+    # ibl-f334f2324443: a pending job that's YOUNGER than the stale threshold
+    # must NOT be healed — that would race a legitimate dispatch that's still
+    # acquiring its lifecycle file lock. The fix only heals old pending jobs.
+    from ouroboros.skill_review_runner import (
+        reconcile_stale_review_jobs,
+        review_job_state_path,
+    )
+
+    ctx = _make_ctx(tmp_path)
+    job_path = review_job_state_path(ctx.drive_root, "delta")
+    job_path.parent.mkdir(parents=True, exist_ok=True)
+    now_iso = utc_now_iso()
+    job_path.write_text(
+        json.dumps(
+            {
+                "status": "pending",
+                "skill": "delta",
+                "content_hash": "h3",
+                "job_id": "skill-job-fresh",
+                "started_at": now_iso,
+                "pid": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ouroboros.skill_review_runner._pid_alive", lambda _pid: False)
+
+    healed = reconcile_stale_review_jobs(ctx.drive_root)
+
+    assert healed == 0
+    data = json.loads(job_path.read_text(encoding="utf-8"))
+    assert data["status"] == "pending"
 
 
 def test_async_review_cancellation_waits_for_review_thread(tmp_path, monkeypatch):
