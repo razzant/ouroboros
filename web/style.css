@@ -3108,7 +3108,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .chat-context-mode[data-context-mode="nano"] .chat-seg[data-mode="nano"] {
     background: rgba(168, 85, 247, 0.18);
-    color: var(--purple, #c084fc);
+    color: #c084fc;
 }
 
 .chat-send-group {

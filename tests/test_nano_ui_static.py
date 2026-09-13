@@ -23,4 +23,6 @@ def test_chat_control_ids_match_instance_wiring_and_nano_has_active_style():
     assert "const swarmBtn = byId('swarm');" in chat
     assert "const contextModeBtn = byId('context-mode');" in chat
     assert '.chat-context-mode[data-context-mode="nano"] .chat-seg[data-mode="nano"]' in styles
+    assert 'color: #c084fc;' in styles
+    assert 'var(--purple' not in styles
     assert 'justify-content: center;' in styles
