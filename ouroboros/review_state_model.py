@@ -60,6 +60,7 @@ class AdvisoryReviewState:
     last_stale_from_edit_ts: str = ""
     last_stale_reason: str = ""
     last_stale_repo_key: str = ""
+    last_stale_task_id: str = ""
 
     def latest(self) -> Optional[AdvisoryRunRecord]:
         return self.advisory_runs[-1] if self.advisory_runs else None
@@ -202,6 +203,7 @@ class AdvisoryReviewState:
             self.last_stale_from_edit_ts = ""
             self.last_stale_reason = ""
             self.last_stale_repo_key = ""
+            self.last_stale_task_id = ""
         self._sync_commit_readiness_debts(repo_key=run.repo_key or None)
 
     def mark_stale(self, snapshot_hash: str) -> None:
@@ -224,6 +226,7 @@ class AdvisoryReviewState:
         reason_ts: str = "",
         reason: str = "",
         stale_repo_key: str = "",
+        stale_task_id: str = "",
     ) -> int:
         """Invalidate advisory runs for a repo, falling back conservatively."""
         invalidatable = [
@@ -247,6 +250,7 @@ class AdvisoryReviewState:
             self.last_stale_from_edit_ts = reason_ts or _rs()._utc_now()
             self.last_stale_reason = reason
             self.last_stale_repo_key = stale_repo_key or repo_key
+            self.last_stale_task_id = stale_task_id
             self._sync_commit_readiness_debts(repo_key=stale_repo_key or repo_key or None)
         return len(target_runs)
 
@@ -792,6 +796,7 @@ class AdvisoryReviewState:
             self.last_stale_from_edit_ts = ""
             self.last_stale_reason = ""
             self.last_stale_repo_key = ""
+            self.last_stale_task_id = ""
             for debt in _rs()._commit_readiness_debts_view(self):
                 self._hydrate_commit_readiness_debt(debt)
                 if debt.status in _rs()._OPEN_COMMIT_READINESS_DEBT_STATUSES:
@@ -809,6 +814,7 @@ class AdvisoryReviewState:
             self.last_stale_from_edit_ts = ""
             self.last_stale_reason = ""
             self.last_stale_repo_key = ""
+            self.last_stale_task_id = ""
         self._sync_commit_readiness_debts(repo_key=repo_key)
 
     def expire_stale_attempts(
