@@ -3,9 +3,73 @@ from types import SimpleNamespace
 
 from ouroboros.triad_review import (
     emit_review_model_error_events,
+    empty_array_is_verified_clean,
     extract_json_array,
     parse_model_review_results,
+    strip_leading_reasoning_block,
 )
+
+# A MiniMax-M3 / DeepSeek-R1 style response: the whole review lives in a
+# passthrough <think> block, then the clean sentinel with no separator.
+_REASONING_CLEAN = (
+    "<think>\nLet me review this diff. It touches build_touched_file_pack.\n"
+    "Checklist: bible_compliance PASS, code_quality PASS. Brackets [x] and "
+    "braces {y} in my reasoning must not confuse the parser.\nOK. NO_FINDINGS.\n"
+    "</think>\n\n[]NO_FINDINGS"
+)
+_REASONING_FINDING = (
+    "<think>I spotted a real bug at line 5 [note]</think>\n"
+    '[{"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": "x"}]'
+)
+
+
+def test_strip_leading_reasoning_block_only_removes_a_wellformed_leading_block():
+    assert strip_leading_reasoning_block("<think>abc</think>\n[]") == "[]"
+    assert strip_leading_reasoning_block("  <think>a</think> tail") == "tail"
+    # no block, or a block that is not leading, is left untouched
+    assert strip_leading_reasoning_block("[]\nNO_FINDINGS") == "[]\nNO_FINDINGS"
+    assert strip_leading_reasoning_block("prefix <think>a</think>") == "prefix <think>a</think>"
+
+
+def test_reasoning_wrapped_clean_verdict_enters_quorum():
+    """A reasoning model whose clean [] / NO_FINDINGS verdict sits behind a
+    passthrough <think> block must NOT drop out of quorum (ibl-local-8212d8d13320)."""
+    assert empty_array_is_verified_clean(_REASONING_CLEAN) is True
+    assert extract_json_array(_REASONING_CLEAN) == []
+    parsed = parse_model_review_results({
+        "results": [
+            {"model": "minimax::MiniMax-M3", "verdict": "REVIEW", "text": _REASONING_CLEAN},
+            {"model": "claude", "verdict": "REVIEW", "text": "[]\nNO_FINDINGS"},
+        ]
+    })
+    assert parsed.responsive_models == ["minimax::MiniMax-M3#1", "claude#2"]
+    assert parsed.quorum_met is True
+
+
+def test_reasoning_wrapped_findings_are_still_extracted():
+    parsed = extract_json_array(_REASONING_FINDING, normalize=True)
+    assert parsed and parsed[0]["item"] == "code_quality" and parsed[0]["verdict"] == "FAIL"
+
+
+def test_array_inside_a_whole_response_think_block_is_still_recovered():
+    """A response that is ENTIRELY one <think>…</think> block (truncation, or a
+    route that wraps everything) must not be stripped to nothing — the
+    bracket-scan still recovers the array from inside the block."""
+    whole = (
+        '<think>\nReviewing… my verdict array is '
+        '[{"item": "security_issues", "verdict": "FAIL", "severity": "critical", "reason": "y"}]'
+        '\n</think>'
+    )
+    assert strip_leading_reasoning_block(whole) == whole  # nothing survives stripping → keep original
+    parsed = extract_json_array(whole, normalize=True)
+    assert parsed and parsed[0]["item"] == "security_issues" and parsed[0]["verdict"] == "FAIL"
+
+
+def test_reasoning_block_does_not_launder_a_refusal():
+    """Stripping <think> must not turn a real refusal into a clean verdict:
+    prose after the block is still a non-response."""
+    refusal = "<think>considering</think>\nI cannot review this diff. []\nNO_FINDINGS"
+    assert empty_array_is_verified_clean(refusal) is False
 
 
 def test_extract_json_array_handles_fences_and_normalizes():
