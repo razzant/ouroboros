@@ -21,6 +21,7 @@ from ouroboros import mcp_client
 @pytest.fixture(autouse=True)
 def _isolate_manager():
     mcp_client.reset_manager_for_tests()
+    _wire_singleton(_FakeTransport([]))
     yield
     mcp_client.reset_manager_for_tests()
 

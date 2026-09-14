@@ -611,13 +611,14 @@ def test_key_probe_failures_are_informational_and_back_off():
     assert probe.fragment() == "key uncapped"
 
 
-def test_watcher_tick_never_waits_on_the_key_probe(capsys):
+def test_watcher_tick_never_waits_on_the_key_probe(capsys, monkeypatch):
     """A probe stuck in a provider call must not delay the tick: the watcher reads the probe's
     last fragment and prints the ledger's spend regardless."""
-    stop, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(run_live_lanes.shutil, "disk_usage", lambda _mount: types.SimpleNamespace(free=100 * 2**30))
+    stop = threading.Event()
 
     def stuck() -> float | None:
-        release.wait(10)
+        stop.wait(10)
         return None
 
     probe = run_live_lanes.KeyProbe(stuck, floor=1.0, interval=30.0, stop=stop)
@@ -634,7 +635,6 @@ def test_watcher_tick_never_waits_on_the_key_probe(capsys):
         time.sleep(0.05)
         seen += capsys.readouterr().out
     stop.set()
-    release.set()
     thread.join(timeout=5)
     line = next(ln for ln in seen.splitlines() if "[watch]" in ln)
     assert "spent $2.50/$50.00 reserved $16.00" in line and "SM1_a1=running scenario" in line   # $16 per task, one root
