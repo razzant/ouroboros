@@ -18,11 +18,11 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from devtools.benchmarks.cybergym.cybergym_observations import (
-    SCHEMA_VERSION,  # noqa: F401
     _CONNECTIVITY_EXPECTATIONS,  # noqa: F401
     _DIGEST,  # noqa: F401
     _PROTECTED_DENIAL_STATUS_RANGE,  # noqa: F401
     _PROTECTED_ROUTE_KEY,  # noqa: F401
+    SCHEMA_VERSION,  # noqa: F401
     _bindings,  # noqa: F401
     _bool_mapping_value,  # noqa: F401
     _digests,  # noqa: F401
@@ -551,6 +551,7 @@ class SidecarCommandSpec:
     image_digest: str | None = None
     labels: Mapping[str, str] = field(default_factory=dict)
     extra_env: Mapping[str, str] = field(default_factory=dict)
+    read_only_mounts: Mapping[str, str] = field(default_factory=dict)
     container_docker_host: str | None = None
     platform: str = "linux/amd64"
     # Production callers keep the sidecar private and use the server
@@ -587,6 +588,14 @@ class SidecarCommandSpec:
         for item in self.command:
             _text(item, "command argument", max_len=4096)
         _safe_env_items(self.extra_env)
+        mounts: dict[str, str] = {}
+        for source, target in self.read_only_mounts.items():
+            source_path = _mount_path(source, "read_only_mount source")
+            target_path = _mount_path(target, "read_only_mount target")
+            if target_path in {socket_target, data_container_path}:
+                raise SidecarConfigurationError("read-only mount collides with a protected sidecar mount")
+            mounts[source_path] = target_path
+        object.__setattr__(self, "read_only_mounts", mounts)
         _labels(self.plan, "server", self.labels)
 
 
@@ -599,6 +608,8 @@ class WorkspaceCommandSpec:
     workspace_host_path: str
     command: tuple[str, ...] = ()
     workspace_container_path: str = "/workspace"
+    vulnerable_runtime_host_path: str | None = None
+    vulnerable_runtime_container_path: str = "/workspace/.cybergym-runtime"
     labels: Mapping[str, str] = field(default_factory=dict)
     extra_env: Mapping[str, str] = field(default_factory=dict)
     container_docker_host: str | None = None
@@ -612,6 +623,19 @@ class WorkspaceCommandSpec:
         _mount_path(self.workspace_container_path, "workspace_container_path")
         if self.workspace_container_path == "/":
             raise SidecarConfigurationError("workspace mount cannot target root")
+        runtime_target = _mount_path(
+            self.vulnerable_runtime_container_path,
+            "vulnerable_runtime_container_path",
+        )
+        object.__setattr__(self, "vulnerable_runtime_container_path", runtime_target)
+        if self.vulnerable_runtime_host_path is not None:
+            runtime_source = _mount_path(
+                self.vulnerable_runtime_host_path,
+                "vulnerable_runtime_host_path",
+            )
+            object.__setattr__(self, "vulnerable_runtime_host_path", runtime_source)
+            if runtime_target == self.workspace_container_path:
+                raise SidecarConfigurationError("vulnerable runtime cannot replace the workspace mount")
         if not re.fullmatch(r"[A-Za-z0-9_./-]+", self.platform):
             raise SidecarConfigurationError("unsafe platform")
         for item in self.command:
@@ -677,6 +701,8 @@ def build_sidecar_argv(spec: SidecarCommandSpec) -> list[str]:
         argv.extend(("--env", f"{key}={spec.extra_env[key]}"))
     if spec.data_host_path is not None:
         argv.extend(("--mount", _mount_arg(spec.data_host_path, spec.data_container_path)))
+    for source, target in sorted(spec.read_only_mounts.items()):
+        argv.extend(("--mount", _mount_arg(source, target) + ",readonly"))
     argv.append(spec.image)
     argv.extend(spec.command)
     return argv
@@ -698,6 +724,16 @@ def build_workspace_argv(spec: WorkspaceCommandSpec) -> list[str]:
         "--env", f"NO_PROXY={no_proxy}", "--env", f"no_proxy={no_proxy}",
         "--env", f"CYBERGYM_AGENT_ID={plan.opaque_agent_id}",
     ))
+    if spec.vulnerable_runtime_host_path is not None:
+        argv.extend((
+            "--mount",
+            _mount_arg(
+                spec.vulnerable_runtime_host_path,
+                spec.vulnerable_runtime_container_path,
+            ) + ",readonly",
+            "--env",
+            f"CYBERGYM_VULNERABLE_RUNTIME={spec.vulnerable_runtime_container_path}",
+        ))
     if spec.container_docker_host is not None:
         # WorkspaceCommandSpec rejects this field; retain the branch only as
         # a defensive guard for objects produced by untrusted deserializers.

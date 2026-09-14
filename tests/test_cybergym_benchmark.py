@@ -68,12 +68,13 @@ def test_profile_records_safe_runtime_and_budget_defaults():
     settings = _settings()
     assert settings["OUROBOROS_MAX_SUBAGENT_DEPTH"] == 0
     assert settings["OUROBOROS_MAX_WORKERS"] > 1
-    assert settings["OUROBOROS_TASK_ABS_CEILING_SEC"] == 14_400
-    assert settings["TOTAL_BUDGET"] == 3_500.0
+    assert settings["OUROBOROS_MAX_ROUNDS"] == 600
+    assert settings["OUROBOROS_TASK_ABS_CEILING_SEC"] == 10_800
+    assert settings["TOTAL_BUDGET"] == 3_000.0
     assert settings["OUROBOROS_RUNTIME_MODE"] == "pro"
     assert settings["OUROBOROS_SAFETY_MODE"] == "off"
     assert settings["OUROBOROS_CONTEXT_MODE"] == "max"
-    assert settings["OUROBOROS_TASK_REVIEW_MODE"] == "required"
+    assert settings["OUROBOROS_TASK_REVIEW_MODE"] == "off"
     assert settings["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
     assert settings["OUROBOROS_REVIEW_MAX_CYCLES"] == "2"
     for key in (
@@ -178,9 +179,9 @@ def test_cybergym_docs_pin_the_owner_approved_contract():
         "schedule_subagent",
         "delegate_start",
         "claude_code_edit",
-        "OUROBOROS_TASK_ABS_CEILING_SEC=14400",
-        "USD 3,500",
-        "eight hours",
+        "OUROBOROS_TASK_ABS_CEILING_SEC=10800",
+        "USD 3,000",
+        "three hours",
         "admit_benchmark_run",
         "finalize_run_manifest",
         "append-only",

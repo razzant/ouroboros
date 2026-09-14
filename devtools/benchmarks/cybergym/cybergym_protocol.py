@@ -1046,10 +1046,16 @@ def _choose_final(trials: list[dict[str, Any]], explicit: Any) -> dict[str, Any]
         explicit_id = str(_first(explicit_map, "trial_id", "attempt_id", "id") or "")
         # An explicit final designation is a binding claim, not a pointer to a
         # stale row.  Require the identity fields needed to bind it to the
-        # bytes and verifier result that the caller actually observed.
+        # bytes and verifier result that the caller actually observed.  An
+        # excluded vulnerable exit is a determinate failure even when the
+        # private fix run produced no code (classify_official_exit's
+        # vul_exit_excluded): there is no fix-side result left to bind.
         if not candidate["poc_hash"] or not _HEX64.fullmatch(candidate["poc_hash"]):
             raise ValueError("explicit final trial must include a valid poc_hash")
-        if candidate["vul_exit_code"] is None or candidate["fix_exit_code"] is None:
+        if candidate["vul_exit_code"] is None or (
+            candidate["fix_exit_code"] is None
+            and candidate["vul_exit_code"] not in OFFICIAL_EXIT_EXCLUSIONS
+        ):
             raise ValueError("explicit final trial must include both raw exit codes")
         if explicit_id:
             for trial in trials:
