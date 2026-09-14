@@ -74,6 +74,57 @@ def test_strict_config_round_trips_object_and_json_to_one_canonical_string():
     assert LEGACY_SUBAGENT_COMPATIBILITY == "remove_after_next_minor_release"
 
 
+def test_session_access_is_per_actor_and_round_trips_without_changing_default_bytes():
+    original, original_bytes = normalize_configured_subagents(_config())
+    explicit_default, default_bytes = normalize_configured_subagents(_config(_row(access="workspace_write")))
+    assert explicit_default == original and default_bytes == original_bytes
+    assert explicit_default.items[0].access == "workspace_write"
+
+    configured, serialized = normalize_configured_subagents(_config(
+        _row("broad", access="full"), _row("ordinary"),
+    ))
+    assert [row.access for row in configured.items] == ["full", "workspace_write"]
+    assert json.loads(serialized)["items"][0]["access"] == "full"
+    assert "access" not in json.loads(serialized)["items"][1]
+    assert parse_configured_subagents(serialized) == configured
+    full_only = parse_configured_subagents(_config(_row(access="full")))
+    assert configured_subagents_fingerprint(full_only) != configured_subagents_fingerprint(original)
+
+
+@pytest.mark.parametrize("access", [None, "", "readonly", "inherit_native", True, {}, "FULL"])
+def test_invalid_actor_access_is_not_silently_coerced(access):
+    with pytest.raises(ValueError, match="access must be workspace_write or full"):
+        parse_configured_subagents(_config(_row(access=access)))
+
+
+def test_api_actor_cannot_request_full_session_access():
+    row = _row(route={"kind": "api_model", "target_id": "provider/model"}, access="workspace_write")
+    config, serialized = normalize_configured_subagents(_config(row))
+    assert config.items[0].access == "workspace_write"
+    assert "access" not in json.loads(serialized)["items"][0]
+    row["access"] = "full"
+    with pytest.raises(ValueError, match="meaningful only for agent_session"):
+        parse_configured_subagents(_config(row))
+
+
+def test_unsaved_candidate_composition_retains_selected_access(_clean_subagent_env):
+    candidate = parse_configured_subagents(_config(_row(access="full")))
+    resolution = resolve_configured_subagents({}, default_candidate=candidate)
+    assert resolution.config == candidate
+    assert resolution.config.items[0].access == "full"
+
+
+def test_access_edit_changes_existing_preset_fingerprint():
+    raw = _config()
+    receipt = {"source": SOURCE_ONBOARDING_DEFAULT,
+               "available_subagents_fingerprint": configured_subagents_fingerprint(parse_configured_subagents(raw)),
+               "available_subagents": json.loads(json.dumps(raw))}
+    settings = {SUBAGENTS_SETTING: raw, SUBAGENTS_RECEIPT_KEY: receipt}
+    assert resolve_configured_subagents(settings).source == SOURCE_ONBOARDING_DEFAULT
+    raw["items"][0]["access"] = "full"
+    assert resolve_configured_subagents(settings).source == SOURCE_CONFIGURED
+
+
 def test_shared_browser_backend_contract_fixture_has_identical_acceptance():
     fixture_path = (
         Path(__file__).resolve().parents[1]

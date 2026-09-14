@@ -1,0 +1,5 @@
+--- a/vendor/base/tools/aapt2/ResourceTable.cpp
++++ b/vendor/base/tools/aapt2/ResourceTable.cpp
+@@ -423 +423 @@
+-    auto it = std::lower_bound(el.begin(), el.end(), value, [&](auto& lhs, auto& rhs) {
++    auto it = std::lower_bound(el.begin(), el.end(), value, [this](const T& lhs, const T& rhs) {

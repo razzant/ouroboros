@@ -28,13 +28,13 @@ def _make_event(etype: str, **kwargs):
 
 
 def _make_completed_event(input_tokens: int = 100, output_tokens: int = 50):
-    usage_obj = MagicMock()
-    usage_obj.model_dump.return_value = {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-    }
-    resp_obj = MagicMock()
-    resp_obj.usage = usage_obj
+    usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    # SDK model_dump returns finite data. An unconstrained MagicMock instead
+    # creates another model_dump mock recursively during citation extraction.
+    resp_obj = types.SimpleNamespace(
+        usage=types.SimpleNamespace(model_dump=lambda: dict(usage)),
+        model_dump=lambda: {"usage": dict(usage), "output": []},
+    )
     return _make_event("response.completed", response=resp_obj)
 
 

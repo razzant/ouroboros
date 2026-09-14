@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros.tools.release_sync import (
     RELEASE_ASSET_TEMPLATES,
+    DESKTOP_DOWNLOAD_IDS,
     check_history_limit,
     detect_numeric_claims,
     normalize_linux_package_version,
@@ -343,7 +344,7 @@ class TestSyncReleaseMetadata:
         )
 
         assert "README.md download macos-arm64" not in desync
-        assert len(desync) == len(RELEASE_ASSET_TEMPLATES) - 1
+        assert len(desync) == len(DESKTOP_DOWNLOAD_IDS) - 1
 
     def test_idempotent_second_call_returns_no_changes(self, tmp_path):
         repo = _make_repo(tmp_path, "1.2.3")

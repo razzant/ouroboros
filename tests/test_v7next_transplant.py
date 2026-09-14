@@ -438,6 +438,91 @@ def test_shadows_are_never_rewritten():
     assert result.proof["ok"]
 
 
+@pytest.mark.parametrize("body,declared,expected", [
+    ("return [X for X in ITEMS], {X for X in ITEMS}, {X: X + OFFSET for X in ITEMS}, X",
+     {"ITEMS", "OFFSET", "X"}, ([2, 3], {2, 3}, {2: 9, 3: 10}, 50)),
+    ("return [ITEMS for ITEMS in ITEMS], ITEMS",
+     {"ITEMS"}, ([2, 3], [2, 3])),
+    ("return [[X + Y + OFFSET for Y in ITEMS] for X in ITEMS], X",
+     {"ITEMS", "OFFSET", "X"}, ([[11, 12], [12, 13]], 50)),
+    ("funcs = [lambda: X + OFFSET for X in ITEMS]\n"
+     "def inner():\n    return OFFSET\n"
+     "return [fn() for fn in funcs], inner(), X",
+     {"ITEMS", "OFFSET", "X"}, ([10, 10], 7, 50)),
+    ("values = [list(X + Y + OFFSET for Y in ITEMS) for X in ITEMS]\nreturn values, X",
+     {"ITEMS", "OFFSET", "X"}, ([[11, 12], [12, 13]], 50)),
+    ("total = 0\nvalues = [(total := X + OFFSET) for X in ITEMS]\nreturn values, total",
+     {"ITEMS", "OFFSET"}, ([9, 10], 10)),
+    ("class C:\n    OFFSET = 99\n    values = [OFFSET for X in ITEMS]\nreturn C.values",
+     {"ITEMS", "OFFSET"}, [7, 7]),
+    ("OFFSET = 11\nclass C:\n    OFFSET = 99\n    values = [OFFSET for X in ITEMS]\nreturn C.values",
+     {"ITEMS"}, [11, 11]),
+    ("unused = [X for X in ITEMS]\nclass C:\n    values = [X for _ in ITEMS]\nreturn C.values",
+     {"ITEMS", "X"}, [50, 50]),
+    ("unused = [X for X in ITEMS]\nclass C:\n    X = 99\n    values = [X for _ in ITEMS]\nreturn C.values",
+     {"ITEMS", "X"}, [50, 50]),
+])
+def test_comprehension_scope_preserves_executed_bindings(body, declared, expected, monkeypatch):
+    """PEP 709 changes scope tables, never target isolation or lexical binding."""
+    import types
+
+    source = "def moved():\n" + textwrap.indent(body, "    ") + "\n"
+    original = {"ITEMS": [2, 3], "OFFSET": 7, "X": 50}
+    exec(source, original)
+    parent = types.ModuleType("transplant_scope_parent")
+    for name in declared:
+        setattr(parent, name, original[name])
+    monkeypatch.setitem(sys.modules, parent.__name__, parent)
+    result = tp.transplant(source, ["moved"], declared, "_up", parent_module=parent.__name__)
+    leaf = {}
+    exec(result.leaf_source, leaf)
+    assert original["moved"]() == expected
+    assert leaf["moved"]() == expected
+    assert result.proof["ok"]
+    # The original module and handle source change together; iteration locals
+    # and closures must still resist rewriting after their parent is rebound.
+    original["ITEMS"] = [4]
+    parent.ITEMS = [4]
+    assert leaf["moved"]() == original["moved"]()
+
+
+def test_async_comprehension_keeps_target_shadowing(monkeypatch):
+    import asyncio
+    import types
+
+    source = ("async def moved():\n"
+              "    async def values():\n        for value in ITEMS:\n            yield value\n"
+              "    result = [X + OFFSET async for X in values()]\n"
+              "    return result, X\n")
+    original = {"ITEMS": [2, 3], "OFFSET": 7, "X": 50}
+    exec(source, original)
+    parent = types.ModuleType("transplant_async_parent")
+    parent.ITEMS, parent.OFFSET, parent.X = [2, 3], 7, 50
+    monkeypatch.setitem(sys.modules, parent.__name__, parent)
+    result = tp.transplant(source, ["moved"], {"ITEMS", "OFFSET", "X"}, "_up",
+                           parent_module=parent.__name__)
+    leaf = {}
+    exec(result.leaf_source, leaf)
+    assert asyncio.run(leaf["moved"]()) == asyncio.run(original["moved"]()) == ([9, 10], 50)
+
+
+def test_inlined_class_comprehension_keeps_import_time_read_refusal():
+    source = "class C:\n    OFFSET = 99\n    values = [OFFSET for X in (1, 2)]\n"
+    with pytest.raises(tp.TransplantError) as refused:
+        tp.transplant(source, ["C"], {"OFFSET"}, "_up", parent_module="parent")
+    assert refused.value.kind == "violation"
+    assert "import-time read" in refused.value.message
+
+
+def test_prior_comprehension_target_cannot_hide_unresolved_class_body_global():
+    source = ("def moved():\n    unused = [X for X in ITEMS]\n"
+              "    class C:\n        values = [X for _ in ITEMS]\n    return C.values\n")
+    with pytest.raises(tp.TransplantError) as refused:
+        tp.transplant(source, ["moved"], {"ITEMS"}, "_up", parent_module="parent")
+    assert refused.value.kind == "unresolved_names"
+    assert refused.value.details["unresolved"]["moved"] == ["X"]
+
+
 def test_module_reads_rewritten_strings_and_comments_untouched():
     result = _syn(["uses", "strings_and_comments"], {"PENDING", "RUNNING", "helper"})
     uses = _span_text(result.leaf_source, "uses")

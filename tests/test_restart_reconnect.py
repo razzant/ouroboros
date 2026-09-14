@@ -357,7 +357,10 @@ def test_restart_watchdog_waits_for_uvicorn_exit():
     assert "_uvicorn_exited.set()" in source
 
 
-def test_owner_restart_copy_is_explicit_about_stopped_task():
+def test_owner_restart_copy_is_explicit_about_stopped_task(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import server
+
     source = _read("server.py")
     assert "Stopping active task. New settings apply to the next message." in source
     assert "owner_restart_no_resume.flag" in source
@@ -370,9 +373,35 @@ def test_owner_restart_copy_is_explicit_about_stopped_task():
     owner_restart = source.split('elif lowered.startswith("/restart"):', 1)[1].split(
         'elif lowered == "/review"', 1
     )[0]
-    notice = owner_restart.index("Stopping active task. New settings apply to the next message.")
-    assert (owner_restart.index("_safe_restart_serialized(") < owner_restart.index("owner_restart_no_resume.flag")
-            < owner_restart.index("_stop_owned_work(ctx)") < notice)
+    assert "_perform_owner_restart(ctx, reply)" in owner_restart
+    flags = tmp_path / "state"
+    calls = []
+    ctx = SimpleNamespace(safe_restart=object())
+
+    def checked(function, **kwargs):
+        assert function is ctx.safe_restart and not flags.exists()
+        assert kwargs == {"reason": "owner_restart", "unsynced_policy": "rescue_and_reset"}
+        calls.append("checked")
+        return True, "ok"
+
+    def stopped(actual):
+        assert actual is ctx
+        assert (flags / "owner_restart_no_resume.flag").read_text() == "owner_restart"
+        assert (flags / "panic_stop.flag").read_text() == "owner_restart_no_resume"
+        calls.append("stopped")
+        return ["active-task"]
+
+    def notice(text, _suffix):
+        assert calls == ["checked", "stopped"]
+        assert text == "Stopping active task. New settings apply to the next message."
+        calls.append("notice")
+
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "_safe_restart_serialized", checked)
+    monkeypatch.setattr(server, "_stop_owned_work", stopped)
+    monkeypatch.setattr(server, "_request_restart_exit", lambda owner: calls.append(("exit", owner)))
+    assert server._perform_owner_restart(ctx, notice) == (True, "")
+    assert calls == ["checked", "stopped", "notice", ("exit", True)]
     stop = _read("ouroboros/server_restart.py").split("def _stop_owned_work", 1)[1]
     assert (stop.index("request_cancel(") < stop.index("ctx.kill_workers(")
             < stop.index("reconcile_orphaned_runs(") < stop.index("stop_outcome()"))

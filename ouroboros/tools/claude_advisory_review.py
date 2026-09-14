@@ -1418,11 +1418,25 @@ def _preflight_review_params() -> dict:
     }
 
 
+def _preflight_tool_timeout_sec() -> float:
+    """Finite settlement envelope, following the existing plan-review wrapper.
+
+    Tests precede the critic. Cover their resolved total plus the existing
+    task/transport envelope; do not create or replace the critic's own deadline.
+    """
+    from ouroboros.config import get_llm_transport_read_timeout_sec, get_task_abs_ceiling_sec
+    from ouroboros.preflight_runner import _resolve_preflight_timeout
+
+    grace = get_finalization_grace_sec()
+    review_envelope = max(get_task_abs_ceiling_sec(), get_llm_transport_read_timeout_sec() + grace)
+    return _resolve_preflight_timeout() + review_envelope + grace
+
+
 def get_tools() -> list:
     return [
         ToolEntry(
             name="preflight_review",
-            timeout_sec=1200,
+            timeout_sec=_preflight_tool_timeout_sec(),
             schema={
                 "name": "preflight_review",
                 "description": (
@@ -1442,7 +1456,7 @@ def get_tools() -> list:
         # parameters as the canonical entry so old calls keep their args.
         ToolEntry(
             name="advisory_review",
-            timeout_sec=1200,
+            timeout_sec=_preflight_tool_timeout_sec(),
             alias_for="preflight_review",
             schema={
                 "name": "advisory_review",

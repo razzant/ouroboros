@@ -489,6 +489,8 @@ def test_a_stranger_that_took_a_recycled_pid_or_pgid_is_never_signalled(monkeypa
 @pytest.mark.serial
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux nondumpable process fixture")
 def test_unrelated_nondumpable_process_does_not_block_or_receive_a_signal(monkeypatch, caplog):
+    import builtins
+    import errno
     from ouroboros import process_containment
 
     container = process_containment.ProcessContainer()
@@ -502,6 +504,14 @@ def test_unrelated_nondumpable_process_does_not_block_or_receive_a_signal(monkey
     signals = []
     try:
         assert stranger.stdout.readline().strip() == "ready"
+        # CAP_SYS_PTRACE may read a nondumpable process even as UID 0. Exercise
+        # the unreadable-environment outcome, not the test runner's privileges.
+        def denied_stranger_environ(path, *args, **kwargs):
+            if os.fspath(path) == f"/proc/{stranger.pid}/environ":
+                raise PermissionError(errno.EACCES, "fixture environment denied", path)
+            return builtins.open(path, *args, **kwargs)
+
+        monkeypatch.setattr(process_containment, "open", denied_stranger_environ, raising=False)
         assert process_containment.pid_marker_state(stranger.pid, container._token) == process_containment.MARKER_UNREADABLE
         root.stdin.close()
         root.wait(timeout=10)

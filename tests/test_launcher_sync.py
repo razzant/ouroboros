@@ -304,8 +304,8 @@ def test_agent_lifecycle_preflight_cleans_host_service_port(monkeypatch):
     # The per-generation stray sweep must never signal a real process from a test.
     monkeypatch.setattr(launcher, "_reap_same_install_strays", lambda reason: [])
     monkeypatch.setattr(launcher, "start_agent", lambda port: FakeProcess())
-    monkeypatch.setattr(launcher, "_poll_port_file", lambda timeout=30: 8765)
-    monkeypatch.setattr(launcher, "_wait_for_server", lambda port, timeout=30.0: True)
+    monkeypatch.setattr(launcher, "_poll_port_file", lambda timeout=30, abort_event=None: 8765)
+    monkeypatch.setattr(launcher, "_wait_for_server", lambda port, timeout=30.0, abort_event=None: True)
     monkeypatch.setattr(launcher, "_agent_job", None)
     monkeypatch.setattr(launcher, "log", types.SimpleNamespace(info=lambda *args, **kwargs: None))
 
@@ -358,6 +358,15 @@ def test_start_agent_exports_presentation_posture(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "_headless", True)
     launcher.start_agent(port=9872)
     assert captured["env"]["OUROBOROS_PRESENTATION"] == "browser_fallback"
+
+    monkeypatch.setattr(launcher, "_external_ui", True)
+    monkeypatch.setenv("OUROBOROS_PRESENTATION", "android_app")
+    launcher.start_agent(port=9873)
+    assert captured["env"]["OUROBOROS_PRESENTATION"] == "android_app"
+
+    monkeypatch.delenv("OUROBOROS_PRESENTATION")
+    launcher.start_agent(port=9874)
+    assert captured["env"]["OUROBOROS_PRESENTATION"] == "web"
 
 
 def test_start_agent_unix_uses_process_group_and_writes_server_record(monkeypatch, tmp_path):
@@ -625,3 +634,78 @@ def test_launcher_reexports_the_windows_runtime_leaf():
     # launcher.py's surface, so it is deliberately not re-exported.
     assert not hasattr(launcher, "_windows_dll_dir_handles")
     assert isinstance(launcher_windows_runtime._windows_dll_dir_handles, list)
+
+
+def test_external_source_launcher_keeps_older_seed_version_and_local_head(tmp_path, monkeypatch):
+    import launcher
+
+    bootstrap = _reload_bootstrap()
+    src = _make_bundle_source(tmp_path)
+    seed, repo = tmp_path / 'seed', tmp_path / 'repo'
+    _write_bundle(src, seed)
+    (seed / 'VERSION').write_text('4.50.0-rc.2\n')
+    original_manifest = (seed / 'repo_bundle_manifest.json').read_bytes()
+    assert bootstrap.ensure_managed_repo(_make_context(seed, repo)) == 'created'
+    (repo / 'VERSION').write_text('4.50.1\n')
+    (repo / 'server.py').write_text("print('personal body')\n")
+    _run(['git', 'add', '-A'], cwd=repo)
+    _run(['git', 'commit', '-m', 'personal source update'], cwd=repo)
+    personal_head = _git_output(repo, 'rev-parse', 'HEAD')
+    monkeypatch.setattr(launcher, '_external_seed_bundle', seed)
+    monkeypatch.setattr(launcher, 'APP_VERSION', '4.50.1')
+    monkeypatch.setattr(launcher, 'REPO_DIR', repo)
+    monkeypatch.setattr(launcher, 'DATA_DIR', tmp_path / 'data')
+    monkeypatch.setattr(launcher, 'SETTINGS_PATH', tmp_path / 'data' / 'settings.json')
+    context = launcher._bootstrap_context()
+    assert context.app_version == '4.50.0-rc.2'
+    assert context.bundle_dir == seed
+    assert bootstrap.ensure_managed_repo(context) == 'unchanged'
+    assert _git_output(repo, 'rev-parse', 'HEAD') == personal_head
+    assert (repo / 'VERSION').read_text().strip() == '4.50.1'
+    assert (seed / 'repo_bundle_manifest.json').read_bytes() == original_manifest
+
+
+def test_external_restart_reexecs_current_source_after_sync_in_same_process(tmp_path, monkeypatch):
+    import launcher
+
+    class ReexecReached(BaseException):
+        pass
+
+    calls = []
+    process = types.SimpleNamespace(pid=12345, returncode=launcher.RESTART_EXIT_CODE,
+                                    wait=lambda: None)
+    monkeypatch.setattr(launcher, '_external_seed_bundle', tmp_path / 'seed')
+    monkeypatch.setattr(launcher, 'REPO_DIR', tmp_path / 'repo')
+    monkeypatch.setattr(launcher, '_launch_argv', ['--no-ui', '--seed-bundle', str(tmp_path / 'seed')])
+    monkeypatch.setattr(launcher, '_pre_generation_cleanup', lambda port: [])
+    monkeypatch.setattr(launcher, 'update_external_host', lambda *a: calls.append('native') or {})
+    monkeypatch.setattr(launcher, 'start_agent', lambda port: calls.append('core') or process)
+    monkeypatch.setattr(launcher, '_poll_port_file', lambda **kw: 8765)
+    monkeypatch.setattr(launcher, '_update_server_process_record_port', lambda *a: None)
+    monkeypatch.setattr(launcher, '_wait_for_server', lambda *a, **kw: True)
+    monkeypatch.setattr(launcher, '_cleanup_recorded_server_group_for_pid', lambda *a: None)
+    monkeypatch.setattr(launcher, '_sync_existing_repo_from_bundle', lambda: calls.append('source'))
+    monkeypatch.setattr(launcher, '_install_deps', lambda: calls.append('deps') or True)
+    monkeypatch.setattr(launcher, 'release_pid_lock', lambda: calls.append('release'))
+    monkeypatch.setattr(launcher.time, 'sleep', lambda *a: None)
+
+    def reexec(executable, argv):
+        calls.append(('exec', executable, argv))
+        raise ReexecReached()
+
+    monkeypatch.setattr(launcher.os, 'execv', reexec)
+    launcher._shutdown_event.clear()
+    launcher._agent_restart_requested.clear()
+    try:
+        try:
+            launcher.agent_lifecycle_loop()
+        except ReexecReached:
+            pass
+        else:
+            raise AssertionError('The same process did not re-exec the source launcher')
+    finally:
+        launcher._shutdown_event.clear()
+    assert calls[:5] == ['native', 'core', 'source', 'deps', 'release']
+    assert calls[5] == ('exec', launcher.EMBEDDED_PYTHON,
+                        [launcher.EMBEDDED_PYTHON, str(tmp_path / 'repo' / 'launcher.py'),
+                         '--no-ui', '--seed-bundle', str(tmp_path / 'seed')])

@@ -260,7 +260,8 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     except Exception:
         _FINALIZING_MEMO.pop(memo_id, None)
         return {}
-    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    # Atomic replacement can preserve size and mtime within one timestamp tick.
+    key = (str(path), stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size)
     memo = _FINALIZING_MEMO.get(memo_id)
     if memo is not None and memo[0] == key:
         return memo[1]

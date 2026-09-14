@@ -9,6 +9,7 @@ from typing import Any, Dict
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.background import BackgroundTask
 
 from ouroboros import get_version
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or, request_repo_dir
@@ -165,7 +166,14 @@ async def api_command(request: Request) -> JSONResponse:
         if cmd:
             from supervisor.message_bus import get_bridge, log_chat
 
-            bridge = get_bridge()
+            try:
+                bridge = get_bridge()
+            except AssertionError:
+                callback = getattr(request.app.state, "startup_owner_command", None)
+                action = callback(cmd) if callable(callback) else None
+                if action is not None:
+                    return JSONResponse({"status": "ok"}, background=BackgroundTask(action))
+                return json_error("Complete provider setup before sending this command.", 409)
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
             visible_task_id = str(body.get("visible_task_id") or "").strip()

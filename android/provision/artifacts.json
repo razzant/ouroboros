@@ -1,0 +1,216 @@
+[
+  {
+    "name": "ubuntu-base",
+    "url": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.4-base-arm64.tar.gz",
+    "sha256": "04207713ece899c3740823d33690441ad3a7f0ded1101aca744e2b0f37ac7ff2",
+    "size_bytes": 29870567
+  },
+  {
+    "name": "aapt2-source",
+    "url": "https://codeload.github.com/termux/android-build-tools/tar.gz/ee7f70b4499fcea5569f0428a538f18671d71840",
+    "filename": "termux-ee7f70b4499fcea5569f0428a538f18671d71840.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools",
+    "strip_components": 1,
+    "source_commit": "ee7f70b4499fcea5569f0428a538f18671d71840",
+    "sha256": "8ff5444629fa277ad556e3f879c18d82bb49a422bc07247a8d0c1c071c44211f",
+    "size_bytes": 17016
+  },
+  {
+    "name": "aapt2-aidl",
+    "url": "https://android.googlesource.com/platform/system/tools/aidl/+archive/9a94664f74536bf28010207fd1804b04c6435e2c.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/aidl",
+    "filename": "aapt2-vendor-aidl.tar.gz",
+    "source_commit": "9a94664f74536bf28010207fd1804b04c6435e2c",
+    "archive_content_sha256": "7a9673d26598fa3b5a12c2c4bb6098086829ad4b8f120e6d688e1201a0501b46"
+  },
+  {
+    "name": "aapt2-base-cmds-idmap2-libidmap2_policies-include-idmap2",
+    "url": "https://android.googlesource.com/platform/frameworks/base/+archive/94b4c163b7dfe5ce3607f7bb8456f9573f7de57d/cmds/idmap2/libidmap2_policies/include/idmap2.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/base/cmds/idmap2/libidmap2_policies/include/idmap2",
+    "filename": "aapt2-vendor-base-cmds-idmap2-libidmap2_policies-include-idmap2.tar.gz",
+    "source_commit": "94b4c163b7dfe5ce3607f7bb8456f9573f7de57d",
+    "archive_content_sha256": "a63553721cd9e841853547b097c727b1a966153571dbc571e30d5d9170157cb9"
+  },
+  {
+    "name": "aapt2-base-libs-androidfw",
+    "url": "https://android.googlesource.com/platform/frameworks/base/+archive/94b4c163b7dfe5ce3607f7bb8456f9573f7de57d/libs/androidfw.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/base/libs/androidfw",
+    "filename": "aapt2-vendor-base-libs-androidfw.tar.gz",
+    "source_commit": "94b4c163b7dfe5ce3607f7bb8456f9573f7de57d",
+    "archive_content_sha256": "dd2acbd9b7c84682136d86db1674e368d14e287e4ff05b1557764081442ecd95"
+  },
+  {
+    "name": "aapt2-base-tools-aapt",
+    "url": "https://android.googlesource.com/platform/frameworks/base/+archive/94b4c163b7dfe5ce3607f7bb8456f9573f7de57d/tools/aapt.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/base/tools/aapt",
+    "filename": "aapt2-vendor-base-tools-aapt.tar.gz",
+    "source_commit": "94b4c163b7dfe5ce3607f7bb8456f9573f7de57d",
+    "archive_content_sha256": "5150a6b8ba139a8f0510bd7cf55920cfb5aea9f2967fdb9a933f032ab01b4d5f"
+  },
+  {
+    "name": "aapt2-base-tools-aapt2",
+    "url": "https://android.googlesource.com/platform/frameworks/base/+archive/94b4c163b7dfe5ce3607f7bb8456f9573f7de57d/tools/aapt2.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/base/tools/aapt2",
+    "filename": "aapt2-vendor-base-tools-aapt2.tar.gz",
+    "source_commit": "94b4c163b7dfe5ce3607f7bb8456f9573f7de57d",
+    "archive_content_sha256": "66b816b27e4be5eaf8d8019644e012330ddddb160d2c81621b06e5d2690a0fdf"
+  },
+  {
+    "name": "aapt2-build-tools-zipalign",
+    "url": "https://codeload.github.com/aosp-mirror/platform_build/tar.gz/045a3d6a3e359633a14853a5a5e1e4f2a11cbdae",
+    "source_commit": "045a3d6a3e359633a14853a5a5e1e4f2a11cbdae",
+    "extract_to": "toolchain-source/android-build-tools/vendor/build",
+    "strip_components": 1,
+    "filename": "aosp-platform-build-045a3d6a3e359633a14853a5a5e1e4f2a11cbdae.tar.gz",
+    "sha256": "a084bfe092d2ec5af7c381361b60d0ebfb19449aa25919c0e9c75d63acbdba12",
+    "size_bytes": 7074531
+  },
+  {
+    "name": "aapt2-core-include",
+    "url": "https://android.googlesource.com/platform/system/core/+archive/545d2487e38192a2ce25040897ced877cf6b4f53/include.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/core/include",
+    "filename": "aapt2-vendor-core-include.tar.gz",
+    "source_commit": "545d2487e38192a2ce25040897ced877cf6b4f53",
+    "archive_content_sha256": "2c79fa7896d765b2c1a695d4223104131e5545e9055546cd448de29fcd381a66"
+  },
+  {
+    "name": "aapt2-core-libsystem-include-system",
+    "url": "https://android.googlesource.com/platform/system/core/+archive/545d2487e38192a2ce25040897ced877cf6b4f53/libsystem/include/system.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/core/libsystem/include/system",
+    "filename": "aapt2-vendor-core-libsystem-include-system.tar.gz",
+    "source_commit": "545d2487e38192a2ce25040897ced877cf6b4f53",
+    "archive_content_sha256": "4e2b789c6a711e563c61ef4d4016cccf4c8260a90a0038f421c9e26765ddbd0b"
+  },
+  {
+    "name": "aapt2-core-libcutils",
+    "url": "https://android.googlesource.com/platform/system/core/+archive/545d2487e38192a2ce25040897ced877cf6b4f53/libcutils.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/core/libcutils",
+    "filename": "aapt2-vendor-core-libcutils.tar.gz",
+    "source_commit": "545d2487e38192a2ce25040897ced877cf6b4f53",
+    "archive_content_sha256": "803ca467ad1c509b7d5f1993997690dd998534dc42f7514fcf51556e919da294"
+  },
+  {
+    "name": "aapt2-core-libutils",
+    "url": "https://android.googlesource.com/platform/system/core/+archive/545d2487e38192a2ce25040897ced877cf6b4f53/libutils.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/core/libutils",
+    "filename": "aapt2-vendor-core-libutils.tar.gz",
+    "source_commit": "545d2487e38192a2ce25040897ced877cf6b4f53",
+    "archive_content_sha256": "dfc109284f78d7c70067ebc3b21ac494a17f97c168e2898b55fbd64fee3e6028"
+  },
+  {
+    "name": "aapt2-incremental_delivery",
+    "url": "https://android.googlesource.com/platform/system/incremental_delivery/+archive/6b853f9e5703a8c90648f82850a3a01d9763e619.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/incremental_delivery",
+    "filename": "aapt2-vendor-incremental_delivery.tar.gz",
+    "source_commit": "6b853f9e5703a8c90648f82850a3a01d9763e619",
+    "archive_content_sha256": "a91d0fac9ad6c70480e91f626d3a9de6e6ccd242da39611f239899ee5baddea2"
+  },
+  {
+    "name": "aapt2-libbase",
+    "url": "https://android.googlesource.com/platform/system/libbase/+archive/fef4173e19d97cd4b4fc09a06bccbf800d0d3937.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/libbase",
+    "filename": "aapt2-vendor-libbase.tar.gz",
+    "source_commit": "fef4173e19d97cd4b4fc09a06bccbf800d0d3937",
+    "archive_content_sha256": "559159c227aa014867126fec4d77c57f3f86db8820f1b8749ed71d6c334e9223"
+  },
+  {
+    "name": "aapt2-libziparchive",
+    "url": "https://android.googlesource.com/platform/system/libziparchive/+archive/bdd41f9c99400f241363b035eb64ad3d5f063c82.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/libziparchive",
+    "filename": "aapt2-vendor-libziparchive.tar.gz",
+    "source_commit": "bdd41f9c99400f241363b035eb64ad3d5f063c82",
+    "archive_content_sha256": "9e1bf71bd08f0e5a2a64384ebb9fb8b0cc6d0c4d04b22ca55af3101201f309d9"
+  },
+  {
+    "name": "aapt2-logging-liblog",
+    "url": "https://android.googlesource.com/platform/system/logging/+archive/d35ba620451b28512f46ebb5421f783fd77968d5/liblog.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/logging/liblog",
+    "filename": "aapt2-vendor-logging-liblog.tar.gz",
+    "source_commit": "d35ba620451b28512f46ebb5421f783fd77968d5",
+    "archive_content_sha256": "66ca8bfc78b8a3239ca3226a4a5c360d2dc7cc4e22dbe320c9a3b2dd70249df9"
+  },
+  {
+    "name": "aapt2-native-include-android",
+    "url": "https://android.googlesource.com/platform/frameworks/native/+archive/ae266dcb706d083868578cfedce381ef44488a07/include/android.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/native/include/android",
+    "filename": "aapt2-vendor-native-include-android.tar.gz",
+    "source_commit": "ae266dcb706d083868578cfedce381ef44488a07",
+    "archive_content_sha256": "7593a8c82416112f00d83a3f7eeb1614b61bae9abd227337417d72eae0585251"
+  },
+  {
+    "name": "aapt2-native-include-binder",
+    "url": "https://android.googlesource.com/platform/frameworks/native/+archive/ae266dcb706d083868578cfedce381ef44488a07/include/binder.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/native/include/binder",
+    "filename": "aapt2-vendor-native-include-binder.tar.gz",
+    "source_commit": "ae266dcb706d083868578cfedce381ef44488a07",
+    "archive_content_sha256": "e29c8018afc1399088605ddb54db14b8c3a04c8e5ae6aad87409a9b693cf1875"
+  },
+  {
+    "name": "aapt2-native-libs-binder-include-binder",
+    "url": "https://android.googlesource.com/platform/frameworks/native/+archive/ae266dcb706d083868578cfedce381ef44488a07/libs/binder/include/binder.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/native/libs/binder/include/binder",
+    "filename": "aapt2-vendor-native-libs-binder-include-binder.tar.gz",
+    "source_commit": "ae266dcb706d083868578cfedce381ef44488a07",
+    "archive_content_sha256": "0967a2ac303b045f53aec3b12330efb15c91781442008c499589b862e8e63b0f"
+  },
+  {
+    "name": "aapt2-sysprop",
+    "url": "https://android.googlesource.com/platform/system/tools/sysprop/+archive/deead2d06508faeca98c236feea7e59bb4c43c8c.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/sysprop",
+    "filename": "aapt2-vendor-sysprop.tar.gz",
+    "source_commit": "deead2d06508faeca98c236feea7e59bb4c43c8c",
+    "archive_content_sha256": "e765cdcf58236ebd937a7cc87c5c4e010dd34b8626897c03d1f98ef93ae80fe9"
+  },
+  {
+    "name": "aapt2-zopfli",
+    "url": "https://android.googlesource.com/platform/external/zopfli/+archive/eef2dd4266802ab1b7f26cb72cb1fc9b8ed3f55b.tar.gz",
+    "extract_to": "toolchain-source/android-build-tools/vendor/zopfli",
+    "filename": "aapt2-vendor-zopfli.tar.gz",
+    "source_commit": "eef2dd4266802ab1b7f26cb72cb1fc9b8ed3f55b",
+    "archive_content_sha256": "2c72594c43c745d11a979c3b4dc90aa962f23d9836a0d51760aaf2546ddb4773"
+  },
+  {
+    "name": "android-platform",
+    "url": "https://dl.google.com/android/repository/platform-36_r02.zip",
+    "sha256": "37607369a28c5b640b3a7998868d45898ebcb777565a0e85f9acf36f29631d2e",
+    "size_bytes": 65878410
+  },
+  {
+    "name": "android-build-tools",
+    "url": "https://dl.google.com/android/repository/build-tools_r36_linux.zip",
+    "sha256": "5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b",
+    "size_bytes": 63737259
+  },
+  {
+    "name": "node",
+    "url": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-arm64.tar.gz",
+    "sha256": "589f5b6dd4fcfee4dfda73013903c966abaa8abd93dbc9d436544e472b4f0e74",
+    "size_bytes": 56772294,
+    "extract_to": "node",
+    "strip_components": 1
+  },
+  {
+    "name": "playwright-chromium",
+    "url": "https://playwright.download.prss.microsoft.com/dbazure/download/playwright/builds/chromium/1234/chromium-linux-arm64.zip",
+    "filename": "chromium-linux-arm64.zip",
+    "sha256": "b5ad7d8fe70f230b34198ddb5626d717c016db2f627cb44b922babbcaf3479b9",
+    "size_bytes": 204732694,
+    "playwright_path": "builds/chromium/1234/chromium-linux-arm64.zip"
+  },
+  {
+    "name": "playwright-headless",
+    "url": "https://playwright.download.prss.microsoft.com/dbazure/download/playwright/builds/chromium/1234/chromium-headless-shell-linux-arm64.zip",
+    "filename": "chromium-headless-shell-linux-arm64.zip",
+    "sha256": "b03443e1e1a60d06e07b6cdfe650b8c2bfcbb3db497d2b652f73dc6912f4ae15",
+    "size_bytes": 116380215,
+    "playwright_path": "builds/chromium/1234/chromium-headless-shell-linux-arm64.zip"
+  },
+  {
+    "name": "playwright-ffmpeg",
+    "url": "https://playwright.download.prss.microsoft.com/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux-arm64.zip",
+    "filename": "ffmpeg-linux-arm64.zip",
+    "sha256": "2628c03f05318ff812c8c9baaf207dea2ddf53e818c0dc936714b0fbe3afb009",
+    "size_bytes": 1717234,
+    "playwright_path": "builds/ffmpeg/1011/ffmpeg-linux-arm64.zip"
+  }
+]

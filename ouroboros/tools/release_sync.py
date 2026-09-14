@@ -91,7 +91,16 @@ RELEASE_ASSET_TEMPLATES = {
     "linux-rpm-x86_64": "ouroboros-{version}-1.x86_64.rpm",
     "linux-rpm-red80-x86_64": "ouroboros-{version}-1.red80.x86_64.rpm",
     "windows-x64": "Ouroboros-{version}-windows-x64.zip",
+    "android-arm64": "Ouroboros-{version}-android-arm64.tar.gz",
+    "android-apk": "Ouroboros-{version}-android.apk",
 }
+# Android has a rooted-device USB setup guide, not the desktop download flow.
+# Keep its artifacts in the same release registry without inventing missing
+# Android buttons in already-published desktop onboarding/version carriers.
+DESKTOP_DOWNLOAD_IDS = tuple(
+    proof_id for proof_id in RELEASE_ASSET_TEMPLATES
+    if proof_id not in {"android-arm64", "android-apk"}
+)
 _PUBLIC_REPOSITORY = "razzant/ouroboros"
 
 
@@ -130,14 +139,14 @@ class VersionCarrierSpan(NamedTuple):
 def _install_page_spans(tag: str, path: str) -> Tuple[VersionCarrierSpan, ...]:
     """Carrier spans for one public install page: every anchor tag owned by
     the release projection (``data-release-download``), derived from
-    ``RELEASE_ASSET_TEMPLATES`` so a new installer automatically gets a span.
+    ``DESKTOP_DOWNLOAD_IDS``; Android setup links belong to its own guide.
 
     ``macos-arm64`` appears twice by design (the platform button and the
     quick-start step); the pair disambiguates on the step's literal ``Click ``
     prefix. A page restructure that breaks either anchor degrades the file to
     the ordinary assisted path (malformed/duplicate anchor) — never a guess."""
     spans: List[VersionCarrierSpan] = []
-    for proof_id in RELEASE_ASSET_TEMPLATES:
+    for proof_id in DESKTOP_DOWNLOAD_IDS:
         if proof_id == "macos-arm64":
             spans.append(VersionCarrierSpan(
                 f"{tag}_download_{proof_id}_button", path,
@@ -340,7 +349,7 @@ def _download_url_desyncs(
         ("site/install/index.html", site_install_text),
         ("docs/install/index.html", docs_install_text),
     )
-    for proof_id in RELEASE_ASSET_TEMPLATES:
+    for proof_id in DESKTOP_DOWNLOAD_IDS:
         expected = release_asset_download_url(proof_id, version)
         if readme_has_projection:
             reference_pattern = re.compile(

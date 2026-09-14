@@ -1,5 +1,6 @@
 """Required Project questions share their durable ask with every display lens."""
 import json
+import os
 
 import pytest
 
@@ -82,7 +83,8 @@ def test_pointer_quota_dedup_and_optional_filter(tmp_path):
     assert all(row["system_type"] == "project_question_pointer" for row in messages)
 
 
-def test_activity_question_uses_same_memo_and_preserves_wait_semantics(tmp_path, monkeypatch):
+@pytest.mark.parametrize("same_timestamp", [False, True])
+def test_activity_question_uses_same_memo_and_preserves_wait_semantics(tmp_path, monkeypatch, same_timestamp):
     from ouroboros.gateway import state as gs
     from ouroboros import utils
     from supervisor import queue
@@ -103,9 +105,23 @@ def test_activity_question_uses_same_memo_and_preserves_wait_semantics(tmp_path,
     assert reads.count(str(tmp_path / "task_results/t1.json")) == 1
     gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])
     assert reads.count(str(tmp_path / "task_results/t1.json")) == 1
+    path = tmp_path / "task_results/t1.json"
+    before = path.stat()
     set_owner_wait(tmp_path, "t1", {"quiz_id": "q1", "wait_id": "w1", "state": "resumed"}, "w1")
+    if same_timestamp:
+        # Atomic replacement within one filesystem timestamp tick can retain
+        # both mtime and size: waiting/resumed have the same serialized length.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        assert after.st_ino != before.st_ino
+        assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+    previous_reads = reads.count(str(path))
     rows = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])
+    assert rows[0]["required_question"]["owner_wait_state"] == "resumed"
     assert rows[0]["required_question"]["text"] == "Question in Waiting Project"
+    assert reads.count(str(path)) == previous_reads + 1
+    gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])
+    assert reads.count(str(path)) == previous_reads + 1
     assert quiz_states(tmp_path, "t1")["q1"]["state"] == "open"
 
 

@@ -116,7 +116,7 @@ def test_assemble_binds_every_asset_smoke_and_sbom(tmp_path: Path):
 
     evidence = json.loads((release_dir / "release-evidence.json").read_text())
     assert evidence["source"]["commit"] == "a" * 40
-    assert len(evidence["artifacts"]) == 7
+    assert len(evidence["artifacts"]) == 9
     assert {row["proofId"] for row in evidence["artifacts"]} == set(
         release_proof.PROOF_IDS
     )
@@ -195,6 +195,20 @@ def test_assemble_rejects_smoke_digest_drift(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="not bound"):
         release_proof.command_assemble(args)
+
+
+@pytest.mark.parametrize("proof_id", ["android-arm64", "android-apk"])
+def test_release_cannot_omit_an_android_artifact_or_its_verification(tmp_path, proof_id):
+    release_dir, _version, _readme = _fixture_release(tmp_path)
+    receipt_path = release_dir / f"release-smoke-{proof_id}.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["checks"] = []
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="missing required checks"):
+        release_proof._proof_files(release_dir, "6.87.5", commit="a" * 40, tag="v6.87.5")
+    (release_dir / release_proof.release_asset_name(proof_id, "6.87.5")).unlink()
+    with pytest.raises(ValueError, match="release asset set"):
+        release_proof._proof_files(release_dir, "6.87.5", commit="a" * 40, tag="v6.87.5")
 
 
 @pytest.mark.parametrize(
@@ -302,10 +316,15 @@ def test_linux_packages_declare_and_resolve_the_git_runtime_dependency():
     assert "rpm --install" not in smoke
 
 
-def test_every_future_release_receipt_requires_real_embedded_betterleaks():
+def test_release_receipts_match_the_runtime_the_artifact_distributes():
     assert set(release_proof.REQUIRED_SMOKE_CHECKS) == set(release_proof.PROOF_IDS)
     for proof_id, checks in release_proof.REQUIRED_SMOKE_CHECKS.items():
-        assert "embedded_betterleaks_runtime" in checks, proof_id
+        if proof_id in {"android-arm64", "android-apk"}:
+            # Android installs dependencies from upstream; no embedded scanner
+            # or physical-device smoke is claimed for the source/setup archive.
+            assert "embedded_betterleaks_runtime" not in checks, proof_id
+        else:
+            assert "embedded_betterleaks_runtime" in checks, proof_id
 
 
 def test_future_final_artifact_lanes_smoke_betterleaks_from_the_artifact():

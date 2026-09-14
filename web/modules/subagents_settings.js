@@ -1,5 +1,5 @@
-// Settings/onboarding actor editor; reviewer policy stays in reviewer_slots.js.
-
+// Available subagents editor shared by Settings and first-run onboarding.
+// Reviewer policy stays in reviewer_slots.js; only route presentation is shared.
 import {
     FACET_ACCOUNTS, FACET_CATALOG, FACET_QUOTA, READ_OK, accountRows,
     bindStatusSurface, boundedStatusRefresh, claudexorStatus,
@@ -19,18 +19,14 @@ import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog } from './
 import { harnessMap, rowIdentity, rowMeta, rowStatus, sessionRouteVerdict } from './subagent_status_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-
 export const MAX_AVAILABLE_SUBAGENTS = 10;
 export const SUBAGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
-
 const SETTING_KEYS = new Set(['enabled', 'items']);
-const ROW_KEYS = new Set(['subagent_id', 'name', 'recommended_use', 'route', 'effort', 'processing_preference']);
+const ROW_KEYS = new Set(['subagent_id', 'name', 'recommended_use', 'route', 'effort', 'processing_preference', 'access']);
 const ROUTE_KEYS = new Set(['kind', 'target_id', 'credential_profile_id']);
-
 function ownUnknownKeys(value, allowed) {
     return Object.keys(value || {}).filter((key) => !allowed.has(key));
 }
-
 function canonicalRow(row) {
     const route = serializeRouteSpec(row?.route || {}, {
         apiKind: ROUTE_KIND_API_MODEL,
@@ -41,18 +37,16 @@ function canonicalRow(row) {
         route.credential_profile_id = String(route.credential_profile_id || '').trim();
         if (!route.credential_profile_id) delete route.credential_profile_id;
     }
-    // `name` is retired (owner decision 1=A): a legacy value parses and is
-    // DROPPED — identity is the neutral subagent_id plus derived route facts,
-    // and recommended_use is the one semantic field.
+    // Drop legacy `name`; identity uses subagent_id and description uses recommended_use.
     return {
         subagent_id: String(row?.subagent_id || '').trim(),
         recommended_use: String(row?.recommended_use || ''),
         route,
         ...(row?.effort ? { effort: String(row.effort).trim().toLowerCase() } : {}),
         ...(row?.processing_preference ? { processing_preference: String(row.processing_preference).trim().toLowerCase() } : {}),
+        ...(row?.access === 'full' ? { access: 'full' } : {}),
     };
 }
-
 function attachUiKeys(setting, previousItems = []) {
     const previous = new Map((previousItems || []).map(
         (row) => [String(row.subagent_id || ''), row._uiKey],
@@ -66,7 +60,6 @@ function attachUiKeys(setting, previousItems = []) {
     });
     return setting;
 }
-
 /** Parse without replacing malformed saved bytes with an empty list. */
 export function parseAvailableSubagentsSetting(value) {
     if (value === undefined || value === null || value === '') {
@@ -137,6 +130,12 @@ export function parseAvailableSubagentsSetting(value) {
         if (![ROUTE_KIND_API_MODEL, ROUTE_KIND_AGENT_SESSION].includes(routeKind)) {
             return { setting: null, error: `row ${index + 1} has unsupported route kind` };
         }
+        if (row.access !== undefined && !['workspace_write', 'full'].includes(row.access)) {
+            return { setting: null, error: `row ${index + 1} access must be workspace_write or full` };
+        }
+        if (row.access === 'full' && routeKind !== ROUTE_KIND_AGENT_SESSION) {
+            return { setting: null, error: `row ${index + 1} full access requires an Agent session` };
+        }
         if (!routeSupportsAccount({ ...row.route, kind: routeKind })
             && String(row.route.credential_profile_id || '').trim()) {
             return { setting: null, error: `row ${index + 1} has an account pin on an API route` };
@@ -154,10 +153,7 @@ export function parseAvailableSubagentsSetting(value) {
         error: '',
     };
 }
-
-// One row's owner-facing errors, named the way the card is ("Subagent N").
-// `ids` accumulates in list order so a repeated stable ID blames the later row;
-// the list validator and the per-row display read this one source.
+// Shared card/list errors; ordered `ids` assigns duplicate errors to the later row.
 function rowErrors(row, index, ids) {
     const errors = [];
     const id = String(row?.subagent_id || '').trim();
@@ -168,6 +164,11 @@ function rowErrors(row, index, ids) {
     }
     ids.add(id);
     const route = row?.route || {};
+    if (row?.access !== undefined && !['workspace_write', 'full'].includes(row.access)) {
+        errors.push('access must be Working files or Full system access.');
+    } else if (row?.access === 'full' && route.kind !== ROUTE_KIND_AGENT_SESSION) {
+        errors.push('can use Full system access only with an Agent session.');
+    }
     if (![ROUTE_KIND_API_MODEL, ROUTE_KIND_AGENT_SESSION].includes(route.kind)) {
         errors.push('must use API model or Agent session.');
     }
@@ -198,12 +199,10 @@ function rowErrors(row, index, ids) {
     }
     return errors.map((text) => `Subagent ${index + 1} ${text}`);
 }
-
 function listLevelErrors(setting) {
     return setting.items.length > MAX_AVAILABLE_SUBAGENTS
         ? [`Available subagents supports at most ${MAX_AVAILABLE_SUBAGENTS} rows.`] : [];
 }
-
 export function validateAvailableSubagentsSetting(setting) {
     if (!setting || typeof setting.enabled !== 'boolean' || !Array.isArray(setting.items)) {
         return ['Available subagents configuration is not loaded.'];
@@ -213,7 +212,6 @@ export function validateAvailableSubagentsSetting(setting) {
     setting.items.forEach((row, index) => errors.push(...rowErrors(row, index, ids)));
     return errors;
 }
-
 export function buildAvailableSubagentsSetting(setting) {
     return {
         enabled: Boolean(setting?.enabled),
@@ -229,19 +227,16 @@ export function buildAvailableSubagentsSetting(setting) {
         }),
     };
 }
-
 export function subagentSettingsFingerprint(value) {
     const parsed = parseAvailableSubagentsSetting(value);
     return parsed.setting
         ? JSON.stringify(buildAvailableSubagentsSetting(parsed.setting))
         : JSON.stringify(value ?? null);
 }
-
 export function availableSubagentsSavePayload({ loaded = false, parseError = '', setting } = {}) {
     if (!loaded || parseError) return {};
     return { OUROBOROS_SUBAGENTS: buildAvailableSubagentsSetting(setting) };
 }
-
 /** Preview the current Settings draft without turning its generated actor rows into owner input. */
 export function availableSubagentsPreviewPayload(settingsDraft, subscriptionsConnected) {
     const payload = {
@@ -251,13 +246,11 @@ export function availableSubagentsPreviewPayload(settingsDraft, subscriptionsCon
     delete payload.OUROBOROS_SUBAGENTS;
     return payload;
 }
-
 export function generatedPreviewCanReplace({
     dirty = false, outerDraftClean = true, parsedSetting = null,
 } = {}) {
     return !dirty && outerDraftClean && Boolean(parsedSetting);
 }
-
 function diagnosticsText(diagnostics, out = []) {
     if (!diagnostics) return out;
     if (typeof diagnostics === 'string') {
@@ -278,14 +271,12 @@ function diagnosticsText(diagnostics, out = []) {
     Object.values(diagnostics).forEach((item) => diagnosticsText(item, out));
     return out;
 }
-
 function connectedHarnessIds(snapshot) {
     return new Set(accountRows(snapshot)
         .filter((row) => row?.enabled !== false
             && String(row?.status?.verification || '') === 'passed')
         .map((row) => String(row.harness || '')));
 }
-
 function focusSnapshot(host, doc) {
     const active = doc?.activeElement;
     if (!active || !host?.contains?.(active)) return null;
@@ -298,7 +289,6 @@ function focusSnapshot(host, doc) {
         scrollTop: host.scrollTop,
     };
 }
-
 function restoreFocus(host, saved) {
     if (!saved) return;
     const rows = host.querySelectorAll?.('[data-subagent-row]') || [];
@@ -310,7 +300,6 @@ function restoreFocus(host, saved) {
     }
     host.scrollTop = saved.scrollTop;
 }
-
 export function availableSubagentRowMarkup(row, state, index = 0) {
     const ordinal = index + 1;
     const rowKey = row._uiKey || row.subagent_id;
@@ -366,10 +355,17 @@ export function availableSubagentRowMarkup(row, state, index = 0) {
                 ${effortSelectHtml(`data-subagent-field="effort" aria-label="Reasoning effort for Subagent ${ordinal}"`, row.effort || '', 'route default')}
             </div>
             ${processingDetailsHtml(`data-subagent-field="processing_preference" aria-label="Processing for Subagent ${ordinal}"`, row.processing_preference, state.processingPreference)}
+            ${session ? `<div class="ui-field">
+                <label for="actor-${escapeHtml(rowKey)}-access">Access</label>
+                ${selectHtml(`id="actor-${escapeHtml(rowKey)}-access" data-subagent-field="access" aria-label="Access for Subagent ${ordinal}"`, [{ label: '', options: [
+                    { value: 'workspace_write', label: 'Working files (default)' },
+                    { value: 'full', label: 'Full system access' },
+                ] }], row.access || 'workspace_write')}
+                <div class="ui-field-help" id="actor-${escapeHtml(rowKey)}-access-help">Full system access can reach outside the working folder. The selected agent must support it.</div>
+            </div>` : ''}
             <div id="actor-${escapeHtml(rowKey)}-meta" class="available-subagent-meta ui-field-help" data-subagent-meta${meta.tone ? ` data-tone="${escapeHtml(meta.tone)}"` : ''} title="${escapeHtml(meta.text)}"${meta.text ? '' : ' hidden'}>${escapeHtml(meta.text)}</div>
         </article>`;
 }
-
 export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
     return JSON.stringify([
         state.loaded,
@@ -393,7 +389,6 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.providers, state.providerProfiles,
     ]);
 }
-
 /** One isolated editor instance; Settings keeps a singleton wrapper below. */
 export function createAvailableSubagentsEditor({
     hostId = 'available-subagents-editor',
@@ -437,7 +432,6 @@ export function createAvailableSubagentsEditor({
         previewSignature: '',
         previewGeneration: 0,
     };
-
     function host() {
         return getDoc()?.getElementById?.(hostId) || null;
     }
@@ -454,10 +448,8 @@ export function createAvailableSubagentsEditor({
 
     function validationErrors() {
         if (!state.loaded) {
-            // An unrelated Settings save may omit a field the response did not
-            // load at all. Once the response carries saved bytes or an explicit
-            // migration/repair candidate, though, its parse error is actionable
-            // and must block rather than masquerade as an accepted repair.
+            // Unloaded fields may be omitted; malformed saved or repair bytes
+            // must block saving until repaired.
             if (state.unloadedOmissionAllowed) return [];
             return [state.parseError
                 || 'Available subagents draft is still loading. Retry the preview before finishing.'];
@@ -466,8 +458,8 @@ export function createAvailableSubagentsEditor({
         return validateAvailableSubagentsSetting(state.setting);
     }
 
-    // Patch verdicts and inherited intent in place, preserving the caret.
-    // Structural errors always show; row errors follow an attempted save.
+    // Reconcile verdicts in place to preserve the caret. Structural errors always
+    // show; row errors follow an attempted save, keeping hints for new rows.
     function renderValidation() {
         const container = host();
         if (!container) return;
@@ -485,7 +477,8 @@ export function createAvailableSubagentsEditor({
             if (processingSummary) processingSummary.textContent = processingIntentLabel(row.processing_preference, state.processingPreference);
             el.toggleAttribute('data-invalid', judged);
             el.querySelectorAll('[data-subagent-field]').forEach((field) => {
-                field.setAttribute('aria-describedby', `actor-${row._uiKey || row.subagent_id}-meta`);
+                const prefix = `actor-${row._uiKey || row.subagent_id}`;
+                field.setAttribute('aria-describedby', `${prefix}-meta${field.dataset.subagentField === 'access' ? ` ${prefix}-access-help` : ''}`);
                 if (field.dataset.subagentField !== 'recommended_use') field.setAttribute('aria-invalid', String(judged));
             });
             const status = rowStatus(row, state);
@@ -507,7 +500,8 @@ export function createAvailableSubagentsEditor({
         if (state.saveAttempted) onJudged(!shown.length);
     }
 
-    // Judge existing rows on Save/Finish; later new rows remain fresh.
+    // Save validates existing rows; later additions stay fresh. Advance the
+    // signature after in-place validation so status ticks skip repainting.
     function noteSaveAttempt() {
         state.saveAttempted = true;
         state.setting.items.forEach((row) => { row._uiAttempted = true; });
@@ -520,7 +514,7 @@ export function createAvailableSubagentsEditor({
             state.dirty = true;
             onDirtyChange(true);
         }
-        // Text and fixed choices hold their draft; status keeps the same nodes.
+        // Preserve text inputs on late status updates; structural changes still repaint.
         state.signature = structural ? '' : availableSubagentsRenderSignature(state);
         renderValidation();
         onChange(buildAvailableSubagentsSetting(state.setting));
@@ -538,6 +532,7 @@ export function createAvailableSubagentsEditor({
             });
             rowElement.querySelector('[data-subagent-field="route"]')?.addEventListener('change', (event) => {
                 row.route = changeRouteChoice(row.route, event.target.value);
+                if (row.route.kind !== ROUTE_KIND_AGENT_SESSION) delete row.access;
                 markDirty({ structural: true });
                 paint();
             });
@@ -568,6 +563,11 @@ export function createAvailableSubagentsEditor({
             rowElement.querySelector('[data-subagent-field="processing_preference"]')?.addEventListener('change', (event) => {
                 if (event.target.value) row.processing_preference = event.target.value;
                 else delete row.processing_preference;
+                markDirty();
+            });
+            rowElement.querySelector('[data-subagent-field="access"]')?.addEventListener('change', (event) => {
+                if (event.target.value === 'full') row.access = 'full';
+                else delete row.access;
                 markDirty();
             });
             rowElement.querySelector('[data-subagent-duplicate]')?.addEventListener('click', () => {
@@ -663,15 +663,14 @@ export function createAvailableSubagentsEditor({
         return true;
     }
 
-    // Reveal the new row after the painter restores previous focus.
+    // After restoring prior focus, reveal the new row and focus its Description.
     function revealRow(uiKey) {
         const row = host()?.querySelector?.(`[data-subagent-row="${uiKey}"]`);
         revealNewRow(row, row?.querySelector?.('[data-subagent-field="recommended_use"]'));
     }
 
     function load(value, { source = '', diagnostics = [], allowOmission = false } = {}) {
-        // Invalidate a preview launched for the previous settings document.
-        // A late response must never overwrite a freshly loaded configured row.
+        // Invalidate old previews so late responses cannot overwrite newly loaded rows.
         state.previewGeneration += 1;
         state.previewSignature = '';
         const parsed = parseAvailableSubagentsSetting(value);
@@ -743,8 +742,7 @@ export function createAvailableSubagentsEditor({
         await boundedStatusRefresh(store);
         adoptStatus();
         paint({ discoveryOnly: true });
-        // Generated rows are enrichment, never a second unbounded gate on the
-        // Settings critical path. The response is generation- and clean-gated.
+        // Preview enrichment is bounded and only adopted for the same clean generation.
         void maybeRefreshGeneratedPreview({ force: true });
     }
 
@@ -771,9 +769,7 @@ export function createAvailableSubagentsEditor({
                 subscriptionsConnected: state.accountsKnown && connected.length > 0,
             });
             if (generation !== state.previewGeneration) return false;
-            // This is still the unsaved migration/default candidate.  Preserve
-            // that provenance so a later clean account-status change may
-            // refresh it again; onboarding editors keep the endpoint source.
+            // Preserve unsaved candidate provenance for future clean status refreshes.
             const result = applyGeneratedPreview({ ...response, source: state.source });
             if (!result.applied) state.previewSignature = '';
             return result.applied;
@@ -995,5 +991,5 @@ export function validateSubagentsDraft() { return settingsEditor?.validate() || 
 
 /** Settings' Save button: the draft's own errors become visible from here on. */
 export function noteSubagentsSaveAttempt() { settingsEditor?.noteSaveAttempt(); }
-// Compatibility name for callers of the actor-list signature.
+// Compatibility name; the signature covers the actor list.
 export const renderSignature = availableSubagentsRenderSignature;

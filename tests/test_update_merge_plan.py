@@ -260,6 +260,40 @@ def test_finalize_rolls_back_after_unhealthy_boot(tmp_path, monkeypatch):
     assert gate_calls == [("close", "managed_update:rollback")]
 
 
+def test_native_host_mismatch_rolls_back_even_when_core_booted(tmp_path, monkeypatch):
+    repo, branch = _init_repo(tmp_path)
+    pre = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _wire_git_ops(monkeypatch, repo, tmp_path / "data")
+    (repo / "native-change.txt").write_text("new host expected")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "native update")
+    current = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    update_merge.write_update_tx({"phase": "pending_boot_smoke", "merge_commit": current,
+                                  "pre_update_sha": pre, "pre_update_branch": branch})
+    monkeypatch.setattr(update_merge, "external_host_restart_smoke",
+                        lambda: {"ok": False, "stdout": "build_required", "returncode": 1})
+    import supervisor.workers as workers
+    monkeypatch.setattr(workers, "close_repo_writer_admission", lambda reason: True)
+    monkeypatch.setattr(workers, "open_repo_writer_admission", lambda expected_reason="": True)
+    result = update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
+    assert result["finalized"] is False and result["rolled_back"] is True
+    assert result["smoke"]["stdout"] == "build_required"
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == pre
+    assert not (repo / "native-change.txt").exists()
+
+
+def test_external_host_boot_smoke_only_checks_installed_artifact(monkeypatch):
+    seen = []
+    monkeypatch.setenv("OUROBOROS_EXTERNAL_HOST_UPDATE", "/native/update-host")
+    monkeypatch.setattr(update_merge, "_run_update_smoke",
+                        lambda argv: seen.append(argv) or {"ok": True})
+    assert update_merge.external_host_restart_smoke()["ok"]
+    assert seen == [[update_merge.sys.executable, "/native/update-host", "--check"]]
+    monkeypatch.delenv("OUROBOROS_EXTERNAL_HOST_UPDATE")
+    assert update_merge.external_host_restart_smoke() == {"ok": True, "skipped": "no_external_host"}
+    assert len(seen) == 1
+
+
 def test_rollback_still_resets_when_the_forensics_ref_cannot_be_written(tmp_path, monkeypatch):
     """Recovery must not be traded away for a forensics branch name.
 

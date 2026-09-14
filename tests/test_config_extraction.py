@@ -43,6 +43,8 @@ _ADDED_OWNERS = {
     "CLAUDEXOR_MODEL_POLL_INTERVAL_SEC": runtime_limits,
     "CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC": runtime_limits,
     "CLAUDEXOR_STOP_EXIT_WAIT_SEC": runtime_limits,
+    # The native platform build envelope is owned by the common runtime-limits leaf.
+    "EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC": runtime_limits,
 }
 
 _MOVED_OWNERS = {
@@ -241,6 +243,7 @@ def test_config_facade_reexports_every_moved_identity():
         assert getattr(config, name) is getattr(owner, name), name
     owned = {name for module in _LEAVES for name in vars(module)}
     assert set(_MOVED_OWNERS) <= owned
+    assert config.EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC is runtime_limits.EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC
 
 
 def test_settings_file_lifecycle_and_path_roots_stay_with_the_parent():

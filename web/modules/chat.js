@@ -462,7 +462,6 @@ export function createChatInstance({
     let lastLoadedHistoryRevision = 0;
     // one-shot idle gate for Main's deferred first hydration.
     let hydrationGatePromise = null;
-    // The server retains whole-history coverage independently of the DOM window.
     let historyWindow = null;
     let welcomeShown = false;
     // Cross-instance hide/show position; visible mutations use live geometry.
@@ -521,8 +520,6 @@ export function createChatInstance({
     // Local user submissions awaiting server confirmation (clientMessageId
     // -> { clientMessageId, timestamp }).
     const pendingSubmissions = new Map();
-    // Bounded conclusions block late root typing and stale state snapshots; reusable
-    // logical task slots are cleared whenever their cycle settles.
     const concludedDirectActivities = new Map();
     const CONCLUDED_ACTIVITY_LEDGER_MAX = 200;
     // Retryable queue-loss candidates plus process-local single-flight reads.
@@ -560,9 +557,6 @@ export function createChatInstance({
         else recordConcludedActivity(id);
         settleTerminalRootChildren(id);
     }
-    // A root proven terminal settles descendant cards a lost child terminal left
-    // open (#300): one single-flight durable read each, through the ordinary
-    // child-terminal path; no proven terminal fact = the child keeps its state.
     function settleTerminalRootChildren(rootId) {
         for (const [childId, info] of subagentChildParents) {
             if (info.parentId !== rootId) continue;
@@ -576,10 +570,7 @@ export function createChatInstance({
             }).catch(() => {}).finally(() => managedTaskDetailReads.delete(childId));
         }
     }
-    // Finished task ids hidden from routine syncs until reload/reconnect rebuilds history.
     const retiredTaskIds = new Set();
-    // The owner's last main-chat request, handed to the next live card it spawns so a
-    // "turn into project" conversion can name the project from it (P1).
     let _pendingCardObjective = '';
     let activeLiveGroupId = '';
     let pendingReconnectSync = false;  // Set when a fromReconnect sync arrives while one is already in-flight.
@@ -1155,7 +1146,6 @@ export function createChatInstance({
         });
     }
 
-    // Durable cancel state wins over legacy status; only settled truth closes the card.
     function reconcileCancelCardFromDetail(record, taskId, stored) {
         return withStableViewport(() => {
             if (!stored || !record || record.finished) return false;
@@ -1243,10 +1233,6 @@ export function createChatInstance({
         return record ? syncCancelRunButton(record) : false;
     }
 
-    // One-way conversion (P3): the WHOLE card becomes a calm "project identity"
-    // chip. The live task is now owned by the project panel (it's bound there),
-    // so the main chat is freed — the card stops being a busy red task and
-    // recolors to the project fuchsia. Plain wording (no "ack"); click opens the panel.
     function markCardConverted(record, project) {
         return withStableViewport(() => markCardConvertedMutation(record, project));
     }
@@ -1405,9 +1391,6 @@ export function createChatInstance({
             ? explicitCardExpansion.get(normalizedGroupId)
             : Boolean(options.isSubagent && nestedSubagentsExpanded);
         root.dataset.expanded = initialExpanded ? '1' : '0';
-        // No "Turn into project" for: subagent cards, non-main panels, or a task that
-        // is ALREADY bound to a project (a project-chat follow-up) — see task_bindings
-        // from /api/state, surfaced on window.__ouroTaskBindings (P2).
         const alreadyBound = !!(window.__ouroTaskBindings || {})[normalizedGroupId];
         const projectActionHtml = (
             isMain
@@ -1511,9 +1494,6 @@ export function createChatInstance({
             if (nowExpanded) record.expandedLineKeys.add(lineKey);
             else record.expandedLineKeys.delete(lineKey);
             renderLiveCardTimeline(record);
-            // P3: on expand, lazily fetch the genuinely-full output for a server-truncated
-            // line (the WS preview was capped at 4000); cached on the item so a re-render
-            // keeps it. Best-effort — the capped preview stays on failure.
             if (nowExpanded) {
                 const item = record.items.find((it) => it.lineKey === lineKey);
                 if (item && item.truncated && item.fullRef && !item.fetchedFull && !item._fetchingFull) {
@@ -1734,19 +1714,12 @@ export function createChatInstance({
     window.addEventListener('ouro:page-shown', handlePageShown);
     document.addEventListener('visibilitychange', handlePageShown);
 
-    // P3: fetch the genuinely-full text of a server-truncated timeline line (the WS
-    // preview is capped at 4000 chars) on demand, not over the socket; cache it on
-    // the item, re-render if the line is still expanded, and show it in a
-    // bounded-scroll box. Best-effort: the capped preview stays on failure.
     async function fetchFullLineOutput(item, record) {
         item._fetchingFull = true;
         let changed = false;
         try {
             const resp = await apiFetch(`/api/tasks/${encodeURIComponent(item.fullRef)}`, { cache: 'no-store' });
             const data = resp && typeof resp.json === 'function' ? await resp.json() : resp;
-            // Compose ALL available full fields — a subagent line can carry both a result AND a
-            // (separately truncated) trace_summary, so `result || trace_summary` would hide the
-            // full trace. Label each section when both are present.
             const result = String((data && data.result) || '').trim();
             const trace = String((data && data.trace_summary) || '').trim();
             let full = '';
@@ -1854,8 +1827,6 @@ export function createChatInstance({
 
         const desiredPhase = desiredLiveCardPhase(record, activePhase);
         setLiveCardPhase(record, desiredPhase.phase, desiredPhase.text, desiredPhase.className);
-        // A coined project name takes the title slot (the activity headline stays in the
-        // timeline); a child's title is its lineage identity; otherwise the activity headline.
         const title = record.suggestedName || (record.isSubagent ? childTitle(record)
             : (record.finished ? record.lastHumanHeadline || 'Task activity' : activeHeadline));
         if (record.titleEl.textContent !== title) record.titleEl.textContent = title;
@@ -2079,9 +2050,6 @@ export function createChatInstance({
         return summary ? withTaskCostMeta(summary, evt, { rawTs }) : null;
     }
 
-    // A child's title is its lineage identity plus, for twins (same displayed identity
-    // under one parent), the short id; re-projected on every title write and lineage
-    // change (terminal children included).
     function childTitle(record) {
         const twin = subagentTwin(subagentChildParents, record.groupId);
         return subagentIdentityTitle(subagentChildParents.get(record.groupId))
@@ -2501,7 +2469,6 @@ export function createChatInstance({
         addMessage('Ouroboros has awakened', 'assistant', false, null, false, { ephemeral: true });
     }
 
-    // Hydration triggers share one sticky request; reconnect/resync still refetch.
     function awaitInitialHydration({ includeUser = false } = {}) {
         if (initialHydrationPromise) return initialHydrationPromise;
         initialHydrationPromise = syncHistory({ includeUser });
@@ -2633,7 +2600,6 @@ export function createChatInstance({
                     }
                 } } finally { _syncPass1Active = false; _historyRow = null; }
 
-                // Pass 2 inserts cards at the first visible task message, then finishes them.
                 const insertedCardTaskIds = new Set();
                 function reorderDirtyCardIfNeeded(rec) {
                     if (!rec?._anchorOrderDirty || rec.isSubagent || !rec.root?.isConnected) return;
@@ -2803,7 +2769,6 @@ export function createChatInstance({
                     finishLiveCard(tid, taskTerminalPhase(terminalRecord));
                 }
 
-                // Append disconnected visible cards after mid-task reload; skip trivial placeholders.
                 for (const [tid, rec] of liveCardRecords) {
                     reorderDirtyCardIfNeeded(rec);
                     if (rec && rec.root && !rec.root.isConnected && !retiredTaskIds.has(tid)) {
@@ -3285,7 +3250,6 @@ export function createChatInstance({
         });
     }
 
-    // Ignore hidden/restoring scroll events so browser resets cannot corrupt saved intent.
     messagesDiv?.addEventListener('scroll', () => {
         if (!isInstanceVisible()) return;
         if (_restoring) { updateScrollButton(); return; }
@@ -3496,8 +3460,6 @@ export function createChatInstance({
     }
 
     const typingEl = document.createElement('div');
-    // Per-instance id (main stays 'typing-indicator'; panels get a unique id) so
-    // multiple open chat columns never collide on a duplicate DOM id.
     typingEl.id = idPrefix === 'chat' ? 'typing-indicator' : `${idPrefix}-typing-indicator`;
     typingEl.className = 'chat-bubble assistant typing-bubble';
     typingEl.style.display = 'none';

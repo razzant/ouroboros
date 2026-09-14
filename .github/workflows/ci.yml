@@ -41,6 +41,7 @@ on:
       - 'scripts/**'
       - 'devtools/**'
       - 'packaging/**'
+      - 'android/**'
       - 'VERSION'
       - 'README.md'
       - 'CONTRIBUTING.md'
@@ -770,6 +771,258 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   # Tier 3: Build & Release (tag push only)
   # ──────────────────────────────────────────────────────────────────
+  # Android source tests live outside the ordinary tests/ collection. This
+  # fork-safe lane compiles a real host with an explicitly disposable key;
+  # its output is never used as a publisher-signed release artifact.
+  android-test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-python-env
+      - name: Cache Android build dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/platforms/android-36
+            ${{ env.ANDROID_HOME }}/build-tools/36.0.0
+          key: android-sdk-${{ runner.os }}-api36-build36.0.0
+      - name: Prepare Android compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+          test -x "$JAVA_HOME_17_X64/bin/java"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-36' 'build-tools;36.0.0'
+      - name: Run Android source and release contract tests
+        env:
+          OUROBOROS_DATA_DIR: ${{ runner.temp }}/android-test-data
+          OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/android-test-data/settings.json
+        run: python -m pytest android/tests tests/test_android_release.py -q --tb=short
+      - name: Compile and verify explicitly test-signed Android host
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_ROOT="$(mktemp -d "$RUNNER_TEMP/android-test.XXXXXX")"
+          trap 'rm -rf "$TEST_ROOT"' EXIT
+          printf '%s' 'ci-test-only' > "$TEST_ROOT/password"
+          python android/host/build.py --sdk "$ANDROID_HOME" \
+            --java-home "$JAVA_HOME_17_X64" --out "$TEST_ROOT/build" \
+            --keystore "$TEST_ROOT/test.keystore" --key-alias ouroboros-host \
+            --keystore-pass-file "$TEST_ROOT/password" --create-development-key \
+            --version-code "$GITHUB_RUN_NUMBER" --version-name "$(cat VERSION)"
+          "$JAVA_HOME_17_X64/bin/java" -jar "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" \
+            verify --verbose "$TEST_ROOT/build/Ouroboros.apk"
+
+  # Install/start smoke across the supported minSdk and representative Android
+  # releases. This is an emulator compatibility signal, not a substitute for
+  # rooted ARM64, SELinux, launcher, WebView and physical-device qualification.
+  android-emulator-smoke:
+    if: github.event_name != 'schedule'
+    name: Android emulator smoke (API ${{ matrix.api-level }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [26, 29, 30, 33, 36]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+      - name: Install emulator API and compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          AVD_HOME="$RUNNER_TEMP/android-avd"
+          USER_HOME="$RUNNER_TEMP/android-user-home"
+          mkdir -p "$AVD_HOME" "$USER_HOME"
+          echo "ANDROID_AVD_HOME=$AVD_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_USER_HOME=$USER_HOME" >> "$GITHUB_ENV"
+          export ANDROID_AVD_HOME="$AVD_HOME" ANDROID_USER_HOME="$USER_HOME"
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" \
+            "emulator" "system-images;android-${{ matrix.api-level }};default;x86_64"
+          echo "no" | avdmanager create avd --force --name "obo-api-${{ matrix.api-level }}" \
+            --package "system-images;android-${{ matrix.api-level }};default;x86_64" \
+            --device "pixel_2"
+          "$ANDROID_HOME/emulator/emulator" -list-avds
+      - name: Build disposable test APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/android-smoke"
+          mkdir -p "$ROOT"
+          printf '%s' 'ci-test-only' > "$ROOT/password"
+          python android/host/build.py --sdk "$ANDROID_HOME" --java-home "$JAVA_HOME" \
+            --out "$ROOT/build" --keystore "$ROOT/test.keystore" --key-alias ouroboros-host \
+            --keystore-pass-file "$ROOT/password" --create-development-key \
+            --version-code "$GITHUB_RUN_NUMBER" --version-name "$(cat VERSION)"
+          python android/host/build.py --sdk "$ANDROID_HOME" --java-home "$JAVA_HOME" \
+            --out "$ROOT/device" --project android/tests/device \
+            --keystore "$ROOT/test.keystore" --key-alias ouroboros-host \
+            --keystore-pass-file "$ROOT/password" \
+            --version-code "$GITHUB_RUN_NUMBER" --version-name "$(cat VERSION)"
+      - name: Boot emulator and smoke install/start
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd" ANDROID_USER_HOME="$RUNNER_TEMP/android-user-home"
+          AVD="obo-api-${{ matrix.api-level }}"
+          LOG="$RUNNER_TEMP/android-smoke/emulator.log"
+          "$ANDROID_HOME/emulator/emulator" -avd "$AVD" -no-window -no-audio -no-boot-anim \
+            -no-snapshot -gpu swiftshader_indirect -accel off >"$LOG" 2>&1 &
+          emulator_pid=$!
+          trap 'cat "$LOG"; kill "$emulator_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 180); do
+            kill -0 "$emulator_pid" 2>/dev/null || { wait "$emulator_pid"; exit 1; }
+            [ "$(timeout 5s adb -e get-state 2>/dev/null)" = "device" ] && break
+            sleep 2
+          done
+          test "$(timeout 5s adb -e get-state)" = "device"
+          for attempt in $(seq 1 120); do
+            kill -0 "$emulator_pid" 2>/dev/null || { wait "$emulator_pid"; exit 1; }
+            [ "$(timeout 5s adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = "1" ] && break
+            sleep 2
+          done
+          test "$(adb shell getprop sys.boot_completed | tr -d "\r")" = "1"
+          adb install -r "$RUNNER_TEMP/android-smoke/build/Ouroboros.apk"
+          adb install -r "$RUNNER_TEMP/android-smoke/device/app.apk"
+          adb shell am start -n ai.ouroboros.android/.MainActivity
+          sleep 2
+          adb shell pm path ai.ouroboros.android
+          adb shell dumpsys package ai.ouroboros.android | grep -E 'versionName|versionCode'
+          adb shell am force-stop ai.ouroboros.android
+          adb logcat -c || true
+          set +e
+          timeout 60s adb shell am instrument -w ai.ouroboros.android.device.smoke/ai.ouroboros.android.device.DeviceSdkSmoke >"$RUNNER_TEMP/android-smoke/instrument.txt" 2>&1
+          instrument_status=$?
+          set -e
+          cat "$RUNNER_TEMP/android-smoke/instrument.txt"
+          adb logcat -d -s OuroborosDeviceSdkSmoke:I '*:S' | tee "$RUNNER_TEMP/android-smoke/device-log.txt"
+          grep -q 'OBO_DEVICE_SDK_SMOKE=PASS' "$RUNNER_TEMP/android-smoke/instrument.txt" \
+            || grep -q 'OBO_DEVICE_SDK_SMOKE=PASS' "$RUNNER_TEMP/android-smoke/device-log.txt"
+          test "$instrument_status" -eq 0
+
+  # The publisher key is used only on the trusted tag path. Root/boot/device
+  # acceptance is separate from these exact-byte artifact checks.
+  android-build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android-test, android-emulator-smoke, release-preflight]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.10'
+      - name: Cache Android release build dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/platforms/android-36
+            ${{ env.ANDROID_HOME }}/build-tools/36.0.0
+          key: android-sdk-${{ runner.os }}-api36-build36.0.0
+      - name: Prepare Android release compiler and source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$JAVA_HOME_17_X64/bin/java"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-36' 'build-tools;36.0.0'
+          if git merge-base --is-ancestor HEAD origin/ouroboros; then
+            branch=ouroboros
+          else
+            branches="$(git branch -r --contains HEAD --format='%(refname:short)' \
+              | sed -n 's#^origin/##p' | grep -v '^HEAD$' || true)"
+            count="$(printf '%s\n' "$branches" | sed '/^$/d' | wc -l | tr -d ' ')"
+            test "$count" = 1 || { echo 'Cannot resolve one managed source branch' >&2; exit 1; }
+            branch="$branches"
+          fi
+          echo "OUROBOROS_MANAGED_SOURCE_BRANCH=$branch" >> "$GITHUB_ENV"
+      - name: Build and verify publisher-signed Android release assets
+        id: android_assets
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64" && test -n "$ANDROID_KEYSTORE_PASSWORD" \
+            && test -n "$ANDROID_KEY_ALIAS" || { echo 'Android publisher signing credentials are required' >&2; exit 1; }
+          ANDROID_STORE="$RUNNER_TEMP/android-publisher.keystore"
+          ANDROID_PASSWORD_FILE="$RUNNER_TEMP/android-publisher.password"
+          trap 'rm -f "$ANDROID_STORE" "$ANDROID_PASSWORD_FILE"' EXIT
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_STORE"
+          printf '%s' "$ANDROID_KEYSTORE_PASSWORD" > "$ANDROID_PASSWORD_FILE"
+          python scripts/build_android_release.py --sdk "$ANDROID_HOME" \
+            --java-home "$JAVA_HOME_17_X64" --keystore "$ANDROID_STORE" \
+            --key-alias "$ANDROID_KEY_ALIAS" --keystore-pass-file "$ANDROID_PASSWORD_FILE" \
+            --version-code "$GITHUB_RUN_NUMBER" --source-branch "$OUROBOROS_MANAGED_SOURCE_BRANCH" \
+            --out dist --work "$RUNNER_TEMP" --github-output "$GITHUB_OUTPUT"
+      - name: Generate Android source and APK CycloneDX inventories
+        shell: bash
+        run: |
+          set -euo pipefail
+          SYFT_ARCHIVE="$RUNNER_TEMP/syft-android.tar.gz"
+          curl --fail --location --silent --show-error \
+            https://github.com/anchore/syft/releases/download/v1.50.0/syft_1.50.0_linux_amd64.tar.gz \
+            --output "$SYFT_ARCHIVE"
+          printf '%s  %s\n' bf7b29ff57f06da30918266a0e1c2885a8f99784798d1bdb1628886aa015d788 "$SYFT_ARCHIVE" | sha256sum --check
+          SYFT_ROOT="$(mktemp -d "$RUNNER_TEMP/android-syft.XXXXXX")"
+          tar -xzf "$SYFT_ARCHIVE" -C "$SYFT_ROOT"
+          "$SYFT_ROOT/syft" "dir:${{ steps.android_assets.outputs.sbom_path }}" \
+            --output cyclonedx-json=dist/sbom-android-arm64.cdx.json
+          APK_ROOT="$(mktemp -d "$RUNNER_TEMP/android-apk-sbom.XXXXXX")"
+          unzip -q "${{ steps.android_assets.outputs.apk }}" -d "$APK_ROOT"
+          "$SYFT_ROOT/syft" "dir:$APK_ROOT" --output cyclonedx-json=dist/sbom-android-apk.cdx.json
+      - name: Attest Android build provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            ${{ steps.android_assets.outputs.archive }}
+            ${{ steps.android_assets.outputs.apk }}
+      - name: Attest Android source SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ steps.android_assets.outputs.archive }}
+          sbom-path: dist/sbom-android-arm64.cdx.json
+      - name: Attest Android APK SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ steps.android_assets.outputs.apk }}
+          sbom-path: dist/sbom-android-apk.cdx.json
+      - name: Upload Android release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ouroboros-android
+          path: |
+            ${{ steps.android_assets.outputs.archive }}
+            ${{ steps.android_assets.outputs.apk }}
+            dist/release-smoke-android-arm64.json
+            dist/release-smoke-android-apk.json
+            dist/sbom-android-arm64.cdx.json
+            dist/sbom-android-apk.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
   release-preflight:
     if: startsWith(github.ref, 'refs/tags/v')
     # system-e2e-mock joined the release bar with the v7 campaign (batch №13 item 4).
@@ -1563,7 +1816,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke]
+    needs: [build, android-build, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke]
     runs-on: ubuntu-latest
     concurrency:
       group: release-${{ github.ref }}
@@ -1616,7 +1869,9 @@ jobs:
                       release-artifacts/ouroboros_*_amd64.deb \
                       release-artifacts/ouroboros-*-1.x86_64.rpm \
                       release-artifacts/ouroboros-*-1.red80.x86_64.rpm \
-                      release-artifacts/Ouroboros-*-windows-x64.zip; do
+                      release-artifacts/Ouroboros-*-windows-x64.zip \
+                      release-artifacts/Ouroboros-*-android-arm64.tar.gz \
+                      release-artifacts/Ouroboros-*-android.apk; do
             SOURCE_ARGS=(
               --repo "$GITHUB_REPOSITORY"
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml"
@@ -1689,6 +1944,8 @@ jobs:
             release-artifacts/ouroboros-*-1.x86_64.rpm
             release-artifacts/ouroboros-*-1.red80.x86_64.rpm
             release-artifacts/Ouroboros-*-windows-x64.zip
+            release-artifacts/Ouroboros-*-android-arm64.tar.gz
+            release-artifacts/Ouroboros-*-android.apk
             release-artifacts/release-smoke-macos-arm64.json
             release-artifacts/release-smoke-linux-x86_64.json
             release-artifacts/release-smoke-linux-appimage-x86_64.json
@@ -1696,6 +1953,8 @@ jobs:
             release-artifacts/release-smoke-linux-rpm-x86_64.json
             release-artifacts/release-smoke-linux-rpm-red80-x86_64.json
             release-artifacts/release-smoke-windows-x64.json
+            release-artifacts/release-smoke-android-arm64.json
+            release-artifacts/release-smoke-android-apk.json
             release-artifacts/sbom-macos-arm64.cdx.json
             release-artifacts/sbom-linux-x86_64.cdx.json
             release-artifacts/sbom-linux-appimage-x86_64.cdx.json
@@ -1703,6 +1962,8 @@ jobs:
             release-artifacts/sbom-linux-rpm-x86_64.cdx.json
             release-artifacts/sbom-linux-rpm-red80-x86_64.cdx.json
             release-artifacts/sbom-windows-x64.cdx.json
+            release-artifacts/sbom-android-arm64.cdx.json
+            release-artifacts/sbom-android-apk.cdx.json
             release-artifacts/SHA256SUMS
             release-artifacts/release-evidence.json
           body_path: release-notes.md

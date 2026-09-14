@@ -147,7 +147,7 @@ def _events(path):
 def _call(client=None, **kwargs):
     return vision._vision_query_with_timeout(client, prompt="Describe only this image",
                                              images=[{"url": "data:image/png;base64,AAAA"}],
-                                             model=MODEL, timeout=0.02, **kwargs)
+                                             model=MODEL, timeout=1.0, **kwargs)
 
 
 def test_private_ipc_publication_never_exposes_an_empty_control_file(tmp_path, monkeypatch):

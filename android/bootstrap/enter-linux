@@ -1,0 +1,38 @@
+#!/system/bin/sh
+# Enter the Linux ABI while retaining Android's network namespace.
+# Caller must first create a private mount namespace with unshare -m.
+set -eu
+# Magisk su can hand us oom_score_adj=-1000. Keep root privileges while making
+# this workload and its descendants ordinary candidates for Linux OOM recovery.
+echo 0 > /proc/self/oom_score_adj
+test "$(cat /proc/self/oom_score_adj)" = 0 || {
+    echo 'Could not restore ordinary OOM selection for the Linux workload.' >&2
+    exit 1
+}
+preflight_workers=${OUROBOROS_PREFLIGHT_TEST_WORKERS:-2}
+preflight_timeout=${OUROBOROS_PREFLIGHT_TIMEOUT_SEC:-3600}
+root=/data/local/ouroboros-phone/rootfs
+bb=/data/adb/magisk/busybox
+"$bb" mount --make-rprivate /
+"$bb" mount --bind /proc "$root/proc"
+"$bb" mount --rbind /sys "$root/sys"
+"$bb" mount -t tmpfs -o mode=0755 tmpfs "$root/dev"
+for node in null zero random urandom tty; do
+    touch "$root/dev/$node"
+    "$bb" mount --bind "/dev/$node" "$root/dev/$node"
+done
+mkdir -p "$root/dev/pts" "$root/dev/shm"
+"$bb" mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$root/dev/pts"
+ln -s pts/ptmx "$root/dev/ptmx"
+ln -s /proc/self/fd "$root/dev/fd"
+ln -s /proc/self/fd/0 "$root/dev/stdin"
+ln -s /proc/self/fd/1 "$root/dev/stdout"
+ln -s /proc/self/fd/2 "$root/dev/stderr"
+"$bb" mount -t tmpfs -o mode=1777 tmpfs "$root/dev/shm"
+"$bb" mount -t tmpfs -o mode=0755 tmpfs "$root/run"
+unset LD_PRELOAD LD_LIBRARY_PATH LD_CONFIG_FILE
+exec chroot "$root" /usr/bin/env -i \
+    HOME=/root PATH=/opt/ouroboros/venv/bin:/opt/ouroboros/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    OUROBOROS_PREFLIGHT_TEST_WORKERS="$preflight_workers" \
+    OUROBOROS_PREFLIGHT_TIMEOUT_SEC="$preflight_timeout" \
+    LANG=C.UTF-8 TERM=xterm-256color DEBIAN_FRONTEND=noninteractive "$@"

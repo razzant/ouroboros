@@ -1,0 +1,4 @@
+#!/bin/sh
+# Linux-side native Android argv execution. No scenario or command allowlist.
+exec /usr/bin/nsenter --target 1 --mount --root --wdns=/ -- \
+    /system/bin/env PATH=/system_ext/bin:/system/bin:/system/xbin:/vendor/bin:/vendor/xbin "$@"

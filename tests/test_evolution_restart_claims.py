@@ -928,3 +928,44 @@ def test_containment_disowns_the_commit_intent_so_boot_cannot_adopt_it(
     current = evolution_lifecycle._read_evolution_campaign()
     assert str(current["active_transaction"].get("commit_sha") or "") == ""
     assert int(current.get("absorbed_cycles_done") or 0) == 0
+
+
+@pytest.mark.parametrize('has_marker', [False, True])
+@pytest.mark.parametrize('native_status', ['unconfigured', 'verified', 'failed', 'missing', 'stale'])
+def test_native_host_adoption_is_required_for_restart_success(
+    tmp_path, monkeypatch, has_marker, native_status,
+):
+    from ouroboros import agent_startup_checks, process_custody
+    from supervisor import evolution_lifecycle
+
+    monkeypatch.setattr(process_custody, 'current_custody_session_id', lambda: 'before-native')
+    campaign, tx = _active_transaction(tmp_path)
+    sha = 'e' * 40
+    claim = {'campaign_id': campaign['id'], 'transaction_id': tx['transaction_id'],
+             'task_id': tx['task_id'], 'commit_sha': sha}
+    assert evolution_lifecycle.record_evolution_commit(**claim)['ok']
+    if has_marker:
+        (tmp_path / 'state' / 'pending_restart_verify.json').write_text(
+            json.dumps({'expected_sha': sha, 'evolution_claim': claim}))
+    monkeypatch.setattr(process_custody, 'current_custody_session_id', lambda: 'after-native')
+    monkeypatch.delenv('OUROBOROS_EXTERNAL_HOST_UPDATE', raising=False)
+    monkeypatch.delenv('OUROBOROS_EXTERNAL_HOST_RESULT', raising=False)
+    if native_status != 'unconfigured':
+        monkeypatch.setenv('OUROBOROS_EXTERNAL_HOST_UPDATE', '/native/update-host')
+    if native_status != 'missing':
+        monkeypatch.setenv('OUROBOROS_EXTERNAL_HOST_RESULT', json.dumps({
+            'status': 'verified' if native_status in {'verified', 'stale'} else native_status,
+            'source_commit': 'f' * 40 if native_status == 'stale' else sha,
+            'input_sha256': '1' * 64, 'apk_sha256': '2' * 64, 'signer_sha256': '3' * 64}))
+    env = SimpleNamespace(drive_path=lambda name: tmp_path / name,
+                          drive_root=tmp_path, repo_dir=tmp_path)
+    agent_startup_checks.verify_restart(env, sha)
+    stored = evolution_lifecycle._read_evolution_campaign()
+    if native_status in {'unconfigured', 'verified'}:
+        assert 'active_transaction' not in stored
+        assert stored['transaction_history'][-1]['cycle_outcome'] == 'absorbed'
+    else:
+        pending = stored['active_transaction']
+        assert pending['restart_required'] and not pending['restart_verified']
+        assert pending['restart_authority_error'] == 'native_update_failed_or_unverified'
+        assert int(stored.get('absorbed_cycles_done') or 0) == 0

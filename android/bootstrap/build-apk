@@ -1,0 +1,10 @@
+#!/bin/sh
+# Ordinary Java/Android project compiler. The caller supplies all app source.
+# Personal app signing stays outside the project and core repo. Provisioning
+# creates this key once; an ordinary build never silently replaces a lost key.
+exec /opt/ouroboros/venv/bin/python /opt/ouroboros/repo/android/host/build.py \
+    --sdk /opt/ouroboros/android-sdk \
+    --java-home /usr/lib/jvm/java-17-openjdk-arm64 \
+    --keystore /opt/ouroboros/signing/host.keystore \
+    --key-alias ouroboros-host \
+    --keystore-pass-file /opt/ouroboros/signing/host-password "$@"

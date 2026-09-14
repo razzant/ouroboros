@@ -106,7 +106,6 @@ def run_node_tests(
     # Lazy sibling import: preflight_runner imports this module at its top, so
     # the shared helpers must be reached at call time, not import time.
     from ouroboros import preflight_runner as pr
-    from ouroboros.platform_layer import kill_processes_referencing
     from ouroboros.process_containment import ProcessContainer
 
     files = candidate_node_tests(worktree)
@@ -200,9 +199,6 @@ def run_node_tests(
             pass
         container.reap()
         container.close()
-        # Sweep so a node-lane escapee cannot touch the pytest passes that
-        # follow — the same between-pass hygiene the pytest loop applies.
-        kill_processes_referencing(str(temp_root))
     elapsed = time.monotonic() - started
     result["returncode"] = returncode
     if reap_error:

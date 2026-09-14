@@ -51,6 +51,7 @@ import json
 import symtable
 import sys
 import tokenize
+from _symtable import DEF_FREE_CLASS
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 _BUILTIN_NAMES = frozenset(dir(builtins)) | {
@@ -298,6 +299,18 @@ class _Scope:
             )
         return _Scope(child)
 
+    def comprehension(self, node: ast.expr) -> "_Scope":
+        name = _COMP_NAMES[type(node)]
+        if self._next < len(self._children):
+            child = self._children[self._next]
+            if child.get_name() == name and child.get_lineno() == node.lineno:
+                return self.enter(name, node.lineno)
+        # PEP 709 removes these tables in 3.12+, promoting their children.
+        # Generator expressions still own a real scope and retain strict alignment.
+        if isinstance(node, ast.GeneratorExp) or sys.version_info < (3, 12):
+            return self.enter(name, node.lineno)
+        return _InlinedComprehension(self, node)
+
     def resolve(self, name: str) -> str:
         """'local' | 'enclosing' | 'class_local' | 'module' for a name used here."""
         if self.kind == "module":
@@ -319,6 +332,34 @@ class _Scope:
         if sym.is_free():
             return "enclosing"
         return "module" if sym.is_global() else "enclosing"
+
+
+class _InlinedComprehension(_Scope):
+    """Isolated iteration names with the enclosing table's promoted child cursor."""
+
+    def __init__(self, parent: _Scope, node: ast.expr) -> None:
+        self.parent = parent
+        self.kind = "function"
+        self.locals = {name for gen in node.generators for name in _unfold_target(gen.target)[0]}
+
+    def enter(self, name: str, lineno: int) -> _Scope:
+        return self.parent.enter(name, lineno)
+
+    def comprehension(self, node: ast.expr) -> _Scope:
+        if isinstance(node, ast.GeneratorExp):
+            return self.enter("genexpr", node.lineno)
+        return _InlinedComprehension(self, node)
+
+    def resolve(self, name: str) -> str:
+        if name in self.locals:
+            return "local"
+        outer = self.parent
+        if outer.kind == "class" and outer.table.lookup(name).is_local():
+            # A class-local collision may still capture an enclosing function.
+            # Python 3.12 has no Symbol.is_free_class(): use the compiler's flag,
+            # not ancestor locals polluted by other inlined iteration targets.
+            return "enclosing" if outer.table._table.symbols[name] & DEF_FREE_CLASS else "module"
+        return outer.resolve(name)
 
 
 class _Analysis:
@@ -413,7 +454,7 @@ class _Walker:
         if type(node) in _COMP_NAMES:
             gens = node.generators
             self._visit(gens[0].iter, scope, calltime)  # outermost iterable: enclosing scope
-            inner = scope.enter(_COMP_NAMES[type(node)], node.lineno)
+            inner = scope.comprehension(node)
             self._visit(gens[0].target, inner, calltime)
             for cond in gens[0].ifs:
                 self._visit(cond, inner, calltime)

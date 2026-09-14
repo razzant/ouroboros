@@ -29,7 +29,7 @@ release_asset_name = _RELEASE_SYNC["release_asset_name"]
 # looks at these suffixes. The AppImage and native Linux packages are produced
 # after the tarball is located and are discovered separately.
 ARCHIVE_SUFFIXES = (".dmg", ".tar.gz", ".zip")
-RELEASE_ASSET_SUFFIXES = ARCHIVE_SUFFIXES + (".AppImage", ".deb", ".rpm")
+RELEASE_ASSET_SUFFIXES = ARCHIVE_SUFFIXES + (".AppImage", ".deb", ".rpm", ".apk")
 PROOF_IDS = {
     proof_id: partial(release_asset_name, proof_id)
     for proof_id in RELEASE_ASSET_TEMPLATES
@@ -42,6 +42,8 @@ DOWNLOAD_LABELS = {
     "linux-rpm-red80-x86_64": "RED OS 8 x86_64 (.rpm)",
     "linux-appimage-x86_64": "Other Linux x86_64 (AppImage)",
     "linux-x86_64": "Linux x86_64 archive (.tar.gz)",
+    "android-arm64": "Experimental Android ARM64 USB setup (.tar.gz)",
+    "android-apk": "Android publisher-signed reference APK (see setup guide)",
 }
 RELEASE_GATES = (
     "full-test",
@@ -51,6 +53,7 @@ RELEASE_GATES = (
     "docker-portable-test",
     "skill-smoke",
     "packaged-artifact-smoke",
+    "android-build",
 )
 COMMON_SMOKE_CHECKS = frozenset(
     {
@@ -97,6 +100,10 @@ REQUIRED_SMOKE_CHECKS = {
     "linux-rpm-x86_64": PACKAGE_SMOKE_CHECKS,
     "linux-rpm-red80-x86_64": PACKAGE_SMOKE_CHECKS,
     "windows-x64": COMMON_SMOKE_CHECKS,
+    "android-arm64": frozenset({
+        "embedded_repo_bundle", "android_source_manifest", "usb_installer_help",
+    }),
+    "android-apk": frozenset({"apk_signature", "apk_package_version"}),
 }
 
 
@@ -294,7 +301,8 @@ def _release_notes(
         "",
         "## Download",
         "",
-        "Choose your platform below. You do not need to clone the repository or install Python or uv.",
+        "Choose your platform below. Desktop installers do not require Python or uv. "
+        "Experimental Android uses the USB setup guide on an already Magisk-rooted ARM64 device.",
         "",
     ]
     records_by_id = {
@@ -318,6 +326,11 @@ def _release_notes(
         )
         lines.append(f"- **{label}:** [{name}]({url})")
     lines.extend([
+        "",
+        f"[Android setup guide](https://github.com/{repository}/blob/{tag}/docs/ANDROID_INSTALL.md): "
+        "the installer builds the installed host with a persistent personal signing key. "
+        "Installing the reference APK alone does not provision the Linux runtime. "
+        "CI artifact checks do not certify root, boot, hardware, or phone runtime behavior.",
         "",
         "Files named `SHA256SUMS`, `release-evidence.json`, `release-smoke-*.json`, "
         "and `sbom-*.cdx.json` are verification evidence, not additional installers.",

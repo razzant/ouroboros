@@ -1,0 +1,131 @@
+#!/opt/ouroboros/venv/bin/python
+"""Call host-UID Android SDK primitives, with one newline JSON request/response.
+
+Read the full request from stdin (or --request FILE); never put credentials in argv.
+Examples: {"method":"capabilities"}, {"method":"packages.inspect","params":{
+"package":"ai.ouroboros.android"}}, or {"method":"packages.install","params":{
+"source_uri":"content://...","idempotency_key":"termux-2026-09-14"}}. Use method names returned by capabilities.
+Package installs are asynchronous: a successful call proves bytes were staged and commit was submitted,
+not that Android completed the install. Query packages.install.status and packages.sessions. A lost response
+is unknown and is never retried automatically.
+source_uri must be readable by the Android app UID, not just Linux root.
+To pass a Linux download, use content.write to transfer bytes to a writable
+provider URI (an app-owned MediaStore entry or a granted document), then install
+that URI. mode='wt' replaces contents; mode='wa' appends a subsequent chunk.
+Root android-exec remains a separate native installation path.
+After a rejected or unknown PackageInstaller result, use packages.install.abandon
+with the same idempotency_key to close that installer-owned session; it is a
+cleanup operation and never starts a replacement installation.
+
+location.state reports grants/providers. location.get accepts provider and
+timeout_ms (1000..30000); its result includes age_ms and mock when a fix exists.
+accessibility.windows accepts max_windows, max_nodes and max_depth; node_address
+identifies a path in that snapshot, so inspect the current UI before acting.
+accessibility.perform accepts action=click/set_text/scroll plus node_address;
+set_text also needs text; scroll uses direction=forward/backward. Global actions
+are back/home/notifications/quick_settings. action=gesture accepts gesture=tap/swipe,
+x/y, and for swipe x2/y2 and duration_ms.
+notifications.list defaults to metadata; include_text=true requests title/text.
+packages.inspect on the host package lists declared activities/services. A declared
+Quick Settings tile or wallpaper service is not proof that it is added or selected.
+
+Intent params: action, data, type (MIME), package, component (package/class),
+categories, numeric flags, extras. Extras and ContentValues use {"type":...,"value":...}
+per key, e.g. {"length":{"type":"int","value":900}}. Bytes are base64, long values
+may be decimal strings. content.query accepts uri, projection, selection,
+selection_args, sort, offset and limit (default 100, no silent clipping).
+content.call accepts uri, method, arg, extras; insert/update accept typed values;
+update/delete accept selection/selection_args. content.read uses uri, offset,
+length (default 65536); content.write requires uri, mode and data_base64.
+Paging is not a database snapshot. Provider access uses the host app's grants.
+Transport loss after sending means an unknown outcome: inspect before retrying.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+
+def connect(connection: socket.socket, address: str, ensure_host: bool) -> None:
+    """Restore only the native bridge, and only before any request is sent."""
+    endpoint = "\0" + address[1:] if address.startswith("@") else address
+    try:
+        connection.connect(endpoint)
+        return
+    except (ConnectionRefusedError, FileNotFoundError):
+        if not ensure_host or address != "@ai.ouroboros.android.rpc":
+            raise
+    subprocess.run(
+        ["android-exec", "am", "start-foreground-service", "-n",
+         "ai.ouroboros.android/.CoreService", "-a", "status"],
+        check=True, capture_output=True, timeout=15,
+    )
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            connection.connect(endpoint)
+            return
+        except (ConnectionRefusedError, FileNotFoundError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
+def call(request: dict, address: str, timeout: float, *, ensure_host: bool = False) -> dict:
+    if not isinstance(request, dict) or not isinstance(request.get("method"), str):
+        raise ValueError("Request must be an object with a string method")
+    request = dict(request)
+    request.setdefault("id", str(uuid.uuid4()))
+    data = (json.dumps(request, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    sent = False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(timeout)
+            connect(connection, address, ensure_host)
+            sent = True  # A failed sendall can still deliver a complete request.
+            connection.sendall(data)
+            with connection.makefile("rb") as stream:
+                line = stream.readline()
+            if not line.endswith(b"\n"):
+                raise ConnectionError("Android host closed before a complete response")
+            response = json.loads(line)
+            if not isinstance(response, dict) or not isinstance(response.get("ok"), bool):
+                raise ValueError("Invalid Android response envelope")
+            before_parse = (response.get("id") is None and response["ok"] is False
+                            and isinstance(response.get("error"), dict)
+                            and response["error"].get("outcome") == "not_dispatched")
+            if response.get("id") != request["id"] and not before_parse:
+                raise ValueError("Android response ID does not match request")
+            return response
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return {"id": request["id"], "ok": False, "error": {
+            "type": type(error).__name__, "message": str(error),
+            "outcome": "unknown" if sent else "not_dispatched",
+            "retry_automatically": False}}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--request", type=Path, help="JSON request file; default: stdin")
+    parser.add_argument("--socket", default="@ai.ouroboros.android.rpc", help="@abstract-name or filesystem socket; host service must be running")
+    parser.add_argument("--timeout", type=float, default=60, help="Socket inactivity timeout in seconds; not cancellation")
+    args = parser.parse_args()
+    try:
+        if args.timeout <= 0:
+            raise ValueError("--timeout must be positive")
+        request = json.loads(args.request.read_text() if args.request else sys.stdin.read())
+        response = call(request, args.socket, args.timeout, ensure_host=True)
+    except (OSError, ValueError) as error:
+        response = {"ok": False, "error": {"type": type(error).__name__, "message": str(error), "outcome": "not_dispatched"}}
+    print(json.dumps(response, ensure_ascii=False, allow_nan=False))
+    return 0 if response["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

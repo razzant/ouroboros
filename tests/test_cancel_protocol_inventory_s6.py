@@ -82,6 +82,9 @@ TERMINAL_WRITERS = {
     # The locked field projector preserves the existing status, including a
     # terminal one; publishing review evidence never completes the task itself.
     ('ouroboros/review_projection.py::publish_acceptance_checkpoint', '"running"'): 'dynamic',
+    # Rebinds a proven legacy child start before existing orphan materialization;
+    # write_task_result still preserves any terminal status under its locked reducer.
+    ('ouroboros/server_maintenance.py::_recover_terminal_task_files', '"running"'): 'dynamic',
     ('ouroboros/task_status.py::reconcile_orphaned_running_tasks', 'eff_status'): 'dynamic',
     ('ouroboros/tools/control_delegation.py::record_depth_limit_refusal', 'STATUS_FAILED'): 'terminal',
     ('supervisor/cancel_publication.py::_finalize_cancel_intent_on_miss', 'STATUS_CANCELLED'): 'terminal',

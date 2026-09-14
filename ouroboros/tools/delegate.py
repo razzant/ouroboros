@@ -14,7 +14,7 @@ destroys the verdict you wanted.
 
 Read-only and mutating children share ONE nanny and ONE transport. The only difference
 is the access profile the HOST derives from the calling task's authority (``readonly``
-vs ``workspace_write``) and the run shape that follows from it; there is no second
+vs the owner-selected mutating profile) and the run shape that follows from it; there is no second
 pipeline and no second slot. The child gets a broker tool, never a shell, so it can ask
 the host to run something but never choose with what powers.
 
@@ -38,6 +38,7 @@ from ouroboros import delegate_custody as custody
 from ouroboros import delegate_progress as progress
 from ouroboros.delegate_custody import RunCustody as _RunCustody
 from ouroboros.tool_capabilities import tool_result_limit
+from ouroboros.subagents import is_mutating_delegated_access
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.subagent_work_order import (  # noqa: F401 - compatibility re-export
     assignment_instructions as _assignment_instructions,
@@ -165,7 +166,13 @@ def _host_instructions(authority: "DelegatedRunShape", assignment: str = "",
     if payload_skill:
         text = payload_host_instructions(text, payload_skill)
     if authority.delegated:
-        text += _UNPROVEN_BOUNDARY_INSTRUCTION
+        text += (
+            " The owner selected full native access for this run. No filesystem sandbox "
+            "is requested; scoped HOME only selects account and writable native state. "
+            "Your assignment and private-snapshot integration rules still apply. "
+            "Report the actual access honestly and do not claim to be sandboxed."
+            if authority.access == "full" else _UNPROVEN_BOUNDARY_INSTRUCTION
+        )
     text += access_instruction(authority.access)  # the typed profile outranks prose
     if assignment:
         text += "\n\n" + assignment
@@ -182,7 +189,7 @@ def _build_start_instructions(
     )
 
 
-def _derive_authority(ctx: ToolContext) -> "DelegatedRunShape":
+def _derive_authority(ctx: ToolContext, access: str = "workspace_write") -> "DelegatedRunShape":
     """Derive the run shape from the task's own authority — one question, asked here.
 
     Host-derived, never model-supplied: the child asks the host to run something, and
@@ -209,7 +216,7 @@ def _derive_authority(ctx: ToolContext) -> "DelegatedRunShape":
         constraint = getattr(ctx, "task_constraint", None)
         surface = str(getattr(constraint, "surface", "") or "external_workspace")
         mutating = presence_ceiling_allows_delegated_surface(ctx, surface)
-    return delegated_run_shape(mutating)
+    return delegated_run_shape(mutating, access)
 
 
 def _presence_delegate_read_refusal(ctx: ToolContext) -> str:
@@ -380,11 +387,11 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         route = actor["route"]
         if selector_root:
             authority, payload_auth, payload_error = _payload_mutation_authority(
-                ctx, drive, bucket, skill_name, _resolved_binding)
+                ctx, drive, bucket, skill_name, _resolved_binding, actor.get("access", "workspace_write"))
             if payload_error:
                 return payload_error
         else:
-            authority = _derive_authority(ctx)
+            authority = _derive_authority(ctx, actor.get("access", "workspace_write"))
             payload_auth = None
             if refusal := _presence_delegate_read_refusal(ctx):
                 return refusal
@@ -399,6 +406,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         )
 
     access = authority.access
+    requested = recovering  # A recovered invocation may already own a physical run.
     try:
         gateway = ensure_owned_gateway()
     except ClaudexorUnavailable as exc:
@@ -432,9 +440,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     return root_error
             invocation_id = custody.new_invocation_id()
             root = record_auth["target_root"]
-            if authority.access == "workspace_write":
-                # Git/payload snapshots are registered before POST; directory
-                # copies belong to the engine, with the stable target kept separate.
+            if is_mutating_delegated_access(authority.access):
                 target_root = record_auth["target_root"]
                 authority_source = record_auth["source"]
                 if authority_source == "skill_payload":
@@ -463,10 +469,9 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             scope_root = target_root if execution_root or directory_options else root
             (project_id, owned_project_id, project_persistent) = resolve_registration(
                 gateway, scope_root, execution_root, getattr(authority, "access", ""))
-            if directory_options:
-                project_persistent = True
-            # Assignment plus instructions identifies pending work; the invocation
-            # remains the wire key, and retry replays its original complete body.
+            project_persistent |= bool(directory_options)
+            if authority.access == "full":
+                gateway.ensure_full_access(scope_root)
             seconds = _bounded_max_seconds(ctx, max_seconds)
             request_body = _start_request(ctx, route, authority, scope_root, text,
                                           seconds, instructions, execution_root,
@@ -552,7 +557,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         # A registration we created BEFORE the start must not outlive a failed start.
         # It used to be left behind with nothing anywhere naming its id.
         status = int(getattr(exc, "status_code", 0) or 0)
-        definite = 400 <= status < 500
+        definite = 400 <= status < 500 or not requested
         # An UNKNOWN outcome hands back the retry token: only the caller can say
         # whether the next call is a retry of this intention or a new intention, and
         # without the token every next call is a new one. A definite refusal retires
@@ -564,6 +569,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                                   "retry_of=pending_invocation_id); a plain call starts a NEW run"})
         return _fail("delegate_start", exc.code, str(exc), executor="blocked",
                      reset_at=getattr(exc, "reset_at", ""), **pending,
+                     **({"definitely_unrun": True} if not requested else {}),
                      **_retire_orphaned_registration(ctx, gateway, owned_project_id, project_persistent=project_persistent,
                                                      definite_refusal=definite,
                                                      reason=str(getattr(exc, "code", "")),
@@ -635,11 +641,10 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
             "tree: at terminal its diff is captured for you, and NOTHING lands in "
             "the shared tree until you explicitly integrate_delegated_patch(run_id="
             "...) to apply or reject it — read the captured diff before you claim "
-            "it, and never let the run commit. It was ASKED to run under a scoped "
-            "HOME and an OS-enforced boundary; whether the engine applied either is "
-            "a per-run fact that delegate_wait reads back from the run's own "
-            "artifacts. A host with no boundary mechanism runs it anyway and says "
-            "so there."
+            "it, and never let the run commit. The requested native access profile "
+            f"is {authority.access}; scoped HOME selects native state and credentials, "
+            "not filesystem confinement. Actual access is read from the run's own "
+            "artifacts by delegate_wait."
             if authority.isolation == "live" else
             " This run cannot write anything: it reads and answers."
         )

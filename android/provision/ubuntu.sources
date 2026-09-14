@@ -1,0 +1,6 @@
+Types: deb
+URIs: https://snapshot.ubuntu.com/ubuntu/20260911T000000Z/
+Suites: noble noble-updates noble-backports noble-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+Snapshot: no

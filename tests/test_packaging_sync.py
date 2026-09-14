@@ -4,7 +4,7 @@ import re
 import pytest
 
 from ouroboros.tools.release_sync import (
-    RELEASE_ASSET_TEMPLATES,
+    DESKTOP_DOWNLOAD_IDS,
     _normalize_pep440,
     check_history_limit,
     release_asset_download_url,
@@ -184,7 +184,7 @@ def test_readme_prioritizes_macos_dmg_install_and_model_access():
         in readme
     )
     assert "/releases/latest/download/" not in readme
-    for proof_id in RELEASE_ASSET_TEMPLATES:
+    for proof_id in DESKTOP_DOWNLOAD_IDS:
         assert (
             f"[download-{proof_id}]: {release_asset_download_url(proof_id, version)}"
             in readme
@@ -208,7 +208,7 @@ def test_install_page_matches_macos_quick_start_and_model_prerequisite():
     assert install_page.index("platform-downloads") < install_page.index(
         "Advanced: headless CLI with uv"
     ) < install_page.index("Develop or run from source")
-    for proof_id in RELEASE_ASSET_TEMPLATES:
+    for proof_id in DESKTOP_DOWNLOAD_IDS:
         assert f'data-release-download="{proof_id}"' in install_page
         assert release_asset_download_url(proof_id, version) in install_page
 

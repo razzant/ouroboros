@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ai.ouroboros.android.device.smoke">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+    <instrumentation android:name="ai.ouroboros.android.device.DeviceSdkSmoke"
+        android:targetPackage="ai.ouroboros.android"
+        android:label="Ouroboros Android SDK smoke" />
+</manifest>

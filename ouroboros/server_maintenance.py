@@ -725,8 +725,9 @@ def _recover_terminal_task_files(drive_root: pathlib.Path, protected: set[str]) 
         terminal_task_files_ready,
     )
     from ouroboros.observability import _has_pending_ref_promotion
-    from ouroboros.task_results import load_task_result, validate_task_id
-    from ouroboros.task_status import SETTLED_STATUSES
+    from ouroboros.cancel_intents import cancel_pending
+    from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
+    from ouroboros.task_status import SETTLED_STATUSES, effective_task_result
 
     root = pathlib.Path(drive_root)
     report = {"recovered": [], "unresolved": [], "protected": sorted(protected), "errors": []}
@@ -761,6 +762,22 @@ def _recover_terminal_task_files(drive_root: pathlib.Path, protected: set[str]) 
                 if not ready:
                     source = load_task_result(child_root, task_id, strict=True) or {}
                     if source.get("status") not in SETTLED_STATUSES:
+                        if (current.get("status") == "scheduled" and source.get("status") == "running"
+                                and source.get("started_at") and not source.get("_is_direct_chat")
+                                and not cancel_pending(root, task_id, strict=True)):
+                            # Older split roots omitted their canonical start.
+                            # Rebind only when the existing queue/worker/direct
+                            # ownership rules already prove this child orphaned.
+                            observed = effective_task_result(root, {
+                                **current, "child_drive_root": str(child_root),
+                            }, materialize_artifacts=False)
+                            if observed.get("reason_code") == "orphaned_running_after_worker_restart":
+                                write_task_result(
+                                    root, task_id, "running", child_drive_root=str(child_root),
+                                    budget_drive_root=str(root), started_at=source["started_at"],
+                                    ts=source.get("ts") or source["started_at"],
+                                )
+                                report.setdefault("rebound", []).append(task_id)
                         if (pending or current.get("status") == "completed") and (
                             suffix or current.get("headless_child_drive_root") or current.get("child_drive_root")
                         ):

@@ -227,12 +227,11 @@ BAND_PATHS = {
     "web/modules/chat_activity.js": "Existing task activity renderer consumes the shared quota/auth wait state; no parallel task card or lifecycle.",
     "web/modules/harness_accounts.js": None,
     "web/modules/log_events.js": None,
-    "web/modules/onboarding_wizard.js": "Multi-surface onboarding keeps its step projection and completion payload together.",
-    "web/modules/reviewer_slots.js": "Owner-approved 5A editor: per-row Direct model / Configured subagent source picker with read-only derived disclosure replaces the legacy Claude-SDK advisory input in the same module that owns reviewer-row editing.",
     "web/modules/settings.js": None,
     "web/modules/skills.js": "One installed-skill page controller owns independently settling primary/optional reads and current-generation menu, identity and badge updates; domain lifecycle, cards, hub truth and shared interactions remain separate owners.",
     "web/tests/chat_instance_dom.test.js": "Entered the band from 1000 lines with the alias-free subagent cost pin (stage-2 fix wave): that regression reproduces only through the real createChatInstance card path, and this file owns the DOM harness that drives it; split when the next createChatInstance face lands.",
     "web/tests/harness_login_cards.test.js": "Login-card suite grew past 1000 lines with the name-the-account face cases (agy pickup, issue #232); split when the next face lands.",
+    "web/tests/reviewer_slots.test.js": "The reviewer-slot tests keep source selection and access serialization coverage together with their UI contract.",
 }
 
 BYTE_BASELINE_DEBT = {
@@ -246,5 +245,5 @@ BYTE_BASELINE_DEBT = {
 
 BYTE_DEBT = {
     "tests/test_devtools_benchmarks.py": 327840,
-    "web/modules/chat.js": 203362,
+    "web/modules/chat.js": 201650,
 }

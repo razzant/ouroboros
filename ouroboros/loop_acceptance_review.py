@@ -36,7 +36,6 @@ def _loop():
     of freezing whatever object a from-import saw at import time.
     """
     from ouroboros import loop
-
     return loop
 
 
@@ -100,7 +99,6 @@ def announce_acceptance_settlement(usage_ctx: Any, request: Any, wave: dict) -> 
     if usage_ctx is None or not getattr(usage_ctx, "drive_root", None):
         return
     from ouroboros.owner_mailbox import write_task_message
-
     try:
         slots = wave.get("slots") or {}
         write_task_message(
@@ -117,7 +115,6 @@ def announce_acceptance_settlement(usage_ctx: Any, request: Any, wave: dict) -> 
 def prepare_acceptance_observation(ctx: Any, trace: dict, incoming: Any, messages: list, tool_schemas: list) -> None:
     """Present the current owner-source selector immediately before Main's send."""
     from ouroboros.loop_acceptance import capture_acceptance_observation, acceptance_observation_prompt
-
     observed = capture_acceptance_observation(ctx, trace, incoming)
     if (_loop().get_task_review_mode() not in {"auto", "required"}
             or not any(row.get("function", {}).get("name") == "task_acceptance_review" for row in tool_schemas)):
@@ -128,7 +125,6 @@ def prepare_acceptance_observation(ctx: Any, trace: dict, incoming: Any, message
     # successful cognitive tool call it can otherwise answer the selector itself,
     # replacing the natural conversational response with acceptance bookkeeping.
     from ouroboros.task_results import resolve_task_lineage
-
     meta = getattr(ctx, "task_metadata", {})
     meta = meta if isinstance(meta, dict) else {}
     lineage = resolve_task_lineage(
@@ -171,7 +167,6 @@ def wait_for_acceptance_feedback(tools: Any, limit_ctx: Any, trace: dict,
     if not getattr(getattr(ctx, "_delivery_candidate", None), "control_episode_seen", False):
         _loop()._arm_delivery_control(tools, limit_ctx, trace)
     from ouroboros.owner_wait import wait_after_tools
-
     wait_after_tools(ctx, limit_ctx.messages, trace, limit_ctx.accumulated_usage,
                      limit_ctx.round_idx, tool_schemas, seen, review_binding=binding)
 
@@ -184,7 +179,6 @@ def advance_explicit_acceptance(tools: Any, limit_ctx: Any, trace: dict,
         return
     tools._ctx._acceptance_request_pending = None
     from ouroboros.loop_delivery import apply_delivery_subject_decision
-
     subject = request.get("acceptance_subject")
     if subject is not None:
         ok, reason = apply_delivery_subject_decision(tools, limit_ctx, trace, subject)
@@ -277,7 +271,6 @@ def _build_host_acceptance_evidence(ctx: _TaskAcceptanceContext) -> Dict[str, An
     """Build the one bounded host packet shared by binding and reviewer input."""
     from ouroboros.review_evidence import build_task_acceptance_evidence
     from ouroboros.loop_delivery import delivery_subject_projection
-
     committed_this_turn = any(
         isinstance(call, dict)
         and str(call.get("tool") or "") in ("commit_reviewed", "vcs_commit_reviewed")
@@ -312,7 +305,6 @@ def _total_paid_acceptance_cycles(ctx: _TaskAcceptanceContext) -> Any:
     SAME ledger the wallet claim counts (``claimed_cycles``); ``None`` when the
     projection is unavailable (a descendant that may observe but not initialize)."""
     from ouroboros.task_results import project_task_acceptance_review_capacity
-
     return project_task_acceptance_review_capacity(
         ctx.tools._ctx, task_id=str(ctx.task_id or ""),
     ).get("claimed_cycles")
@@ -328,7 +320,6 @@ _RETRIEVING_ACCESS_DISCLOSURE = (
 
 def _retrieving_packet_projection(evidence: Dict[str, Any]) -> Dict[str, Any]:
     from ouroboros.review_dispatch import retrieving_acceptance_packet
-
     return retrieving_acceptance_packet(evidence)
 
 
@@ -350,7 +341,6 @@ def acceptance_retrieving_work_order(
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.outcome_receipt_store import verification_receipts_path
     from ouroboros.review_execution import ReviewRouteKind, _render_prompt_parts, review_output_contract
-
     request.session_root = session_root
     request.policy["output_contract"] = review_output_contract(request)
     request.policy["native_data_root"] = str(data_root)
@@ -420,14 +410,12 @@ def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
         run_zero_physical_task_acceptance as _free_dispatch,
         task_acceptance_preclaim_refusal,
     )
-
     def _refused(reason: str) -> Any:
         return ReviewRunResult(
             request={"surface": "task_acceptance", "task_id": str(ctx.task_id)},
             actors=[], parsed_findings=[], aggregate_signal="DEGRADED", degraded=True,
             degraded_reasons=[reason],
         )
-
     evidence = ctx.evidence or _build_host_acceptance_evidence(ctx)
     try:
         # R2: the SAME triad rows every other triad surface reads — each with
@@ -490,12 +478,10 @@ def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
     # R52). The per-send wallet binding at dispatch still protects money.
     from ouroboros.review_execution import ReviewRouteKind, panel_delivery_class, slot_delivery
     from ouroboros.tools.review_helpers import review_wave_budget_gate
-
     paid = [slot for slot in slots if getattr(slot, "route", None) is not ReviewRouteKind.AGENT_SESSION]
     if paid:
         try:
             from ouroboros.review_substrate import _messages_char_count, _request_messages
-
             _prompt_chars = max(
                 len(request.slot_session_tasks.get(slot.slot_id, "")) + len(request.policy["output_contract"])
                 if getattr(slot, "retrieves", False)
@@ -539,7 +525,6 @@ def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
     try:
         from ouroboros.review_cycles import review_max_cycles, review_max_cycles_source
         from ouroboros.utils import append_jsonl, utc_now_iso
-
         # TELEMETRY ONLY (owner R52): a panel that just cost money says what
         # bounded it, how long it ran, how many panels the tree has bought and
         # which deliveries it ran on — "21 paid panels" was invisible until
@@ -597,7 +582,6 @@ def _record_host_acceptance_run(ctx: _TaskAcceptanceContext, result: Any) -> Dic
         run_record["task_attempt"] = ctx.tools._ctx.task_attempt
     run_record.update(ctx.review_binding or {})
     from ouroboros.review_substrate import task_acceptance_is_clean
-
     run_record["enforcement_impact"] = (
         "allows_completion" if task_acceptance_is_clean(result) else "degrades_completion"
     )
@@ -622,7 +606,6 @@ def _set_applied_host_acceptance_impact(
         run_record["enforcement_impact"] = "requires_revision"
         return
     from ouroboros.review_substrate import task_acceptance_is_clean
-
     run_record["enforcement_impact"] = (
         "allows_completion" if task_acceptance_is_clean(result) else "degrades_completion"
     )
@@ -634,7 +617,6 @@ def _finish_cyber_acceptance(ctx: _TaskAcceptanceContext, result: Any) -> bool:
     from ouroboros.loop_delivery import delivery_subject_hash
     from ouroboros.review_records import build_author_disposition
     from ouroboros.review_substrate import build_improvement_capsule, task_acceptance_is_clean
-
     pending = acceptance_run_pending(result)
     if getattr(ctx.tools._ctx, "_acceptance_review_only", False):
         if not pending and (capsule := build_improvement_capsule(result, rails_line=ctx.rails_line)):
@@ -681,7 +663,6 @@ def _finish_advisory_author(ctx: _TaskAcceptanceContext) -> bool:
                      and run.get("feedback_delivered")), None)
     disposition = str(stance.get("agent_disposition") or "")
     from ouroboros.loop_delivery import delivery_evidence_fingerprint
-
     if (not feedback or not intent or disposition not in {"accepted", "rejected", "partial", "deferred"}
             or intent.get("review_binding_hash") != feedback.get("binding_hash")
             or intent.get("tool_count") != len(ctx.llm_trace.get("tool_calls") or [])
@@ -689,7 +670,6 @@ def _finish_advisory_author(ctx: _TaskAcceptanceContext) -> bool:
             or intent.get("evidence_fingerprint") != delivery_evidence_fingerprint(ctx.tools._ctx, ctx.llm_trace)):
         return False
     from ouroboros.review_records import build_author_disposition
-
     author = build_author_disposition(
         disposition=disposition, rationale=str(stance.get("agent_rationale") or ""),
         subject_hash=ctx.review_binding["binding_hash"],

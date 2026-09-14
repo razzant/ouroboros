@@ -320,12 +320,21 @@ def test_an_archive_entry_the_anchor_cannot_open_is_typed_corruption(data_root, 
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
     if held_dir_fd:  # the root handle is opened only on the dir-fd shape
-        data_root.chmod(0o111)  # traversable, unreadable: fd exhaustion reads the same
-        try:
-            with pytest.raises(UsageLedgerCorrupt):
+        real_open = os.open
+        denied = PermissionError(errno.EACCES, "root directory unavailable", str(data_root))
+
+        def refuse_root_open(path, flags, *args, **kwargs):
+            if path == str(data_root) and flags & os.O_DIRECTORY:
+                raise denied
+            return real_open(path, flags, *args, **kwargs)
+
+        # chmod does not make this open fail for UID 0; inject the actual
+        # filesystem error so root and ordinary-user runs test the same contract.
+        with monkeypatch.context() as unavailable:
+            unavailable.setattr(os, "open", refuse_root_open)
+            with pytest.raises(UsageLedgerCorrupt, match="root is not readable") as caught:
                 uc.archived_attempt_ids(data_root)
-        finally:
-            data_root.chmod(0o755)
+            assert caught.value.__cause__ is denied
     planted = archive_dir / "segment_ep0009_planted.jsonl"
     planted.symlink_to(data_root / "nowhere.jsonl")  # dangling: unopenable either way
     with pytest.raises(UsageLedgerCorrupt, match="could not complete"):

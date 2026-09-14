@@ -47,6 +47,11 @@ ACCESS_INSTRUCTIONS = {
     "workspace_write": (
         " ACCESS: you may edit inside this root; " + _ACCESS_PRECEDENCE
     ),
+    "full": (
+        " ACCESS: you may edit inside this root with full native process access "
+        "requested; effective access is established by the run receipt, and the "
+        "private snapshot is not an OS sandbox; " + _ACCESS_PRECEDENCE
+    ),
 }
 
 

@@ -706,6 +706,46 @@ class ClaudexorGateway:
                 return str(row.get("id") or "")
         return ""
 
+    def ensure_full_access(self, root: str) -> Dict[str, Any]:
+        """Apply a caller-authorized initial scope grant, preserving an existing denial.
+
+        Scoped GET also returns default false for an absent trust file. The
+        actual-file list distinguishes absence from an explicit refusal; its
+        path remains authoritative when a legacy record has no repoRoot.
+        """
+        from urllib.parse import quote
+
+        target = str(root)
+        body = self._request("GET", f"/v2/trust?repoRoot={quote(target, safe='')}")
+        entries = body.get("entries") if isinstance(body, dict) else None
+        if not isinstance(entries, list) or len(entries) != 1:
+            raise ClaudexorUnavailable("malformed_response", "Scoped trust lookup returned no unique state")
+        state = _trust_state(entries[0])
+        if state["repoRoot"] != target:
+            raise ClaudexorUnavailable("malformed_response", "Scoped trust lookup returned a different root")
+        if state["allowFullAccess"]:
+            return state
+        body = self._request("GET", "/v2/trust")
+        entries = body.get("entries") if isinstance(body, dict) else None
+        if not isinstance(entries, list):
+            raise ClaudexorUnavailable("malformed_response", "Trust listing returned no entries")
+        for entry in entries:
+            entry = _trust_state(entry)
+            if entry["path"] == state["path"]:
+                if entry["allowFullAccess"]:
+                    return entry
+                raise ClaudexorUnavailable(
+                    "trust_full_access_required", "Full access is disabled for this scope; its existing choice was preserved.",
+                    status_code=403,
+                )
+        granted = _trust_state(self._request(
+            "POST", "/v2/trust", json_body={"repoRoot": target, "allowFullAccess": True},
+        ))
+        if (granted["repoRoot"] != target or granted["path"] != state["path"]
+                or not granted["allowFullAccess"]):
+            raise ClaudexorUnavailable("malformed_response", "Trust update did not confirm full access for this scope")
+        return granted
+
     def start_run(self, request: Dict[str, Any], *, idempotency_key: str = "") -> Dict[str, Any]:
         """POST /v2/runs with a caller-built, schema-valid request body.
 
@@ -1074,6 +1114,16 @@ class ClaudexorGateway:
             json_body={"name": str(name), "value": str(value)},
         )
         return body if isinstance(body, dict) else {}
+
+
+def _trust_state(body: Any) -> Dict[str, Any]:
+    if (not isinstance(body, dict) or "repoRoot" not in body
+            or (body["repoRoot"] is not None and not isinstance(body["repoRoot"], str))
+            or not isinstance(body.get("path"), str) or not body["path"]
+            or type(body.get("allowFullAccess")) is not bool
+            or not isinstance(body.get("accessDefault"), str) or not body["accessDefault"]):
+        raise ClaudexorUnavailable("malformed_response", "Trust lookup returned an invalid state")
+    return body
 
 
 def _model_object(body: Any) -> Dict[str, Any]:

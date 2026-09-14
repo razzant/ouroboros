@@ -756,7 +756,7 @@ def _plugin_missing_remediation(agent_python: str, rejected: str = "") -> str:
 _DEFAULT_PREFLIGHT_TIMEOUT_SEC = 1800
 
 
-def _resolve_preflight_timeout(timeout: int) -> int:
+def _resolve_preflight_timeout(timeout: int = _DEFAULT_PREFLIGHT_TIMEOUT_SEC) -> int:
     """Env override (`OUROBOROS_PREFLIGHT_TIMEOUT_SEC`) takes precedence so the
     timeout is one SSOT across callers without editing each call site."""
     raw = os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
@@ -778,16 +778,17 @@ def _terminate_preflight_tree(proc: "subprocess.Popen", temp_root: pathlib.Path)
     children with new sessions) or double-forked to init survive it. So collect
     the live descendant PIDs and their group ids FIRST (the ``pgrep -P`` chain
     breaks once pytest dies and children reparent), then kill pytest's group, the
-    recursive PID tree, each captured escapee group, and finally sweep any
-    straggler still rooted under the disposable temp root. All platform-specific
-    process discovery/termination lives behind platform_layer helpers."""
+    recursive PID tree and each captured escapee group. The caller's existing
+    ProcessContainer then reaps detached/reparented members by its unique token
+    or Windows job, and reports any unconfirmed cleanup. A path substring is
+    not process ownership. Platform-specific operations stay in platform_layer.
+    """
     from ouroboros.platform_layer import (
         IS_WINDOWS,
         collect_descendant_pids,
         kill_pid_tree,
         kill_process_group_id,
         kill_process_tree,
-        kill_processes_referencing,
         process_group_id,
     )
 
@@ -809,7 +810,6 @@ def _terminate_preflight_tree(proc: "subprocess.Popen", temp_root: pathlib.Path)
             pass
     for gid in descendant_pgids:
         kill_process_group_id(gid)
-    kill_processes_referencing(str(temp_root))
 
 
 def _partial_stream_text(chunk) -> str:
@@ -910,8 +910,8 @@ def _execute_pytest_pass(
         # the verdict can carry it. `communicate` returning only proves the pytest
         # CONTROLLER exited: a test that spawned a detached child with redirected
         # stdio and a temp-path-free argv is invisible to both the `pgrep -P` walk
-        # (its parent is gone, so the ppid links are gone with it) and the
-        # command-line sweep. The container still names it, through the membership
+        # (its parent is gone, so the ppid links are gone with it). The container
+        # still names it, through the membership
         # token the kernel copied into every descendant's environment — including a
         # `setsid()` escapee's — resolved from the live process table HERE rather
         # than sampled earlier, so a child born and orphaned in the same instant is
@@ -1356,7 +1356,6 @@ def run_hermetic_pytest(
                 "error in the body below. This is not a test failure.",
                 str(exc), max_output,
             )
-        from ouroboros.platform_layer import kill_processes_referencing
         from ouroboros.commit_admission import (
             PreflightTestProof, capture_preflight_test_subject, log_preflight_test_proof,
             preflight_test_workload_unchanged,
@@ -1396,8 +1395,6 @@ def run_hermetic_pytest(
             )
             elapsed = time.monotonic() - pass_started
             timings.append((spec.label, round(elapsed, 1)))
-            # Sweep between passes so a pass-1 escapee cannot touch pass 2.
-            kill_processes_referencing(str(temp_root))
             if reap_error:
                 # Checked BEFORE the exit code, including before the green path:
                 # the scan says processes the pass spawned are still running (or
@@ -1482,8 +1479,6 @@ def run_hermetic_pytest(
     except Exception as exc:
         return f"⚠️ PRE_PUSH_TEST_ERROR: hermetic preflight failed: {exc}"
     finally:
-        from ouroboros.platform_layer import kill_processes_referencing
-        kill_processes_referencing(str(temp_root))
         if worktree_added:
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree)],

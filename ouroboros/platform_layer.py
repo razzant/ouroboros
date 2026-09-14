@@ -969,34 +969,6 @@ def collect_descendant_pids(pid: int, *, exclude_pids: "set[int] | None" = None)
     return result
 
 
-def kill_processes_referencing(marker: str) -> None:
-    """Force-kill any process whose command line references ``marker``.
-
-    Sweeps children that double-forked to init, escaping both ``killpg`` and the
-    ``pgrep -P`` walk. ``marker`` is matched literally (regex specials escaped) so a
-    temp path containing ``.``/``+`` cannot over-match unrelated command lines."""
-    if IS_WINDOWS or not marker:
-        return
-    try:
-        out = subprocess.run(
-            ["pgrep", "-f", re.escape(marker)], capture_output=True, text=True, timeout=3
-        )
-    except Exception:
-        return
-    my_pid = os.getpid()
-    for line in (out.stdout or "").strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            pid = int(line)
-        except ValueError:
-            continue
-        if pid == my_pid:
-            continue
-        force_kill_pid(pid)
-
-
 def tcp_keepalive_socket_options() -> List[tuple]:
     """Platform-guarded TCP keepalive options from config; unknown options are omitted.
 

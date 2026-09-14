@@ -120,7 +120,7 @@ def test_first_run_onboarding_is_presented_only_after_the_gateway_is_healthy():
         "_prepare_first_run_settings()",
         '_cleanup_recorded_server_process("preflight")',
         "lifecycle_thread.start()",
-        "_await_server_ready(port, _abort)",
+        "_await_server_ready(port, _abort, lifecycle_thread)",
         "_present_first_run_onboarding(",
     ]
     positions = [src.index(marker) for marker in order]
@@ -237,7 +237,7 @@ def test_completion_reporting_restart_required_recycles_the_managed_server(monke
     src = inspect.getsource(launcher.main)
     restart_at = src.index('if onboarding["restart_required"]')
     assert "_request_agent_restart()" in src[restart_at:restart_at + 800]
-    assert "_await_server_ready(port, _abort)" in src[restart_at:restart_at + 800]
+    assert "_await_server_ready(port, _abort, lifecycle_thread)" in src[restart_at:restart_at + 800]
 
 
 # --------------------------------------------------------------------------

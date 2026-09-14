@@ -17,14 +17,15 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import textwrap
+import time
 
 import pytest
 
 from ouroboros import preflight_node as pn
 
-# Spawns real node/git subprocesses; run_hermetic_pytest's reaper sweeps
-# processes referencing its temp root. Same class as test_preflight_runner.py.
+# Spawns real node/git subprocesses and exercises pass-owned process cleanup.
 pytestmark = pytest.mark.serial
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -219,6 +220,97 @@ def test_a_passing_web_suite_is_green(tmp_path):
     assert result["returncode"] == 0
     assert result["files"] == 1
     assert result["node"]
+
+
+@requires_node
+@pytest.mark.skipif(os.name == "nt", reason="POSIX detached-process cleanup")
+@pytest.mark.parametrize("outcome", ["pass", "fail", "timeout"])
+def test_relative_root_reaps_owned_children_and_preserves_unrelated_process(
+    tmp_path, monkeypatch, outcome,
+):
+    """The real '.' invocation must clean its children without claiming the host.
+
+    A command-line search is intercepted even on regression, so this test can
+    never signal arbitrary host processes. Real container discovery still runs.
+    """
+    from ouroboros.platform_layer import force_kill_pid, pid_is_alive
+
+    pid_file = tmp_path / "owned.json"
+    body = f"""
+        import test from 'node:test';
+        import assert from 'node:assert/strict';
+        import {{spawn}} from 'node:child_process';
+        import {{writeFileSync}} from 'node:fs';
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {{}}, 1000)'],
+                            {{detached: true, stdio: 'ignore'}});
+        writeFileSync({json.dumps(str(pid_file))}, JSON.stringify({{root: process.pid, child: child.pid}}));
+        child.unref();
+        test('owned_fixture', async () => {{
+            if ({json.dumps(outcome)} === 'timeout') await new Promise(r => setTimeout(r, 60000));
+            assert.equal({json.dumps(outcome)} === 'fail', false);
+        }});
+    """
+    worktree = _worktree(tmp_path, {"web/tests/owned.test.js": textwrap.dedent(body)})
+    stranger = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(120)",
+         str(worktree / "unrelated.android.service")],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        start_new_session=True,
+    )
+    original_run = subprocess.run
+    broad_queries = []
+
+    def record_process_search(argv, *args, **kwargs):
+        if list(argv[:2]) == ["pgrep", "-f"]:
+            broad_queries.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        return original_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", record_process_search)
+    monkeypatch.chdir(worktree)
+    try:
+        assert stranger.stdout.readline().strip() == "ready"
+        result = pn.run_node_tests(".", ".", 2 if outcome == "timeout" else 30, 8000)
+        assert not broad_queries, "preflight rediscovered process ownership from command-line text"
+        assert stranger.poll() is None, "an unrelated process was killed because its argv named a path"
+        assert pid_file.exists(), "the owned fixture never ran"
+        owned = json.loads(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while any(pid_is_alive(pid) for pid in owned.values()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not any(pid_is_alive(pid) for pid in owned.values()), "an owned worker or orphan survived"
+        if outcome == "timeout":
+            assert result["returncode"] is None and "timed out" in result["error"]
+        elif outcome == "fail":
+            assert result["returncode"] not in (0, None) and "NODE_TESTS_FAILED" in result["error"]
+        else:
+            assert result["returncode"] == 0 and result["error"] is None
+    finally:
+        if pid_file.exists():
+            for pid in json.loads(pid_file.read_text()).values():
+                if pid_is_alive(pid):
+                    force_kill_pid(pid)
+        stranger.terminate()
+        stranger.wait(timeout=10)
+        stranger.stdout.close()
+
+
+@requires_node
+def test_node_containment_unknown_remains_a_hard_block(tmp_path, monkeypatch):
+    from ouroboros.process_containment import ProcessContainer
+
+    original_reap = ProcessContainer.reap
+
+    def reap_with_unknown(container):
+        original_reap(container)
+        return "the live process table could not be enumerated"
+
+    monkeypatch.setattr(ProcessContainer, "reap", reap_with_unknown)
+    worktree = _worktree(tmp_path, {"web/tests/ok.test.js": _PASSING_TEST})
+    result = pn.run_node_tests(worktree, tmp_path / "t", 30, 8000)
+    assert result["returncode"] == 0
+    assert "PREFLIGHT_CONTAINMENT_FAILED" in result["error"]
+    assert "could not be enumerated" in result["error"]
 
 
 # ── Orchestration: the gate runs the lane on the CANDIDATE tree ───────

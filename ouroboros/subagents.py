@@ -32,6 +32,7 @@ from datetime import datetime, timezone  # noqa: F401
 from typing import Any, Dict, List, Mapping
 
 from ouroboros.config import runtime_setting
+from ouroboros.configured_subagents import SESSION_ACCESS_PROFILES
 from ouroboros.config import (
     SETTINGS_DEFAULTS,
     get_heavy_model,
@@ -131,13 +132,19 @@ class DelegatedRunShape:
     delegated: bool = False
 
 
-def delegated_run_shape(acting: bool) -> DelegatedRunShape:
+def is_mutating_delegated_access(access: str) -> bool:
+    """Profiles that keep the same owned snapshot, retry and capture contract."""
+    return isinstance(access, str) and access in SESSION_ACCESS_PROFILES
+
+
+def delegated_run_shape(acting: bool, access: str = "workspace_write") -> DelegatedRunShape:
     """The run shape for an acting (mutating) child, or for a read-only one.
 
-    A MUTATING child runs ``live``: Claudexor edits the nanny's OWN worktree in place,
-    so the nanny's existing workspace-patch capture sees the harness's edits with no
-    new plumbing, and the same capture invalidates itself if the harness dared to
-    commit. In place is also the ONE shape where Claudexor would otherwise hand the
+    A MUTATING child runs ``live`` in the host's private execution snapshot;
+    captured changes still require explicit integration. The selected immutable
+    owner-configured session may request full access; existing rows keep workspace_write.
+    This changes the harness's OS powers, not the task's assignment or write target.
+    In place is also the ONE shape where Claudexor would otherwise hand the
     harness the operator's real ``$HOME`` — which holds the daemon control token — so
     ``delegated`` travels with it, inseparably, in the same record.
 
@@ -146,8 +153,9 @@ def delegated_run_shape(acting: bool) -> DelegatedRunShape:
     one derived difference, not a second pipeline.
     """
     if acting:
-        return DelegatedRunShape(access="workspace_write", mode="agent",
-                                 isolation="live", delegated=True)
+        if not is_mutating_delegated_access(access):
+            raise ValueError("Delegated session access must be workspace_write or full")
+        return DelegatedRunShape(access=access, mode="agent", isolation="live", delegated=True)
     return DelegatedRunShape(access="readonly", mode="ask")
 
 

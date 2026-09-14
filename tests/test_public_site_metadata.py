@@ -12,6 +12,7 @@ import yaml
 
 from ouroboros.tools.release_sync import (
     RELEASE_ASSET_TEMPLATES,
+    DESKTOP_DOWNLOAD_IDS,
     release_asset_download_url,
 )
 
@@ -187,7 +188,7 @@ def test_install_manifest_discovers_releases_without_future_asset_hashes():
     }
     assert artifacts == expected
     assert {row["nameTemplate"] for row in manifest["artifacts"]} == set(
-        RELEASE_ASSET_TEMPLATES.values()
+        RELEASE_ASSET_TEMPLATES[proof_id] for proof_id in DESKTOP_DOWNLOAD_IDS
     )
     for row in manifest["artifacts"]:
         assert "sha256" not in row
@@ -238,7 +239,7 @@ def test_install_page_has_version_bound_direct_downloads_before_advanced_setup()
             "</div>", 1
         )[0]
         assert "/releases/latest" not in downloads
-        for proof_id in RELEASE_ASSET_TEMPLATES:
+        for proof_id in DESKTOP_DOWNLOAD_IDS:
             expected = release_asset_download_url(proof_id, version)
             assert f'data-release-download="{proof_id}"' in html
             assert expected in html

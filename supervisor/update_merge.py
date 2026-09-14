@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -736,6 +737,14 @@ def update_restart_smoke() -> Dict[str, Any]:
 _ASSISTED_BOOT_ATTEMPT_CAP = 3
 
 
+def external_host_restart_smoke() -> Dict[str, Any]:
+    """Read the selected native host's installed artifact; never install it here."""
+    hook = os.environ.get("OUROBOROS_EXTERNAL_HOST_UPDATE", "")
+    if not hook:
+        return {"ok": True, "skipped": "no_external_host"}
+    return _run_update_smoke([sys.executable, hook, "--check"])
+
+
 def _log_supervisor(payload: Dict[str, Any]) -> None:
     append_jsonl(_g.DRIVE_ROOT / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), **payload})
 
@@ -772,6 +781,14 @@ def _finalize_pending_boot_smoke(tx: Dict[str, Any], supervisor_ready: bool) -> 
         tx["pre_restart_smoke"] = _PRE_RESTART_SMOKE_PASSED
         write_update_tx(tx)
     if bool(supervisor_ready) and merge_in_head:
+        native_smoke = external_host_restart_smoke()
+        if not native_smoke.get("ok"):
+            ok, msg = rollback_managed_update(
+                "external_host_post_boot_smoke_failed", reopen_writer_admission=False
+            )
+            _log_supervisor({"type": "managed_update_native_host_failed", "ok": ok,
+                             "msg": msg, "smoke": native_smoke})
+            return {"finalized": False, "rolled_back": ok, "msg": msg, "smoke": native_smoke}
         if not _g._clear_update_intent():
             mark_update_tx_gate_blocked("finalize_intent_cleanup_failed")
             return {"finalized": False, "reason": "could not clear update intent"}

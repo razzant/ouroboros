@@ -2698,6 +2698,11 @@ by "Provider Independence" above. Call-site imperatives:
   the lock; unrelated CURRENT fields survive. Pending retry starts from CURRENT,
   not an old child body. One operation-scoped memo may reuse verified work; it
   must not cache failure as success or survive as a second store.
+- Mirror a split root's actual execution start and child-drive binding into its
+  canonical result through the existing terminal-preserving writer.
+  Recover a legacy missing binding only from positive known-child start evidence
+  plus the existing fresh-queue/later-worker orphan proof, never while pending or
+  actively cancelled and never as permission to resume execution.
 - Pooled terminal file preparation belongs to `headless.prepare_terminal_task_files`
   at the worker's own task_done boundary, after blocking post-task
   work and before releasing the slot. Earlier answer/metrics delivery stays early.
@@ -2898,6 +2903,11 @@ commit review.
   before the destruction; record the pointer in the update transaction so a
   replayed rollback does not re-snapshot and a retry rescues what appeared
   since.
+- External native hosts add no source updater. Their selected launcher hook
+  installs/verifies the source-selected artifact before the next core generation;
+  the managed post-boot check verifies it again before finalization. Failure uses
+  the existing rollback transaction. Worker self-restart verification retains
+  incomplete native adoption even when the expected core SHA is running.
 - Manual Restore reuses the same writer fence and pins the previous HEAD on
   a local recovery branch before reset. Promotion resolves the development
   SHA once and uses that exact SHA for both the local QA ref and any remote
@@ -3060,6 +3070,90 @@ Failed final sends remain delivery failures; background failure after a successf
 body is a separate diagnostic. Widget pull credits bound transport buffering;
 large URL downloads use the existing native/browser file owner, never an automatic
 HTTP-stream-to-Blob conversion.
+
+## Android platform development
+
+Android keeps the common source/update/review authority. Its runtime layout,
+launcher/seed distinction, native artifact receipt and lifecycle owners live in
+ARCHITECTURE "Android host (experimental)"; the user procedure is
+`docs/ANDROID_INSTALL.md`. Keep experiments described as rooted ARM64 Android,
+physically tested on Pixel 10a only. Do not turn that tested model into a runtime
+allowlist or treat the manifest's minimum SDK as a proven support matrix.
+
+Native changes use ordinary Android source, reviewed commits and the persistent
+per-install signing identity. Never copy the publisher private key, runtime
+credentials, memory or a live rootfs into release assets. Verify official bytes
+before trusting their source; distinguish a publisher-signed reference APK from
+the locally built installed APK, and record each artifact's own identity. Restore
+the original personal key after loss; do not silently generate another identity
+for an installed package. Preserve source/data/key on installer retries and use
+the existing managed Git merge to retain local evolution during official updates.
+
+Dependency changes must reach the same source-selected hook: `ensure_platform`
+serves first installation and later updates, with package, Java SDK, native AAPT,
+common Node and browser input groups in the existing SDK receipt. Include tracked
+recipes and patches; retain `platform_preparing` until completion so interruption
+and Git rollback cannot reuse a partially changed SDK as current. Verify installed
+output hashes and desired-source stability before native success. Use the existing
+verified download cache, Node manager and Playwright installer; do not start a
+second daemon. A legacy receipt is prepared once; Java SDK-only changes skip AAPT
+compilation. The common `EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC` constant is 3600
+seconds in `runtime_limits.py`, re-exported by `config.py`, with the existing
+ProcessContainer cleanup. Start the HTTP readiness clock only after server spawn, not while native preparation runs. Propagate launcher shutdown into the hook and await its owned cleanup before exiting, including a later generation. Preparation completion is not HTTP or native-success evidence. This bound is not an environment setting or a harness deadline.
+The Ubuntu Base archive remains initial seed provenance. Same-Noble apt recipes
+can evolve, with actual installed package versions recorded; Git rollback does
+not promise package removal/downgrade or a major distribution migration.
+
+Exercise actual source → dependency preparation → build → install → readback → restart behavior before
+claiming native adoption. Cover failed native builds alongside a still-usable
+core, older immutable seed with newer source, local APK modification followed by
+an upstream source merge, bootstrap-only changes, rollback to older native source
+with a newer versionCode, bridge loss/recovery, and Panic versus automatic entry.
+Core HTTP health is separate from native artifact and bridge readiness; checks
+must use their existing owners and preserve incomplete outcomes.
+
+Each Available-subagents `agent_session` row may select `access=full` for its
+mutating assignments; omitted access stays `workspace_write` on every platform.
+API-model rows cannot request full. Preserve the choice in the existing canonical
+configuration fingerprint and immutable task snapshot, and consume that snapshot
+at dispatch preflight and fresh start. Omitted defaults must preserve existing
+fingerprints. Both profiles use the same snapshot, retry, capture and
+persistent-registration owners.
+Only a fresh full request can create an absent Claudexor trust grant for its stable
+project root through the existing API; an explicit false grant remains a refusal.
+Retries use their stored access and exact request, without granting or widening.
+Full means broader native process powers, not a different assignment or implicit
+patch integration. Read-only tasks retain Ask/readonly; an Android Codex sandbox
+failure must not be hidden as success or an automatic full-access retry.
+
+On Android, `enter-linux` restores ordinary OOM selection for its own process and
+descendants without removing root. The existing
+`OUROBOROS_PREFLIGHT_TEST_WORKERS` operator lever defaults to 2 and
+`OUROBOROS_PREFLIGHT_TIMEOUT_SEC` to 3600 seconds at this entry, preserving explicit
+overrides. Other installs retain the upstream 1800-second total test budget.
+Standalone preflight/advisory ToolEntry bounds add that resolved test total to the
+existing plan-style task/transport settlement envelope and finalization grace;
+they must not expire before tests and the critic can settle. This outer bound
+creates no new cognitive deadline; inner critic/owner deadlines, test containment
+and the reviewed commit's terminal wait remain unchanged. These settings change
+test concurrency/time, not test content, review models or context. Measure memory/swap and confirm process cleanup before
+running full preflight on a phone; do not deliberately reproduce a kernel panic.
+Keep reusable large downloads in the installer's durable cache.
+
+`android-test` explicitly collects `android/tests`; ordinary `pytest tests/` does
+not cover that directory. Portable source/transport fixtures and host compilation
+are separate from physical root, boot, permissions, hardware and battery evidence.
+The same-key instrumentation under `android/tests/device` owns a temporary SDK
+bridge and an uncommitted PackageInstaller session. The emulator job executes
+session readback on API 26/29/30/33/36 and accepts its explicit PASS only after
+abandon and bridge cleanup. It requires neither root nor a provisioned Linux
+core; it does not certify the phone bootstrap or owner consent UI.
+Android release source/APK SBOMs describe those shipped bytes; installed dependency
+pins/package inventories describe the provisioned phone. Neither invents the other.
+The trusted tag-only `android-build` job reads `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, and `ANDROID_KEY_ALIAS` from repository secrets;
+the branch/PR Android jobs use a disposable key and never publish it. A PR is
+therefore source/build evidence, not a publisher-signed release claim.
 
 ## Platform Abstraction Rule
 
@@ -3680,7 +3774,7 @@ across runs.
 
 The artifact pipeline — per-platform archive smokes, native Linux packages,
 the AppImage custody chain, SBOM and attestation binding, and the
-seven-asset release job — lives in ARCHITECTURE "8. Git Branching, CI, and
+nine-asset release job — lives in ARCHITECTURE "8. Git Branching, CI, and
 Build" and `.github/workflows/ci.yml`. The honesty invariants a change must
 preserve:
 

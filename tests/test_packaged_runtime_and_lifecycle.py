@@ -224,8 +224,8 @@ def test_a_restart_with_a_failed_dependency_install_pauses_and_discloses(
         launcher, "_cleanup_recorded_server_group_for_pid", lambda pid, reason: None,
     )
     monkeypatch.setattr(launcher, "_update_server_process_record_port", lambda pid, port: None)
-    monkeypatch.setattr(launcher, "_poll_port_file", lambda timeout=30: 52123)
-    monkeypatch.setattr(launcher, "_wait_for_server", lambda port, timeout=45: True)
+    monkeypatch.setattr(launcher, "_poll_port_file", lambda timeout=30, abort_event=None: 52123)
+    monkeypatch.setattr(launcher, "_wait_for_server", lambda port, timeout=45, abort_event=None: True)
     monkeypatch.setattr(launcher, "PORT_FILE", tmp_path / "port")
     monkeypatch.setattr(launcher, "_sync_existing_repo_from_bundle", lambda: None)
     monkeypatch.setattr("time.sleep", lambda seconds: None)

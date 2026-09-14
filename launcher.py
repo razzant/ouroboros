@@ -1,4 +1,4 @@
-"""Immutable desktop launcher: bootstrap repo, manage server.py, and host UI."""
+"""Immutable launcher: bootstrap repo, manage server.py, and optionally host UI."""
 
 from __future__ import annotations
 
@@ -53,6 +53,9 @@ from ouroboros.launcher_bootstrap import (
     check_git as _check_git,
     install_deps as _install_deps_impl,
     embedded_python_env,
+    update_external_host,
+    parse_launch_options,
+    automatic_launch_allowed,
     sync_existing_repo_from_bundle as _sync_existing_repo_from_bundle_impl,
 )
 from ouroboros.launcher_onboarding import (
@@ -182,7 +185,7 @@ EMBEDDED_PYTHON = _find_embedded_python()
 def _bundle_dir() -> pathlib.Path:
     if getattr(sys, "frozen", False):
         return pathlib.Path(sys._MEIPASS)
-    return pathlib.Path(__file__).parent
+    return _external_seed_bundle or pathlib.Path(__file__).parent
 
 
 def _bootstrap_context() -> BootstrapContext:
@@ -192,7 +195,7 @@ def _bootstrap_context() -> BootstrapContext:
         data_dir=DATA_DIR,
         settings_path=SETTINGS_PATH,
         embedded_python=EMBEDDED_PYTHON,
-        app_version=APP_VERSION,
+        app_version=(_external_seed_bundle / "VERSION").read_text().strip() if _external_seed_bundle else APP_VERSION,
         hidden_run=_hidden_run,
         # Launcher is owner-process boundary; first-launch migration may set runtime mode.
         save_settings=lambda settings: save_settings(settings, allow_elevation=True),
@@ -229,6 +232,11 @@ _webview_window = None
 # probe never runs there, so every `if _headless:` branch is dead code on
 # those platforms and their behavior is unchanged.
 _headless = False
+_external_ui = False
+_external_host_update: Optional[pathlib.Path] = None
+_external_host_result: dict = {}
+_external_seed_bundle: Optional[pathlib.Path] = None
+_launch_argv: list[str] = []
 
 
 def _server_process_identity_matches(record: dict) -> bool:
@@ -394,7 +402,16 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     # erase an injected value). Known bounded lie: a SIGKILLed launcher can
     # orphan the server with a stale "desktop_window" until the next launcher
     # start reaps it — the same envelope OUROBOROS_MANAGED_BY_LAUNCHER accepts.
-    env["OUROBOROS_PRESENTATION"] = "browser_fallback" if _headless else "desktop_window"
+    env["OUROBOROS_PRESENTATION"] = (
+        str(os.environ.get("OUROBOROS_PRESENTATION") or "web")
+        if _external_ui else "browser_fallback" if _headless else "desktop_window"
+    )
+    if _external_host_update is not None:
+        env["OUROBOROS_EXTERNAL_HOST_UPDATE"] = str(_external_host_update)
+        env["OUROBOROS_EXTERNAL_HOST_RESULT"] = json.dumps(_external_host_result)
+    else:
+        env.pop("OUROBOROS_EXTERNAL_HOST_UPDATE", None)
+        env.pop("OUROBOROS_EXTERNAL_HOST_RESULT", None)
     # The server runs out of the managed repo, not the bundle: without this the
     # bundled payloads (node, ripgrep) are invisible to it (platform_layer.
     # bundled_resource_bases).
@@ -650,10 +667,12 @@ def _wait_for_server(port: int, timeout: float = 30.0, abort_event=None) -> bool
     return False
 
 
-def _poll_port_file(timeout: float = 30.0) -> int:
+def _poll_port_file(timeout: float = 30.0, abort_event=None) -> int:
     """Poll until the port file is freshly written."""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if abort_event is not None and abort_event.is_set():
+            break
         try:
             if PORT_FILE.exists():
                 age = time.time() - PORT_FILE.stat().st_mtime
@@ -704,7 +723,7 @@ def _kill_orphaned_children(port: int, reason: str = "window_close") -> None:
 
 def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
     """Start/monitor agent; restart on code 42 or bounded crashes."""
-    global _agent_proc, _agent_job
+    global _agent_proc, _agent_job, _external_host_result
     crash_times: list[float] = []
 
     while not _shutdown_event.is_set():
@@ -725,11 +744,17 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         except OSError:
             pass
 
+        _external_host_result = update_external_host(_external_host_update, EMBEDDED_PYTHON, log, _shutdown_event)
+        if _shutdown_event.is_set():
+            break  # Native preparation has reaped its owned processes before returning.
         proc = start_agent(port)
+        if _shutdown_event.is_set():
+            stop_agent()
+            break
 
-        actual_port = _poll_port_file(timeout=30)
+        actual_port = _poll_port_file(timeout=30, abort_event=_shutdown_event)
         _update_server_process_record_port(proc.pid, actual_port)
-        if not _wait_for_server(actual_port, timeout=45):
+        if not _wait_for_server(actual_port, timeout=45, abort_event=_shutdown_event):
             log.warning("Agent server did not become responsive within 45s (port %d)", actual_port)
 
         proc.wait()
@@ -801,6 +826,9 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
                         "import them — see the pip output above for the cause.",
                         MAX_CRASH_RESTARTS, CRASH_WINDOW_SEC,
                     )
+            if _external_seed_bundle is not None:
+                release_pid_lock()
+                os.execv(EMBEDDED_PYTHON, [EMBEDDED_PYTHON, str(REPO_DIR / "launcher.py"), *_launch_argv])
             # No port sweep here: _pre_generation_cleanup owns it next iteration.
             continue
 
@@ -831,13 +859,24 @@ def _request_agent_restart() -> None:
     stop_agent()
 
 
-def _await_server_ready(port: int, abort_event=None) -> tuple[bool, int]:
+def _await_server_ready(port: int, abort_event=None, lifecycle_thread=None) -> tuple[bool, int]:
     """Wait for managed-server health; resolve the AUTHORITATIVE bound port.
 
     The server may rebind on conflict and publish the real port in
     ``data/state/server_port``; every later consumer (UI URL, onboarding window,
     teardown sweep) must use that value, not the requested one.
     """
+    if _external_host_update is not None and lifecycle_thread is not None:
+        # Native preparation has its own bounded operation before server.py exists.
+        # Do not spend the HTTP readiness window waiting for a compiler. On shutdown
+        # the hook observes the event and reaps before this thread can finish.
+        while lifecycle_thread.is_alive():
+            with _agent_lock:
+                if _agent_proc is not None:
+                    break
+            lifecycle_thread.join(timeout=0.1)
+        else:
+            return False, _read_port_file()
     ready = _wait_for_server(port, timeout=15, abort_event=abort_event)
     actual_port = _read_port_file()
     if actual_port != port:
@@ -1075,13 +1114,16 @@ def _run_headless_main(url: str, port: int, lifecycle_thread: threading.Thread) 
         # A signal can land between main()'s startup check and this entry:
         # no URL announcement / browser launch mid-shutdown — straight to
         # teardown (the keep-alive loop returns immediately).
-        log.info("Headless browser mode: serving the UI at %s", url)
-        print(
-            f"Ouroboros is running at {url}. No GUI backend (GTK/QT) — "
-            "opening in your default browser. Press Ctrl-C to stop.",
-            flush=True,
-        )
-        _open_browser_detached(url)
+        log.info("Headless mode: serving the UI at %s", url)
+        if _external_ui:
+            print(f"Ouroboros is running at {url}. UI is owned by the host.", flush=True)
+        else:
+            print(
+                f"Ouroboros is running at {url}. No GUI backend (GTK/QT) — "
+                "opening in your default browser. Press Ctrl-C to stop.",
+                flush=True,
+            )
+            _open_browser_detached(url)
     # Handlers were installed in main() BEFORE the lifecycle thread started;
     # the browser open above rides a daemon thread because stdlib can resolve
     # a console browser (GenericBrowser) that blocks for its whole lifetime.
@@ -1094,6 +1136,8 @@ def _run_headless_main(url: str, port: int, lifecycle_thread: threading.Thread) 
             break
     requested_shutdown = _shutdown_event.is_set()
     stop_agent()
+    if _external_host_update is not None:
+        lifecycle_thread.join()  # The hook observes shutdown and owns its bounded reap.
     _kill_orphaned_children(port, reason="headless_shutdown" if requested_shutdown else "crash_fuse")
     # NO explicit release_pid_lock(): sys.exit runs the atexit-registered
     # release, and a second release would unconditionally unlink a lock a
@@ -1101,8 +1145,16 @@ def _run_headless_main(url: str, port: int, lifecycle_thread: threading.Thread) 
     sys.exit(0 if requested_shutdown else 1)
 
 
-def main():
-    if IS_WINDOWS:
+def main(argv=()):
+    global _headless, _external_ui, _external_host_update, _external_seed_bundle, _launch_argv
+    options = parse_launch_options(argv)
+    _launch_argv = list(argv)
+    _external_ui = options.no_ui
+    _external_host_update = options.host_update.resolve() if options.host_update is not None else None
+    _external_seed_bundle = options.seed_bundle.resolve() if options.seed_bundle is not None else None
+    if _external_ui:
+        _headless = True
+    if IS_WINDOWS and not _external_ui:
         ok, reason = _prepare_windows_webview_runtime()
         if not ok:
             log.error("Windows UI runtime initialization failed: %s", reason)
@@ -1114,7 +1166,8 @@ def main():
             )
             return
 
-    _detect_headless()
+    if not _external_ui:
+        _detect_headless()
 
     if not _headless:
         import webview
@@ -1146,7 +1199,8 @@ def main():
             # default browser at it. Bounded join: the open rides a daemon
             # thread (see _open_browser_detached), and returning immediately
             # would end the process under the opener before it fires.
-            _open_browser_detached(existing_url).join(timeout=5.0)
+            if not _external_ui:
+                _open_browser_detached(existing_url).join(timeout=5.0)
             return
         webview.create_window(
             "Ouroboros",
@@ -1161,6 +1215,9 @@ def main():
     import atexit
 
     atexit.register(release_pid_lock)
+
+    if not automatic_launch_allowed(options.launch_intent, DATA_DIR, log):
+        return
 
     if not check_git():
         log.warning("Git not found.")
@@ -1279,7 +1336,7 @@ def main():
     lifecycle_thread = threading.Thread(target=agent_lifecycle_loop, args=(port,), daemon=True)
     lifecycle_thread.start()
 
-    server_ready, actual_port = _await_server_ready(port, _abort)
+    server_ready, actual_port = _await_server_ready(port, _abort, lifecycle_thread)
 
     if server_ready and onboarding_required and not _shutdown_event.is_set():
         # The gateway is live and, with no provider configured, runs WITHOUT a
@@ -1297,7 +1354,7 @@ def main():
             # runtime-mode baseline). The launcher owns the process, so it
             # recycles it instead of leaving the owner with a restart nag.
             _request_agent_restart()
-            server_ready, actual_port = _await_server_ready(port, _abort)
+            server_ready, actual_port = _await_server_ready(port, _abort, lifecycle_thread)
 
     if _headless and _shutdown_event.is_set():
         # Shutdown during startup: same teardown the keep-alive loop performs
@@ -1534,4 +1591,4 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    main()
+    main(sys.argv[1:])

@@ -7,10 +7,118 @@ test_launcher_sync.py / test_packaged_runtime_and_lifecycle.py which import
 ``monkeypatch`` so the tests are parallel-safe and leave no residue.
 """
 
+import json
 import sys
 import types
 
 import pytest
+
+
+@pytest.fixture
+def external_launcher(monkeypatch, tmp_path):
+    """A native host owns presentation; never start or stop the live install."""
+    import atexit
+    import launcher
+
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "_headless", False)
+    monkeypatch.setattr(launcher, "_external_ui", False)
+    monkeypatch.setattr(launcher, "_external_host_update", None)
+    monkeypatch.setattr(launcher, "acquire_pid_lock", lambda: True)
+    monkeypatch.setattr(atexit, "register", lambda *args: None)
+    monkeypatch.setattr(launcher, "_detect_headless", lambda: pytest.fail("GUI probe"))
+    monkeypatch.setattr(launcher, "_prepare_windows_webview_runtime", lambda: pytest.fail("Windows GUI setup"))
+    monkeypatch.setattr(launcher, "_open_browser_detached", lambda *_: pytest.fail("browser opened"))
+    return launcher
+
+
+def test_external_ui_reopen_attaches_without_browser(external_launcher, monkeypatch):
+    launcher = external_launcher
+    monkeypatch.setattr(launcher, "acquire_pid_lock", lambda: False)
+    monkeypatch.setattr(launcher, "_read_port_file", lambda: 9876)
+    monkeypatch.setattr(launcher, "_wait_for_server", lambda *args, **kwargs: True)
+    launcher.main(["--no-ui"])
+    assert launcher._headless
+
+
+@pytest.mark.parametrize("intent,marker,launches", [
+    ("automatic", "panic", False),
+    ("owner", "panic", True),
+    ("automatic", "owner_restart_no_resume", True),
+    ("automatic", None, True),
+])
+def test_native_boot_preserves_panic_but_owner_can_start(
+    external_launcher, monkeypatch, intent, marker, launches,
+):
+    launcher = external_launcher
+    flag = launcher.DATA_DIR / "state" / "panic_stop.flag"
+    if marker is not None:
+        flag.parent.mkdir()
+        flag.write_text(marker)
+    observed = []
+
+    class ReachedBootstrap(Exception):
+        pass
+
+    def bootstrap():
+        observed.append("bootstrap")
+        raise ReachedBootstrap()
+
+    monkeypatch.setattr(launcher, "check_git", lambda: True)
+    monkeypatch.setattr(launcher, "bootstrap_repo", bootstrap)
+    if launches:
+        with pytest.raises(ReachedBootstrap):
+            launcher.main(["--no-ui", "--launch-intent", intent])
+    else:
+        launcher.main(["--no-ui", "--launch-intent", intent])
+    assert bool(observed) == launches
+    if marker is not None:
+        assert flag.read_text() == marker
+
+
+def test_external_ui_keepalive_preserves_crash_shutdown(external_launcher, monkeypatch):
+    launcher = external_launcher
+    monkeypatch.setattr(launcher, "_external_ui", True)
+    monkeypatch.setattr(launcher, "_shutdown_event", _FakeEvent())
+    stopped = []
+    monkeypatch.setattr(launcher, "stop_agent", lambda: stopped.append("stop"))
+    monkeypatch.setattr(launcher, "_kill_orphaned_children", lambda *a, **kw: stopped.append("cleanup"))
+    with pytest.raises(SystemExit) as result:
+        launcher._run_headless_main("http://127.0.0.1:9876", 9876,
+                                    types.SimpleNamespace(is_alive=lambda: False))
+    assert result.value.code == 1
+    assert stopped == ["stop", "cleanup"]
+
+
+@pytest.mark.parametrize("returncode,complete", [(0, True), (1, True), (0, False)])
+def test_native_update_uses_selected_hook_and_discloses_failure(
+    external_launcher, monkeypatch, tmp_path, caplog, returncode, complete,
+):
+    launcher = external_launcher
+    hook = tmp_path / "update-host"
+    monkeypatch.setattr(launcher, "_external_host_update", hook)
+    calls = []
+    proof = {"status": "installed", "source_commit": "a" * 40, "input_sha256": "b" * 64,
+             "apk_sha256": "c" * 64, "signer_sha256": "d" * 64}
+    payload = json.dumps(proof if complete else {"status": "installed"})
+    def communicate(*, timeout):
+        from ouroboros.config import EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC
+        assert timeout == EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC == 3600.0
+        return payload, ''
+
+    process = types.SimpleNamespace(returncode=returncode, stdout=None, stderr=None,
+                                    communicate=communicate,
+                                    wait=lambda **kw: returncode)
+    container = types.SimpleNamespace(
+        spawn=lambda argv, **kw: calls.append(argv) or process,
+        reap=lambda: "", close=lambda: None,
+    )
+    monkeypatch.setattr("ouroboros.process_containment.ProcessContainer", lambda: container)
+    result = launcher.update_external_host(hook, launcher.EMBEDDED_PYTHON, launcher.log)
+    assert (result["status"] == "verified") is (returncode == 0 and complete)
+    assert calls == [[launcher.EMBEDDED_PYTHON, str(hook)]]
+    if returncode or not complete:
+        assert "native_update_failed" in caplog.text
 
 
 class _FakeEvent:

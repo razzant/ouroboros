@@ -54,7 +54,6 @@ def _stub_preflight_lanes(repo, monkeypatch):
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", raising=False)
     monkeypatch.setattr(pr, "_verify_preflight_plugins", lambda *a: [])
     monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
-    monkeypatch.setattr("ouroboros.platform_layer.kill_processes_referencing", lambda *a: None)
     monkeypatch.setattr(git, "_consecutive_test_failures", 0)
     lanes = []
 

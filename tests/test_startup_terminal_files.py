@@ -263,6 +263,110 @@ def test_missing_or_nonterminal_child_does_not_resume_model_work(roots, monkeypa
     assert excluded == [{"saved"}] * 4
 
 
+def _started_split_root(root, task_id="split", *, canonical_status="scheduled", started=True):
+    from ouroboros.utils import utc_now_iso
+
+    child = headless.prepare_task_drive(root, task_id, "empty")
+    write_task_result(root, task_id, canonical_status, delegation_role="root",
+                      result="admitted", ts="2020-01-01T00:00:00+00:00")
+    write_task_result(child, task_id, "running", delegation_role="root", drive_root=str(child),
+                      budget_drive_root=str(root), result="unfinished child work",
+                      ts="2020-01-01T00:00:01+00:00",
+                      **({"started_at": "2020-01-01T00:00:01+00:00"} if started else {}))
+    (root / "state/queue_snapshot.json").write_text(json.dumps({
+        "ts": utc_now_iso(), "pending": [], "running": [],
+    }))
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "logs/events.jsonl").write_text(json.dumps({
+        "ts": "2020-01-01T00:01:00+00:00", "type": "worker_boot",
+    }) + "\n")
+    return child
+
+
+def test_actual_split_root_start_is_canonical_and_existing_orphan_sweep_settles_it(roots, monkeypatch):
+    from ouroboros.agent import OuroborosAgent
+    from ouroboros.task_status import reconcile_orphaned_running_tasks
+
+    root, _ = roots
+    child = _started_split_root(root)
+    actor = SimpleNamespace(env=SimpleNamespace(drive_root=child, budget_drive_root=root),
+                            _task_started_ts=1577836801.0)
+    OuroborosAgent._persist_running_record(actor, {
+        "id": "split", "delegation_role": "root", "budget_drive_root": str(root),
+        "drive_root": str(child), "_is_direct_chat": False,
+    })
+    started = load_task_result(root, "split")
+    assert started["status"] == "running" and started["child_drive_root"] == str(child)
+    assert started["started_at"] == "2020-01-01T00:00:01+00:00"
+    assert reconcile_orphaned_running_tasks(root) == 1
+    settled = load_task_result(root, "split")
+    assert settled["status"] == "failed"
+    assert settled["reason_code"] == "orphaned_running_after_worker_restart"
+    assert settled["outcome_axes"]["execution"]["status"] == "infra_failed"
+
+
+def test_legacy_scheduled_split_root_is_rebound_only_from_proven_child_start(roots, monkeypatch):
+    from supervisor import queue, workers
+
+    root, repo = roots
+    child = _started_split_root(root)
+    monkeypatch.setattr("ouroboros.agent.run_llm_loop", lambda *a, **k: pytest.fail("no task replay"))
+    monkeypatch.setattr("ouroboros.agent_task_pipeline.recover_pending_root_post_task_synthesis", lambda *a, **k: None)
+    report = _recovery(root, repo)
+    assert report["rebound"] == ["split"]
+    assert report["unresolved"] == report["errors"] == []
+    result = load_task_result(root, "split")
+    assert result["status"] == "failed"
+    assert result["reason_code"] == "orphaned_running_after_worker_restart"
+    assert result["child_drive_root"] == str(child)
+    assert "unfinished child work" in result["result"]
+    assert queue.PENDING == [] and queue.RUNNING == {} and workers.WORKERS == {}
+    before = (root / "task_results/split.json").read_bytes()
+    assert not _recovery(root, repo).get("rebound")
+    assert (root / "task_results/split.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("condition", ["pending", "owner_wait", "live", "no_start", "missing_queue", "stale_queue", "no_boot", "cancel_pending"])
+def test_legacy_split_start_recovery_preserves_unproven_or_owned_work(roots, monkeypatch, condition):
+    from supervisor import queue
+    from ouroboros.cancel_intents import request_cancel
+
+    root, repo = roots
+    child = _started_split_root(root, started=condition != "no_start")
+    if condition in {"pending", "owner_wait"}:
+        queue.PENDING.append({"id": "split", **({"_owner_wait_resume": {"wait_id": "question"}} if condition == "owner_wait" else {})})
+    elif condition == "live":
+        queue.RUNNING["split"] = {"task": {"id": "split"}}
+    elif condition == "missing_queue":
+        (root / "state/queue_snapshot.json").unlink()
+    elif condition == "stale_queue":
+        (root / "state/queue_snapshot.json").write_text('{"ts":"2020-01-01T00:02:00+00:00","pending":[],"running":[]}')
+    elif condition == "no_boot":
+        (root / "logs/events.jsonl").write_text("")
+    elif condition == "cancel_pending":
+        request_cancel(root, "split", reason="owner stop", source="test")
+    before = (root / "task_results/split.json").read_bytes()
+    child_before = (child / "task_results/split.json").read_bytes()
+    monkeypatch.setattr("ouroboros.agent_task_pipeline.recover_pending_root_post_task_synthesis", lambda *a, **k: None)
+    report = _recovery(root, repo)
+    assert not report.get("rebound")
+    assert (root / "task_results/split.json").read_bytes() == before
+    assert (child / "task_results/split.json").read_bytes() == child_before
+
+
+def test_late_split_root_start_cannot_replace_canonical_terminal(roots):
+    from ouroboros.agent import OuroborosAgent
+
+    root, _ = roots
+    child = _started_split_root(root, canonical_status="cancelled")
+    actor = SimpleNamespace(env=SimpleNamespace(drive_root=child, budget_drive_root=root),
+                            _task_started_ts=1577836801.0)
+    task = {"id": "split", "delegation_role": "root", "budget_drive_root": str(root), "drive_root": str(child)}
+    before = (root / "task_results/split.json").read_bytes()
+    OuroborosAgent._persist_running_record(actor, task)
+    assert (root / "task_results/split.json").read_bytes() == before
+
+
 @pytest.mark.parametrize("failure", [False, True])
 def test_periodic_bulk_work_does_not_block_drain_or_duplicate_sweep(roots, monkeypatch, failure):
     root, _ = roots

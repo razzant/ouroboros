@@ -537,13 +537,12 @@ def test_run_script_timeout_360():
     assert rs[0].timeout_sec == 360
 
 
-def test_advisory_pre_review_timeout_1200():
-    """advisory_pre_review ToolEntry must declare timeout_sec=1200."""
-    from ouroboros.tools.claude_advisory_review import get_tools
-    entries = get_tools()
-    apr = [e for e in entries if e.name == "advisory_review"]
-    assert apr, "advisory_pre_review not found"
-    assert apr[0].timeout_sec == 1200
+def test_advisory_pre_review_timeout_covers_tests_and_review():
+    """Both names share the finite envelope around tests and the critic."""
+    from ouroboros.tools.claude_advisory_review import get_tools, _preflight_tool_timeout_sec
+    entries = {entry.name: entry for entry in get_tools()}
+    for name in ("preflight_review", "advisory_review"):
+        assert entries[name].timeout_sec == _preflight_tool_timeout_sec()
 
 
 def test_full_repo_pack_excludes_junk_dirs():

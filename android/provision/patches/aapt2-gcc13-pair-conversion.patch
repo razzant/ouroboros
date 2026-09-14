@@ -1,0 +1,8 @@
+--- a/vendor/base/tools/aapt2/ResourceTable.cpp
++++ b/vendor/base/tools/aapt2/ResourceTable.cpp
+@@ -443 +443 @@
+-        lhs, std::tie(rhs.name, rhs.id));
++        lhs, std::make_pair(std::string_view(rhs.name), rhs.id));
+@@ -456 +456 @@
+-        lhs, std::tie(rhs.name, rhs.id));
++        lhs, std::make_pair(std::string_view(rhs.name), rhs.id));

@@ -948,16 +948,13 @@ def test_classify_green_and_empty_pass():
 #
 # These drive `run_hermetic_pytest` end to end — real git worktree, real
 # diff/env plumbing — with `_execute_pytest_pass` stubbed, so the budget and
-# sweep contracts are pinned WITHOUT depending on pytest-xdist being installed
+# pass contracts are pinned WITHOUT depending on pytest-xdist being installed
 # in the interpreter running this file.
 
 
 @pytest.fixture
 def stub_passes(monkeypatch):
-    """Replace the pytest spawn with a recorder, and log the temp-root sweeps.
-
-    Both are appended to ONE ordered event log so a caller can pin not just how
-    often the sweep runs but WHERE it runs relative to each pass.
+    """Replace each contained pytest pass with an ordered result recorder.
 
     The two OTHER real-interpreter seams `run_hermetic_pytest` crosses are
     neutralised here as well, because neither can work when nothing is spawned:
@@ -973,14 +970,10 @@ def stub_passes(monkeypatch):
     `test_a_nominally_parallel_pass_on_one_worker_is_a_hard_block` and the
     real-spawn `test_the_parallel_pass_really_starts_more_than_one_worker`.
     """
-    from ouroboros import platform_layer, preflight_runner
+    from ouroboros import preflight_runner
 
     events: list[tuple] = []
 
-    def _record_sweep(marker: str) -> None:
-        events.append(("sweep", marker))
-
-    monkeypatch.setattr(platform_layer, "kill_processes_referencing", _record_sweep)
     monkeypatch.setattr(preflight_runner, "_verify_preflight_plugins", lambda *a, **k: [])
     monkeypatch.setattr(preflight_runner, "_observed_worker_ids", lambda *a, **k: {"gw0", "gw1"})
 
@@ -1000,27 +993,6 @@ def stub_passes(monkeypatch):
         return events
 
     return _install
-
-
-def test_temp_root_is_swept_between_passes_not_only_at_teardown(tmp_path, two_pass_env, stub_passes):
-    """A pass-1 escapee (detached child, bound port, stray server) must be reaped
-    BEFORE pass 2 reads the same worktree. Pinned positionally in the event log:
-    deleting the in-loop sweep leaves the teardown sweep behind, which a bare
-    `"kill_processes_referencing" in source` assertion cannot distinguish."""
-    from ouroboros.preflight_runner import run_hermetic_pytest
-
-    events = stub_passes([(0, ""), (0, "")])
-    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
-
-    assert run_hermetic_pytest(repo, timeout=120) is None
-
-    kinds = [event[0] for event in events]
-    assert kinds == ["pass", "sweep", "pass", "sweep", "sweep"], (
-        f"expected a sweep after EVERY pass plus one at teardown, got {kinds}"
-    )
-    # ...and it is the two-pass split that ran, in order.
-    assert "not serial and" in events[0][1][2]
-    assert events[2][1][2].startswith("serial and")
 
 
 def test_second_pass_never_starts_once_the_total_budget_is_gone(tmp_path, two_pass_env, stub_passes):
@@ -2888,10 +2860,9 @@ def test_a_green_pass_cannot_leak_a_child_into_the_next_pass(tmp_path, two_pass_
     `communicate()` returning only proves the pytest CONTROLLER exited. A test
     that spawned a child and did not wait for it leaves that child alive, and
     after the controller dies nothing can find it: the `pgrep -P` parent->child
-    walk is gone with the ppid links, and the temp-root command-line sweep misses
-    an argv that names no sweepable path. Such a child ran on into pass 2 — the
-    very cross-pass contamination the inter-pass sweep exists to prevent — and
-    then past teardown onto the machine.
+    walk is gone with the ppid links. Such a child ran on into pass 2 and then
+    past teardown onto the machine. The pass-owned container must reap it before
+    returning control to the next pass.
 
     The child here calls `setsid()` (`start_new_session=True`), which is the
     HARDEST shape: it leaves the controller's process group, so the recorded pgid
@@ -2917,9 +2888,9 @@ def test_a_green_pass_cannot_leak_a_child_into_the_next_pass(tmp_path, two_pass_
         {
             # Stdio to DEVNULL so the child does NOT hold the inherited pipe open
             # — otherwise `communicate` blocks and this becomes the timeout case
-            # that was already covered. The argv is deliberately path-free, so the
-            # temp-root sweep cannot see it either. `start_new_session=True` puts
-            # it in its OWN session and process group, so the group handle the
+            # that was already covered. The argv is deliberately path-free:
+            # ownership must not depend on path text. `start_new_session=True`
+            # puts it in its OWN session and process group, so the group handle the
             # container recorded at spawn does not cover it.
             "tests/test_leaks_a_child.py": f"""
                 import pathlib
@@ -3093,8 +3064,9 @@ def test_pass2_timeout_names_serial_pass(tmp_path, two_pass_env):
 
 def test_hermetic_pytest_timeout_invokes_full_tree_reaper():
     """The timeout path must delegate to the full-tree reaper (not a bare killpg),
-    and that reaper must use the recursive PID-tree kill, escaped process-group
-    kill, and the temp-root sweep so detached/reparented children cannot survive."""
+    and the pass-owned container must reap detached/reparented descendants.
+    The timeout helper retains its captured PID-tree and process-group cleanup.
+    """
     from ouroboros import preflight_runner
 
     pass_src = inspect.getsource(preflight_runner._execute_pytest_pass)
@@ -3129,16 +3101,13 @@ def test_hermetic_pytest_timeout_invokes_full_tree_reaper():
     assert "container.reap()" in teardown
     assert "container.close()" in teardown
 
-    # The inter-pass temp-root sweep is pinned BEHAVIOURALLY by
-    # `test_temp_root_is_swept_between_passes_not_only_at_teardown`, not here: a
-    # bare `"kill_processes_referencing" in run_hermetic_pytest source` check
-    # cannot fail, because the teardown `finally` block contains that same call
-    # and predates the two-pass split.
+    # Real orphan cleanup before the next pass is covered by
+    # test_a_green_pass_cannot_leak_a_child_into_the_next_pass; timeout cleanup
+    # is covered by test_hermetic_pytest_timeout_reaps_detached_session_child.
     reaper_src = inspect.getsource(preflight_runner._terminate_preflight_tree)
     assert "kill_process_tree" in reaper_src
     assert "kill_pid_tree" in reaper_src
     assert "kill_process_group_id" in reaper_src
-    assert "kill_processes_referencing" in reaper_src
     # Platform-specific process discovery stays behind platform_layer helpers.
     assert "collect_descendant_pids" in reaper_src
 

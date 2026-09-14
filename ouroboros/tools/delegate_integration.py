@@ -23,6 +23,7 @@ from ouroboros.delegate_custody import RunCustody as _RunCustody
 # `delegate_shared` (phase B's facade split), never a local twin that could drift.
 from ouroboros.delegate_registration_policy import record_persistent as _record_persistent
 from ouroboros.delegate_shared import _fail
+from ouroboros.subagents import is_mutating_delegated_access
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
 from ouroboros.utils import resolve_path_allow_missing
 
@@ -60,7 +61,7 @@ def _mutation_authority(ctx: ToolContext, authority: "DelegatedRunShape") -> tup
     Disagreement anywhere is a typed refusal, never a best-effort guess.
     """
     root = str(active_repo_dir_for(ctx))
-    if authority.access != "workspace_write":
+    if not is_mutating_delegated_access(authority.access):
         return {"target_root": root, "source": "readonly", "capture_mode": "none"}, ""
     constraint = getattr(ctx, "task_constraint", None)
     mode = str(
@@ -285,7 +286,7 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
     # carry none; their scope.root IS the authority target (in-place regime).
     snapshot_id = str(record.get("snapshot_id") or "")
     target_root = str(record.get("target_root") or "") or scope_root
-    if authority.access == "workspace_write":
+    if is_mutating_delegated_access(authority.access):
         binding_refusal = _retry_binding_refusal(record, retry_token)
         if binding_refusal:
             return None, binding_refusal
@@ -716,7 +717,7 @@ def claimed_start_request(
 
 def _payload_mutation_authority(
     ctx: ToolContext, drive: pathlib.Path, bucket: str, skill_name: str,
-    binding: Any,
+    binding: Any, access: str = "workspace_write",
 ) -> Tuple[Optional[Any], Optional[Dict[str, Any]], str]:
     """The payload counterpart of ``_mutation_authority`` (R1 item 1).
 
@@ -811,7 +812,7 @@ def _payload_mutation_authority(
             "payload_hash": "",
         },
     }
-    return delegated_run_shape(True), record, ""
+    return delegated_run_shape(True, access), record, ""
 
 
 def _provision_payload_snapshot(

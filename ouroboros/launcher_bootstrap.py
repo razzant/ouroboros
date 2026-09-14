@@ -1,12 +1,14 @@
-"""Managed git bootstrap helpers for the desktop launcher."""
+"""Managed source and native-host bootstrap helpers for the common launcher."""
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 import pathlib
 import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -1028,3 +1030,120 @@ def bootstrap_repo(context: BootstrapContext) -> bool:
             )
     context.log.info("Bootstrap complete.")
     return deps_ok
+
+
+def update_external_host(hook: pathlib.Path | None, python: str, log: Any, abort_event=None) -> dict:
+    """Synchronize a selected native host while preserving the available core."""
+    if hook is None:
+        return {}
+    from ouroboros.process_containment import ProcessContainer
+    from ouroboros.config import EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC
+
+    container = ProcessContainer()
+    proc = None
+    returncode = None
+    detail = ""
+    cancelled = False
+    try:
+        proc = container.spawn(
+            [python, str(hook)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        deadline = time.monotonic() + EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC
+        while True:
+            if abort_event is not None and abort_event.is_set():
+                cancelled = True
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC)
+            try:
+                # communicate retains partial pipe output across timeout retries.
+                # This is a shutdown observation interval, not a shorter build budget.
+                stdout, stderr = proc.communicate(timeout=min(remaining, 0.2) if abort_event is not None
+                                                  else EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC)
+                returncode = proc.returncode
+                detail = stdout.strip() or stderr.strip()
+                break
+            except subprocess.TimeoutExpired:
+                if abort_event is None:
+                    raise
+    except (OSError, subprocess.SubprocessError) as error:
+        detail = str(error)
+    finally:
+        try:
+            reap_error = container.reap()
+        except Exception as error:
+            reap_error = str(error)
+        finally:
+            container.close()
+        if proc is not None:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                reap_error = reap_error or "Native update process termination was not confirmed."
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+    if cancelled:
+        log.info("Native host preparation cancelled by launcher shutdown.")
+        if reap_error:
+            log.error("Native host preparation cleanup was not confirmed: %s", reap_error)
+        return {"status": "cancelled"}
+    if returncode == 0 and not reap_error:
+        try:
+            payload = json.loads(detail)
+            installed = payload.get("installed") or {}
+            proof = {"source_commit": payload.get("source_commit"),
+                     "input_sha256": payload.get("input_sha256"),
+                     "apk_sha256": payload.get("apk_sha256") or installed.get("sha256"),
+                     "signer_sha256": payload.get("signer_sha256")}
+            if (payload.get("status") in {"current", "installed"}
+                    and all(isinstance(value, str) and len(value) == (40 if key == "source_commit" else 64)
+                            and all(char in "0123456789abcdef" for char in value)
+                            for key, value in proof.items())):
+                log.info("External host update verified: %s", json.dumps(proof))
+                return {"status": "verified", **proof}
+            detail = "Native installer did not return a complete artifact proof."
+        except (ValueError, TypeError, AttributeError):
+            detail = "Native installer did not return a valid artifact proof."
+    if reap_error:
+        detail += "; " + reap_error
+    # Core health remains independent; managed-update boot verification checks
+    # the desired host artifact before reporting that the full update landed.
+    log.error("native_update_failed: %s; continuing with the available core", detail)
+    return {"status": "failed"}
+
+
+def parse_launch_options(argv):
+    """Parse presentation/seed inputs while tolerating ordinary platform launch arguments."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-ui", action="store_true", help="Use an external UI host.")
+    parser.add_argument("--launch-intent", choices=("owner", "automatic"), default="owner",
+                        help="Automatic boot entry preserves an explicit Panic stop.")
+    parser.add_argument("--host-update", type=pathlib.Path,
+                        help="External host Python installer; also supports read-only --check.")
+    parser.add_argument("--seed-bundle", type=pathlib.Path, help="Keep immutable seed provenance while running an external host from source.")
+    # Desktop launchers may supply platform arguments (for example Finder's
+    # process serial number). Retain their previously ignored behavior.
+    options, _ = parser.parse_known_args(argv)
+    if (options.host_update is not None or options.seed_bundle is not None) and not options.no_ui:
+        parser.error("--host-update and --seed-bundle require --no-ui")
+    return options
+
+
+def automatic_launch_allowed(intent: str, data_dir: pathlib.Path, log: Any) -> bool:
+    if intent == "automatic":
+        # The server consumes this existing marker on an explicit owner start.
+        # A boot entry must not start it and accidentally erase the owner's Stop.
+        # The same file also carries owner_restart_no_resume: that is a restart,
+        # not Panic, and must remain launchable. No second stop-state store.
+        try:
+            stopped = (data_dir / "state" / "panic_stop.flag").read_text(encoding="utf-8").strip() == "panic"
+        except FileNotFoundError:
+            stopped = False
+        if stopped:
+            log.info("Automatic start skipped: Ouroboros was stopped with Panic.")
+            print("Ouroboros is stopped. Use Start to resume.", flush=True)
+            return False
+    return True

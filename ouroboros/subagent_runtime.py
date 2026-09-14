@@ -98,6 +98,7 @@ def model_visible_subagent_catalog(settings: Mapping[str, Any]) -> dict[str, Any
             "requested_effort": row.effort or "(not explicitly set)",
         }
         if session:
+            projected["mutating_access"] = row.access
             projected["requested_target"] = row.route.target_id
             if row.route.credential_profile_id:
                 projected["account_policy"] = "explicit profile pin"
@@ -335,6 +336,7 @@ def select_subagent_snapshot(
         "effort": row.effort,
         "processing_preference": resolve_processing_preference(
             override=row.processing_preference or None, settings=dict(settings)),
+        **({"access": row.access} if row.access != "workspace_write" else {}),
         "selected_at": utc_now_iso(),
     }, used_legacy
 
@@ -346,12 +348,17 @@ def validate_subagent_snapshot(raw: Any) -> dict[str, Any]:
     route = snapshot.get("route") if isinstance(snapshot.get("route"), dict) else {}
     kind = str(route.get("kind") or "")
     target = str(route.get("target_id") or "").strip()
+    from ouroboros.subagents import is_mutating_delegated_access
+
+    access = snapshot.get("access", "workspace_write")
     if (
         int(snapshot.get("schema") or 0) != 1
         or not str(snapshot.get("selected_subagent_id") or "").strip()
         or not str(snapshot.get("config_fingerprint") or "").strip()
         or kind not in {"api_model", "agent_session"}
         or not target
+        or not is_mutating_delegated_access(access)
+        or (access == "full" and kind != "agent_session")
     ):
         raise SubagentSelectionError(
             "subagent_snapshot_invalid", "The task has no complete immutable subagent snapshot."
@@ -459,7 +466,8 @@ def resolve_configured_actor_dispatch(
         normalized = normalize_task_constraint(task.get("task_constraint"))
         surface = str(getattr(normalized, "surface", "") or "")
         shape = delegated_run_shape(
-            predicted_subagent_profile(write_surface=surface) == "acting_subagent"
+            predicted_subagent_profile(write_surface=surface) == "acting_subagent",
+            snapshot.get("access", "workspace_write"),
         )
         gateway = None
         try:
@@ -543,6 +551,7 @@ def current_subagent_alternatives(exclude_id: str = "") -> list[dict[str, Any]]:
             "route_kind": row.route.kind,
             "target_id": row.route.target_id,
             "effort": row.effort,
+            **({"mutating_access": row.access} if row.route.is_session else {}),
             "availability": "check_at_dispatch",
         }
         for row in config.items
@@ -645,6 +654,7 @@ def prepare_delegate_start_actor(
         )
     return {
         "route": route,
+        "access": snapshot.get("access", "workspace_write"),
         "selected_subagent_id": selected_id,
         "processing_preference": str(snapshot.get("processing_preference") or ""),
         "config_fingerprint": config_fingerprint,

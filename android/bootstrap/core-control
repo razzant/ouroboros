@@ -1,0 +1,83 @@
+#!/system/bin/sh
+# One-shot Android entry. The ordinary launcher alone supervises core processes.
+set -eu
+base=/data/local/ouroboros-phone
+data="$base/rootfs/opt/ouroboros/data"
+port_file="$data/state/server_port"
+entry="$base/bin/enter-linux"
+action=${1:-status}
+intent=${2:-owner}
+case "$intent" in owner|automatic) ;; *) echo 'Invalid launch intent' >&2; exit 2;; esac
+port=8765
+if [ -f "$port_file" ]; then port=$(cat "$port_file"); fi
+case "$port" in ''|*[!0-9]*) echo 'Invalid runtime port' >&2; exit 2;; esac
+probe_core() {
+  unshare -m sh "$entry" python3 -c \
+    'import json,sys,urllib.request; r=urllib.request.urlopen("http://127.0.0.1:"+sys.argv[1]+"/api/health",timeout=2); assert json.load(r)["status"]=="ok"' "$port" 2>/dev/null
+}
+case "$action" in
+  port) echo "$port" ;;
+  status)
+    if [ -f "$data/state/panic_stop.flag" ] && [ "$(cat "$data/state/panic_stop.flag")" = panic ]; then
+      echo 'Stopped with Panic. Use Start to resume.'
+    else
+      echo "Recorded runtime endpoint: http://127.0.0.1:$port"
+      # Report the host APK the update receipt last verified as installed. The
+      # receipt is written after a proven install, so it is neither Git HEAD nor
+      # evidence that every live process already runs that code.
+      receipt="$data/state/android_host.json"
+      if [ -f "$receipt" ]; then
+        host_name=$(sed -n 's/.*"version_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$receipt" | head -n 1)
+        host_code=$(sed -n 's/.*"version_code"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$receipt" | head -n 1)
+        echo "Android host APK: ${host_name:-unknown} (versionCode ${host_code:-unknown})"
+        echo 'Last verified installed APK from the update receipt; not Git HEAD, and not proof that every process already runs this code.'
+      fi
+      # A saved server receipt is historical state.  Probe the actual loopback
+      # endpoint before describing the core as live; a reboot can leave the
+      # receipt behind after its PID has disappeared.
+      probe="unavailable"
+      if [ -x "$entry" ] && probe_core; then
+        probe="healthy"
+      elif [ -x "$entry" ]; then
+        probe="not_healthy"
+      fi
+      case "$probe" in
+        healthy) echo "Live core probe: healthy at http://127.0.0.1:$port" ;;
+        not_healthy) echo 'Live core probe: no healthy core at the recorded endpoint.' ;;
+        *) echo 'Live core probe: unavailable (Linux entry is not installed).' ;;
+      esac
+      if [ -f "$data/state/server_process.json" ]; then
+        echo 'Saved server receipt (historical; not proof of a live process):'
+        cat "$data/state/server_process.json"
+      fi
+      if [ -f "$base/bootstrap/host-launch.log" ]; then tail -n 15 "$base/bootstrap/host-launch.log"; fi
+    fi ;;
+  start)
+    if [ "$intent" = automatic ] && [ -f "$data/state/panic_stop.flag" ] && \
+       [ "$(cat "$data/state/panic_stop.flag")" = panic ]; then
+      echo stopped; exit 0
+    fi
+    # Attach to the already running install, including the initial source-mode
+    # server. Never start a launcher that would reap a healthy current task.
+    if probe_core; then
+      echo running; exit 0
+    fi
+    test -f "$base/rootfs/opt/ouroboros/launcher/current/launcher.py" || {
+      echo 'Launcher payload is not installed yet.' >&2; exit 1;
+    }
+    mkdir -p "$base/bootstrap"
+    # Detach physical entry only. No retry loop and no alternate task manager.
+    setsid unshare -m sh "$entry" /usr/bin/env \
+      OUROBOROS_APP_ROOT=/opt/ouroboros \
+      OUROBOROS_REPO_DIR=/opt/ouroboros/repo \
+      OUROBOROS_DATA_DIR=/opt/ouroboros/data \
+      OUROBOROS_SETTINGS_PATH=/opt/ouroboros/data/settings.json \
+      OUROBOROS_PRESENTATION=android_app \
+      /opt/ouroboros/venv/bin/python /opt/ouroboros/repo/launcher.py \
+      --no-ui --launch-intent "$intent" \
+      --host-update /opt/ouroboros/repo/android/bootstrap/update-host \
+      --seed-bundle /opt/ouroboros/launcher/current \
+      </dev/null >>"$base/bootstrap/host-launch.log" 2>&1 &
+    echo starting ;;
+  *) echo 'Usage: core-control start|port|status [owner|automatic]' >&2; exit 2 ;;
+esac

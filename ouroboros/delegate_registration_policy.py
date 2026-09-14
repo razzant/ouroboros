@@ -28,11 +28,13 @@ def persistent_registration(execution_root: str, access: str) -> bool:
 
     True exactly when the engine bound a stable execution workspace
     (``workspaceRoot`` supported => non-empty execution root) and the run
-    writes into the user's own tree (``workspace_write``): that registration
+    writes for the user's own tree (``workspace_write`` or ``full``): that registration
     names the user's project, not a disposable snapshot, and must outlive
     the run (#362).
     """
-    return bool(str(execution_root or "").strip()) and str(access or "") == "workspace_write"
+    from ouroboros.subagents import is_mutating_delegated_access
+
+    return bool(str(execution_root or "").strip()) and is_mutating_delegated_access(str(access or ""))
 
 
 def record_persistent(record) -> bool:
