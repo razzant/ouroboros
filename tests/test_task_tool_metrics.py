@@ -63,9 +63,11 @@ def test_actual_metrics_summary_and_history_keep_complete_tool_census(tmp_path, 
     authored = next(json.loads(line) for line in (logs / "chat.jsonl").read_text().splitlines()
                     if json.loads(line).get("summary_kind") == "authored_root_summary")
     replay = next(row for row in _history(tmp_path) if row["system_type"] == "task_summary")
+    addressing = sum(1 for name in names if name.strip() in ("promote_chat_to_task", "route_to_project", "steer_task"))
     for row in (metric, evaluation, forwarded[0], authored, replay):
         assert row["tool_calls"] == len(names)
         assert row["tool_errors"] == len(failed)
+        assert row["routing_tool_calls"] == addressing
         assert row["tool_call_counts"] == expected
         assert row["outcome_axes"]["execution"] == metric["outcome_axes"]["execution"]
     assert len(model_calls) == bool(names)
@@ -94,7 +96,10 @@ def test_incomplete_trace_never_claims_empty_or_partial_census(trace, expected_t
     # Keep the existing aggregate semantics; no partial dictionary can hide an
     # unrecognized row by classifying its missing name as addressing/non-work.
     metrics = task_tool_metrics(trace)
-    assert metrics == {"tool_calls": expected_total, "tool_errors": expected_errors, "tool_call_counts": None}
+    expected_routing = None if expected_total is None else sum(
+        1 for call in trace.get("tool_calls") or [] if isinstance(call, dict) and call.get("tool") == "promote_chat_to_task")
+    assert metrics == {"tool_calls": expected_total, "tool_errors": expected_errors,
+                       "routing_tool_calls": expected_routing, "tool_call_counts": None}
 
 
 def test_unknown_and_legacy_evidence_keep_absence_distinct_from_zero(tmp_path, monkeypatch):
@@ -105,15 +110,15 @@ def test_unknown_and_legacy_evidence_keep_absence_distinct_from_zero(tmp_path, m
                       {"loop_evidence_unavailable": True},
                       {"loop_evidence_unavailable": True, "tool_calls": []}, tmp_path / "logs")
     [unknown] = _history(tmp_path)
-    assert all(unknown[key] is None for key in ("tool_calls", "tool_errors", "tool_call_counts"))
+    assert all(unknown[key] is None for key in ("tool_calls", "tool_errors", "routing_tool_calls", "tool_call_counts"))
     append_jsonl(tmp_path / "logs/chat.jsonl", {"type": "task_summary", "task_id": "legacy",
         "direction": "system", "chat_id": 1, "text": "Legacy summary", "tool_calls": 1, "rounds": 2})
     legacy = next(row for row in _history(tmp_path) if row["task_id"] == "legacy")
-    assert "tool_call_counts" not in legacy and "tool_errors" not in legacy
+    assert "tool_call_counts" not in legacy and "tool_errors" not in legacy and "routing_tool_calls" not in legacy
     wire = []
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, PENDING=[], append_jsonl=append_jsonl,
                           bridge=SimpleNamespace(push_log=wire.append))
     _handle_task_metrics({"task_id": "legacy", "tool_calls": 1}, ctx)
-    assert "tool_call_counts" not in wire[0]
+    assert "tool_call_counts" not in wire[0] and "routing_tool_calls" not in wire[0]
     _handle_task_metrics({"task_id": "unknown", **task_tool_metrics({"loop_evidence_unavailable": True})}, ctx)
-    assert all(wire[1][key] is None for key in ("tool_calls", "tool_errors", "tool_call_counts"))
+    assert all(wire[1][key] is None for key in ("tool_calls", "tool_errors", "routing_tool_calls", "tool_call_counts"))

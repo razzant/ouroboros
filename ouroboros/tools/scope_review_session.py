@@ -51,8 +51,8 @@ def governance_nav_maps(repo_dir: pathlib.Path, doc_paths: Tuple[str, ...]) -> s
     complete-subtree line range, read on demand by the session with its own tools.
     ``generate_doc_nav_map`` is the one existing mapper — no second repository
     scanner (§8 item 8)."""
-    from ouroboros.context_layout import generate_doc_nav_map
-    from ouroboros.reference_books import BOOK_ENTRYPOINTS, load_reference_book, overview_book
+    from ouroboros.context_layout import book_navigation, generate_doc_nav_map
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, load_reference_book
 
     parts: list[str] = []
     for rel_path in doc_paths:
@@ -63,10 +63,9 @@ def governance_nav_maps(repo_dir: pathlib.Path, doc_paths: Tuple[str, ...]) -> s
             except (OSError, ValueError) as exc:
                 parts.append(f"Reference book source unavailable: {rel_path}. {exc}. Required coverage is incomplete.")
                 continue
-            if not book.legacy:
-                parts.append(overview_book(book).text)
-                continue
-            text = book.entrypoint.text
+            # One map per book, addressed to the chapter the section lives in.
+            parts.append(book_navigation(book))
+            continue
         else:
             text = load_governance_doc(repo_dir, rel_path, on_missing="placeholder")
         if str(text or "").strip():

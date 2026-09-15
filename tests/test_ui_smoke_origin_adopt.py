@@ -1,8 +1,11 @@
 """Browser proof for #895: two Main root cards born from ONE owner message convert into ONE Project.
 
-Seeds a completed direct turn (T1) and the root it promoted (T2), both carrying the same
-ingress origin, as Main root cards. Converting T1 creates the Project; converting T2 must
-ADOPT it (same chip name, one registry row), never mint a second one.
+Seeds two completed managed roots (T1, T2) carrying the same ingress origin, as Main root
+cards. Converting T1 creates the Project; converting T2 must ADOPT it (same chip name, one
+registry row), never mint a second one. A direct conversation turn keeps no conversion
+control (docs/DESIGN.md "Conversation activity block": conversion is the model's addressing
+call, never a card button), so both cards here are managed roots — the case the origin key
+exists for.
 
 Run: OUROBOROS_RUN_UI_SMOKE=1 OUROBOROS_DATA_DIR=$(mktemp -d) python -m pytest \
   tests/test_ui_smoke_origin_adopt.py -o addopts="" -m ui_browser -q
@@ -45,20 +48,20 @@ def _seed(data_dir: pathlib.Path) -> dict:
         "ts": ref["ts"], "direction": "in", "chat_id": 1, "user_id": 1,
         "text": ORIGIN_TEXT, "client_message_id": ref["client_message_id"],
     })
-    # T1: the direct turn (ephemeral, completed); T2: the root it promoted (completed).
-    for tid, title, direct in (("t1direct", "Direct turn", True), ("t2promoted", "Publish seven skills", False)):
+    # T1 and T2: two completed managed roots admitted from the same owner message.
+    for tid, title, first in (("t1direct", "Draft the plan", True), ("t2promoted", "Publish seven skills", False)):
         write_task_result(
             data_dir, tid, "completed", result="done", description=ORIGIN_TEXT, objective=ORIGIN_TEXT,
             chat_id=1, title=title, origin_message_ref=dict(ref), origin_message_text=ORIGIN_TEXT,
-            **({"_is_direct_chat": True} if direct else {"delegation_role": "root", "root_task_id": tid}),
+            delegation_role="root", root_task_id=tid,
         )
         append_jsonl(logs / "progress.jsonl", {
-            "ts": "2026-09-14T12:30:00+00:00" if direct else "2026-09-14T12:38:00+00:00",
+            "ts": "2026-09-14T12:30:00+00:00" if first else "2026-09-14T12:38:00+00:00",
             "type": "send_message", "direction": "out", "chat_id": 1, "user_id": 1,
             "task_id": tid, "is_progress": True, "content": f"Working on {title}", "text": f"Working on {title}",
         })
         append_jsonl(logs / "chat.jsonl", {
-            "ts": "2026-09-14T12:39:31+00:00" if direct else "2026-09-14T12:41:00+00:00",
+            "ts": "2026-09-14T12:39:31+00:00" if first else "2026-09-14T12:41:00+00:00",
             "direction": "system", "chat_id": 1, "user_id": 1, "type": "task_summary",
             "summary_kind": "terminal_root_projection", "summary_id": f"task-terminal:{tid}",
             "task_id": tid, "root_task_id": tid, "status": "completed", "outcome": "Done",
@@ -143,7 +146,7 @@ def test_ui_two_cards_one_origin_convert_into_one_project(direct_server_with_dat
 
 
 def _seed_live_sibling(data_dir: pathlib.Path) -> None:
-    """T1 = completed direct turn (card in Main); T2 = a LIVE queued root with the same origin,
+    """T1 = a completed managed root (card in Main); T2 = a LIVE queued root with the same origin,
     parked by a replay-safe budget pause so assignment never dispatches it (the same row shape
     ``test_budget_pause_v664.py`` restores). Both render as Main root cards with the convert button."""
     import datetime as _dt
@@ -165,19 +168,19 @@ def _seed_live_sibling(data_dir: pathlib.Path) -> None:
     })
     write_task_result(
         data_dir, "l1direct", "completed", result="done", description=ORIGIN_TEXT, objective=ORIGIN_TEXT,
-        chat_id=1, title="Direct turn", origin_message_ref=dict(ref), origin_message_text=ORIGIN_TEXT,
-        _is_direct_chat=True,
+        chat_id=1, title="Draft the plan", origin_message_ref=dict(ref), origin_message_text=ORIGIN_TEXT,
+        delegation_role="root", root_task_id="l1direct",
     )
     append_jsonl(logs / "progress.jsonl", {
         "ts": "2026-09-14T12:30:00+00:00", "type": "send_message", "direction": "out", "chat_id": 1,
-        "user_id": 1, "task_id": "l1direct", "is_progress": True, "content": "Working on Direct turn",
-        "text": "Working on Direct turn",
+        "user_id": 1, "task_id": "l1direct", "is_progress": True, "content": "Working on Draft the plan",
+        "text": "Working on Draft the plan",
     })
     append_jsonl(logs / "chat.jsonl", {
         "ts": "2026-09-14T12:39:31+00:00", "direction": "system", "chat_id": 1, "user_id": 1,
         "type": "task_summary", "summary_kind": "terminal_root_projection", "summary_id": "task-terminal:l1direct",
         "task_id": "l1direct", "root_task_id": "l1direct", "status": "completed", "outcome": "Done",
-        "outcome_phase": "done", "outcome_final": True, "text": "Done. Direct turn", "tool_calls": 1, "rounds": 2,
+        "outcome_phase": "done", "outcome_final": True, "text": "Done. Draft the plan", "tool_calls": 1, "rounds": 2,
     })
     live_task = {
         "id": "l2root", "type": "task", "chat_id": 1, "priority": 0, "text": ORIGIN_TEXT,
@@ -209,8 +212,8 @@ def _seed_live_sibling(data_dir: pathlib.Path) -> None:
 
 
 def test_ui_live_sibling_loses_button_without_reload(direct_server_with_data, tmp_path):  # noqa: F811
-    """Converting the direct-turn card binds the LIVE promoted root too: its Main card drops the
-    convert button and shows the Project pointer after the state refresh, with no reload."""
+    """Converting the completed root's card binds the LIVE sibling root too: its Main card drops
+    the convert button and shows the Project pointer after the state refresh, with no reload."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
 

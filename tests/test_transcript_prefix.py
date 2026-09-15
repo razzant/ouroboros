@@ -199,6 +199,62 @@ def test_every_send_of_one_execution_extends_the_previous_send(full_loop, monkey
     assert "prompt_prefix_breaks" not in usage
 
 
+# ---------------------------------------------------------------------------
+# One predicate for every producer that appends behind a sent row
+# ---------------------------------------------------------------------------
+
+def test_a_sent_tail_row_is_never_merged_into_whatever_produced_it():
+    """The #929 carve-out generalized: the acceptance observation, an owner
+    follow-up, a task message and a roster note are all just rows that went out
+    in the previous send; with the slot in hand the digest list decides, and a
+    slot-less producer still keeps the observation marker as its stand-in."""
+    from ouroboros.loop_messages import _append_or_merge_user_content
+    from ouroboros.transcript_prefix import sent_in_previous_send
+
+    slot = SimpleNamespace()
+    messages = [SYSTEM, TASK, {"role": "user", "content": "[Message from my human]: first"}]
+    _append_or_merge_user_content(messages, "merged before any send", slot=slot)
+    assert len(messages) == 3 and "merged before any send" in messages[-1]["content"]
+    observe_send(slot, messages, round_idx=1)
+    assert sent_in_previous_send(slot, messages[-1]) is True
+    _append_or_merge_user_content(messages, "[Message from independent task x]\nhello", slot=slot)
+    assert len(messages) == 4, "a sent tail is byte-frozen: the new content is its own row"
+    assert messages[2]["content"].endswith("merged before any send")
+    _append_or_merge_user_content(messages, "same round follow-up", slot=slot)
+    assert len(messages) == 4 and messages[-1]["content"].endswith("same round follow-up")
+    # The slot-less arm: an observation row is refused on its marker alone.
+    tail = {"role": "user", "content": "[ACCEPTANCE_SUBJECT_OBSERVATION]", "acceptance_observation": True}
+    plain = [SYSTEM, TASK, tail]
+    _append_or_merge_user_content(plain, "owner words")
+    assert len(plain) == 4 and plain[2] is tail
+
+
+def test_the_roster_note_rides_the_real_loop_as_an_append(full_loop, monkeypatch):  # noqa: F811 -- imported pytest fixture
+    """A host-listed independent root appears once, as a fresh tail row, and the
+    transcript stays a prefix chain across every send (no tail_replaced)."""
+    from ouroboros.utils import atomic_write_json, utc_now_iso
+
+    f = full_loop
+    (f.ctx.drive_root / "state").mkdir(parents=True, exist_ok=True)
+    atomic_write_json(f.ctx.drive_root / "state" / "queue_snapshot.json", {
+        "ts": utc_now_iso(), "running": [
+            {"id": "peer-root", "task": {"id": "peer-root", "title": "Peer work", "chat_id": 0}},
+        ], "pending": [], "worker_total": 1,
+    })
+    monkeypatch.setattr(loop, "call_llm_with_retry", _four_tool_rounds(f))
+
+    result, usage, _trace = f.run()
+
+    assert result == ANSWER, (result, f.progress)
+    _assert_prefix_chain(f.model_inputs)
+    assert _prefix_breaks(f.events) == []
+    notes = [m for m in f.model_inputs[-1]
+             if m.get("role") == "user" and "[INDEPENDENT_ROOTS]" in transcript_prefix._plain_text(m.get("content"))]
+    assert len(notes) == 1, "the roster changed once, so exactly one note was appended"
+    assert "- peer-root · Peer work · chat=0 · running" in transcript_prefix._plain_text(notes[0]["content"])
+    assert "prompt_prefix_breaks" not in usage
+
+
 def _fake_compaction(messages, *_args, **_kwargs):
     """Stand in for the summarizer behind both compaction seams: rewrite the
     first tool result in place and report the pass as applied."""

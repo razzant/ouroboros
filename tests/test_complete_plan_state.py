@@ -83,7 +83,8 @@ def test_full_plan_review_disposition_repeat_and_tail_delta(_harness):
     ctx = _harness.make_ctx()
     goal = "full chosen goal\n" * 22_000 + "GOAL_TAIL"
     spec = {"in_scope": ["full requirement\n" * 22_000 + "SCOPE_TAIL_A"],
-            "acceptance_claims": ["full criterion\n" * 22_000 + "CLAIM_TAIL"]}
+            "acceptance_claims": ["full criterion\n" * 22_000 + "CLAIM_TAIL"],
+            "affected_paths": []}  # required on every submitted spec (owner 9=A)
     assert _control(_call(ctx, spec, goal=goal)) == {"outcome": "REVIEW_REQUIRED", "closed": True}
     state = _state(_harness)
     fingerprint = state["waves"][-1]["request_fingerprint"]

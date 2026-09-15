@@ -43,6 +43,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from tests._shared import SETTINGS_WRITERS, calls_function
+from tests._governance_docs_shared import architecture_text
 
 # One owner-authored document, written entirely under keys a release renamed or
 # retired. Every value differs from both its legacy default and its current one,
@@ -665,8 +666,7 @@ def test_a_retired_key_is_absent_from_every_surface_that_would_react_to_it():
     from ouroboros import config as cfg
     from ouroboros.gateway import settings as settings_mod
 
-    documented = (pathlib.Path(__file__).resolve().parents[1]
-                  / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8").splitlines()
+    documented = architecture_text().splitlines()
     for key in cfg.RETIRED_SETTING_KEYS:
         assert key not in settings_mod._IMMEDIATE_KEYS, key
         assert key not in settings_mod._RESTART_REQUIRED_KEYS, key

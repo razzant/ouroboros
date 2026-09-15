@@ -23,6 +23,7 @@ from ouroboros import config as cfg
 from ouroboros import review_cycles as rc
 from ouroboros import task_pacing
 from ouroboros.contracts.task_contract import normalize_budget_profile
+from tests._governance_docs_shared import architecture_text, development_text
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
@@ -549,8 +550,8 @@ def test_exhausted_event_is_durable_even_with_a_live_queue(tmp_path):
 
 
 def test_docs_describe_shared_key_and_new_module_size():
-    dev = (REPO / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
-    arch = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    dev = development_text(REPO)
+    arch = architecture_text(REPO)
     assert dev.count(KEY) >= 2 and "review_cycles.py" in dev
     assert f"| {KEY} |" in arch
     # the LEGACY row documents the load-time migration, not a runtime binding

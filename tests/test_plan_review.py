@@ -225,10 +225,10 @@ def test_invalid_new_plan_attempts_do_not_reuse_old_green(tmp_path):
     ctx.system_repo_dir = tmp_path
     ctx.emit_progress_fn = lambda _message: None
     cases = [
-        ({"plan": "", "goal": "G", "spec": {"in_scope": ["x"]}}, "plan: required non-empty prose"),
-        ({"plan": "P", "goal": "", "spec": {"in_scope": ["x"]}}, "goal: required non-empty string"),
+        ({"plan": "", "goal": "G", "spec": {"in_scope": ["x"], "affected_paths": []}}, "plan: required non-empty prose"),
+        ({"plan": "P", "goal": "", "spec": {"in_scope": ["x"], "affected_paths": []}}, "goal: required non-empty string"),
         ({"plan": "P", "goal": "G", "spec": "not-an-object"}, "spec: must be an object"),
-        ({"plan": "P", "goal": "G", "spec": {"bogus": 1}}, "unknown fields: bogus"),
+        ({"plan": "P", "goal": "G", "spec": {"bogus": 1, "affected_paths": []}}, "unknown fields: bogus"),
     ]
     for params, error_text in cases:
         record_plan_review_attempt(tmp_path, "root1", fingerprint=old_fingerprint)
@@ -355,7 +355,7 @@ def test_malformed_reviewer_slots_block_plan_review_before_any_dispatch(tmp_path
         patch.object(pr, "_run_plan_review_slots",
                      side_effect=AssertionError("no reviewer dispatch")),
     ):
-        result = pr._handle_plan_task(ctx, plan="P", goal="G", spec={"in_scope": ["x"]})
+        result = pr._handle_plan_task(ctx, plan="P", goal="G", spec={"in_scope": ["x"], "affected_paths": []})
 
     assert "Invalid reviewer-slot configuration blocks plan review" in result
     assert "not valid JSON" in result
@@ -410,7 +410,7 @@ def test_expired_explicit_deadline_skips_before_any_reviewer(monkeypatch, tmp_pa
     monkeypatch.setattr(pr, "_plan_review_slots",
                         lambda: (_ for _ in ()).throw(AssertionError("expired deadline must skip")))
     out = asyncio.run(pr._run_plan_review_async(
-        ctx, pr._PlanRequest(goal="G", plan="P", spec={"in_scope": ["x"]}),
+        ctx, pr._PlanRequest(goal="G", plan="P", spec={"in_scope": ["x"], "affected_paths": []}),
     ))
 
     assert out.startswith("PLAN_TASK_SKIPPED_DEADLINE: the task deadline has expired")
@@ -437,7 +437,7 @@ def test_expired_deadline_replays_a_recorded_wave_but_never_pays(monkeypatch, tm
     monkeypatch.setattr(pr, "_plan_review_slots",
                         lambda: (_ for _ in ()).throw(AssertionError("no panel under a dead deadline")))
     out = asyncio.run(pr._run_plan_review_async(
-        ctx, pr._PlanRequest(goal="G", plan="P", spec={"in_scope": ["x"]}),
+        ctx, pr._PlanRequest(goal="G", plan="P", spec={"in_scope": ["x"], "affected_paths": []}),
     ))
     assert out.startswith("PLAN_TASK_SKIPPED_DEADLINE:")
     attempt = load_plan_review_state(tmp_path, ctx.task_id)["current_attempt"]
@@ -467,21 +467,21 @@ class TestPlanReviewInputValidation(unittest.TestCase):
         self.ctx.emit_progress_fn = lambda _m: None
 
     def test_missing_plan_returns_error(self):
-        result = self.handler(self.ctx, plan="", goal="some goal", spec={"in_scope": ["x"]})
+        result = self.handler(self.ctx, plan="", goal="some goal", spec={"in_scope": ["x"], "affected_paths": []})
         self.assertIn("ERROR: PLAN_SPEC_INVALID", result)
         self.assertIn("plan", result.lower())
 
     def test_missing_goal_returns_error(self):
-        result = self.handler(self.ctx, plan="some plan", goal="", spec={"in_scope": ["x"]})
+        result = self.handler(self.ctx, plan="some plan", goal="", spec={"in_scope": ["x"], "affected_paths": []})
         self.assertIn("ERROR: PLAN_SPEC_INVALID", result)
         self.assertIn("goal", result.lower())
 
     def test_whitespace_plan_returns_error(self):
-        result = self.handler(self.ctx, plan="   ", goal="some goal", spec={"in_scope": ["x"]})
+        result = self.handler(self.ctx, plan="   ", goal="some goal", spec={"in_scope": ["x"], "affected_paths": []})
         self.assertIn("ERROR", result)
 
     def test_whitespace_goal_returns_error(self):
-        result = self.handler(self.ctx, plan="some plan", goal="   ", spec={"in_scope": ["x"]})
+        result = self.handler(self.ctx, plan="some plan", goal="   ", spec={"in_scope": ["x"], "affected_paths": []})
         self.assertIn("ERROR", result)
 
     def test_missing_spec_is_a_typed_refusal(self):
@@ -512,8 +512,10 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         spec = params["spec"]["properties"]
         self.assertEqual(set(spec), {
             "in_scope", "non_goals", "acceptance_claims", "invariants", "decisions",
-            "deferred", "affected_resources", "evidence",
+            "deferred", "affected_paths", "affected_resources", "evidence",
         })
+        # The ONE list the host resolves as file paths, and the one a submitted spec must carry.
+        self.assertEqual(params["spec"]["required"], ["affected_paths"])
         disposition = params["review_disposition"]
         self.assertEqual(disposition["required"], ["review_fingerprint", "items"])
         decision = disposition["properties"]["items"]["items"]["properties"]["decision"]
@@ -749,6 +751,29 @@ class TestPlanReviewDispositionEnvelope(unittest.TestCase):
             )
         self.assertEqual(out, "reviewed")
         run.assert_called_once()
+
+    def test_default_filled_author_disposition_beside_a_plan_is_ignored(self):
+        """Seen live: a model that fills every schema key sent
+        {"author_disposition": {"disposition": "accepted", "rationale": ""},
+         "items": [], "review_fingerprint": ""} with its FIRST plan and looped on
+        MIXED_ENVELOPE. No fingerprint names no wave, so it carries nothing."""
+        import ouroboros.tools.plan_review as pr
+        from ouroboros.tools.registry import ToolContext
+
+        ctx = ToolContext(repo_dir=pathlib.Path("."), drive_root=pathlib.Path("."))
+        ctx.task_id = "parent"
+        filler = {"author_disposition": {"disposition": "accepted", "rationale": ""},
+                  "items": [], "review_fingerprint": ""}
+        with patch.object(pr, "_run_plan_review_async", return_value="reviewed") as run:
+            out = pr._handle_plan_task(ctx, plan="P", goal="G", spec={}, review_disposition=filler)
+        self.assertEqual(out, "reviewed")
+        run.assert_called_once()
+        # A rationale is a statement; with it the disposition is real and still refused beside a plan.
+        spoken = {**filler, "author_disposition": {"disposition": "rejected", "rationale": "no"}}
+        with patch.object(pr, "_run_plan_review_async") as run:
+            out = pr._handle_plan_task(ctx, plan="P", goal="G", spec={}, review_disposition=spoken)
+        self.assertIn("PLAN_REVIEW_DISPOSITION_MIXED_ENVELOPE", out)
+        run.assert_not_called()
 
     def test_duplicate_plan_calls_use_existing_sequential_tool_lane(self):
         from ouroboros.loop_tool_execution import tool_calls_can_run_parallel

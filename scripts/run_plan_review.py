@@ -14,7 +14,10 @@ Usage (from anywhere):
 
 ``spec.json`` follows the plan_task spec schema: in_scope, non_goals, acceptance_claims,
 invariants, decisions[{choice, rejected, why}], deferred[{what, why_safe_to_defer}],
-affected_resources, evidence (``--evidence`` values are appended to it).
+affected_paths (REQUIRED — the files the work will CHANGE, ``[]`` when it changes none; this
+is the only list resolved as paths, and a path under the system repo makes the plan
+constitutional), affected_resources (the same question in words: systems, services, projects,
+people), evidence (``--evidence`` values are appended to it).
 """
 from __future__ import annotations
 

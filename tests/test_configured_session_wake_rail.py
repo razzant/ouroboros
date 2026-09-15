@@ -51,7 +51,7 @@ def test_sleeping_nanny_wakes_for_only_a_direct_child_beacon(tmp_path):
         ).startswith("OK:")
         return json.dumps({"status": "no_progress", "run_id": "run-1", "last_seq": 1})
 
-    wake = json.loads(supervised_wait(ctx, "run-1", wait_once=wait_once))
+    wake = json.loads(supervised_wait(ctx, "run-1", wait_once=wait_once).text)
     assert wake["status"] == "no_progress"
     assert [event["type"] for event in wake["wake_events"]] == ["child_attention_beacon"]
     assert wake["wake_events"][0]["beacon"]["task_id"] == "child"
@@ -69,7 +69,7 @@ def test_child_terminal_transition_coalesces_with_leaf_wake_and_replays_until_ac
         write_task_result(tmp_path, "child", STATUS_COMPLETED, result="verified child artifact")
         return json.dumps({"status": "no_progress", "run_id": "run-1", "last_seq": 2})
 
-    first = json.loads(supervised_wait(ctx, "run-1", wait_once=wait_once))
+    first = json.loads(supervised_wait(ctx, "run-1", wait_once=wait_once).text)
     terminal = next(event for event in first["wake_events"] if event["type"] == "child_terminal")
     assert terminal["child_task_id"] == "child"
     assert terminal["status"] == STATUS_COMPLETED
@@ -79,7 +79,7 @@ def test_child_terminal_transition_coalesces_with_leaf_wake_and_replays_until_ac
         wait_once=lambda *_args: (_ for _ in ()).throw(
             AssertionError("the unacknowledged child wake must replay before polling the leaf")
         ),
-    ))
+    ).text)
     assert replay == first
     assert acknowledge_pending_wake(ctx, replay)
     assert calls == [1]
@@ -106,7 +106,8 @@ def test_physical_terminal_wake_is_not_mislabeled_as_coordination(tmp_path):
         }),
     )
 
-    assert acknowledge_pending_wake(ctx, wake)
+    # The ACK input stays the DELIVERED transcript text, never the result object.
+    assert acknowledge_pending_wake(ctx, wake.text)
     events = [
         json.loads(line)
         for line in custody.event_log_path(tmp_path).read_text().splitlines()
@@ -196,7 +197,7 @@ def test_meaningful_wake_carries_live_tree_planning_facts_and_replays_exactly(
             "status": "completed", "run_id": "run-live", "last_seq": 1,
         }),
     )
-    wake = json.loads(raw)
+    wake = json.loads(raw.text)
     facts = wake["coordination_context"]
     assert facts["parent_intent"] == {
         "state": "present",
@@ -256,7 +257,7 @@ def test_child_terminal_before_first_sleep_is_not_lost_as_cursor_baseline(tmp_pa
         wait_once=lambda *_args: json.dumps({
             "status": "no_progress", "run_id": "run-1", "last_seq": 1,
         }),
-    ))
+    ).text)
 
     terminal = next(event for event in wake["wake_events"] if event["type"] == "child_terminal")
     assert terminal["child_task_id"] == "child"
@@ -294,9 +295,9 @@ def test_oversized_coordination_wake_is_valid_bounded_json_with_exact_source(tmp
             "status": "no_progress", "run_id": "run-large", "last_seq": 1,
         }),
     )
-    assert len(raw) <= tool_result_limit("delegate_wait")
-    assert _truncate_tool_result(raw, "delegate_wait", {}) == raw
-    delivered = json.loads(raw)
+    assert len(raw.text) <= tool_result_limit("delegate_wait")
+    assert _truncate_tool_result(raw.text, "delegate_wait", {}) == raw.text
+    delivered = json.loads(raw.text)
     assert delivered["supervision_wake_id"]
     assert delivered["wake_delivery"]["complete"] is False
     assert delivered["wake_delivery"]["wake_events_total"] == 5
@@ -306,7 +307,7 @@ def test_oversized_coordination_wake_is_valid_bounded_json_with_exact_source(tmp
     assert len(full["wake_events"]) == 5
     assert all(len(item["beacon"]["text"]) > 3800 for item in full["wake_events"])
     assert len(full["coordination_context"]["parent_intent"]["text"]) > 30_000
-    assert acknowledge_pending_wake(ctx, raw)
+    assert acknowledge_pending_wake(ctx, raw.text)
 
     after = json.loads(supervised_wait(
         ctx,
@@ -314,7 +315,7 @@ def test_oversized_coordination_wake_is_valid_bounded_json_with_exact_source(tmp
         wait_once=lambda *_args: json.dumps({
             "status": "completed", "run_id": "run-large", "last_seq": 2,
         }),
-    ))
+    ).text)
     assert not any(
         item.get("type") == "child_attention_beacon"
         for item in after.get("wake_events", [])
@@ -510,7 +511,7 @@ def test_supervision_loop_holds_one_handshaken_gateway_and_drops_it_on_a_failed_
     monkeypatch.setattr(gateway_module, "ClaudexorGateway", _Gateway)
     monkeypatch.setattr(supervision, "_control_wakes",
                         lambda _ctx: [{"type": "deadline"}] if len(ticks) >= 6 else [])
-    wake = json.loads(supervision.supervised_wait(ctx, "run-loop"))
+    wake = json.loads(supervision.supervised_wait(ctx, "run-loop").text)
     assert wake["wake_events"] == [{"type": "deadline"}]
     assert ticks == [1, 1, 1, 1, 2, 2], ticks
     first, second = gateways

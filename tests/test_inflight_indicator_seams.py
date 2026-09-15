@@ -64,9 +64,6 @@ def _patch_workers(monkeypatch, tmp_path):
     # Windows CI shard; same isolation precedent as
     # tests/test_promote_event_transport.py::_isolate_event_bus_shutdown_latch).
     monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
-    import ouroboros.project_naming as project_naming
-
-    monkeypatch.setattr(project_naming, "spawn_proactive_namer", lambda *a, **k: None)
     # Capture the turn's start announce (bridge typing frame) instead of
     # touching the real singleton bridge.
     bridge_probe = _BridgeProbe()

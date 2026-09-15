@@ -1,6 +1,7 @@
 """The public workspace contract must keep ordinary folders visible."""
 
 from pathlib import Path
+from tests._governance_docs_shared import architecture_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_external_workspace_docs_distinguish_plain_folders_from_git_operations():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(ROOT)
     control = (ROOT / "ouroboros" / "tools" / "control.py").read_text(encoding="utf-8")
     assert "ordinary folders or separate Git worktree roots" in readme
     assert "ordinary file and process work runs directly" in readme

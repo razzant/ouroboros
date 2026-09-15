@@ -116,6 +116,8 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
         "outcome_axes": normalize_outcome_axes(evt),
         "reason_code": str(evt.get("reason_code") or ""),
     }
+    if "routing_tool_calls" in evt:
+        payload["routing_tool_calls"] = None if evt["routing_tool_calls"] is None else int(evt["routing_tool_calls"])
     if "tool_call_counts" in evt:
         counts = evt["tool_call_counts"]
         payload["tool_call_counts"] = dict(counts) if isinstance(counts, dict) else None

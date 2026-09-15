@@ -21,6 +21,7 @@ SYSTEM + BIBLE are tier-0 and always full.
 import os
 import pathlib
 import tempfile
+from tests._governance_docs_shared import governance_doc_text
 
 # Unique sentinel placed inside the ARCHITECTURE body so we can prove the full
 # body is inlined (max) vs replaced by a structure-only nav map (low).
@@ -91,7 +92,7 @@ def test_plan_review_docs_pin_fail_closed_exact_artifact_custody():
     repo = pathlib.Path(__file__).resolve().parents[1]
 
     for relative in ("docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md"):
-        text = (repo / relative).read_text(encoding="utf-8")
+        text = governance_doc_text(relative, repo)
         assert "plan_review_exact_artifact_unavailable" in text, relative
         assert "only when no exact artifact reference exists" in text, relative
 

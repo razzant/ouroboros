@@ -204,10 +204,27 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # harvest can reach: the two promotion receipts carry no warning marker for the
     # identifier scan, and the two project-routing receipts reach their result
     # through the swarm-handoff latch, so no (code, first line) pair exists either.
-    "shape:promote_rejected": Delta(False, "ok", True, "blocked", "A.21", "a promotion the supervisor refused created no task"),
-    "shape:promote_unconfirmed": Delta(False, "ok", True, "unavailable", "A.21", "an unconfirmed admission must not be reported as a created task"),
-    "shape:route_rejected": Delta(False, "ok", True, "blocked", "A.21", "a project route the supervisor refused scheduled nothing"),
-    "shape:route_unconfirmed": Delta(False, "ok", True, "unavailable", "A.21", "an unconfirmed project route must not be reported as routed"),
+    # A.21 continued, 14.09 receipt incident: these four rows used to be answered by
+    # the code the corpus DECLARED for them, and the declared codes were invented —
+    # every one of these producers returns a plain string. Classified for real, the
+    # family lands in `tool_reported_failure` beside the steer receipts below: the
+    # agent SEES the refusal, and the host's "no" does not degrade execution health.
+    # The retired pair answers a `⚠️ X_REJECTED` / `⚠️ X_UNCONFIRMED` first line the
+    # same generic ok it gave the markerless promotion sentences (the route rows,
+    # which carried the marker at capture time, hold that evidence), so the recorded
+    # golden answers still describe the promotion texts that now carry the marker.
+    "shape:promote_rejected": Delta(False, "ok", True, "tool_reported_failure", "A.21", "a promotion the supervisor refused created no task"),
+    "shape:promote_unconfirmed": Delta(False, "ok", True, "tool_reported_failure", "A.21", "an unconfirmed admission must not be reported as a created task"),
+    "shape:route_rejected": Delta(False, "ok", True, "tool_reported_failure", "A.21", "a project route the supervisor refused scheduled nothing"),
+    "shape:route_unconfirmed": Delta(False, "ok", True, "tool_reported_failure", "A.21", "an unconfirmed project route must not be reported as routed"),
+    # The same family through its IDENTIFIERS: `ROUTE_*`/`ROUTING_UNCONFIRMED`/
+    # `NEEDS_MANUAL_TARGET` end in none of the suffixes the generic marker chain
+    # reads, so a route that dispatched nothing and a picker card that replaced the
+    # route both reported an ordinary warning on a successful call.
+    "ROUTE_REJECTED": Delta(False, "ok", True, "tool_reported_failure", "A.21", "a route the supervisor refused is a refusal the agent must see, not a routed task"),
+    "ROUTE_UNCONFIRMED": Delta(False, "ok", True, "tool_reported_failure", "A.21", "a route with no confirmed receipt did not provably schedule anything"),
+    "ROUTING_UNCONFIRMED": Delta(False, "ok", True, "tool_reported_failure", "A.21", "an unconfirmed manual-target delivery dispatched no route and offered no options"),
+    "NEEDS_MANUAL_TARGET": Delta(False, "ok", True, "tool_reported_failure", "A.21", "a routing act that ended in a picker card dispatched no route"),
     # A.21 across the remaining control leaves. Same blindness as above: a
     # markerless sentence, or one that reaches its result through a helper the
     # publication wraps, has no (code, first line) pair to harvest.
@@ -332,6 +349,18 @@ CURRENT_PRODUCER_CONTRACTS = {
     # The harvest puts every identifier first. A standalone capture failure
     # is an error; the actual successful-write suffix is pinned separately.
     "OUTPUT_CAPTURE_FAILED": (True, "error"),
+    # The two promotion receipts gained the warning marker their identifier needs
+    # to be read at all (14.09): before it, `PROMOTE_REJECTED: task … was not
+    # scheduled` opened line 1 with no marker and every refused promotion was a
+    # SUCCESSFUL tool call. New identifiers to the harvest, so their live answer is
+    # asserted here instead of borrowing an old tree's answer for a text it never saw.
+    "PROMOTE_REJECTED": (True, "tool_reported_failure"),
+    "PROMOTE_UNCONFIRMED": (True, "tool_reported_failure"),
+    # ensure_project_scope joined the receipt rail (15.09): its refused / unconfirmed
+    # bind outcomes are new identifiers, registered beside the routing family and
+    # asserted live here for the same reason as the promotion receipts above.
+    "SCOPE_REJECTED": (True, "tool_reported_failure"),
+    "SCOPE_UNCONFIRMED": (True, "tool_reported_failure"),
     "TOOL_ERROR": (True, "error"),
     "native:TOOL_REPORTED_FAILURE:TOOL_ERROR": (True, "tool_reported_failure"),
 }

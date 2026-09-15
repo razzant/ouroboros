@@ -865,6 +865,11 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             default=HIDDEN_CHAT_ID,
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
+        # The direct-turn fact rides the rebuilt terminal so the chat block keys
+        # its chrome on host truth: the worker frame carries it, the durable
+        # result carries it, and a reaper-delivered terminal reads the result.
+        "_is_direct_chat": bool(evt.get("_is_direct_chat") or (
+            isinstance(final_task_result, dict) and final_task_result.get("_is_direct_chat"))),
         "root_phase_checkpoint": final_task_result.get("root_phase_checkpoint") or {},
         "outcome_axes": outcome_axes,
         "reason_code": reason_code,

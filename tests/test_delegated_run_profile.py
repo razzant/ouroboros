@@ -116,7 +116,7 @@ def test_real_geometry_on_a_read_only_child_refuses_before_the_daemon(
     monkeypatch.setattr(_gw, "ClaudexorGateway", lambda *a, **k: _NeverReached())
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
     ctx = _delegating_ctx(tmp_path, acting=False, task_id="t-geometry")
-    refused = json.loads(delegate._delegate_start(ctx, "audit the folder", **geometry))
+    refused = json.loads(delegate._delegate_start(ctx, "audit the folder", **geometry).text)
     assert refused["status"] == "refused"
     assert refused["reason"] == "directory_execution_unavailable"
     assert refused["definitely_unrun"] is True
@@ -300,7 +300,7 @@ def test_a_mutating_run_requires_an_ACTIVE_workspace_not_merely_agreement(tmp_pa
     ctx.workspace_mode = ""
     record, refusal = _mutation_authority(
         ctx, delegated_run_shape(True))
-    assert refusal and "workspace_not_active" in refusal, refusal
+    assert refusal and "workspace_not_active" in refusal.text, refusal
     assert record == {}
 
 
@@ -361,7 +361,8 @@ def test_a_delegated_run_can_only_be_touched_by_the_task_that_started_it(tmp_pat
 
     for tool, call in (
         ("delegate_wait", lambda ctx, rid: delegate._delegate_wait(ctx, rid, wait_sec=1)),
-        ("delegate_cancel", lambda ctx, rid: delegate._delegate_cancel(ctx, rid, reason="x")),
+        # delegate_wait is the tick contract (str); cancel answers natively.
+        ("delegate_cancel", lambda ctx, rid: delegate._delegate_cancel(ctx, rid, reason="x").text),
     ):
         # A run with NO durable start record anywhere: ownership is UNKNOWN, which is a
         # different fact from "demonstrably someone else's" and is refused on its own name.
@@ -428,7 +429,7 @@ def test_a_mutating_run_is_refused_when_the_root_and_the_granted_write_root_disa
     ctx.workspace_root = str(inside_the_drive)
     ctx.workspace_mode = "self_worktree"
 
-    out = json.loads(delegate._delegate_start(ctx, "edit the README"))
+    out = json.loads(delegate._delegate_start(ctx, "edit the README").text)
     assert out["status"] == "refused", out
     # A worktree overlapping the data drive is refused as "not an active workspace" —
     # `workspace_mode_block_reason` fires first and is the stronger statement.
@@ -437,7 +438,7 @@ def test_a_mutating_run_is_refused_when_the_root_and_the_granted_write_root_disa
     # And a mutating child whose constraint granted no write_root at all is refused too,
     # rather than the host picking a directory on its behalf.
     ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="self_worktree")
-    out = json.loads(delegate._delegate_start(ctx, "edit the README"))
+    out = json.loads(delegate._delegate_start(ctx, "edit the README").text)
     assert out["status"] == "refused", out
     assert out["reason"] in ("write_root_missing", "workspace_not_active"), out
 
@@ -454,11 +455,11 @@ def test_the_guards_that_protect_a_delegated_run_fail_closed(tmp_path, monkeypat
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a"}
-    assert json.loads(delegate._delegate_cancel(ctx, "run-x"))["reason"] == "run_not_owned"
+    assert json.loads(delegate._delegate_cancel(ctx, "run-x").text)["reason"] == "run_not_owned"
     ctx.task_id = ""
     delegate._CUSTODY["run-x"] = delegate._RunCustody(
         task_id="t-a", route_id="r", model="m", project_id="p", project_owned=False)
-    assert json.loads(delegate._delegate_cancel(ctx, "run-x"))["reason"] == "run_not_owned"
+    assert json.loads(delegate._delegate_cancel(ctx, "run-x").text)["reason"] == "run_not_owned"
     delegate._CUSTODY.clear()
 
     # 2. A run with no knowable deadline gets a conservative cap, never an omitted one:
@@ -520,7 +521,7 @@ def test_the_guards_that_protect_a_delegated_run_fail_closed(tmp_path, monkeypat
     from ouroboros.gateways import claudexor as _gw
 
     monkeypatch.setattr(_gw, "ClaudexorGateway", lambda *a, **k: _NeverReached())
-    refused = json.loads(delegate._delegate_start(expired, "start something new"))
+    refused = json.loads(delegate._delegate_start(expired, "start something new").text)
     assert refused["status"] == "refused" and refused["reason"] == "task_deadline_expired"
     assert refused["definitely_unrun"] is True
     assert reached == [], "expired nanny never reaches daemon"
@@ -563,7 +564,7 @@ def test_an_unresolvable_write_root_is_a_typed_refusal_not_a_traceback(tmp_path)
     ctx.workspace_mode = "self_worktree"
     record, refusal = _mutation_authority(
         ctx, delegated_run_shape(True))
-    assert refusal and "write_root_mismatch" in refusal, refusal
+    assert refusal and "write_root_mismatch" in refusal.text, refusal
     assert record == {}
 
 
@@ -599,5 +600,5 @@ def test_an_inactive_workspace_is_refused_even_when_the_root_is_set(tmp_path):
     record, refusal = _mutation_authority(
         ctx, delegated_run_shape(True))
     assert refusal, "an inactive workspace must be refused"
-    assert "workspace_not_active" in refusal, refusal
+    assert "workspace_not_active" in refusal.text, refusal
     assert record == {}

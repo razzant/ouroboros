@@ -2,6 +2,7 @@ import pathlib
 import re
 
 import pytest
+from tests._governance_docs_shared import architecture_text
 
 from ouroboros.tools.release_sync import (
     RELEASE_ASSET_TEMPLATES,
@@ -89,7 +90,7 @@ def test_release_guidance_accepts_author_facing_and_pep440_forms():
 
 
 def test_architecture_docs_describe_bundle_bootstrap_not_per_launch_core_sync():
-    architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(REPO)
 
     assert "scripts/build_repo_bundle.py" in architecture
     assert "repo.bundle" in architecture
@@ -214,7 +215,7 @@ def test_install_page_matches_macos_quick_start_and_model_prerequisite():
 
 
 def test_architecture_doc_describes_build_script_release_tag_check():
-    architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(REPO)
 
     assert "Release tag prerequisite" in architecture
     assert "scripts/build_repo_bundle.py" in architecture
@@ -275,7 +276,7 @@ def test_architecture_doc_does_not_claim_ensure_managed_repo_fetches():
     """ensure_managed_repo only validates + ensures the managed remote is
     configured; the actual fetch lives in supervisor.git_ops.checkout_and_reset.
     The ARCHITECTURE.md startup flow must not conflate the two."""
-    architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(REPO)
 
     assert "ensure_managed_repo()" in architecture
     assert "supervisor/git_ops.checkout_and_reset" in architecture
@@ -311,7 +312,7 @@ def test_architecture_module_tree_lists_all_live_extension_http_endpoints():
     same document. Specifically the Phase 5 review surface
     ``POST /api/skills/<skill>/review`` is exported via
     ``server.py`` and must appear in both places."""
-    architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(REPO)
 
     # Module map entry lives on the ``gateway/extensions.py`` tree line.
     tree_idx = architecture.find("├── extensions.py")
@@ -328,7 +329,7 @@ def test_architecture_doc_lists_valid_extension_route_methods_in_frozen_contract
     ``__all__`` + ``tests/test_contracts.py``). The ARCHITECTURE §11.1
     frozen-contract table must list it alongside the other Phase 4
     plugin_api exports so the doc/code mirror is accurate."""
-    architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(REPO)
 
     assert "VALID_EXTENSION_ROUTE_METHODS" in architecture
     assert "test_extension_route_methods_contract_matches_server_dispatch" in architecture
@@ -339,7 +340,7 @@ def test_architecture_doc_describes_extension_staging_surface():
     runtime subdirectory under ``data/state/skills/<name>/``. The
     architecture doc's skills data-layout section must describe it so the
     doc/code mirror is accurate."""
-    architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(REPO)
 
     assert "__extension_imports/" in architecture
     assert "_stage_extension_import_tree" in architecture

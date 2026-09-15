@@ -596,7 +596,7 @@ def test_a_202_handle_without_a_run_id_is_a_live_run_not_a_failure(tmp_path, mon
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
     delegate._CUSTODY.clear()
-    out = json.loads(delegate._delegate_start(_plain_ctx(tmp_path), "x"))
+    out = json.loads(delegate._delegate_start(_plain_ctx(tmp_path), "x").text)
     assert out["status"] == "started", out
     assert out["run_id"] == "job-42"
     assert "job-42" in delegate._CUSTODY, "the run must be in custody or nobody can cancel it"

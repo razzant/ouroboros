@@ -206,17 +206,21 @@ def _pre_start_leaf(
     waiting is the model's own ``delegate_wait`` decision, so owner messages,
     hurry controls and parallel children stay live for the whole run."""
 
+    from ouroboros.delegate_shared import delegate_payload
     from ouroboros.subagent_runtime import delegate_start_entry
 
-    started_raw = delegate_start_entry(ctx, "", **{
+    # The start wrapper answers with the family's NATIVE result; the receipt below
+    # carries the producer's own payload, never a stringified result object. An
+    # UNREADABLE payload proves nothing about the run's absence, so it wakes the
+    # model with the fault rather than claiming a $0 unrun terminal.
+    started = delegate_start_entry(ctx, "", **{
         key: actor_bootstrap[key] for key in ("directory_strategy", "scope_paths")
         if key in actor_bootstrap
     })
     try:
-        payload = json.loads(started_raw) if isinstance(started_raw, str) else {}
-    except (TypeError, ValueError):
+        payload = delegate_payload(started)
+    except (AttributeError, TypeError, ValueError):
         payload = {}
-    payload = payload if isinstance(payload, dict) else {}
     status = str(payload.get("status") or "")
     if status in {"started", "started_uncustodied"}:
         # Idempotent beside the start wrapper's own marker: the host episode

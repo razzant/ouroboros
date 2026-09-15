@@ -10,6 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.delegate_shared import _fail, delegate_result
+from ouroboros.tools.tool_result import ToolResult
+
 from tests.test_available_subagents_runtime import _session_row, _settings, _snapshot
 
 
@@ -39,10 +42,10 @@ def test_definite_configured_session_start_refusal_terminalizes_before_llm(
     import ouroboros.subagent_runtime as runtime
     from ouroboros.subagent_bootstrap import bootstrap_before_context
 
-    monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: json.dumps({
-        "status": "refused", "reason": reason, "reset_at": "2030-01-01T00:00:00Z",
-        **extra,
-    }))
+    monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: _fail(
+        "delegate_start", reason, "the route refused this start",
+        reset_at="2030-01-01T00:00:00Z", **extra,
+    ))
     monkeypatch.setattr(
         runtime, "current_subagent_alternatives", lambda _exclude: [],
     )
@@ -85,8 +88,9 @@ def test_startup_refusal_classifier_preserves_ambiguous_wakes(
     import ouroboros.subagent_runtime as runtime
     from ouroboros.subagent_bootstrap import bootstrap_before_context
 
-    raw = payload if isinstance(payload, str) else json.dumps(payload)
-    monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: raw)
+    started = (delegate_result(payload) if isinstance(payload, dict)
+               else ToolResult(status="ok", code="OK", text=payload))
+    monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: started)
     snapshot = _snapshot(_settings(_session_row()), "session-builder")
     ctx = SimpleNamespace(
         task_id="child-ambiguous", drive_root=tmp_path,
@@ -228,10 +232,10 @@ def test_definite_refusal_reaches_the_zero_dollar_terminal_without_a_model_round
     monkeypatch.setattr(agent_module, "run_llm_loop", lambda **kw: (
         calls.append(kw) or ("model ran", {}, {"reasoning_notes": [], "tool_calls": []})
     ))
-    monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: _json.dumps({
-        "status": "refused", "reason": "credential_pool_exhausted",
-        "reset_at": "2030-01-01T00:00:00Z",
-    }))
+    monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: _fail(
+        "delegate_start", "credential_pool_exhausted", "no credential profile is available",
+        reset_at="2030-01-01T00:00:00Z",
+    ))
     monkeypatch.setattr(runtime, "current_subagent_alternatives", lambda _x: [])
     import ouroboros.subagents as subagents
     monkeypatch.setattr(subagents, "route_health", lambda *_a, **_k: ("", ""))
@@ -387,16 +391,16 @@ def test_precustody_refusals_leave_a_durable_start_blocked_row(tmp_path):
         _configured_actor_bootstrap={"selected_subagent_id": "session-builder"},
     )
     out = runtime.delegate_start_entry(ctx, "do work", root="skill_payload")
-    assert "configured_actor_resource_mismatch" in out
+    assert "configured_actor_resource_mismatch" in out.text
     reasons = [row["reason"] for row in _rows(tmp_path)]
     assert reasons == ["configured_actor_resource_mismatch"]
 
     out = runtime.delegate_start_entry(ctx, "do work", subagent_id="someone-else")
-    assert "configured_actor_route_mismatch" in out
+    assert "configured_actor_route_mismatch" in out.text
     reasons = [row["reason"] for row in _rows(tmp_path)]
     assert reasons[-1] == "configured_actor_route_mismatch"
 
     out = runtime.delegate_start_entry(ctx, "do work")
-    assert "configured_work_order_unavailable" in out
+    assert "configured_work_order_unavailable" in out.text
     reasons = [row["reason"] for row in _rows(tmp_path)]
     assert reasons[-1] == "configured_work_order_unavailable"

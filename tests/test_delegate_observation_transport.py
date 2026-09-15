@@ -67,7 +67,7 @@ def test_public_wait_reads_response_slower_than_five_seconds(tmp_path, monkeypat
         gateway_module.DaemonEndpoint("127.0.0.1", server.server_port, "fixture-token")))
     try:
         started = time.monotonic()
-        result = json.loads(delegate._delegate_wait_entry(ctx, "run-slow"))
+        result = json.loads(delegate._delegate_wait_entry(ctx, "run-slow").text)
         assert time.monotonic() - started >= 5.0
         assert result["status"] == "terminal", result
         assert result["state"] == "succeeded"
@@ -94,7 +94,7 @@ def test_typed_observation_timeout_keeps_same_run_inside_supervision(tmp_path, m
                                "reason": "observation_read_timeout", "waited_sec": 5.0})
         return json.dumps({"status": "terminal", "run_id": run_id, "state": "succeeded"})
 
-    result = json.loads(delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=wait_once))
+    result = json.loads(delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=wait_once).text)
     assert result["status"] == "terminal"
     assert calls == ["run-existing", "run-existing"]
     assert sleeps == [delegate_supervision._TICK_SEC]
@@ -126,7 +126,7 @@ def test_existing_control_returns_without_starting_another_observation(tmp_path,
     calls = []
     monkeypatch.setattr(delegate_supervision, "_control_wakes", lambda _ctx: [{"type": "deadline"}])
     result = json.loads(delegate_supervision.supervised_wait(
-        ctx, "run-existing", wait_once=lambda *_args: calls.append(1)))
+        ctx, "run-existing", wait_once=lambda *_args: calls.append(1)).text)
     assert result["wake_events"] == [{"type": "deadline"}]
     assert calls == []
 
@@ -256,7 +256,7 @@ def test_unreachable_daemon_episode_is_one_owner_line_each_way(tmp_path, monkeyp
         ctx, "run-existing", wait_once=_scripted_wait_once([
             unreachable, unreachable, unreachable, ("no_progress", None),
             unreachable, ("terminal", None),
-        ])))
+        ])).text)
     assert result["status"] == "terminal"
     assert [text.startswith("Delegation daemon unreachable") for text, _ in notes] == [
         True, False, True, False]
@@ -295,7 +295,7 @@ def test_other_typed_observation_reasons_say_nothing_to_the_owner(tmp_path, monk
     monkeypatch.setattr(delegate_supervision.time, "sleep", lambda _sec: None)
     slow = ("observation_pending", "observation_read_timeout")
     result = json.loads(delegate_supervision.supervised_wait(
-        ctx, "run-existing", wait_once=_scripted_wait_once([slow, slow, ("terminal", None)])))
+        ctx, "run-existing", wait_once=_scripted_wait_once([slow, slow, ("terminal", None)])).text)
     assert result["status"] == "terminal"
     assert notes == []
 
@@ -317,7 +317,7 @@ def test_a_refusal_that_never_reached_the_daemon_closes_no_outage(tmp_path, monk
     result = json.loads(delegate_supervision.supervised_wait(
         ctx, "run-existing", wait_once=_scripted_wait_once([
             unreachable, unreachable, ("refused", "daemon_not_discovered"),
-        ])))
+        ])).text)
 
     assert result["status"] == "refused" and result["reason"] == "daemon_not_discovered"
     assert [text.startswith("Delegation daemon unreachable") for text, _ in notes] == [True]
@@ -341,6 +341,6 @@ def test_outer_controls_still_cut_a_long_unobserved_stretch(tmp_path, monkeypatc
         return json.dumps({"status": "observation_pending", "run_id": run_id,
                            "reason": "daemon_unreachable", "waited_sec": 0.1})
 
-    result = json.loads(delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=wait_once))
+    result = json.loads(delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=wait_once).text)
     assert result["wake_events"] == [{"type": control}]
     assert len(ticks) == 3, "the stretch ended on the control, not on a daemon answer"

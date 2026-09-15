@@ -41,8 +41,8 @@ def default_shaped_directory_options(strategy, scope_paths) -> bool:
     return strategy in (None, "direct") and not scope_paths
 
 
-def blocked_geometry_refusal(ctx, authority, selector_root, strategy, scope_paths) -> str:
-    """Typed pre-POST refusal for geometry this shape can never serve, else ``""``.
+def blocked_geometry_refusal(ctx, authority, selector_root, strategy, scope_paths):
+    """Typed pre-POST refusal for geometry this shape can never serve, else ``None``.
 
     A read-only child and a payload selector never open the ordinary-folder session,
     so a real geometry request is refused before the daemon call — the parent repairs
@@ -61,9 +61,9 @@ def blocked_geometry_refusal(ctx, authority, selector_root, strategy, scope_path
     at the 300-line function cap on a shrink-only band path.
     """
     if not (selector_root or getattr(authority, "access", "") != "workspace_write"):
-        return ""
+        return None
     if default_shaped_directory_options(strategy, scope_paths):
-        return ""
+        return None
     from ouroboros.delegate_evidence import record_start_blocked
     from ouroboros.delegate_shared import _fail
 

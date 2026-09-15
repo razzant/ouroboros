@@ -67,11 +67,14 @@ def _stamp_owner_delivery(
 ) -> None:
     """Record the latest owner message this turn actually DRAINED (latest wins).
 
-    The steer relay reads this typed fact to tell "still acting on the message
-    that started me" from "relaying my own words after a later owner message
-    reached me". Only owner DIALOGUE stamps it: typed controls (task messages,
-    quiz answers, hurry, finalize-now, revocations) are not the owner's steering
-    text, and a message merely WRITTEN to a mailbox has not been delivered at all.
+    The steer relay and the routing issuer read this typed fact to tell "acting
+    on the owner message this round delivered" from "speaking for myself".
+    Only owner DIALOGUE stamps it: typed controls (task messages, quiz answers,
+    hurry, finalize-now, revocations) are not the owner's steering text, and a
+    message merely WRITTEN to a mailbox has not been delivered at all. The fact
+    lives for one drain: ``_drain_incoming_messages`` clears it before reading
+    the mailbox, so a task that relayed one owner message is a task again on its
+    next round rather than an owner turn for the rest of its life.
     """
     if owner_ctx is None:
         return
@@ -91,6 +94,8 @@ def _drain_incoming_messages(
 ) -> Dict[str, Any]:
     """Injects dialogue; returns typed controls."""
     controls: Dict[str, Any] = {}
+    if owner_ctx is not None and getattr(owner_ctx, "last_owner_delivery", None) is not None:
+        owner_ctx.last_owner_delivery = None
     while not incoming_messages.empty():
         try:
             injected = incoming_messages.get_nowait()
@@ -113,7 +118,9 @@ def _drain_incoming_messages(
                     text=str(injected.get("text") or ""),
                     ts=str(injected.get("ts") or ""),
                 )
-                _loop()._append_or_merge_user_content(messages, _loop()._owner_marked_content(owner_content))
+                _loop()._append_or_merge_user_content(
+                    messages, _loop()._owner_marked_content(owner_content), slot=owner_ctx,
+                )
             else:
                 _loop()._record_owner_directive(
                     owner_ctx, source="direct_incoming", content=injected,
@@ -121,12 +128,14 @@ def _drain_incoming_messages(
                 _stamp_owner_delivery(
                     owner_ctx, msg_id="", client_message_id="", text=str(injected), ts="",
                 )
-                _loop()._append_or_merge_user_message(messages, _loop()._owner_marked_content(injected))
+                _loop()._append_or_merge_user_message(
+                    messages, _loop()._owner_marked_content(injected), slot=owner_ctx,
+                )
         except queue.Empty:
             break
 
     if drive_root is not None and task_id:
-        from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_TASK_MESSAGE, acknowledge_transcript_entry, deliver_quiz_answer, deliver_task_message, drain_owner_entries
+        from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_TASK_MESSAGE, PROVENANCE_INDEPENDENT_TASK, acknowledge_transcript_entry, deliver_quiz_answer, deliver_task_message, drain_owner_entries
 
         if owner_ctx:
             owner_ctx._loop_mailbox_seen_ids = _owner_msg_seen
@@ -154,8 +163,14 @@ def _drain_incoming_messages(
                 # words the parent RELAYED are context with a real source, not the
                 # principal's own directive: the typed provenance and the relay ids ride
                 # the row, exactly as the dialogue renderer already distinguishes them.
+                # An INDEPENDENT task's words (a peer root speaking for itself) are
+                # context the receiving model judges, never a directive: they enter no
+                # owner corpus, so owner_source_sha256, the post-drain growth check and
+                # the acceptance premises stay the owner's (owner 4=A -- only the
+                # owner's messages supersede a reviewed answer). The typed provenance
+                # and the sender id ride the row, the injected event and the ack.
                 provenance = str(entry.get("provenance") or "ancestor_task")
-                if provenance not in {"system", "descendant_task"}:
+                if provenance not in {"system", "descendant_task", PROVENANCE_INDEPENDENT_TASK}:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
                         source=("relayed_peer_message" if provenance == "peer_via_ancestor"
@@ -163,7 +178,10 @@ def _drain_incoming_messages(
                         origin={"source_task_id": str(entry.get("source_task_id") or ""),
                                 "relayed_from_task_id": str(entry.get("relayed_from_task_id") or "")},
                     )
-                deliver_task_message(entry, task_id, event_queue, lambda text: _loop()._append_or_merge_user_message(messages, text))
+                deliver_task_message(
+                    entry, task_id, event_queue,
+                    lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx),
+                )
                 acknowledge_transcript_entry(drive_root, task_id, entry)
                 continue
             if kind == KIND_QUIZ_ANSWER:
@@ -171,7 +189,10 @@ def _drain_incoming_messages(
                     owner_ctx, source="owner_quiz_answer", content=dmsg,
                     msg_id=str(entry.get("msg_id") or ""),
                 )
-                deliver_quiz_answer(entry, task_id, event_queue, lambda text: _loop()._append_or_merge_user_message(messages, text))
+                deliver_quiz_answer(
+                    entry, task_id, event_queue,
+                    lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx),
+                )
                 acknowledge_transcript_entry(drive_root, task_id, entry)
                 continue
             _loop()._record_owner_directive(
@@ -189,7 +210,10 @@ def _drain_incoming_messages(
             )
             from ouroboros.client_surface import noted_owner_text
 
-            _loop()._append_or_merge_user_message(messages, _loop()._owner_marked_content(noted_owner_text(owner_ctx, entry, dmsg)))
+            _loop()._append_or_merge_user_message(
+                messages, _loop()._owner_marked_content(noted_owner_text(owner_ctx, entry, dmsg)),
+                slot=owner_ctx,
+            )
             acknowledge_transcript_entry(drive_root, task_id, entry)
             if event_queue is not None:
                 try:
@@ -228,6 +252,22 @@ def _context_overflow_retries(tool_ctx: Any) -> set[Tuple[str, str]]:
 
 
 def _run_round_compaction(
+    messages: List[Dict[str, Any]],
+    ctx: _CompactionRoundContext,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """The round's transcript maintenance before the send: an explicit manual
+    reclaim (Main fit owns automatic decisions), then -- on the transcript that
+    will actually go out -- the host roster of independent roots as a TAIL row
+    when it changed (owner 6C). The note follows any reclaim so it is never
+    folded into a rewrite, and precedes the acceptance observation and the seal."""
+    from ouroboros.peer_roster import maybe_append_roster_note
+
+    messages, usage = _run_round_reclaim(messages, ctx)
+    maybe_append_roster_note(ctx.tools._ctx, messages, ctx.drive_root)
+    return messages, usage
+
+
+def _run_round_reclaim(
     messages: List[Dict[str, Any]],
     ctx: _CompactionRoundContext,
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:

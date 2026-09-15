@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import json
 import threading
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Seconds the mock model holds every completion before answering (0 = answer at
+# once). A browser fixture that needs a GENUINELY running root sets this so the
+# dispatched task stays in its first model call for the test's duration; setting
+# HOLD_RELEASE lets a held handler answer at once (fixture teardown joins it).
+HOLD_SECONDS = 0.0
+HOLD_RELEASE = threading.Event()
 
 
 class MockLLMServer:
@@ -28,6 +36,8 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self.send_error(404)
             return
+        if HOLD_SECONDS > 0:
+            HOLD_RELEASE.wait(HOLD_SECONDS)
         payload = {
             "id": "mock-chat",
             "object": "chat.completion",

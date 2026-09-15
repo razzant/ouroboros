@@ -570,7 +570,10 @@ def integrate_payload_patch(
         ctx, entry.resource_ref, entry.target_root,
         tool="integrate_delegated_patch", context=f"run_id={rid}")
     if rebind_refusal:
-        return rebind_refusal
+        # The family boundary: this rebind helper is shared with the
+        # external-executor verbs, which speak the native result; the patch
+        # integration tool keeps its own string ABI, so the refusal projects here.
+        return rebind_refusal.text
     from ouroboros.subagent_worktrees import isolated_git_env
 
     # NO-REPOSITORY mode for BOTH git invocations below (the touched-path reader

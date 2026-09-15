@@ -433,7 +433,7 @@ def test_no_post_fires_when_the_start_request_row_did_not_land(tmp_path, monkeyp
 
     monkeypatch.setattr(dc, "append_jsonl", broken_append)
     delegate._CUSTODY.clear()
-    out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "do the work"))
+    out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "do the work").text)
     delegate._CUSTODY.clear()
     assert out["status"] == "refused"
     assert out["reason"] == "start_request_row_unwritable"

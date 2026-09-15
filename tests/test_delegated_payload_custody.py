@@ -434,7 +434,7 @@ def test_wait_and_cancel_authority_did_not_widen_for_an_orphan(tmp_path, monkeyp
     second, skill, entry, capture = _payload_orphan(tmp_path, monkeypatch)
     waited = json.loads(delegate._delegate_wait(second, "run-p1", wait_sec=1))
     assert waited["reason"] == "run_not_owned", waited
-    cancelled = json.loads(delegate._delegate_cancel(second, "run-p1", "stop"))
+    cancelled = json.loads(delegate._delegate_cancel(second, "run-p1", "stop").text)
     assert cancelled["reason"] == "run_not_owned", cancelled
     assert entry.patch_disposed == ""
     custody._CUSTODY.clear()

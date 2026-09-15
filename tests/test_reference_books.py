@@ -74,16 +74,37 @@ def test_missing_authored_preamble_is_not_generated_from_body():
         load_reference_book(Path("unused"), "architecture", corpus.__getitem__)
 
 
+def test_a_historical_monolith_revision_still_reads_as_one_complete_legacy_source():
+    """The migration is forward-only; an exact older revision must still compose."""
+    monolith = b"# Book\n\nOrientation.\n\n## Runtime\n\nProcesses carry the work.\n"
+    book = load_reference_book(Path("unused"), "architecture", lambda _: monolith)
+    assert book.legacy and not book.chapters
+    assert compose_book(book).encode() == monolith
+    view = overview_book(book)
+    assert "docs/ARCHITECTURE.md" in view.text
+    assert "Runtime" in view.text and not view.source_complete
+
+
 @pytest.mark.parametrize("book_id,path", [
     ("architecture", "docs/ARCHITECTURE.md"),
     ("development", "docs/DEVELOPMENT.md"),
 ])
-def test_current_production_monoliths_remain_byte_identical(book_id, path):
+def test_current_production_books_are_chaptered_and_composition_covers_the_closure(book_id, path):
     root = Path(__file__).resolve().parents[1]
     book = load_reference_book(root, book_id)
-    assert book.legacy
-    assert compose_book(book).encode() == (root / path).read_bytes()
+    assert not book.legacy and book.chapters
+    closure = (book.entrypoint, *book.chapters)
+    composed = compose_book(book)
+    for source in closure:
+        # Every declared source, whole, exactly once: a composed book is the
+        # complete book or it is a lie about coverage.
+        assert composed.count(source.text) == 1, source.source_path
+        assert source.source_path == path or source.source_path.startswith(f"docs/{book_id}/")
+    assert len(composed) >= sum(len(source.text) for source in closure)
     view = overview_book(book)
-    assert path in view.text
     assert view.sources[0].path == path
+    for chapter in book.chapters:
+        # The compact view orients by authored introduction and addresses the
+        # PHYSICAL chapter, never a line of the composed book.
+        assert f"Source: `{chapter.source_path}`" in view.text
     assert not view.source_complete

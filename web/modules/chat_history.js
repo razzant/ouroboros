@@ -1,3 +1,5 @@
+import { isReplayEvidenceRow } from './chat_activity.js';
+
 /** Chat's bounded archive-page owner. DOM, reading protection and live rows stay
  * with the chat instance; only fetchPage is asynchronous. Cursors are opaque.
  */
@@ -110,8 +112,7 @@ export function createChatHistoryPager({
             throw new TypeError('History page is missing its messages or continuation boundary');
         }
         const nextChain = newChain ? chain + 1 : chain;
-        const messageCount = data.messages.filter(row => row.system_type !== 'quiz_answer'
-            && !(row.summary_kind && row.historical_terminal)).length;
+        const messageCount = data.messages.filter(row => !isReplayEvidenceRow(row)).length;
         // Re-reading a page refreshes its row count, never its frozen boundaries.
         const prior = newChain ? null : pages[index];
         const page = prior?.rows === messageCount ? prior : Object.freeze(prior

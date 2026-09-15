@@ -2,7 +2,7 @@
 // live-card presentation projections (moved verbatim from chat.js) plus the
 // in-flight direct/ephemeral turn status reducer and snapshot hydration.
 import { executorIdentityMarkup } from './harness_presentation.js';
-import { compactModel, modelExecutionLabel } from './log_events.js';
+import { compactModel, formatLogDuration, modelExecutionLabel } from './log_events.js';
 import { createSystemMessageAction } from './ui_helpers.js';
 import { joinMarkdownHeadings } from './utils.js';
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
@@ -172,16 +172,13 @@ export function shouldAlwaysShowTaskCard(taskId = '') {
     return isBackgroundTaskId(taskId);
 }
 
-export const ADDRESSING_ONLY_TOOLS = new Set(['promote_chat_to_task', 'route_to_project', 'steer_task']);
-
-export function addressingToolCallCount(count, metrics) {
-    const counts = metrics.tool_call_counts;
-    const entries = counts && typeof counts === 'object' && !Array.isArray(counts) ? Object.entries(counts) : [];
-    if (!Number.isInteger(count) || count <= 0 || !Number.isInteger(metrics.tool_errors)
-            || metrics.tool_errors < 0 || !entries.length
-            || !entries.every(([, n]) => Number.isInteger(n) && n > 0)
-            || entries.reduce((sum, [, n]) => sum + n, 0) !== count) return null;
-    return entries.reduce((sum, [name, n]) => sum + (ADDRESSING_ONLY_TOOLS.has(name) ? n : 0), 0);
+/**
+ * A history row that carries replay evidence only (a recorded quiz answer, a
+ * hidden terminal projection) and mounts nothing: the one owner of that
+ * distinction for the replay passes and the pager's page-row count.
+ */
+export function isReplayEvidenceRow(row) {
+    return row?.system_type === 'quiz_answer' || Boolean(row?.summary_kind && row?.historical_terminal);
 }
 
 export function isForegroundLiveCard(record) {
@@ -513,6 +510,8 @@ export function clearStickyCardState(record) {
     }
     record.modelExecution = null;
     record.toolCalls = null;
+    record.toolErrors = null;
+    record.durationSec = null;
     record.historicalUnavailable = false;
     record.historicalUnconfirmed = false;
     record.historicalTerminal = null;
@@ -1095,6 +1094,8 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
         modelExecutionLabel(record.modelExecution),
         Number.isInteger(record.toolCalls) ? `${record.toolCalls} tool ${record.toolCalls === 1 ? "call" : "calls"}` : '',
+        record.toolErrors > 0 ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
+        Number.isFinite(record.durationSec) ? formatLogDuration(record.durationSec) : '',
         ...(Array.isArray(record._lastFrameMeta) ? record._lastFrameMeta : []),
         ...((record.costMeta && Array.isArray(record.costMeta.meta)) ? record.costMeta.meta : []),
         record.latestActivityTs ? `updated ${record.latestActivityTs}` : '',

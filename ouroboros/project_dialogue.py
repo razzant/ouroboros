@@ -317,6 +317,19 @@ def _latest_annotations(path: pathlib.Path) -> Dict[str, Dict[str, Any]]:
     return latest
 
 
+def _latest_annotations_by_token(path: pathlib.Path) -> Dict[tuple, Dict[str, Any]]:
+    """Latest row per (message, routing token): one owner message carries several
+    routing acts -- a first promote, a later steer relaying the same message, a
+    picker click -- and each act's receipt must stay readable by its own token
+    while the message's LATEST row is what the UI paints."""
+    latest: Dict[tuple, Dict[str, Any]] = {}
+    for row in iter_jsonl_objects(path):
+        message_id = str(row.get("client_message_id") or "")
+        if message_id and row.get("type") == "chat_annotation":
+            latest[(message_id, str(row.get("routing_token") or ""))] = dict(row)
+    return latest
+
+
 def latest_chat_annotations(drive_root: Any) -> Dict[str, Dict[str, Any]]:
     """Latest presentation annotation per message; a torn tail is ignored."""
     path = pathlib.Path(drive_root) / "logs" / _ANNOTATIONS_NAME
@@ -326,11 +339,16 @@ def latest_chat_annotations(drive_root: Any) -> Dict[str, Dict[str, Any]]:
 def chat_annotation_receipt(
     drive_root: Any, client_message_id: str, routing_token: str,
 ) -> Dict[str, Any]:
-    """Return the exact token-bound annotation for one routing attempt."""
-    row = latest_chat_annotations(drive_root).get(str(client_message_id or ""), {})
-    if str(row.get("routing_token") or "") != str(routing_token or ""):
-        return {}
-    return dict(row)
+    """The latest annotation written for one routing attempt, read BY TOKEN.
+
+    A later act under the same owner message no longer hides an earlier act's
+    receipt: the waiter that minted the token polls for its own outcome, and the
+    UI projection stays latest-per-message (``latest_chat_annotations``)."""
+    path = pathlib.Path(drive_root) / "logs" / _ANNOTATIONS_NAME
+    row = _latest_annotations_by_token(path).get(
+        (str(client_message_id or ""), str(routing_token or "")),
+    )
+    return dict(row) if row else {}
 
 
 def _compact_annotations_locked(drive_root: Any, path: pathlib.Path) -> None:
@@ -347,8 +365,10 @@ def _compact_annotations_locked(drive_root: Any, path: pathlib.Path) -> None:
         (message_id for message_id in latest if message_id.startswith(AGENT_RECEIPT_ID_PREFIX)),
         key=lambda message_id: str(latest[message_id].get("ts") or ""),
     )[-_RETAINED_AGENT_RECEIPTS:])
+    # Retained per (message, token): an older act's receipt under a message that
+    # is still in the chat survives beside the message's newest act.
     rows = [
-        row for message_id, row in latest.items()
+        row for (message_id, _token), row in _latest_annotations_by_token(path).items()
         if message_id in retained_ids or message_id in kept_receipts
     ]
     rows.sort(key=lambda row: str(row.get("ts") or ""))

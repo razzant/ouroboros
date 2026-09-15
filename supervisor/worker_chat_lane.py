@@ -187,7 +187,7 @@ def _host_operation_failure(metadata: Optional[dict]) -> dict:
 
 
 def _broadcast_task_named(msg: dict) -> None:
-    """Bridge broadcast callback for the proactive namer (kept tiny + fail-soft)."""
+    """Bridge broadcast callback for admission naming (kept tiny + fail-soft)."""
     try:
         from supervisor.message_bus import get_bridge
 
@@ -345,15 +345,10 @@ def _run_chat_task(
                 _pool()._report_binding_failure(task["id"], pid, exc, path="direct_project_turn")
         if not task["text"]:
             task["text"] = "(image attached)" if image_data else ""
-        # Cluster B: proactively coin a project name for a fresh MAIN-CHAT direct card
-        # (not an already-bound project-thread task) so
-        # the card shows a human title up front and turn-into-project reuses it.
-        if not task.get("project_id"):
-            from ouroboros.project_naming import spawn_proactive_namer
-
-            spawn_proactive_namer(
-                _pool().DRIVE_ROOT, str(task["id"]), task["text"], broadcast=_broadcast_task_named
-            )
+        # A direct turn is not named: it renders as an activity block, never as
+        # a titled task card, and joins a Project only through the model's own
+        # scope tools (owner decision 14=A). Managed promotes keep their
+        # admission names (worker_promotion._admitted_suggested_name).
         attach_task_contract(task)
 
         # Announce the authoritative start immediately (owner decision 2A):

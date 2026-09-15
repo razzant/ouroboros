@@ -29,6 +29,7 @@ from ouroboros.triad_review import (
     REVIEW_JSON_MATRIX_CONTRACT,
 )
 from ouroboros.tools.review_helpers import (
+    CANONICAL_GOVERNANCE_DOCS,
     build_rebuttal_section,
     REVIEW_SEVERITY_THRESHOLDS,
     REVIEW_THOROUGHNESS_BLOCK,
@@ -131,9 +132,10 @@ def _build_blocking_history_section(drive_root: pathlib.Path, repo_key: str = ""
 # (the mandatory-read pointers of `_build_advisory_prompt`); the CHECKLISTS
 # entry is the surface's one checklist section. `_mandatory_read_corpus_chars`
 # measures exactly these, never a remembered size.
-_MANDATORY_READ_DOCS = (
-    "BIBLE.md", "docs/CHECKLISTS.md", "docs/DEVELOPMENT.md", "docs/DESIGN.md", "docs/ARCHITECTURE.md",
-)
+# The canonical five, from their one owner. A book entrypoint measures as its
+# COMPOSED text here, because that is what the non-retrieving branch inlines
+# and what a retrieving reviewer is told to read in full.
+_MANDATORY_READ_DOCS = CANONICAL_GOVERNANCE_DOCS
 
 
 def _checklist_name(review_surface: str) -> str:

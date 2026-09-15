@@ -186,6 +186,14 @@ def test_review_helpers_extraction_size_bounds_have_meaningful_headroom():
         for module in (review_helpers, *_LEAVES)
     }
     assert all(count <= 1000 for count in counts.values()), counts
-    assert counts["ouroboros.tools.review_helpers"] <= 850
+    # 925 rather than the extraction's original 850: the canonical governance
+    # corpus (`CANONICAL_GOVERNANCE_DOCS` and its two predicates) became ONE
+    # owner here, replacing four hand-maintained copies across the review
+    # surfaces, and the book-aware `load_governance_doc` sits beside it. The
+    # bound still protects what it was for — real headroom under the 1000 all
+    # leaves share, far under the 1600-line ratchet — and the honest paydown for
+    # the next addition is a governance-document leaf beside
+    # `review_prompt_text` and `review_file_pack`, not a smaller docstring.
+    assert counts["ouroboros.tools.review_helpers"] <= 925
     assert 300 <= counts["ouroboros.tools.review_prompt_text"] <= 1000
     assert 400 <= counts["ouroboros.tools.review_file_pack"] <= 1000

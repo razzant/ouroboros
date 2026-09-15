@@ -349,26 +349,27 @@ _PRODUCER_SHAPES = (
     ("send_photo_empty_payload", "send_photo", "⚠️ Image data is empty or too short.", "LEGACY_TOOL_ERROR", ()),
     ("send_video_missing_file", "send_video", "⚠️ File not found: /x/clip.mp4", "LEGACY_TOOL_ERROR", ()),
     ("send_file_missing_argument", "send_file", "⚠️ Provide a file_path.", "LEGACY_TOOL_ERROR", ()),
-    # tools/control_routing.py — owner item A.21. The promotion receipts carry no
-    # warning marker at all, and the two project-routing receipts reach their
-    # result through the swarm-handoff latch, so neither the identifier harvest
-    # nor the (code, first line) harvest can see any of the four. Without a shape
-    # the differential is blind to the whole family: a promotion that was refused
-    # could go on reporting ok and no case would move.
+    # tools/control_routing.py — owner item A.21. All four receipts are PLAIN
+    # STRINGS the host adapts, so they carry no declared code: the codes they used
+    # to declare were invented, and the differential compared each against itself
+    # while the classifier read the markerless promotion sentences as successes
+    # (the 14.09 receipt incident). The two promotion receipts now carry the
+    # warning marker their identifier needs to be read at all.
     ("promote_rejected", "promote_chat_to_task",
-     "PROMOTE_REJECTED: task 4f2a1c was not scheduled (admission_rejected). "
-     "Do not report this task as created.", "LEGACY_BLOCKED", ()),
+     "⚠️ PROMOTE_REJECTED: task 4f2a1c was not scheduled (admission_rejected). "
+     "Do not report this task as created.", "", ()),
     ("promote_unconfirmed", "promote_chat_to_task",
-     "PROMOTE_UNCONFIRMED: task 4f2a1c admission was not confirmed within 30 seconds. "
-     "Do not report this task as created and do not retry automatically; keep this task "
-     "id for reconciliation.", "LEGACY_UNAVAILABLE", ()),
+     "⚠️ PROMOTE_UNCONFIRMED: task 4f2a1c admission was not confirmed within 30 seconds; "
+     "the requested destination was new project 'Dinosaurs' and the effective one is "
+     "unknown until the admission is reconciled. Do not report this task as created and "
+     "do not retry automatically; keep this task id for reconciliation.", "", ()),
     ("route_rejected", "route_to_project",
      "⚠️ ROUTE_REJECTED: task 4f2a1c was not routed to project 'dinosaurs' "
-     "(target_not_steerable).", "LEGACY_BLOCKED", ()),
+     "(target_not_steerable).", "", ()),
     ("route_unconfirmed", "route_to_project",
      "⚠️ ROUTE_UNCONFIRMED: task 4f2a1c routing to project 'dinosaurs' was not durably "
      "confirmed. Do not report it as routed and do not retry automatically.",
-     "LEGACY_UNAVAILABLE", ()),
+     "", ()),
     # tools/control_runtime.py, control_scheduling.py, control_task_results.py —
     # owner item A.21 again. Every sentence below is either markerless (the deep
     # self-review notice, the depth-limit refusal, the unknown-task read, both
@@ -529,7 +530,17 @@ def build_corpus(root: pathlib.Path | None = None) -> tuple[Case, ...]:
 
 def typed_result(case: Case) -> ToolResult:
     """The typed result the runtime carries for one case: the producer's own when
-    it publishes a code, otherwise the single adapter's."""
+    it publishes a ``ToolResult``, otherwise the single adapter's reading of the
+    producer's actual string.
+
+    ``code`` is therefore a claim about the PRODUCER, never the expected answer —
+    a case may declare one only where the tool really publishes it. The four
+    control_routing receipts declared ``LEGACY_BLOCKED``/``LEGACY_UNAVAILABLE``
+    while their producers return plain strings, so the differential compared that
+    invented code against itself and passed while the classifier read a refused
+    promotion as SUCCESS. Their rows now carry no code, which puts the producer's
+    own sentence in front of the one classifier — the only thing that can fail.
+    """
     if not case.code:
         return LegacyTextResultAdapter.from_text(case.tool, case.text)
     from ouroboros.tools.tool_result import TOOL_CODE_SPECS

@@ -17,6 +17,16 @@ _MAILBOX_DIR = "memory/owner_mailbox"
 # are routed structurally (never shown as user prose).
 KIND_OWNER_TEXT = "owner_text"
 KIND_TASK_MESSAGE = "task_message"
+# Provenance of a task-tree message written by a task that is NOT in the
+# recipient's tree: a pooled, Swarm, project or headless root speaking for
+# itself (steer_task / forward_to_worker with a task issuer). It is context the
+# receiving model judges, never the owner's steering text: it renders under its
+# own prefix, enters no owner corpus and supersedes no reviewed answer.
+PROVENANCE_INDEPENDENT_TASK = "independent_task"
+TASK_MESSAGE_PROVENANCES = frozenset({
+    "ancestor_task", "peer_via_ancestor", "system", "descendant_task",
+    PROVENANCE_INDEPENDENT_TASK,
+})
 KIND_FINALIZE_NOW = "finalize_now"
 # Owner "hurry" control (HQ1, 2026-08-15): a task-local typed acceleration
 # directive — NEVER owner dialogue and NEVER revoked after drain (restart
@@ -225,7 +235,7 @@ def write_task_message(
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance."""
 
-    if provenance not in {"ancestor_task", "peer_via_ancestor", "system", "descendant_task"}:
+    if provenance not in TASK_MESSAGE_PROVENANCES:
         return False
     path = _mailbox_path(drive_root, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -334,6 +344,10 @@ def deliver_task_message(
         # Escalation direction is upward: signing it "ancestor" would invert
         # the sender's place in the tree (decision 31 hierarchy).
         prefix = f"[Escalation from descendant task {source}]"
+    elif provenance == PROVENANCE_INDEPENDENT_TASK:
+        # A peer root's own words: never the ancestor fallback, which would
+        # place a stranger above the recipient in its tree.
+        prefix = f"[Message from independent task {source}]"
     else:
         prefix = f"[Message from ancestor task {source}]"
     append_message(f"{prefix}\n{entry.get('text') or ''}")
@@ -342,6 +356,10 @@ def deliver_task_message(
             event_queue.put_nowait({
                 "type": "task_message_injected", "task_id": task_id,
                 "source_task_id": source, "provenance": provenance,
+                "relayed_from_task_id": relayed,
+                # A bounded preview for the receiver's visible timeline row
+                # (owner 5=A); the full text is in the receiver's transcript.
+                "text_preview": str(entry.get("text") or "")[:200],
             })
         except Exception:
             pass

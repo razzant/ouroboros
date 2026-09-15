@@ -631,6 +631,7 @@ def _run_supervisor(settings: dict) -> None:
             persist_queue_snapshot, restore_pending_from_snapshot,
             cancel_task_by_id, queue_deep_self_review_task, sort_pending,
         )
+        from supervisor.direct_roots import publish_direct_roots
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
             spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
@@ -836,6 +837,7 @@ def _run_supervisor(settings: dict) -> None:
             if _restart_requested.is_set():
                 break  # restart just triggered (drain done) — exit without assigning new work (bridge intake already ran early this iteration)
             persist_queue_snapshot(reason="main_loop")
+            publish_direct_roots(_event_ctx.DRIVE_ROOT)
 
             crash_count = 0
             time.sleep(0.5)

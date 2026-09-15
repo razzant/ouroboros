@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
+from ouroboros.tool_capabilities import ROUTING_VERBS
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -42,7 +43,7 @@ def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
     """Emit a control event live when possible, preserving legacy fallback."""
     def _mark_typed_routing_action() -> None:
         event_type = str(evt.get("type") or "")
-        if event_type not in {"promote_chat_to_task", "routing_manual_target", "steer_task"}:
+        if not any(event_type in events for events in ROUTING_VERBS.values()):
             return
         # Keep a turn-local fact on the existing ToolContext so finalization can
         # expose the typed action on task_done. The supervisor receipt remains the

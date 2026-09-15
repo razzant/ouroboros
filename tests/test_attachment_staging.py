@@ -529,10 +529,6 @@ class TestDesktopChatFullSetStaging:
         # isolation precedent as tests/test_inflight_indicator_seams.py::
         # _patch_workers).
         monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
-        # Avoid the proactive namer spinning a real thread/LLM in this unit test
-        # (it is a local `from ouroboros.project_naming import ...`, so patch source).
-        import ouroboros.project_naming as project_naming
-        monkeypatch.setattr(project_naming, "spawn_proactive_namer", lambda *a, **k: None)
 
         # Two uploads on disk: an image and a non-image PDF.
         img_src = tmp_path / "photo.png"
@@ -586,8 +582,6 @@ class TestDesktopChatFullSetStaging:
         # lifespan in this xdist worker must not abort the turn before
         # handle_task.
         monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
-        import ouroboros.project_naming as project_naming
-        monkeypatch.setattr(project_naming, "spawn_proactive_namer", lambda *a, **k: None)
 
         b64 = base64.b64encode(_PNG_BYTES).decode("ascii")
         agent = _FakeChatAgent()

@@ -16,11 +16,15 @@ from ouroboros.utils import append_jsonl, utc_now_iso
 
 KNOWLEDGE_DIR = "memory/knowledge"
 BACKLOG_TOPIC = "improvement-backlog"
+PATTERNS_TOPIC = "patterns"
 # Reserved shared topics with exactly one home. Whichever room asks for them,
-# they resolve to the global shelf: the backlog is the P7 SSOT, and the overview
-# is the shared orientation every context loads. A project copy of either would
-# be a second source of truth nobody reads.
-GLOBAL_ONLY_TOPICS = frozenset({BACKLOG_TOPIC, OVERVIEW_TOPIC})
+# they resolve to the global shelf: the backlog is the P7 SSOT, the overview is
+# the shared orientation every context loads, and the Pattern Register is
+# cross-project cognition whose only writer (post-task reflection) and only
+# readers (context, deep self-review, the headless copy) all use the canonical
+# drive. A project copy of any of them would be a second source of truth nobody
+# reads.
+GLOBAL_ONLY_TOPICS = frozenset({BACKLOG_TOPIC, OVERVIEW_TOPIC, PATTERNS_TOPIC})
 # Existing consolidator and Pattern Register imports share this exact lock.
 _knowledge_write_lock = knowledge_store.knowledge_write_lock
 
@@ -171,7 +175,7 @@ def _knowledge_list(ctx: ToolContext, scope: str = "") -> str:
 
 def get_tools() -> List[ToolEntry]:
     topic = {"type": "string", "description": "Shelf-relative topic path without .md; nested paths and Unicode names are supported; no scope prefixes (global/, project/)."}
-    scope = {"type": "string", "description": "global or project:<exact project id>. Omitted uses this task's project shelf, otherwise global. Global knowledge remains explicitly reachable from a project. Understanding of people and relationships, and anything that should outlive the project, belongs in global. Reserved topics (improvement-backlog, overview) always resolve to global."}
+    scope = {"type": "string", "description": "global or project:<exact project id>. Omitted uses this task's project shelf, otherwise global. Global knowledge remains explicitly reachable from a project. Understanding of people and relationships, and anything that should outlive the project, belongs in global. Reserved topics (improvement-backlog, overview, patterns) always resolve to global."}
     return [
         ToolEntry("knowledge_read", {
             "name": "knowledge_read",

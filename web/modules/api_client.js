@@ -275,7 +275,7 @@ export const apiClient = {
         `/api/owner/skills/${encodeURIComponent(skill)}/presence-runtime`,
         payload,
     ),
-    projectFromTask: (taskId, id, name, objectiveHint = '') => jsonPost('/api/projects/from-task', { task_id: taskId, id, name, objective_hint: objectiveHint }),
+    projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task', { task_id: taskId, id, name }),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),
     projectUpdate: (projectId, name) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`, { name }),

@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.delegate_shared import delegate_result
+
 
 def _settings(*rows):
     return {
@@ -278,7 +280,7 @@ def test_context_build_exception_after_pre_start_still_propagates(monkeypatch, t
     monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
     monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: (
         order.append("physical_start")
-        or json.dumps({"status": "started", "run_id": "run-pre"})
+        or delegate_result({"status": "started", "run_id": "run-pre"})
     ))
     monkeypatch.setattr(
         supervision, "supervised_wait",
@@ -353,7 +355,7 @@ def test_delegate_owner_wake_ack_replays_on_fresh_physical_attempt(tmp_path):
         wait_once=lambda *_a, **_k: json.dumps({
             "status": "no_progress", "run_id": "run-1", "last_seq": 0,
         }),
-    ))
+    ).text)
     assert wake["wake_events"][0]["text"] == exact
     assert supervision.acknowledge_pending_wake(first_ctx, wake)
     assert supervision._addressed_wakes(first_ctx, supervision.supervision_checkpoint(first_ctx)) == []
@@ -381,7 +383,7 @@ def test_unacknowledged_delegate_wake_replays_before_successor_poll(tmp_path):
         wait_once=lambda *_a, **_k: json.dumps({
             "status": "no_progress", "run_id": "run-1", "last_seq": 0,
         }),
-    ))
+    ).text)
     successor = SimpleNamespace(**{**first_ctx.__dict__, "task_attempt": 2})
     assert supervision.acknowledge_pending_wake(successor) is False
     assert supervision.supervision_checkpoint(successor)["pending_wake"]
@@ -390,7 +392,7 @@ def test_unacknowledged_delegate_wake_replays_before_successor_poll(tmp_path):
         wait_once=lambda *_a, **_k: (_ for _ in ()).throw(
             AssertionError("successor must replay before polling the harness")
         ),
-    ))
+    ).text)
     assert replay["supervision_wake_id"] == first["supervision_wake_id"]
     assert replay["wake_events"][0]["text"] == "pending exact"
 
@@ -438,7 +440,7 @@ def test_sleeping_control_wakes_then_loop_routes_without_supervision_ack(tmp_pat
         wait_once=lambda *_a, **_k: json.dumps({
             "status": "no_progress", "run_id": "run-1", "last_seq": 0,
         }),
-    ))
+    ).text)
     assert wake["wake_events"][0]["kind"] == kind
     assert supervision.supervision_checkpoint(ctx)["pending_wake"]["mailbox_ids"] == []
     assert supervision.acknowledge_pending_wake(ctx, wake)

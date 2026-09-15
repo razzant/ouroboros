@@ -237,10 +237,10 @@ def _real_delegate_start(
             "route_available": True,
         }
         payload = json.loads(
-            subagent_runtime.delegate_start_entry(ctx, coordination_context)
+            subagent_runtime.delegate_start_entry(ctx, coordination_context).text
         )
     else:
-        payload = json.loads(delegate._delegate_start(ctx, "edit the README"))
+        payload = json.loads(delegate._delegate_start(ctx, "edit the README").text)
     delegate_custody._CUSTODY.clear()
     return payload
 

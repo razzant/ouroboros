@@ -183,6 +183,11 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         # frames are addressed to the task's card but authored by the supervisor, so they
         # are narration ABOUT the task, never work BY it.
         progress_meta = evt.get("progress_meta") if isinstance(evt.get("progress_meta"), dict) else None
+        if is_progress and evt.get("_is_direct_chat") is True:
+            # Stamped by value on the turn's own queue (TurnEventQueue); the live
+            # frame is built from progress_meta, so the fact rides along.
+            progress_meta = dict(progress_meta or {})
+            progress_meta["_is_direct_chat"] = True
         _running = getattr(ctx, "RUNNING", None)
         task_row: Dict[str, Any] = {}
         if task_id and isinstance(_running, dict):

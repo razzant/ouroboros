@@ -166,7 +166,7 @@ def test_delegate_start_refuses_typed_when_no_route_is_configured(tmp_path, monk
 
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "")
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
-    payload = json.loads(_delegate_start(ctx, "do a thing"))
+    payload = json.loads(_delegate_start(ctx, "do a thing").text)
     assert payload["status"] == "refused"
     assert payload["reason"] == "subagent_selection_required"
 

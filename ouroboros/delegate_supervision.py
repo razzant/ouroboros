@@ -9,12 +9,14 @@ import uuid
 from typing import Any, Callable, Optional
 
 from ouroboros import delegate_custody as custody
+from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
 from ouroboros.owner_mailbox import (
     KIND_FINALIZE_NOW,
     KIND_HURRY,
     KIND_TASK_MESSAGE,
     drain_owner_entries,
 )
+from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
 _TICK_SEC = 3
@@ -581,7 +583,17 @@ def _wake_event_summary(event: Any) -> dict[str, Any]:
     return summary or {"type": str(event.get("type") or "unknown")}
 
 
-def _render_wake_payload(ctx: Any, payload: dict[str, Any]) -> str:
+def _wake_result(payload: dict[str, Any]) -> ToolResult:
+    """One wake payload as its native result, keyed by the wake id it published.
+
+    The id rides in producer meta because the ACK is keyed on it: the loop
+    acknowledges the wake the result itself names, not every call that happens to
+    be spelled ``delegate_wait``."""
+    wake_id = str(payload.get("supervision_wake_id") or "")
+    return delegate_result(payload, meta={"supervision_wake_id": wake_id} if wake_id else {})
+
+
+def _render_wake_payload(ctx: Any, payload: dict[str, Any]) -> ToolResult:
     """Render valid bounded JSON, spilling an oversized exact wake to artifacts."""
 
     raw = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -589,7 +601,7 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any]) -> str:
 
     budget = tool_result_limit("delegate_wait")
     if len(raw) <= budget:
-        return raw
+        return _wake_result(payload)
     wake_id = str(payload.get("supervision_wake_id") or "")
     try:
         from ouroboros.artifacts import store_actor_source_bytes, task_id_for_artifacts
@@ -610,12 +622,15 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any]) -> str:
             "wake_id": wake_id,
             "total_chars": len(raw),
         })
-        return raw
+        return _wake_result(payload)
     events = payload.get("wake_events") if isinstance(payload.get("wake_events"), list) else []
     summaries = [_wake_event_summary(event) for event in events]
+    # ``ok``/``host_code`` ride the fitted envelope: a wake that relays a REFUSED
+    # observation must keep its classification when the exact payload spills, or a
+    # refusal too large to inline would read as a successful wait.
     envelope: dict[str, Any] = {
         key: (str(value)[:600] if isinstance(value, str) else value)
-        for key in ("status", "run_id", "state", "last_seq", "reason")
+        for key in ("status", "ok", "host_code", "run_id", "state", "last_seq", "reason")
         if (value := payload.get(key)) not in (None, "")
     }
     envelope["supervision_wake_id"] = wake_id
@@ -656,20 +671,38 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any]) -> str:
     if len(rendered) > budget:
         envelope = {
             "status": str(payload.get("status") or "wake_available")[:120],
+            **({"ok": False, "host_code": str(payload.get("host_code") or "")}
+               if payload.get("ok") is False else {}),
             "run_id": str(payload.get("run_id") or "")[:200],
             "supervision_wake_id": wake_id,
             "coordination_context": {"state": "available_in_full_wake_source"},
             "wake_delivery": envelope["wake_delivery"],
         }
         rendered = json.dumps(envelope, ensure_ascii=False, indent=2)
-    return rendered
+    return _wake_result(envelope)
+
+
+def _schema_1_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    """Carry a schema-1 ``pending_wake.payload`` forward without rewriting it.
+
+    Rows written before this family carried ``ok``/``host_code`` replay exactly as
+    stored; only the two classification keys are derived, and only when they are
+    ABSENT. ``refused`` was the one status the old writer used for a refused
+    observation, so it replays as the recorded tool failure it always was and
+    everything else replays as the ordinary observation it always was. No prose is
+    read, no word is matched, no terminal/success/zero-spend fact is invented, and
+    an unknown or corrupt shape keeps its whole body.
+    """
+    if "ok" in payload or str(payload.get("status") or "") != "refused":
+        return dict(payload)
+    return {**payload, "ok": False, "host_code": refusal_host_code(str(payload.get("reason") or ""))}
 
 
 def _pending_payload(ctx: Any, state: dict[str, Any]) -> dict[str, Any]:
     pending = state.get("pending_wake") if isinstance(state.get("pending_wake"), dict) else {}
     payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
     if pending and not pending.get("acknowledged_at") and payload:
-        replay = dict(payload)
+        replay = _schema_1_envelope(payload)
         if str(pending.get("attempt_key") or "") != _attempt_key(ctx):
             events = replay.get("wake_events")
             if isinstance(events, list):
@@ -829,15 +862,16 @@ def supervised_wait(
     checkpoint_after_sec: Optional[int] = None,
     checkpoint_reason: str = "",
     wait_once: Optional[Callable[..., str]] = None,
-) -> str:
+) -> ToolResult:
     """Renew quiet windows internally and return only a meaningful wake batch."""
 
     if (checkpoint_after_sec is None) != (not str(checkpoint_reason or "").strip()):
-        return json.dumps({
-            "status": "refused",
-            "reason": "checkpoint_requires_time_and_reason",
-            "detail": "checkpoint_after_sec and non-empty checkpoint_reason must be supplied together.",
-        }, ensure_ascii=False, indent=2)
+        # The family's ONE refusal author, not a second literal envelope beside
+        # it: this is an argument fault, and it is recorded as one.
+        return _fail(
+            "delegate_wait", "checkpoint_requires_time_and_reason",
+            "checkpoint_after_sec and non-empty checkpoint_reason must be supplied together.",
+        )
     owns_transport = wait_once is None
     if wait_once is None:
         from ouroboros.tools.delegate import _delegate_wait
@@ -1084,7 +1118,7 @@ def delegate_wait_entry(
     since_seq: Optional[int] = None,
     checkpoint_after_sec: Optional[int] = None,
     checkpoint_reason: str = "",
-) -> str:
+) -> ToolResult:
     """Event-only wait; hidden ``wait_sec`` is accepted only for old transcripts."""
 
     if wait_sec is not None:

@@ -194,12 +194,26 @@ class TurnEventQueue:
     def stamp(self, item: Any) -> Any:
         if isinstance(item, dict):
             data = item.get("data") if item.get("type") == "log_event" else item
-            if (
-                isinstance(data, dict)
-                and str(data.get("task_id") or "") == self._task_id
-                and data.get("chat_id") is None
-            ):
-                data["chat_id"] = self._chat_id
+            if isinstance(data, dict) and str(data.get("task_id") or "") == self._task_id:
+                if data.get("chat_id") is None:
+                    data["chat_id"] = self._chat_id
+                # The lane fact rides the same events by the same rule: a live
+                # tool or progress frame names its direct turn on arrival, so
+                # the chat block never wears managed chrome (a Task title, a
+                # conversion control) in the window before the census lists it.
+                data.setdefault("_is_direct_chat", True)
+                # The host-attested Stop marker rides the turn's WORK frames as
+                # it rides its narration rows (events_chat_delivery stamps those
+                # through the same registry): a turn that only calls tools
+                # offers Stop on the block its rows already justify, and a turn
+                # that does neither keeps no block to hang a Stop on. An
+                # addressing call (``routing_action``) is a receipt, not work:
+                # it carries no marker, so an addressing-only turn keeps no block.
+                if (
+                    data.get("type") in ("tool_call_started", "tool_call_finished")
+                    and not data.get("routing_action")
+                ):
+                    data.setdefault("cancelable", True)
         return item
 
     def put(self, item: Any, *args: Any, **kwargs: Any) -> Any:

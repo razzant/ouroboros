@@ -27,6 +27,7 @@ a dict this process happens to still hold.
 from __future__ import annotations
 
 import datetime as _dt
+import functools
 import json
 import logging
 import time
@@ -39,6 +40,7 @@ from ouroboros import delegate_progress as progress
 from ouroboros.delegate_custody import RunCustody as _RunCustody
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_result import ToolResult
 from ouroboros.subagent_work_order import (  # noqa: F401 - compatibility re-export
     assignment_instructions as _assignment_instructions,
 )
@@ -104,6 +106,9 @@ from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
     _owned_run,
+    delegate_result,
+    publish_delegate_result,
+    refusal_host_code,
 )
 # The C1 integration seam (mutation authority, execution snapshots, retry binding,
 # terminal patch capture) lives in its own module (size gate); re-exported here
@@ -213,11 +218,11 @@ def _derive_authority(ctx: ToolContext) -> "DelegatedRunShape":
     return delegated_run_shape(mutating)
 
 
-def _presence_delegate_read_refusal(ctx: ToolContext) -> str:
+def _presence_delegate_read_refusal(ctx: ToolContext) -> Optional[ToolResult]:
     from ouroboros.presence_authority import presence_ceiling_allows_delegated_read
 
     if presence_ceiling_allows_delegated_read(ctx):
-        return ""
+        return None
     return _fail(
         "delegate_start",
         "presence_delegate_read_root_unselected",
@@ -318,7 +323,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     _resolved_binding: Any = None,
                     _canonical_work_order_fingerprint: str = "",
                     _work_order_source_request: Any = None,
-                    _coordination_context: str = "") -> str:
+                    _coordination_context: str = "") -> ToolResult:
     from ouroboros.claudexor_daemon import ensure_owned_gateway
     from ouroboros.delegate_evidence import record_start_blocked
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -616,7 +621,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,
                      authority: "DelegatedRunShape", root: str, *, durable: bool,
                      recovering: bool, invocation_id: str, snapshot_id: str, target_root: str,
-                     baseline_sha: str, engine_version: str = "", resource_ref=None, processing=None) -> str:
+                     baseline_sha: str, engine_version: str = "", resource_ref=None, processing=None) -> ToolResult:
     """The one author of delegate_start's started result (note + payload).
 
     The AUTHORITY guidance and the CUSTODY warning are independent facts about the same
@@ -688,7 +693,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
                if direct else "The engine prepares a separate copy of the selected inputs; its actual execution directory is not yet observed. ")
             + "Use delegate_wait for its complete file manifest and result. Copy results use integrate_delegated_patch for apply or reject."
         )
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    return delegate_result(payload)
 
 
 def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: str, *,
@@ -818,7 +823,7 @@ def _halt_breached_run(ctx: ToolContext, gateway: Any, entry: _RunCustody,
         "containment fault in the transport or the engine, not a task failure — report "
         "it and continue within your own authority.",
         run_id=run_id, cancel_outcome=outcome, **breach.facts,
-    )
+    ).text
 
 
 # The typed external-wait lease lives in `delegate_progress` (the wait-liveness
@@ -874,10 +879,11 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
 
     rid = str(run_id or "").strip()
     if not rid:
-        return _fail("delegate_wait", "missing_run_id", "run_id is required")
+        return _fail("delegate_wait", "missing_run_id", "run_id is required").text
     not_mine, entry = _owned_run(ctx, "delegate_wait", rid)
     if not_mine or entry is None:
-        return not_mine or _fail("delegate_wait", "run_ownership_unknown", "custody unresolved", run_id=rid)
+        return (not_mine or _fail("delegate_wait", "run_ownership_unknown",
+                                  "custody unresolved", run_id=rid)).text
     ceiling = get_delegate_wait_max_sec()
     try:
         window = int(wait_sec) if wait_sec is not None else get_delegate_wait_sec()
@@ -910,7 +916,7 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                 "reason": exc.observation_reason or exc.code, "detail": str(exc),
                 "waited_sec": time.monotonic() - started,
             })
-        return _fail("delegate_wait", exc.code, str(exc), run_id=rid)
+        return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
 
     borrowed = gateway is not None
 
@@ -1044,7 +1050,11 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                                                     if entry.work_order_source_request else {}
                                                 ))
             def _expired() -> str:
-                rendered = progress.rendered_window(
+                # The window payload is a DICT here, and the cache-horizon note is a
+                # field in it: appending the note after the rendered JSON left the
+                # result unparseable for every reader of this family — the supervising
+                # loop included, which then read the whole window as a `fault`.
+                payload = progress.window_payload(
                     run_id=rid, state=state, last_seq=last_seq,
                     window=(time.monotonic() - started) if observation_only else window,
                     elapsed_seconds=(None if _started_at is None else max(0, int(
@@ -1055,8 +1065,9 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                     detail=detail, seen=seen,
                     budget=tool_result_limit("delegate_wait"))
                 from ouroboros.tools.control import cache_horizon_note
-                _horizon = cache_horizon_note(ctx, time.monotonic() - started)
-                return f"{rendered}\n\n{_horizon}" if _horizon else rendered
+                if _horizon := cache_horizon_note(ctx, time.monotonic() - started):
+                    payload["cache_horizon_note"] = _horizon
+                return json.dumps(payload, ensure_ascii=False, indent=2)
 
             if observation_only or time.monotonic() >= deadline:
                 if observation_only:
@@ -1100,7 +1111,7 @@ _CANCEL_NOTES = {
 }
 
 
-def _delegate_cancel(ctx: ToolContext, run_id: str, reason: str = "") -> str:
+def _delegate_cancel(ctx: ToolContext, run_id: str, reason: str = "") -> ToolResult:
     """Stop a delegated run. Destructive by nature — a cancelled reviewer has no verdict.
 
     Reports only what a terminal receipt proves. Saying "cancelled" over an unverified
@@ -1124,17 +1135,45 @@ def _delegate_cancel(ctx: ToolContext, run_id: str, reason: str = "") -> str:
         result = custody.cancel_and_verify(custody.custody_root(ctx), gateway, entry, reason)
     finally:
         gateway.close()
-    return json.dumps({
-        "status": result["outcome"],
+    outcome = str(result["outcome"])
+    payload = {
+        "status": outcome,
         "run_id": rid,
-        "run_may_still_be_live": result["outcome"] != custody.CANCEL_CONFIRMED,
+        "run_may_still_be_live": outcome != custody.CANCEL_CONFIRMED,
         "accepted": result["accepted"],
         "control_status": result["control_status"],
         "state": result["state"],
         "fault_reason": result["fault_reason"],
         "detail": result["detail"],
-        "note": _CANCEL_NOTES.get(result["outcome"], ""),
-    }, ensure_ascii=False, indent=2)
+        "note": _CANCEL_NOTES.get(outcome, ""),
+    }
+    if outcome in (custody.CANCEL_FAILED, custody.CANCEL_CONTAINMENT_FAULT):
+        # The daemon REFUSED the stop, or the stop could not be verified: a call
+        # that reports a run which may still be live and mutating is not a
+        # successful call. `confirmed` and `requested` stay successful
+        # observations — `requested` IS an accepted command, and `confirmed`
+        # with accepted=false over an already settled/absent run is a
+        # legitimate no-op, not a failure.
+        payload.update(ok=False, host_code=refusal_host_code(outcome))
+    return delegate_result(payload)
+
+
+def _published_entry(core: Any) -> Any:
+    """The family's four REGISTERED entries, wrapped in their one string boundary.
+
+    Inside the family a result is a native ``ToolResult``; the handler ABI is
+    still ``str``. Publication happens HERE, after every decorator the core ran
+    (``exact_start``'s actor/source facts, the wake renderer's spill envelope),
+    because the registry's equality gate accepts the published result only when
+    its text IS the string the handler returned — an earlier publish inside a
+    core is silently discarded. ``functools.wraps`` keeps the core's signature,
+    which is what the registry binds arguments against.
+    """
+    @functools.wraps(core)
+    def entry(ctx: ToolContext, *args: Any, **kwargs: Any) -> str:
+        return publish_delegate_result(ctx, core(ctx, *args, **kwargs))
+
+    return entry
 
 
 def get_tools() -> List[ToolEntry]:
@@ -1229,7 +1268,7 @@ def get_tools() -> List[ToolEntry]:
                     "NEW invocation, even with an identical prompt."},
                 },
             },
-        }, _delegate_start_entry,
+        }, _published_entry(_delegate_start_entry),
            timeout_sec=120),
         ToolEntry("delegate_wait", {
             "name": "delegate_wait",
@@ -1263,7 +1302,7 @@ def get_tools() -> List[ToolEntry]:
                 "checkpoint_reason": {"type": "string", "description":
                     "Why one proactive inspection is worth a model call. No repeating cadence."},
             }},
-        }, _delegate_wait_entry, timeout_sec=get_task_abs_ceiling_sec() + 120),
+        }, _published_entry(_delegate_wait_entry), timeout_sec=get_task_abs_ceiling_sec() + 120),
         ToolEntry("delegate_cancel", {
             "name": "delegate_cancel",
             "description": (
@@ -1277,7 +1316,7 @@ def get_tools() -> List[ToolEntry]:
                 "run_id": {"type": "string", "description": "Run id from delegate_start."},
                 "reason": {"type": "string", "description": "Why you are stopping it."},
             }},
-        }, lambda ctx, run_id, reason="": _delegate_cancel(ctx, run_id, reason), timeout_sec=120),
+        }, _published_entry(_delegate_cancel), timeout_sec=120),
         ToolEntry("delegate_answer", {
             "name": "delegate_answer",
             "description": (
@@ -1330,8 +1369,7 @@ def get_tools() -> List[ToolEntry]:
                     "full brief SHA, canonical selector, and text at start_char:end_char "
                     "before delivering it."},
             }},
-        }, lambda ctx, run_id, interaction_id, answers, source_response=None: _delegate_answer(
-            ctx, run_id, interaction_id, answers, source_response), timeout_sec=120),
+        }, _published_entry(_delegate_answer), timeout_sec=120),
     ]
 
 

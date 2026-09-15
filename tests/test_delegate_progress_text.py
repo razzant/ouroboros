@@ -172,7 +172,7 @@ def test_start_receipt_names_the_serving_engine_without_claiming_review_success(
         "readonly", delegated_run_shape(False), "/fixture/repo", durable=True, recovering=False,
         invocation_id="invocation-1", snapshot_id="", target_root="", baseline_sha="",
         engine_version="3.9.7",
-    ))
+    ).text)
     assert payload["engine_version"] == "3.9.7"
     assert payload["status"] == "started"
     assert "review_passed" not in payload

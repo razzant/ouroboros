@@ -1,4 +1,4 @@
-"""Owner steering delivery into a running task's mailbox.
+"""Steering delivery into a running task's mailbox.
 
 Extracted VERBATIM from ``supervisor/events.py`` (byte-neutral module-size
 boundary for the pinned events surface): the cancel-pending steering refusal
@@ -6,6 +6,16 @@ and the ``steer_task`` event handler. ``supervisor.events`` imports the handler
 back and keeps the dispatch table; the routing-receipt emitter stays in
 ``events.py`` (many other handlers use it) and is imported lazily here so the
 dependency stays one-way at import time.
+
+Who speaks decides how the message travels (the event's ``issuer`` fact, minted
+by the tool host-side, never by the model). An OWNER TURN steers with owner
+text: ``KIND_OWNER_TEXT``, the owner-message generation bump, the room veto and
+the owner acknowledgement/notice. A TASK speaking for itself never travels as
+owner text: its words are written as a ``KIND_TASK_MESSAGE`` row with
+``independent_task`` provenance through the same writer ``forward_to_worker``
+uses, any host-listed active independent root is addressable (owner 6C, the
+hidden partition included), no chat is told, and the receipt plus one typed
+Logs row carry the true author and target (owner 5=A/7A).
 """
 
 from __future__ import annotations
@@ -14,6 +24,8 @@ import logging
 import pathlib
 import uuid
 from typing import Any, Dict
+
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +40,40 @@ def _relayed_owner_message(client_message_id: str) -> str:
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
 
     return "" if client_message_id.startswith(AGENT_RECEIPT_ID_PREFIX) else client_message_id
+
+
+def _issuer(evt: Dict[str, Any]) -> Dict[str, Any]:
+    """The event's issuer fact; an event from a producer that predates it is an
+    owner turn (every such producer was a chat turn or the owner's picker click)."""
+    issuer = evt.get("issuer")
+    return dict(issuer) if isinstance(issuer, dict) and issuer.get("kind") else {"kind": "owner_turn"}
+
+
+def _task_issued(evt: Dict[str, Any]) -> bool:
+    return str(_issuer(evt).get("kind") or "") == "task"
+
+
+def _record_task_message_routing(
+    ctx: Any, evt: Dict[str, Any], target: str, *, status: str, reason: str = "",
+) -> None:
+    """One typed Logs row per task-authored act: true author, target, outcome (7A).
+
+    The receiving task's own timeline gets ``task_message_injected`` when it
+    drains the row; this row lands in the SENDER's timeline (keyed on its id),
+    so a refusal a target never saw is still visible somewhere."""
+    issuer = _issuer(evt)
+    try:
+        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "task_message_routed",
+            "task_id": str(issuer.get("task_id") or ""),
+            "target_task_id": target,
+            "status": status,
+            "reason": reason,
+            "routing_token": str(evt.get("routing_token") or ""),
+        })
+    except Exception:
+        log.debug("task_message_routed row failed", exc_info=True)
 
 
 def _refuse_steering_while_cancelling(
@@ -47,8 +93,6 @@ def _refuse_steering_while_cancelling(
     exactly the window a cancel ingress lands in; a single up-front check would
     let a message reach a task the supervisor is already tearing down.
     """
-    from supervisor.events import _emit_routing_receipt
-
     try:
         from ouroboros.cancel_intents import cancel_pending
 
@@ -57,23 +101,50 @@ def _refuse_steering_while_cancelling(
     except Exception:
         log.debug("steer_task cancel-pending check failed", exc_info=True)
         return False
-    _emit_routing_receipt(
-        ctx, evt, action="steer_task", target=target, target_label=target_label,
-        status="rejected",
-        reason="cancel_pending",
+    _steer_receipt(
+        ctx, evt, target, target_label=target_label, status="rejected", reason="cancel_pending",
     )
-    if notify and chat_id:
+    # A cancel-pending refusal is a live notice to the OWNER who asked; a task
+    # that spoke for itself reads its typed refusal in the tool result instead.
+    if notify and not _task_issued(evt) and chat_id:
         try:
-            ctx.send_with_budget(
-                chat_id,
-                f"⚠️ Couldn't steer task {target_label or '(no longer available)'} — "
-                "its cancellation is pending "
-                "(the supervisor is tearing it down). Wait for the settled "
-                "outcome or start a new task.",
-            )
+            ctx.send_with_budget(chat_id, _cancel_pending_notice(target_label))
         except Exception:
             log.debug("steer_task cancel-pending notice failed", exc_info=True)
     return True
+
+
+def _cancel_pending_notice(target_label: str) -> str:
+    return (
+        f"⚠️ Couldn't steer task {target_label or '(no longer available)'} — "
+        "its cancellation is pending "
+        "(the supervisor is tearing it down). Wait for the settled "
+        "outcome or start a new task."
+    )
+
+
+def _steer_receipt(
+    ctx: Any, evt: Dict[str, Any], target: str, *, target_label: str, status: str,
+    reason: str = "", detail: str = "", attachment_manifest: Any = None,
+) -> Dict[str, Any]:
+    """The durable token-bound receipt every outcome writes; a task-authored act
+    additionally gets its Logs row and never publishes a chat acknowledgement
+    (nothing in any chat carries its synthetic id, and no owner asked)."""
+    from supervisor.events import _emit_routing_receipt
+
+    task_issued = _task_issued(evt)
+    receipt = _emit_routing_receipt(
+        ctx, evt, action="steer_task", target=target, target_label=target_label,
+        status=status, reason=reason, detail=detail,
+        attachment_manifest=attachment_manifest, publish=not task_issued,
+    )
+    if task_issued:
+        _record_task_message_routing(
+            ctx, evt, target,
+            status="written" if status == "delivered" else "refused",
+            reason=reason,
+        )
+    return receipt
 
 
 def _steer_refusal_notice(refusal: str, target_label: str) -> str:
@@ -103,16 +174,39 @@ def _steer_refusal_notice(refusal: str, target_label: str) -> str:
     ))
 
 
+def _owner_lane_allows(ctx: Any, task: Dict[str, Any], target: str, chat_id: int) -> bool:
+    """The room veto for an OWNER turn: its own chat's roots, a root bound to its
+    Project room, and -- from the Main lane, which sees the global manifest --
+    every root. The lane is the host registry's answer for the issuing chat, so
+    a Swarm root (no routing contract) and a picker click read the same rule."""
+    try:
+        if int(task.get("chat_id") or 0) == chat_id:
+            return True
+    except (TypeError, ValueError):
+        pass
+    # A converted/bound task may keep its original chat_id on the live object
+    # but belong to a project thread — match via the durable binding.
+    try:
+        from ouroboros.projects_registry import project_chat_for_task
+        from ouroboros.server_routing_context import _project_id_for_registered_chat
+
+        if int(project_chat_for_task(ctx.DRIVE_ROOT, target) or 0) == chat_id:
+            return True
+        return not _project_id_for_registered_chat(ctx, chat_id)
+    except Exception:
+        return False
+
+
 def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
-    """Deliver an agent-chosen steering message to an addressable owner root.
+    """Deliver a steering message to an addressable independent root.
 
-    A Project decision is restricted to that room.  A Main decision may address
-    any root in the host-provided global manifest, including a Project-bound root.
-    In both cases this only enforces transport invariants and writes the active
-    task drive; stale targets are reported, never silently respawned.
+    An owner turn in a Project room is restricted to that room; one in Main may
+    address any root in the host-provided global manifest, including a
+    Project-bound root. A task speaking for itself may address any host-listed
+    active independent root (owner 6C). In every case this only enforces
+    transport invariants and writes the active task drive; stale targets are
+    reported, never silently respawned.
     """
-    from supervisor.events import _emit_routing_receipt
-
     target = str(evt.get("target_task_id") or "").strip()
     message = str(evt.get("message") or "")
     raw_chat_id = evt.get("chat_id")
@@ -122,6 +216,8 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         chat_id = 0
     if not target or not message.strip():
         return
+    task_issued = _task_issued(evt)
+    issuer_task_id = str(_issuer(evt).get("task_id") or "")
     direct_agent = None
     direct_lock = None
     direct_active = False
@@ -169,22 +265,6 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     ):
         return
 
-    def _matches_chat(t: Dict[str, Any]) -> bool:
-        try:
-            if evt.get("allow_global_root"):
-                return True
-            if int(t.get("chat_id") or 0) == chat_id:
-                return True
-        except (TypeError, ValueError):
-            pass
-        # A converted/bound task may keep its original chat_id on the live object
-        # but belong to a project thread — match via the durable binding.
-        try:
-            from ouroboros.projects_registry import project_chat_for_task
-            return int(project_chat_for_task(ctx.DRIVE_ROOT, target) or 0) == chat_id
-        except Exception:
-            return False
-
     # Four different refusals in the same order the boolean used to fold them
     # into one. Which one fired is what the owner needs: a task running in its
     # own project room for another half hour is not a task that "may have
@@ -196,20 +276,22 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         refusal = "direct_chat_turn"
     elif str(task.get("delegation_role") or "") == "subagent":
         refusal = "subagent_target"
-    elif not _matches_chat(task):
+    elif not task_issued and not _owner_lane_allows(ctx, task, target, chat_id):
         refusal = "chat_mismatch"
     else:
         refusal = ""
     if refusal:
         # Fail visibly: the chosen task is not a steerable running task here.
-        # Tell the owner so the agent/owner can answer or spawn instead.
+        # The receipt carries the cause; an OWNER turn whose act wears no owner
+        # message (a synthetic receipt id) also gets the chat sentence, because
+        # nothing else in its chat can show the refusal. A task that spoke for
+        # itself reads the typed refusal in its tool result and its Logs row.
         client_message_id = str(evt.get("client_message_id") or "").strip()
-        _emit_routing_receipt(
-            ctx, evt, action="steer_task", target=target, target_label=target_label,
-            status="needs_manual_target",
-            reason=refusal,
+        _steer_receipt(
+            ctx, evt, target, target_label=target_label, status="needs_manual_target", reason=refusal,
         )
-        if not client_message_id and chat_id:
+        owner_unlabelled = not task_issued and not _relayed_owner_message(client_message_id)
+        if owner_unlabelled and chat_id:
             try:
                 ctx.send_with_budget(chat_id, _steer_refusal_notice(refusal, target_label))
             except Exception:
@@ -242,7 +324,9 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     attachment_report = ""
     try:
         from supervisor.queue import ACCEPTANCE_FENCES, _queue_lock, _task_drive_for_task
-        from ouroboros.owner_mailbox import write_owner_message, KIND_OWNER_TEXT
+        from ouroboros.owner_mailbox import (
+            KIND_OWNER_TEXT, PROVENANCE_INDEPENDENT_TASK, write_owner_message, write_task_message,
+        )
         if direct_active and direct_lock is not None:
             direct_lock.acquire()
             direct_lock_held = True
@@ -251,15 +335,18 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 and getattr(direct_agent, "_accepting_owner_messages", False)
                 and str(getattr(direct_agent, "_current_task_id", "") or "") == target
             ):
-                _emit_routing_receipt(
-                    ctx, evt, action="steer_task", target=target, target_label=target_label,
-                    status="needs_manual_target",
-                    reason="target_closed",
+                _steer_receipt(
+                    ctx, evt, target, target_label=target_label,
+                    status="needs_manual_target", reason="target_closed",
                 )
                 return
         drive = pathlib.Path(ctx.DRIVE_ROOT) if direct_active else _task_drive_for_task(task, target)
         attachment_note = ""
-        uploads = evt.get("attachment_uploads") if isinstance(evt.get("attachment_uploads"), list) else []
+        # Tasks cannot attach files to peer messages: only an owner turn stages.
+        uploads = (
+            evt.get("attachment_uploads")
+            if not task_issued and isinstance(evt.get("attachment_uploads"), list) else []
+        )
         if uploads:
             from ouroboros.artifacts import attachment_manifest_projection, stage_task_attachments
             from ouroboros.gateway.tasks import _render_attachment_lines
@@ -283,19 +370,17 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 for row in list(getattr(ctx, "PENDING", []) or [])
             )
             if live_meta is None and not still_pending:
-                _emit_routing_receipt(
-                    ctx, evt, action="steer_task", target=target, target_label=target_label,
-                    status="needs_manual_target",
-                    reason="target_finished",
+                _steer_receipt(
+                    ctx, evt, target, target_label=target_label,
+                    status="needs_manual_target", reason="target_finished",
                 )
                 return
             fence_root = str(task.get("root_task_id") or target)
             active_fence = ACCEPTANCE_FENCES.get(fence_root)
             if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "sealed":
-                _emit_routing_receipt(
-                    ctx, evt, action="steer_task", target=target, target_label=target_label,
-                    status="needs_manual_target",
-                    reason="acceptance_fence_sealed",
+                _steer_receipt(
+                    ctx, evt, target, target_label=target_label,
+                    status="needs_manual_target", reason="acceptance_fence_sealed",
                 )
                 return
         # Re-check INSIDE the admission transaction: the up-front check runs
@@ -310,6 +395,16 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
             ctx, evt, target, chat_id, target_label=target_label, notify=False,
         ):
             cancel_pending_refused = True
+        elif task_issued:
+            # A task's own words: a task-message row under the sender's id and
+            # the independent provenance. No owner generation moves -- a peer
+            # message supersedes no reviewed answer (owner 4=A).
+            if not write_task_message(
+                drive, message, target, source_task_id=issuer_task_id,
+                provenance=PROVENANCE_INDEPENDENT_TASK, msg_id=msg_id,
+            ):
+                raise OSError("task mailbox append was not durable")
+            delivered = True
         else:
             if not write_owner_message(
                 drive,
@@ -339,10 +434,9 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
             delivered = True
     except Exception:
         log.warning("steer_task delivery failed for task %s", target, exc_info=True)
-        _emit_routing_receipt(
-            ctx, evt, action="steer_task", target=target, target_label=target_label,
-            status="needs_manual_target",
-            reason="mailbox_write_failed",
+        _steer_receipt(
+            ctx, evt, target, target_label=target_label,
+            status="needs_manual_target", reason="mailbox_write_failed",
         )
     finally:
         if queue_lock_held:
@@ -358,31 +452,20 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 log.debug("staged-attachment cleanup failed for %s", target, exc_info=True)
     if cancel_pending_refused:
         # GR2-9: the message was refused, so the inputs staged for it must not
-        # linger in the dying task's artifact store.
-        if chat_id:
+        # linger in the dying task's artifact store. The notice is the owner's:
+        # a task that spoke for itself has its typed refusal and Logs row.
+        if not task_issued and chat_id:
             try:
-                ctx.send_with_budget(
-                    chat_id,
-                    f"⚠️ Couldn't steer task {target_label or '(no longer available)'} — "
-                    "its cancellation is pending "
-                    "(the supervisor is tearing it down). Wait for the settled "
-                    "outcome or start a new task.",
-                )
+                ctx.send_with_budget(chat_id, _cancel_pending_notice(target_label))
             except Exception:
                 log.debug("steer_task cancel-pending notice failed", exc_info=True)
     if delivered:
         if fence_generation_changed:
             ctx.persist_queue_snapshot(reason="acceptance_fence_owner_message")
         log.info("steer_task: delivered to task %s (chat %s) on drive %s", target, chat_id, drive)
-        _emit_routing_receipt(
-            ctx,
-            evt,
-            action="steer_task",
-            target=target,
-            target_label=target_label,
-            status="delivered",
-            detail=attachment_report,
-            attachment_manifest=staged_manifest if uploads else None,
+        _steer_receipt(
+            ctx, evt, target, target_label=target_label, status="delivered",
+            detail=attachment_report, attachment_manifest=staged_manifest if uploads else None,
         )
         if attachment_report:
             from supervisor.message_bus import notification_chat_route

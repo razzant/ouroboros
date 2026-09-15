@@ -1,6 +1,6 @@
 """Structural constitutional escalation for ``plan_task`` (formerly v6.61.0 plan_class
-escalation): the ONE path fact ``constitutional`` — declared ``affected_resources`` /
-``evidence`` locators resolving under the Ouroboros system repository (owner D29:
+escalation): the ONE path fact ``constitutional`` — declared ``affected_paths`` locators
+(the files the work will CHANGE) resolving under the Ouroboros system repository (owner D29:
 the active binding alone never decides) — with the skill-payload exemption the
 retired ``resolve_plan_class`` applied. Kept from the original file: the
 path-escalation and payload-exemption cases, ported to ``plan_spec.resolve_constitutional``
@@ -34,7 +34,7 @@ def _resolve(ctx, affected, evidence=()):
     active = ctx.active_repo_dir()
     return resolve_constitutional(
         active_root=active, system_repo_root=system,
-        affected_resources=list(affected), evidence=list(evidence),
+        affected_paths=list(affected), evidence=list(evidence),
         payload_roots=plan_payload_roots(ctx, list(affected) + list(evidence)),
     )
 
@@ -44,7 +44,7 @@ def _resolve(ctx, affected, evidence=()):
 def test_system_repo_paths_make_the_plan_constitutional(tmp_path):
     ctx = _ctx(tmp_path)  # active workspace IS the system repo
     ok, note = _resolve(ctx, ["ouroboros/loop.py"])
-    assert ok and "affected_resources" in note
+    assert ok and "affected_paths" in note
     # D29: the binding alone never decides — nothing declared, not constitutional.
     ok, note = _resolve(ctx, [])
     assert ok is False and note.startswith("not constitutional")
@@ -56,15 +56,15 @@ def test_external_workspace_paths_stay_non_constitutional_unless_absolute_into_s
     # An ABSOLUTE path back into the system repo escalates even from a workspace.
     abs_sys = str(tmp_path / "sys" / "ouroboros" / "config.py")
     ok, note = _resolve(ctx, ["src/app.py", abs_sys])
-    assert ok and "affected_resources" in note
-    # A declared EVIDENCE locator under the system repo escalates too — when it exists.
+    assert ok and "affected_paths" in note
+    # Owner 16=A: a declared EVIDENCE locator under the system repo is a READ, not a change —
+    # it never escalates on its own, existing or not, and the host says which reads it saw
+    # instead of reporting "no locator resolved".
     (tmp_path / "sys" / "BIBLE.md").write_text("# constitution\n", encoding="utf-8")
     ok, note = _resolve(ctx, ["src/app.py"], evidence=[str(tmp_path / "sys" / "BIBLE.md")])
-    assert ok and "evidence" in note
-    # A system-repo evidence path that does NOT exist (a typo) must not drag the constitutional
-    # pack in, and the host says exactly that instead of "no locator resolved".
+    assert ok is False and "EVIDENCE reads" in note
     ok, note = _resolve(ctx, ["src/app.py"], evidence=[str(tmp_path / "sys" / "NOPE.md")])
-    assert ok is False and "do not exist" in note
+    assert ok is False and "EVIDENCE reads" in note
 
 
 # --- skill-payload exemption (data plane, never self-modification by itself) ---------
@@ -100,7 +100,7 @@ def test_native_bucket_is_not_exempt(tmp_path):
     # Native skills are repo-seeded territory — the payload predicate does not admit them.
     ctx = _ctx(tmp_path)
     ok, note = _resolve(ctx, ["data/skills/native/x/plugin.py"])
-    assert ok and "affected_resources" in note
+    assert ok and "affected_paths" in note
 
 
 def test_drive_resolution_failure_skips_the_exemption(tmp_path):

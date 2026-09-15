@@ -554,11 +554,22 @@ def _preflight_check(commit_message: str, staged_files: str,
         f for f in new_files
         if f.startswith(("ouroboros/", "supervisor/")) and f.endswith(".py")
     ]
-    if new_logic_files and "docs/ARCHITECTURE.md" not in active_staged:
+    # The Architecture book is the obligation, not one file: a new module is
+    # documented in the CHAPTER that owns its subsystem, and demanding an
+    # entrypoint edit would only buy a membership-list touch that documents
+    # nothing. Any staged source of the book satisfies it.
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, book_entrypoint_for
+
+    architecture_entrypoint = BOOK_ENTRYPOINTS["architecture"]
+    documented = any(
+        book_entrypoint_for(staged) == architecture_entrypoint for staged in active_staged
+    )
+    if new_logic_files and not documented:
         return (
             "⚠️ PREFLIGHT_BLOCKED: New files added in ouroboros/ or supervisor/ "
-            "but docs/ARCHITECTURE.md is not staged.\n"
-            "  New structural additions must be documented in ARCHITECTURE.md "
+            "but no source of the Architecture book is staged.\n"
+            "  New structural additions must be documented in the Architecture book "
+            f"(`{architecture_entrypoint}` or a `docs/architecture/` chapter) "
             "(Bible P6: authenticity / architectural mirror).\n"
             f"  New files: {new_logic_files[:5]}\n"
             f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
@@ -903,7 +914,13 @@ def _triad_session_task(ctx: ToolContext, **sections) -> str:
     same session task text; a managed subject inlines its authoritative delta."""
     from ouroboros.tools.review_subject import build_triad_session_task
 
-    return build_triad_session_task(**sections)
+    # Governance always comes from the system repository, and the nav maps must
+    # address the physical chapter a section lives in.
+    governance_root = getattr(ctx, "repo_dir", None)
+    return build_triad_session_task(
+        governance_repo_dir=pathlib.Path(governance_root) if governance_root else None,
+        **sections,
+    )
 
 
 def _capture_triad_staged_diff(

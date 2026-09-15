@@ -474,6 +474,7 @@ def force_plan_decision(
     ``enforcement`` is supplied by the loop wrapper from ITS module namespace so
     the existing ``loop.get_review_enforcement`` test/monkeypatch seam holds.
     """
+    reconcile_transferred_obligation(ctx)
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
     not_required = {"required": False, "allow": True, "status": "not_required"}
@@ -528,6 +529,82 @@ def force_plan_decision(
     return decision
 
 
+def reconcile_transferred_obligation(ctx: Any) -> str:
+    """Release the worker's copy of an obligation the supervisor already moved.
+
+    A promote/route admitted AFTER the tool's wait returned unconfirmed still
+    records the transfer durably (the promoter's task result carries
+    ``force_plan_transfer.to``); without this read the worker's metadata kept
+    ``force_plan`` and its finalization held for a plan the new root owes.
+    Returns the task id the obligation moved to, or '' when nothing moved."""
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if metadata.get("force_plan") is not True:
+        return ""
+    task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    root = _canonical_root(ctx)
+    if not task_id or root is None:
+        return ""
+    try:
+        from ouroboros.task_results import load_task_result
+
+        transfer = (load_task_result(root, task_id) or {}).get("force_plan_transfer")
+    except Exception:
+        log.debug("force_plan transfer read failed for %s", task_id, exc_info=True)
+        return ""
+    moved_to = str((transfer or {}).get("to") or "").strip() if isinstance(transfer, dict) else ""
+    if moved_to:
+        release_force_plan_obligation(ctx, moved_to)
+    return moved_to
+
+
+def unmet_force_plan_obligation(ctx: Any) -> Dict[str, Any]:
+    """Does THIS task still owe a plan review nobody has started (owner 3=A)?
+
+    A Swarm-admitted root carries ``force_plan`` in its metadata; the obligation
+    is MET once the task entered the plan-review gate (a wave recorded for it --
+    ``_plan_review_engaged`` on the same durable state ``force_plan_decision``
+    projects), because from then on the gate binds the task itself. Only an
+    UNMET obligation follows the work a promote moves elsewhere. An unreadable
+    state is not proof of anything and transfers nothing (I-17: a gate that
+    cannot read its authority is engaged, not absent).
+    """
+    if reconcile_transferred_obligation(ctx):
+        return {"unmet": False, "reason": "transferred"}
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if metadata.get("force_plan") is not True:
+        return {"unmet": False, "reason": "not_required"}
+    task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    root = _canonical_root(ctx)
+    if not task_id or root is None:
+        return {"unmet": False, "reason": "no_task_identity"}
+    from ouroboros.task_results import load_plan_review_state
+
+    try:
+        state = load_plan_review_state(root, task_id)
+    except (OSError, TimeoutError, ValueError):
+        log.warning("Unable to read durable force-plan review state", exc_info=True)
+        return {"unmet": False, "reason": "plan_review_state_unreadable"}
+    if _plan_review_engaged(state):
+        return {"unmet": False, "reason": "plan_review_engaged"}
+    return {
+        "unmet": True,
+        "source": str(metadata.get("force_plan_source") or "operator").strip() or "operator",
+    }
+
+
+def release_force_plan_obligation(ctx: Any, transferred_to: str) -> None:
+    """The worker's copy of the fact the supervisor released in the promote
+    transaction: ``force_plan_decision`` reads this metadata, so the promoter's
+    own finalization stops requiring a plan the new root now owes."""
+    metadata = getattr(ctx, "task_metadata", None)
+    if not isinstance(metadata, dict):
+        return
+    metadata["force_plan"] = False
+    metadata["force_plan_transferred_to"] = str(transferred_to or "")
+
+
 def plan_review_reminder(decision: Dict[str, Any]) -> str:
     """The user-turn reminder appended while a blocking plan review holds finalization
     (text moved out of the pinned ``loop.py``)."""
@@ -537,7 +614,8 @@ def plan_review_reminder(decision: Dict[str, Any]) -> str:
     if status == "legacy_open_requires_resubmission":
         return (
             f"{tag} An open plan review from a previous schema cannot be honored. Re-call "
-            "plan_task with your goal, plan and spec to start a fresh review before finalizing."
+            "plan_task with your goal, plan and spec — including affected_paths, the files the "
+            "work will change ([] when none) — to start a fresh review before finalizing."
         )
     from ouroboros.review_cycles import review_max_cycles
 
@@ -578,13 +656,15 @@ def plan_review_reminder(decision: Dict[str, Any]) -> str:
         )
     if outcome == "REVISE_PLAN":
         return (
-            f"{tag} Blocking plan review requires a revised spec. Change the spec and call "
+            f"{tag} Blocking plan review requires a revised spec. Change the spec — it carries "
+            "affected_paths, the files the work will change ([] when none) — and call "
             "plan_task again (or reject the blocking findings with a rationale via "
             "review_disposition). Continue analysis and non-mutating preparation, but do not "
             "begin the work before the review closes or a real task-wide rail fires."
         )
     return (
-        f"{tag} Call plan_task with a concrete goal, plan and spec. If review infrastructure "
+        f"{tag} Call plan_task with a concrete goal, plan and spec, whose affected_paths lists "
+        "the files the work will change ([] when none). If review infrastructure "
         "is unavailable, continue analysis and non-mutating preparation, but do not begin the "
         "work before the review closes or a real task-wide rail fires."
     )

@@ -268,7 +268,7 @@ def test_a_retry_health_check_judges_the_stored_pin_not_the_current_setting(
 
     # 1. The intended start stores its canonical body — pin included — then the
     #    POST's outcome is lost, leaving the invocation pending.
-    lost = json.loads(delegate._delegate_start(_plain_ctx(tmp_path), "the intended work"))
+    lost = json.loads(delegate._delegate_start(_plain_ctx(tmp_path), "the intended work").text)
     assert lost["reason"] == "daemon_unreachable"
     token = lost["pending_invocation_id"]
     assert bodies[0]["credentialProfileId"] == "stored-pin"
@@ -282,7 +282,7 @@ def test_a_retry_health_check_judges_the_stored_pin_not_the_current_setting(
     quota["snapshots"] = [_snap("stored-pin", spent=True, reset="2099-08-20T00:00:00Z"),
                           _snap("drifted-pin", spent=False, reset="2099-08-21T00:00:00Z")]
     blocked = json.loads(delegate._delegate_start(_plain_ctx(tmp_path), "the intended work",
-                                                  retry_of=token))
+                                                  retry_of=token).text)
     assert blocked["reason"] == "subscription_window_exhausted", blocked
     assert blocked["reset_at"] == "2099-08-20T00:00:00Z"
     assert len(bodies) == 1, "a health-refused retry must never reach the wire"
@@ -293,7 +293,7 @@ def test_a_retry_health_check_judges_the_stored_pin_not_the_current_setting(
     quota["snapshots"] = [_snap("stored-pin", spent=False, reset="2099-08-20T00:00:00Z"),
                           _snap("drifted-pin", spent=True, reset="2099-08-21T00:00:00Z")]
     retried = json.loads(delegate._delegate_start(_plain_ctx(tmp_path), "the intended work",
-                                                  retry_of=token))
+                                                  retry_of=token).text)
     assert retried["status"] == "started", retried
     assert bodies[-1] == bodies[0], "the retry replays the RECORDED body"
     assert bodies[-1]["credentialProfileId"] == "stored-pin"

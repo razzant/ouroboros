@@ -516,7 +516,13 @@ def generate_reflection(
         "ts": utc_now_iso(),
         "task_id": task.get("id", ""),
         "task_type": str(task.get("type", "")),
+        # Two goal fields with one owner each: ``goal`` is the bounded DISPLAY
+        # field every log/UI reader has always shown, ``goal_exact`` is the
+        # request as the owner wrote it. A destructive writer (the Pattern
+        # Register replaces its whole document) must decide from the exact text,
+        # not from a 200-char display prefix that can end mid-sentence.
         "goal": goal,
+        "goal_exact": str(task.get("text") or ""),
         "rounds": None if usage_dict.get("loop_evidence_unavailable") else int(usage_dict.get("rounds", 0)),
         "cost_usd": (
             round(float(usage_dict["cost"]), 4)
@@ -638,8 +644,11 @@ def append_reflection(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
     if _admits_pattern_register(entry):
         try:
             _update_patterns(drive_root, entry)
-        except Exception:
-            log.debug("Pattern register update failed (non-critical)", exc_info=True)
+        except Exception as exc:
+            # Learning that silently fails to land is invisible erosion: the
+            # register simply never hears about this class again (P1).
+            log.warning("Pattern register update failed for task %s: %s",
+                        entry.get("task_id", "?"), exc, exc_info=True)
 
 
 def append_reflection_routed(env: Any, task: Dict[str, Any], entry: Dict[str, Any]) -> None:
@@ -653,7 +662,9 @@ def append_reflection_routed(env: Any, task: Dict[str, Any], entry: Dict[str, An
     full text, which feeds future global context and would leak project facts
     across projects. A non-project root reflects on the canonical budget drive
     directly. The Pattern Register update stays on the canonical drive in both
-    cases (general error patterns are cross-project cognition)."""
+    cases and reads the WHOLE reflection plus the exact goal (owner decision
+    Q2A: general error patterns are cross-project cognition, and the register
+    is the one global consumer of that text)."""
     canonical = pathlib.Path(str(task.get("budget_drive_root") or "").strip() or str(env.drive_root))
     try:
         from ouroboros.project_facts import resolve_project_id
@@ -679,8 +690,9 @@ def append_reflection_routed(env: Any, task: Dict[str, Any], entry: Dict[str, An
     if _admits_pattern_register(entry):
         try:
             _update_patterns(canonical, entry)
-        except Exception:
-            log.debug("Pattern register update failed (non-critical)", exc_info=True)
+        except Exception as exc:
+            log.warning("Pattern register update failed for task %s: %s",
+                        entry.get("task_id", "?"), exc, exc_info=True)
     try:
         append_jsonl(canonical / "logs" / REFLECTIONS_FILENAME, {
             "ts": str(entry.get("ts") or utc_now_iso()),
@@ -741,13 +753,16 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
         current = _PATTERNS_HEADER
 
     prompt = _PATTERNS_PROMPT.format(
-        # This call replaces the whole file, so its decision input must be the
-        # complete current register.  Provider overflow/error is handled by the
-        # caller as an abstention; a prefix can never authorize the rewrite.
+        # This call replaces the whole file, so EVERY decision input must be
+        # complete: the current register, the exact goal, and the whole
+        # reflection.  Provider overflow/error is handled by the caller as an
+        # abstention; a prefix can never authorize the rewrite.  A 500-char clip
+        # of the reflection once cut an exculpatory clause mid-word and the
+        # register recorded the inverse of what the reflection concluded.
         current_patterns=current,
-        goal=_truncate_with_notice(entry.get("goal", "?"), 200),
+        goal=str(entry.get("goal_exact") or entry.get("goal") or "?"),
         markers=", ".join(entry.get("key_markers", [])),
-        reflection=_truncate_with_notice(entry.get("reflection", ""), 500),
+        reflection=str(entry.get("reflection") or ""),
     )
 
     light_model = get_light_model()
@@ -792,7 +807,16 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
             log.warning("Pattern register source became unavailable; preserving it")
             return
         if latest != current:
-            log.info("Pattern register changed during update; preserving the newer source")
+            # The newer source wins and this rewrite is abandoned — so the
+            # learning it carried is DROPPED, not deferred. Name whose it was:
+            # a silent "preserving the newer source" hid which task's lesson the
+            # register never recorded. No retry (a second paid call would decide
+            # from a register that has moved again).
+            log.warning(
+                "Pattern register changed during this update; preserving the newer source. "
+                "Task %s learning was NOT recorded in the register (no retry).",
+                str(entry.get("task_id") or "?"),
+            )
             return
         if not append_jsonl(drive_root / "memory" / "knowledge" / "patterns_history.jsonl", {
             "ts": utc_now_iso(),

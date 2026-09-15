@@ -10,6 +10,7 @@ Also covers the core governance artifact invariants introduced in the
 """
 
 from unittest.mock import MagicMock
+from tests._governance_docs_shared import development_text
 
 
 def _make_ctx(tmp_path):
@@ -462,7 +463,7 @@ def test_development_md_contains_core_governance_invariant():
     import pathlib
     dev_md = pathlib.Path(__file__).resolve().parent.parent / "docs" / "DEVELOPMENT.md"
     assert dev_md.exists(), "docs/DEVELOPMENT.md must exist"
-    content = dev_md.read_text(encoding="utf-8")
+    content = development_text()
 
     required_phrases = [
         "Core Governance Artifacts",

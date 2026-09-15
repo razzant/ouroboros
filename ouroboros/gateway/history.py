@@ -342,30 +342,30 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
         rec["model_execution"] = dict(entry["model_execution"])
     if entry.get("suggested_name"):
         rec["suggested_name"] = str(entry["suggested_name"])
-    for key in ("tool_calls", "rounds", "tool_errors"):
+    for key in ("tool_calls", "rounds", "tool_errors", "routing_tool_calls"):
         if key in entry:
             rec[key] = None if entry[key] is None else int(entry[key])
     if "tool_call_counts" in entry:
-        counts = entry["tool_call_counts"]
-        rec["tool_call_counts"] = dict(counts) if isinstance(counts, dict) else None
-    if entry.get("type") == "task_summary" or isinstance(entry.get("outcome_axes"), dict):
-        rec["outcome_axes"] = normalize_outcome_axes(entry)
+        rec["tool_call_counts"] = dict(entry["tool_call_counts"]) if isinstance(entry["tool_call_counts"], dict) else None
+    # The row's own direct-turn fact (pruned-result fallback; the persisted
+    # result overrides it) and the typed routing action as `addressing_only`.
+    if "_is_direct_chat" in entry:
+        rec["_is_direct_chat"] = bool(entry["_is_direct_chat"])
+    if entry.get("typed_routing_action"):
+        rec["addressing_only"] = str(entry["typed_routing_action"])
+    rec["outcome_axes"] = normalize_outcome_axes(entry)
     if "reason_code" in entry:
         rec["reason_code"] = str(entry.get("reason_code") or "")
     if isinstance(entry.get("review_projection"), dict):
         rec["review_projection"] = dict(entry.get("review_projection") or {})
-    # The chat row carries the flat task-scope cost snapshot written by
-    # the task-summary producer.
-    # _annotate_terminal_task_truth later OVERRIDES these with the persisted
-    # task_results values when the result file survives (row = fallback only).
-    # ABI-3: CONVERTED, not copied — a stored legacy row's pair resolves
-    # deprecated-wins and replays under the honest names only.
+    # The row's flat task-scope cost snapshot; _annotate_terminal_task_truth
+    # later OVERRIDES it with the persisted task_results values when the result
+    # file survives (row = fallback only). ABI-3: CONVERTED, not copied — a
+    # stored legacy pair resolves deprecated-wins under the honest names only.
     rec.update(carry_cost_meta(entry))
     # Live-card outcome axes ride the summary row too (the pruned-result
     # fallback); persisted task_results values still override them below.
-    for key in ("outcome_phase", "outcome_final"):
-        if key in entry:
-            rec[key] = entry[key]
+    rec.update({key: entry[key] for key in ("outcome_phase", "outcome_final") if key in entry})
 
 
 def _load_terminal_result(
@@ -493,7 +493,7 @@ def _annotate_terminal_task_truth(
                 terminal_status_by_task[task_id] = status
             if task_id in finalizing_tasks or task_id in terminal_status_by_task:
                 terminal_truth: Dict[str, Any] = {
-                    "outcome_axes": normalize_outcome_axes(result),
+                    "outcome_axes": normalize_outcome_axes(result), "_is_direct_chat": bool(result.get("_is_direct_chat")),
                     "outcome_phase": outcome_phase(result, {}), "outcome_final": task_id not in finalizing_tasks,
                 }
                 if isinstance(result.get("model_execution"), dict):

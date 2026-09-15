@@ -655,6 +655,34 @@ def commit_review_evidence_section(evidence: dict, *, delivery: str, compact: bo
     return header + "\nRecorded excerpt:\n" + truncate_within_limit(preview, room)
 
 
+def _split_advisory_runs_by_owner(runs: List[Any], task_id: str) -> tuple[List[Any], List[Any]]:
+    """Split repository advisory runs into this task's own rows and another task's.
+
+    Keyed on ROW IDENTITY, never on a scope key. Advisory runs are scoped by
+    repository, and several tasks legitimately review the same checkout, so a
+    repo-scoped list mixes owners: a root's post-task reflection was handed
+    another task's failed advisory commands with their identity stripped and
+    narrated them as its own failures. An empty ``repo_key`` widens the
+    candidate list to every advisory run on the drive, which is why the split
+    cannot key on that key either — the installation's history is not this
+    task's record.
+
+    A row carrying no ``task_id`` is legacy provenance: unknown, never
+    re-attributed in either direction, and left in the repository group it has
+    always been rendered in. A caller with no ``task_id`` (repository-readiness
+    surfaces) keeps whole-repository semantics, where nothing is foreign.
+    """
+    current = str(task_id or "")
+    if not current:
+        return list(runs), []
+    own: List[Any] = []
+    foreign: List[Any] = []
+    for run in runs:
+        owner = str(getattr(run, "task_id", "") or "")
+        (foreign if owner and owner != current else own).append(run)
+    return own, foreign
+
+
 def collect_review_evidence(
     drive_root: Any,
     *,
@@ -665,6 +693,16 @@ def collect_review_evidence(
     max_obligations: int | None = None,
     max_continuations: int = 3,
 ) -> Dict[str, Any]:
+    """Project this task's commit/advisory review record over the durable ledger.
+
+    Repository readiness (``current_repo``, obligations, debts, the exact
+    snapshot match) stays repository-scoped — that is what "can this checkout be
+    committed" means. The RUN LISTS are attributed: ``recent_advisory_runs``
+    holds only rows this task owns (plus legacy rows with no recorded owner),
+    while another task's rows on the same checkout are carried separately under
+    ``foreign_advisory_runs`` so a reader cannot mistake them for this task's
+    own work.
+    """
     from ouroboros.review_state import (
         _LEGACY_CURRENT_REPO_KEY,
         advisory_commit_ready,
@@ -687,6 +725,7 @@ def collect_review_evidence(
         repo_runs = state.filter_advisory_runs(repo_key=repo_key)
     else:
         repo_runs = all_runs
+    own_runs, foreign_runs = _split_advisory_runs_by_owner(repo_runs, task_id)
 
     if task_id:
         scoped_attempts = state.filter_attempts(task_id=task_id)
@@ -731,8 +770,10 @@ def collect_review_evidence(
         },
         "recent_attempts": [_attempt_to_dict(item) for item in (scoped_attempts[-max_attempts:] if max_attempts > 0 else [])],
         "omitted_attempts": max(0, len(scoped_attempts) - max_attempts) if max_attempts > 0 else len(scoped_attempts),
-        "recent_advisory_runs": [_run_to_dict(item) for item in (repo_runs[-max_runs:] if max_runs > 0 else [])],
-        "omitted_advisory_runs": max(0, len(repo_runs) - max_runs) if max_runs > 0 else len(repo_runs),
+        "recent_advisory_runs": [_run_to_dict(item) for item in (own_runs[-max_runs:] if max_runs > 0 else [])],
+        "omitted_advisory_runs": max(0, len(own_runs) - max_runs) if max_runs > 0 else len(own_runs),
+        "foreign_advisory_runs": [_run_to_dict(item) for item in (foreign_runs[-max_runs:] if max_runs > 0 else [])],
+        "omitted_foreign_advisory_runs": max(0, len(foreign_runs) - max_runs) if max_runs > 0 else len(foreign_runs),
         "open_obligations": [_obligation_to_dict(item) for item in (open_obligations[:max_obligations] if max_obligations is not None else open_obligations)],
         "omitted_obligations": max(0, len(open_obligations) - max_obligations) if max_obligations is not None else 0,
         "commit_readiness_debts": [_debt_to_dict(item) for item in open_debts],
@@ -744,6 +785,10 @@ def collect_review_evidence(
     evidence["has_evidence"] = any([
         evidence["recent_attempts"],
         evidence["recent_advisory_runs"],
+        # Another task's runs are still evidence about this checkout: the lens
+        # must not report "nothing recorded" when it is holding rows it simply
+        # may not attribute to this task.
+        evidence["foreign_advisory_runs"],
         evidence["open_obligations"],
         evidence["commit_readiness_debts"],
         evidence["continuations"],
@@ -752,6 +797,7 @@ def collect_review_evidence(
         # Omission counters signal truncated evidence even when visible lists are empty
         evidence["omitted_attempts"] > 0,
         evidence["omitted_advisory_runs"] > 0,
+        evidence["omitted_foreign_advisory_runs"] > 0,
         evidence["omitted_obligations"] > 0,
         evidence["omitted_continuations"] > 0,
         evidence["omitted_corrupt"] > 0,
@@ -781,6 +827,33 @@ def _acceptance_panel_prompt_row(panel: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+_FOREIGN_ADVISORY_KEYS = ("foreign_advisory_runs", "omitted_foreign_advisory_runs")
+
+
+def _foreign_advisory_section(evidence: Dict[str, Any]) -> str:
+    """Render another task's advisory runs under a heading that says whose they are.
+
+    Rows split out by ``collect_review_evidence`` are repository context, so
+    they must reach the reader — but never inside the block a summariser or a
+    reflection reads as "my review record". The heading names the owning task
+    ids, because the identity is exactly what a reader needs to not adopt the
+    failures.
+    """
+    rows = [row for row in (evidence.get("foreign_advisory_runs") or []) if isinstance(row, dict)]
+    omitted = int(evidence.get("omitted_foreign_advisory_runs") or 0)
+    if not rows and not omitted:
+        return ""
+    owners = sorted({str(row.get("task_id") or "") for row in rows} - {""})
+    return (
+        "ADVISORY RUNS OF OTHER TASKS (NOT this task's work — do not report them as my own):\n"
+        f"owning task_ids: {', '.join(owners) if owners else '(none recorded)'}; "
+        f"shown={len(rows)}; omitted={omitted}.\n"
+        "These ran on the same checkout for a different task. They are evidence about the\n"
+        "repository, never this task's errors, decisions or obligations.\n"
+        + json.dumps(rows, ensure_ascii=False, indent=2)
+    )
+
+
 def format_review_evidence_for_prompt(
     evidence: Dict[str, Any],
     *,
@@ -798,7 +871,14 @@ def format_review_evidence_for_prompt(
     ``acceptance_panels`` leads with the task's OWN acceptance-panel projection.
     The commit/advisory lens knows nothing about it, so its absence statement
     names the lens it describes rather than claiming the task bought no review.
+
+    Another task's advisory runs leave the main JSON body entirely and are
+    rendered last, under their own attributing heading.
     """
+    evidence = evidence if isinstance(evidence, dict) else {}
+    foreign_section = _foreign_advisory_section(evidence)
+    if foreign_section:
+        evidence = {key: value for key, value in evidence.items() if key not in _FOREIGN_ADVISORY_KEYS}
     rows = [
         _acceptance_panel_prompt_row(panel)
         for panel in (acceptance_panels if isinstance(acceptance_panels, list) else [])
@@ -839,9 +919,19 @@ def format_review_evidence_for_prompt(
             "TASK ACCEPTANCE PANELS:\n"
             + json.dumps(projection, ensure_ascii=False, indent=2)
         )
+    if foreign_section and max_chars > 0:
+        # The attributing section is part of the same budget, but it is ANOTHER
+        # task's record: it takes at most a quarter of the bound, so the task's
+        # own evidence (what the reflection and the Pattern Register learn from)
+        # keeps the rest. Charging the untruncated section first let three long
+        # foreign runs squeeze the own body down to one character.
+        foreign_cap = max(1, max_chars // 4)
+        if len(foreign_section) > foreign_cap:
+            foreign_section = truncate_review_artifact(foreign_section, limit=foreign_cap)
     if evidence and evidence.get("has_evidence"):
         rendered_evidence = json.dumps(evidence, ensure_ascii=False, indent=2)
         prefix_chars = len(sections[0]) + 2 if sections else 0
+        prefix_chars += len(foreign_section) + 2 if foreign_section else 0
         limit = max_chars - prefix_chars if max_chars > 0 else 0
         if source_ref and max_chars > 0 and len(rendered_evidence) > max(1, limit):
             rendered_evidence = truncate_review_artifact(
@@ -852,6 +942,12 @@ def format_review_evidence_for_prompt(
                 f"canonical source_ref={json.dumps(source_ref, ensure_ascii=False)}"
             )
         sections.append(rendered_evidence)
+    if foreign_section:
+        room = max_chars - sum(len(section) + 2 for section in sections) if max_chars > 0 else 0
+        sections.append(
+            truncate_review_artifact(foreign_section, limit=max(1, room))
+            if max_chars > 0 and len(foreign_section) > max(1, room) else foreign_section
+        )
     if not sections:
         return "(no commit/advisory review evidence recorded for this task)"
     return "\n\n".join(sections)
@@ -887,7 +983,16 @@ _RESPONDED_STATUSES = frozenset({"fresh", "stale"})
 
 
 def _run_to_dict(item: Any) -> Dict[str, Any]:
-    """Serialise AdvisoryRunRecord with responded/skipped/error status summary."""
+    """Serialise AdvisoryRunRecord with responded/skipped/error status summary.
+
+    The row carries its own IDENTITY: the owning ``task_id`` ("" = a legacy row
+    written before the field existed — unknown, never re-attributed), the
+    complete ``snapshot_hash`` of the tree that was reviewed (a 12-char prefix
+    cannot be joined back to an exact snapshot), and the ``attempt``/``phase``
+    of the lifecycle that produced it. A stripped row is why one root narrated
+    another task's advisory failures as its own. The keys are additive; every
+    historical reader keeps working.
+    """
     valid_items = [entry for entry in list(getattr(item, "items", []) or []) if isinstance(entry, dict)]
     fail_items = [
         {
@@ -914,6 +1019,10 @@ def _run_to_dict(item: Any) -> Dict[str, Any]:
 
     return {
         "ts": str(getattr(item, "ts", "") or ""),
+        "task_id": str(getattr(item, "task_id", "") or ""),
+        "attempt": int(getattr(item, "attempt", 0) or 0),
+        "phase": str(getattr(item, "phase", "") or ""),
+        "snapshot_hash": str(getattr(item, "snapshot_hash", "") or ""),
         "status": status,
         "status_summary": status_summary,
         "repo_key": str(getattr(item, "repo_key", "") or ""),

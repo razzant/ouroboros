@@ -16,3 +16,10 @@ tests/fixtures/skill_publish_scanner/*.fixture text eol=lf
 # Recorded provider wire (SSE / JSON bodies) is byte-exact evidence: no line-ending
 # conversion at commit or checkout, so the replay corpus always sees the recorded bytes.
 tests/fixtures/llm_wire/** -text -whitespace
+
+# Reference-book chapters are addressed by physical LF line ranges and byte
+# spans (`reference_books` source refs, the generated inventories' chapter
+# provenance notes, the migration byte proof). Pin every docs markdown file to
+# LF so a Windows checkout reads the same lines and digests as the committed
+# bytes.
+docs/**/*.md text eol=lf

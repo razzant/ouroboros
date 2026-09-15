@@ -33,10 +33,8 @@ export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
 
 // A replayed final may preserve only an already-terminal phase. Ordinary DOM
 // progress is presentation state, not terminal outcome truth.
-export function replayTerminalPhase(taskState, record) {
-    return taskState?.completedPhase
-        || (record?.finished ? record?.phaseEl?.dataset?.phase : '')
-        || 'done';
+export function replayTerminalPhase(record) {
+    return (record?.finished ? record?.phaseEl?.dataset?.phase : '') || 'done';
 }
 
 // Preserve the authoritative unfinished phase fact across an optimistic owner

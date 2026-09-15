@@ -22,7 +22,7 @@ from hashlib import sha256
 import json
 import pathlib
 import re
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from ouroboros.config import adaptive_quorum
 from ouroboros.contracts.task_contract import normalize_acceptance_claims
@@ -57,10 +57,12 @@ AUTHOR_DISPOSITION_SCHEMA = {
 }
 DISPOSITION_DECISIONS = ("accept", "reject", "defer")
 
-_SPEC_STRING_LISTS = ("in_scope", "non_goals", "invariants", "affected_resources", "evidence")
+_SPEC_STRING_LISTS = (
+    "in_scope", "non_goals", "invariants", "affected_paths", "affected_resources", "evidence",
+)
 _SPEC_KEYS = frozenset({
     "goal", "in_scope", "non_goals", "acceptance_claims", "invariants",
-    "decisions", "deferred", "affected_resources", "evidence",
+    "decisions", "deferred", "affected_paths", "affected_resources", "evidence",
 })
 _URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 _FILE_SCHEME = "file://"
@@ -224,6 +226,9 @@ def normalize_spec(raw: Mapping[str, Any] | None) -> tuple[dict, list[str]]:
     Invariant ids are positional (``invariant_1..N``) because the schema keeps
     ``invariants: [str]``; ``spec_ids``/``spec_with_ids`` derive them; the id
     ``goal`` is reserved for the intention as a whole (D32).
+    ``affected_paths`` (the files the work will CHANGE) appears in the normalized
+    spec only when the input declared it, so a spec stored before the field existed
+    keeps its recorded identity byte for byte.
     """
     errors: list[str] = []
     omissions: list[str] = []
@@ -240,6 +245,13 @@ def normalize_spec(raw: Mapping[str, Any] | None) -> tuple[dict, list[str]]:
         )
     spec: dict[str, Any] = {"goal": goal}
     for key in _SPEC_STRING_LISTS:
+        # `affected_paths` is the ONE key that is never defaulted: a spec RECORDED before the
+        # field existed must normalize to the same bytes as it did then, or its `spec_hash` /
+        # `plan_fingerprint` move and the open wave it belongs to becomes uncollectable. New
+        # submissions always carry the key — `plan_review` refuses the old mixed form before
+        # any paid dispatch, so the absence here only ever means "stored under the old shape".
+        if key == "affected_paths" and key not in raw:
+            continue
         spec[key] = _string_list(raw.get(key), key, errors, omissions)
     seen = {GOAL_ID, *(f"invariant_{i}" for i in range(1, len(spec["invariants"]) + 1))}
     spec["acceptance_claims"] = _normalize_claims(raw.get("acceptance_claims"), errors, omissions, seen)
@@ -248,8 +260,8 @@ def normalize_spec(raw: Mapping[str, Any] | None) -> tuple[dict, list[str]]:
     spec["normalization_omissions"] = omissions
     ordered = {key: spec[key] for key in (
         "goal", "in_scope", "non_goals", "acceptance_claims", "invariants", "decisions",
-        "deferred", "affected_resources", "evidence", "normalization_omissions",
-    )}
+        "deferred", "affected_paths", "affected_resources", "evidence", "normalization_omissions",
+    ) if key in spec}
     return ordered, errors
 
 
@@ -333,7 +345,9 @@ def spec_delta(prev_spec: Mapping[str, Any] | None, spec: Mapping[str, Any]) -> 
     (added / removed / changed content); plain string lists diff by text; the
     goal is a changed flag; ``renumbered`` lists elements whose text moved to a
     different id (positional ids shift when an earlier element is dropped or
-    reordered). ``prev_spec=None`` means everything is added.
+    reordered); ``declared_keys_changed`` reports a spec whose set of declared keys
+    itself moved (a spec stored before ``affected_paths`` existed declares no such
+    key at all). ``prev_spec=None`` means everything is added.
     """
     prev = dict(prev_spec or {})
     ids: dict[str, list[str]] = {"added": [], "removed": [], "changed": []}
@@ -350,12 +364,21 @@ def spec_delta(prev_spec: Mapping[str, Any] | None, spec: Mapping[str, Any]) -> 
             "removed": [t for t in before_l if t not in after_l],
         }
     goal_changed = str(prev.get("goal") or "") != str(spec.get("goal") or "")
-    changed = goal_changed or any(ids.values()) or any(
+    # A key that appears or disappears between two normalized specs is a change even when both
+    # sides read as empty: `affected_paths` ABSENT (stored before the field existed) and
+    # `affected_paths: []` ("this work changes no files") are different claims, and the spec
+    # hash already says so — the delta the reviewer reads must not say they are the same.
+    declared_keys_changed = prev_spec is not None and (
+        {key for key in prev if key != "normalization_omissions"}
+        != {key for key in spec if key != "normalization_omissions"}
+    )
+    changed = goal_changed or declared_keys_changed or any(ids.values()) or any(
         entry["added"] or entry["removed"] for entry in lists.values()
     )
     return {
         "changed": changed,
         "goal_changed": goal_changed,
+        "declared_keys_changed": declared_keys_changed,
         "ids": ids,
         "lists": lists,
         "renumbered": _renumbered(prev, spec),
@@ -454,35 +477,31 @@ def _under(path: pathlib.Path, root: pathlib.Path) -> bool:
         return False
 
 
-def _default_exists(path: pathlib.Path) -> bool:
-    """Fail CLOSED: only a definite "this path is not there" lets an evidence locator skip
-    the constitutional escalation. An unreadable path (permissions, a transient I/O error)
-    counts as present, because the safe error is carrying the constitution needlessly, never
-    dropping it on a filesystem hiccup."""
-    try:
-        return path.exists()
-    except (OSError, ValueError, RuntimeError):
-        return True
-
-
 def resolve_constitutional(
     *,
     active_root: str | pathlib.Path,
     system_repo_root: str | pathlib.Path,
-    affected_resources: Iterable[str],
+    affected_paths: Iterable[str],
     evidence: Iterable[str],
     payload_roots: Iterable[str | pathlib.Path] = (),
-    evidence_exists: Optional[Callable[[pathlib.Path], bool]] = None,
 ) -> tuple[bool, str]:
-    """ONE structural fact: does this plan touch Ouroboros's own body?
+    """ONE structural fact: will this plan CHANGE Ouroboros's own body?
 
-    Port of ``plan_review_runtime.resolve_plan_class`` without the enum. True iff
-    any ``affected_resources`` / ``evidence`` PATH locator (relative resolved
-    against ``active_root``, absolute or ``file://`` as-is) resolves to or under
-    the system repository. The active binding alone does NOT decide (owner
-    decision D29: a plan bound to the system repo that declares no system path
-    is not constitutional). Skill-payload paths under ``payload_roots`` are
-    exempt (data plane, as today). URLs and ``task:``/``chat:`` locators never make it
+    True iff a declared ``affected_paths`` locator (relative resolved against
+    ``active_root``, absolute or ``file://`` as-is) resolves to or under the
+    system repository — whether or not the file exists yet, because creating
+    ``ouroboros/new_module.py`` IS self-modification. ``affected_resources`` is
+    never read here: treating every non-URL string in it as a path is what turned
+    a Russian sentence about a project into "a file under the repo" and billed the
+    whole constitution to a deck plan (owner decisions 8=A/9=A/16=A).
+    ``evidence`` is what to LOOK AT — reading a repository file is not changing it,
+    so an evidence locator never decides on its own (16=A); when the work will also
+    change that file it is in ``affected_paths`` and decides there. System-repo
+    evidence reads are named in the note so the author can see why the constitutional
+    pack was not bought (P1). The active binding alone does NOT decide (owner
+    decision D29: a plan bound to the system repo that declares no system path is
+    not constitutional). Skill-payload paths under ``payload_roots`` are exempt
+    (data plane, as today). URLs and ``task:``/``chat:`` locators never make it
     true. Returns ``(constitutional, note)`` — the note names the deciding
     locator for disclosure.
     """
@@ -498,9 +517,10 @@ def resolve_constitutional(
     # proposal to drop system-repo-nested payload roots (S-B05) was REJECTED for that
     # reason; the residual it names requires control of the payload predicate itself.
     payloads = [pathlib.Path(p).resolve(strict=False) for p in payload_roots]
-    exists = evidence_exists if evidence_exists is not None else _default_exists
-    skipped: list[str] = []
-    for label, locators in (("affected_resources", affected_resources), ("evidence", evidence)):
+
+    def _system_locators(locators: Iterable[str]):
+        """Lazily yield the declared locators that are PATHS resolving under the system repo,
+        verbatim — the first one is enough to decide, so nothing further is resolved."""
         for raw in locators or []:
             locator = str(raw or "").strip()
             if not _is_path_locator(locator):
@@ -509,28 +529,31 @@ def resolve_constitutional(
             if resolved is None or any(_under(resolved, payload) for payload in payloads):
                 continue
             if resolved == system or _under(resolved, system):
-                # An `affected_resources` target counts whether or not it exists yet — creating
-                # `ouroboros/new_module.py` IS self-modification. An `evidence` locator is only
-                # something to LOOK AT: a path that does not exist (a typo, a file belonging to
-                # another workspace) must not drag the constitutional pack in behind it — but the
-                # skip is DISCLOSED, never reported as "no locator resolved" (P1).
-                if label == "evidence" and not exists(resolved):
-                    skipped.append(locator)
-                    continue
-                # The locator is quoted VERBATIM (never ``repr``): the note is disclosure a
-                # reviewer copies back, and ``repr`` doubles every backslash of a Windows path.
-                return True, (
-                    f"constitutional: {label} locator '{locator}' resolves under the "
-                    "Ouroboros system repository (structural fact)"
-                )
-    if skipped:
-        listed = ", ".join(f"'{item}'" for item in skipped[:5])
-        return False, (
-            "not constitutional: the only system-repo locators declared are EVIDENCE paths that do "
-            f"not exist ({listed}) — declare them under "
-            "affected_resources if the work will change them"
+                yield locator
+
+    for target in _system_locators(affected_paths):
+        # The locator is quoted VERBATIM (never ``repr``): the note is disclosure a
+        # reviewer copies back, and ``repr`` doubles every backslash of a Windows path.
+        return True, (
+            f"constitutional: affected_paths locator '{target}' resolves under the "
+            "Ouroboros system repository (structural fact)"
         )
-    return False, "not constitutional: no declared locator resolves under the Ouroboros system repository"
+    reads: list[str] = []
+    for read in _system_locators(evidence):
+        reads.append(read)
+        if len(reads) >= 5:  # the note names them; a sixth adds nothing a reviewer acts on
+            break
+    if reads:
+        listed = ", ".join(f"'{item}'" for item in reads)
+        return False, (
+            "not constitutional: the system-repo locators declared are EVIDENCE reads "
+            f"({listed}), and reading a repository file is not changing it — list a file "
+            "under affected_paths if the work will change it"
+        )
+    return False, (
+        "not constitutional: no declared affected_paths locator resolves under the "
+        "Ouroboros system repository"
+    )
 
 
 # ----------------------------------------------------------------------- findings

@@ -82,7 +82,7 @@ def test_start_uses_normal_writing_mode_without_git_or_fake_snapshot(tmp_path, m
     ctx, target = context(tmp_path, monkeypatch)
     engine = DirectoryEngine(target, strategy)
     monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda *a, **k: engine)
-    result = json.loads(delegate._delegate_start(ctx, "edit documents", directory_strategy=strategy, scope_paths=["."]))
+    result = json.loads(delegate._delegate_start(ctx, "edit documents", directory_strategy=strategy, scope_paths=["."]).text)
     assert result["status"] == "started", result
     request, key = engine.posts[0]
     assert request["scope"]["root"] == str(target)
@@ -119,7 +119,7 @@ def test_a_write_capable_child_keeps_its_attested_folder_shape(
     ctx, target = context(tmp_path, monkeypatch)
     engine = DirectoryEngine(target, "direct")
     monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda *a, **k: engine)
-    result = json.loads(delegate._delegate_start(ctx, "edit documents", **options))
+    result = json.loads(delegate._delegate_start(ctx, "edit documents", **options).text)
     assert result["status"] == "started", result
     execution = engine.posts[0][0]["execution"]
     assert execution["workspaceKind"] == "directory" and execution["isolation"] == "live"
@@ -140,7 +140,7 @@ def _git_workspace_start(tmp_path, monkeypatch, case, **options):
     engine = DirectoryEngine(target, "direct")
     monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda *a, **k: engine)
     delegate._CUSTODY.clear()
-    payload = json.loads(delegate._delegate_start(ctx, "edit documents", **options))
+    payload = json.loads(delegate._delegate_start(ctx, "edit documents", **options).text)
     delegate._CUSTODY.clear()
     return payload, engine
 
@@ -282,12 +282,12 @@ def test_lost_start_replays_original_processing_facts_after_setting_changes(tmp_
     monkeypatch.setattr(delegate, "prepare_delegate_start_actor", actor)
     monkeypatch.setattr(engine, "start_run", start)
     monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda: engine)
-    lost = json.loads(delegate._delegate_start(ctx, "edit documents", directory_strategy="copy", scope_paths=["."]))
+    lost = json.loads(delegate._delegate_start(ctx, "edit documents", directory_strategy="copy", scope_paths=["."]).text)
     token = lost["pending_invocation_id"]
     original = custody.invocation_record(ctx.drive_root, token)["processing"]
     assert original["requested"] == original["submitted"] == "economy"
     preference = "fast"
-    retried = json.loads(delegate._delegate_start(ctx, "edit documents", retry_of=token))
+    retried = json.loads(delegate._delegate_start(ctx, "edit documents", retry_of=token).text)
     assert retried["status"] == "started" and retried["processing"] == original
     assert engine.posts[0] == engine.posts[1]
     assert engine.posts[1][0]["processingPreference"] == "economy"

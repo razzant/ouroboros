@@ -949,11 +949,11 @@ def adopt_handoff(ctx: Any, task: Mapping[str, Any]) -> dict[str, Any]:
             _write(drive, row)
         except Exception:
             return {"status": "recovery_required", "reason": "adoption_record_unwritable"}
-        result = exact_start(ctx, replay_prompt, retry_spec)
-        try:
-            parsed = json.loads(result)
-        except (TypeError, ValueError):
-            parsed = {}
+        # The exact-start primitive answers with the family's NATIVE result; the
+        # durable invocation fate below, not this payload, decides the outcome.
+        from ouroboros.delegate_shared import delegate_payload
+
+        parsed = delegate_payload(exact_start(ctx, replay_prompt, retry_spec))
         run_id = str(parsed.get("run_id") or "")
         if str(parsed.get("status") or "") != "started" or not run_id:
             # Durable fate, not transport prose, decides whether this exact POST

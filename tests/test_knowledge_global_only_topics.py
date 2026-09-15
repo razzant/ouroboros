@@ -1,7 +1,9 @@
-"""The two reserved shared topics resolve to the global shelf from any room.
+"""The reserved shared topics resolve to the global shelf from any room.
 
-`overview` is the orientation every context loads and `improvement-backlog` is
-the P7 SSOT. Before this, a project room silently minted
+`overview` is the orientation every context loads, `improvement-backlog` is the
+P7 SSOT, and `patterns` is the Pattern Register, whose only writer (post-task
+reflection) and whose readers (context, deep self-review, the headless copy) all
+use the canonical drive. Before this, a project room silently minted
 `projects/<id>/knowledge/overview.md`: the write succeeded, nothing read it, and
 the resident orientation slot stayed empty. Ordinary topics keep following the
 room they were written in.
@@ -22,8 +24,31 @@ def project_ctx(tmp_path, project_id: str = "demo") -> ToolContext:
                        budget_drive_root=str(tmp_path), project_id=project_id, task_id="t1")
 
 
-def test_reserved_set_is_exactly_the_two_shared_topics():
-    assert tools.GLOBAL_ONLY_TOPICS == frozenset({tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC})
+def test_reserved_set_is_exactly_the_three_shared_topics():
+    assert tools.GLOBAL_ONLY_TOPICS == frozenset({
+        tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC, tools.PATTERNS_TOPIC})
+
+
+def test_pattern_register_topic_reaches_the_drive_the_writer_and_readers_use(tmp_path):
+    """The Pattern Register has one home, and it is the one everybody else uses.
+
+    The register's writer (`reflection._update_patterns`) and its readers
+    (`context.py`, `deep_self_review`, the headless copy) all address
+    `memory/knowledge/patterns.md` on the canonical drive. A project room that
+    could mint `projects/<id>/knowledge/patterns.md` through the tool would be
+    writing error-class learning into a file none of them ever open.
+    """
+    ctx = project_ctx(tmp_path)
+    canonical = tmp_path / "memory" / "knowledge" / "patterns.md"
+
+    written = tools._knowledge_write(
+        ctx, topic=tools.PATTERNS_TOPIC,
+        content="# Pattern Register\n\n| Error class | Count |\n|---|---|\n| x | 1 |\n")
+
+    assert "✅" in written
+    assert canonical.exists()
+    assert not (tmp_path / "projects" / "demo" / "knowledge" / "patterns.md").exists()
+    assert "| x | 1 |" in tools._knowledge_read(ctx, tools.PATTERNS_TOPIC)
 
 
 @pytest.mark.parametrize("topic", sorted(tools.GLOBAL_ONLY_TOPICS))
@@ -37,7 +62,7 @@ def test_reserved_topics_resolve_globally_from_a_project_room(tmp_path, topic, s
 
 
 def test_ordinary_topic_still_follows_the_room(tmp_path):
-    """The narrowing is exactly two names — every other topic keeps both shelves."""
+    """The narrowing is exactly three names — every other topic keeps both shelves."""
     ctx = project_ctx(tmp_path)
 
     room = tools._address(ctx, "deploy-recipes")
@@ -125,7 +150,7 @@ def test_write_schema_states_the_rules_the_code_actually_enforces(tmp_path):
     schemas = {entry.name: entry.schema for entry in tools.get_tools()}
     props = schemas["knowledge_write"]["parameters"]["properties"]
 
-    assert "Reserved topics (improvement-backlog, overview) always resolve to global." in props["scope"]["description"]
+    assert "Reserved topics (improvement-backlog, overview, patterns) always resolve to global." in props["scope"]["description"]
     assert "people and relationships" in props["scope"]["description"]
     assert "no scope prefixes" in props["topic"]["description"]
     assert "stays resident in the index" in schemas["knowledge_write"]["description"]

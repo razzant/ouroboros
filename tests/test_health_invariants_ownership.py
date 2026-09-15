@@ -14,6 +14,7 @@ import types
 
 import ouroboros.context_health as context_health
 from ouroboros.delegate_custody import RunCustody
+from tests._governance_docs_shared import architecture_text
 
 
 def _env(tmp_path):
@@ -61,10 +62,7 @@ def test_non_owner_gets_no_call_shaped_instruction(tmp_path, monkeypatch):
 
 
 def test_architecture_states_the_terminal_owner_apply_reject_authority_split():
-    import pathlib
-
-    architecture = (pathlib.Path(__file__).resolve().parents[1] / "docs" /
-                    "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text()
     assert "Apply requires the caller's active Git root or fresh payload binding" in architecture
     assert "Reject requires only the owner's proven terminality" in architecture
     assert "a live top-level task with a different active root may reject and release" in architecture

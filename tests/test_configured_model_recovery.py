@@ -9,6 +9,7 @@ import pytest
 
 from ouroboros import delegate_custody as custody, delegate_hold, loop, loop_transport
 from ouroboros import usage_accounting as ua
+from ouroboros.delegate_shared import delegate_result
 from ouroboros.delegate_start_claims import claimed_start_request
 from tests.test_delegate_hold import _configured_registry, _loop_kwargs, _start_leaf
 from tests.test_transport_death_retry import _LedgerLLM, _ledger
@@ -129,7 +130,7 @@ def test_live_hold_takes_over_an_existing_transport_episode(tmp_path, monkeypatc
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable", observed)
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *a: False)
     monkeypatch.setattr(delegate_hold, "_leaf_probe_live", lambda *a: True)
-    monkeypatch.setattr(delegate_hold, "supervised_wait", lambda *a: json.dumps({
+    monkeypatch.setattr(delegate_hold, "supervised_wait", lambda *a: delegate_result({
         "status": "succeeded", "run_id": "run-leaf", "supervision_wake_id": "wake-after-hold"}))
     monkeypatch.setattr(delegate_hold, "acknowledge_pending_wake", lambda *a, **kw: True)
     monkeypatch.setattr(custody, "release_task_runs", lambda *a: None)

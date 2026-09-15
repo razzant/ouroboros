@@ -44,12 +44,12 @@ def test_custody_survives_the_worker_that_started_the_run(tmp_path, monkeypatch)
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: stub)
     delegate._CUSTODY.clear()
     ctx = _nanny_ctx(tmp_path)
-    assert json.loads(delegate._delegate_start(ctx, "review the diff"))["status"] == "started"
+    assert json.loads(delegate._delegate_start(ctx, "review the diff").text)["status"] == "started"
 
     delegate._CUSTODY.clear()          # the worker died; only the durable rows remain
     resumed = json.loads(delegate._delegate_wait(ctx, "run-live", wait_sec=1))
     assert resumed["status"] == "no_progress", resumed
-    cancelled = json.loads(delegate._delegate_cancel(ctx, "run-live", reason="restart"))
+    cancelled = json.loads(delegate._delegate_cancel(ctx, "run-live", reason="restart").text)
     assert cancelled["status"] in {"requested", "confirmed"}, cancelled
     assert stub.cancels, "the restarted owner must be able to actually stop its own run"
 
@@ -113,21 +113,21 @@ def test_the_invocation_id_is_reused_on_retry_and_fresh_per_intended_start(
 
     # 1. Outcome unknown: the refusal HANDS BACK the retry token. Nothing else may
     #    ever resurrect this invocation.
-    lost = json.loads(delegate._delegate_start(ctx, prompt, max_seconds=120))
+    lost = json.loads(delegate._delegate_start(ctx, prompt, max_seconds=120).text)
     assert lost["status"] == "refused" and lost["reason"] == "daemon_unreachable"
     token = lost["pending_invocation_id"]
     assert token == keys[0] and "retry_of" in lost["retry_hint"]
 
     # 2. A plain identical call is an intended replacement, but the unknown
     # first POST has not settled. The replacement fence refuses before the wire.
-    blocked = json.loads(delegate._delegate_start(ctx, prompt))
+    blocked = json.loads(delegate._delegate_start(ctx, prompt).text)
     assert blocked["reason"] == "replacement_requires_settlement"
     assert len(keys) == 1
 
     # 3. Only the EXPLICIT token replays the invocation -- the STORED body verbatim,
     #    even though the route config drifted between the attempts.
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:high")
-    retried = json.loads(delegate._delegate_start(ctx, prompt, retry_of=token))
+    retried = json.loads(delegate._delegate_start(ctx, prompt, retry_of=token).text)
     assert retried["status"] == "started" and retried["idempotent_recovery"] is True
     assert keys[1] == token, "the retry must present the original invocation id"
     assert bodies[1] == bodies[0], "the retry must replay the RECORDED body, not re-derive it"
@@ -142,7 +142,7 @@ def test_the_invocation_id_is_reused_on_retry_and_fresh_per_intended_start(
 
     # Once the old invocation is durably settled, a plain identical call is a
     # genuinely NEW intention: fresh id, never content-matched reuse.
-    fresh = json.loads(delegate._delegate_start(ctx, prompt))
+    fresh = json.loads(delegate._delegate_start(ctx, prompt).text)
     assert fresh["status"] == "started"
     assert keys[2] != token, "content-matched reuse is forbidden: new intention, new id"
     assert fresh["idempotent_recovery"] is False
@@ -151,22 +151,22 @@ def test_the_invocation_id_is_reused_on_retry_and_fresh_per_intended_start(
     })
 
     # 4-5. A bound invocation is never re-posted; an unknown token is refused.
-    again = json.loads(delegate._delegate_start(ctx, prompt, retry_of=token))
+    again = json.loads(delegate._delegate_start(ctx, prompt, retry_of=token).text)
     assert again["reason"] == "invocation_already_started"
     assert again["run_id"] == retried["run_id"]
-    ghost = json.loads(delegate._delegate_start(ctx, prompt, retry_of="no-such-invocation"))
+    ghost = json.loads(delegate._delegate_start(ctx, prompt, retry_of="no-such-invocation").text)
     assert ghost["reason"] == "unknown_invocation"
 
     # 6. A DEFINITE refusal offers no token: the id is dead, the next start is new.
-    refused = json.loads(delegate._delegate_start(ctx, prompt))
+    refused = json.loads(delegate._delegate_start(ctx, prompt).text)
     assert refused["status"] == "refused" and "pending_invocation_id" not in refused
 
     # 7-8. The token replays the recorded invocation, so a divergent prompt is a
     #    confusion, not a merge.
-    lost2 = json.loads(delegate._delegate_start(ctx, prompt))
+    lost2 = json.loads(delegate._delegate_start(ctx, prompt).text)
     assert lost2["reason"] == "daemon_unreachable"
     mismatch = json.loads(delegate._delegate_start(
-        ctx, "an entirely different ask", retry_of=lost2["pending_invocation_id"]))
+        ctx, "an entirely different ask", retry_of=lost2["pending_invocation_id"]).text)
     assert mismatch["reason"] == "retry_prompt_mismatch"
 
     assert len(keys) == 5, "refused retry_of shapes must never reach the wire"
@@ -259,7 +259,7 @@ def test_a_retry_testifies_about_the_stored_invocation_not_the_current_config(
     #    the project for root-a, then the POST's outcome is lost.
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "route-a=model-old:low")
     lost = json.loads(delegate._delegate_start(_ctx(root_a), "the intended work",
-                                               max_seconds=120))
+                                               max_seconds=120).text)
     assert lost["reason"] == "daemon_unreachable"
     token = lost["pending_invocation_id"]
     prj_a = projects[str(root_a)]
@@ -270,7 +270,7 @@ def test_a_retry_testifies_about_the_stored_invocation_not_the_current_config(
     # 2a. A refused token performs no daemon work (old branch registered a
     #     project for the CURRENT root before reading the record).
     ghost = json.loads(delegate._delegate_start(_ctx(root_b), "the intended work",
-                                                retry_of="no-such-invocation"))
+                                                retry_of="no-such-invocation").text)
     assert ghost["reason"] == "unknown_invocation"
     assert str(root_b) not in projects, "refused retry registers no projects"
 
@@ -278,7 +278,7 @@ def test_a_retry_testifies_about_the_stored_invocation_not_the_current_config(
     #     project kept, invocation pending (a run may exist behind the lost POST).
     monkeypatch.setattr(dc, "record_start_requested", lambda *a, **k: False)
     unwritable = json.loads(delegate._delegate_start(_ctx(root_b), "the intended work",
-                                                     retry_of=token))
+                                                     retry_of=token).text)
     assert unwritable["reason"] == "start_request_row_unwritable"
     assert "definitely_unrun" not in unwritable
     assert removals == [], "unknown original outcome keeps its project"
@@ -296,7 +296,7 @@ def test_a_retry_testifies_about_the_stored_invocation_not_the_current_config(
     #    is not in the daemon's catalog at all), the wire carries the STORED body,
     #    and no project is registered for the drifted root.
     retried = json.loads(delegate._delegate_start(_ctx(root_b), "the intended work",
-                                                  retry_of=token))
+                                                  retry_of=token).text)
     assert retried["status"] == "started", retried
     assert bodies[-1] == bodies[0], "the retry replays the RECORDED body"
     assert keys[-1] == token
@@ -336,12 +336,12 @@ def test_a_retry_testifies_about_the_stored_invocation_not_the_current_config(
     lost2 = json.loads(delegate.exact_start(
         _ctx(root_c), "other work",
         {"snapshot": _transport_snapshot(subagents.parse_subagent_harness("route-a=model-old:low"))},
-    ))
+    ).text)
     assert lost2["reason"] == "daemon_unreachable"
     prj_c = projects[str(root_c)]
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "route-b=model-new:high")
     refused = json.loads(delegate._delegate_start(
-        _ctx(root_b), "other work", retry_of=lost2["pending_invocation_id"]))
+        _ctx(root_b), "other work", retry_of=lost2["pending_invocation_id"]).text)
     assert refused["status"] == "refused" and refused["project_retired"] is True
     assert removals == [prj_c], "the retired project is the stored attempt's own"
     delegate._CUSTODY.clear()
@@ -367,7 +367,7 @@ def test_custody_rows_outlive_the_child_drive_they_were_written_from(tmp_path, m
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a", "budget_drive_root": str(canonical)}
 
-    assert json.loads(delegate._delegate_start(ctx, "review the diff"))["status"] == "started"
+    assert json.loads(delegate._delegate_start(ctx, "review the diff").text)["status"] == "started"
     assert (canonical / "logs" / "events.jsonl").exists(), "custody must live on the canonical root"
     assert not (child / "logs" / "events.jsonl").exists(), "not on the drive that gets pruned"
 
@@ -411,7 +411,7 @@ def test_delegated_spend_settles_into_the_canonical_budget_ledger(tmp_path, monk
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a", "budget_drive_root": str(canonical)}
 
-    assert json.loads(delegate._delegate_start(ctx, "review the diff"))["status"] == "started"
+    assert json.loads(delegate._delegate_start(ctx, "review the diff").text)["status"] == "started"
     done = json.loads(delegate._delegate_wait(ctx, "run-live", wait_sec=1))
     assert done["settlement"]["settled"] is True
     assert done["settlement"]["ledger_recorded"] is True
@@ -618,7 +618,7 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
 
     # The durable residue of the crash, produced through the REAL path: an accepted
     # POST whose response was lost. Only START_REQUESTED names the invocation.
-    lost = json.loads(delegate._delegate_start(ctx, "the intended work", max_seconds=60))
+    lost = json.loads(delegate._delegate_start(ctx, "the intended work", max_seconds=60).text)
     token = lost["pending_invocation_id"]
     delegate._CUSTODY.clear()            # the worker that knew the token is gone
     assert [r["invocation_id"] for r in dc.pending_invocations(tmp_path)] == [token]
@@ -663,7 +663,7 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
     # 3. A DEFINITE refusal at recovery retires the invocation and the registration
     #    the original attempt owned; an unreachable daemon leaves it pending.
     script[:] = ["transport_error"]
-    lost2 = json.loads(delegate._delegate_start(ctx, "other intended work"))
+    lost2 = json.loads(delegate._delegate_start(ctx, "other intended work").text)
     token2 = lost2["pending_invocation_id"]
     delegate._CUSTODY.clear()
 
@@ -715,7 +715,7 @@ def test_a_start_whose_custody_row_did_not_land_does_not_claim_to_be_custodied(t
 
     monkeypatch.setattr(dc, "append_jsonl", _started_row_lost)
     delegate._CUSTODY.clear()
-    out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "review the diff"))
+    out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "review the diff").text)
     delegate._CUSTODY.clear()
 
     assert out["run_id"] == "run-live", "the run really did start; that is not in doubt"
@@ -767,7 +767,7 @@ def test_a_failed_start_does_not_leave_the_registration_it_created(
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
     delegate._CUSTODY.clear()
-    out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "x"))
+    out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "x").text)
     delegate._CUSTODY.clear()
     assert out["status"] == "refused" and out["reason"] == "run_start_failed"
     assert out["project_retired"] is retired, out
@@ -798,7 +798,7 @@ def test_a_queued_handle_with_no_run_id_names_its_registration_like_its_twin(tmp
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
     delegate._CUSTODY.clear()
-    out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "x"))
+    out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "x").text)
     delegate._CUSTODY.clear()
     assert out["reason"] == "queued_without_run_id"
     assert out["project_id"] == "prj-new", "the retained registration must be named"

@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 import yaml
+from tests._governance_docs_shared import architecture_text
 
 REPO = Path(__file__).resolve().parents[1]
 RELEASE_VERSION = "6.92.1"
@@ -195,7 +196,7 @@ def test_benchmark_evidence_keeps_exact_scores_and_hugging_face_revisions():
 
 
 def test_architecture_registers_each_new_public_metadata_surface():
-    architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(REPO)
 
     for path in (
         ".github/workflows/scorecard.yml",

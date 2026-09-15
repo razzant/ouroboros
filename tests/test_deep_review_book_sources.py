@@ -90,7 +90,9 @@ def test_retrieving_book_navigation_uses_only_physical_chapter_addresses(tmp_pat
     repo, data = tmp_path / "repo", tmp_path / "data"
     _corpus(repo)
     # This legacy mapper must not be fed a composed book with invented entrypoint lines.
-    monkeypatch.setattr(deep, "generate_doc_nav_map", lambda *a, **k: pytest.fail("chaptered book mapped as monolith"))
+    # The deep-review packet reads the chapter-addressed view (context_layout.book_navigation);
+    # the legacy monolith mapper is no longer imported here at all.
+    assert not hasattr(deep, "generate_doc_nav_map")
     task, _facts = deep._retrieving_task(repo, data)
     assert "Source: `docs/architecture/flow.md`" in task
     assert "Source: `docs/development/state.md`" in task

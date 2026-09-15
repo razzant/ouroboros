@@ -430,20 +430,32 @@ def triad_pack_exclusions(
       copy already inlined in this same prompt's governance prefix
       (``prefix_texts``: path -> the prefix's text) — pure duplication.
 
+    A reference-book entrypoint's prefix copy is the COMPOSED book, so a
+    touched CHAPTER is duplicated exactly when its current bytes already sit
+    in that composition — the same byte-identity fact, asked of a member
+    instead of a whole file. Without this the split would have withheld
+    nothing and inlined every touched chapter twice.
+
     A carrier edited outside its spans, a prefix doc whose bytes differ from
     the prefix copy and a managed subject (the caller skips this helper: its
     reviewed delta is M0→staged, not HEAD→staged) all keep the full text."""
+    from ouroboros.reference_books import book_entrypoint_for, book_path_role
+
     carriers = span_only_release_carriers(repo_dir, paths)
     duplicated: list[str] = []
     for rel in paths:
-        prefix_text = prefix_texts.get(rel) or ""
-        if not prefix_text or rel in carriers:
+        if rel in carriers:
+            continue
+        member_of = book_entrypoint_for(rel) if book_path_role(rel) == "chapter" else ""
+        prefix_text = prefix_texts.get(rel) or (prefix_texts.get(member_of) or "" if member_of else "")
+        if not prefix_text:
             continue
         try:
-            if (repo_dir / rel).read_text(encoding="utf-8") == prefix_text:
-                duplicated.append(rel)
+            current = (repo_dir / rel).read_text(encoding="utf-8")
         except Exception:
             continue
+        if current == prefix_text or (member_of and current and current in prefix_text):
+            duplicated.append(rel)
     return set(carriers) | set(duplicated), pack_exclusion_note(carriers, duplicated)
 
 

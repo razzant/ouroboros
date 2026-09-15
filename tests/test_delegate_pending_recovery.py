@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.delegate_shared import _fail, delegate_result
+
 
 def _session_snapshot() -> dict:
     from ouroboros.subagent_runtime import select_subagent_snapshot
@@ -90,7 +92,7 @@ def test_exact_pending_retry_bypasses_fresh_zero_run_unknown_fence(
         "_delegate_start",
         lambda _ctx, prompt, _max_seconds, retry_of, **_kwargs: (
             calls.append((prompt, retry_of))
-            or json.dumps({"status": "started", "run_id": "run-recovered"})
+            or delegate_result({"status": "started", "run_id": "run-recovered"})
         ),
     )
     ctx = SimpleNamespace(
@@ -118,7 +120,7 @@ def test_exact_pending_retry_bypasses_fresh_zero_run_unknown_fence(
 
     result = json.loads(runtime.exact_start(
         ctx, "stored canonical request", {"retry_of": "inv-recovery"},
-    ))
+    ).text)
 
     assert result["status"] == "started"
     assert calls == [("stored canonical request", "inv-recovery")]
@@ -150,7 +152,7 @@ def test_unknown_retry_token_cannot_bypass_zero_run_unknown_fence(
 
     result = json.loads(runtime.exact_start(
         ctx, "stored canonical request", {"retry_of": "unknown-invocation"},
-    ))
+    ).text)
 
     assert result["status"] == "refused"
     assert result["reason"] == "zero_run_evidence_unavailable"
@@ -168,10 +170,10 @@ def test_retry_refusal_preserves_live_owner_handoff_and_pending_invocation(
     monkeypatch.setattr(
         delegate,
         "exact_start",
-        lambda *_args, **_kwargs: json.dumps({
-            "status": "refused",
-            "reason": "subscription_window_exhausted",
-        }),
+        lambda *_args, **_kwargs: _fail(
+            "delegate_start", "subscription_window_exhausted",
+            "the engine subscription window is spent",
+        ),
     )
     monkeypatch.setattr(
         custody,
@@ -232,7 +234,7 @@ def test_definite_retry_refusal_retires_handoff_without_false_pending_claim(
             "invocation_id": invocation_id,
             "definite": True,
         })
-        return json.dumps({"status": "refused", "reason": "route_refused"})
+        return _fail("delegate_start", "route_refused", "the engine refused this route")
 
     monkeypatch.setattr(delegate, "exact_start", refuse_definitely)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"])
@@ -268,11 +270,10 @@ def test_started_retry_race_adopts_same_durable_invocation(monkeypatch, tmp_path
             work_order_fingerprint=fingerprint,
             authority_fingerprint=authority,
         ))
-        return json.dumps({
-            "status": "refused",
-            "reason": "invocation_already_started",
-            "run_id": "run-started-race",
-        })
+        return _fail(
+            "delegate_start", "invocation_already_started",
+            "that invocation already bound a run", run_id="run-started-race",
+        )
 
     class Gateway:
         def get_run(self, run_id):

@@ -128,7 +128,7 @@ def test_constitutional_packet_without_architecture_is_a_typed_failure(harness):
     agent sees, never a reviewer wave that silently lacks the document."""
     sub = harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
     (harness.system / "docs" / "ARCHITECTURE.md").unlink()
-    spec = {**DECK_SPEC, "affected_resources": [str(harness.system / "ouroboros" / "loop.py")]}
+    spec = {**DECK_SPEC, "affected_paths": [str(harness.system / "ouroboros" / "loop.py")]}
     out = _call(harness.make_ctx(), spec=spec)
     assert "ARCHITECTURE.md" in out and "W3" in out
     assert sub.calls == []  # no reviewer was called
@@ -372,7 +372,7 @@ def test_session_task_is_the_compact_form_with_governance_by_mandatory_retrieval
     resolvable locators, never ~500k chars inline; api rows still get them inline."""
     harness.state["slots"] = _slots(("api1", "m/a"), ("sess1", "cursor=grok", "session"), ("api2", "m/b"))
     sub = harness.install({"api1": CLEAN, "sess1": CLEAN, "api2": CLEAN})
-    spec = {**DECK_SPEC, "affected_resources": [str(harness.system / "ouroboros" / "loop.py")]}
+    spec = {**DECK_SPEC, "affected_paths": [str(harness.system / "ouroboros" / "loop.py")]}
     _call(harness.make_ctx(), spec=spec)
     request = sub.calls[0]["request"]
     api_system = request.messages[0]["content"][0]["text"]
@@ -383,9 +383,12 @@ def test_session_task_is_the_compact_form_with_governance_by_mandatory_retrieval
     assert "slots and quorum." not in task and "Principle 3: Immune Integrity\n\nreview." not in task
     assert "Plan Review Checklist" in task and "REDACTED snapshot" in task
     # the governance documents are the ONE raw-read exception, even when the agent ALSO declared
-    # BIBLE.md as evidence (declaring it makes the plan constitutional): no contradictory orders
+    # BIBLE.md as evidence beside changing it (the change target is what makes the plan
+    # constitutional — owner 16=A): no contradictory orders
     sub = harness.install({"api1": CLEAN, "sess1": CLEAN, "api2": CLEAN})
-    _call(harness.make_ctx(task_id="task-2"), spec={**DECK_SPEC, "evidence": [str(harness.system / "BIBLE.md")]})
+    _call(harness.make_ctx(task_id="task-2"), spec={**DECK_SPEC,
+          "affected_paths": [str(harness.system / "BIBLE.md")],
+          "evidence": [str(harness.system / "BIBLE.md")]})
     task2 = sub.calls[0]["request"].session_task
     assert "MANDATORY FULL READS" in task2 and "even if the agent also declared them as evidence" in task2
     assert f"### {harness.system / 'BIBLE.md'}" in task2  # the redacted snapshot is still there too
@@ -416,7 +419,8 @@ def test_state_stays_persistable_at_the_worst_case_request_bounds(tmp_path):
         "decisions": [{"choice": wide, "why": wide,
                        "rejected": [wide] * 8} for _ in range(n_items)],
         "deferred": [{"what": wide, "why_safe_to_defer": wide} for _ in range(n_items)],
-        "affected_resources": [f"{wide[:-4]}a{i:03d}" for i in range(n_items)],
+        "affected_paths": [f"{wide[:-4]}a{i:03d}" for i in range(n_items)],
+        "affected_resources": [f"{wide[:-4]}r{i:03d}" for i in range(n_items)],
         "evidence": [f"{wide[:-4]}e{i:03d}" for i in range(n_items)],
     }
     normalized, errors = plan_spec.normalize_spec(spec)
@@ -689,13 +693,17 @@ def test_both_reviewer_routes_learn_the_range_selectors(harness):
     assert "::lines=A-B" in request.session_task
 
 
-def test_the_plan_spec_schema_discloses_both_halves_of_the_constitutional_trigger():
-    """The trigger reads `affected_resources` AND an existing `evidence` path; the schema the
-    agent sees says so, including that a non-existent path does not count."""
+def test_the_plan_spec_schema_names_affected_paths_as_the_only_resolved_list():
+    """The trigger reads ONE list — `affected_paths` — and the schema the agent sees says so:
+    required, files only, `[]` when none, and the other two lists explicitly not resolved."""
+    assert pr._SPEC_SCHEMA["required"] == ["affected_paths"]
     props = pr._SPEC_SCHEMA["properties"]
-    assert "system repository" in props["affected_resources"]["description"]
+    paths = props["affected_paths"]["description"]
+    assert "REQUIRED" in paths and "system repository" in paths and "[]" in paths
+    resources = props["affected_resources"]["description"]
+    assert "never file paths" in resources and "system repository" not in resources
     evidence = props["evidence"]["description"]
-    assert "system repository" in evidence and "EXISTING" in evidence
+    assert "does not make the plan" in evidence and "affected_paths" in evidence
 
 
 # ------------------------------------------------------------- in-flight honesty (P1-4)

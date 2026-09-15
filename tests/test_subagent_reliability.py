@@ -66,7 +66,12 @@ def test_replay_learns_subagent_lineage_before_merging_card_rows():
     # child card; ephemeral registration now lives in the early reference seam.
     assert fanout.index("learnSubagentLineage(msg);") < fanout.index("updateLiveCardFromProgressMessage(msg,")
     assert fanout.index("learnSubagentLineage(msg);") < fanout.index("routeSubagentFinalMessageToCard(explicitTaskId, msg)")
-    assert "forceTaskCard(childId, rawTs);" in src
+    # A lineage-known child is minted as its parent's nested card by whichever
+    # path reaches it first (#636) — no sticky force writer: the parent's anchor
+    # follows the child's frame and the predicate always admits a child block.
+    assert "reanchorTaskCard(getLiveCardRecord(parentId), rawTs);" in src
+    assert "const record = getSubagentCardRecord(childId, parentId, role);" in src
+    assert "if (!record || record.isSubagent) return true;" in src
     # A child is locked terminal from EITHER a terminal subagent event OR a
     # genuinely-settled server task_terminal_status; interrupted stays retryable.
     assert "const replayTerminal = msg.task_terminal_status" in src

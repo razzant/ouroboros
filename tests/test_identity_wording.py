@@ -32,10 +32,32 @@ def test_live_task_message_marker_uses_my_human_wording():
     # The drained mailbox text (plus its optional surface note) must still go
     # through the owner-marking wrapper before injection.
     assert "_owner_marked_content(noted_owner_text(owner_ctx, entry, dmsg))" in loop
-    # Addressed task-tree messages are peer/ancestor communication, not owner
-    # dialogue, and must never borrow the owner's priority marker.
-    assert "never labels this " in tools
-    assert "message as owner dialogue" in tools
+    # Addressed task-tree messages are peer/ancestor/peer-root communication,
+    # not owner dialogue, and must never borrow the owner's priority marker.
+    # Ask the render ladder itself: every provenance it can frame — including
+    # the independent-root prefix a task may now be addressed by — names a
+    # TASK, so none of them can be mistaken for my human.
+    from ouroboros.owner_mailbox import PROVENANCE_INDEPENDENT_TASK, deliver_task_message
+
+    rendered = {}
+    for provenance in (
+        "ancestor_task", "descendant_task", "peer_via_ancestor", "system",
+        PROVENANCE_INDEPENDENT_TASK, "",
+    ):
+        lines: list[str] = []
+        deliver_task_message(
+            {
+                "provenance": provenance, "source_task_id": "t-source",
+                "relayed_from_task_id": "t-relayed", "text": "body",
+            },
+            "t-recipient", None, lines.append,
+        )
+        rendered[provenance] = lines[0]
+    assert all("human" not in text for text in rendered.values()), rendered
+    assert rendered[PROVENANCE_INDEPENDENT_TASK].startswith(
+        "[Message from independent task t-source]")
+    assert rendered["ancestor_task"].startswith("[Message from ancestor task t-source]")
+    assert rendered[""] == rendered["ancestor_task"], "unknown provenance keeps the tree fallback"
     assert "[Message from my human]" not in tools
     assert "[Owner message during task]" not in system
     assert "[Owner message during task]" not in loop

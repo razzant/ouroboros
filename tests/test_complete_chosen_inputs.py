@@ -9,8 +9,8 @@ from ouroboros.tools import plan_packet, plan_spec
 
 
 @pytest.mark.parametrize("field", ["goal", "in_scope", "non_goals", "invariants",
-                                   "affected_resources", "evidence", "acceptance_claims",
-                                   "decisions", "deferred"])
+                                   "affected_paths", "affected_resources", "evidence",
+                                   "acceptance_claims", "decisions", "deferred"])
 def test_operative_tail_changes_normalized_identity_and_current_packet(field):
     prefix = "яё𐍈🚀\n" * 500
     raw = {"goal": "Full plan", field: prefix + "TAIL_A"}

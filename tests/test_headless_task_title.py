@@ -125,10 +125,10 @@ def test_a_title_hidden_in_metadata_is_refused_like_a_project_id(admission):
 def test_a_derived_name_is_not_reported_as_model_coined():
     """Turn-into-project reuses the name slot; it must not claim authorship.
 
-    Two producers fill `suggested_name`: the proactive namer coins one with a
-    model, and headless admission derives one from the request's first line.
-    The conversion cannot tell them apart, so its naming reason names the SLOT
-    it read rather than a coiner that may not exist.
+    `suggested_name` is filled by admission naming (a caller title, or the
+    request's first line) and by the agent's own scope tools; the conversion
+    cannot tell them apart, so its naming reason names the SLOT it read rather
+    than a coiner that may not exist.
     """
     import pathlib
 

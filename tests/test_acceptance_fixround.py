@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests._governance_docs_shared import architecture_text, development_text
 
 
 def test_prompt_projection_keeps_panels_ahead_of_an_oversized_lens():
@@ -721,8 +722,8 @@ def test_budget_ladder_stops_shedding_after_predecessor_fits():
 
 
 def test_acceptance_docs_have_complete_sentence_boundaries():
-    development = Path("docs/DEVELOPMENT.md").read_text(encoding="utf-8")
-    architecture = Path("docs/ARCHITECTURE.md").read_text(encoding="utf-8")
+    development = development_text()
+    architecture = architecture_text()
 
     assert "silent false green. The\n  Every forced rail" not in development
     assert "never certify success; An OPEN plan wave" not in architecture

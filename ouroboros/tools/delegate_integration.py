@@ -23,6 +23,7 @@ from ouroboros.delegate_custody import RunCustody as _RunCustody
 # `delegate_shared` (phase B's facade split), never a local twin that could drift.
 from ouroboros.delegate_registration_policy import record_persistent as _record_persistent
 from ouroboros.delegate_shared import _fail
+from ouroboros.tools.tool_result import ToolResult
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
 from ouroboros.utils import resolve_path_allow_missing
 
@@ -47,7 +48,7 @@ def _resolved(path: Any) -> Optional[pathlib.Path]:
 _CAPTURE_DELEGATED_SNAPSHOT = "delegated_snapshot"
 
 
-def _mutation_authority(ctx: ToolContext, authority: "DelegatedRunShape") -> tuple[Dict[str, str], str]:
+def _mutation_authority(ctx: ToolContext, authority: "DelegatedRunShape") -> tuple[Dict[str, str], Optional[ToolResult]]:
     """The UNIFIED host-derived authority record for one delegated run (B5).
 
     ``{"target_root", "source", "capture_mode"}``. Two sources, one shape:
@@ -61,7 +62,7 @@ def _mutation_authority(ctx: ToolContext, authority: "DelegatedRunShape") -> tup
     """
     root = str(active_repo_dir_for(ctx))
     if authority.access != "workspace_write":
-        return {"target_root": root, "source": "readonly", "capture_mode": "none"}, ""
+        return {"target_root": root, "source": "readonly", "capture_mode": "none"}, None
     constraint = getattr(ctx, "task_constraint", None)
     mode = str(
         (constraint.get("mode") if isinstance(constraint, dict)
@@ -109,7 +110,7 @@ def _mutation_authority(ctx: ToolContext, authority: "DelegatedRunShape") -> tup
                 active_root=root, granted_write_root=granted,
             )
         return {"target_root": root, "source": "acting_constraint",
-                "capture_mode": _CAPTURE_DELEGATED_SNAPSHOT}, ""
+                "capture_mode": _CAPTURE_DELEGATED_SNAPSHOT}, None
     # An ordinary room uses the same selected-target authority without becoming
     # a pooled workspace task or requiring Git merely for native file operations.
     from ouroboros.tool_access import _TOP_LEVEL_PRINCIPAL_PROFILES, active_tool_profile, project_room_lens_dir
@@ -141,26 +142,26 @@ def _mutation_authority(ctx: ToolContext, authority: "DelegatedRunShape") -> tup
             active_root=root, declared_workspace_root=str(selected_root or ""),
         )
     return {"target_root": root, "source": "external_workspace_root",
-            "capture_mode": _CAPTURE_DELEGATED_SNAPSHOT}, ""
+            "capture_mode": _CAPTURE_DELEGATED_SNAPSHOT}, None
 
 
-def _retry_binding_refusal(record: Dict[str, Any], retry_token: str) -> str:
+def _retry_binding_refusal(record: Dict[str, Any], retry_token: str) -> Optional[ToolResult]:
     """Refuse a MUTATING retry whose stored row carries no C1 isolation binding.
 
     A PRE-C1 row's recorded body scopes the run at the LIVE target tree, and the
     body is replayed byte-identically — so the binding cannot be minted
     retroactively and replaying would write straight into the shared tree, in the
-    in-place regime C1 retired. Returns "" when the full binding is present.
+    in-place regime C1 retired. Returns ``None`` when the full binding is present.
     """
     reference = record.get("resource_ref") or {}
     request = record.get("request") or {}
     if reference.get("workspace_kind") == "directory" and (request.get("execution") or {}).get("workspaceKind") == "directory" and record.get("target_root"):
-        return ""
+        return None
     snapshot_id = str(record.get("snapshot_id") or "")
     baseline_sha = str(record.get("baseline_sha") or "")
     target_root = str(record.get("target_root") or "")
     if snapshot_id and str(record.get("execution_root") or "") and baseline_sha and target_root:
-        return ""
+        return None
     return _fail(
         "delegate_start", "retry_binding_absent",
         "This retry replays a MUTATING invocation recorded BEFORE private "
@@ -174,7 +175,7 @@ def _retry_binding_refusal(record: Dict[str, Any], retry_token: str) -> str:
 
 
 def _validated_invocation(drive: Any, retry_token: str, task_id: str,
-                          text: str) -> Tuple[Optional[Dict[str, Any]], str]:
+                          text: str) -> Tuple[Optional[Dict[str, Any]], Optional[ToolResult]]:
     """The stored invocation a retry may replay, or the typed refusal that stops it.
 
     Six ways a token is not replayable, each answered by name: no record, another
@@ -218,7 +219,7 @@ def _validated_invocation(drive: Any, retry_token: str, task_id: str,
                            "you passed differs from the one it sent. Pass the original "
                            "prompt to retry, or drop retry_of to start a new run.",
                            retry_of=retry_token)
-    return record, ""
+    return record, None
 
 
 class _RetryBinding(NamedTuple):
@@ -242,7 +243,7 @@ class _RetryBinding(NamedTuple):
 
 
 def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token: str,
-                              text: str) -> Tuple[Optional[_RetryBinding], str]:
+                              text: str) -> Tuple[Optional[_RetryBinding], Optional[ToolResult]]:
     """Rebuild a retried start from its stored invocation, or refuse it typed.
 
     The stored invocation is the SINGLE SOURCE of EVERY retry fact (route, shape,
@@ -348,17 +349,17 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         resource_ref=(record.get("resource_ref")
                       if isinstance(record.get("resource_ref"), dict) else {}),
         processing=deepcopy(record.get("processing") if isinstance(record.get("processing"), dict) else {}),
-    ), ""
+    ), None
 
 
 def _provision_snapshot(ctx: ToolContext, drive: pathlib.Path, target_root: str,
-                        invocation_id: str) -> Tuple[Optional[Any], str]:
+                        invocation_id: str) -> Tuple[Optional[Any], Optional[ToolResult]]:
     """Provision the C1 private execution snapshot for one mutating run.
 
     Registered durably (worktree registry) and described durably (baseline manifest
     artifact) BEFORE the caller records any start intent, so a worker death at any
     later point leaves a nameable, GC-reconcilable root — never an orphan directory.
-    Returns ``(handle, "")`` or ``(None, typed_refusal)``.
+    Returns ``(handle, None)`` or ``(None, typed_refusal)``.
     """
     from ouroboros.subagent_worktrees import provision_execution_snapshot
 
@@ -374,7 +375,7 @@ def _provision_snapshot(ctx: ToolContext, drive: pathlib.Path, target_root: str,
             "delegated run executes only in its own snapshot, never in the shared tree.",
             target_root=target_root)
     _record_baseline_manifest(drive, task_id, invocation_id, handle)
-    return handle, ""
+    return handle, None
 
 
 def _record_baseline_manifest(drive: pathlib.Path, task_id: str, invocation_id: str,
@@ -658,7 +659,7 @@ def _payload_delegation_busy(drive: pathlib.Path, target: pathlib.Path) -> str:
 
 
 def _payload_selector_refusal(selector_root: str, retry_of: Any, bucket: Any,
-                              skill_name: Any) -> str:
+                              skill_name: Any) -> Optional[ToolResult]:
     """Argument-shape validation for delegate_start's exact-resource selector."""
     if selector_root and selector_root != "skill_payload":
         return _fail("delegate_start", "unsupported_root",
@@ -676,7 +677,7 @@ def _payload_selector_refusal(selector_root: str, retry_of: Any, bucket: Any,
         return _fail("delegate_start", "payload_selector_incomplete",
                      "bucket/skill_name select a skill payload only together with "
                      "root='skill_payload'.")
-    return ""
+    return None
 
 
 def payload_host_instructions(text: str, skill_name: str) -> str:
@@ -717,10 +718,10 @@ def claimed_start_request(
 def _payload_mutation_authority(
     ctx: ToolContext, drive: pathlib.Path, bucket: str, skill_name: str,
     binding: Any,
-) -> Tuple[Optional[Any], Optional[Dict[str, Any]], str]:
+) -> Tuple[Optional[Any], Optional[Dict[str, Any]], Optional[ToolResult]]:
     """The payload counterpart of ``_mutation_authority`` (R1 item 1).
 
-    Returns ``(run_shape, authority_record, refusal)``. The authority is a FRESH
+    Returns ``(run_shape, authority_record, refusal)``; the refusal is ``None`` on success. The authority is a FRESH
     ``ResolvedResourceBinding`` for ``skill_payload.write`` through the same one
     authorizer the registry uses; the record carries the host-minted semantic
     ``resource_ref`` that custody stores durably and retry/apply re-resolve.
@@ -811,12 +812,12 @@ def _payload_mutation_authority(
             "payload_hash": "",
         },
     }
-    return delegated_run_shape(True), record, ""
+    return delegated_run_shape(True), record, None
 
 
 def _provision_payload_snapshot(
     ctx: ToolContext, drive: pathlib.Path, record: Dict[str, Any], invocation_id: str,
-) -> Tuple[Optional[Any], str]:
+) -> Tuple[Optional[Any], Optional[ToolResult]]:
     """Provision the standalone private Git snapshot for one payload run (R1 §9.2).
 
     Same durability contract as ``_provision_snapshot``: registered in the
@@ -843,18 +844,18 @@ def _provision_payload_snapshot(
     _record_baseline_manifest(drive, task_id, invocation_id, handle,
                               payload_hash=handle.payload_hash,
                               capture_kind="skill_payload")
-    return handle, ""
+    return handle, None
 
 
 def _rebind_payload_reference(
     ctx: ToolContext, resource_ref: Dict[str, Any], recorded_target: str, *,
     tool: str, context: str,
-) -> Tuple[Optional[pathlib.Path], Optional[Any], str]:
+) -> Tuple[Optional[pathlib.Path], Optional[Any], Optional[ToolResult]]:
     """Re-resolve a recorded semantic payload reference against CURRENT authority.
     Retry and the owned apply (R1 item 3) require the fresh binding path to
     equal the recorded target — a moved/collided/removed skill is a typed
     refusal, never a write through a stale physical path. Returns
-    ``(live_target, fresh_binding, refusal)``."""
+    ``(live_target, fresh_binding, refusal)``, the refusal ``None`` when it rebinds."""
     from ouroboros.tool_access import build_resolved_resource_binding
 
     ref = resource_ref if isinstance(resource_ref, dict) else {}
@@ -887,7 +888,7 @@ def _rebind_payload_reference(
             "physical path.",
             recorded_target=str(recorded), current_target=str(fresh or ""),
             context=context)
-    return fresh, binding, ""
+    return fresh, binding, None
 
 
 __all__ = [

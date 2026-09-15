@@ -149,6 +149,49 @@ def _assert_menu_geometry(metrics: dict, *, placement: str | None = None) -> Non
 
 
 @pytest.mark.ui_browser
+
+def _hold_live_root(data_dir, task_id: str, *, hold_seconds: float = 90.0) -> None:
+    """Make ``task_id`` a GENUINELY running managed root for the test's duration: a queued
+    row restored from the queue snapshot at boot, dispatched by the pool, and held inside
+    its first model call by the mock model (``fixtures_mock_llm.HOLD_SECONDS``). Since
+    54dfdc727 a replayed progress row's marker offers Stop only once the activity census
+    or a durable record vouches for the root, so the fixture must vouch, not just replay.
+    Reset the hold with ``_release_mock_model()`` in the test's ``finally``."""
+    import datetime as _dt
+
+    from tests import fixtures_mock_llm
+    from ouroboros.task_results import write_task_result
+
+    fixtures_mock_llm.HOLD_RELEASE.clear()
+    fixtures_mock_llm.HOLD_SECONDS = float(hold_seconds)
+    (data_dir / "state").mkdir(parents=True, exist_ok=True)
+    live_task = {
+        "id": task_id, "type": "task", "chat_id": 1, "priority": 0, "text": "the big thing",
+        "description": "the big thing", "objective": "the big thing", "title": "The big thing",
+        "root_task_id": task_id, "delegation_role": "root",
+    }
+    write_task_result(
+        data_dir, task_id, "scheduled", result="Task is queued.", description="the big thing",
+        objective="the big thing", chat_id=1, title="The big thing", delegation_role="root", root_task_id=task_id,
+    )
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    (data_dir / "state" / "queue_snapshot.json").write_text(json.dumps({
+        "_schema_version": 1, "ts": now, "reason": "ui_smoke_seed",
+        "pending_count": 1, "running_count": 0, "reaping_count": 0,
+        "acceptance_fences": [], "budget_root_fences": [],
+        "pending": [{"id": task_id, "type": "task", "priority": 0, "attempt": 1, "queued_at": now,
+                     "queue_seq": 1, "task": live_task}],
+        "running": [],
+    }), encoding="utf-8")
+
+
+def _release_mock_model() -> None:
+    from tests import fixtures_mock_llm
+
+    fixtures_mock_llm.HOLD_SECONDS = 0.0
+    fixtures_mock_llm.HOLD_RELEASE.set()
+
+
 def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
     """Chat surface: frozen dropdown, no-chat hurry with idempotent request_id
     retry, and the soft stop collapsing the pending menu to the escalation."""
@@ -160,6 +203,8 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
     data_dir = direct_server_with_data["data_dir"]
     logs_dir = data_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    # Seed while no server runs (the live loop rewrites the queue snapshot every tick).
+    direct_server_with_data["stop_server"]()
     (logs_dir / "chat.jsonl").write_text("", encoding="utf-8")
     (logs_dir / "progress.jsonl").write_text(
         json.dumps({
@@ -168,6 +213,8 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
         }) + "\n",
         encoding="utf-8",
     )
+    _hold_live_root(data_dir, "live-root")
+    direct_server_with_data["start_server"]()
 
     try:
         with sync_playwright() as pw:
@@ -480,6 +527,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 )
             finally:
                 browser.close()
+                _release_mock_model()
     except PlaywrightError as exc:
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
             pytest.skip(str(exc))

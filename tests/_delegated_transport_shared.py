@@ -201,7 +201,7 @@ def _started_request(tmp_path, *, acting: bool, monkeypatch,
     payload = json.loads(delegate._delegate_start(
         _delegating_ctx(tmp_path, acting=acting, task_id=task_id), "edit the README",
         **(start_kwargs or {})
-    ))
+    ).text)
     delegate._CUSTODY.clear()
     assert payload["status"] == expect, payload
     return seen.get("request"), payload

@@ -447,6 +447,46 @@ def _live_task_ids() -> set:
     return live
 
 
+def live_origin_lanes() -> list:
+    """``(task_id, origin_message_ref)`` for every LIVE owner ROOT and in-flight
+    direct turn — the task ids one owner message's work can still be spread across.
+
+    Subagents are excluded: a delegated child is never bound itself, it inherits
+    its root's project by lineage. ONE scan with TWO readers that must agree — the
+    freshly created project's sibling claim (which binds them durably) and the
+    /api/state binding projection (which only closes their convert gate). While
+    each kept its own scan, a task the claim skipped could still be offered as a
+    second convertible unit for work that already has a project. Never raises: an
+    unreadable supervisor answers "no lanes", which degrades to today's
+    task-keyed behaviour rather than blocking the owner.
+    """
+    lanes: list = []
+    try:
+        from supervisor.queue import _queue_lock
+        from supervisor.workers import PENDING, RUNNING
+
+        with _queue_lock:
+            rows = [meta.get("task") for meta in list(RUNNING.values()) if isinstance(meta, dict)]
+            rows += list(PENDING or ())
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("delegation_role") or "") == "subagent":
+                continue
+            lanes.append((str(row.get("id") or ""), row.get("origin_message_ref")))
+    except Exception:
+        log.debug("live_origin_lanes: queue scan failed", exc_info=True)
+    try:
+        from supervisor.active_activity import get_direct_activity_registry
+
+        for entry in get_direct_activity_registry().actors():
+            lanes.append((
+                str(getattr(entry, "activity_id", "") or ""),
+                getattr(entry, "origin_message_ref", None),
+            ))
+    except Exception:
+        log.debug("live_origin_lanes: direct activity scan failed", exc_info=True)
+    return [(tid, ref) for tid, ref in lanes if tid]
+
+
 def project_id_for_origin(drive_root: Any, origin_ref: Any, *, strict: bool = False) -> str:
     """Project bound to ANY task whose binding names this owner-message origin, else "".
 
@@ -1326,6 +1366,7 @@ __all__ = [
     "list_projects",
     "list_reserved_projects",
     "list_sidebar_projects",
+    "live_origin_lanes",
     "origin_claim_lock",
     "origin_key",
     "project_binding_for_task",

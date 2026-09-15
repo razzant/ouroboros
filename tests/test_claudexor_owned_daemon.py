@@ -11,6 +11,7 @@ import shlex
 import pytest
 
 from ouroboros import claudexor_daemon as owned
+from tests._governance_docs_shared import architecture_text
 
 
 def _write_descriptor(config_dir: pathlib.Path, *, port: int = 45678) -> None:
@@ -3610,8 +3611,7 @@ def test_the_proxy_count_in_the_docs_matches_the_handlers_that_exist(tmp_path):
         f"does not say \"{expected} THIN proxies\""
     )
 
-    arch = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "ARCHITECTURE.md") \
-        .read_text(encoding="utf-8")
+    arch = architecture_text()
     account_line = next(ln for ln in arch.splitlines() if "claudexor_accounts.py" in ln)
     assert f"{expected} thin proxies" in account_line.lower(), (
         "the gateway map still counts a different number of account proxies: "

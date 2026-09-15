@@ -551,6 +551,9 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             fullBody: summary.fullBody || summary.body || it.fullBody || '',
             fullRef: summary.fullRef || it.fullRef || '',
             truncated: summary.truncated || it.truncated || false,
+            // A call's failure frame replaces its receipt start: the row is
+            // content again once it reports an error.
+            receipt: Boolean(summary.receipt),
             ts: ts || it.ts,
         };
         if (Object.entries(patch).some(([key, value]) => it[key] !== value)) {
@@ -591,6 +594,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             fullBody: summary.fullBody || summary.body || '',
             fullRef: summary.fullRef || '',
             truncated: summary.truncated || false,
+            receipt: Boolean(summary.receipt),
             ts: ts || '',
             sourceTs: rawTs,
             count: 1,

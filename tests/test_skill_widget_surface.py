@@ -12,6 +12,7 @@ import pathlib
 import pytest
 
 from ouroboros.tools.registry import ToolContext
+from tests._governance_docs_shared import architecture_text
 
 
 def _make_ctx(tmp_path: pathlib.Path) -> ToolContext:
@@ -437,9 +438,7 @@ def test_save_enabled_row_is_disclosure_never_a_gate(tmp_path):
 def test_save_enabled_best_effort_disclosure_contract_is_documented():
     from ouroboros.skill_loader import save_enabled
 
-    architecture = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "ARCHITECTURE.md").read_text(
-        encoding="utf-8"
-    )
+    architecture = architecture_text()
     assert "best-effort" in str(save_enabled.__doc__)
     assert "append failure is logged and never blocks the enablement change" in architecture
 

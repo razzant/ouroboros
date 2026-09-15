@@ -34,6 +34,67 @@ def test_pattern_register_rewrite_receives_complete_tail(tmp_path, monkeypatch):
     assert tail in path.read_text(encoding="utf-8")
 
 
+def test_pattern_register_receives_the_whole_reflection_and_the_exact_goal(tmp_path, monkeypatch):
+    """A correction past character 500 decides the register's row, so it must arrive.
+
+    The incident: the Pattern Register writer received ``reflection[:500]``. The
+    clip landed inside the exculpatory clause of a reflection whose EARLIER
+    sentence said the opposite, so the register recorded the inverse conclusion
+    and kept bumping its count. The goal was clipped the same way at 200 chars.
+    Both are decision inputs of a DESTRUCTIVE rewrite (this call replaces the
+    whole register), so both arrive complete. Asserted on the messages actually
+    composed for the Light model, and on the producer's own entry rather than a
+    hand-built one.
+    """
+    from ouroboros import reflection
+
+    (tmp_path / "memory" / "knowledge").mkdir(parents=True)
+    goal_tail = "GOAL TAIL: the owner asked for the release notes, not a branch cleanup."
+    goal = "Ship the release. " + ("Background context sentence. " * 30) + goal_tail
+    early = "EARLY READING: the host should fail closed on REVIEW_REQUIRED."
+    correction = (
+        "DECISIVE CORRECTION: this install runs advisory enforcement, so failing closed "
+        "on REVIEW_REQUIRED would be the inverse of the configured rule."
+    )
+    reflection_body = early + " " + ("Padding sentence about the trace. " * 30) + correction
+    assert len(goal) > 200
+    assert reflection_body.index(correction) > 500
+
+    captured = {}
+    replies = [{"content": reflection_body
+                + "\nMEMORY_ACTIONS_JSON: []\nBACKLOG_CANDIDATES_JSON: []"}]
+
+    def fake_chat(*args, **kwargs):
+        if kwargs.get("call_type") == "pattern_register_update":
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return ({"content": reflection._PATTERNS_HEADER
+                     + "| advisory misreading | 1 | clipped input | pass whole input | open |\n"}, {})
+        return (replies.pop(0), {})
+
+    monkeypatch.setattr("ouroboros.config.get_light_model", lambda: "light")
+    monkeypatch.setattr("ouroboros.llm.LLMClient", lambda: object())
+    monkeypatch.setattr("ouroboros.llm_observability.chat_observed", fake_chat)
+
+    entry = reflection.generate_reflection(
+        {"id": "task-learn", "text": goal, "drive_root": str(tmp_path)},
+        {"tool_calls": [{"tool": "write_file", "is_error": True, "status": "error",
+                         "tool_result_code": "TOOL_REPORTED_FAILURE", "result": "boom"}]},
+        "trace", object(), {"rounds": 3, "cost": 0.0},
+    )
+    # The bounded display field survives beside the exact one; neither replaces the other.
+    assert entry["goal_exact"] == goal
+    assert entry["goal"].startswith("Ship the release.") and goal_tail not in entry["goal"]
+    assert entry["reflection"] == reflection_body
+
+    reflection.append_reflection(tmp_path, entry)
+
+    prompt = captured["prompt"]
+    assert reflection_body in prompt
+    assert prompt.index(correction) > prompt.index(early)
+    assert goal_tail in prompt
+    assert "OMISSION NOTE" not in prompt
+
+
 def test_backlog_fingerprint_uses_unsanitized_canonical_fields(tmp_path, monkeypatch):
     from ouroboros.improvement_backlog import append_backlog_items, load_backlog_items
 

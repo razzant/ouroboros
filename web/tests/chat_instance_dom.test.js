@@ -1073,9 +1073,10 @@ test('history rebuild keeps a lineage-known branch nested, never appended top-le
 });
 
 // ---------------------------------------------------------------------------
-// Direct-turn tool work, typed conclusions and accounting keep the ordinary card.
+// Direct-turn tool work, typed conclusions and accounting render the compact
+// activity block: no conversion, no title placeholder, the same card component.
 // ---------------------------------------------------------------------------
-test('a direct turn renders tool work and needs host authority for Cancel', async () => {
+test('a direct turn renders tool work as an activity block and needs host authority for Cancel', async () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({ active_direct_turns: [] }) }));
     const handlers = new Map();
     const ws = {
@@ -1089,12 +1090,14 @@ test('a direct turn renders tool work and needs host authority for Cancel', asyn
     };
     let instance;
     try {
-        // Main chat: the only surface that offers "Turn into project".
+        // Main chat: the only surface that offers "Turn into project" — to managed roots.
         instance = createChatInstance({
             ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
             updateUnreadBadge() {}, stateSnapshots, chatId: 1, idPrefix: 'chat', mountEl: mount,
         });
         const messages = globalThis.document.byId.get('chat-messages');
+        // The census is the host fact that this turn is a direct conversation turn.
+        listActivity(instance, 'eph-1', 1, 'thinking', 'direct_chat');
         handlers.get('log')({ chat_id: 1, data: {
             type: 'task_started', task_id: 'eph-1', ts: '2026-09-05T10:00:00Z',
         } });
@@ -1103,8 +1106,10 @@ test('a direct turn renders tool work and needs host authority for Cancel', asyn
             type: 'tool_call_started', task_id: 'eph-1', tool: 'read_file', ts: '2026-09-05T10:00:01Z',
         } });
         const card = walkCard(messages, 'eph-1');
-        assert.ok(card, 'real tool work reveals the ordinary live card');
-        assert.ok(card.querySelector('[data-turn-into-project]'), 'ordinary Main work can become a project');
+        assert.ok(card, 'real tool work reveals the activity block');
+        assert.equal(card.dataset.direct, '1', 'the block wears the direct chrome');
+        assert.equal(card.querySelector('[data-turn-into-project]'), null, 'a direct turn is never offered conversion');
+        assert.equal(card.querySelector('[data-live-title]').textContent, '', 'no Task/Working placeholder title');
         assert.equal(card.querySelector('[data-cancel-run]'), null, 'no host cancelable marker: no Cancel');
         handlers.get('chat')({
             chat_id: 1, role: 'assistant', is_progress: true,
@@ -1135,7 +1140,7 @@ test('a direct turn renders tool work and needs host authority for Cancel', asyn
         } });
         assert.equal(card.dataset.finished, '1');
         assert.match(card.querySelector('[data-live-meta]').innerHTML, /\$2\.70/);
-        assert.ok(card.querySelector('[data-turn-into-project]'));
+        assert.equal(card.querySelector('[data-turn-into-project]'), null);
         // A direct turn without tool work or progress stays a plain answer.
         handlers.get('log')({ chat_id: 1, data: {
             type: 'task_started', task_id: 'eph-2', ts: '2026-09-05T11:00:00Z',
@@ -1158,7 +1163,9 @@ test(`history replay of a direct turn preserves ${execution}`, async () => {
           ts: '2026-09-05T10:00:00Z' },
         { chat_id: 1, role: 'assistant', is_progress: true,
           content: 'Reading the account snapshots…', ts: '2026-09-05T10:00:02Z', task_id: 'eph-h' },
-        { chat_id: 1, role: 'assistant', is_progress: true,
+        // gateway/history lands the terminal truth (the direct-turn fact included)
+        // on the latest in-window progress row when no summary row is present.
+        { chat_id: 1, role: 'assistant', is_progress: true, _is_direct_chat: true,
           content: 'Comparing the reset windows…', ts: '2026-09-05T10:05:00Z', task_id: 'eph-h' },
         { chat_id: 1, role: 'assistant', content: 'The earliest window resets on Monday.',
           text: 'The earliest window resets on Monday.', ts: '2026-09-05T10:22:00Z', task_id: 'eph-h',
@@ -1197,7 +1204,8 @@ test(`history replay of a direct turn preserves ${execution}`, async () => {
         assert.equal(card.querySelector('[data-live-phase]').dataset.phase, phase);
         assert.doesNotMatch(card.querySelector('[data-live-meta]').innerHTML, /\$0(?:\.00)?(?:\s|<|$)/);
         if (execution === 'ok') assert.match(card.querySelector('[data-live-meta]').innerHTML, /\$0\.75/);
-        assert.ok(card.querySelector('[data-turn-into-project]'));
+        assert.equal(card.dataset.direct, '1', 'replay reads the same host fact');
+        assert.equal(card.querySelector('[data-turn-into-project]'), null);
         assert.equal(card.querySelector('[data-cancel-run]'), null);
         assert.equal(messages.children.filter((n) => /resets on Monday/.test(n.innerHTML)).length, 1);
     } finally {

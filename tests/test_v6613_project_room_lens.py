@@ -289,7 +289,7 @@ def test_non_git_room_delegation_reports_its_actual_snapshot_limitation(tmp_path
     authority, error = _mutation_authority(ctx, _derive_authority(ctx))
     assert not error and authority["target_root"] == str(room)
     handle, error = _provision_snapshot(ctx, ctx.drive_root, authority["target_root"], "non-git-room")
-    refused = json.loads(error)
+    refused = json.loads(error.text)
     assert handle is None and refused["reason"] == "execution_snapshot_failed"
     assert refused["target_root"] == str(room) and "not a git working tree" in refused["detail"]
     assert not (room / ".git").exists() and not (repo / ".git").exists()

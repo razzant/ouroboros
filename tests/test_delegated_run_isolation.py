@@ -479,7 +479,7 @@ class TestLegacyRetry:
                 "primaryHarness": "some-route",
             }, project_id="p", project_owned=False, route="some-route")
         out = _delegate_start(ctx, "do the thing", retry_of="inv-legacy")
-        assert "retry_binding_absent" in out, out
+        assert "retry_binding_absent" in out.text, out
         custody._CUSTODY.clear()
 
 
@@ -1579,7 +1579,7 @@ class TestRootMutationAuthority:
         assert authority.access == "workspace_write"
         assert authority.isolation == "live" and authority.delegated is True
         record, err = _mutation_authority(ctx, authority)
-        assert err == "", err
+        assert err is None, err
         assert record["source"] == "external_workspace_root"
         assert record["capture_mode"] == "delegated_snapshot"
         assert pathlib.Path(record["target_root"]).resolve() == target.resolve()
@@ -1596,4 +1596,4 @@ class TestRootMutationAuthority:
         ctx.workspace_mode = ""
         ctx.task_metadata = {}
         record, err = _mutation_authority(ctx, delegated_run_shape(True))
-        assert record == {} and "workspace_not_active" in err
+        assert record == {} and "workspace_not_active" in err.text

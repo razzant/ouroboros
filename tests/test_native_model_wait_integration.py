@@ -85,7 +85,7 @@ def test_native_wait_controls_and_manual_restart_address_all_registered_actors(t
 @pytest.mark.parametrize("project_id", ["", "room"])
 @pytest.mark.parametrize("action", ["switch", "stop", "stop_settled"])
 def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, monkeypatch, project_id, action):
-    from ouroboros import agent_task_pipeline as pipeline, project_naming
+    from ouroboros import agent_task_pipeline as pipeline
     from ouroboros.gateway.state import _chat_activities_snapshot_safe
     from ouroboros.post_task_checkpoint import post_task_model_wait
     from ouroboros.task_results import load_task_result, write_task_result
@@ -97,7 +97,6 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
     monkeypatch.setattr(workers, "DRIVE_ROOT", f.root)
     monkeypatch.setattr(workers, "WORKERS", {})
     monkeypatch.setattr(workers, "get_event_q", lambda: f.events)
-    monkeypatch.setattr(project_naming, "spawn_proactive_namer", lambda *a, **kw: None)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **kw: None))
     monkeypatch.setattr(task_queue, "DRIVE_ROOT", f.root)
     monkeypatch.setattr(task_queue, "RUNNING", {})

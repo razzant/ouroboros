@@ -509,7 +509,7 @@ def test_harness_point_refusal_without_a_route_is_typed(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "")
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
-    payload = json.loads(_delegate_start(ctx, "do a thing"))
+    payload = json.loads(_delegate_start(ctx, "do a thing").text)
     assert payload["status"] == "refused"
     assert payload["reason"] == "subagent_selection_required"
 

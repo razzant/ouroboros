@@ -16,6 +16,7 @@ from ouroboros.runtime_mode_policy import (
     PROTECTED_RUNTIME_PATHS,
 )
 from ouroboros.tools.review_helpers import (
+    is_canonical_governance_path,
     _FULL_REPO_BINARY_EXTENSIONS,
     _FULL_REPO_SKIP_DIR_PREFIXES,
     _MAX_FULL_REPO_FILE_BYTES,
@@ -45,13 +46,6 @@ _COLLAPSED_INDEX_DISPOSITIONS = frozenset({
     "vendored_minified",
 })
 
-_CANONICAL_CONTEXT_DOCS = frozenset({
-    "BIBLE.md",
-    "docs/DEVELOPMENT.md",
-    "docs/DESIGN.md",
-    "docs/ARCHITECTURE.md",
-    "docs/CHECKLISTS.md",
-})
 
 _REVIEW_STACK_PATHS = frozenset({
     "ouroboros/size_ratchet_manifest.py",
@@ -557,7 +551,7 @@ def _build_file_facts(
     # Every early return sees the same answer; no branch re-derives it.
     force_include = _is_force_include(rel)
     is_anchor = rel in anchors
-    is_canonical = rel in _CANONICAL_CONTEXT_DOCS
+    is_canonical = is_canonical_governance_path(rel)
     facts.required = force_include or is_anchor or is_canonical
     # The classes owed IN FULL regardless of the change: for these the staged
     # diff is never a substitute for the artifact. An anchor is required
@@ -854,7 +848,7 @@ def atlas_required_beyond_diff(rel: str) -> bool:
     ladder that chooses what to degrade and the assembler that refuses a
     degraded required artifact cannot drift apart.
     """
-    return _is_force_include(rel) or rel in _CANONICAL_CONTEXT_DOCS
+    return _is_force_include(rel) or is_canonical_governance_path(rel)
 
 
 def _skip_by_dir(rel: str) -> bool:

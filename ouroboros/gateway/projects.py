@@ -324,37 +324,18 @@ def _mark_task_lane(task_id: str, pid: str) -> str:
 
 def _live_origin_siblings(origin_ref: Any, clicked_task_id: str) -> list:
     """Live task ids OTHER than ``clicked_task_id`` carrying the same owner-message
-    origin: RUNNING/PENDING ROOTS (a subagent is never bound itself — it inherits its
-    root's project by lineage) and in-flight direct turns. Never raises."""
-    from ouroboros.projects_registry import origin_key
+    origin. The live scan itself is ``projects_registry.live_origin_lanes`` — the
+    /api/state binding projection reads the SAME lanes, so a card this claim does
+    not reach cannot keep offering a second conversion. Never raises."""
+    from ouroboros.projects_registry import live_origin_lanes, origin_key
 
     key = origin_key(origin_ref)
+    clicked = str(clicked_task_id)
     if key is None:
         return []
-    found: list = []
-    try:
-        from supervisor.queue import _queue_lock
-        from supervisor.workers import PENDING, RUNNING
-
-        with _queue_lock:
-            rows = [meta.get("task") for meta in list(RUNNING.values()) if isinstance(meta, dict)]
-            rows += list(PENDING or ())
-            for row in rows:
-                if not isinstance(row, dict) or str(row.get("delegation_role") or "") == "subagent":
-                    continue
-                if origin_key(row.get("origin_message_ref")) == key:
-                    found.append(str(row.get("id") or ""))
-    except Exception:
-        log.debug("_live_origin_siblings: queue scan failed", exc_info=True)
-    try:
-        from supervisor.active_activity import get_direct_activity_registry
-
-        for entry in get_direct_activity_registry().actors():
-            if origin_key(getattr(entry, "origin_message_ref", None)) == key:
-                found.append(str(getattr(entry, "activity_id", "") or ""))
-    except Exception:
-        log.debug("_live_origin_siblings: direct activity scan failed", exc_info=True)
-    return [tid for tid in dict.fromkeys(found) if tid and tid != str(clicked_task_id)]
+    return list(dict.fromkeys(
+        tid for tid, ref in live_origin_lanes() if origin_key(ref) == key and tid != clicked
+    ))
 
 
 def _claim_origin_siblings(
@@ -848,10 +829,13 @@ async def api_project_from_task(request: Request) -> JSONResponse:
             # immediately, instead of waiting for the periodic /api/state poll
             # (mirrors the promote path in supervisor/workers.py).
             _broadcast_projects_changed(pid, project.get("chat_id"))
-            payload = {"project": project, "binding": binding}
-            if adopted:
-                payload["adopted"] = True
-            return JSONResponse(payload)
+            # ``adopted`` is always stated: a client that must tell "this work
+            # already had a project" from "this click created one" cannot read
+            # that from a key's absence, which is also how a transport that drops
+            # unknown fields looks.
+            return JSONResponse(
+                {"project": project, "binding": binding, "adopted": bool(adopted)},
+            )
 
         def _claim(project_name: str = "", naming_reason: str = "") -> Any:
             """The whole claim under the ONE process-local claim lock: re-read the

@@ -29,7 +29,7 @@
  * @property {Object} accounting  // physical-attempt ledger projection
  * @property {Array<Object>} projects  // active/deleting ProjectEntry sidebar projection
  * @property {Array<number>} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
- * @property {Object<string, {project_id: string, chat_id: number}>} task_bindings  // bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4)
+ * @property {Object<string, {project_id: string, chat_id: number, origin_bound?: boolean}>} task_bindings  // bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4). origin_bound marks a task the host included because its OWNER MESSAGE already has a project (#902), so one message cannot keep a second convertible card
  * @property {ActiveDirectTurn[]=} active_direct_turns  // active direct/ephemeral chat turns snapshot
  * @property {boolean=} active_chat_activities_complete
  * @property {ActiveChatActivity[]=} active_chat_activities  // combined snapshot: direct/ephemeral turns + root managed queue tasks
@@ -329,6 +329,10 @@
  * @property {string=} task_group_id
  * @property {string=} task_event
  * @property {string=} status
+ * @property {boolean=} _is_direct_chat
+ *   The lane fact of a direct conversation turn, stamped by the host on the
+ *   turn's own progress/tool frames and on every task_done; the chat block
+ *   reads it before any census lists the turn.
  * @property {boolean=} cancelable
  *   v6.82 (P5): host-attested — this frame's task is a supervisor-queue task that
  *   POST /api/tasks/{id}/cancel can force-cancel: a lineage-resolved pooled root or
@@ -720,7 +724,7 @@
  * @typedef {Object} TaskNamedOutbound
  * @property {"task_named"} type
  * @property {string} task_id
- * @property {string} suggested_name  // proactively-coined project name; client sets the live card title (v6.40.0)
+ * @property {string} suggested_name  // admission-coined name of a managed task; client sets the live card title
  */
 
 /**

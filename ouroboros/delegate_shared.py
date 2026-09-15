@@ -7,6 +7,15 @@ helpers back from the facade (``tools/delegate`` → ``delegate_interactions`` �
 ``tools/delegate``), and the house seam pattern is one-way — an extracted
 module never imports the facade back. ``tools.delegate`` re-exports all three,
 so every existing reference and monkeypatch target keeps the same objects.
+
+This module also owns the external-executor family's RESULT ENVELOPE. Inside the
+family (``delegate_start``/``delegate_wait``/``delegate_cancel``/
+``delegate_answer``, their producers and their host consumers) a result is a
+native ``ToolResult``; only the four registered entries project it back to the
+``str`` handler ABI. The envelope is two additive JSON keys — ``ok`` and
+``host_code`` — written beside the domain payload, never instead of it: the
+domain ``reason`` keeps its own name and its own vocabulary, and nothing here
+renames it into ``ToolResult.code``.
 """
 
 from __future__ import annotations
@@ -19,13 +28,111 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_custody import RunCustody as _RunCustody
 from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.tool_result import (
+    TOOL_CODE_SPECS,
+    ToolResult,
+    _publish_tool_result,
+)
 
 log = logging.getLogger(__name__)
 
+# The two host classes the owner's rule leaves for this family (ARCHITECTURE
+# §"Tool capability and execution": a refusal is recorded as a refusal, and a
+# refused steer/refusal does not degrade the execution axis). A SUBSTRATE
+# refusal — the daemon, the engine, custody or the run itself said no — is
+# recorded and never degrading (`_outcome_tool_errors._POLICY_DENIAL_STATUSES`
+# holds `tool_reported_failure`). An AGENT fault — the call itself was
+# malformed or self-contradictory — degrades and feeds reflection. Neither is
+# `TOOL_TIMEOUT` (nothing here timed out) nor `TOOL_ERROR` (which would hide
+# which of the two this was).
+SUBSTRATE_REFUSAL_CODE = "TOOL_REPORTED_FAILURE"
+AGENT_FAULT_CODE = "TOOL_ARG_ERROR"
 
-def _fail(tool: str, code: str, detail: str, **extra: Any) -> str:
-    payload = {"status": "refused", "tool": tool, "reason": code, "detail": detail, **extra}
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+# The EXACT domain reasons whose refusal is the caller's own defect: a missing or
+# empty required argument, two selectors that contradict each other, an answer
+# row that is not an answer, a turn bound to one actor asking for another. Every
+# other reason — including every engine/daemon code that arrives through
+# `ClaudexorUnavailable` and every custody verdict — defaults to the substrate
+# class, which is the safe direction: a reason nobody has classified yet is
+# recorded honestly instead of being blamed on the agent.
+_AGENT_FAULT_REASONS = frozenset({
+    "answer_row_empty",
+    "answer_row_invalid",
+    "answers_required",
+    "api_actor_requires_schedule_subagent",
+    "checkpoint_requires_time_and_reason",
+    "configured_actor_resource_mismatch",
+    "configured_actor_route_mismatch",
+    "empty_prompt",
+    "missing_interaction_id",
+    "missing_run_id",
+    "payload_binding_mismatch",
+    "payload_selector_incomplete",
+    "retry_prompt_mismatch",
+    "retry_selector_conflict",
+    "selector_on_retry",
+    "source_response_invalid",
+    "source_response_not_required",
+    "subagent_selection_required",
+    "subagent_selector_conflict",
+    "unknown_subagent_id",
+    "unsupported_root",
+})
+
+
+def refusal_host_code(reason: str) -> str:
+    """The host class of one domain refusal reason. Exact keys, safe default."""
+    return AGENT_FAULT_CODE if str(reason or "") in _AGENT_FAULT_REASONS else SUBSTRATE_REFUSAL_CODE
+
+
+def delegate_result(payload: Mapping[str, Any], *,
+                    meta: Optional[Mapping[str, Any]] = None) -> ToolResult:
+    """Render one external-executor payload as its native result.
+
+    The payload's own envelope keys ARE the classification: ``ok: false`` marks a
+    refusal and ``host_code`` names its class. A payload without them is an
+    ordinary observation and stays ``OK`` — a terminal run that FAILED is still a
+    successful observation of an unsuccessful leaf, which is the distinction this
+    whole envelope exists to keep.
+    """
+    code = "OK"
+    if payload.get("ok") is False:
+        code = str(payload.get("host_code") or "")
+        if code not in TOOL_CODE_SPECS:
+            code = SUBSTRATE_REFUSAL_CODE
+    return ToolResult(
+        status=TOOL_CODE_SPECS[code].status,
+        code=code,
+        text=json.dumps(dict(payload), ensure_ascii=False, indent=2),
+        meta=dict(meta or {}),
+    )
+
+
+def delegate_payload(result: ToolResult) -> Dict[str, Any]:
+    """The JSON object one native family result carries.
+
+    Every producer here renders a JSON OBJECT, so this is a READ of the
+    producer's own payload rather than a parse of untrusted text: a consumer that
+    silently fell back to ``{}`` would ship an undecorated start receipt or an
+    unacknowledgeable wake instead of failing where the contract actually broke.
+    """
+    payload = json.loads(result.text)
+    if not isinstance(payload, dict):
+        raise TypeError("delegate result text is not a JSON object")
+    return payload
+
+
+def publish_delegate_result(ctx: Any, result: ToolResult) -> str:
+    """The family's ONE public boundary: publish the native result, return its text."""
+    return _publish_tool_result(ctx, result)
+
+
+def _fail(tool: str, code: str, detail: str, **extra: Any) -> ToolResult:
+    payload = {
+        "status": "refused", "ok": False, "tool": tool, "reason": code,
+        "host_code": refusal_host_code(code), "detail": detail, **extra,
+    }
+    return delegate_result(payload)
 
 
 def _emit(ctx: ToolContext, kind: str, payload: Dict[str, Any]) -> None:
@@ -34,7 +141,7 @@ def _emit(ctx: ToolContext, kind: str, payload: Dict[str, Any]) -> None:
     })
 
 
-def _owned_run(ctx: ToolContext, tool: str, run_id: str) -> Tuple[Optional[str], Optional[_RunCustody]]:
+def _owned_run(ctx: ToolContext, tool: str, run_id: str) -> Tuple[Optional[ToolResult], Optional[_RunCustody]]:
     """Resolve custody for a run, or return a typed refusal payload.
 
     The daemon bearer token grants the ENTIRE Claudexor API, so a run id is not a
@@ -190,5 +297,7 @@ def orphan_capture_read_target(
     return None
 
 
-__all__ = ["_emit", "_fail", "_owned_run", "orphan_apply_target_ok",
-           "orphan_capture_read_target", "orphan_disposition_status"]
+__all__ = ["AGENT_FAULT_CODE", "SUBSTRATE_REFUSAL_CODE", "_emit", "_fail", "_owned_run",
+           "delegate_payload", "delegate_result", "orphan_apply_target_ok",
+           "orphan_capture_read_target", "orphan_disposition_status",
+           "publish_delegate_result", "refusal_host_code"]

@@ -476,11 +476,6 @@ def expiring_poll(
         return None
 
 
-def rendered_window(**kwargs: Any) -> str:
-    """``window_payload`` rendered the way the wait returns it (and measures it)."""
-    return json.dumps(window_payload(**kwargs), ensure_ascii=False, indent=2)
-
-
 def waiting_expiry_clause(pending: Optional[List[Dict[str, Any]]]) -> str:
     """The honest expiry clause for a waiting note, keyed on the rows' own
     ``timeout_at`` (R2-7e). The engine benign-declines an unanswered question

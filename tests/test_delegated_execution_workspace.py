@@ -78,14 +78,14 @@ def test_retry_binding_keeps_snapshot_as_host_execution_root(tmp_path, monkeypat
     }
     monkeypatch.setattr(
         integration, "_validated_invocation",
-        lambda *_args, **_kwargs: (record, ""),
+        lambda *_args, **_kwargs: (record, None),
     )
     monkeypatch.setattr(
-        integration, "_retry_binding_refusal", lambda *_args, **_kwargs: "",
+        integration, "_retry_binding_refusal", lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         integration, "_mutation_authority",
-        lambda *_args, **_kwargs: ({"target_root": str(stable_root)}, ""),
+        lambda *_args, **_kwargs: ({"target_root": str(stable_root)}, None),
     )
     monkeypatch.setattr(
         worktrees, "find_execution_snapshot",
@@ -96,7 +96,7 @@ def test_retry_binding_keeps_snapshot_as_host_execution_root(tmp_path, monkeypat
         SimpleNamespace(task_id="task-a"), tmp_path, "invocation-a", "same prompt",
     )
 
-    assert refusal == ""
+    assert refusal is None
     assert binding is not None
     assert binding.request_body is request
     assert binding.root == str(snapshot_root)

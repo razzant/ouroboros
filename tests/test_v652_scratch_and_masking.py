@@ -1,7 +1,7 @@
 """v6.52.2 — ephemeral `scratch=[...]` (Fix #1) + verify_and_record exit-masking sensor (Fix #2).
 
 Both are GENERAL, leak-free, advisory-only. Additive: with no scratch / no masking, behavior is
-unchanged. Includes the false-completion adversarial coverage DEVELOPMENT.md §651 mandates for the
+unchanged. Includes the false-completion adversarial coverage DEVELOPMENT.md "Loop / State-Machine Changes" mandates for the
 loop nudge (one-shot, fires only on a masked unreconciled PASS, suppressed by a later clean pass,
 ordered after the red nudge, advisory).
 """

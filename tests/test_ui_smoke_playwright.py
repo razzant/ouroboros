@@ -3626,9 +3626,13 @@ def test_ui_smoke_cancel_run_button_eligibility_and_cancelled_state(direct_serve
     data_dir = direct_server_with_data["data_dir"]
     logs_dir = data_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    # Seed while no server runs (the live loop rewrites the queue snapshot every tick).
+    direct_server_with_data["stop_server"]()
     (logs_dir / "chat.jsonl").write_text("", encoding="utf-8")
     rows = [
-        # Pooled live root: carries the supervisor's host-attested marker.
+        # Pooled live root: carries the supervisor's host-attested marker AND is
+        # genuinely running (dispatched at boot, held in its first model call) so
+        # the census vouches for it (the 09.09 rule).
         {"ts": "2026-07-29T10:00:00+00:00", "chat_id": 1, "task_id": "live-root",
          "content": "Working on the big thing", "cancelable": True},
         # Direct-chat-turn shape: same card shape, NO marker -> no button.
@@ -3663,6 +3667,10 @@ def test_ui_smoke_cancel_run_button_eligibility_and_cancelled_state(direct_serve
             "execution": {"status": "cancelled"},
         },
     }) + "\n", encoding="utf-8")
+    from tests.test_s3_task_control_browser import _hold_live_root, _release_mock_model
+
+    _hold_live_root(data_dir, "live-root")
+    direct_server_with_data["start_server"]()
 
     try:
         with sync_playwright() as pw:
@@ -3700,6 +3708,7 @@ def test_ui_smoke_cancel_run_button_eligibility_and_cancelled_state(direct_serve
                 page.screenshot(path=str(data_dir.parent / "cancel-run.png"), full_page=True)
             finally:
                 browser.close()
+                _release_mock_model()
     except PlaywrightError as exc:
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
             pytest.skip(str(exc))

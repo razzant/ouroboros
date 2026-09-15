@@ -3,10 +3,11 @@
 An LLM-first short human title for a project card, with a deterministic heuristic
 fallback. Shared by every path that names a project so the UI conversion and the
 agent never drift:
-  - the proactive card namer (names ANY task card up front, supervisor side);
-  - ``gateway/projects.py`` turn-into-project conversion (reuses the up-front name,
+  - ``gateway/projects.py`` turn-into-project conversion (reuses an admission name,
     or names inline as a race fallback);
-  - ``ensure_project_scope`` (the agent self-creates + names a project).
+  - ``ensure_project_scope`` (the agent self-creates + names a project);
+  - ``admission_names`` (headless runs and chat promotion, no model call).
+A direct conversation turn is never named: it renders as an activity block.
 
 Doctrine:
   - P5 LLM-first: the model COINS the name; post-processing is purely lexical
@@ -19,11 +20,8 @@ Doctrine:
 from __future__ import annotations
 
 import logging
-import pathlib
-import threading
 from dataclasses import replace
-from typing import Any, Callable, Dict, Optional, Sequence
-import contextvars
+from typing import Any, Dict, Optional, Sequence
 
 log = logging.getLogger("ouroboros.project_naming")
 
@@ -269,134 +267,6 @@ async def llm_project_name_async(
     except Exception:
         log.debug("llm_project_name_async timed out/failed; using heuristic", exc_info=True)
         return fb
-
-
-def _refresh_root_cost_after_naming(drive_root: Any, task_id: str) -> None:
-    """Refresh a terminal root projection after the naming attempt settles."""
-    try:
-        from types import SimpleNamespace
-
-        from ouroboros.agent_task_pipeline import _set_root_post_task_checkpoint
-        from ouroboros.task_results import load_task_result
-
-        current = load_task_result(drive_root, task_id) or {}
-        refreshed = {**current, "id": task_id, "budget_drive_root": str(drive_root)}
-        _set_root_post_task_checkpoint(
-            SimpleNamespace(drive_root=pathlib.Path(drive_root)), refreshed, "refresh",
-        )
-    except Exception:
-        log.debug("project naming cost refresh failed for %s", task_id, exc_info=True)
-
-
-def spawn_proactive_namer(
-    drive_root: Any, task_id: str, text: str, *, broadcast: Optional[Callable[[dict], None]] = None,
-) -> None:
-    """Proactively coin an LLM project name for a fresh card in a DAEMON thread (Cluster B).
-
-    Writes the coined ``suggested_name`` onto the task result (turn-into-project then reuses
-    it with zero extra call) and, via ``broadcast``, emits a ``task_named`` event so the live
-    card shows a human title up front. NEVER blocks the task. ``drive_root`` is captured at
-    CALL time — NOT read from a mutable module global at thread-execution time — so a later
-    context switch (or a test that swaps the supervisor drive) can't redirect this thread's
-    write. Skips cleanly unless ``drive_root`` is a real directory (test safety: a stub /
-    MagicMock drive must never materialise a stray path — chat_observed persists BEFORE the
-    LLM call). Fail-soft."""
-    from ouroboros.settings_integrity import copy_task_settings_context
-
-    body = " ".join(str(text or "").split())
-    if not body:
-        return
-    try:
-        if not pathlib.Path(str(drive_root)).is_dir():
-            return
-    except (OSError, TypeError, ValueError):
-        return
-
-    def _work() -> None:
-        try:
-            # v6.58.0 (§3.4b): HARD total wall-clock bound. The transport timeout bounds
-            # ONE attempt, but llm.chat's retry/fallback chain under a degraded provider
-            # could stretch the whole call to tens of minutes (the incident where the
-            # card was named 24 minutes late). A title is cosmetic: if it hasn't landed
-            # within the transport budget + slack, drop it — the id/title heuristics and
-            # the convert path's own bounded inline call (8s) already cover naming.
-            _result: list[str] = []
-            _detached = threading.Event()
-            _finished = threading.Event()
-            _refresh_lock = threading.Lock()
-            _refreshed = False
-
-            def _refresh_detached_once() -> None:
-                nonlocal _refreshed
-                with _refresh_lock:
-                    if _refreshed:
-                        return
-                    _refreshed = True
-                _refresh_root_cost_after_naming(drive_root, task_id)
-
-            def _call() -> None:
-                try:
-                    _result.append(llm_project_name(body, drive_root=drive_root, task_id=task_id))
-                except Exception:
-                    log.debug("proactive namer inner call failed for %s", task_id, exc_info=True)
-                finally:
-                    _finished.set()
-                    if _detached.is_set():
-                        _refresh_detached_once()
-
-            settings_context = contextvars.Context()
-            copy_task_settings_context(settings_context)
-            inner = threading.Thread(target=settings_context.run, args=(_call,), name=f"namer-call-{task_id}", daemon=True)
-            inner.start()
-            if not _finished.wait(timeout=max(0.0, _naming_timeout_sec() + 30.0)):
-                _detached.set()
-                # Close the race where settlement lands between wait() and
-                # the detached marker. The once-guard covers both interleavings.
-                if _finished.is_set():
-                    _refresh_detached_once()
-                log.debug("proactive namer exceeded its wall-clock bound for %s; skipped", task_id)
-                return
-            inner.join()
-            if not _result:
-                log.debug("proactive namer exceeded its wall-clock bound for %s; skipped", task_id)
-                return
-            name = _result[0]
-            if not name:
-                return
-            from ouroboros.task_results import (
-                STATUS_RUNNING,
-                load_task_result,
-                write_task_result,
-            )
-
-            # Persist suggested_name as same-status ENRICHMENT, not a RUNNING transition: a
-            # fast task may already be terminal (completed/failed/cancelled) by the time this
-            # daemon finishes, and write_task_result's monotonic guard DROPS a regressing
-            # RUNNING write — which would silently lose the name the convert path reuses.
-            # Writing under the current on-disk status lets the monotonic guard's same-status
-            # enrichment carry the field through (and a benign drop only in the rare race where
-            # the status advanced past our read — acceptable for a best-effort title).
-            current = load_task_result(drive_root, task_id) or {}
-            status = str(current.get("status") or "") or STATUS_RUNNING
-            write_task_result(drive_root, task_id, status, suggested_name=name)
-            # A cosmetic namer may settle concurrently with or after the ordinary
-            # post-task worker.  The shared refresh/checkpoint critical section
-            # linearizes both cases without marking an unfinished phase complete.
-            _refresh_root_cost_after_naming(drive_root, task_id)
-            if broadcast is not None:
-                try:
-                    broadcast({"type": "task_named", "task_id": task_id, "suggested_name": name})
-                except Exception:
-                    log.debug("task_named broadcast failed for %s", task_id, exc_info=True)
-        except Exception:
-            log.debug("proactive namer failed for %s", task_id, exc_info=True)
-
-    try:
-        settings_context = contextvars.Context()
-        copy_task_settings_context(settings_context)
-        threading.Thread(target=settings_context.run, args=(_work,), name=f"namer-{task_id}", daemon=True).start()
-    except Exception:
-        log.debug("proactive namer thread spawn failed for %s", task_id, exc_info=True)
 
 
 def admission_names(body: Dict[str, Any], description: str) -> tuple:

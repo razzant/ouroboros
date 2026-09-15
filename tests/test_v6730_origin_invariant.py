@@ -190,7 +190,7 @@ def test_ensure_scope_tool_attaches_task_origin(tmp_path):
     ctx.task_id = "t-run"
     ctx.task_contract = {}
     out = _ensure_project_scope(ctx, project_name="Robot City")
-    assert out.startswith("OK: created/attached")
+    assert out.startswith("⚠️ SCOPE_UNCONFIRMED")  # deferred transport: no bind landed yet
     evt = [e for e in events if e.get("type") == "ensure_project_scope"][0]
     assert evt["source_ref"] == _ref()
     assert evt["source_text"] == OWNER_TEXT

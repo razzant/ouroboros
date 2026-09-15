@@ -18,6 +18,7 @@ import subprocess
 import pytest
 
 from ouroboros import delegate_custody as custody
+from tests._governance_docs_shared import architecture_text
 from ouroboros.subagent_worktrees import (
     find_execution_snapshot,
     provision_payload_snapshot,
@@ -87,12 +88,13 @@ def _payload_ctx(tmp_path: pathlib.Path, monkeypatch):
 
 
 def _exact_payload_start(ctx, prompt: str, **params):
+    """The start's own JSON payload, read off the family's native result."""
     from ouroboros.subagent_runtime import exact_start
 
     return exact_start(ctx, prompt, {
         "snapshot": ctx._payload_subagent_snapshot,
         **params,
-    })
+    }).text
 
 
 class _StartStub:
@@ -220,7 +222,7 @@ def test_selector_argument_shapes_refuse_typed(tmp_path, monkeypatch):
         (dict(root="skill_payload", bucket="external"), "payload_selector_incomplete"),
         (dict(bucket="external", skill_name="alpha"), "payload_selector_incomplete"),
     ):
-        out = json.loads(delegate._delegate_start(ctx, "x", **kwargs))
+        out = json.loads(delegate._delegate_start(ctx, "x", **kwargs).text)
         assert out["status"] == "refused" and out["reason"] == reason, out
 
 
@@ -309,7 +311,7 @@ def test_markerless_native_delegates_as_external_and_rebinds_by_marker(
         context="test",
     )
     assert rebound is None
-    assert "payload_target_unresolved" in refusal
+    assert "payload_target_unresolved" in refusal.text
     custody._CUSTODY.clear()
 
 
@@ -1165,8 +1167,7 @@ def test_schema_and_docs_split_git_staging_from_payload_live_apply():
     decision = entry.schema["parameters"]["properties"]["decision"]["description"]
     assert "STAGED into your active root" in decision
     assert "applied LIVE into the non-Git payload" in decision
-    arch = (pathlib.Path(__file__).resolve().parents[1] / "docs" /
-            "ARCHITECTURE.md").read_text(encoding="utf-8")
+    arch = architecture_text()
     assert "staging substrate differs" in arch
     assert "A SKILL-PAYLOAD target captures through the payload adapter" in arch
     assert "QUEUES the extension reconcile request" in arch

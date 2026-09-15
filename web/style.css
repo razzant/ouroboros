@@ -308,6 +308,27 @@ body.resizing-panels { user-select: none; }
 }
 
 
+/* A direct conversation turn renders the same component as a compact activity
+   block (docs/DESIGN.md "Conversation activity block"): no Task/Working/Done
+   chip while it runs or once it is Done (Cancelling…/Finalizing…/Waiting and a
+   non-Done outcome stay visible), no title placeholder, the typing dots as its
+   running indicator; the collapsed header carries the count, cost and duration. */
+.chat-live-card[data-direct="1"] {
+    border-color: var(--accent-08);
+}
+
+.chat-live-card[data-direct="1"] > .chat-live-summary-button [data-live-phase]:is(.done, .working:not(.cancelling):not(.finalizing):not(.waiting)) {
+    display: none;
+}
+
+.chat-live-card[data-direct="1"] > .chat-live-summary-button .chat-live-title:empty {
+    display: none;
+}
+
+.chat-live-actions:empty {
+    display: none;
+}
+
 /* P3 — a converted card becomes a calm "project identity" chip. The whole card
    recolors from the red task accent to the project fuchsia over ~250ms; the live
    timeline is gone (the project panel owns it now), so the main chat is freed. */

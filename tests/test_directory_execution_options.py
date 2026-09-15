@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.tools.control_subagent_spec import _validated_schedule_fields
+from ouroboros.delegate_shared import delegate_result
 
 
 @pytest.mark.parametrize("options", [
@@ -224,7 +225,7 @@ def test_directory_options_survive_schedule_result_dispatch_and_bootstrap(
     starts = []
     def exact_start(ctx, prompt, spec):
         starts.append((ctx, prompt, spec))
-        return json.dumps({"status": "started", "run_id": "directory-run"})
+        return delegate_result({"status": "started", "run_id": "directory-run"})
     monkeypatch.setattr(subagent_runtime, "exact_start", exact_start)
     child = SimpleNamespace(
         task_id=tid, drive_root=Path(task["drive_root"]), budget_drive_root=str(parent.drive_root),

@@ -24,10 +24,10 @@ def _isolated_projects_root(tmp_path_factory, monkeypatch):
     )
 
 
-def _confirm_promote(monkeypatch):
-    monkeypatch.setattr(
+def _confirm_promote(monkeypatch, effective_project_id: str = ""):
+    monkeypatch.setattr(  # the receipt names where admission actually put the task
         "ouroboros.tools.control_events._wait_for_promotion_admission",
-        lambda *_args, **_kwargs: {"status": "scheduled"},
+        lambda *_a, **_k: {"status": "scheduled", "effective_project_id": effective_project_id},
     )
 
 
@@ -602,8 +602,8 @@ def test_managed_swarm_can_choose_a_named_project_for_later_work(tmp_path, monke
     from ouroboros.project_facts import project_id_from_display_name
     from ouroboros.tools.control import _promote_chat_to_task
 
-    _confirm_promote(monkeypatch)
-    ctx = _managed_swarm_ctx(tmp_path)  # project_id="" — projectless main chat
+    _confirm_promote(monkeypatch, project_id_from_display_name("Slime Lab Escape"))
+    ctx = _managed_swarm_ctx(tmp_path, task_id="swarm-root")  # project_id="" — projectless main chat
 
     out = _promote_chat_to_task(
         ctx,
@@ -615,13 +615,16 @@ def test_managed_swarm_can_choose_a_named_project_for_later_work(tmp_path, monke
     )
 
     assert out.startswith("OK: task")
-    assert "new project 'Slime Lab Escape'" in out
+    assert f"in project '{project_id_from_display_name('Slime Lab Escape')}'" in out
     evt = ctx.pending_events[0]
     assert evt["project_name"] == "Slime Lab Escape"
     assert evt["project_id"] == project_id_from_display_name("Slime Lab Escape")
     assert evt["workspace_root"] == "/tmp/foreign"
     assert evt["source"] == "https://example.invalid/repo.git"
-    assert "force_plan" not in evt
+    # Owner 3=A: the root's still-unmet Swarm obligation follows the promoted work.
+    assert (evt["force_plan"], evt["force_plan_source"], evt["force_plan_transferred_from"]) == (
+        True, "swarm", "swarm-root",
+    )
 
 
 def test_managed_swarm_can_choose_an_existing_project_for_later_work(tmp_path, monkeypatch):
@@ -630,7 +633,7 @@ def test_managed_swarm_can_choose_an_existing_project_for_later_work(tmp_path, m
     the project_name drop)."""
     from ouroboros.tools.control import _promote_chat_to_task
 
-    _confirm_promote(monkeypatch)
+    _confirm_promote(monkeypatch, "racer")
     ctx = _managed_swarm_ctx(tmp_path)  # project_id="" — projectless main chat
 
     out = _promote_chat_to_task(ctx, "Continue the racer build", project_id="racer", predecessor_task_id="")
@@ -646,11 +649,11 @@ def test_managed_swarm_promotes_in_current_project_without_explicit_target(tmp_p
     from ouroboros.tools.control import _promote_chat_to_task
 
     _confirm_promote(monkeypatch)
-    ctx = _managed_swarm_ctx(tmp_path, project_id="alpha")
+    ctx = _managed_swarm_ctx(tmp_path, project_id="alpha", task_id="swarm-root")
     out = _promote_chat_to_task(ctx, "Audit the issue", predecessor_task_id="")
     assert out.startswith("OK: task")
     assert ctx.pending_events[0]["project_id"] == "alpha"
-    assert "force_plan" not in ctx.pending_events[0]
+    assert ctx.pending_events[0]["force_plan_transferred_from"] == "swarm-root"
     assert not hasattr(ctx, "_swarm_handoff_attempt")
 
 
@@ -869,7 +872,7 @@ def test_presence_unconfirmed_promotion_records_handoff_for_reconciliation(tmp_p
     )
     ctx = _managed_swarm_ctx(tmp_path, task_metadata={"presence": {"binding_id": "presence-binding"}})
     out = _promote_chat_to_task(ctx, "Audit and fix the issue", predecessor_task_id="")
-    assert out.startswith("PROMOTE_UNCONFIRMED")
+    assert out.startswith("⚠️ PROMOTE_UNCONFIRMED")
     assert len(ctx.pending_events) == 1
     assert ctx._swarm_handoff_attempt["task_id"] == ctx.pending_events[0]["task_id"]
     assert ctx._swarm_handoff_attempt["status"] == "unconfirmed"
@@ -900,21 +903,33 @@ def test_presence_rejected_promotion_records_handoff_without_event(tmp_path, mon
     )
     ctx = _managed_swarm_ctx(tmp_path, task_metadata={"presence": {"binding_id": "presence-binding"}})
     out = _promote_chat_to_task(ctx, "Audit and fix the issue", predecessor_task_id="")
-    assert out.startswith("PROMOTE_REJECTED")
+    assert out.startswith("⚠️ PROMOTE_REJECTED")
     assert ctx.pending_events == []
     assert ctx._swarm_handoff_attempt["status"] == "rejected"
 
 
-def test_managed_swarm_does_not_recursively_propagate_routing_intent(tmp_path, monkeypatch):
+def test_an_unmet_swarm_obligation_follows_the_promoted_work(tmp_path, monkeypatch):
+    """Owner 3=A supersedes the old "no recursive propagation" rule: a Swarm root
+    that never entered plan review and promotes its work hands the obligation to
+    the new root (the admission seam stamps it and releases the promoter). A root
+    whose obligation is already met -- a plan wave recorded -- transfers nothing."""
+    import ouroboros.task_results as task_results
     from ouroboros.tools.control import _promote_chat_to_task
 
     _confirm_promote(monkeypatch)
-    ctx = _managed_swarm_ctx(tmp_path)
+    ctx = _managed_swarm_ctx(tmp_path, task_id="swarm-root")
 
     _promote_chat_to_task(ctx, "A later task chosen during execution", predecessor_task_id="")
 
-    assert "force_plan" not in ctx.pending_events[0]
+    evt = ctx.pending_events[0]
+    assert evt["force_plan"] is True and evt["force_plan_transferred_from"] == "swarm-root"
     assert not hasattr(ctx, "_swarm_handoff_attempt")
+
+    monkeypatch.setattr(task_results, "load_plan_review_state",
+                        lambda _root, _tid: {"schema_version": 2, "waves": [{"request_fingerprint": "f1"}]})
+    engaged = _managed_swarm_ctx(tmp_path, task_id="swarm-root")
+    _promote_chat_to_task(engaged, "Another later task", predecessor_task_id="")
+    assert "force_plan" not in engaged.pending_events[0]
 
 
 def test_managed_swarm_can_steer_through_the_ordinary_receipt_path(tmp_path, monkeypatch):
@@ -924,11 +939,16 @@ def test_managed_swarm_can_steer_through_the_ordinary_receipt_path(tmp_path, mon
         "ouroboros.tools.control_events._wait_for_routing_annotation",
         lambda *_args, **_kwargs: {"status": "delivered"},
     )
-    ctx = _managed_swarm_ctx(tmp_path)
+    ctx = _managed_swarm_ctx(tmp_path, task_id="swarm-root")
     out = _steer_task(ctx, "existing-root", "do this there")
-    assert "durably confirmed" in out
+    # A Swarm root speaks for itself: its words are WRITTEN as a task message
+    # (never the owner's), on the same receipt rail (wave 2 issuer fact).
+    assert out.startswith("✉️ Message to task existing-root written to its mailbox (durably confirmed")
     assert ctx.pending_events[0]["type"] == "steer_task"
     assert ctx.pending_events[0]["target_task_id"] == "existing-root"
+    assert ctx.pending_events[0]["issuer"] == {
+        "kind": "task", "task_id": "swarm-root", "root_task_id": "swarm-root",
+    }
     assert not hasattr(ctx, "_swarm_handoff_attempt")
 
 
@@ -948,7 +968,7 @@ def test_promote_tool_project_name_creates_named_project_event(tmp_path, monkeyp
     derives a clean id, carries the human display name, and rides title."""
     from ouroboros.tools.control import _promote_chat_to_task
 
-    _confirm_promote(monkeypatch)
+    _confirm_promote(monkeypatch, "airi-research")
     events = []
     ctx = types.SimpleNamespace(
         pending_events=events, event_queue=None, current_chat_id=1, drive_root=tmp_path,
@@ -959,7 +979,7 @@ def test_promote_tool_project_name_creates_named_project_event(tmp_path, monkeyp
         predecessor_task_id="",
     )
     assert out.startswith("OK: task")
-    assert "new project 'Airi Research'" in out
+    assert "in project 'airi-research'" in out   # the receipt's destination, not the ask
     evt = events[0]
     assert evt["project_name"] == "Airi Research"
     assert evt["project_id"] == "airi-research"   # derived, filesystem-clean
@@ -2338,7 +2358,10 @@ def test_steer_task_tool_emits_event_with_target_and_client_id(tmp_path):
     assert evt["message"] == "also add the benchmarks slide"
     assert evt["chat_id"] == 1
     assert evt["client_message_id"] == "cm-42"
-    assert evt["allow_global_root"] is False
+    # The host-minted issuer fact replaces the routing-contract lane flag: a
+    # chat turn is an owner turn, and the lane is the supervisor's registry answer.
+    assert evt["issuer"] == {"kind": "owner_turn"}
+    assert "allow_global_root" not in evt
     assert ctx._typed_routing_action_emitted == "steer_task"
 
 
@@ -2382,7 +2405,7 @@ def test_main_steer_can_address_project_bound_root_from_host_manifest(tmp_path, 
         },
     )
     _steer_task(tool_ctx, "project-root", "continue from Main")
-    assert emitted[0]["allow_global_root"] is True
+    assert emitted[0]["issuer"] == {"kind": "owner_turn"}
 
     supervisor_ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,
@@ -2699,25 +2722,29 @@ def test_direct_project_followup_carries_same_live_human_identity(tmp_path):
 
 
 def test_handle_steer_task_stale_target_notifies_visibly(tmp_path, monkeypatch):
-    """A target no longer RUNNING (or in another chat / a subagent) fails VISIBLY
-    with a chat notice and writes NO mailbox — never silently dropped or respawned."""
+    """A target no longer RUNNING (or in another room / a subagent) fails VISIBLY
+    with a chat notice and writes NO mailbox — never silently dropped or respawned.
+    The issuing chat is a Project ROOM: Main sees the global manifest and may
+    address any root, so only a room turn has a "wrong chat" to refuse."""
     import supervisor.queue as queue
     from supervisor.events import _handle_steer_task
     from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.projects_registry import create_project
 
     monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
+    room = int(create_project(tmp_path, "issuing-room", name="Issuing Room")["chat_id"])
     notices = []
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,
         RUNNING={
             "other": {"task": {"id": "other", "chat_id": 999}},  # different chat
-            "sub": {"task": {"id": "sub", "chat_id": 1, "delegation_role": "subagent"}},
+            "sub": {"task": {"id": "sub", "chat_id": room, "delegation_role": "subagent"}},
         },
         send_with_budget=lambda cid, text, *a, **k: notices.append(text),
     )
-    _handle_steer_task({"target_task_id": "gone", "message": "a", "chat_id": 1}, ctx)   # not running
-    _handle_steer_task({"target_task_id": "other", "message": "b", "chat_id": 1}, ctx)  # wrong chat
-    _handle_steer_task({"target_task_id": "sub", "message": "c", "chat_id": 1}, ctx)    # subagent
+    _handle_steer_task({"target_task_id": "gone", "message": "a", "chat_id": room}, ctx)   # not running
+    _handle_steer_task({"target_task_id": "other", "message": "b", "chat_id": room}, ctx)  # wrong chat
+    _handle_steer_task({"target_task_id": "sub", "message": "c", "chat_id": room}, ctx)    # subagent
     assert len(notices) == 3 and all("Couldn't steer task" in n for n in notices)
     assert drain_owner_entries(tmp_path, "gone") == []
     assert drain_owner_entries(tmp_path, "other") == []
@@ -2970,11 +2997,13 @@ def _steer_refusal(tmp_path, monkeypatch, *, running: dict, chat_id: int = 1):
 def test_steer_refusal_names_the_room_when_the_task_belongs_to_another_chat(tmp_path, monkeypatch):
     """Four refusals folded into one boolean told the owner the task "may have
     finished" while it ran in its own project room for another half hour, and the
-    receipt said only `target_not_steerable`. The room is what the owner needs."""
+    receipt said only `target_not_steerable`. The room is what the owner needs.
+    The refusing turn is itself a Project room (Main may address any root)."""
     from ouroboros.projects_registry import create_project
 
     create_project(tmp_path, "roomp", name="RoomP")
-    receipt, sent = _steer_refusal(tmp_path, monkeypatch, running={
+    issuing_room = int(create_project(tmp_path, "rooma", name="RoomA")["chat_id"])
+    receipt, sent = _steer_refusal(tmp_path, monkeypatch, chat_id=issuing_room, running={
         "target-1": {"task": {"id": "target-1", "chat_id": 777, "project_id": "roomp",
                               "title": "Deploy the docs"}},
     })

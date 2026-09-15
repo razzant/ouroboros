@@ -1,6 +1,5 @@
 """A cooperative stop interrupts only the unsent paid transport-repeat grant."""
 
-import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +10,7 @@ import pytest
 
 from ouroboros import cancel_intents, loop, loop_llm_call, loop_transport, owner_mailbox
 from ouroboros import usage_accounting as accounting
+from ouroboros.delegate_shared import delegate_result
 from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.task_results import write_task_result
 from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN, owner_stop_control_id
@@ -194,7 +194,7 @@ def test_wrapup_reason_survives_the_live_delegate_hold(tmp_path, monkeypatch, wi
 
     def hold(*args):
         request_wrapup()
-        return json.dumps({"status": "progress", "wake_events": [{"kind": "finalize_now"}]})
+        return delegate_result({"status": "progress", "wake_events": [{"kind": "finalize_now"}]})
 
     if during_hold:
         monkeypatch.setattr(delegate_hold, "supervised_wait", hold)

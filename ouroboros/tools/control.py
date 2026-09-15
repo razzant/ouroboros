@@ -108,12 +108,16 @@ _PROMOTE_CHAT_DESCRIPTION = (
     "('check/fix/extend the X skill/file'), ground-truth its existence with one cheap probe "
     "first (skills: list_skills; files: list_files) — memory of past work is not evidence "
     "the referent still exists. Always give a short, human-readable task `title`. To "
-    "CREATE A NEW NAMED PROJECT and do the work there (owner asked to 'create a "
-    "project called X and …'), set `project_name` — the project is created now "
-    "and this task runs inside it (my own judgment: the owner's phrasing is intent, "
-    "not a keyword trigger — I name the project from what they actually want it "
-    "called, and do not just answer or spawn a project-less task). `project_id` "
-    "scopes to an existing project. When this new task continues one specific "
+    "CREATE A NEW NAMED PROJECT and start the work there (owner asked to 'create a "
+    "project called X and …'), set `project_name` — the project is created now and "
+    "a NEW independent task starts in it; the task you are in stays where it is. To "
+    "move THIS task into a project use ensure_project_scope instead (my own judgment: "
+    "the owner's phrasing is intent, not a keyword trigger — I name the project from "
+    "what they actually want it called, and do not just answer or spawn a project-less "
+    "task). `project_id` starts the new task in an existing project. If your task "
+    "carries a planning obligation (Swarm force_plan) that no plan review has met, the "
+    "obligation moves to the new task and your own further work here is unplanned. "
+    "When this new task continues one specific "
     "completed result shown by the host (the Main manifest or Project last-result "
     "preview), pass its internal id as `predecessor_task_id`; pass an empty string for fresh work. "
     "`workspace_root` points at a working folder. A project-scoped task inherits "
@@ -155,7 +159,7 @@ def get_tools() -> List[ToolEntry]:
                 "properties": {
                     "objective": {"type": "string", "description": "What the task must accomplish."},
                     "title": {"type": "string", "description": "A short human-readable task name (<=80 chars, e.g. 'Tic-tac-toe game'). Reused as the project name if the owner later turns the task into a project — so coin a clean, concise one.", "default": ""},
-                    "project_name": {"type": "string", "description": "Set ONLY to create a brand-new NAMED project now and run this task inside it (e.g. 'airi research'). The display name; a filesystem id is derived from it.", "default": ""},
+                    "project_name": {"type": "string", "description": "Set ONLY to create a brand-new NAMED project now and start a NEW independent task in it (e.g. 'airi research'); to move THIS task into a project use ensure_project_scope. The display name; a filesystem id is derived from it.", "default": ""},
                     "expected_output": {"type": "string", "description": "What done looks like.", "default": ""},
                     "project_id": {"type": "string", "description": "Optional EXISTING project scope (filesystem-clean id).", "default": ""},
                     "workspace_root": {"type": "string", "description": "Optional absolute working-folder path (validated at admission as an ordinary folder or Git worktree root outside the Ouroboros repo/data). Git-specific operations require a Git worktree; ordinary file and process work is supported directly in a validated folder. When omitted for a project-scoped task, the project's registered working_dir is used by default.", "default": ""},
@@ -169,14 +173,17 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("ensure_project_scope", {
             "name": "ensure_project_scope",
             "description": (
-                "Create (or attach to) a named Ouroboros PROJECT and scope THE CURRENT running "
-                "task into it. Use this when you are ALREADY working a task and realize it should "
-                "be a named project (the owner asked to 'create a project called X', or the work "
-                "has grown into a real deliverable) — instead of a bare filesystem mkdir. Unlike "
-                "promote_chat_to_task (which creates a NEW task in a project), this binds the task "
-                "you are in: its journal_write and per-project knowledge start working, and its "
-                "live progress routes to the project thread. Idempotent for the same project; it "
-                "will NOT re-scope a task that already belongs to a different project."
+                "Create (or attach to) a named Ouroboros PROJECT and bind THE CURRENT running "
+                "task to it DURABLY. Use this when you are ALREADY working a task and realize it "
+                "should be a named project (the owner asked to 'create a project called X', or the "
+                "work has grown into a real deliverable) — instead of a bare filesystem mkdir. "
+                "Unlike promote_chat_to_task (which starts a NEW independent task in a project), "
+                "this binds the task you are in: its journal_write and per-project knowledge start "
+                "working, and its live progress routes to the project thread. The result states "
+                "the REAL outcome the host recorded — the durable binding, a typed refusal, or "
+                "unconfirmed — never a promise. Idempotent for the same project; a task already "
+                "bound to a different project stays there (a requested name is carried to that "
+                "project as a rename). A planning obligation stays with this task."
             ),
             "parameters": {
                 "type": "object",
@@ -223,11 +230,14 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("steer_task", {
             "name": "steer_task",
             "description": (
-                "Deliver a follow-up/steering message to a host-listed RUNNING/PENDING owner root — YOU "
-                "pick from current_chat.addressable_root_tasks in a Project room, or from "
-                "main_routing_manifest.root_tasks in Main (including Project-bound roots). Use it when a message continues or redirects a task already "
-                "in flight, instead of spawning a duplicate. The message reaches that task's mailbox and "
-                "it picks it up at its next step. If no running task clearly fits, use promote_chat_to_task "
+                "Deliver a message to any host-listed active independent root (a running or pending "
+                "root task; hidden/headless roots included) — YOU pick from current_chat.addressable_root_tasks, "
+                "main_routing_manifest.root_tasks, or the [INDEPENDENT_ROOTS] note. Use it when a message "
+                "continues or redirects a task already in flight, instead of spawning a duplicate. Who "
+                "you are decides how it lands: in an owner conversation turn it is delivered as the "
+                "owner's steering text; from a task it is written as a message from THIS task (never "
+                "owner text, no file attachments), and the result says written, not read. The task picks "
+                "it up at its next step. If no running task clearly fits, use promote_chat_to_task "
                 "(new work) or answer inline — never steer a task you are unsure about."
             ),
             "parameters": {"type": "object", "properties": {

@@ -35,6 +35,7 @@ from typing import Any, Dict, List
 
 from ouroboros import delegate_custody as custody
 from ouroboros.config import NETWORK_WAIT_BACKOFF_START_SEC
+from ouroboros.delegate_shared import delegate_payload
 from ouroboros.delegate_supervision import (
     UnknownHoldUnreadable,
     _control_wakes,
@@ -330,12 +331,15 @@ def hold_step(
             NETWORK_WAIT_BACKOFF_START_SEC * (2.0 ** min(cycles - 1, 4)),
             _HOLD_BACKOFF_CAP_SEC,
         ))
-    raw = supervised_wait(ctx, run_id)
+    # The supervising wait answers with the family's NATIVE result; its own JSON
+    # payload is what the hold judges. A shape this cannot read leaves the payload
+    # empty, which fails the acknowledgement below into the honest no-resend
+    # terminal — never an escape that would let the cleanup cancel a healthy leaf.
+    wake = supervised_wait(ctx, run_id)
     try:
-        payload = json.loads(raw) if isinstance(raw, str) else {}
-    except (TypeError, ValueError):
+        payload = delegate_payload(wake)
+    except (AttributeError, TypeError, ValueError):
         payload = {}
-    payload = payload if isinstance(payload, dict) else {}
     # Controls re-checked at the SOURCE too: an oversized wake render may drop
     # the control event from the rendered list, so also read the DURABLE
     # unrendered pending-wake payload (covers finalize_now, which the

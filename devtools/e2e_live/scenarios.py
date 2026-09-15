@@ -784,7 +784,9 @@ def sw1_stub_script(_clone: pathlib.Path) -> dict:
                 "goal": "Survey the repository with two parallel scouts.",
                 "plan": "Schedule two scouts, wait for both, summarize.",
                 "spec": {"deliverables": ["Two scout results summarized."],
-                         "acceptance_claims": ["Both scouts completed and were absorbed."]}}},
+                         "acceptance_claims": ["Both scouts completed and were absorbed."],
+                         # Required on every submitted spec (owner 9=A); a survey changes no file.
+                         "affected_paths": []}}},
             scout("A", "list the top-level directories"),
             scout("B", "list the test modules under tests/system_e2e"),
             wait_step,

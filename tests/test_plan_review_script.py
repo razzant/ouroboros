@@ -62,6 +62,8 @@ def test_run_plan_review_script_runs_the_engine_on_the_new_envelope(monkeypatch,
     spec_path.write_text(json.dumps({
         "in_scope": ["the accepted phase"], "acceptance_claims": ["tests green"],
         "invariants": ["no new settings"],
+        # An operator envelope carries the same required form as the agent's (owner 9=A).
+        "affected_paths": [],
     }), encoding="utf-8")
     evidence_file = workspace / "notes.txt"
     evidence_file.write_text("inspect the existing SSOT", encoding="utf-8")

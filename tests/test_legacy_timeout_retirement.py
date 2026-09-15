@@ -117,16 +117,28 @@ def test_no_runtime_or_settings_surface_still_names_either_key():
         "tests/test_rc_audit_fixture_suite.py",
         "tests/test_settings_honesty.py",
         "tests/test_heartbeat_presentation.py",
-        "docs/ARCHITECTURE.md",                 # the retirement is documented
+        # The retirement is documented in the Architecture book: the entrypoint
+        # is now a membership list, so the prose lives in the chapter that owns
+        # the frozen contracts. A book source is allowed as a whole class, so a
+        # later chapter split cannot silently turn a record of a removal into a
+        # live surface finding.
+        "docs/ARCHITECTURE.md",
         "ADOPTION_v7next.md",                   # ...and adopted: the D04 row names
                                                 # what it retired, same as the already
                                                 # skipped docs/v7next/ ledger. A record
                                                 # of a removal is not a live surface
     }
+    from ouroboros.reference_books import book_entrypoint_for
+
     offenders = []
     for pattern in ("*.py", "*.js", "*.json", "*.md", "*.html"):
         for path in REPO.rglob(pattern):
             rel = path.relative_to(REPO).as_posix()
+            # A reference book is allowed as a BOOK: whichever chapter of an
+            # allowlisted entrypoint carries the retirement record, the record
+            # is still documentation and not a live surface.
+            if book_entrypoint_for(rel) in allowed:
+                continue
             if rel in allowed or rel.startswith(("venv", "node_modules", "docs/v7next/", "docs/archive/")):
                 continue
             try:

@@ -13,6 +13,7 @@ SYSTEM, BIBLE and the common identity/narrative core remain caller-owned.
 
 from __future__ import annotations
 
+import pathlib
 from typing import Any, List
 
 from ouroboros.reference_books import ReferenceBook, compose_book, load_reference_book, overview_book
@@ -36,7 +37,7 @@ def _read_doc(env: Any, rel_path: str) -> str:
         return ""
 
 
-def generate_doc_nav_map(text: str, *, title: str, rel_path: str) -> str:
+def generate_doc_nav_map(text: str, *, title: str, rel_path: str, instructions: bool = True) -> str:
     """Build a compact, fence-aware navigation map of a markdown doc.
 
     Lists every ``##`` through ``####`` heading with its inclusive line range
@@ -63,16 +64,16 @@ def generate_doc_nav_map(text: str, *, title: str, rel_path: str) -> str:
         elif line.startswith("#### "):
             headings.append((4, line[5:].strip(), i))
 
-    out = [
-        f"## {title} (navigation map)",
-        "",
-        f"Full text is NOT inlined to keep the working context window fit. Read any "
-        f"section on demand with `read_file(root=\"system_repo\", path=\"{rel_path}\", "
-        f"start_line=A, max_lines=N)` (untruncated). Ranges are inclusive; a "
-        f"parent includes its complete descendant group, and `max_lines=B-A+1` "
-        f"for `lines A-B`. Sections:",
-        "",
-    ]
+    out = [f"## {title} (navigation map)", ""]
+    if instructions:
+        out += [
+            f"Full text is NOT inlined to keep the working context window fit. Read any "
+            f"section on demand with `read_file(root=\"system_repo\", path=\"{rel_path}\", "
+            f"start_line=A, max_lines=N)` (untruncated). Ranges are inclusive; a "
+            f"parent includes its complete descendant group, and `max_lines=B-A+1` "
+            f"for `lines A-B`. Sections:",
+            "",
+        ]
     if not headings:
         out.append(f"- (no `##`/`###`/`####` headings; read `{rel_path}` directly)")
     for idx, (level, htitle, lineno) in enumerate(headings):
@@ -84,6 +85,39 @@ def generate_doc_nav_map(text: str, *, title: str, rel_path: str) -> str:
         indent = "  " * (level - 2)
         out.append(f"{indent}- {htitle} — lines {lineno}-{end}")
     return "\n".join(out)
+
+
+def book_navigation(book: ReferenceBook) -> str:
+    """The compact, CHAPTER-ADDRESSED view of one reference book.
+
+    The authored introductions are the overview (there is no second editable
+    summary corpus), and beside each one sits that chapter's own heading index
+    with line ranges into the PHYSICAL chapter file. A composed-book line
+    number is never a `read_file` locator: the composition exists only in the
+    prompt, so an offset taken from it would address the wrong bytes of the
+    entrypoint. The read instruction is stated once, by `overview_book`, rather
+    than repeated under every chapter.
+
+    The one place a source's SHAPE still decides anything: an exact historical
+    revision is one physical file, and the single-source mapper is the right
+    map for it. That is a fact about the revision, not a migration switch —
+    callers declare the VIEW they want and both shapes answer.
+    """
+    if book.legacy:
+        return generate_doc_nav_map(
+            book.entrypoint.text,
+            title=pathlib.PurePosixPath(book.entrypoint.source_path).name,
+            rel_path=book.entrypoint.source_path,
+        )
+    return overview_book(
+        book,
+        lambda chapter: generate_doc_nav_map(
+            chapter.text,
+            title=chapter.headings[0].title if chapter.headings else chapter.source_path,
+            rel_path=chapter.source_path,
+            instructions=False,
+        ),
+    ).text
 
 
 def architecture_context_section(
@@ -100,8 +134,11 @@ def architecture_context_section(
         except (OSError, ValueError) as exc:
             return f"Reference book source unavailable: docs/ARCHITECTURE.md. {exc}. Full context is not established."
     if book is not None:
-        if context_mode in {"low", "nano"} and not book.legacy:
-            return overview_book(book).text
+        # View intent, not a migration flag: a compact mode asks for the
+        # navigable overview and a full mode asks for the composition. Both
+        # answers are defined for a legacy revision too.
+        if context_mode in {"low", "nano"}:
+            return book_navigation(book)
         if text is None:
             text = compose_book(book)
     if text is None:
@@ -158,7 +195,7 @@ def reference_doc_sections(
         dev_text = compose_book(development_book)
     if dev_text.strip():
         if context_mode in {"low", "nano"}:
-            parts.append(overview_book(development_book).text if development_book and not development_book.legacy
+            parts.append(book_navigation(development_book) if development_book is not None
                          else generate_doc_nav_map(dev_text, title="DEVELOPMENT.md", rel_path="docs/DEVELOPMENT.md"))
         elif include_development:
             parts.append("## DEVELOPMENT.md\n\n" + dev_text)

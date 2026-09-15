@@ -266,7 +266,7 @@ def test_source_answer_is_verified_before_delivery_and_replayed(tmp_path, monkey
         ctx, entry.run_id, "interaction-1",
         [{"question_id": "q1", "free_text": "Here is the requested range."}],
         first,
-    ))
+    ).text)
     assert out["status"] == "delivered"
     assert out["work_order_verification"]["status"] == "cannot_verify"
     assert "[SOURCE_RESPONSE]" in calls[0][2][0]["freeText"]
@@ -275,7 +275,7 @@ def test_source_answer_is_verified_before_delivery_and_replayed(tmp_path, monkey
         ctx, entry.run_id, "interaction-2",
         [{"question_id": "q1", "free_text": "The remaining range."}],
         second,
-    ))
+    ).text)
     assert out["work_order_verification"]["status"] == "complete"
     custody = __import__("ouroboros.delegate_custody", fromlist=["replay"])
     custody._CUSTODY.clear()
@@ -316,14 +316,14 @@ def test_source_receipt_retries_after_delivery_when_first_append_fails(tmp_path,
     first = json.loads(delegate._delegate_answer(
         ctx, entry.run_id, "interaction-retry",
         [{"question_id": "q1", "free_text": "range"}], response,
-    ))
+    ).text)
     assert first["status"] == "delivered"
     assert first["work_order_verification"]["status"] == "cannot_verify"
     custody._CUSTODY.clear()
     second = json.loads(delegate._delegate_answer(
         ctx, entry.run_id, "interaction-retry",
         [{"question_id": "q1", "free_text": "range"}], response,
-    ))
+    ).text)
     assert second["status"] == "already_resolved"
     assert next(append_results, None) is None
 
@@ -353,7 +353,7 @@ def test_already_resolved_without_prior_delivery_keeps_source_unverified(tmp_pat
     out = json.loads(delegate._delegate_answer(
         ctx, entry.run_id, "interaction-timeout",
         [{"question_id": "q1", "free_text": "range"}], response,
-    ))
+    ).text)
     assert calls == [True]
     assert out["status"] == "already_resolved"
     assert out["work_order_verification"]["status"] == "cannot_verify"
@@ -383,13 +383,13 @@ def test_invalid_source_answer_never_posts_to_engine(tmp_path, monkeypatch):
     bad["complete_sha256"] = "0" * 64
     out = json.loads(delegate._delegate_answer(
         ctx, entry.run_id, "interaction-1", [{"question_id": "q1"}], bad,
-    ))
+    ).text)
     assert out["reason"] == "source_response_invalid"
     assert calls == []
     fractional = _source_response(request, full_text[:20], 0.0, 20)
     out = json.loads(delegate._delegate_answer(
         ctx, entry.run_id, "interaction-1", [{"question_id": "q1"}], fractional,
-    ))
+    ).text)
     assert out["reason"] == "source_response_invalid"
     assert calls == []
 

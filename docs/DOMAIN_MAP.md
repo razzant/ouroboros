@@ -8,14 +8,14 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 
 | domain | name | modules | proposed |
 |---|---|---:|---:|
-| D01 | Agent core & main loop | 31 | 0 |
+| D01 | Agent core & main loop | 32 | 0 |
 | D02 | LLM client, routing & providers | 37 | 0 |
 | D03 | Context assembly, fit & compaction | 11 | 0 |
 | D04 | Tool execution: registry, access & typed results | 20 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 28 | 0 |
 | D06 | Review stack | 66 | 0 |
 | D07 | Delegation, subagents & Claudexor | 50 | 0 |
-| D08 | Supervisor: queue, workers, events & runtime control | 44 | 0 |
+| D08 | Supervisor: queue, workers, events & runtime control | 46 | 0 |
 | D09 | Cancellation, owner control & process custody | 13 | 0 |
 | D10 | Git, update & release machinery | 28 | 0 |
 | D11 | Gateway, server & Web UI | 54 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 14 | 0 |
 | D19 | Frozen contracts (ABI) | 10 | 0 |
 | D20 | Presence | 9 | 0 |
-| **total** | | **543** | **0** |
+| **total** | | **546** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -201,6 +201,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/outcomes.py`
 - `ouroboros/owner_mailbox.py`
 - `ouroboros/owner_wait.py`
+- `ouroboros/peer_roster.py`
 - `ouroboros/post_task_checkpoint.py`
 - `ouroboros/post_task_synthesis.py`
 - `ouroboros/synthesis_cost_text.py`
@@ -450,6 +451,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `supervisor/__init__.py`
 - `supervisor/active_activity.py`
 - `supervisor/cognitive_operations.py`
+- `supervisor/direct_roots.py`
 - `supervisor/event_taxonomy.py`
 - `supervisor/events.py`
 - `supervisor/events_budget.py`
@@ -464,6 +466,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `supervisor/events_worker_reports.py`
 - `supervisor/log_addressing.py`
 - `supervisor/message_bus.py`
+- `supervisor/plan_obligation.py`
 - `supervisor/queue.py`
 - `supervisor/queue_schedules.py`
 - `supervisor/queue_snapshot.py`

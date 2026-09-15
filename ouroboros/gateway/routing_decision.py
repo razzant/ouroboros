@@ -94,17 +94,15 @@ def handle_routing_decision(
     if not client_message_id or not token:
         return 400, {"ok": False, "error": "malformed_decision_id",
                      "decision_id": decision_id}
-    from ouroboros.project_dialogue import (
-        append_chat_annotation,
-        chat_annotation_receipt,
-        latest_chat_annotations,
-    )
+    from ouroboros.project_dialogue import append_chat_annotation, latest_chat_annotations
 
-    receipt = chat_annotation_receipt(drive_root, client_message_id, token)
+    # The card is live only while its token is the message's LATEST act:
+    # receipts are kept per token, but a newer routing attempt on the same
+    # message supersedes the picker, so the click reads the latest row and
+    # settles instead of retrying when the token no longer matches.
+    latest = latest_chat_annotations(drive_root).get(client_message_id, {})
+    receipt = latest if str(latest.get("routing_token") or "") == token else {}
     if not receipt:
-        # The refusal row was superseded (a newer routing attempt re-minted
-        # the token) or never existed — the card settles instead of retrying.
-        latest = latest_chat_annotations(drive_root).get(client_message_id, {})
         return 409, {"ok": False, "error": "decision_superseded",
                      "decision_id": decision_id,
                      "state": "superseded",
@@ -196,10 +194,10 @@ def handle_routing_decision(
             "message": origin_text,
             "chat_id": chat_id,
             "client_message_id": client_message_id,
-            # The option list was host-built for this exact message's lane and
-            # the owner picked the row explicitly — global root addressing is
-            # the validated intent, not a widening.
-            "allow_global_root": True,
+            # The owner clicked: an owner turn by construction. The option list
+            # was host-built for this exact message's lane, and the room veto
+            # reads that lane from the origin chat (Main sees every root).
+            "issuer": {"kind": "owner_turn"},
             "attachment_uploads": attachment_uploads,
             **provenance,
             "ts": utc_now_iso(),

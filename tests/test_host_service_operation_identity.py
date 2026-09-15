@@ -126,7 +126,6 @@ def test_ordinary_main_and_transport_refusals_keep_their_original_envelope(monke
 @pytest.mark.parametrize("host_operation", [False, True])
 def test_chat_crash_preserves_only_the_host_accepted_operation(tmp_path, monkeypatch, host_operation):
     from queue import SimpleQueue
-    from ouroboros import project_naming
     from supervisor import worker_chat_lane, workers
 
     class CrashingAgent:
@@ -140,7 +139,6 @@ def test_chat_crash_preserves_only_the_host_accepted_operation(tmp_path, monkeyp
     monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(workers, "get_event_q", SimpleQueue)
     monkeypatch.setattr(workers, "send_with_budget", message_bus.send_with_budget)
-    monkeypatch.setattr(project_naming, "spawn_proactive_namer", lambda *a, **kw: None)
     client = _client(tmp_path, bridge)
     assert client.post("/chat/inject", headers=_headers(), json={
         "chat_id": CHAT, "client_message_id": MSG, "text": "do work",

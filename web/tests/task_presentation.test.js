@@ -79,7 +79,7 @@ test('typed terminal status drives an error phase on live and replay cards', () 
     assert.equal(taskDoneIsTerminal(failed), true);
     assert.match(
         chatSource,
-        /finishLiveCard\(taskId, msg\.task_terminal_status \? taskTerminalPhase\(msg\) : replayTerminalPhase\(taskState, record\)\);/,
+        /finishLiveCard\(taskId, msg\.task_terminal_status \? taskTerminalPhase\(msg\) : replayTerminalPhase\(record\)\);/,
     );
     assert.match(chatSource, /appendTaskSummaryToLiveCard\(msg\) \|\| changed;/);
 });
@@ -279,15 +279,15 @@ test('history replay keeps open summaries live and terminal fallbacks factual', 
     assert.match(summary, /record\.finalizingHold = true/);
     assert.match(summary, /if \(finalizing\) return changed;\s*changed = finishLiveCard/);
 
-    assert.equal(replayTerminalPhase({}, { finished: false, phaseEl: {
+    assert.equal(replayTerminalPhase({ finished: false, phaseEl: {
         dataset: { phase: 'working' },
     } }), 'done');
-    assert.equal(replayTerminalPhase({}, { finished: true, phaseEl: {
+    assert.equal(replayTerminalPhase({ finished: true, phaseEl: {
         dataset: { phase: 'error' },
     } }), 'error');
-    assert.equal(replayTerminalPhase({ completedPhase: 'warn' }, {}), 'warn');
+    assert.equal(replayTerminalPhase({}), 'done');
     assert.equal(
-        [...chatSource.matchAll(/finishLiveCard\(taskId, msg\.task_terminal_status \? taskTerminalPhase\(msg\) : replayTerminalPhase\(taskState, record\)\);/g)].length,
+        [...chatSource.matchAll(/finishLiveCard\(taskId, msg\.task_terminal_status \? taskTerminalPhase\(msg\) : replayTerminalPhase\(record\)\);/g)].length,
         2,
     );
     assert.doesNotMatch(
@@ -299,7 +299,7 @@ test('history replay keeps open summaries live and terminal fallbacks factual', 
         chatSource.indexOf("if (msg.system_type === 'task_summary')"),
         chatSource.indexOf("if (explicitTaskId && subagentChildParents.has", chatSource.indexOf("if (msg.system_type === 'task_summary')")),
     );
-    assert.match(wsSummary, /if \(!finalizing\) markAssistantReply\(explicitTaskId\);/);
+    assert.match(wsSummary, /const changed = appendTaskSummaryToLiveCard\(msg\);/);
 });
 
 test('phase chips are contextual polite status regions without repeat announcements', () => {

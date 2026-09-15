@@ -104,12 +104,16 @@ def test_duplicate_named_sections_are_ambiguous_instead_of_first_match():
         read_book_section(book, "Exact section")
 
 
-def test_current_reference_books_pass_the_explicit_transition_policy():
+def test_current_reference_books_pass_the_final_chaptered_admission():
+    """The production caller of the validator: the tracked tree, chaptered.
+
+    This is the docs-lane check item 8 asks for -- a missing chapter, an
+    unlisted one, or a chapter whose authored introduction was lost fails here
+    rather than at the next review that assembles a book.
+    """
     root = pathlib.Path(__file__).resolve().parents[1]
     tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
-    # The physical split switches this same CI/preflight requirement to True;
-    # current monolith compatibility must not select that policy from filenames.
-    assert validate_reference_books(root, tracked_paths=tracked, require_chaptered=False) == ()
+    assert validate_reference_books(root, tracked_paths=tracked, require_chaptered=True) == ()
 
 
 def test_docs_sync_reads_full_chapters_and_never_loses_residue_between_files(monkeypatch):

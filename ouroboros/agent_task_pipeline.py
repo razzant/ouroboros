@@ -686,6 +686,8 @@ def emit_task_results(
         post_usage = dict(usage or {})
         post_usage["outcome_axes"] = outcome_axes
         post_usage["reason_code"] = reason_code
+        if _typed_routing_action:
+            post_usage["typed_routing_action"] = _typed_routing_action
         from ouroboros.project_facts import resolve_project_id
 
         _project_scoped = bool(resolve_project_id(task))

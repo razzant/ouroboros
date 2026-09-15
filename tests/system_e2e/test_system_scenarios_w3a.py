@@ -253,6 +253,8 @@ S11_GOAL = "Write the w3a plan-review smoke note."
 S11_SPEC_V1 = {
     "in_scope": ["w3a plan-review smoke"],
     "acceptance_claims": ["The plan-review smoke completes with a recorded chronicle."],
+    # Required on every submitted spec (owner 9=A); the smoke note changes no repository file.
+    "affected_paths": [],
 }
 S11_SPEC_V2 = {
     **S11_SPEC_V1,

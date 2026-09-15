@@ -100,7 +100,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         if (record && !record.finished) {
             record.modelWaiting = waiting;
             record.root.dataset.modelWaiting = waiting ? '1' : '0';
-            if (waiting && !record.suggestedName && !record.lastHumanHeadline) record.titleEl.textContent = taskId === 'bg-consciousness' ? 'Background thinking' : 'Task';
+            if (waiting && !record.suggestedName && !record.lastHumanHeadline && !record.direct) record.titleEl.textContent = taskId === 'bg-consciousness' ? 'Background thinking' : 'Task';
             const phase = desiredLiveCardPhase(record);
             setLiveCardPhase(record, record.backgroundPaused ? 'model_wait' : phase.phase,
                 record.backgroundPaused ? 'Paused for foreground task' : phase.text, phase.className);

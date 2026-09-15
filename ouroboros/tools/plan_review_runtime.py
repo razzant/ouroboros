@@ -100,6 +100,19 @@ def _governance_text(system_root: pathlib.Path, rel_path: str) -> str:
     return "" if text.startswith("[⚠️ OMISSION") else text
 
 
+def _architecture_navigation(system_root: pathlib.Path, architecture_text: str) -> str:
+    """The Architecture book as a chapter-addressed map, or the supplied text."""
+    from ouroboros.context_layout import book_navigation, generate_doc_nav_map
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, load_reference_book
+
+    try:
+        return book_navigation(load_reference_book(system_root, "architecture"))
+    except (OSError, ValueError):
+        return generate_doc_nav_map(
+            architecture_text, title="ARCHITECTURE.md",
+            rel_path=BOOK_ENTRYPOINTS["architecture"])
+
+
 def _session_task_text(system_prompt: str, user_content: str, session_root: str) -> str:
     return (
         "RETRIEVING REVIEWER (agent session): you run read-only inside "
@@ -141,8 +154,10 @@ def build_plan_review_packet(
         if bible_text.strip():
             bible_nav_map = generate_doc_nav_map(bible_text, title="BIBLE.md", rel_path="BIBLE.md")
         if architecture_text.strip():
-            architecture_nav_map = generate_doc_nav_map(
-                architecture_text, title="ARCHITECTURE.md", rel_path="docs/ARCHITECTURE.md")
+            # `architecture_text` is the COMPOSED book (the constitutional pack
+            # needs it whole); the pointer view must address each physical
+            # chapter instead of offsets into the membership page.
+            architecture_nav_map = _architecture_navigation(system_root, architecture_text)
 
     def system(by_retrieval: bool) -> str:
         return build_plan_review_system_prompt(

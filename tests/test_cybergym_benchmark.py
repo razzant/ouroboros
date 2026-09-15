@@ -13,6 +13,7 @@ from pathlib import Path
 from devtools.benchmarks.common import launcher_audit
 from ouroboros.configured_subagents import parse_configured_subagents
 from ouroboros.reviewer_slot_config import parse_reviewer_slots
+from tests._governance_docs_shared import architecture_text
 
 REPO = Path(__file__).resolve().parents[1]
 PROFILE = REPO / "devtools" / "benchmarks" / "cybergym" / "settings_base.json"
@@ -142,7 +143,7 @@ def test_benchmark_inventory_points_to_cybergym_docs():
     common_readme = (REPO / "devtools" / "benchmarks" / "README.md").read_text(
         encoding="utf-8"
     )
-    architecture = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    architecture = architecture_text(REPO)
     assert "cybergym/" in common_readme
     assert "devtools/benchmarks/cybergym/" in architecture
 

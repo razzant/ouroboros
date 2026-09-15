@@ -1,8 +1,11 @@
 """Two reference books composed from one explicit Markdown membership list.
 
-Legacy monoliths remain a single physical source during the coordinated migration.
-Chapter bytes are never copied to a second editable corpus. Full composition has
-no runtime paths or revision stamps; selected views carry physical refs separately.
+Each entrypoint carries its H1, one authored introduction and the ordered
+`## Chapters` list; each member carries its own H1, one authored introduction
+and its subject body. An exact historical revision that predates the split is
+still read as the one physical source it was. Chapter bytes are never copied to
+a second editable corpus, full composition has no runtime paths or revision
+stamps, and selected views carry physical refs separately.
 """
 
 from __future__ import annotations
@@ -20,6 +23,35 @@ BOOK_ENTRYPOINTS = {
     "architecture": "docs/ARCHITECTURE.md",
     "development": "docs/DEVELOPMENT.md",
 }
+
+
+def book_path_role(path: str) -> str:
+    """``"entrypoint"``, ``"chapter"`` or ``""`` for a repository path.
+
+    Pure path shape and no I/O, so every consumer that must treat a relocated
+    chapter exactly as it treated the monolith it came out of — canonical
+    requiredness, untruncated reads, pack duplicate suppression, the
+    new-module documentation gate — asks ONE question instead of carrying its
+    own copy of the chapter population.
+    """
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    if normalized in set(BOOK_ENTRYPOINTS.values()):
+        return "entrypoint"
+    for book_id in BOOK_ENTRYPOINTS:
+        if normalized.startswith(f"docs/{book_id}/") and normalized.endswith(".md"):
+            return "chapter"
+    return ""
+
+
+def book_entrypoint_for(path: str) -> str:
+    """The entrypoint of the book this path belongs to, else ``""``."""
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    role = book_path_role(normalized)
+    if role == "entrypoint":
+        return normalized
+    if role == "chapter":
+        return BOOK_ENTRYPOINTS[normalized.split("/")[1]]
+    return ""
 
 
 @dataclass(frozen=True)
@@ -56,14 +88,27 @@ def _whole(source: MarkdownSource) -> SourceRange:
 
 
 def _preamble(source: MarkdownSource) -> SourceRange:
+    """The authored introduction: the FIRST paragraph after a source's H1.
+
+    It must open the chapter — a source whose H1 is followed straight by a
+    subsection has no introduction and is refused, which is the property that
+    keeps an overview from quoting body prose as if someone had written it for
+    that purpose. What it deliberately does NOT require is that the
+    introduction be the only paragraph before the first subsection: a chapter
+    carries its relocated section body at the heading level that body already
+    had, and most sections open with prose, so demanding a single paragraph
+    would force either a rewritten heading level or an invented sub-heading.
+    The overview says in its own words that it holds introductions, not
+    complete chapters, and carries each chapter's physical path beside them.
+    """
     first = source.headings[0] if source.headings else None
     if first is None or first.level != 1 or not first.title:
         raise ValueError(f"{source.source_path}: chapter needs a nonempty H1")
-    stop = next((h.span.start_byte for h in source.headings[1:] if h.level <= 2), len(source.raw))
-    paragraphs = [p for p in source.paragraphs if first.span.end_byte <= p.start_byte < stop]
-    if len(paragraphs) != 1 or not source.text_at(paragraphs[0]).strip():
-        raise ValueError(f"{source.source_path}: chapter needs one authored introductory paragraph before its first H2")
-    return paragraphs[0]
+    stop = next((h.span.start_byte for h in source.headings[1:]), len(source.raw))
+    intro = next((p for p in source.paragraphs if first.span.end_byte <= p.start_byte < stop), None)
+    if intro is None or not source.text_at(intro).strip():
+        raise ValueError(f"{source.source_path}: chapter needs an authored introductory paragraph under its H1")
+    return intro
 
 
 def _member_paths(entrypoint: MarkdownSource, book_id: str) -> tuple[str, ...] | None:
@@ -184,7 +229,17 @@ def compose_book(book: ReferenceBook) -> str:
     return "\n\n".join(source.text for source in (book.entrypoint, *book.chapters))
 
 
-def overview_book(book: ReferenceBook) -> BookView:
+def overview_book(
+    book: ReferenceBook,
+    chapter_navigation: Callable[[MarkdownSource], str] | None = None,
+) -> BookView:
+    """The compact view: authored introductions plus physical source addresses.
+
+    ``chapter_navigation`` is INJECTED rather than imported, because the one
+    heading mapper lives in the doc-layout owner above this module. A compact
+    view that lost the subsection index the monolith's map carried would be a
+    capability regression for every reader that navigates before reading.
+    """
     read_instruction = (
         'Full chapter text is available through `read_file(root="system_repo", path=...)`; '
         'use the physical Source path listed below, with `start_line` and `max_lines` '
@@ -203,6 +258,9 @@ def overview_book(book: ReferenceBook) -> BookView:
         preamble = _preamble(chapter)
         rows.extend((f"# {chapter.headings[0].title}",
                      f"Source: `{chapter.source_path}`", chapter.text_at(preamble)))
+        navigation = chapter_navigation(chapter) if chapter_navigation is not None else ""
+        if navigation.strip():
+            rows.append(navigation)
         refs.extend((_ref(book, chapter, chapter.headings[0].span), _ref(book, chapter, preamble)))
     return BookView("\n\n".join(rows), tuple(refs), False)
 

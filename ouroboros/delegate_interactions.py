@@ -20,9 +20,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.delegate_output import _PAYLOAD_ENVELOPE_HEADROOM, _stage_full_output
-from ouroboros.delegate_shared import _emit, _fail, _owned_run
+from ouroboros.delegate_shared import AGENT_FAULT_CODE, SUBSTRATE_REFUSAL_CODE, _emit, _fail, _owned_run, delegate_result
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import truncate_within_limit
 
 log = logging.getLogger(__name__)
@@ -258,7 +259,7 @@ _ANSWER_NOTES = {
 
 def _normalized_answers(
     answers: Any, source_response: Optional[Dict[str, Any]] = None,
-) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[ToolResult]]:
     """The wire-shaped answer rows, or a typed argument refusal.
 
     Model-facing snake_case in, engine camelCase out — one translation, here.
@@ -329,12 +330,12 @@ def _normalized_answers(
             "selectedLabels": list(labels),
             "freeText": encoded_free_text,
         })
-    return wire, ""
+    return wire, None
 
 
 def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
                              exc: Exception,
-                             seconds_left: Optional[float] = None) -> str:
+                             seconds_left: Optional[float] = None) -> ToolResult:
     """The typed outcome for a transport that died mid-answer: re-read, never re-guess.
 
     An ambiguous failure means the answer MAY have landed. The one forbidden move
@@ -375,14 +376,14 @@ def _answer_delivery_unknown(gateway: Any, run_id: str, interaction_id: str,
         hint = ("the run detail could not be re-read either. Re-check with "
                 "delegate_wait before anything else, and NEVER post a different "
                 "answer for this interaction.")
-    return json.dumps({
+    return delegate_result({
         "status": "delivery_unknown",
         "run_id": run_id,
         "interaction_id": interaction_id,
         "still_pending": still_pending,
         "transport_error": f"{getattr(exc, 'code', type(exc).__name__)}: {exc}",
         "note": f"The answer POST did not come back typed; {hint}",
-    }, ensure_ascii=False, indent=2)
+    })
 
 
 # The 4xx codes that are PAYLOAD-SEMANTIC — a verdict about these answer bytes
@@ -406,7 +407,7 @@ _ANSWER_HANDSHAKE_MAX_SEC = 30.0
 def _delegate_answer(
     ctx: ToolContext, run_id: str, interaction_id: str, answers: Any,
     source_response: Optional[Dict[str, Any]] = None,
-) -> str:
+) -> ToolResult:
     """Answer a delegated run's pending interactive question (B4, owner 7=A).
 
     Custody-gated like cancel: the bearer token reaches every run, so only the
@@ -496,8 +497,9 @@ def _delegate_answer(
                 # schedulable). The answer definitely did NOT land: the typed
                 # refusal happened before delivery, so the question is still
                 # pending and the SAME answers stay valid.
-                return json.dumps({
+                return delegate_result({
                     "status": "subscription_window_exhausted",
+                    "ok": False, "host_code": SUBSTRATE_REFUSAL_CODE,
                     "run_id": rid, "interaction_id": iid,
                     "accepted": False,
                     "reset_at": str(getattr(exc, "reset_at", "") or "") or None,
@@ -508,7 +510,7 @@ def _delegate_answer(
                         "and the question is still pending. Retry the SAME "
                         "answers after reset_at, or keep waiting with "
                         "delegate_wait meanwhile."),
-                }, ensure_ascii=False, indent=2)
+                })
             if status_code == 501:
                 return _fail(
                     "delegate_answer", "interaction_answers_unsupported",
@@ -520,11 +522,12 @@ def _delegate_answer(
             if status_code == 404:
                 # A bodyless 404 is the daemon's own "no such run" — a definite
                 # absence, not an ambiguous transport.
-                return json.dumps({
-                    "status": "not_found", "run_id": rid, "interaction_id": iid,
+                return delegate_result({
+                    "status": "not_found", "ok": False, "host_code": SUBSTRATE_REFUSAL_CODE,
+                    "run_id": rid, "interaction_id": iid,
                     "accepted": False, "detail": str(exc),
                     "note": _ANSWER_NOTES["not_found"],
-                }, ensure_ascii=False, indent=2)
+                })
             if status_code in _REJECTED_STATUS_CODES:
                 # F3 (races #1), narrowed by R2-1: only a PAYLOAD-SEMANTIC 4xx
                 # is the engine ANSWERING about these bytes — relayed in the
@@ -533,13 +536,16 @@ def _delegate_answer(
                 # auth/rate/timeout 4xx says nothing about the rows and falls
                 # through to delivery_unknown below, whose re-read correctly
                 # advises retrying the SAME answers while the row is pending.
-                return json.dumps({
-                    "status": "rejected", "run_id": rid, "interaction_id": iid,
+                return delegate_result({
+                    # The engine answered about these bytes: a definite refusal of
+                    # the model's own rows, recorded as the agent fault it is.
+                    "status": "rejected", "ok": False, "host_code": AGENT_FAULT_CODE,
+                    "run_id": rid, "interaction_id": iid,
                     "accepted": False, "detail": str(exc),
                     "note": _ANSWER_NOTES["rejected"] + (
                         f" This was a definite engine refusal (HTTP {status_code}): "
                         "fix the rows; do not re-post the same bytes."),
-                }, ensure_ascii=False, indent=2)
+                })
             return _answer_delivery_unknown(gateway, rid, iid, exc,
                                             seconds_left=_left())
         status = str(body.get("status") or "")
@@ -602,9 +608,12 @@ def _delegate_answer(
             "detail": str(body.get("message") or ""),
             "note": _ANSWER_NOTES.get(status, ""),
         }
+        if status == "rejected":
+            # The daemon's typed refusal of these rows: an agent fault, recorded.
+            result.update({"ok": False, "host_code": AGENT_FAULT_CODE})
         if source_receipt is not None:
             result["work_order_verification"] = source_receipt
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return delegate_result(result)
     except Exception as exc:  # noqa: BLE001 — F7: never a raw traceback to the model
         # F7 (gemini #3): an unexpected failure around the gateway call or the
         # body handling is an AMBIGUOUS delivery, typed — the POST may or may

@@ -271,7 +271,7 @@ def test_tool_snapshot_precheck_skips_source_side_effects(monkeypatch, tmp_path)
         source="/tmp/must-not-attach",
         predecessor_task_id="",
     )
-    assert out.startswith("PROMOTE_REJECTED:")
+    assert out.startswith("⚠️ PROMOTE_REJECTED:")
     assert "worker_crash_storm" in out
     assert ctx.pending_events == []
 
@@ -554,7 +554,7 @@ def test_stale_live_transport_returns_unconfirmed_not_ok(monkeypatch, tmp_path):
         out = control._promote_chat_to_task(ctx, "Never drained", predecessor_task_id="")
         event = stale_queue.get(timeout=10)
         assert event["type"] == "promote_chat_to_task"
-        assert out.startswith("PROMOTE_UNCONFIRMED:")
+        assert out.startswith("⚠️ PROMOTE_UNCONFIRMED:")
         assert "Do not report this task as created" in out
         assert not (tmp_path / "task_results" / f"{event['task_id']}.json").exists()
     finally:

@@ -90,7 +90,7 @@ def _start_with_contract(
     payload = json.loads(subagent_runtime.exact_start(ctx, prompt, {
         "snapshot": snapshot,
         "compiled_work_order": compiled_work_order,
-    }))
+    }).text)
     delegate._CUSTODY.clear()
     assert payload["status"] == "started", payload
     return seen["request"]

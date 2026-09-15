@@ -7,6 +7,7 @@ import re
 from types import SimpleNamespace
 
 import pytest
+from tests._governance_docs_shared import governance_doc_text
 
 
 @pytest.fixture(autouse=True)
@@ -515,7 +516,7 @@ def test_delegate_start_recipes_match_the_fresh_start_schema():
     # audit removed. Any recipe the prompt GAINS must still be schema-valid.
     tolerant = {"docs/CHECKLISTS.md", "prompts/SYSTEM.md"}
     for relative in (*recipe_paths, "docs/CHECKLISTS.md"):
-        text = (repo / relative).read_text(encoding="utf-8")
+        text = governance_doc_text(relative, repo)
         recipes = re.findall(r"\bdelegate_start\(([^)]*)\)", text, flags=re.DOTALL)
         assert recipes or relative in tolerant, (
             f"expected at least one delegate_start recipe in {relative}"

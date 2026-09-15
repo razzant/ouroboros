@@ -278,7 +278,7 @@ def test_delivered_answer_relays_typed_and_writes_the_custody_row(tmp_path, monk
     _own_run(delegate)
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "selected_labels": ["8080"]},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "delivered" and out["accepted"] is True
     assert "delegate_wait" in out["note"]
@@ -298,7 +298,7 @@ def test_already_resolved_tells_the_nanny_not_to_repost(tmp_path, monkeypatch):
     _own_run(delegate)
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "9090"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "already_resolved"
     assert "do NOT re-post" in out["note"]
@@ -316,7 +316,7 @@ def test_ambiguous_transport_becomes_delivery_unknown_with_a_reread(tmp_path, mo
     _own_run(delegate)
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "9090"},
-    ]))
+    ]).text)
     assert out["status"] == "delivery_unknown"
     assert out["still_pending"] is True
     assert "SAME answers" in out["note"]
@@ -327,7 +327,7 @@ def test_ambiguous_transport_becomes_delivery_unknown_with_a_reread(tmp_path, mo
                  detail_pending=[])
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "9090"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "delivery_unknown"
     assert out["still_pending"] is False
@@ -341,10 +341,10 @@ def test_answers_are_validated_and_custody_gated(tmp_path, monkeypatch):
     ctx = _answer_ctx(tmp_path)
     _own_run(delegate)
 
-    out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", []))
+    out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", []).text)
     assert out["status"] == "refused" and out["reason"] == "answers_required"
 
-    out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [{"free_text": "x"}]))
+    out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [{"free_text": "x"}]).text)
     assert out["status"] == "refused" and out["reason"] == "answer_row_invalid"
 
     # Another task's run: custody refuses before any daemon call.
@@ -354,7 +354,7 @@ def test_answers_are_validated_and_custody_gated(tmp_path, monkeypatch):
     )
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "refused" and out["reason"] == "run_not_owned"
 
@@ -369,7 +369,7 @@ def test_unsupported_engine_build_is_a_typed_refusal(tmp_path, monkeypatch):
     _own_run(delegate)
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "refused"
     assert out["reason"] == "interaction_answers_unsupported"
@@ -395,7 +395,7 @@ def test_definite_4xx_maps_to_the_rejected_shape_not_delivery_unknown(tmp_path, 
     _own_run(delegate)
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     assert out["status"] == "rejected", out
     assert out["accepted"] is False
     assert "do not re-post the same bytes" in out["note"]
@@ -406,7 +406,7 @@ def test_definite_4xx_maps_to_the_rejected_shape_not_delivery_unknown(tmp_path, 
         "http_409", "conflict without a typed body", status_code=409))
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     assert out["status"] == "rejected", out
     assert "HTTP 409" in out["note"]
 
@@ -416,7 +416,7 @@ def test_definite_4xx_maps_to_the_rejected_shape_not_delivery_unknown(tmp_path, 
             f"http_{code}", "typed refusal", status_code=code))
         out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
             {"question_id": "q1", "free_text": "x"},
-        ]))
+        ]).text)
         assert out["status"] == "rejected", out
         assert f"HTTP {code}" in out["note"]
 
@@ -425,7 +425,7 @@ def test_definite_4xx_maps_to_the_rejected_shape_not_delivery_unknown(tmp_path, 
         "http_503", "bad gateway", status_code=503))
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "delivery_unknown", out
 
@@ -448,7 +448,7 @@ def test_auth_and_rate_4xx_stay_delivery_unknown_not_rejected(tmp_path, monkeypa
         _own_run(delegate)
         out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
             {"question_id": "q1", "free_text": "x"},
-        ]))
+        ]).text)
         assert out["status"] == "delivery_unknown", (code, out)
         assert out["still_pending"] is True
         assert "SAME answers" in out["note"]
@@ -469,7 +469,7 @@ def test_a_spent_subscription_window_is_schedulable_not_flattened(tmp_path, monk
     _own_run(delegate)
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "subscription_window_exhausted", out
     assert out["reset_at"] == "2026-08-11T22:00:00Z"
@@ -489,7 +489,7 @@ def test_a_delivered_answer_pops_the_reported_memo_so_the_next_wait_reports(tmp_
     delegate._REPORTED_INTERACTIONS["run-1"] = frozenset({"int-1"})
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "selected_labels": ["8080"]},
-    ]))
+    ]).text)
     assert out["status"] == "delivered"
     assert "run-1" not in delegate._REPORTED_INTERACTIONS
 
@@ -498,7 +498,7 @@ def test_a_delivered_answer_pops_the_reported_memo_so_the_next_wait_reports(tmp_
     delegate._REPORTED_INTERACTIONS["run-1"] = frozenset({"int-1"})
     json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     assert "run-1" not in delegate._REPORTED_INTERACTIONS
 
     _answer_stub(monkeypatch, result={"accepted": False, "status": "rejected",
@@ -506,7 +506,7 @@ def test_a_delivered_answer_pops_the_reported_memo_so_the_next_wait_reports(tmp_
     delegate._REPORTED_INTERACTIONS["run-1"] = frozenset({"int-1"})
     json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert delegate._REPORTED_INTERACTIONS.get("run-1") == frozenset({"int-1"})
 
@@ -522,7 +522,7 @@ def test_an_unexpected_exception_becomes_typed_delivery_unknown_not_a_traceback(
     _own_run(delegate)
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "delivery_unknown", out
     assert "NEVER post a different answer" in out["note"]
@@ -559,7 +559,7 @@ def test_an_exhausted_internal_budget_returns_typed_without_further_wire_calls(t
     _own_run(delegate)
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": "x"},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "delivery_unknown", out
     assert out["still_pending"] is None
@@ -597,26 +597,26 @@ def test_answer_rows_are_validated_strictly_before_the_post(tmp_path, monkeypatc
     # Non-string label: refused, nothing posted (8080 as an int is NOT "8080").
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "selected_labels": [8080]},
-    ]))
+    ]).text)
     assert out["status"] == "refused" and out["reason"] == "answer_row_invalid"
 
     # Non-string free_text: refused.
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "free_text": 42},
-    ]))
+    ]).text)
     assert out["status"] == "refused" and out["reason"] == "answer_row_invalid"
 
     # Empty row (no labels, no text): refused as empty, not posted as "an answer".
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "selected_labels": [], "free_text": "  "},
-    ]))
+    ]).text)
     assert out["status"] == "refused" and out["reason"] == "answer_row_empty"
     assert sent == [], "nothing malformed ever reached the wire"
 
     # A valid row still flows, uncoerced.
     out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
         {"question_id": "q1", "selected_labels": ["8080"]},
-    ]))
+    ]).text)
     delegate._CUSTODY.clear()
     assert out["status"] == "delivered"
     assert sent == [[{"questionId": "q1", "selectedLabels": ["8080"], "freeText": None}]]
@@ -1031,3 +1031,18 @@ def test_expiry_notes_teach_the_escalation_verb():
                        "escalated a question to its human",
                        "goes to your human", "surface it to your human"):
             assert phrase not in text, (module.__name__, phrase)
+
+
+def test_definite_answer_refusals_publish_as_recorded_refusals(tmp_path, monkeypatch):
+    """Owner Q8A: a refusal the engine confirmed (rejected rows) is an agent fault,
+    an absent run a substrate refusal; neither is an OK observation."""
+    import ouroboros.tools.delegate as delegate
+    from ouroboros.delegate_shared import AGENT_FAULT_CODE
+
+    ctx = _answer_ctx(tmp_path)
+    _answer_stub(monkeypatch, result={"accepted": False, "status": "rejected", "message": "bad rows"})
+    _own_run(delegate)
+    out = delegate._delegate_answer(ctx, "run-1", "int-1", [{"question_id": "q1", "free_text": "x"}])
+    assert out.code == AGENT_FAULT_CODE and out.status != "ok"
+    assert json.loads(out.text)["status"] == "rejected"
+

@@ -719,8 +719,22 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "TOOL_ARG_ERROR": "TOOL_ARG_ERROR",
         "INVALID_ARG": "TOOL_ARG_ERROR",
         "CHILD_RESULT_DISPOSITION_INVALID": "TOOL_ARG_ERROR",
+        # The routing refusal family, homed exactly like the steer receipts above:
+        # a refused or unconfirmed promote/route scheduled nothing, so the agent
+        # must SEE it, while the refusal is the host's answer and not the agent's
+        # own execution failure (recorded, never degrading).
         "STEER_REJECTED": "TOOL_REPORTED_FAILURE",
         "STEER_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
+        "PROMOTE_REJECTED": "TOOL_REPORTED_FAILURE",
+        "PROMOTE_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
+        "ROUTE_REJECTED": "TOOL_REPORTED_FAILURE",
+        "ROUTE_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
+        "ROUTING_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
+        "NEEDS_MANUAL_TARGET": "TOOL_REPORTED_FAILURE",
+        # ensure_project_scope joined the same rail: a refused or unconfirmed
+        # bind scoped nothing durably.
+        "SCOPE_REJECTED": "TOOL_REPORTED_FAILURE",
+        "SCOPE_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
         "TOOL_ERROR": "TOOL_ERROR",
         "TOOL_INTERNAL_ERROR": "TOOL_INTERNAL_ERROR",
         "EXECUTOR_UNAVAILABLE": "LEGACY_UNAVAILABLE",

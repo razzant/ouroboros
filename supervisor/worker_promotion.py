@@ -72,19 +72,24 @@ def _origin_from_task_record(task_id: str) -> Optional[dict]:
 
 def _report_binding_failure(
     task_id: str, project_id: str, exc: Exception, *, path: str, reason: str = "",
+    drive_root: Any = None,
 ) -> None:
     """A failed durable bind is LOUD (BIBLE P1: silent linkage loss is memory
     loss): warning log + typed events.jsonl row; the task itself keeps running.
 
-    ``reason`` names a REFUSAL that never reached the bind (today only
+    ``reason`` names a REFUSAL that never reached the bind (today
     ``project_scope_conflict``: the task is already bound elsewhere, so no second
-    project is created); the row is otherwise the same shape a raising bind writes.
+    project is created; ``project_binding_unreadable``: the store could not be
+    read at all); the row is otherwise the same shape a raising bind writes.
+    ``drive_root`` names the store the failure belongs to for a caller that does
+    not own the pool root — the reaper passes the queue's drive.
     """
     # A refusal carries no live traceback, so only a real bind failure logs one.
     log.warning("%s for %s/%s (%s)", reason or "bind_task_to_project failed",
                 task_id, project_id, path, exc_info=not reason)
     try:
-        append_jsonl(_pool().DRIVE_ROOT / "logs" / "events.jsonl", {
+        root = _pool().DRIVE_ROOT if drive_root is None else drive_root
+        append_jsonl(root / "logs" / "events.jsonl", {
             "ts": utc_now_iso(),
             "type": "project_binding_failed",
             "task_id": str(task_id or ""),
@@ -316,6 +321,68 @@ def _admit_project_scope(
     return None
 
 
+def bind_retry_to_origin_project(
+    drive_root: Any, task: dict, task_id: str, retry_task_id: str,
+) -> str:
+    """Carry a timed-out root's Project onto the retry that replaces it.
+
+    A retry is the SAME work under a new physical id, so it belongs to the room
+    the work already has (DEVELOPMENT "the captured reference is the identity of
+    the work"). Before this, the new id copied the origin ref but carried no
+    binding, and the retried work painted a Main card offering "Turn into
+    project" until some later implicit act adopted it. The predecessor's own
+    binding answers first — it is the SSOT for that task's project — and the
+    origin-keyed lookup covers a root that was never bound itself while another
+    task id of the same owner message was. The new row reuses the predecessor's
+    stored origin BY VALUE, so the retry joins that message's one convertible
+    unit instead of starting a second.
+
+    The reaper calls this INSIDE its retry admission transaction, under the same
+    ``origin_claim_lock`` every implicit claim holds, and only once cancellation
+    can no longer win the boundary: ``bind_task_to_project`` is immutable, so a
+    bound-but-never-admitted retry id would answer ``project_id_for_task``
+    forever. Creates no project and never raises — a refused bind (a project that
+    stopped accepting them) or an unreadable store leaves the retry unbound and
+    is disclosed as ``project_binding_failed``. Returns the project the retry was
+    bound to, "" when there was nothing to inherit.
+    """
+    tid = str(retry_task_id or "").strip()
+    origin_id = str(task_id or "").strip()
+    if not tid or not origin_id or tid == origin_id:
+        return ""
+    from ouroboros.projects_registry import (
+        bind_task_to_project,
+        project_binding_for_task,
+        project_id_for_origin,
+    )
+
+    origin = _origin_from_mapping(task, absent="mid_task_no_origin")
+    try:
+        predecessor = project_binding_for_task(drive_root, origin_id) or {}
+        pid = str(predecessor.get("project_id") or "") or str(
+            project_id_for_origin(drive_root, origin.get("ref"), strict=True) or ""
+        )
+    except Exception as exc:
+        _report_binding_failure(tid, "", exc, path="timeout_retry_admission",
+                                reason="project_binding_unreadable", drive_root=drive_root)
+        return ""
+    if not pid:
+        return ""
+    if isinstance(predecessor.get("source_ref"), dict):
+        origin = {"ref": dict(predecessor["source_ref"])}
+        if isinstance(predecessor.get("source_text"), str):
+            origin["text"] = predecessor["source_text"]
+    elif predecessor.get("origin_absent"):
+        origin = {"absent": str(predecessor["origin_absent"])}
+    try:
+        bind_task_to_project(drive_root, tid, pid, origin=origin)
+    except Exception as exc:
+        _report_binding_failure(tid, pid, exc, path="timeout_retry_admission",
+                                drive_root=drive_root)
+        return ""
+    return pid
+
+
 def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     """Enqueue a first-class pooled owner task from a conversation-lane promote.
     The task carries the originating ``chat_id`` (its live card and replies
@@ -497,6 +564,12 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             "project_lifecycle": str(admitted.get("_project_lifecycle") or ""),
             "task_id": tid,
         }, attachment_manifest)
+    # Owner 3=A: the promoter's unmet planning obligation now belongs to this root
+    # (stamped by _promoted_force_plan_metadata above); release it on the promoter's
+    # live row BEFORE the snapshot persist below, so one persist shows both facts.
+    from supervisor.plan_obligation import transfer_promoter_obligation
+
+    obligation_transfer = transfer_promoter_obligation(ctx, evt, tid)
     # A positive promote confirmation is allowed only after the durable queue
     # projection exists.  The event handler writes the scheduled task result
     # after the routing receipt; keeping that last step outside this function
@@ -538,6 +611,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         outcome["project_id"] = effective_pid
     if source_note:
         outcome["source_note"] = source_note
+    if obligation_transfer:
+        outcome["force_plan_transfer"] = obligation_transfer
     return outcome
 
 
@@ -756,16 +831,19 @@ def _fail_promoted_task_loudly(
         log.debug("promote loud-fail: chat message failed for %s", tid, exc_info=True)
 
 
-def ensure_project_scope(evt: dict, ctx: Any) -> None:
+def ensure_project_scope(evt: dict, ctx: Any) -> dict:
     """Create/attach the registry project for an in-task ensure_project_scope call
     and bind the CURRENT (already-running) task to it, then broadcast so the UI moves
     the card into the project thread. Mirrors the project-registration half of
     promote_chat_to_task, but for a task that already exists (the worker has already
-    set ctx.project_id locally; this makes it durable + visible)."""
+    set ctx.project_id locally; this makes it durable + visible). Returns the typed
+    outcome the receipt rail reports: ``delivered`` with the bound project, or
+    ``rejected`` with the reason (bound elsewhere, a refused bind, a registration
+    failure) -- the tool never says "OK" for a bind that did not land."""
     tid = str(evt.get("task_id") or "").strip()
     pid = str(evt.get("project_id") or "").strip()
     if not tid or not pid:
-        return
+        return {"status": "rejected", "reason": "missing_task_or_project"}
     name = str(evt.get("project_name") or "").strip()
     try:
         from ouroboros.projects_registry import (
@@ -820,6 +898,7 @@ def ensure_project_scope(evt: dict, ctx: Any) -> None:
                 # Bound elsewhere: the request is a RENAME of the project this task already
                 # belongs to, never a second project. Nothing else happens - no create, no
                 # lease mark, no broadcast, no announcement.
+                rename = "name_unchanged"
                 if name:
                     try:
                         from ouroboros.projects_registry import get_project
@@ -827,14 +906,17 @@ def ensure_project_scope(evt: dict, ctx: Any) -> None:
                         row = get_project(_pool().DRIVE_ROOT, bound) or {}
                         if str(row.get("name") or "") != name:
                             update_project(_pool().DRIVE_ROOT, bound, name=name)
+                            rename = "renamed"
                     except Exception:
+                        rename = "rename_failed"
                         log.warning("ensure_project_scope: rename of %s to %r failed", bound, name, exc_info=True)
                 _report_binding_failure(
                     tid, pid,
                     ValueError(f"task is already bound to project {bound!r}; it stays there"),
                     path="ensure_project_scope", reason="project_scope_conflict",
                 )
-                return
+                return {"status": "rejected", "reason": "project_scope_conflict",
+                        "project_id": bound, "detail": rename}
 
             project = create_project(_pool().DRIVE_ROOT, pid, name=name, origin="ensure_project_scope")
             touch_project(_pool().DRIVE_ROOT, pid)
@@ -849,7 +931,8 @@ def ensure_project_scope(evt: dict, ctx: Any) -> None:
                 # mark, the broadcast and the announcement (the promote path already
                 # rejects this way), instead of publishing a project the task is not in.
                 _report_binding_failure(tid, pid, exc, path="ensure_project_scope")
-                return
+                return {"status": "rejected", "reason": "project_binding_failed",
+                        "project_id": pid, "detail": f"{type(exc).__name__}: {exc}"}
         # Make the one-writer-per-project lease recognize THIS already-running task
         # as a lane occupant: project_lease reads task["project_id"] from the
         # supervisor RUNNING map, which (unlike the promote path that sets it at
@@ -883,5 +966,9 @@ def ensure_project_scope(evt: dict, ctx: Any) -> None:
         _pool()._announce_created_project(
             project, tid, task=row.get("task") if isinstance(row, dict) else None,
         )
-    except Exception:
-        log.debug("ensure_project_scope: project registration failed for %s", pid, exc_info=True)
+        return {"status": "delivered", "project_id": pid, "chat_id": proj_chat,
+                "reason": "created" if (project or {}).get("created") else ("adopted" if adopted == pid else "attached")}
+    except Exception as exc:
+        log.warning("ensure_project_scope: project registration failed for %s", pid, exc_info=True)
+        return {"status": "rejected", "reason": "project_registration_failed",
+                "project_id": pid, "detail": f"{type(exc).__name__}: {exc}"}

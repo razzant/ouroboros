@@ -183,7 +183,8 @@ test('a 404 cancel reconciles the card from the durable record', () => {
     // "Working" forever. The branch must fetch the durable record and resolve the
     // card through the SAME terminal seam replay uses — not merely hide a button.
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    const branch = chat.slice(chat.indexOf('cancelableTaskIds.delete(taskId)'));
+    const branch = chat.slice(chat.indexOf('exc?.status === 404'));
+    assert.match(branch.slice(0, 600), /revokeManagedTaskCancelAuthority\(taskId\);/);
     assert.match(branch.slice(0, 1200), /reconcileCancelCardFromDetail\(record, taskId, await fetchTaskDetail\(taskId\)\)/);
 });
 

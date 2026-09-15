@@ -10,7 +10,6 @@ from supervisor.active_activity import get_direct_activity_registry
 
 
 def _lane(monkeypatch, tmp_path):
-    from ouroboros import project_naming
     from supervisor import message_bus, state
 
     monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
@@ -19,7 +18,6 @@ def _lane(monkeypatch, tmp_path):
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **kw: None)
     monkeypatch.setattr(state, "load_state", lambda: {})
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
-    monkeypatch.setattr(project_naming, "spawn_proactive_namer", lambda *a, **kw: None)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **kw: None))
     workers.open_repo_writer_admission()
 

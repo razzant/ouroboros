@@ -41,17 +41,28 @@ def _handle_typed_telemetry(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_task_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
     """Log A2A task-message injections so health checks can detect duplicate
-    processing (sibling of owner_message_injected for the task channel)."""
+    processing (sibling of owner_message_injected for the task channel), and
+    push the same row live so the receiving task's chat block shows the
+    message as a timeline row (owner 5=A: visible where it lands)."""
+    payload = {
+        "ts": evt.get("ts", utc_now_iso()),
+        "type": "task_message_injected",
+        "task_id": evt.get("task_id", ""),
+        "source_task_id": evt.get("source_task_id", ""),
+        "provenance": evt.get("provenance", ""),
+        "relayed_from_task_id": evt.get("relayed_from_task_id", ""),
+        "text_preview": str(evt.get("text_preview") or "")[:200],
+    }
     try:
-        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
-            "ts": evt.get("ts", utc_now_iso()),
-            "type": "task_message_injected",
-            "task_id": evt.get("task_id", ""),
-            "source_task_id": evt.get("source_task_id", ""),
-            "provenance": evt.get("provenance", ""),
-        })
+        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", payload)
     except Exception:
         log.warning("Failed to log task_message_injected event", exc_info=True)
+    try:
+        from supervisor.log_addressing import address_ctx_event
+
+        ctx.bridge.push_log(address_ctx_event(ctx, dict(payload)))
+    except Exception:
+        log.debug("Failed to forward task_message_injected to live logs", exc_info=True)
 
 
 # Merged into supervisor.events.EVENT_HANDLERS (the `**_CEH` pattern). The

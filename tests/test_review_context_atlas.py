@@ -794,13 +794,27 @@ def test_scope_ladder_never_hands_required_beyond_diff_paths_to_diff_only(tmp_pa
     assert "docs/ARCHITECTURE.md" not in degradable
 
 
-def test_canonical_context_docs_membership_includes_design():
-    """Drift guard for the three synchronized canonical-doc lists: the atlas
-    copy must carry docs/DESIGN.md like scope_review's tuple and the external
-    substrate set (fable p0-review note, 2026-08-31)."""
-    from ouroboros.tools.review_context_atlas import _CANONICAL_CONTEXT_DOCS
+def test_canonical_context_docs_have_one_owner_and_cover_book_chapters():
+    """This was a drift guard over three synchronized canonical-doc lists (fable
+    p0-review note, 2026-08-31). The lists are now ONE owner, so the guard is
+    the identity instead: the atlas reads `review_helpers`, the scope pack's
+    tuple IS that value, and a book chapter answers exactly as its entrypoint
+    does -- a copy that omitted the chapters would quietly stop treating
+    relocated governance prose as canonical."""
+    from ouroboros.tools import review_context_atlas as atlas
+    from ouroboros.tools.review_helpers import (
+        CANONICAL_GOVERNANCE_DOCS,
+        is_canonical_governance_path,
+    )
+    from ouroboros.tools.scope_review import _CANONICAL_CONTEXT_DOCS
 
-    assert "docs/DESIGN.md" in _CANONICAL_CONTEXT_DOCS
+    assert "docs/DESIGN.md" in CANONICAL_GOVERNANCE_DOCS
+    assert tuple(_CANONICAL_CONTEXT_DOCS) == CANONICAL_GOVERNANCE_DOCS
+    assert atlas.is_canonical_governance_path is is_canonical_governance_path
+    for doc in CANONICAL_GOVERNANCE_DOCS:
+        assert atlas.atlas_required_beyond_diff(doc), doc
+    assert atlas.atlas_required_beyond_diff("docs/architecture/06-agent-core.md")
+    assert not atlas.atlas_required_beyond_diff("docs/reference-books-migration.md")
 
 
 def test_atlas_diff_only_reason_override_is_the_callers_typed_omission(tmp_path):

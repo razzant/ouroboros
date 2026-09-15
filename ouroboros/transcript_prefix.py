@@ -85,6 +85,27 @@ def message_digest(message: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def sent_in_previous_send(slot: Any, message: Any) -> bool:
+    """Whether ``message`` already went out in this execution's previous send.
+
+    A sent row is byte-frozen: merging new text into it rewrites a message the
+    provider already holds and discards the conversation cache (issue #906; the
+    #929 carve-out for the acceptance observation was one instance of this).
+    With a ``slot`` the answer is the digest list the last observation parked
+    there -- one predicate for owner follow-ups, task messages, quiz answers,
+    roster notes and the observation row alike.  Without a slot (a producer
+    that holds only the transcript) the acceptance observation's own marker
+    stands in: that row is appended and sent within the same round, so by the
+    time such a producer can reach it, it has been sent.
+    """
+    if not isinstance(message, Mapping):
+        return False
+    previous = getattr(slot, DIGEST_ATTR, None) if slot is not None else None
+    if isinstance(previous, list):
+        return message_digest(message) in previous
+    return bool(message.get("acceptance_observation"))
+
+
 def observe_send(
     slot: Any,
     messages: Sequence[Mapping[str, Any]],

@@ -344,6 +344,24 @@ function extractCommandText(args) {
     return '';
 }
 
+// The compact row for one tool call: the command, else the first string
+// argument (a path, a query, a url — whatever the tool names first), lexical
+// only. The complete arguments stay behind the row's expand.
+function toolCallTarget(args) {
+    const cmd = extractCommandText(args);
+    if (cmd) return cmd;
+    for (const value of Object.values(args && typeof args === 'object' ? args : {})) {
+        if (typeof value === 'string' && value.trim()) return value;
+    }
+    return '';
+}
+
+// Start, finish, failure and timeout of one call share a row: the call id when
+// the producer stamped one, else the tool with its target.
+function toolCallKey(evt, groupId) {
+    return `tool:${groupId}:${evt.tool_call_id || `${evt.tool || ''}|${toolCallTarget(evt.args)}`}`;
+}
+
 function describeStartupChecks(checks) {
     if (!checks || typeof checks !== 'object') return '';
     const parts = [];
@@ -766,6 +784,32 @@ export function summarizeLogEvent(evt) {
         });
     }
 
+    if (t === 'task_message_injected') {
+        // A message from another task landed in THIS task's transcript (its
+        // timeline groups on task_id). The sender is named by value; the
+        // provenance says how it was framed (ancestor / relayed peer /
+        // independent task / system / escalation).
+        const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
+        return view('info', `Message from task ${source}`, {
+            body: shortText(evt.text_preview, 200),
+            meta: taskMeta(
+                evt.provenance ? `provenance=${evt.provenance}` : '',
+                evt.relayed_from_task_id ? `relayed=${evt.relayed_from_task_id}` : '',
+            ),
+        });
+    }
+
+    if (t === 'task_message_routed') {
+        // The SENDER's row for a task-authored message (task_id is the author):
+        // written to the target's mailbox, or refused with the host's reason.
+        const target = evt.target_task_id ? String(evt.target_task_id) : 'task';
+        const written = String(evt.status || '') === 'written';
+        return view(written ? 'info' : 'warn', written ? `Message sent to task ${target}` : `Message to task ${target} refused`, {
+            body: written ? '' : shortText(evt.reason, 160),
+            meta: taskMeta(`target=${target}`, evt.status ? String(evt.status) : ''),
+        });
+    }
+
     if (t === 'task_metrics_event' || t === 'task_eval') {
         return view('metrics', 'Task metrics', {
             meta: taskMeta(
@@ -953,6 +997,7 @@ function chatView({
     truncated = false,
     chip = null,
     model = '',
+    receipt = false,
 } = {}) {
     const out = {
         phase,
@@ -964,6 +1009,10 @@ function chatView({
         human,
         dedupeKey,
     };
+    // A receipt row renders inside a block but is not content the block can
+    // stand on: the fact it reports lives elsewhere (the owner message's
+    // routing annotation for an addressing call).
+    if (receipt) out.receipt = true;
     if (fullBody) out.fullBody = fullBody;
     if (fullHeadline) out.fullHeadline = fullHeadline;
     // Explicit emptiness is part of the presentation contract: a review-only
@@ -1198,8 +1247,41 @@ export function summarizeChatLiveEvent(evt) {
         return chatView({ phase: 'thinking', headline: 'Thinking', dedupeKey: key(evt.round || '', evt.attempt || '') });
     }
 
-    if (t === 'tool_call_started') {
-        return chatView({ headline: 'Working through the next step', dedupeKey: key(evt.tool || '') });
+    if (t === 'task_message_injected') {
+        // A message from another task landed in this task's transcript: a
+        // visible row in the receiver's block (owner 5=A), named by value.
+        const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
+        const preview = String(evt.text_preview || '');
+        return chatView({
+            phase: 'info',
+            headline: `Message from task ${source}`,
+            body: shortText(preview, 200),
+            fullBody: preview,
+            visible: true,
+            dedupeKey: key(source, evt.ts || ''),
+        });
+    }
+
+    if (t === 'tool_call_started' || (t === 'tool_call_finished' && !evt.is_error)) {
+        // A successful call is a compact one-line row: `tool · target`, then
+        // `✓ duration` when it finishes — content the block can stand on,
+        // unless the host stamped it as an addressing act (`routing_action`):
+        // the owner message's annotation is that call's receipt, so the row is
+        // one too (owner decision 11.09). A failure keeps its own error row.
+        const target = describeText(toolCallTarget(evt.args), 60);
+        const finished = t === 'tool_call_finished';
+        // `done` is the TASK's terminal phase (`isTerminalTaskPhase`): a row that
+        // carried it marked a still-running card finished after its first
+        // successful call. A finished CALL is `ok`, a running one `calling`.
+        return chatView({
+            phase: finished ? 'ok' : 'calling',
+            headline: [evt.tool || 'tool', target.preview, finished ? `✓ ${formatLogDuration(evt.duration_sec)}`.trim() : '']
+                .filter(Boolean).join(' · '),
+            fullBody: compactJson(evt.args, 260),
+            visible: true,
+            receipt: Boolean(evt.routing_action),
+            dedupeKey: toolCallKey(evt, groupId),
+        });
     }
 
     if (t === 'task_checkpoint') {
@@ -1253,9 +1335,9 @@ export function summarizeChatLiveEvent(evt) {
     if (t === 'tool_call_timeout' || t === 'tool_timeout') {
         return chatView({
             phase: 'error',
-            headline: 'One of the steps took too long',
+            headline: `One of the steps took too long${evt.tool ? ` · ${evt.tool}` : ''}`,
             visible: true,
-            dedupeKey: key(evt.tool || ''),
+            dedupeKey: toolCallKey(evt, groupId),
         });
     }
 
@@ -1276,16 +1358,16 @@ export function summarizeChatLiveEvent(evt) {
                 body: shortText(bodyParts.join(' '), 220),
                 fullBody: fullBodyParts.join('\n\n'),
                 visible: true,
-                dedupeKey: key(evt.tool || '', evt.status || '', evt.exit_code || '', commandText.full || errorResult.full),
+                dedupeKey: toolCallKey(evt, groupId),
             });
         }
         return chatView({
             phase: 'error',
-            headline: 'One of the steps failed',
+            headline: `One of the steps failed${evt.tool ? ` · ${evt.tool}` : ''}`,
             body: shortText(bodyParts.join(' '), 220),
             fullBody: fullBodyParts.join('\n\n'),
             visible: true,
-            dedupeKey: key(evt.tool || '', evt.status || '', evt.exit_code || '', commandText.full || errorResult.full),
+            dedupeKey: toolCallKey(evt, groupId),
         });
     }
 

@@ -111,8 +111,13 @@ def test_bound_direct_task_header_and_review_cost_survive_reopen(
 
             def assert_running(amount):
                 card = page.locator(card_selector)
-                expect(card.locator("[data-live-phase]")).to_be_visible(timeout=10_000)
-                expect(card.locator("[data-live-phase]")).to_have_text("Working")
+                # The subject is a DIRECT turn, so the block wears the compact
+                # chrome (DESIGN.md "Conversation activity block"): no
+                # Working/Done chip, a running indicator while the turn runs.
+                # The phase therefore survives as the record's fact the block
+                # logic reads, not as a visible chip.
+                expect(card).to_have_attribute("data-direct", "1", timeout=10_000)
+                expect(card.locator("[data-live-phase]")).to_have_attribute("data-phase", "working")
                 expect(card.locator("[data-live-typing]")).to_be_visible()
                 expect(card.locator("[data-live-meta]")).not_to_contain_text("Activity unconfirmed")
                 expect(card.locator("[data-live-meta]")).to_contain_text(f"up to ${amount}")
@@ -152,8 +157,7 @@ def test_bound_direct_task_header_and_review_cost_survive_reopen(
             page.evaluate("() => window.__ouroWs.emit('projects_changed', {})")
             card = page.locator(card_selector)
             expect(card).to_have_attribute("data-finished", "1", timeout=15_000)
-            expect(card.locator("[data-live-phase]")).to_be_visible()
-            expect(card.locator("[data-live-phase]")).to_have_text("Done")
+            expect(card.locator("[data-live-phase]")).to_have_attribute("data-phase", "done")
             expect(card.locator("[data-live-typing]")).not_to_be_visible()
             page.evaluate(
                 "row => window.__ouroWs.emit('log', {chat_id: row.chat_id, data: row})",
@@ -162,8 +166,7 @@ def test_bound_direct_task_header_and_review_cost_survive_reopen(
             close_project()
             open_project()
             expect(card).to_have_attribute("data-finished", "1")
-            expect(card.locator("[data-live-phase]")).to_be_visible()
-            expect(card.locator("[data-live-phase]")).to_have_text("Done")
+            expect(card.locator("[data-live-phase]")).to_have_attribute("data-phase", "done")
             screenshot("completed")
         except Exception:
             page.screenshot(path=str(evidence / f"task-card-{browser_engine}-failed.png"), animations="disabled")

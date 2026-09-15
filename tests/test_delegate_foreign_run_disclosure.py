@@ -35,7 +35,8 @@ def test_foreign_refusal_carries_owner_and_settlement_facts(tmp_path):
 
         refusal, returned = _owned_run(_Ctx("task-other", tmp_path), "delegate_wait", "run-x")
         assert returned is None
-        out = json.loads(refusal)
+        assert (refusal.status, refusal.code) == ("error", "TOOL_REPORTED_FAILURE")
+        out = json.loads(refusal.text)
         assert out["reason"] == "run_not_owned"
         assert out["owner_task_id"] == "task-owner"
         assert out["run_settled"] is True
@@ -48,7 +49,8 @@ def test_unknown_refusal_names_the_crosstask_read(tmp_path):
     custody._CUSTODY.clear()
     refusal, returned = _owned_run(_Ctx("task-a", tmp_path), "delegate_cancel", "run-nowhere")
     assert returned is None
-    out = json.loads(refusal)
+    assert (refusal.status, refusal.code) == ("error", "TOOL_REPORTED_FAILURE")
+    out = json.loads(refusal.text)
     assert out["reason"] == "run_ownership_unknown"
     assert "get_task_result" in out.get("hint", "")
 

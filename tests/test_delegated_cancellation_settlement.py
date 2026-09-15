@@ -42,7 +42,7 @@ def test_cancel_never_claims_more_than_a_terminal_receipt_proves(
     delegate._CUSTODY.clear()
     delegate._CUSTODY["run-1"] = delegate._RunCustody(
         run_id="run-1", task_id="t-a", route_id="r", model="m", project_id="p", project_owned=False)
-    out = json.loads(delegate._delegate_cancel(_nanny_ctx(tmp_path), "run-1", reason="stuck"))
+    out = json.loads(delegate._delegate_cancel(_nanny_ctx(tmp_path), "run-1", reason="stuck").text)
     delegate._CUSTODY.clear()
     assert out["status"] == expected, out
     assert out["run_may_still_be_live"] is may_be_live, out
@@ -114,7 +114,7 @@ def test_an_unverifiable_cancel_is_a_loud_durable_incident(tmp_path, monkeypatch
     delegate._CUSTODY.clear()
     delegate._CUSTODY["run-1"] = delegate._RunCustody(
         run_id="run-1", task_id="t-a", route_id="r", model="m", project_id="p", project_owned=False)
-    out = json.loads(delegate._delegate_cancel(_nanny_ctx(tmp_path), "run-1"))
+    out = json.loads(delegate._delegate_cancel(_nanny_ctx(tmp_path), "run-1").text)
     assert out["status"] == "containment_fault_run_may_still_be_live", out
     assert out["run_may_still_be_live"] is True
     faults = dc.open_containment_faults(tmp_path)
@@ -132,7 +132,7 @@ def test_an_unverifiable_cancel_is_a_loud_durable_incident(tmp_path, monkeypatch
             return {"lastSeq": 4, "summary": {"state": "cancelled", "spendUsd": 0.0}}
 
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stopped())
-    again = json.loads(delegate._delegate_cancel(_nanny_ctx(tmp_path), "run-1"))
+    again = json.loads(delegate._delegate_cancel(_nanny_ctx(tmp_path), "run-1").text)
     delegate._CUSTODY.clear()
     assert again["status"] == "confirmed", again
     assert dc.open_containment_faults(tmp_path) == []
@@ -175,7 +175,7 @@ def test_cancelling_a_run_this_module_already_settled_is_not_an_incident(tmp_pat
     # the last thing it did. Nothing can be read back, so only the durable settlement this
     # module already wrote can answer, and it does.
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Deaf())
-    after_settlement = json.loads(delegate._delegate_cancel(ctx, "run-1", reason="ordinary"))
+    after_settlement = json.loads(delegate._delegate_cancel(ctx, "run-1", reason="ordinary").text)
     assert after_settlement["status"] == "confirmed", after_settlement
     assert after_settlement["run_may_still_be_live"] is False
     assert dc.open_containment_faults(tmp_path) == []
@@ -188,7 +188,7 @@ def test_cancelling_a_run_this_module_already_settled_is_not_an_incident(tmp_pat
     dc.record_started(tmp_path, delegate._RunCustody(
         run_id="run-2", task_id="t-a", route_id="r", model="m", project_id="p",
         project_owned=False, root_task_id="t-a", ledger_root=str(tmp_path)))
-    unsettled = json.loads(delegate._delegate_cancel(ctx, "run-2", reason="stuck"))
+    unsettled = json.loads(delegate._delegate_cancel(ctx, "run-2", reason="stuck").text)
     delegate._CUSTODY.clear()
     assert unsettled["status"] == "confirmed", unsettled
     assert dc.open_containment_faults(tmp_path) == []

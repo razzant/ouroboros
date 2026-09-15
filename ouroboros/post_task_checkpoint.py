@@ -232,8 +232,8 @@ def project_root_post_task_checkpoint_fields(
     The root writer owns only post-task synthesis and its accounting snapshot;
     acceptance remains whatever the current record says. Once post-task state
     is terminal, an open or different-terminal stale patch cannot replace that
-    state or its accounting. A same-terminal patch remains valid so the
-    proactive namer's explicit ``refresh`` can update the final cost snapshot.
+    state or its accounting. A same-terminal patch remains valid so an explicit
+    ``refresh`` can update the final cost snapshot.
     """
     overlay = dict(patch_fields)
     if canonical_fields.get("status"):
@@ -316,8 +316,8 @@ def set_root_post_task_checkpoint(
         return
     authority_root = roots[0]
     finalized_event: Dict[str, Any] | None = None
-    # The proactive namer can settle concurrently with post-task synthesis. A
-    # shared critical section makes its refresh and the final snapshot linear.
+    # A late cost refresh can settle concurrently with post-task synthesis. A
+    # shared critical section makes that refresh and the final snapshot linear.
     with POST_TASK_SYNTHESIS_LOCK:
         existing = load_task_result(authority_root, task_id) or {}
         checkpoint = existing.get("root_phase_checkpoint")

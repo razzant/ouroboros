@@ -106,8 +106,37 @@ def _mandatory_read_pointer(repo_dir: pathlib.Path, rel_path: str, section: str 
     bodies — ``plan_review_runtime`` and the DEVELOPMENT.md "Core Governance
     Artifacts" table are the precedent): the session reads the document itself
     with its own tools; that retrieval is disclosed by the delegated-route
-    telemetry and is non-certifying."""
-    path = (pathlib.Path(repo_dir) / rel_path).resolve(strict=False)
+    telemetry and is non-certifying.
+
+    A reference-book entrypoint enumerates its CHAPTER CLOSURE with each
+    chapter's size. The entrypoint is an orientation page and a membership
+    list, so a reviewer who read it and stopped would have read none of the
+    book while the pointer said "in full" — the closure makes what "in full"
+    covers explicit, and the sizes let a chunked reader plan."""
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, load_reference_book
+
+    root = pathlib.Path(repo_dir)
+    path = (root / rel_path).resolve(strict=False)
+    book_id = next((key for key, entry in BOOK_ENTRYPOINTS.items() if entry == rel_path), None)
+    if book_id is not None and not section:
+        try:
+            book = load_reference_book(root, book_id)
+        except (OSError, ValueError) as exc:
+            return (
+                f"MANDATORY FULL READ (agent_session route): {path} could not be assembled "
+                f"from its chapters ({exc}) — its coverage is UNKNOWN for this review."
+            )
+        if book.chapters:
+            closure = "\n".join(
+                f"  - {(root / chapter.source_path).resolve(strict=False)} ({len(chapter.raw):,} bytes)"
+                for chapter in book.chapters
+            )
+            return (
+                f"MANDATORY FULL READ (agent_session route — bodies not inlined): {path} is the "
+                "book's membership page, NOT the book. Read every chapter below in full with "
+                "your own file tools BEFORE reviewing; do not review from memory of this "
+                f"document.\n{closure}"
+            )
     target = f"the '## {section}' section of {path}" if section else str(path)
     return (
         f"MANDATORY FULL READ (agent_session route — body not inlined): read {target} "

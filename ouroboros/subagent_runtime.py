@@ -23,8 +23,10 @@ from ouroboros.configured_subagents import (
     configured_subagents_fingerprint,
     resolve_configured_subagents,
 )
+from ouroboros.delegate_shared import delegate_payload
 from ouroboros.route_spec import route_spec_dict
 from ouroboros.settings_integrity import SETTINGS_ENV_LOCK, TaskSettingsSnapshot, runtime_setting
+from ouroboros.tools.tool_result import ToolResult, _replace_tool_result
 from ouroboros.utils import utc_now_iso
 
 
@@ -583,7 +585,7 @@ def prepare_delegate_start_actor(
     invocation_id: str,
     work_order_fingerprint: str,
     authority_fingerprint: str,
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], Optional["ToolResult"]]:
     """Resolve the exact actor/start fence without growing the transport facade."""
 
     from ouroboros import delegate_custody as custody
@@ -608,7 +610,7 @@ def prepare_delegate_start_actor(
             "authority_fingerprint": str(
                 invocation.get("authority_fingerprint") or authority_fingerprint
             ),
-        }, ""
+        }, None
 
     if selected_snapshot is None:
         return {}, _fail(
@@ -651,10 +653,10 @@ def prepare_delegate_start_actor(
         "work_order_fingerprint": work_order_fingerprint,
         "authority_fingerprint": authority_fingerprint,
         "compiled_work_order": bool(selection.get("compiled_work_order")),
-    }, ""
+    }, None
 
 
-def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) -> str:
+def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) -> "ToolResult":
     """Shared exact-start primitive for actor-first sessions and root-direct calls."""
 
     options = dict(spec or {})
@@ -786,10 +788,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         # episode could mint a false zero-run receipt after a successful start
         # and nanny economics would miss real activity.
         _mark_actor_physical_start(ctx, result)
-        try:
-            payload = json.loads(result)
-        except (TypeError, ValueError):
-            return result
+        payload = delegate_payload(result)
         if isinstance(selected_snapshot, dict):
             payload["selected_subagent_id"] = str(
                 selected_snapshot.get("selected_subagent_id") or ""
@@ -799,7 +798,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             )
         if isinstance(work_order_source_request, dict):
             payload["work_order_source_request"] = dict(work_order_source_request)
-        return json.dumps(payload, ensure_ascii=False, indent=2)
+        return _replace_tool_result(
+            result, text=json.dumps(payload, ensure_ascii=False, indent=2))
     except SubagentSelectionError as exc:
         from ouroboros.delegate_shared import _fail
 
@@ -808,7 +808,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         _EXACT_START_SELECTION.reset(token)
 
 
-def _mark_actor_physical_start(ctx: Any, result: Any) -> None:
+def _mark_actor_physical_start(ctx: Any, result: "ToolResult") -> None:
     """Record a successful actor-first physical start on the private bootstrap fact.
 
     This is deliberately an internal projection, not a new lifecycle ABI.  The
@@ -819,21 +819,19 @@ def _mark_actor_physical_start(ctx: Any, result: Any) -> None:
     bootstrap = getattr(ctx, "_configured_actor_bootstrap", None)
     if not isinstance(bootstrap, dict):
         return
-    try:
-        payload = json.loads(result) if isinstance(result, str) else result
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return
-    if not isinstance(payload, dict) or str(payload.get("status") or "") not in {
-        "started", "started_uncustodied",
-    }:
+    # The DOMAIN status, never the host class: a started run is `started` (or
+    # `started_uncustodied`), and a refusal that classified `ok` would otherwise
+    # mint a physical-start marker over a run that never began.
+    status = str(delegate_payload(result).get("status") or "")
+    if status not in {"started", "started_uncustodied"}:
         return
     bootstrap["physical_started"] = True
     bootstrap["exact_start_pending"] = False
-    bootstrap["physical_start_status"] = str(payload.get("status") or "")
+    bootstrap["physical_start_status"] = status
     ctx._nanny_physical_activity_seed = True
 
 
-def delegate_start_entry(ctx: Any, prompt: str, _resolved_binding: Any = None, **params: Any) -> str:
+def delegate_start_entry(ctx: Any, prompt: str, _resolved_binding: Any = None, **params: Any) -> "ToolResult":
     # Actor-first configured sessions bind every fresh start to the immutable
     # snapshot captured before the episode. The model supplies only an advisory
     # coordination appendix; the canonical work order remains host-owned.

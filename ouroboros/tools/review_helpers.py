@@ -384,6 +384,50 @@ def build_skill_host_context(repo_dir: Path | None = None) -> str:
     return "\n\n".join(parts)
 
 
+# The canonical governance corpus a packed review surface owes IN FULL. Two of
+# the five are reference-book entrypoints, so their chapters are canonical too:
+# `is_canonical_governance_path` is the one predicate that answers for both
+# forms, and `canonical_governance_sources` resolves the actual population of a
+# given tree. Four surfaces used to keep their own copy of this list.
+CANONICAL_GOVERNANCE_DOCS = (
+    "BIBLE.md",
+    "docs/DEVELOPMENT.md",
+    "docs/DESIGN.md",
+    "docs/ARCHITECTURE.md",
+    "docs/CHECKLISTS.md",
+)
+
+
+def is_canonical_governance_path(path: str) -> bool:
+    """One of the canonical five, or a chapter of one of the two books."""
+    from ouroboros.reference_books import book_path_role
+
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    return normalized in CANONICAL_GOVERNANCE_DOCS or book_path_role(normalized) == "chapter"
+
+
+def canonical_governance_sources(repo_dir: Path) -> tuple[str, ...]:
+    """Every canonical path a packed review inlines in full for THIS tree.
+
+    The five documents plus the chapters each book's entrypoint declares, so a
+    pack that inlined a composed book does not ALSO owe its chapters as
+    separate snapshots. A book that cannot be read contributes its entrypoint
+    alone — the reader that assembles it reports the failure; this resolver
+    must not turn an unreadable book into a claim of wider coverage.
+    """
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, load_reference_book
+
+    root = Path(repo_dir)
+    resolved = [doc for doc in CANONICAL_GOVERNANCE_DOCS if (root / doc).is_file()]
+    for book_id, entrypoint in BOOK_ENTRYPOINTS.items():
+        if entrypoint in resolved:
+            try:
+                resolved.extend(c.source_path for c in load_reference_book(root, book_id).chapters)
+            except (OSError, ValueError):
+                pass
+    return tuple(dict.fromkeys(resolved))
+
+
 def load_governance_doc(
     repo_dir: Path,
     rel_path: str,
@@ -391,9 +435,22 @@ def load_governance_doc(
     on_missing: str = "explicit",
     fallback: str = "",
 ) -> str:
-    """Load a governance/review document relative to ``repo_dir`` with explicit miss policy."""
+    """Load a governance/review document relative to ``repo_dir`` with explicit miss policy.
+
+    A reference-book entrypoint resolves to the COMPOSED book. The entrypoint
+    alone is an orientation page and a membership list: handing it to a review
+    surface that believes it received the architecture map would deliver zero
+    chapters while every caller's contract says "in full". An unassemblable
+    book takes the SAME miss policy as an unreadable file — one ladder, so a
+    failed book cannot render as a delivered one through a second wording.
+    """
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
+
     path = Path(repo_dir) / rel_path
+    book_id = next((key for key, entry in BOOK_ENTRYPOINTS.items() if entry == rel_path), None)
     try:
+        if book_id is not None:
+            return compose_book(load_reference_book(Path(repo_dir), book_id))
         if path.is_file():
             return path.read_text(encoding="utf-8")
     except Exception as exc:

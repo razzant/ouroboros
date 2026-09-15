@@ -102,7 +102,12 @@ def _emit_routing_receipt(
         effective_reason = "routing_annotation_persist_failed"
 
     receipt: Dict[str, Any] = {
-        "persisted": annotation_status in {"persisted", "not_applicable"},
+        # True only when a row was actually written: an event that carries no
+        # receipt id has no receipt, and saying "persisted" for it is how an
+        # ensure_project_scope handler reported a bind nobody could read.
+        # ``annotation_status`` keeps the three-way fact for callers whose
+        # positive authority lives elsewhere (a promote's admission record).
+        "persisted": annotation_status == "persisted",
         "status": effective_status,
         "reason": effective_reason,
         "detail": str(detail or ""),
@@ -112,7 +117,7 @@ def _emit_routing_receipt(
     }
     if attachment_manifest is not None:
         receipt["attachment_manifest"] = _events()._routing_attachments(attachment_manifest) or []
-    if not receipt["persisted"]:
+    if annotation_status == "failed":
         return receipt
     if publish:
         _publish_routing_ack(
@@ -454,11 +459,15 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> Dict[str, Any
                 attachment_manifest=_events()._routing_attachments(outcome.get("attachment_manifest")),
                 publish=False,
             )
+            # The admission record is the positive authority; the annotation is
+            # required only where an owner message exists to carry it.
             admission_status = (
                 "scheduled"
-                if receipt.get("persisted") and str(receipt.get("status") or "") == "scheduled"
+                if str(receipt.get("annotation_status") or "") in {"persisted", "not_applicable"}
+                and str(receipt.get("status") or "") == "scheduled"
                 else "unconfirmed"
             )
+            transfer = outcome.pop("force_plan_transfer", None)
             stored = write_task_result(
                 ctx.DRIVE_ROOT,
                 str(outcome.get("task_id") or task_id),
@@ -479,6 +488,9 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> Dict[str, Any
                     "routing_receipt_required": bool(str(evt.get("client_message_id") or "")),
                     "routing_receipt_status": str(receipt.get("annotation_status") or ""),
                     "source_note": str(outcome.get("source_note") or ""),
+                    # Owner 3=A: the promoter's unmet planning obligation moved onto
+                    # this root; the tool reads it back with the admission receipt.
+                    **({"force_plan_transfer": dict(transfer)} if isinstance(transfer, dict) and transfer else {}),
                 },
                 result=(
                     "Task accepted and durably scheduled."
@@ -495,6 +507,8 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> Dict[str, Any
             ):
                 raise RuntimeError("scheduled promotion result was not persisted")
             supervisor_queue.release_task_admission(task_id, routing_token)
+            if isinstance(transfer, dict) and transfer:
+                _record_obligation_transfer(ctx, transfer)
             if admission_status != "scheduled":
                 return {
                     **outcome,
@@ -603,15 +617,66 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> Dict[str, Any
         return failed_outcome
 
 
+def _record_obligation_transfer(ctx: Any, transfer: Dict[str, Any]) -> None:
+    """The promoter's task details name where its planning obligation went."""
+    promoter = str(transfer.get("from") or "")
+    if not promoter:
+        return
+    try:
+        write_task_result(
+            ctx.DRIVE_ROOT, promoter, "running",
+            _field_projector=lambda current, _patch: {
+                "status": str(current.get("status") or "running"),
+                "force_plan_transfer": dict(transfer),
+            },
+        )
+    except Exception:
+        log.warning("force_plan transfer record failed for %s", promoter, exc_info=True)
+
+
 def _handle_ensure_project_scope(evt: Dict[str, Any], ctx: Any) -> None:
-    """Create/attach the registry project for an in-task ensure_project_scope call
-    and bind the CURRENT task to it (the worker already set ctx.project_id locally)."""
+    """Create/attach the registry project for an in-task ensure_project_scope call,
+    bind the CURRENT task to it, and answer on the receipt rail.
+
+    The worker already scoped itself in memory; what it waits for is the DURABLE
+    outcome: a landed bind (``delivered``) or a typed refusal (``rejected`` with
+    the reason -- bound elsewhere, a refused bind, a registration failure) under
+    the act's own synthetic receipt id. Before this the tool said "OK: created"
+    before any bind existed and the handler's receipt writer reported an unwritten
+    row as persisted."""
     from supervisor.workers import ensure_project_scope
 
     try:
-        ensure_project_scope(evt, ctx)
-    except Exception:
+        outcome = ensure_project_scope(evt, ctx)
+    except Exception as exc:
         log.warning("ensure_project_scope event failed", exc_info=True)
+        outcome = {"status": "rejected", "reason": "ensure_project_scope_failed",
+                   "detail": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(outcome, dict):
+        outcome = {"status": "unconfirmed", "reason": "handler_returned_no_outcome"}
+    target = str(outcome.get("project_id") or evt.get("project_id") or "")
+    label = ""
+    try:
+        from ouroboros.projects_registry import get_project
+
+        label = str((get_project(ctx.DRIVE_ROOT, target) or {}).get("name") or "") if target else ""
+    except Exception:
+        log.debug("ensure_project_scope: project name lookup failed", exc_info=True)
+    _emit_routing_receipt(
+        ctx, evt, action="ensure_project_scope", target=target, target_label=label or target,
+        status=str(outcome.get("status") or "unconfirmed"),
+        reason=str(outcome.get("reason") or ""), detail=str(outcome.get("detail") or ""),
+        publish=False,
+    )
+    try:
+        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+            "ts": utc_now_iso(), "type": "ensure_project_scope_settled",
+            "task_id": str(evt.get("task_id") or ""), "project_id": target,
+            "status": str(outcome.get("status") or ""), "reason": str(outcome.get("reason") or ""),
+            "routing_token": str(evt.get("routing_token") or ""),
+        })
+    except Exception:
+        log.debug("ensure_project_scope settle row failed", exc_info=True)
 
 
 def _handle_routing_manual_target(evt: Dict[str, Any], ctx: Any) -> None:

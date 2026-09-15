@@ -234,7 +234,7 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // behind the scheduler's gate, so sharing cleanup cannot mute either path.
     assert.match(chatSource, /settleLiveCard\(record, summary\.phase \|\| 'done', wasFinished\);/);
     assert.match(chatSource, /settleLiveCard\(record, activePhase, wasFinished\);/);
-    assert.match(chatSource, /if \(!wasFinished\) scheduleHistorySync\(\);/);
+    assert.match(chatSource, /if \(!wasFinished && blockVisible\(record\)\) scheduleHistorySync\(\);/);
     // The third occurrence is the scheduler re-arming when a run settles with the bound
     // still armed, which is how a run that only JOINED an older in-flight fetch (and
     // spent its timer on a window fetched before the arm) keeps the deadline alive.

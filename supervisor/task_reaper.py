@@ -434,8 +434,10 @@ def _run_retry_admission_transaction(
     salvage_note: str,
     custody_audit: Optional[Dict[str, Any]] = None,
 ) -> tuple[Dict[str, str], str]:
-    """Publish one retry admission under the queue -> cancel lock order."""
+    """Publish one retry admission under the claim -> queue -> cancel lock order."""
+    from ouroboros.projects_registry import origin_claim_lock
     from supervisor.cancel_publication import _custody_disclosure_fields
+    from supervisor.worker_promotion import bind_retry_to_origin_project
 
     from ouroboros.task_results import (
         STATUS_CANCELLED,
@@ -461,7 +463,11 @@ def _run_retry_admission_transaction(
         # Match assignment's lock order (queue -> cancel projection). Holding
         # only the projection lock while enqueue_task takes the queue lock would
         # invert _drop_cancelled_pending and deadlock with ordinary dispatch.
-        with q._queue_lock:
+        # The claim lock is OUTERMOST because an implicit claim already takes it
+        # before the queue lock (project_id_for_origin's live-task tie-break), and
+        # it makes this admission and its project bind ONE transaction against a
+        # concurrent conversion of the same owner message.
+        with origin_claim_lock(), q._queue_lock:
             with cancellation_projection_lock(q.DRIVE_ROOT):
                 intents = active_intents(q.DRIVE_ROOT, strict=True)
                 if not isinstance(intents, dict):
@@ -653,6 +659,10 @@ def _run_retry_admission_transaction(
                                 suppression["retry_status"] = str(
                                     retry_terminal.get("status") or ""
                                 )
+                        else:
+                            # Cancellation lost the boundary and the successor is
+                            # durable: the retry inherits its predecessor's room.
+                            bind_retry_to_origin_project(q.DRIVE_ROOT, task, task_id, retry_task_id)
     except Exception:
         admission_block = "cancel_intent_authority_unreadable"
         log.error(
@@ -663,6 +673,18 @@ def _run_retry_admission_transaction(
             exc_info=True,
         )
     return suppression, admission_block
+
+
+def _discard_retry_inputs(q: Any, task: Dict[str, Any], task_id: str, retry_task_id: str) -> None:
+    """Drop the inputs copied onto a retry id that will never run."""
+    if not retry_task_id or retry_task_id == task_id:
+        return
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.owner_mailbox import cleanup_task_mailbox
+
+    drive = q._task_drive_for_task(task, task_id)
+    cleanup_task_mailbox(drive, retry_task_id)
+    shutil.rmtree(task_artifact_dir_path(drive, retry_task_id), ignore_errors=True)
 
 
 def _enqueue_retry(
@@ -687,11 +709,7 @@ def _enqueue_retry(
     admission wins, a later SINGLE cancel resolves the complete durable chain
     under the same projection lock and targets the physical leaf.
     """
-    from ouroboros.task_results import (
-        STATUS_FAILED,
-        load_task_result,
-        write_task_result,
-    )
+    from ouroboros.task_results import STATUS_FAILED, load_task_result, write_task_result
     from supervisor.cancel_publication import _custody_disclosure_fields
 
     retried = dict(task)
@@ -701,11 +719,8 @@ def _enqueue_retry(
     retried["timeout_retry_from"] = task_id
     retried["timeout_retry_at"] = utc_now_iso()
     if retry_task_id and retry_task_id != task_id:
-        from ouroboros.artifacts import (
-            handoff_task_attachments_for_retry,
-            task_artifact_dir_path,
-        )
-        from ouroboros.owner_mailbox import cleanup_task_mailbox, copy_owner_mailbox_for_retry
+        from ouroboros.artifacts import handoff_task_attachments_for_retry
+        from ouroboros.owner_mailbox import copy_owner_mailbox_for_retry
 
         task_drive = q._task_drive_for_task(task, task_id)
         replacements, attachment_error = handoff_task_attachments_for_retry(
@@ -726,10 +741,7 @@ def _enqueue_retry(
                 "Reaper: %s handoff failed for retry %s -> %s: %s",
                 failure, task_id, retry_task_id, attachment_error,
             )
-            shutil.rmtree(
-                task_artifact_dir_path(task_drive, retry_task_id), ignore_errors=True,
-            )
-            cleanup_task_mailbox(task_drive, retry_task_id)
+            _discard_retry_inputs(q, task, task_id, retry_task_id)
             outcome = terminal_outcome_axes(
                 lifecycle=STATUS_FAILED,
                 execution=EXECUTION_INFRA_FAILED,
@@ -775,14 +787,7 @@ def _enqueue_retry(
     )
 
     if suppression:
-        if retry_task_id and retry_task_id != task_id:
-            cleanup_task_mailbox(q._task_drive_for_task(task, task_id), retry_task_id)
-            shutil.rmtree(
-                task_artifact_dir_path(
-                    q._task_drive_for_task(task, task_id), retry_task_id,
-                ),
-                ignore_errors=True,
-            )
+        _discard_retry_inputs(q, task, task_id, retry_task_id)
         reason = (
             "cancel_pending_retry_suppressed"
             if suppression.get("kind") == "cancel_intent"
@@ -791,14 +796,7 @@ def _enqueue_retry(
         return False, attempt, reason, suppression
     if not admission_block:
         return True, attempt + 1, terminal_reason, {}
-    if retry_task_id and retry_task_id != task_id:
-        cleanup_task_mailbox(q._task_drive_for_task(task, task_id), retry_task_id)
-        shutil.rmtree(
-            task_artifact_dir_path(
-                q._task_drive_for_task(task, task_id), retry_task_id,
-            ),
-            ignore_errors=True,
-        )
+    _discard_retry_inputs(q, task, task_id, retry_task_id)
 
     blocked_reason = f"{terminal_reason}_retry_admission_blocked"
     outcome = terminal_outcome_axes(
