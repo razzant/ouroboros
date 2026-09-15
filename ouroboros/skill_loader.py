@@ -328,10 +328,12 @@ def _iter_payload_files(
     in the same byte hash and review pack rather than silently omitting them.
     """
     out: List[pathlib.Path] = []
+    seen: set[pathlib.Path] = set()
     resolved_root = skill_dir.resolve()
 
     def _add(path: pathlib.Path) -> None:
-        if path not in out:
+        if path not in seen:
+            seen.add(path)
             out.append(path)
 
     def _add_if_confined(relpath: str) -> None:

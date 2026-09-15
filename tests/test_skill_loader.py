@@ -754,6 +754,47 @@ def test_hidden_helper_files_are_hashed_and_reviewed(tmp_path):
     )
 
 
+def test_payload_inventory_deduplication_is_linear(tmp_path, monkeypatch):
+    from ouroboros.skill_loader import _iter_payload_files
+
+    repo_root = tmp_path / "skills"
+    skill_dir = _write_skill(
+        repo_root,
+        "large",
+        manifest=_valid_script_manifest("large"),
+        scripts={"main.py": "print('ok')\n"},
+    )
+    payload_dir = skill_dir / "payload"
+    payload_dir.mkdir()
+    file_count = 256
+    for index in range(file_count):
+        (payload_dir / f"{index:04}.txt").write_text("x", encoding="utf-8")
+
+    path_type = type(skill_dir)
+    original_eq = path_type.__eq__
+    comparisons = 0
+
+    def counted_eq(left, right):
+        nonlocal comparisons
+        comparisons += 1
+        return original_eq(left, right)
+
+    with monkeypatch.context() as context:
+        context.setattr(path_type, "__eq__", counted_eq)
+        reviewed = _iter_payload_files(
+            skill_dir,
+            manifest_entry="scripts/main.py",
+            manifest_scripts=[
+                {"name": "main.py"},
+                {"name": "scripts/main.py"},
+            ],
+        )
+
+    assert reviewed == sorted(set(reviewed))
+    assert len(reviewed) == file_count + 2
+    assert comparisons < file_count * 10
+
+
 def test_vcs_cache_dirs_are_not_hashed(tmp_path):
     """Conversely, ``.git``/``__pycache__``/editor scratch directories
     MUST be excluded from the hash so a byte-flip in a cache file does
