@@ -187,3 +187,212 @@ def test_existing_dialogue_blocks_remain_authoritative(tmp_path):
     blocks_path.write_text("[]", encoding="utf-8")
 
     assert json.loads(blocks_path.read_text()) == []
+
+
+# ---------------------------------------------------------------------------
+# ibl-28109914789e — defer on transient empty / non-JSON model reply
+# ---------------------------------------------------------------------------
+
+def _seed_scratchpad_blocks(tmp_path, count: int = 3) -> tuple[list[dict[str, object]], object]:
+    """Drop three pre-existing scratchpad blocks onto disk for consolidation.
+
+    Returns ``(blocks, memory)`` — the blocks already live on disk via
+    ``Memory.mutate_scratchpad_blocks`` so the consolidator's re-read-under-lock
+    sees them too.
+
+    Each block's content is padded past ``SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS``
+    (30,000) so the consolidator actually enters its LLM call path; a 3-block
+    "block N" seed would otherwise early-return None before our deferral code
+    runs.
+    """
+    from ouroboros.memory import Memory
+
+    memory = Memory(drive_root=tmp_path)
+    pad = "x" * 12_000  # 3 * 12,000 = 36,000 > 30,000 threshold
+    blocks = [
+        {
+            "ts": f"2026-09-01T0{i}:00:00Z",
+            "source": "test",
+            "content": f"block {i} " + pad,
+        }
+        for i in range(count)
+    ]
+    memory.mutate_scratchpad_blocks(lambda _live: list(blocks))
+    return blocks, memory
+
+
+def _memory_with_blocks(tmp_path):
+    from ouroboros.memory import Memory
+
+    return Memory(drive_root=tmp_path)
+
+
+def test_consolidate_scratchpad_blocks_defers_on_empty_response(tmp_path, caplog):
+    """ibl-28109914789e — model returning ``""`` (e.g. 429-fallback empty body)
+    used to error the whole pass and return None, wedging the consolidator.
+
+    After the fix: empty response is a recoverable transient — the pass returns
+    the usage dict, logs a warning containing "empty", and DOES NOT write
+    knowledge or mutate scratchpad blocks."""
+    import logging
+
+    seeded, memory = _seed_scratchpad_blocks(tmp_path)
+    knowledge_dir = tmp_path / "knowledge"
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    blocks_path = tmp_path / "memory" / "scratchpad_blocks.json"
+    before = json.loads(blocks_path.read_text())
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = (
+        {"content": ""},
+        {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10, "cost": 0.0},
+    )
+
+    from ouroboros.consolidator import _consolidate_scratchpad_blocks
+
+    caplog.set_level(logging.WARNING, logger="ouroboros.consolidator")
+    result = _consolidate_scratchpad_blocks(
+        memory=memory,
+        blocks=seeded,
+        knowledge_dir=knowledge_dir,
+        llm_client=mock_llm,
+        identity_text="",
+    )
+
+    # Clean deferral: usage returned, NOT None.
+    assert result is not None
+    assert result["prompt_tokens"] == 10
+    # No knowledge files were created.
+    assert not any(knowledge_dir.glob("*.md"))
+    # Scratchpad blocks on disk are unchanged (no merge ran).
+    after = json.loads(blocks_path.read_text())
+    assert after == before
+    # And the warning was loud enough to name "empty".
+    assert any("empty" in rec.message for rec in caplog.records)
+    # And NOT the loud ERROR path the old code took.
+    assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
+
+
+def test_consolidate_scratchpad_blocks_defers_on_non_json_prose(tmp_path, caplog):
+    """ibl-28109914789e — non-JSON prose reply must defer cleanly too."""
+    import logging
+
+    seeded, memory = _seed_scratchpad_blocks(tmp_path)
+    knowledge_dir = tmp_path / "knowledge"
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    blocks_path = tmp_path / "memory" / "scratchpad_blocks.json"
+    before = json.loads(blocks_path.read_text())
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = (
+        {"content": "sorry I can't help with that right now"},
+        {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17, "cost": 0.0001},
+    )
+
+    from ouroboros.consolidator import _consolidate_scratchpad_blocks
+
+    caplog.set_level(logging.WARNING, logger="ouroboros.consolidator")
+    result = _consolidate_scratchpad_blocks(
+        memory=memory,
+        blocks=seeded,
+        knowledge_dir=knowledge_dir,
+        llm_client=mock_llm,
+        identity_text="",
+    )
+
+    assert result is not None
+    assert result["prompt_tokens"] == 12
+    # No knowledge writes, no scratchpad mutation.
+    assert not any(knowledge_dir.glob("*.md"))
+    after = json.loads(blocks_path.read_text())
+    assert after == before
+    # Warning names the deferred reason (the first 120 chars of raw).
+    assert any("non-JSON" in rec.message and "sorry I can" in rec.message
+               for rec in caplog.records)
+    # Never an ERROR.
+    assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
+
+
+def test_consolidate_scratchpad_blocks_recovers_embedded_json(tmp_path, caplog):
+    """A fenced ```` ```json\\n{...}\\n``` ```` payload is the existing happy path.
+    Also: a prose reply that wraps JSON inside braces still parses via the
+    bounded embedded-recovery path."""
+    seeded, memory = _seed_scratchpad_blocks(tmp_path)
+    knowledge_dir = tmp_path / "knowledge"
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    blocks_path = tmp_path / "memory" / "scratchpad_blocks.json"
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = (
+        {"content": (
+            "Here you go:\n\n"
+            "```json\n"
+            "{\"compressed_block\": \"c\", \"knowledge_entries\": []}\n"
+            "```\n"
+        )},
+        {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12, "cost": 0.0001},
+    )
+
+    from ouroboros.consolidator import _consolidate_scratchpad_blocks
+
+    result = _consolidate_scratchpad_blocks(
+        memory=memory,
+        blocks=seeded,
+        knowledge_dir=knowledge_dir,
+        llm_client=mock_llm,
+        identity_text="",
+    )
+
+    assert result is not None
+    # Compression ran: scratchpad now holds the new compressed block.
+    blocks = json.loads(blocks_path.read_text())
+    assert any(b.get("source") == "consolidation" for b in blocks)
+
+
+def test_consolidate_scratchpad_blocks_valid_bare_json(tmp_path, caplog):
+    """A genuinely valid bare-JSON payload is the existing happy path —
+    parses and consolidates normally."""
+    seeded, memory = _seed_scratchpad_blocks(tmp_path)
+    knowledge_dir = tmp_path / "knowledge"
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    blocks_path = tmp_path / "memory" / "scratchpad_blocks.json"
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = (
+        {"content": json.dumps({"compressed_block": "x", "knowledge_entries": []})},
+        {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10, "cost": 0.0},
+    )
+
+    from ouroboros.consolidator import _consolidate_scratchpad_blocks
+
+    result = _consolidate_scratchpad_blocks(
+        memory=memory,
+        blocks=seeded,
+        knowledge_dir=knowledge_dir,
+        llm_client=mock_llm,
+        identity_text="",
+    )
+
+    assert result is not None
+    blocks = json.loads(blocks_path.read_text())
+    assert any(b.get("source") == "consolidation" for b in blocks)
+
+
+def test_try_extract_embedded_json_balanced_and_skips_strings(tmp_path):
+    """Helper sanity: braces inside JSON strings do NOT count toward depth; the
+    outermost matching brace is picked; a top-level non-dict returns None."""
+    from ouroboros.consolidator import _try_extract_embedded_json
+
+    payload = (
+        'Sure! Here: {"a": "}", "b": 1, "c": {"d": 2}}\n\nThanks.'
+    )
+    parsed = _try_extract_embedded_json(payload)
+    assert parsed == {"a": "}", "b": 1, "c": {"d": 2}}
+
+    # Top-level list, not dict — defer.
+    assert _try_extract_embedded_json("[1, 2, 3]") is None
+    # Empty / no braces — defer.
+    assert _try_extract_embedded_json("") is None
+    assert _try_extract_embedded_json("no json here at all") is None
+    # Unbalanced — defer.
+    assert _try_extract_embedded_json("{ \"a\": 1 ") is None
