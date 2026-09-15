@@ -479,6 +479,7 @@ class PresenceState:
 
     selections: tuple[PresenceSelection, ...] = ()
     runtime_overrides: PresenceRuntimeOverrides = field(default_factory=PresenceRuntimeOverrides)
+    workspace_root: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.selections, tuple) or any(
@@ -502,6 +503,13 @@ class PresenceState:
                 "presence_state.runtime_overrides",
                 "presence_state.runtime_overrides must be PresenceRuntimeOverrides",
             )
+        _require_exact_string(self.workspace_root, field_name="presence_state.workspace_root", allow_empty=True)
+        if self.workspace_root and not Path(self.workspace_root).is_absolute():
+            raise _error(
+                "presence_state_invalid_workspace",
+                "presence_state.workspace_root",
+                "presence_state.workspace_root must be an absolute path",
+            )
         object.__setattr__(
             self,
             "selections",
@@ -521,6 +529,8 @@ def _state_payload(state: PresenceState) -> dict[str, Any]:
         "schema_version": PRESENCE_STATE_SCHEMA_VERSION,
         "selections": [_selection_payload(item) for item in state.selections],
         "runtime_overrides": _runtime_overrides_payload(state.runtime_overrides),
+        # Preserve the stored shape and digest of profiles without a workspace.
+        **({"workspace_root": state.workspace_root} if state.workspace_root else {}),
     }
 
 
@@ -691,7 +701,8 @@ def _selection_from_payload(value: Any, *, index: int) -> PresenceSelection:
 
 def _state_from_payload(value: Any) -> PresenceState:
     raw = _require_mapping(value, field_name="presence_state")
-    _require_exact_fields(raw, _STATE_FIELDS, field_name="presence_state")
+    fields = _STATE_FIELDS | {"workspace_root"} if "workspace_root" in raw else _STATE_FIELDS
+    _require_exact_fields(raw, fields, field_name="presence_state")
     version = raw["schema_version"]
     if type(version) is not int or version != PRESENCE_STATE_SCHEMA_VERSION:
         raise _error(
@@ -729,6 +740,7 @@ def _state_from_payload(value: Any) -> PresenceState:
     return PresenceState(
         selections=tuple(_selection_from_payload(item, index=index) for index, item in enumerate(selections_raw)),
         runtime_overrides=overrides,
+        workspace_root=raw.get("workspace_root", ""),
     )
 
 

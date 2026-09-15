@@ -908,6 +908,7 @@
  * @typedef {Object} OwnerSkillPresenceRuntimeRequest
  * @property {string} expected_state_fingerprint
  * @property {{model_slot: ("main"|"light"|null), inline_max_rounds: (number|null)}} runtime_overrides
+ * @property {string=} workspace_root
  */
 
 /**

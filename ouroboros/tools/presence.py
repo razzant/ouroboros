@@ -39,15 +39,14 @@ def _configure_presence(ctx: ToolContext, action: str, **params: Any) -> str:
 
     root = canonical_data_root(ctx)
     selected = str(action or "").strip()
-    if selected in {"inspect", "select", "runtime"}:
-        from dataclasses import asdict
+    if selected in {"inspect", "select", "runtime", "workspace"}:
+        from dataclasses import asdict, replace
 
         from ouroboros.presence_capabilities import (
             PresenceArgumentBinding,
             PresenceResourceTarget,
             PresenceScriptTarget,
             PresenceSelection,
-            PresenceState,
             PresenceToolTarget,
             load_presence_state,
             presence_state_fingerprint,
@@ -83,18 +82,37 @@ def _configure_presence(ctx: ToolContext, action: str, **params: Any) -> str:
                         for request, fingerprint in requests.values()
                     ],
                     "selections": [asdict(item) for item in state.selections],
+                    "workspace_root": state.workspace_root,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
                 default=str,
             )
+        if selected == "workspace":
+            from ouroboros.workspace_admission import validate_workspace_root
+
+            requested = params.get("workspace_root")
+            if not isinstance(requested, str):
+                return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text="ERROR: PRESENCE_WORKSPACE_REQUIRED: supply workspace_root, or an empty string to clear it."))
+            workspace = validate_workspace_root(
+                requested, system_repo_dir=ctx.repo_dir, drive_root=root,
+            )
+            updated = replace(state, workspace_root=str(workspace) if workspace is not None else "")
+            save_presence_state(
+                root, loaded.name, updated,
+                expected_state_fingerprint=presence_state_fingerprint(state),
+            )
+            return json.dumps({
+                "ok": True, "workspace_root": updated.workspace_root,
+                "state_fingerprint": presence_state_fingerprint(updated),
+            }, sort_keys=True)
         if selected == "runtime":
             reset = bool(params.get("reset_runtime"))
             overrides = PresenceRuntimeOverrides() if reset else PresenceRuntimeOverrides(
                 model_slot=(str(params.get("model_slot") or "").strip() or None),
                 inline_max_rounds=params.get("inline_max_rounds"),
             )
-            updated = PresenceState(state.selections, overrides)
+            updated = replace(state, runtime_overrides=overrides)
             save_presence_state(
                 root,
                 loaded.name,
@@ -155,7 +173,7 @@ def _configure_presence(ctx: ToolContext, action: str, **params: Any) -> str:
         replacement = PresenceSelection(request_fingerprint, target, tuple(bindings))
         selections = [item for item in state.selections if item.request_fingerprint != request_fingerprint]
         selections.append(replacement)
-        updated = PresenceState(tuple(selections), state.runtime_overrides)
+        updated = replace(state, selections=tuple(selections))
         save_presence_state(
             root,
             loaded.name,
@@ -343,14 +361,19 @@ def get_tools() -> List[ToolEntry]:
                 "description": (
                     "Create, list, or disable an owner-controlled binding from an authenticated "
                     "transport room to one reviewed behavior skill. Use exact provider account, "
-                    "conversation and optional thread ids supplied by the owner or transport UI."
+                    "conversation and optional thread ids supplied by the owner or transport UI. "
+                    "Use workspace to select an existing working folder for new turns; memory stays shared."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["create", "list", "disable", "inspect", "select", "runtime"],
+                            "enum": ["create", "list", "disable", "inspect", "select", "runtime", "workspace"],
+                        },
+                        "workspace_root": {
+                            "type": "string",
+                            "description": "Existing external folder for action=workspace; empty clears the selection. Does not change capability grants or shared memory.",
                         },
                         "binding_id": {"type": "string"},
                         "transport_skill": {"type": "string"},

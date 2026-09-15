@@ -4339,6 +4339,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     width: 110px;
 }
 
+.skills-presence-runtime .skills-presence-workspace {
+    flex: 1 1 100%;
+    min-width: 0;
+}
+
+.skills-presence-workspace input {
+    width: 100%;
+}
+
 .skills-presence-runtime-actions {
     display: flex;
     gap: 6px;

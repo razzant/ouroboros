@@ -54,6 +54,7 @@ class PresenceAdmission:
     state_fingerprint: str
     selection_fingerprint: str
     capability_ceiling: PresenceCapabilityCeiling
+    workspace_root: str = ""
 
 
 def _component_error(exc: Any) -> PresenceAdmissionError:
@@ -174,6 +175,18 @@ def admit_presence_turn(
                 "binding.behavior_skill",
             )
         state = load_presence_state(root, skill.name)
+        from ouroboros.workspace_admission import WorkspaceRootError, validate_workspace_root
+
+        try:
+            workspace = validate_workspace_root(
+                state.workspace_root,
+                system_repo_dir=Path(__file__).resolve().parents[1],
+                drive_root=root,
+            )
+        except WorkspaceRootError as exc:
+            raise PresenceAdmissionError(
+                "presence_workspace_unusable", "presence_state.workspace_root", str(exc),
+            ) from exc
         state_digest = presence_state_fingerprint(state)
         resolution = resolve_presence_profile_state(
             profile,
@@ -207,6 +220,7 @@ def admit_presence_turn(
         state_fingerprint=state_digest,
         selection_fingerprint=resolution.selection_fingerprint,
         capability_ceiling=ceiling,
+        workspace_root=str(workspace) if workspace is not None else "",
     )
 
 

@@ -861,6 +861,7 @@ class OwnerSafetyModeResponse(TypedDict):
 class OwnerSkillPresenceRuntimeRequest(TypedDict):
     expected_state_fingerprint: str
     runtime_overrides: Dict[str, Any]
+    workspace_root: NotRequired[str]
 
 
 class OwnerSkillPresenceRuntimeResponse(TypedDict):

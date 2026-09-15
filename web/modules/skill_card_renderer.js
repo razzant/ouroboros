@@ -280,11 +280,14 @@ function presenceRuntimeBlock(skill) {
         <label class="ui-field">Inline rounds
             <input name="inline_max_rounds" class="ui-control" type="number" min="1" step="1" value="${escapeHtml(roundsOverride)}" placeholder="${escapeHtml(defaults.inline_max_rounds || 10)}">
         </label>
+        <label class="ui-field skills-presence-workspace">Working folder
+            <input name="workspace_root" class="ui-control" type="text" value="${escapeHtml(runtime.workspace_root || '')}" placeholder="No external folder">
+        </label>
         <div class="skills-presence-runtime-actions">
             <button type="submit" class="btn btn-default btn-sm">Save</button>
             <button type="button" class="btn btn-ghost btn-sm" data-presence-runtime-reset>Use reviewed defaults</button>
         </div>
-        <div class="muted">Applies to new Presence turns only.</div>
+        <div class="muted">Applies to new Presence turns only. Memory stays shared.</div>
     </form>`;
 }
 

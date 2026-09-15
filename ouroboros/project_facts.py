@@ -155,6 +155,10 @@ def resolve_project_id(task: Dict[str, Any]) -> str:
     # mismatch the forked seed prepared at schedule time for an unscoped parent.
     if str(task.get("delegation_role") or "") == "subagent":
         return ""
+    metadata = task.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("presence"), dict) and metadata["presence"]:
+        # Presence changes file/process cwd, not its canonical memory scope.
+        return ""
     workspace = str(task.get("workspace_root") or "").strip()
     if workspace:
         canon = _normalized_workspace(workspace)

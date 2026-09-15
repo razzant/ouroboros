@@ -1,16 +1,17 @@
 """Workspace-task admission SSOT (v6.58.0, slice 1).
 
-ONE validator + room-workspace resolver shared by the two surfaces that turn a
+ONE validator + room-workspace resolver shared by the surfaces that turn a
 folder into a task's active workspace:
 
-- ``gateway/tasks.py::api_tasks_create`` (the `/api/tasks` HTTP path), and
+- ``gateway/tasks.py::api_tasks_create`` (the `/api/tasks` HTTP path),
 - ``supervisor/workers.py::promote_chat_to_task`` (the in-agent promote/route
   path — previously a DEGRADED twin that set ``workspace_root`` as a raw string
-  with no validation).
+  with no validation), and
+- owner-selected Presence folders (local configuration and turn admission).
 
 Two invariants this module enforces (BIBLE P3/P5):
 
-1. **One admission path.** Both surfaces call ``validate_workspace_root`` — the
+1. **One admission path.** These surfaces call ``validate_workspace_root`` — the
    SAME folder + Git geometry + repo/data-overlap check — so they cannot drift.
 2. **Loud fail over silent self_modification.** A task born in a project ROOM
    whose ``working_dir`` is SET-but-unusable (deleted/moved/invalid Git root)

@@ -274,17 +274,22 @@ def test_reviewed_presence_runtime_card_projection_and_owner_cas(tmp_path, monke
         runtime = row["presence_runtime"]
         assert runtime["defaults"] == {"model_slot": "light", "inline_max_rounds": 10}
         assert runtime["overrides"] == {"model_slot": None, "inline_max_rounds": None}
+        assert runtime["workspace_root"] == ""
+        workspace = tmp_path / "presence-workspace"
+        workspace.mkdir()
 
         update = client.post(
             "/api/owner/skills/presence_ext/presence-runtime",
             json={
                 "expected_state_fingerprint": runtime["state_fingerprint"],
                 "runtime_overrides": {"model_slot": "main", "inline_max_rounds": 7},
+                "workspace_root": str(workspace),
             },
         )
         assert update.status_code == 200, update.text
         updated_runtime = update.json()["presence_runtime"]
         assert updated_runtime["overrides"] == {"model_slot": "main", "inline_max_rounds": 7}
+        assert updated_runtime["workspace_root"] == str(workspace)
         assert review_path.read_bytes() == review_before
         assert load_presence_state(drive_root, "presence_ext").runtime_overrides.model_slot == "main"
 
@@ -310,6 +315,17 @@ def test_reviewed_presence_runtime_card_projection_and_owner_cas(tmp_path, monke
             "model_slot": None,
             "inline_max_rounds": None,
         }
+        assert reset.json()["presence_runtime"]["workspace_root"] == str(workspace)
+        invalid = client.post(
+            "/api/owner/skills/presence_ext/presence-runtime",
+            json={
+                "expected_state_fingerprint": reset.json()["presence_runtime"]["state_fingerprint"],
+                "runtime_overrides": {"model_slot": "main", "inline_max_rounds": 8},
+                "workspace_root": str(drive_root),
+            },
+        )
+        assert invalid.status_code == 400
+        assert load_presence_state(drive_root, "presence_ext").workspace_root == str(workspace)
         refreshed = next(
             item for item in client.get("/api/extensions").json()["skills"]
             if item["name"] == "presence_ext"

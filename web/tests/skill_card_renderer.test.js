@@ -21,6 +21,20 @@ function skill(overrides = {}) {
     };
 }
 
+test('Presence runtime exposes the selected working folder with shared memory', () => {
+    const html = renderInstalledSkillCard(skill({
+        presence_runtime: {
+            defaults: { model_slot: 'main', inline_max_rounds: 10 },
+            overrides: { model_slot: 'light', inline_max_rounds: 7 },
+            workspace_root: '/work/reports & notes',
+            state_fingerprint: 'a'.repeat(64),
+        },
+    }));
+    assert.match(html, /name="workspace_root"[^>]+value="\/work\/reports &amp; notes"/);
+    assert.match(html, /Memory stays shared/);
+    assert.match(html, /data-presence-runtime-reset/);
+});
+
 test('extension registration status says Loaded, not Active', () => {
     const html = renderInstalledSkillCard(skill({
         enabled: true,

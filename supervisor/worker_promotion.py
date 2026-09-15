@@ -562,6 +562,21 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
         resolve_room_workspace,
     )
 
+    if task.get("_presence_origin"):
+        # Keep the admitted folder from the inherited contract, never a public
+        # event's replacement. Presence retains its canonical shared memory.
+        workspace = task["task_contract"].get("workspace") or {}
+        resolved_ws, ws_error = resolve_room_workspace(
+            drive_root=_pool().DRIVE_ROOT, system_repo_dir=_pool().REPO_DIR,
+            project_id="", explicit_workspace=str(workspace.get("root") or ""),
+        )
+        if ws_error:
+            _fail_promoted_task_loudly(ctx, task, ws_error)
+            return {"status": "needs_manual_target", "reason": "workspace_unusable", "task_id": tid}
+        if resolved_ws:
+            task.update(workspace_root=resolved_ws, workspace_mode="external", memory_mode="shared")
+        return None
+
     # Q10=A (owner, 2026-08-08): a project promoted with NO working folder gets one
     # AUTO-PROVISIONED via the existing ensure_project_workspace seam (an idempotent
     # standalone git repo under the durable subagent_projects root — passes the same

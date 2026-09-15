@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -41,6 +42,7 @@ def _runtime_projection(profile: Any, state: PresenceState) -> dict[str, Any]:
             "inline_max_rounds": overrides.inline_max_rounds,
         },
         "state_fingerprint": presence_state_fingerprint(state),
+        "workspace_root": state.workspace_root,
     }
 
 
@@ -64,14 +66,17 @@ def presence_runtime_card_projection(drive_root: Path, loaded: Any) -> dict[str,
 
 
 def _parse_overrides(body: Any) -> tuple[str, Mapping[str, Any]]:
-    if not isinstance(body, Mapping) or set(body) != _REQUEST_FIELDS:
-        raise ValueError("body must contain exactly expected_state_fingerprint and runtime_overrides")
+    if (not isinstance(body, Mapping) or not _REQUEST_FIELDS <= set(body)
+            or set(body) - _REQUEST_FIELDS - {"workspace_root"}):
+        raise ValueError("body must contain expected_state_fingerprint and runtime_overrides, with optional workspace_root")
     expected = body.get("expected_state_fingerprint")
     raw = body.get("runtime_overrides")
     if not isinstance(expected, str) or not isinstance(raw, Mapping):
         raise ValueError("expected_state_fingerprint must be a string and runtime_overrides an object")
     if set(raw) != _OVERRIDE_FIELDS:
         raise ValueError("runtime_overrides must contain exactly model_slot and inline_max_rounds")
+    if "workspace_root" in body and not isinstance(body["workspace_root"], str):
+        raise ValueError("workspace_root must be a string; empty clears the selection")
     return expected, raw
 
 
@@ -96,7 +101,15 @@ def _update_runtime_overrides(
         model_slot=raw.get("model_slot"),
         inline_max_rounds=raw.get("inline_max_rounds"),
     )
-    updated = PresenceState(state.selections, overrides)
+    updated = replace(state, runtime_overrides=overrides)
+    if "workspace_root" in body:
+        from ouroboros.workspace_admission import validate_workspace_root
+
+        workspace = validate_workspace_root(
+            body["workspace_root"], system_repo_dir=Path(__file__).resolve().parents[2],
+            drive_root=drive_root,
+        )
+        updated = replace(updated, workspace_root=str(workspace) if workspace is not None else "")
     saved = save_presence_state(
         drive_root,
         loaded.name,
@@ -111,7 +124,7 @@ def _update_runtime_overrides(
 
 
 async def api_owner_skill_presence_runtime(request: Request) -> JSONResponse:
-    """CAS-update only the local runtime overrides of one reviewed profile."""
+    """CAS-update the local runtime and workspace of one reviewed profile."""
     from ouroboros.config import get_skills_repo_path
 
     skill_name = str(request.path_params.get("skill") or "").strip()

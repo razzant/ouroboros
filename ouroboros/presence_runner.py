@@ -329,6 +329,12 @@ def _build_task(
         "metadata": metadata,
         "task_contract": {"capability_ceiling": presence_ceiling_payload(admission.capability_ceiling)},
     }
+    if admission.workspace_root:
+        task.update(
+            workspace_root=admission.workspace_root,
+            workspace_mode="external",
+            memory_mode="shared",
+        )
     manifest = stage_task_attachments(
         drive_root,
         task_id,

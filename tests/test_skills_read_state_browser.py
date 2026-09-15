@@ -129,6 +129,65 @@ def _capture(page, browser_name, width, state):
         page.screenshot(path=str(target / f"skills-{browser_name}-{width}-{state}.png"))
 
 
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1440), ("webkit", 390)])
+def test_presence_workspace_save_and_runtime_reset_keep_owner_folder(skills_browser, browser_name, width):
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        state, installed = _open_skills(page)
+        runtime = {
+            "defaults": {"model_slot": "main", "inline_max_rounds": 10},
+            "overrides": {}, "workspace_root": "/work/current",
+            "state_fingerprint": "a" * 64,
+        }
+        state["extensions"] = [{**installed, "enabled": True, "review_status": "clean",
+            "review_gate": {"executable_review": True}, "presence_runtime": runtime}]
+        writes = []
+
+        def save(route):
+            body = route.request.post_data_json
+            assert body["expected_state_fingerprint"] == runtime["state_fingerprint"]
+            writes.append(body)
+            runtime["overrides"] = body["runtime_overrides"]
+            if "workspace_root" in body:
+                runtime["workspace_root"] = body["workspace_root"]
+            runtime["state_fingerprint"] = str(len(writes)) * 64
+            route.fulfill(content_type="application/json", body=json.dumps({
+                "ok": True, "skill": "weather", "presence_runtime": runtime,
+            }))
+
+        page.route("**/api/owner/skills/weather/presence-runtime", save)
+        page.goto("http://skills.test/", wait_until="networkidle")
+        card = page.locator('.skills-card[data-skill="weather"]')
+        card.locator('.skills-details > summary').click()
+        form = card.locator('[data-presence-runtime-form]')
+        folder = form.locator('[name="workspace_root"]')
+        assert folder.input_value() == "/work/current"
+        selected = "/work/shared documents/quarterly reports"
+        folder.fill(selected)
+        form.locator('[name="model_slot"]').select_option("light")
+        _capture(page, browser_name, width, "presence-workspace-edit")
+        assert folder.bounding_box()["width"] > 200
+        form.locator('button[type="submit"]').click()
+        page.wait_for_function("document.querySelector('[data-presence-runtime-form]').dataset.stateFingerprint === '1'.repeat(64)")
+        assert writes[0]["workspace_root"] == selected
+        assert writes[0]["runtime_overrides"]["model_slot"] == "light"
+        if not form.is_visible():
+            card.locator('.skills-details > summary').click()
+        assert folder.input_value() == selected
+        form.locator('[data-presence-runtime-reset]').click()
+        page.wait_for_function("document.querySelector('[data-presence-runtime-form]').dataset.stateFingerprint === '2'.repeat(64)")
+        assert "workspace_root" not in writes[1]
+        assert writes[1]["runtime_overrides"] == {"model_slot": None, "inline_max_rounds": None}
+        if not form.is_visible():
+            card.locator('.skills-details > summary').click()
+        assert folder.input_value() == selected
+        _capture(page, browser_name, width, "presence-workspace-saved")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    finally:
+        browser.close()
+
+
 @pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
 @pytest.mark.parametrize("width", [390, 1440])
 def test_skills_failure_recovery_and_current_catalog_refresh(skills_browser, browser_name, width):

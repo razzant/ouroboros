@@ -1458,6 +1458,11 @@ Enforcement: `tests/test_protected_artifacts_policy.py` and
   credentials, room ids, or one installed tool spelling.
   `presence_capabilities.py` stores the owner's exact selections outside the
   payload and fingerprints the request semantics that authorize them.
+  Its optional `workspace_root` is an owner-local external folder, validated
+  through the existing workspace admission and copied into each task contract.
+  Preserve it when editing runtime/capability selections; unset profiles retain
+  their prior serialized state and fingerprint. Presence keeps canonical shared
+  memory without deriving a Project or creating a forked drive from that folder.
 - Presence authority is a positive immutable ceiling, not a denylist or a
   prompt promise: admission requires the owner-created binding plus an
   installed, enabled, freshly executable behavior skill and every required
@@ -1484,7 +1489,7 @@ Enforcement: `tests/test_protected_artifacts_policy.py` and
   stays behind the same transport token and binding, and
   `presence_cancel_work` additionally requires the current binding and
   conversation to match). Promotion and `schedule_followup` copy the Presence
-  metadata and capability ceiling by value; any new descendant producer
+  metadata, admitted workspace and capability ceiling by value; any new descendant producer
   preserves this ceiling or refuses the transition — reconstructing authority
   from mutable current state is forbidden.
 - Knowledge-topic and scratchpad mutation each use one stable lock, so

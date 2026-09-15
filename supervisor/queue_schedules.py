@@ -265,6 +265,13 @@ def _task_from_schedule(record: Dict[str, Any]) -> Dict[str, Any]:
     if existing_contract:
         task["task_contract"] = existing_contract
     task["task_contract"] = build_task_contract(task)
+    presence = metadata.get("presence")
+    workspace = task["task_contract"]["workspace"]
+    if isinstance(presence, dict) and presence and workspace["root"]:
+        task.update(
+            workspace_root=workspace["root"], workspace_mode=workspace["mode"],
+            memory_mode="shared",
+        )
     task["metadata"]["schedule_id"] = str(record.get("id") or "")
     task["metadata"]["schedule_name"] = str(record.get("name") or "")
     task["metadata"]["schedule_trigger"] = dict(record.get("trigger") or {})

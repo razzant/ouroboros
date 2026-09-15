@@ -429,6 +429,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                 model_slot: modelValue || null,
                 inline_max_rounds: rounds,
             },
+            ...(!reset ? { workspace_root: String(form.elements.workspace_root?.value || '').trim() } : {}),
         });
         showToast(`${name}: Presence runtime ${reset ? 'reset' : 'saved'} for new turns`, 'ok');
     }
