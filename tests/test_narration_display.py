@@ -28,6 +28,27 @@ def test_reasoning_details_readable_types():
     assert LLMClient.extract_display_reasoning(msg) == "step one\nsummary two"
 
 
+def test_minimax_split_reasoning_narrates_and_leaves_content_parseable():
+    """The direct MiniMax lane asks for ``reasoning_split``, so the thinking arrives as
+    ``reasoning_details`` and ``content`` is the bare verdict — narration reads the one,
+    the review parser reads the other, and no ``<think>`` block has to be stripped."""
+    from ouroboros.triad_review import empty_array_is_verified_clean
+
+    msg = {
+        "role": "assistant",
+        "content": "[]\nNO_FINDINGS",
+        "reasoning_details": [{
+            "type": "reasoning.text",
+            "id": "reasoning-text-1",
+            "format": "MiniMax-response-v1",
+            "index": 0,
+            "text": "checked the diff",
+        }],
+    }
+    assert LLMClient.extract_display_reasoning(msg) == "checked the diff"
+    assert empty_array_is_verified_clean(msg["content"]) is True
+
+
 def test_reasoning_details_encrypted_is_skipped():
     msg = {"reasoning_details": [
         {"type": "reasoning.encrypted", "data": "BASE64OPAQUE=="},

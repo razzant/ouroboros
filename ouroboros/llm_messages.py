@@ -86,6 +86,7 @@ class _MessageShapingMixin:
         messages: List[Dict[str, Any]],
         *,
         keep_reasoning_content: bool = False,
+        keep_reasoning_details: bool = False,
     ) -> List[Dict[str, Any]]:
         """Strip provider-private reasoning round-trip artifacts that a DIFFERENT
         upstream family rejects: assistant-level ``reasoning``/``reasoning_details``/
@@ -102,7 +103,12 @@ class _MessageShapingMixin:
         class — a server that REQUIRES its own echo (tool-bearing requests 400
         without the previous turns' ``reasoning_content``) — so its lane passes
         ``keep_reasoning_content=True`` to retain that one field while every
-        other round-trip artifact is still stripped."""
+        other round-trip artifact is still stripped. MiniMax is the fourth class:
+        a ``reasoning_split`` request returns the thinking as ``reasoning_details``
+        and its interleaved-thinking contract asks for those records back unchanged
+        on the same lane, so it passes ``keep_reasoning_details=True`` to retain that
+        one field. Cross-family switches still scrub everything
+        (``sanitize_reasoning_on_model_switch``)."""
         cleaned = scrub_native_custody(messages)
         for msg in cleaned:
             if not isinstance(msg, dict):
@@ -111,7 +117,8 @@ class _MessageShapingMixin:
             if msg.get("role") != "assistant":
                 continue
             msg.pop("reasoning", None)
-            msg.pop("reasoning_details", None)
+            if not keep_reasoning_details:
+                msg.pop("reasoning_details", None)
             if not keep_reasoning_content:
                 msg.pop("reasoning_content", None)
             msg.pop("response_id", None)

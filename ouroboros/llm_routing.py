@@ -362,6 +362,12 @@ class _ProviderRoutingMixin:
                 "api_key": configured("MINIMAX_API_KEY", ""),
                 "base_url": resolve_minimax_base_url(configured("MINIMAX_REGION", "")),
                 "default_headers": {},
+                # MiniMax returns thinking INSIDE ``content`` wrapped in ``<think>``
+                # tags unless the request carries ``reasoning_split``, which moves it
+                # to ``reasoning_details`` and leaves content clean for every reader.
+                # Its docs require replaying those ``reasoning_details`` unchanged on
+                # the same lane so interleaved thinking survives tool calls.
+                "reasoning_split": True,
                 "supports_openrouter_extensions": False,
                 "supports_generation_cost": False,
             }

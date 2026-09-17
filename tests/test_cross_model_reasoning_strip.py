@@ -211,3 +211,86 @@ def test_normalize_remote_response_drops_reasoning_content_before_transcript():
     msg, usage = client._normalize_remote_response(resp_dict, target, skip_cost_fetch=True)
     assert "reasoning_content" not in msg
     assert msg.get("content") == "hello"
+
+
+# --- MiniMax split reasoning: the wire contract, not a parser-level <think> strip ---
+
+def _split_reasoning_history():
+    return [
+        {
+            "role": "assistant",
+            "content": "the answer",
+            "reasoning": "flat rollup",
+            "response_id": "resp_minimax_1",
+            "reasoning_details": [{
+                "type": "reasoning.text",
+                "id": "reasoning-text-1",
+                "format": "MiniMax-response-v1",
+                "index": 0,
+                "text": "minimax chain of thought",
+            }],
+        },
+        {"role": "user", "content": "next"},
+    ]
+
+
+def test_minimax_request_asks_for_split_reasoning():
+    """MiniMax wraps its thinking in ``<think>`` tags inside ``content`` unless the
+    request carries ``reasoning_split``; it must ride in extra_body because the
+    OpenAI SDK rejects unknown top-level kwargs."""
+    from ouroboros.llm import LLMClient
+    client = LLMClient()
+    target = {"resolved_model": "MiniMax-M3", "provider": "minimax",
+              "supports_openrouter_extensions": False, "reasoning_split": True}
+    kwargs = client._build_remote_kwargs(
+        target, [{"role": "user", "content": "hi"}], reasoning_effort="low",
+        max_tokens=64, tool_choice="auto", temperature=None, tools=None,
+    )
+    assert kwargs["extra_body"]["reasoning_split"] is True
+    # "reasoning_split" is not a top-level request field on any lane.
+    assert "reasoning_split" not in kwargs
+
+
+def test_lanes_without_split_reasoning_send_no_such_field():
+    """Only a target that declares the contract carries it: the DeepSeek and direct
+    OpenAI lanes must keep their own wire shape."""
+    from ouroboros.llm import LLMClient
+    client = LLMClient()
+    for target in (
+        {"resolved_model": "deepseek-chat", "provider": "deepseek",
+         "supports_openrouter_extensions": False, "requires_reasoning_echo": True},
+        {"resolved_model": "gpt-5.5", "provider": "openai",
+         "supports_openrouter_extensions": False},
+    ):
+        kwargs = client._build_remote_kwargs(
+            target, [{"role": "user", "content": "hi"}], reasoning_effort="low",
+            max_tokens=64, tool_choice="auto", temperature=None, tools=None,
+        )
+        assert "reasoning_split" not in kwargs
+        assert "reasoning_split" not in (kwargs.get("extra_body") or {})
+
+
+def test_split_reasoning_lane_replays_reasoning_details_only():
+    """MiniMax's interleaved-thinking contract wants its ``reasoning_details`` records
+    back unchanged on the same lane; every OTHER round-trip artifact still goes."""
+    from ouroboros.llm import LLMClient
+    out = LLMClient._strip_openrouter_roundtrip_metadata(
+        _split_reasoning_history(), keep_reasoning_details=True,
+    )
+    asst = out[0]
+    assert asst["reasoning_details"] == _split_reasoning_history()[0]["reasoning_details"]
+    assert "reasoning" not in asst and "response_id" not in asst
+    assert asst["content"] == "the answer"
+
+
+def test_default_still_strips_reasoning_details():
+    """The default (every other lane, and any cross-family send) is unchanged."""
+    from ouroboros.llm import LLMClient
+    out = LLMClient._strip_openrouter_roundtrip_metadata(_split_reasoning_history())
+    assert "reasoning_details" not in out[0]
+    assert "reasoning" not in out[0] and "response_id" not in out[0]
+    # a cross-family switch scrubs the split-reasoning transcript like any other
+    cross = LLMClient.sanitize_reasoning_on_model_switch(
+        _split_reasoning_history(), "minimax/MiniMax-M3", "anthropic/claude-sonnet-4.6",
+    )
+    assert LLMClient._has_replayed_reasoning_metadata(cross) is False

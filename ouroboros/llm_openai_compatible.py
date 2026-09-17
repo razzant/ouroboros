@@ -149,6 +149,7 @@ class _OpenAICompatibleLaneMixin:
                     flatten_non_user_content_blocks=provider == "deepseek",
                 ),
                 keep_reasoning_content=bool(target.get("requires_reasoning_echo")),
+                keep_reasoning_details=bool(target.get("reasoning_split")),
             )
             if target.get("requires_reasoning_echo"):
                 # A reasoning-echo route (DeepSeek) REQUIRES every assistant
@@ -166,6 +167,14 @@ class _OpenAICompatibleLaneMixin:
                 "messages": clean_messages,
                 token_limit_key: max_tokens,
             }
+            if target.get("reasoning_split"):
+                # MiniMax otherwise returns its chain of thought INSIDE ``content``,
+                # wrapped in ``<think>`` tags that every downstream reader (review
+                # parsers, narration, chat) would have to cope with. ``reasoning_split``
+                # moves it to ``reasoning_details`` and leaves content clean. It must
+                # ride in extra_body: the OpenAI SDK rejects unknown top-level kwargs
+                # with TypeError, so a raw ``reasoning_split=`` never reaches the wire.
+                kwargs.setdefault("extra_body", {})["reasoning_split"] = True
             if stream:
                 kwargs.update(stream=True, stream_options={"include_usage": True})
             if provider == "openai":

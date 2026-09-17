@@ -508,9 +508,12 @@
                   "content": "hello"
                 }
               ],
-              "max_tokens": 65536
+              "max_tokens": 65536,
+              "extra_body": {
+                "reasoning_split": true
+              }
             },
-            "payload_sha256": "65a41fc52448a9eb26a9d2ac2eea731381971b2bac0582a3003d4c14506de338"
+            "payload_sha256": "dadf31aade82adc876baab4d8f718f4cf9836c63ffdf067b05b5d8f0230d03a0"
           }
         ],
         "pricing_calls": [
@@ -533,8 +536,8 @@
             "source": "llm.chat",
             "model": "minimax/MiniMax-M2",
             "provider": "minimax",
-            "candidate_raw_sha256": "65a41fc52448a9eb26a9d2ac2eea731381971b2bac0582a3003d4c14506de338",
-            "candidate_raw_size_bytes": 139,
+            "candidate_raw_sha256": "dadf31aade82adc876baab4d8f718f4cf9836c63ffdf067b05b5d8f0230d03a0",
+            "candidate_raw_size_bytes": 177,
             "candidate_measurement_kind": "canonical_json_v1",
             "states": [
               "reserved",

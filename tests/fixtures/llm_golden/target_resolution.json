@@ -188,10 +188,11 @@
             "api_key": "minimax-fixture-key",
             "base_url": "https://api.minimax.io/v1",
             "default_headers": {},
+            "reasoning_split": true,
             "supports_openrouter_extensions": false,
             "supports_generation_cost": false
           },
-          "value_sha256": "061c2af07a016a1509b3976d923e58357dc1bd3c80a32f25a9c6c55c004a91ed"
+          "value_sha256": "ad8073731e77f81151b8a64c3702d3ac2e934676567d17940ff9cbc91f854437"
         },
         "sends": [],
         "unused_script_steps": 0
