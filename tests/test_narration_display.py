@@ -173,3 +173,83 @@ def test_skill_review_projection_redacts_reviewer_secret_prose():
 
     assert candidate not in markdown
     assert "***REDACTED***" in markdown
+
+
+def _recording_emitter(calls):
+    def emit(text, **kwargs):
+        calls.append((text, kwargs))
+    return emit
+
+
+def test_round_progress_emits_reasoning_stamped_before_visible_text(monkeypatch):
+    from ouroboros.loop import _emit_round_progress
+
+    monkeypatch.delenv("OUROBOROS_REASONING_SUMMARY", raising=False)
+    calls = []
+    trace = {"reasoning_notes": []}
+    msg = {"reasoning": " weigh the two options ", "content": "the answer"}
+
+    _emit_round_progress("the answer", msg, _recording_emitter(calls), trace)
+
+    # think -> say: reasoning goes out first, stamped, even though visible text exists.
+    assert calls == [
+        ("weigh the two options", {"meta": {"reasoning": True}, "narration": False}),
+        ("the answer", {"narration": True}),
+    ]
+    # reasoning is display-only: only the visible text reaches the trace.
+    assert trace["reasoning_notes"] == ["the answer"]
+
+
+def test_round_progress_reasoning_off_emits_only_visible_text(monkeypatch):
+    from ouroboros.loop import _emit_round_progress
+
+    monkeypatch.setenv("OUROBOROS_REASONING_SUMMARY", "off")
+    calls = []
+    msg = {"reasoning": "weigh the two options", "content": "the answer"}
+
+    _emit_round_progress("the answer", msg, _recording_emitter(calls), {"reasoning_notes": []})
+
+    assert calls == [("the answer", {"narration": True})]
+
+
+def test_history_replays_the_reasoning_stamp_on_a_stored_progress_row(tmp_path):
+    """A `progress.jsonl` row stamped `reasoning: true` comes back from the history
+    projection with the stamp (it is whitelisted in `_PROGRESS_META_FIELDS`); an
+    unstamped row carries no `reasoning` key at all."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chat.jsonl").touch()
+    (logs / "progress.jsonl").write_text("".join(json.dumps(row) + "\n" for row in (
+        {"ts": "2026-09-11T00:00:00Z", "task_id": "t1", "content": "💬 weigh the options", "reasoning": True},
+        {"ts": "2026-09-11T00:00:01Z", "task_id": "t1", "content": "💬 the answer"},
+    )))
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "10"})))
+    thinking, plain = [row for row in json.loads(response.body)["messages"] if row.get("is_progress")]
+    assert thinking["text"] == "💬 weigh the options" and thinking["reasoning"] is True
+    assert plain["text"] == "💬 the answer" and "reasoning" not in plain
+
+
+def test_reasoning_rows_stay_in_the_file_but_never_reach_the_recent_progress_digest(tmp_path):
+    """`## Recent progress` (ouroboros/context.py, `summarize_progress(limit=50)`) is a
+    fixed prompt window fed by progress.jsonl. Reasoning is display-only: the stamped row
+    stays on disk for UI replay, yet only narration and visible text reach the digest."""
+    import json
+
+    from ouroboros.memory import Memory
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "progress.jsonl").write_text("".join(json.dumps(row) + "\n" for row in (
+        {"ts": "2026-09-11T00:00:00Z", "task_id": "t1", "text": "💬 weigh the options", "reasoning": True},
+        {"ts": "2026-09-11T00:05:00Z", "task_id": "t1", "text": "💬 the answer"},
+    )))
+    memory = Memory(tmp_path)
+    rows = memory.read_jsonl_tail("progress.jsonl", 200)
+    assert [r.get("reasoning") for r in rows] == [True, None]  # both rows survive the read
+    assert memory.summarize_progress(rows, limit=50) == "⚙️ 00:05 💬 the answer"

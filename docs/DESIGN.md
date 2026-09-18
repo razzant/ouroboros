@@ -16,8 +16,13 @@ styles by both the SPA and the served onboarding document. Page styles own
 composition, not another copy of the shared palette. This file names roles;
 it does not copy an inventory.
 
-The theme is **dark only**. There is no light-theme plumbing, and adding a
-second theme is an architecture change, not a styling change.
+Two themes, one contract: the dark palette is the `:root` block of
+`web/ui.css` and the light palette is the `html[data-theme="light"]` override
+block in the same file (tokens only, never light-only selectors), so a surface
+is themed exactly when it reads tokens. The choice is persisted as the `theme`
+UI preference (`ouroboros/gateway/ui_preferences.py`), applied to the root
+element on boot by `web/modules/theme.js`, and mirrored to `localStorage` so
+the head script paints the right theme before the preference fetch returns.
 
 ---
 
@@ -258,9 +263,13 @@ pointer alone; a card in another chat keeps the excerpt.
   A tone value the code actually emits (`muted`) must have a rule; falling
   through to a default is how chips end up white.
 - Chips are `--type-meta`, not smaller, and are not uppercased.
-- `--green` / `--amber` / `--red` are the saturated hues, and they are for
-  things that are not text: dots, switch tracks, progress. The `--status-*-fg`
-  tints are for text on near-black; do not swap them. (There was also a
+- `--green` / `--amber` / `--red` — with their `--blue` / `--purple` /
+  `--project` peers — are the saturated hues, and they are for things that are
+  not text: dots, switch tracks, progress. The `--status-*-fg` tints are for
+  text; do not swap them. Both families are re-declared in the light block,
+  because the handful of surfaces that do ink a raw hue (`.status-badge`,
+  `.log-type.*`, `.chat-budget-text`) would otherwise sit near 2:1 on paper.
+  (There was also a
   `--tone-ok` / `--tone-warn` / `--tone-danger` alias family, plus
   `--accent-task` / `--accent-system` / `--accent-user` / `--accent-project`
   and `--ui-tone-*`. They were named here and referenced by nothing at all, so
@@ -339,6 +348,12 @@ not move them into the migrated set in section 8.
   as its external executor. A child keeps one useful activity line visible;
   a root permits up to three. Empty activity reserves no band, and a duplicate
   title is not activity. Full narration and Reviews expand independently.
+  The agent's own reasoning is a collapsed `Thinking` timeline row (a
+  reasoning-stamped progress frame); it never becomes the summary line. That
+  row is opt-in and hidden by default: the `show_reasoning` UI preference
+  (Settings -> Behavior -> Appearance) decides whether it renders in the chat
+  timeline and the Logs tab, while the frame stays recorded either way, so
+  turning the display on also reveals it on history replay.
   The root keeps primary title ink at weight 500, children secondary ink at
   400. Nested frames preserve real ancestry; their opaque secondary surface
   avoids accumulating translucent white tints at greater depth.

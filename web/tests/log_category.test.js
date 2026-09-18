@@ -9,7 +9,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
-import { categorizeLogEvent, summarizeLogEvent } from '../modules/log_events.js';
+import {
+    LOG_CATEGORIES,
+    categorizeLogEvent,
+    isReasoningVisible,
+    setReasoningVisible,
+    summarizeChatLiveEvent,
+    summarizeLogEvent,
+} from '../modules/log_events.js';
 
 const logEventsSource = readFileSync(new URL('../modules/log_events.js', import.meta.url), 'utf8');
 
@@ -37,6 +44,9 @@ const TABLE = [
     ['clean tool result', { type: 'tool_call_finished', tool: 'read_file', is_error: false }, 'done', 'tools'],
     ['LLM usage', { type: 'llm_usage', model: 'm' }, 'usage', 'llm'],
     ['unknown quiet event', { type: 'future_scheduler_tick' }, 'info', 'system'],
+    // the agent's reasoning files under its own chip; an unstamped row stays a task update
+    ['reasoning progress row', { type: 'send_message', is_progress: true, reasoning: true, task_id: 't', content: '💬 weighing options' }, 'thinking', 'reasoning'],
+    ['plain progress row', { type: 'send_message', is_progress: true, task_id: 't', content: '💬 editing the file' }, 'progress', 'tasks'],
 ];
 
 test('Logs category is derived from the typed phase of the same projection', () => {
@@ -95,4 +105,112 @@ test('a delegated harness run is not labelled as a subagent in the fan-out row (
     assert.equal(subagents.headline, 'swarm fan-out: 3 subagent(s) requested');
     assert.equal(summarizeLogEvent({ type: 'swarm_fanout', task_ids: ['a', 'b'] }).headline,
         'swarm fan-out: 2 subagent(s) requested');
+});
+
+
+const REASONING_ROW = { type: 'send_message', is_progress: true, reasoning: true, task_id: 't', content: '💬 weighing options' };
+
+test('the reasoning chip exists and the row shows the reasoning text as its body', () => {
+    assert.ok(LOG_CATEGORIES.reasoning);
+    setReasoningVisible(true);
+    const view = summarizeLogEvent(REASONING_ROW);
+    assert.equal(view.headline, 'Thinking');
+    assert.equal(view.body, 'weighing options');
+    assert.notEqual(view.visible, false);
+    setReasoningVisible(false);
+});
+
+test('a freshly loaded module hides reasoning on both surfaces until the preference turns it on', async () => {
+    // Read the real module default (this file's other tests move the flag), so
+    // a default flipped to "shown" fails here.
+    const fresh = await import('../modules/log_events.js?default-state');
+    assert.equal(fresh.isReasoningVisible(), false);
+    assert.equal(fresh.summarizeLogEvent(REASONING_ROW).visible, false);
+    assert.equal(fresh.summarizeChatLiveEvent(REASONING_ROW).visible, false);
+    fresh.setReasoningVisible(true);
+    assert.notEqual(fresh.summarizeLogEvent(REASONING_ROW).visible, false);
+    assert.equal(fresh.summarizeChatLiveEvent(REASONING_ROW).visible, true);
+});
+
+test('reasoning hidden: the stamped Logs row declares itself invisible', () => {
+    setReasoningVisible(false);
+    assert.equal(isReasoningVisible(), false);
+    const hidden = summarizeLogEvent(REASONING_ROW);
+    assert.equal(hidden.visible, false, 'the Logs renderer drops a view with visible === false');
+    // The projection keeps its facts so the chip/phase stay consistent once shown.
+    assert.equal(hidden.phase, 'thinking');
+    assert.equal(categorizeLogEvent(REASONING_ROW, hidden), 'reasoning');
+    // An unstamped progress row is untouched by the preference.
+    const plain = summarizeLogEvent({ type: 'send_message', is_progress: true, task_id: 't', content: '💬 editing the file' });
+    assert.notEqual(plain.visible, false);
+    setReasoningVisible(true);
+    assert.notEqual(summarizeLogEvent(REASONING_ROW).visible, false);
+    setReasoningVisible(false);
+    assert.equal(summarizeLogEvent(REASONING_ROW).visible, false);
+});
+
+test('reasoning hidden: a reasoning-only round keeps its ordinary narration row and card title', () => {
+    // The worker stamps `narration: true` on the reasoning frame only when the round
+    // has no visible text; that frame is then the round's voice, not an extra row.
+    const only = { ...REASONING_ROW, narration: true };
+    setReasoningVisible(false);
+    const log = summarizeLogEvent(only);
+    assert.notEqual(log.visible, false);
+    assert.notEqual(log.phase, 'thinking');
+    assert.equal(categorizeLogEvent(only, log), 'tasks');
+    const chat = summarizeChatLiveEvent(only);
+    assert.equal(chat.visible, true);
+    assert.equal(chat.promote, true, 'it claims the card title, as before the stamp existed');
+    // Beside visible text (`narration: false`) the frame stays hidden.
+    assert.equal(summarizeChatLiveEvent({ ...REASONING_ROW, narration: false }).visible, false);
+    // Display on: the same frame is the collapsed Thinking line again.
+    setReasoningVisible(true);
+    assert.equal(summarizeLogEvent(only).phase, 'thinking');
+    assert.equal(summarizeChatLiveEvent(only).phase, 'thinking');
+    setReasoningVisible(false);
+});
+
+test('the Logs filter chip is offered only while reasoning is displayed', () => {
+    // logs.js::renderFilters skips the chip on this exact condition, so the
+    // owner is never handed a filter that can never match.
+    const logsSource = readFileSync(new URL('../modules/logs.js', import.meta.url), 'utf8');
+    assert.match(logsSource, /key === 'reasoning' && !isReasoningVisible\(\)/);
+    // ... and the renderer really drops an invisible projection.
+    assert.match(logsSource, /summarizeLogEvent\(evt\)\.visible === false/);
+});
+
+const SUBAGENT_REASONING_ROW = {
+    type: 'send_message', is_progress: true, reasoning: true,
+    delegation_role: 'subagent', subagent_task_id: 'child', subagent_role: 'critic',
+    parent_task_id: 'root', root_task_id: 'root', model: 'sonnet',
+    content: '💬 weighing options',
+};
+
+test('reasoning shown: a subagent reasoning frame keeps its subagent row: pills, tasks chip, no Thinking line', () => {
+    // The chat projection lets the subagent branch win over the reasoning stamp; Logs
+    // must agree, or the same frame loses its role/parent/root/model pills here.
+    setReasoningVisible(true);
+    const evt = SUBAGENT_REASONING_ROW;
+    const view = summarizeLogEvent(evt);
+    assert.notEqual(view.phase, 'thinking');
+    assert.notEqual(view.headline, 'Thinking');
+    for (const pill of ['task=child', 'role=critic', 'model=sonnet', 'parent=root', 'root=root']) {
+        assert.ok(view.meta.includes(pill), `missing pill ${pill}`);
+    }
+    assert.equal(categorizeLogEvent(evt, view), 'tasks');
+    // Chat keeps projecting the child's progress as its own visible card line.
+    assert.equal(summarizeChatLiveEvent(evt).visible, true);
+    setReasoningVisible(false);
+});
+
+test('reasoning hidden: a subagent reasoning frame renders no row on either surface', () => {
+    // The subagent lineage stamps ride along with the reasoning stamp, so the
+    // subagent branch must not smuggle the child's reasoning past the preference.
+    setReasoningVisible(false);
+    assert.equal(summarizeLogEvent(SUBAGENT_REASONING_ROW).visible, false);
+    assert.equal(summarizeChatLiveEvent(SUBAGENT_REASONING_ROW).visible, false);
+    // A subagent frame WITHOUT the reasoning stamp is untouched by the preference.
+    const { reasoning, ...plainChild } = SUBAGENT_REASONING_ROW;
+    assert.notEqual(summarizeLogEvent(plainChild).visible, false);
+    assert.equal(summarizeChatLiveEvent(plainChild).visible, true);
 });

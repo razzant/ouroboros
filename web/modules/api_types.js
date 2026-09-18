@@ -292,6 +292,9 @@
  * @property {Object=} origin_message_ref
  *   Host-captured inbound identity for a correlated operation's terminal reply.
  * @property {boolean=} ephemeral_decision
+ * @property {boolean=} reasoning
+ *   A progress frame carrying the agent's display reasoning (rendered as its
+ *   own collapsed "Thinking" timeline line), not narration of what it did.
  * @property {number=} tool_calls
  * @property {number=} rounds
  * @property {string=} suggested_name
@@ -1336,6 +1339,9 @@
  * @property {string[]} widget_order
  * @property {Object.<string,'auto'|'manual'|'retain'>} widget_start_mode  // owner per-card launch-policy override, keyed "<skill>:<tab_id>"
  * @property {boolean} nested_subagents_expanded
+ * @property {'dark'|'light'} theme  // applied before first paint (web/modules/theme.js)
+ * @property {'en'|'ru'} language  // UI overlay language (web/modules/i18n.js)
+ * @property {boolean} show_reasoning  // reasoning rows in Chat and Logs; default false
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
  * @property {Object.<string,number>} project_seen_revision  // monotonic paint ACK

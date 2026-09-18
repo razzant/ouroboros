@@ -97,7 +97,7 @@ from ouroboros.platform_layer import (
     terminate_process_group_id,
     terminate_process_tree,
 )
-from ouroboros.utils import atomic_write_json, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 MAX_CRASH_RESTARTS = 5
 CRASH_WINDOW_SEC = 120
@@ -1549,6 +1549,12 @@ def main(argv=()):
         # Never returns: keep-alive loop + teardown + sys.exit inside.
         _run_headless_main(url, actual_port, lifecycle_thread)
 
+    def _window_background_color() -> str:
+        # Same values as --bg-primary in web/ui.css so the shell chrome does not
+        # flash the other theme before the page paints.
+        prefs = read_json_dict(DATA_DIR / "state" / "ui_preferences.json") or {}
+        return "#f7f5f8" if prefs.get("theme") == "light" else "#0d0b0f"
+
     window = webview.create_window(
         f"Ouroboros v{APP_VERSION}",
         url=url,
@@ -1556,7 +1562,7 @@ def main(argv=()):
         width=1100,
         height=750,
         min_size=(800, 500),
-        background_color="#0d0b0f",
+        background_color=_window_background_color(),
         text_select=True,
     )
 

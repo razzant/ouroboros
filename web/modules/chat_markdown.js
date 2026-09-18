@@ -1,6 +1,6 @@
 /** Rich, sanitized markdown rendering for assistant and system chat messages. */
 
-import { safeExternalUrl } from './utils.js';
+import { cssToken, safeExternalUrl } from './utils.js';
 
 const CHART_TYPES = new Set([
     'bar', 'line', 'pie', 'doughnut', 'polarArea', 'radar', 'scatter', 'bubble',
@@ -15,6 +15,11 @@ const writeDirectly = (mutate) => mutate();
 let markdownParser = null;
 let mermaidLoadPromise = null;
 let mermaidInitialized = false;
+// The diagram palette is sampled once per initialize(); a theme switch must
+// re-sample before the next render (already-rendered SVGs keep their colours).
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('ouro:theme-changed', () => { mermaidInitialized = false; });
+}
 
 function escapeText(value) {
     return String(value ?? '')
@@ -356,10 +361,7 @@ function hardenMermaidLinks(node) {
 
 function initializeMermaid(api) {
     if (mermaidInitialized) return;
-    const rootStyle = typeof getComputedStyle === 'function' && typeof document !== 'undefined'
-        ? getComputedStyle(document.documentElement)
-        : null;
-    const diagramToken = (name, fallback) => rootStyle?.getPropertyValue(name).trim() || fallback;
+    const diagramToken = cssToken;
     api.initialize({
         startOnLoad: false,
         securityLevel: 'strict',

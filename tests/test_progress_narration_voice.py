@@ -78,7 +78,9 @@ def test_round_progress_is_the_only_narration_producer(content, msg, expected):
         seen.append((text, meta))
 
     _emit_round_progress(content, msg, emit, {"reasoning_notes": []})
-    assert seen == [(expected, {"narration": True})]
+    # Display reasoning additionally rides a ``meta={"reasoning": True}`` stamp; the
+    # voice fact pinned here is the ``narration`` flag alone.
+    assert [(text, meta.get("narration")) for text, meta in seen] == [(expected, True)]
 
 
 def test_voice_rides_the_live_frame_the_stored_row_and_the_replay(tmp_path, monkeypatch):

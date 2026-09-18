@@ -1,4 +1,4 @@
-import { allowanceLabel, escapeHtmlText, formatUsd2 } from './utils.js';
+import { allowanceLabel, cssToken, escapeHtmlText, formatUsd2 } from './utils.js';
 import { apiFetch } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 
@@ -277,7 +277,7 @@ export function initEvolution({ ws, state, mount }) {
                     legend: {
                         position: 'top',
                         labels: {
-                            color: '#94a3b8',
+                            color: cssToken('--text-meta', '#94a3b8'),
                             usePointStyle: true,
                             pointStyle: 'circle',
                             padding: 16,
@@ -285,10 +285,10 @@ export function initEvolution({ ws, state, mount }) {
                         },
                     },
                     tooltip: {
-                        backgroundColor: 'rgba(26, 21, 32, 0.95)',
-                        titleColor: '#e2e8f0',
-                        bodyColor: '#94a3b8',
-                        borderColor: 'rgba(201, 53, 69, 0.18)',
+                        backgroundColor: cssToken('--ui-modal-bg', 'rgba(26, 21, 32, 0.95)'),
+                        titleColor: cssToken('--text-primary', '#e2e8f0'),
+                        bodyColor: cssToken('--text-meta', '#94a3b8'),
+                        borderColor: cssToken('--accent-18', 'rgba(201, 53, 69, 0.18)'),
                         borderWidth: 1,
                         titleFont: { family: 'JetBrains Mono, monospace', size: 12 },
                         bodyFont: { family: 'JetBrains Mono, monospace', size: 11 },
@@ -310,21 +310,21 @@ export function initEvolution({ ws, state, mount }) {
                 },
                 scales: {
                     x: {
-                        ticks: { color: '#64748b', font: { size: 10, family: 'JetBrains Mono, monospace' }, maxRotation: 45 },
-                        grid: { color: '#1e293b' },
+                        ticks: { color: cssToken('--text-secondary', '#64748b'), font: { size: 10, family: 'JetBrains Mono, monospace' }, maxRotation: 45 },
+                        grid: { color: cssToken('--divider', '#1e293b') },
                     },
                     y: {
                         type: 'linear',
                         position: 'left',
-                        title: { display: true, text: 'Lines of Code', color: '#60a5fa', font: { size: 11 } },
-                        ticks: { color: '#60a5fa', font: { size: 10 } },
-                        grid: { color: '#1e293b' },
+                        title: { display: true, text: 'Lines of Code', color: cssToken('--blue', '#60a5fa'), font: { size: 11 } },
+                        ticks: { color: cssToken('--blue', '#60a5fa'), font: { size: 10 } },
+                        grid: { color: cssToken('--divider', '#1e293b') },
                     },
                     y1: {
                         type: 'linear',
                         position: 'right',
-                        title: { display: true, text: 'Size (KB)', color: '#94a3b8', font: { size: 11 } },
-                        ticks: { color: '#94a3b8', font: { size: 10 } },
+                        title: { display: true, text: 'Size (KB)', color: cssToken('--text-meta', '#94a3b8'), font: { size: 11 } },
+                        ticks: { color: cssToken('--text-meta', '#94a3b8'), font: { size: 10 } },
                         grid: { drawOnChartArea: false },
                     },
                 },

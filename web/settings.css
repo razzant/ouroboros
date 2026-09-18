@@ -311,7 +311,7 @@
 
 .mcp-tools-disclosure {
     border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--surface-border-soft);
     padding: 10px 12px;
 }
 
@@ -359,7 +359,7 @@
     margin-top: 8px;
     height: 6px;
     border-radius: var(--radius-xs);
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--bg-hover);
     overflow: hidden;
 }
 
@@ -423,8 +423,8 @@
     justify-content: space-between;
     gap: var(--space-3);
     padding: var(--space-3) 2px 0;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(13, 11, 15, 0), rgba(13, 11, 15, 0.92) 55%);
+    border-top: 1px solid var(--surface-border-soft);
+    background: linear-gradient(180deg, rgb(var(--bg-primary-rgb) / 0), rgb(var(--bg-primary-rgb) / 0.92) 55%);
 }
 
 .settings-footer-actions,
@@ -675,8 +675,8 @@
     text-align: center;
     min-height: 38px;
     line-height: 1.2;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
     color: var(--text-secondary);
     border-radius: 12px;
     padding: 10px 12px;
@@ -692,8 +692,14 @@
     background: rgba(232, 93, 111, 0.12);
 }
 
-/* Review enforcement toggle: 2 columns. */
+/* Theme and review enforcement toggles: 2 columns. */
+[data-theme-group].settings-effort-group,
 [data-enforcement-group].settings-effort-group {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* Language toggle: 2 columns. */
+[data-language-group].settings-effort-group {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -717,8 +723,8 @@
     opacity: 0.55;
 }
 .settings-effort-btn:disabled:hover {
-    background: rgba(255, 255, 255, 0.04);
-    border-color: rgba(255, 255, 255, 0.08);
+    background: var(--surface-control);
+    border-color: var(--surface-border);
     color: var(--text-secondary);
     transform: none;
 }
@@ -906,7 +912,7 @@
     padding: 10px 12px;
     border-radius: 12px;
     border: 1px solid var(--surface-border);
-    background: rgba(26, 21, 32, 0.88);
+    background: rgb(var(--bg-secondary-rgb) / 0.88);
     color: var(--text-primary);
     font-size: var(--type-body);
     font-family: inherit;
@@ -919,7 +925,7 @@
 .settings-shell .available-subagent-row input:not(.ui-control):not(.ui-checkbox)::placeholder,
 .settings-shell .available-subagent-row textarea:not(.ui-control):not(.ui-checkbox)::placeholder,
 .secret-input:not(.ui-control)::placeholder {
-    color: rgba(255, 255, 255, 0.24);
+    color: var(--text-disabled);
 }
 
 .settings-shell .form-field input:not(.ui-control):not(.ui-checkbox):focus,

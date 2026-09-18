@@ -103,12 +103,13 @@ def test_poll_advances_remain_independent_and_emit_immediately():
     first = seen.record({"timeline": rows}, 18, 3)
     second = seen.record({"timeline": [*rows, text_event("more "), text_event("text")]}, 30, 6)
     output = []
-    ctx = SimpleNamespace(emit_progress_fn=output.append)
+    ctx = SimpleNamespace(emit_progress_fn=lambda text, **kwargs: output.append((text, kwargs)))
     emit(ctx, "run-1", first)
     emit(ctx, "run-1", second)
+    # thinking-only advances are the run's reasoning: one stamped line each, no action line.
     assert output == [
-        "🛰 delegated run run-1 @seq 18: UX and interaction plan",
-        "🛰 delegated run run-1 @seq 30: more text",
+        ("🛰 delegated run run-1 @seq 18: UX and interaction plan", {"meta": {"reasoning": True}}),
+        ("🛰 delegated run run-1 @seq 30: more text", {"meta": {"reasoning": True}}),
     ]
     assert len(first.events) == len(second.events) == 2
     assert [row["seq"] for row in seen.rows(10000)] == [18, 30]
@@ -181,3 +182,31 @@ def test_start_receipt_names_the_serving_engine_without_claiming_review_success(
     assert "recovered historical run" in description
     assert "self_worktree capture separately requires an unchanged HEAD" in HOST_INSTRUCTIONS
     assert "preserve committed changes" in HOST_INSTRUCTIONS
+
+
+def test_thinking_rows_emit_as_a_separate_reasoning_line_before_the_actions():
+    action = {"type": "tool.call", "title": "read file", "severity": "info",
+              "harnessId": "cursor", "attemptId": "a01"}
+    rows = [text_event("weigh "), text_event("options"), action, text_event("done.", kind="message", delta=False)]
+    advance = WindowObservations().record({"timeline": rows}, 18, 3)
+    output = []
+    emit(SimpleNamespace(emit_progress_fn=lambda text, **kwargs: output.append((text, kwargs))), "run-1", advance)
+    assert output == [
+        ("🛰 delegated run run-1 @seq 18: weigh options", {"meta": {"reasoning": True}}),
+        # the action line is byte-identical to the untyped line of the non-thinking rows.
+        ("🛰 delegated run run-1 @seq 18: [cursor/a01] read file · done.", {}),
+    ]
+    assert output[1][0] == live_line(
+        "run-1", WindowObservations().record({"timeline": rows[2:]}, 18, 3))
+
+
+def test_a_single_argument_progress_callable_still_receives_both_lines():
+    action = {"type": "tool.call", "title": "read file", "severity": "info",
+              "harnessId": "cursor", "attemptId": "a01"}
+    advance = WindowObservations().record({"timeline": [text_event("weigh options"), action]}, 18, 3)
+    output = []
+    emit(SimpleNamespace(emit_progress_fn=output.append), "run-1", advance)
+    assert output == [
+        "🛰 delegated run run-1 @seq 18: weigh options",
+        "🛰 delegated run run-1 @seq 18: [cursor/a01] read file",
+    ]

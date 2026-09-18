@@ -6,6 +6,13 @@
     --bg-secondary: #1a1520;
     --bg-card: rgba(255, 255, 255, 0.06);
     --bg-hover: rgba(255, 255, 255, 0.08);
+    /* Space-separated channels so page sheets can write
+       rgb(var(--bg-primary-rgb) / 0.6) instead of a themed literal. */
+    --bg-primary-rgb: 13 11 15;
+    --bg-secondary-rgb: 26 21 32;
+    /* Ambient matrix-rain canvas: barely there on ink, fainter still on paper
+       where the same accent reads as loud pink noise. */
+    --matrix-rain-opacity: 0.12;
     /* Type scale + foreground semantics: docs/DESIGN.md. Four sizes, no fifth. */
     --type-meta: 12px;
     --type-body: 14px;
@@ -70,6 +77,8 @@
     --green-dim: rgba(34, 197, 94, 0.15);
     --red: #ef4444;
     --red-dim: rgba(239, 68, 68, 0.15);
+    /* The fifth log hue (consciousness); peer of --blue/--amber/--green/--red. */
+    --purple: #d68cff;
     --divider: rgba(255, 255, 255, 0.06);
     --surface-border: rgba(255, 255, 255, 0.08);
     --surface-border-soft: rgba(255, 255, 255, 0.06);
@@ -84,6 +93,15 @@
     --diagram-line: #9b90a6;
     --diagram-secondary: #302b39;
     --diagram-tertiary: #19171d;
+    /* Fenced code block surface + highlight.js roles (chat transcript). */
+    --code-bg: #121016;
+    --code-comment: #8b8294;
+    --code-keyword: #d29ce8;
+    --code-string: #8dd7c7;
+    --code-number: #ee967a;
+    --code-title: #92b7f4;
+    --code-type: #e5c66d;
+    --code-attr: #add782;
     --ui-card-bg: var(--surface-card);
     --ui-card-bg-soft: var(--surface-card-soft);
     --ui-card-border: var(--surface-border);
@@ -154,6 +172,70 @@
 }
 
 .ouro-ui { color-scheme: dark; font-family: var(--font-sans); }
+
+/* Light theme: only token overrides live here, selected by the `theme` UI
+   preference (`html[data-theme="light"]`). Hue tokens and the accent/status
+   alpha ladders are shared; anything that is dark-only ink or surface is
+   re-declared. Keep every override a token: no light-only selectors. */
+html[data-theme="light"] {
+    --bg-primary: #f7f5f8;
+    --bg-secondary: #ffffff;
+    --bg-primary-rgb: 247 245 248;
+    --bg-secondary-rgb: 255 255 255;
+    --bg-card: rgba(20, 15, 25, 0.04);
+    --bg-hover: rgba(20, 15, 25, 0.06);
+    --text-primary: #1a1523;
+    --text-secondary: rgba(26, 21, 35, 0.62);
+    --text-meta: rgba(26, 21, 35, 0.72);
+    --text-disabled: rgba(26, 21, 35, 0.4);
+    --accent-light: #a52434;
+    --user-sender: #2f4f7f;
+    --user-text: #1b2a44;
+    --system-sender: #b45309;
+    --system-text: #5c3d00;
+    --assistant-sender: #a52434;
+    --assistant-text: #3a1a20;
+    --divider: rgba(20, 15, 25, 0.08);
+    --surface-border: rgba(20, 15, 25, 0.12);
+    --surface-border-soft: rgba(20, 15, 25, 0.07);
+    --surface-card: rgba(20, 15, 25, 0.03);
+    --surface-card-soft: rgba(20, 15, 25, 0.02);
+    --surface-control: rgba(20, 15, 25, 0.04);
+    --diagram-bg: #ffffff;
+    --diagram-primary: #f1edf4;
+    --diagram-primary-text: #1a1523;
+    --diagram-border: #a89fb3;
+    --diagram-line: #6f6678;
+    --diagram-secondary: #e6e0ea;
+    --diagram-tertiary: #f7f5f8;
+    --code-bg: #f1edf4;
+    --code-comment: #6b6474;
+    --code-keyword: #7c3aed;
+    --code-string: #047857;
+    --code-number: #c2410c;
+    --code-title: #1d4ed8;
+    --code-type: #92400e;
+    --code-attr: #3f6212;
+    --ui-modal-bg: rgba(255, 255, 255, 0.98);
+    --status-ok-fg: #047857;
+    --status-warn-fg: #b45309;
+    --status-error-fg: #b91c1c;
+    --status-neutral-bg: rgba(20, 15, 25, 0.05);
+    --status-neutral-border: rgba(20, 15, 25, 0.12);
+    --focus-accent-border: rgba(201, 53, 69, 0.6);
+    --menu-item-hover: rgba(20, 15, 25, 0.05);
+    /* Raw hues: same roles, darkened for paper. Every reader is either ink
+       (.status-badge, .log-type.*, .chat-budget-text) or a small solid mark
+       (count badge, bar fill, switch track) whose own label is white. */
+    --blue: #1d4ed8;
+    --amber: #b45309;
+    --green: #047857;
+    --red: #b91c1c;
+    --purple: #7c3aed;
+    --project: #a21caf;
+    --matrix-rain-opacity: 0.035;
+}
+html[data-theme="light"].ouro-ui { color-scheme: light; }
 .muted { color: var(--text-meta); }
 
 .btn {
@@ -208,21 +290,21 @@
    a button label parked at secondary ink reads as disabled next to the one
    beside it. */
 .btn-secondary {
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--surface-control);
     color: var(--text-primary);
-    border-color: rgba(255, 255, 255, 0.10);
+    border-color: var(--surface-border);
 }
 .btn-secondary:hover {
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--bg-hover);
     border-color: var(--accent-25);
 }
 .btn-ghost {
     background: transparent;
     color: var(--text-primary);
-    border-color: rgba(255, 255, 255, 0.08);
+    border-color: var(--surface-border);
 }
 .btn-ghost:hover {
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--surface-control);
 }
 .btn-danger {
     background: rgba(220, 38, 38, 0.2);
@@ -240,11 +322,11 @@
 .btn-default {
     background: var(--bg-card);
     color: var(--text-primary);
-    border-color: rgba(255, 255, 255, 0.08);
+    border-color: var(--surface-border);
 }
 .btn-default:hover {
     background: var(--bg-hover);
-    border-color: rgba(255, 255, 255, 0.14);
+    border-color: var(--status-neutral-border);
 }
 
 
@@ -389,6 +471,9 @@ select.ui-control {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%23e2e8f0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right var(--space-3) center;
+}
+html[data-theme="light"] select.ui-control {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%231a1523' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 textarea.ui-control { resize: vertical; }
 .ui-checkbox {

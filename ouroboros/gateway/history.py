@@ -55,6 +55,7 @@ _ARCHIVE_BACKFILL_CAP = 3
 
 
 _PROGRESS_META_FIELDS = (
+    "reasoning",
     "subagent_event",
     "subagent_task_id",
     "root_task_id",

@@ -10,7 +10,16 @@ export function escapeHtmlText(text) {
 }
 
 export { escapeHtmlAttr } from './ui_primitives.js';
+
 import { escapeHtmlAttr } from './ui_primitives.js';
+
+/** A `:root` custom property as the browser resolves it NOW, so canvas and
+    Chart.js colours follow the active theme; `fallback` when there is no
+    document (node tests) or the token is unset. */
+export function cssToken(name, fallback = '') {
+    if (typeof document === 'undefined' || typeof getComputedStyle !== 'function') return fallback;
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
 
 export const escapeHtml = escapeHtmlText;
 
@@ -538,9 +547,9 @@ export function initMatrixRain() {
     window.addEventListener('resize', resize);
 
     function draw() {
-        ctx.fillStyle = 'rgba(13, 11, 15, 0.06)';
+        ctx.fillStyle = `rgba(${cssToken('--bg-primary-rgb', '13 11 15').split(/\s+/).join(', ')}, 0.06)`;
         ctx.fillRect(0, 0, w, h);
-        ctx.fillStyle = '#ee3344';
+        ctx.fillStyle = cssToken('--accent', '#c93545');
         ctx.font = fontSize + 'px monospace';
 
         for (let i = 0; i < columns.length; i++) {

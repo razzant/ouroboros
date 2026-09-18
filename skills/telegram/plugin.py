@@ -1042,6 +1042,10 @@ def _make_outbound(api):
             # typing indicator already signals "working". Opt in via the toggle.
             if event.get("is_progress") and not _mirror_progress_enabled(local_settings):
                 return
+            # Display reasoning is a web-only row gated by the owner's show_reasoning
+            # preference; it never rides the mirror, so raw reasoning stays off Telegram.
+            if event.get("is_progress") and event.get("reasoning") is True:
+                return
 
             # Routing receipts ride the outbound bus as typed annotations with
             # suppress_bubble (no text). The only one worth a Telegram push is

@@ -11,6 +11,18 @@
   --shadow: 0 28px 64px rgba(0, 0, 0, 0.45);
 }
 
+/* Light theme for the page-local roles above; shared roles come from ui.css. */
+html[data-theme="light"] {
+  --bg: #f7f5f8;
+  --panel: rgba(255, 255, 255, 0.92);
+  --panel-2: rgba(20, 15, 25, 0.035);
+  --panel-3: rgba(20, 15, 25, 0.02);
+  --border: rgba(20, 15, 25, 0.12);
+  --text: #1a1523;
+  --ghost: rgba(26, 21, 35, 0.4);
+  --shadow: 0 28px 64px rgba(20, 15, 25, 0.12);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -54,7 +66,7 @@ textarea::placeholder {
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.02));
+  background: linear-gradient(180deg, var(--panel-2), var(--panel-3));
   backdrop-filter: blur(18px);
   box-shadow: var(--shadow);
 }
@@ -251,7 +263,7 @@ textarea::placeholder {
 .field-note code {
   padding: 1px 4px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--bg-hover);
 }
 
 .grid {
@@ -349,7 +361,7 @@ textarea::placeholder {
 
 .selection-pill {
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-card);
   color: var(--text);
   padding: 10px 14px;
   border-radius: 999px;
@@ -358,7 +370,7 @@ textarea::placeholder {
 }
 
 .selection-pill:hover {
-  border-color: rgba(255, 255, 255, 0.24);
+  border-color: var(--status-neutral-border);
   transform: translateY(-1px);
 }
 
@@ -493,8 +505,8 @@ textarea::placeholder {
 .wizard-test-result {
   padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-card);
   color: var(--muted);
   font-size: var(--type-meta);
   line-height: var(--line-body);
@@ -1049,7 +1061,7 @@ textarea::placeholder {
   margin: 0;
   padding: 8px 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--surface-control);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--type-meta);
   overflow-x: auto;
@@ -1267,7 +1279,7 @@ textarea:not(.ui-control):not(.ui-checkbox) {
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: rgba(11, 9, 16, 0.72);
+  background: var(--bg-secondary);
   color: var(--text);
   font-size: var(--type-body);
   outline: none;

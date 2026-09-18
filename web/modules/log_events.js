@@ -12,11 +12,45 @@ const REVIEW_LIFECYCLE_ERROR_STATUSES = new Set([
 
 export { formatReviewProjection } from './review_presentation.js';
 
+// Display-only gate for the agent's reasoning rows (UI preference
+// `show_reasoning`, default off). The backend keeps emitting and storing the
+// stamped frames either way, so turning it on reveals them on replay too.
+// Both reasoning branches below read it and answer with the file's existing
+// "not visible" contract (`visible: false`) instead of a new sentinel.
+// localStorage mirrors the server preference (as theme.js does) for pre-fetch renders.
+const REASONING_STORAGE_KEY = 'ouro.show_reasoning';
+function storedReasoningVisible() {
+    try { return localStorage.getItem(REASONING_STORAGE_KEY) === '1'; } catch { return false; }
+}
+let reasoningVisible = storedReasoningVisible();
+
+export const REASONING_VISIBILITY_EVENT = 'ouro:reasoning-visibility';
+
+export function isReasoningVisible() {
+    return reasoningVisible;
+}
+
+/** Single writer of the flag. It notifies like theme.js/applyTheme does, so a
+    control bound before the preference arrives (and the Logs filter chips) can
+    resync; outside a DOM (node tests) it is a plain assignment. */
+export function setReasoningVisible(value) {
+    reasoningVisible = value === true;
+    try { localStorage.setItem(REASONING_STORAGE_KEY, reasoningVisible ? '1' : '0'); } catch { /* storage blocked: server value still wins on boot */ }
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function'
+        && typeof CustomEvent === 'function') {
+        window.dispatchEvent(new CustomEvent(REASONING_VISIBILITY_EVENT, {
+            detail: { visible: reasoningVisible },
+        }));
+    }
+    return reasoningVisible;
+}
+
 export const LOG_CATEGORIES = {
     tools: { label: 'Tools', color: 'var(--blue)' },
     llm: { label: 'LLM', color: 'var(--accent)' },
     errors: { label: 'Errors', color: 'var(--red)' },
     tasks: { label: 'Tasks', color: 'var(--amber)' },
+    reasoning: { label: 'Reasoning', color: 'var(--accent)' },
     system: { label: 'System', color: 'var(--text-muted)' },
     consciousness: { label: 'Consciousness', color: 'var(--accent)' },
 };
@@ -33,6 +67,9 @@ export function categorizeLogEvent(evt, view = summarizeLogEvent(evt)) {
     // A wake-up's rows carry the turn's origin label (`initiator`).
     const wake = evt.initiator === 'consciousness';
     if (evt.is_progress) {
+        // A reasoning-stamped row files under its own chip, read off the same
+        // projection that paints its `thinking` phase pill.
+        if (String(view?.phase || '') === 'thinking') return 'reasoning';
         return wake ? 'consciousness' : 'tasks';
     }
     // Severity comes from the typed projection, never from the event name; the
@@ -668,6 +705,22 @@ export function summarizeLogEvent(evt) {
     const taskMeta = (...items) => [evt.task_id ? `task=${evt.task_id}` : '', ...items];
 
     if (evt.is_progress || t === 'send_message') {
+        // Display off + a reasoning-only round's frame (`narration: true`): ordinary row.
+        if (evt.reasoning === true && (reasoningVisible || evt.narration !== true)
+            && (!isSubagentEvent(evt) || !reasoningVisible)) {
+            const thinking = view('thinking', 'Thinking', {
+                body: shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240),
+                meta: taskMeta(),
+            });
+            // Hidden by default: the durable row stays in the log, it just
+            // renders no entry until the owner turns the display on. A subagent's
+            // reasoning frame carries the lineage stamps as well, so while the
+            // display is off it is intercepted here too — otherwise the subagent
+            // branch below would render it as an ordinary row and escape the
+            // preference. With the display on it keeps falling through to that
+            // branch, where the child's work reads as one lineage-labelled row.
+            return reasoningVisible ? thinking : { ...thinking, visible: false };
+        }
         const narration = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240, { markdown: true });
         if (isSubagentEvent(evt)) {
             const sid = subagentId(evt);
@@ -1176,6 +1229,32 @@ function summarizeChatLiveEventView(evt) {
             terminal: ['done', 'lifecycle_error', 'cancelled'].includes(phase),
             human: true,
             dedupeKey: lifecycle.id ? `lifecycle:${lifecycle.id}:${status}:${label}:${stale ? 'stale' : 'fresh'}` : key(status, label),
+        });
+    }
+
+    if ((evt.is_progress || t === 'send_message') && evt.reasoning === true
+        && (reasoningVisible || evt.narration !== true)
+        && (!reasoningVisible || !isSubagentEvent(evt))) {
+        // The agent's own reasoning: a collapsed "Thinking" timeline line (body =
+        // preview, fullBody = the whole text for the existing Expand toggle). It is
+        // neither human narration nor promoted, so the card headline, phase and the
+        // collapsed activity summary keep showing the last action.
+        // A subagent's frame carries the reasoning stamp AND the lineage stamps, so
+        // this branch must run before the subagent branch below: while the display
+        // is off it claims the frame and renders nothing, and with the display on it
+        // hands the frame over, keeping the child's progress collapsed into its card
+        // line instead of a second Thinking row. `summarizeLogEvent` splits on the
+        // same condition.
+        return chatView({
+            phase: 'thinking',
+            headline: 'Thinking',
+            body: progressText.preview,
+            fullBody: progressText.full,
+            activityPreview: '',
+            // Hidden by default; the frame keeps its body so turning the
+            // display on renders the same line, live and on history replay.
+            visible: reasoningVisible,
+            dedupeKey: `reasoning:${evt.ts || ''}:${progressText.full}`,
         });
     }
 

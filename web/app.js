@@ -3,6 +3,7 @@
 import { createWS } from './modules/ws.js';
 import { apiFetch, fetchJson } from './modules/api_client.js';
 import { loadVersion, initMatrixRain } from './modules/utils.js';
+import { applyTheme } from './modules/theme.js';
 import { bindScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
 import { createStateSnapshotSequencer } from './modules/chat_activity.js';
@@ -11,6 +12,7 @@ import { apiClient } from './modules/api_client.js';
 import { openNewProjectDialog, openProjectRowMenu } from './modules/project_create.js';
 
 import { initLogs } from './modules/logs.js';
+import { setReasoningVisible } from './modules/log_events.js';
 import { initEvolution } from './modules/evolution.js';
 import { initSettings } from './modules/settings.js';
 import { initCosts } from './modules/costs.js';
@@ -22,6 +24,7 @@ import { initUpdateStatus } from './modules/update_status.js';
 import { initDashboard } from './modules/dashboard.js';
 import { hydrateNavIcons } from './modules/page_icons.js';
 
+import { setLanguage, storedLanguage } from './modules/i18n.js';
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor, renderProjectChip } from './modules/ui_helpers.js';
 
@@ -29,7 +32,7 @@ const state = {
     messages: [],
     logs: [],
     dashboard: {},
-    activeFilters: { tools: true, llm: true, errors: true, tasks: true, system: true, consciousness: true },
+    activeFilters: { tools: true, llm: true, errors: true, tasks: true, reasoning: true, system: true, consciousness: true },
     unreadCount: 0,
     activePage: 'chat',
     settingsActiveSubtab: 'providers',
@@ -663,6 +666,9 @@ function setupResizablePanels(prefs) {
             }).catch(() => {});
         }, 400);
     };
+    // Server preference reconciles the pre-paint localStorage mirror; a failed
+    // fetch (prefs = {}) leaves whatever the head script already painted.
+    if (prefs && 'theme' in prefs) applyTheme(prefs.theme);
     if (Number(prefs?.sidebar_width) > 0) root.style.setProperty('--sidebar-width', `${prefs.sidebar_width}px`);
     if (Number(prefs?.project_panel_width) > 0) root.style.setProperty('--project-panel-width', `${prefs.project_panel_width}px`);
     const isMobile = () => window.matchMedia('(max-width: 980px)').matches;
@@ -705,10 +711,13 @@ apiFetch('/api/ui/preferences', { cache: 'no-store' })
     .then((prefs) => {
         state.projectSeenRevision = (prefs && prefs.project_seen_revision) || {};
         setupResizablePanels(prefs || {});
+        setLanguage((prefs && prefs.language) || 'en');
+        // Display-only preference: reasoning rows stay recorded either way.
+        setReasoningVisible(prefs?.show_reasoning === true);
         // Re-evaluate unread now that revision cursors are known.
         if (Array.isArray(lastProjectRows)) { knownProjectsJson = null; renderProjectsNav(lastProjectRows, Array.from(state.projectChatIds || [])); }
     })
-    .catch(() => setupResizablePanels({}));
+    .catch(() => { setupResizablePanels({}); setLanguage(storedLanguage()); });
 
 ws.on('open', refreshProjectsNav);
 // A backend-created project (e.g. the agent's promote_chat_to_task tool) pushes

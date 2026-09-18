@@ -1974,9 +1974,8 @@ export function createChatInstance({
             content: msg?.content || msg?.text || '',
             text: msg?.content || msg?.text || '',
             task_id: taskId,
-            ...Object.fromEntries(['subagent_event', 'subagent_task_id', 'root_task_id',
-                'parent_task_id', 'delegation_role', 'subagent_role', 'status', 'result',
-                'trace_summary', 'error', 'artifact_status'].map((key) => [key, msg?.[key] || ''])),
+            ...Object.fromEntries(['subagent_event', 'subagent_task_id', 'root_task_id', 'parent_task_id',
+                'delegation_role', 'subagent_role', 'status', 'result', 'trace_summary', 'error', 'artifact_status', 'reasoning'].map((key) => [key, msg?.[key] || ''])),
             ...cardMetaKeys(msg),
             lifecycle: msg?.lifecycle || null,
             // The frame's voice, live and on replay; absent stays absent.

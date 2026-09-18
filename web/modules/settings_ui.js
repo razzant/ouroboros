@@ -397,6 +397,35 @@ export function renderSettingsPage() {
 
                 <section class="settings-panel" data-settings-panel="behavior">
                     <div class="form-section">
+                        <h3>Appearance</h3>
+                        <div class="settings-section-copy">Applies immediately and is saved on its own; the Save button below does not affect it.</div>
+                        <div class="settings-effort-card">
+                            <label id="s-theme-label">Theme</label>
+                            <div class="ui-segment-group settings-effort-group" data-theme-group role="group" aria-labelledby="s-theme-label">
+                                <button type="button" class="ui-segment settings-effort-btn" data-theme-value="dark">Dark</button>
+                                <button type="button" class="ui-segment settings-effort-btn" data-theme-value="light">Light</button>
+                            </div>
+                        </div>
+                        <div class="settings-section-copy">The agent's reasoning is recorded either way; this only controls whether it is displayed. Logs repaint at once; chat rows already on screen change after a page reload.</div>
+                        <label class="local-toggle ui-field ui-field-inline" title="Display only: reasoning stays in the durable log, so turning this on also reveals it in past conversations.">
+                            <input type="checkbox" id="ui-show-reasoning" class="ui-checkbox" name="ui-show-reasoning">
+                            Show the agent's reasoning in chat and logs
+                        </label>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Language</h3>
+                        <div class="settings-section-copy">Interface language of this browser. Applies immediately; strings without a translation stay English.</div>
+                        <div class="settings-effort-card">
+                            <label>Interface Language</label>
+                            <div class="ui-segment-group settings-effort-group" data-language-group role="group" aria-label="Interface Language">
+                                <button type="button" class="ui-segment settings-effort-btn" data-language-value="en">English</button>
+                                <button type="button" class="ui-segment settings-effort-btn" data-language-value="ru">Русский</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
                         <h3>Reasoning Effort</h3>
                         <div class="settings-section-copy">Controls how deeply the model thinks per task type. Higher effort = slower but more thorough.</div>
                         <div class="settings-effort-grid">

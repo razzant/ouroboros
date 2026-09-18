@@ -255,3 +255,19 @@ def test_history_does_not_move_a_stored_observation_to_another_task(tmp_path):
     row, = json.loads(response.body)["messages"]
     assert row["task_id"] == "parent" and row["text"] == "note"
     assert "executor_observation" not in row
+
+
+def test_meta_stamps_the_frame_but_never_overrides_subagent_lineage():
+    """`meta` merges into `progress_meta` verbatim (the reasoning stamp), yet the
+    child's real lineage still wins over any lineage key smuggled through it, and a
+    later plain note does not inherit the stamp."""
+    agent, events = _agent(SimpleNamespace(task_attempt=0))
+    OuroborosAgent._emit_progress(
+        agent, "weigh the options",
+        meta={"reasoning": True, "root_task_id": "forged", "delegation_role": "root"},
+    )
+    OuroborosAgent._emit_progress(agent, "plain note")
+    stamped = events.get_nowait()["progress_meta"]
+    assert stamped["reasoning"] is True
+    assert stamped["root_task_id"] == "root" and stamped["delegation_role"] == "subagent"
+    assert "reasoning" not in events.get_nowait()["progress_meta"]

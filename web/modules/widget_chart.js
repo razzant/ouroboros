@@ -7,7 +7,7 @@
    lifecycle phase 3; the table cell helpers in the cycle-A fix round). */
 
 import { normalizeTone } from './ui_helpers.js';
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { cssToken, escapeHtmlAttr as escapeHtml } from './utils.js';
 
 export function getPath(root, path, fallback = '') {
     if (!path) return root ?? fallback;
@@ -59,9 +59,9 @@ export function chartConfig(component, data) {
             spanGaps: false,
             plugins: { legend: { display: true } },
             scales: {
-                x: { grid: { color: 'rgba(255, 255, 255, 0.06)' } },
+                x: { grid: { color: cssToken('--divider', 'rgba(255, 255, 255, 0.06)') } },
                 y: {
-                    grid: { color: 'rgba(255, 255, 255, 0.06)' },
+                    grid: { color: cssToken('--divider', 'rgba(255, 255, 255, 0.06)') },
                     title: { display: Boolean(unit), text: unit },
                 },
             },

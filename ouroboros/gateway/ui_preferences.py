@@ -20,6 +20,9 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # the owner's choice instead of losing it with the next discovery.
     "widget_start_mode": {},
     "nested_subagents_expanded": False,
+    # UI language of the browser overlay (web/modules/i18n.js). English is the
+    # authored source; "ru" turns the runtime translation overlay on.
+    "language": "en",
     # Resizable side sections (0 = use the CSS default). Clamped to sane ranges so
     # a stored value can never collapse or run away with the layout.
     "sidebar_width": 0,
@@ -31,8 +34,18 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # unknown-key 400, a stored legacy key is ignored on read and dropped on
     # the next write (``project_seen_revision`` is the replacement).
     "project_seen_revision": {},
+    # Colour theme of both the SPA and the onboarding document; the desktop
+    # launcher reads the same file for its window background.
+    "theme": "dark",
+    # Display-only: whether the agent's reasoning rows are rendered in the chat
+    # timeline and the Logs tab. The backend keeps emitting and storing them
+    # either way (OUROBOROS_REASONING_SUMMARY is the separate backend switch),
+    # so turning this on reveals the recorded rows on history replay too.
+    "show_reasoning": False,
 }
+_THEMES = frozenset({"dark", "light"})
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
+_LANGUAGES = ("en", "ru")
 _MAX_WIDGET_ORDER_ITEMS = 200
 _MAX_WIDGET_START_MODE_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
@@ -119,6 +132,16 @@ def _normalize_preferences(
         if not isinstance(value, bool):
             raise ValueError("nested_subagents_expanded must be a boolean")
         prefs["nested_subagents_expanded"] = value
+    if "show_reasoning" in raw:
+        value = raw.get("show_reasoning")
+        if not isinstance(value, bool):
+            raise ValueError("show_reasoning must be a boolean")
+        prefs["show_reasoning"] = value
+    if "language" in raw:
+        value = raw.get("language")
+        if value not in _LANGUAGES:
+            raise ValueError(f"language must be one of {list(_LANGUAGES)}")
+        prefs["language"] = value
     if "sidebar_width" in raw:
         prefs["sidebar_width"] = _normalize_width(raw.get("sidebar_width"), _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX)
     if "project_panel_width" in raw:
@@ -140,6 +163,14 @@ def _normalize_preferences(
                 except (TypeError, ValueError):
                     raise ValueError("project_seen_revision values must be integers")
             prefs["project_seen_revision"] = cleaned
+    if "theme" in raw:
+        value = raw.get("theme")
+        # `value not in <frozenset>` alone raises TypeError on an unhashable
+        # JSON value ([] / {}), which escapes as a 500; the isinstance guard
+        # keeps every rejected theme a 400 like its neighbours.
+        if not isinstance(value, str) or value not in _THEMES:
+            raise ValueError(f"theme must be one of {sorted(_THEMES)}")
+        prefs["theme"] = value
     return prefs
 
 

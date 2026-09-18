@@ -10,8 +10,10 @@ import {
     formatReviewProjection,
     getLogTaskGroupId,
     isGroupedTaskEvent,
+    isReasoningVisible,
     normalizeLogTs,
     prettyLogEvent,
+    REASONING_VISIBILITY_EVENT,
     summarizeLogEvent,
 } from './log_events.js';
 
@@ -75,6 +77,9 @@ export function initLogs({ ws, state, mount }) {
         const inlineClear = filtersDiv.querySelector('.logs-inline-clear');
         filtersDiv.innerHTML = '';
         Object.entries(LOG_CATEGORIES).forEach(([key, cat]) => {
+            // While reasoning is hidden its rows never render, so the chip
+            // would only offer a filter that can never match.
+            if (key === 'reasoning' && !isReasoningVisible()) return;
             const chip = document.createElement('button');
             chip.className = `filter-chip ${state.activeFilters[key] ? 'active' : ''}`;
             chip.textContent = cat.label;
@@ -359,6 +364,9 @@ export function initLogs({ ws, state, mount }) {
     }
 
     function addLogEntry(evt) {
+        // A projection may declare itself invisible (a reasoning row while the
+        // display preference is off); such an event renders no entry at all.
+        if (summarizeLogEvent(evt).visible === false) return;
         const ts = evt?.ts || evt?.timestamp || '';
         const type = evt?.type || '';
         // Dedupe on the natural identity (timestamp has microseconds, so distinct
@@ -430,6 +438,22 @@ export function initLogs({ ws, state, mount }) {
     // disconnected is recovered; the dedupe guard keeps the overlap single.
     backfillRecentLogs();
     ws.on('open', () => { backfillRecentLogs(); });
+
+    // The reasoning display toggle changes which rows may render at all, so
+    // repaint the chips and replay recent history through the new setting —
+    // the same backfill a reconnect runs. A boot that applies the stored
+    // preference after this panel is built reports no change and does nothing.
+    let reasoningRendered = isReasoningVisible();
+    window.addEventListener(REASONING_VISIBILITY_EVENT, () => {
+        if (reasoningRendered === isReasoningVisible()) return;
+        reasoningRendered = isReasoningVisible();
+        renderFilters();
+        duplicateState.clear();
+        taskGroups.clear();
+        renderedLogKeys.clear();
+        logEntries.innerHTML = '';
+        backfillRecentLogs();
+    });
 
     page.querySelector('#btn-clear-logs').addEventListener('click', () => {
         duplicateState.clear();

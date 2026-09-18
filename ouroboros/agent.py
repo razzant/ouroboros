@@ -1108,9 +1108,12 @@ class OuroborosAgent:
 
     def _emit_progress(self, text: str, *, incident: Optional[Dict[str, str]] = None,
                        executor_observation: Optional[Dict[str, Any]] = None,
+                       meta: Optional[Dict[str, Any]] = None,
                        narration: bool = False) -> None:
         """Owner-visible note; ``incident`` is the typed ``task_incident``/``toast_once``
         pair the browser toasts once.
+        ``meta`` is merged into ``progress_meta`` verbatim (``{"reasoning": True}`` stamps
+        a display-reasoning line); the subagent lineage stamps still win over it.
 
         ``narration`` is the VOICE of the note, not its text: only the model's own
         round narration (``loop_messages._emit_round_progress``) is the turn's
@@ -1131,6 +1134,7 @@ class OuroborosAgent:
             }
             progress_meta: Dict[str, Any] = {}
             progress_meta.update(incident or {})
+            progress_meta.update(meta or {})
             progress_meta.update(self._subagent_progress_meta("progress"))
             if executor_observation is not None:
                 from ouroboros.subagent_messages import executor_observation_meta

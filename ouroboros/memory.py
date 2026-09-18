@@ -953,6 +953,10 @@ class Memory:
         return f"← {ts} [{username}] {raw_text}" if compact else f"← [{ts}] [{username}] {raw_text}"
 
     def summarize_progress(self, entries: List[Dict[str, Any]], limit: int = 15) -> str:
+        # Reasoning-stamped rows stay in progress.jsonl for UI replay, but they are
+        # display-only: the digest that feeds the prompt keeps narration and visible
+        # text ONLY, so reasoning never re-enters the model's own context.
+        entries = [e for e in entries if not e.get("reasoning")]
         if not entries:
             return ""
         return "\n".join(

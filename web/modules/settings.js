@@ -19,6 +19,7 @@ import { initHarnessAccounts } from './harness_accounts.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { PROVIDER_TEST_INPUTS, SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
 import { showToast } from './toast.js';
+import { bindThemeSegments } from './theme.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
@@ -26,6 +27,8 @@ import { createModelRolesEditor, modelRoleMap } from './model_roles.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY } from './route_editor_primitives.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow } from './ui_helpers.js';
 import { extensionActionStatus } from './extension_status_text.js';
+import { currentLanguage, setLanguage, storedLanguage } from './i18n.js';
+import { isReasoningVisible, REASONING_VISIBILITY_EVENT, setReasoningVisible } from './log_events.js';
 
 let markSettingsDirty = () => {};
 const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
@@ -440,6 +443,41 @@ export async function confirmAndSendRestart({ openConfirmDialog: confirmDialog, 
     return result?.status === 'sent' ? 'sent' : 'not_connected';
 }
 
+function bindLanguageSegments(page) {
+    const buttons = Array.from(page.querySelectorAll('[data-language-group] [data-language-value]'));
+    const sync = (lang) => buttons.forEach((button) => {
+        const on = button.dataset.languageValue === lang;
+        button.classList.toggle('active', on);
+        button.setAttribute('aria-pressed', String(on));
+    });
+    sync(currentLanguage() || storedLanguage());
+    window.addEventListener('ouro:language-changed', (event) => sync(event.detail?.language || 'en'));
+    buttons.forEach((button) => button.addEventListener('click', async () => {
+        const lang = button.dataset.languageValue;
+        if (lang === currentLanguage()) return;
+        await setLanguage(lang);
+        apiClient.saveUiPreferences({ language: lang }).catch(() => showToast('Language choice could not be saved.', 'error'));
+    }));
+}
+
+/** Settings -> Behavior display toggle for the agent's reasoning rows. Like the
+    theme control it applies + persists on its own and must never touch the
+    settings draft, so its change event stops before the page-level dirty
+    listener sees it. */
+function bindReasoningToggle(page) {
+    const box = page.querySelector('#ui-show-reasoning');
+    if (!box) return;
+    const sync = () => { box.checked = isReasoningVisible(); };
+    box.addEventListener('change', (event) => {
+        event.stopPropagation();
+        const show = setReasoningVisible(box.checked);
+        apiClient.saveUiPreferences({ show_reasoning: show })
+            .catch(() => showToast('Reasoning display choice could not be saved.', 'error'));
+    });
+    window.addEventListener(REASONING_VISIBILITY_EVENT, sync);
+    sync();
+}
+
 export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     const page = document.createElement('div');
     page.id = 'page-settings';
@@ -455,6 +493,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     const disposeSettingsTabs = bindSettingsTabs(page, { state });
     bindSecretInputs(page);
     bindEffortSegments(page);
+    // Theme and language are owner-local UI preferences, not part of the settings
+    // draft: each applies on click and persists on its own, never marking the page dirty.
+    bindThemeSegments(page);
+    bindLanguageSegments(page);
+    bindReasoningToggle(page);
     const disposeLocalModel = bindLocalModelControls({ state });
     // Best-effort About version from /api/health.
     apiFetch('/api/health')
