@@ -8,8 +8,9 @@ Main moves on — so they live together:
 * the wave wakes Main at its own quorum and again when the last slot settles,
   and the wake carries each reviewer's own verdict
   (``announce_acceptance_settlement``);
-* a final answer delivered while that panel still runs neither buys a second
-  panel nor is refused one (``_deliver_under_running_panel``): Main waits — the
+* final delivery under that panel's feedback buys no second panel
+  (``_deliver_under_running_panel``), whether feedback returned ready or pending.
+  Main waits for a pending panel — the
   default, and the only option under blocking enforcement — or consciously
   finishes; a panel that PASSED the earlier revision accepts the task and the
   owner row says so (fork 1=B), while any other settled verdict hands the
@@ -237,8 +238,8 @@ def acceptance_wait_chosen(tools_ctx: Any) -> bool:
 def _deliver_under_running_panel(ctx: Any, prior_run: Any) -> Optional[bool]:
     """A DELIVERY is not a nomination: it neither buys a panel nor is refused one.
 
-    The panel this turn already paid for keeps its custody and identity. While
-    it runs, Main waits (the default, and the only option under blocking
+    The paid panel keeps its identity whether it returned ready or pending.
+    While it runs, Main waits (the default and the only option under blocking
     enforcement) or consciously finishes. Once it has settled on the earlier
     revision: a PASS accepts the task on the reviewers' word and the owner row
     says so (fork 1=B); any other verdict is not a verdict on this answer, so the
@@ -253,6 +254,7 @@ def _deliver_under_running_panel(ctx: Any, prior_run: Any) -> Optional[bool]:
         _end_acceptance_terminal, _finish_cyber_acceptance,
         _set_applied_host_acceptance_impact, acceptance_run_pending,
     )
+    from ouroboros.loop_delivery import delivery_subject_hash
     from ouroboros.loop_messages import owner_source_sha256
     from ouroboros.outcomes import ACCEPTANCE_ACCEPTED
 
@@ -261,7 +263,18 @@ def _deliver_under_running_panel(ctx: Any, prior_run: Any) -> Optional[bool]:
         return None
     run = panel_awaiting_this_turn(tools_ctx, ctx.llm_trace)
     if run is None:
-        return None
+        # Initial release may return a completed panel. Its delivered feedback
+        # belongs to this turn without pretending the operation is still pending.
+        run = next((row for row in reversed(ctx.llm_trace.get("review_runs") or [])
+                    if isinstance(row, dict) and row.get("authority") == "host_root"), None)
+        if (not run or not run.get("feedback_delivered")
+                or run.get("superseded_reason") != "delivery_candidate_replaced"):
+            return None
+    reviewed_text = (run.get("request") or {}).get("subject", "")
+    if run.get("subject_hash") != delivery_subject_hash(tools_ctx, ctx.llm_trace, reviewed_text):
+        return None  # A held rewrite may have acquired new material after supersession.
+    if run.get("superseded_by_revision") and run.get("superseded_reason") != "delivery_candidate_replaced":
+        return None  # The existing subject/effect owner already invalidated this feedback.
     # Older owner premises cannot authorize this delivery (owner rule 4=A).
     # The panel keeps its physical custody and still arrives as advice.
     reviewed_source = str(run.get("owner_source_sha256") or "")

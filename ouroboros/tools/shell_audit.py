@@ -269,10 +269,12 @@ def _mentioned_user_file_outputs_without_declaration(
                 else:
                     path = (effective_cwd / raw_candidate).resolve(strict=False)
                     lexical_path = effective_cwd / raw_candidate
+                # A speculative prose/path match can resolve but still fail stat.
+                is_directory = path.is_dir()
             except (OSError, RuntimeError, TypeError, ValueError):
                 continue
             paths_to_check: list[tuple[pathlib.Path, pathlib.Path]] = [(path, lexical_path)]
-            if path.is_dir():
+            if is_directory:
                 try:
                     for child in path.iterdir():
                         if len(paths_to_check) >= _UNDECLARED_OUTPUT_SCAN_MAX_FILES:

@@ -1,6 +1,4 @@
-"""Host acceptance: panel admission, dialogue, author response and terminal outcomes.
-The loop facade retains its historical bindings.
-"""
+"""Host acceptance: admission, dialogue and author outcomes; loop facade bindings stay stable."""
 
 from __future__ import annotations
 
@@ -742,13 +740,7 @@ def _finish_advisory_author(ctx: _TaskAcceptanceContext) -> bool:
 
 
 def _slot_cause_clause(result: Any) -> str:
-    """The bounded chat preview of the causes the wave actually recorded.
-
-    Chat preview only; the structured acceptance decision keeps every complete
-    cause. Shared so a revision explains itself with the same facts as a
-    degraded verdict instead of printing the aggregate word as if that word
-    were the reason.
-    """
+    """Bounded chat cause preview; the structured decision retains every complete cause."""
     reasons = list(getattr(result, "degraded_reasons", []) or [])
     note = "; ".join(
         truncate_review_artifact(str(r), limit=300).replace("\n", " ") for r in reasons[:4]
@@ -756,6 +748,20 @@ def _slot_cause_clause(result: Any) -> str:
     if len(reasons) > 4:
         note += f" (+{len(reasons) - 4} more in the task result)"
     return f" Causes: {note}" if note else ""
+
+
+def _offer_acceptance_feedback(ctx: _TaskAcceptanceContext, feedback: str) -> None:
+    """Offer exact-panel feedback; the returned Main request proves delivery."""
+    runs = ctx.llm_trace.get("review_runs") or []
+    for index in range(len(runs) - 1, -1, -1):
+        run = runs[index]
+        if (isinstance(run, dict) and run.get("authority") == "host_root"
+                and run.get("binding_hash") == ctx.review_binding.get("binding_hash")):
+            run["feedback_offered"] = True
+            ctx.messages.append({"role": "user", "content": feedback, "review_feedback": [{
+                "task_id": ctx.task_id, "run_index": index, "binding_hash": str(run.get("binding_hash") or ""),
+            }]})
+            break
 
 
 def _apply_task_acceptance_result(
@@ -801,6 +807,9 @@ def _apply_task_acceptance_result(
             dialogue=dialogue, dissent=bool(dissent), open_obligations=open_obligations,
         )
     if task_acceptance_is_clean(result):
+        if getattr(ctx.tools._ctx, "_acceptance_review_only", False):
+            _offer_acceptance_feedback(
+                ctx, capsule or "[Task acceptance feedback] Review verdict: PASS for the nominated answer.")
         _end_acceptance_terminal(ctx, "pass")
         if not _loop()._dispose_obligations_on_clean_pass(
             ctx.llm_trace, result, open_obligations, bool(dissent),
@@ -861,16 +870,7 @@ def _apply_task_acceptance_result(
             ctx.messages.append({"role": "assistant", "content": ctx.content})
         capsule += (f"\nCritic dialogue assessment: {dialogue['status']}; this is evidence for your decision, not your stop choice. "
                     "The paid review limit does not forbid corrections. If Blocking capacity is spent, preserve corrections and stop; do not claim approval.")
-        runs = ctx.llm_trace.get("review_runs") or []
-        for index in range(len(runs) - 1, -1, -1):
-            run = runs[index]
-            if isinstance(run, dict) and run.get("authority") == "host_root":
-                run["feedback_offered"] = True
-                ctx.messages.append({"role": "user", "content": capsule, "review_feedback": [{
-                    "task_id": ctx.task_id, "run_index": index,
-                    "binding_hash": str(run.get("binding_hash") or ""),
-                }]})
-                break
+        _offer_acceptance_feedback(ctx, capsule)
         # Name the author pass and actual causes; the verdict alone explains neither.
         causes = _slot_cause_clause(result)
         verdict = str(result.aggregate_signal or "").strip()

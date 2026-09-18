@@ -13,7 +13,7 @@ from ouroboros import loop, review_substrate
 from ouroboros.loop_acceptance_review import acceptance_run_pending
 from ouroboros.review_records import ReviewSlot
 from ouroboros.tools.registry import ToolRegistry
-from tests.test_loop_acceptance_gate import _seed_acceptance_root
+from tests.test_loop_acceptance_gate import _order_acceptance_feedback, _seed_acceptance_root
 
 ANSWER = "The complete report includes the requested budget."
 STATUS = "How is it going?"
@@ -204,7 +204,6 @@ def test_full_loop_explicit_batch_owner_status_and_free_collection(full_loop, mo
     assert all(x["subject"] == ANSWER for x in [r["request"] for r in trace["review_runs"] if r.get("authority") == "host_root"])
     assert f.waits and f.waits[0]["reason"] == "review" and not f.waits[0]["quiz_id"]
     assert f.ctx.owner_message_admission_agent._accepting_owner_messages is False
-
 
 
 def test_new_criterion_same_answer_gets_one_new_panel_and_keeps_prior_request(full_loop, monkeypatch):
@@ -405,7 +404,7 @@ def test_a_rewritten_answer_delivers_under_the_running_panel_instead_of_buying_o
     record = _terminal_record(trace)
     assert outcome_phase(record, {}) == "done", record["outcome_axes"]
     assert _completion_verdict(record, {}) == (
-        "The reviewers approved the earlier version of this answer; it changed before they finished."
+        "The reviewers approved an earlier version of this answer; the current version was not re-reviewed."
     )
 
 
@@ -562,7 +561,9 @@ def test_a_rejected_earlier_revision_buys_a_panel_on_the_rewrite_when_the_cap_al
     assert trace["acceptance_decision"]["reason"] in {"clean_pass", "clean_pass_obligations_closed"}
 
 
-def test_an_older_fail_never_outvotes_the_pass_that_accepted_the_task(full_loop, monkeypatch):
+@pytest.mark.parametrize("order", ["ready", "pending"])
+@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
+def test_an_older_fail_never_outvotes_the_pass_that_accepted_the_task(full_loop, monkeypatch, order, enforcement):
     """Astra review round 4: panel A rejects the first draft, Main re-nominates and
     panel B passes the second, Main rewrites once more under B. Both runs end up
     superseded; the decision names B. The review axis must read B alone — the
@@ -570,6 +571,7 @@ def test_an_older_fail_never_outvotes_the_pass_that_accepted_the_task(full_loop,
     from ouroboros.project_dialogue import outcome_phase
 
     f = full_loop
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     f.reviewer_verdict = "FAIL"
     second = ANSWER + " Budget: $12."
     third = second + " Timeline: two weeks."
@@ -585,6 +587,7 @@ def test_an_older_fail_never_outvotes_the_pass_that_accepted_the_task(full_loop,
             with f.condition:
                 assert f.condition.wait_for(lambda: f.settled_count >= 1, timeout=10)
             f.reviewer_verdict = "PASS"
+            _order_acceptance_feedback(f, monkeypatch, second, order)
             return {"content": "", "tool_calls": [call("task_acceptance_review", {"claim": second}, "second-review")]}, 0.0
         if f.model_step == 3:
             # This scenario rewrites under B's settled PASS, not while B runs.
@@ -771,7 +774,6 @@ def test_explicit_ready_panel_does_not_seal_before_main_finishes(full_loop, monk
     assert trace["acceptance_decision"]["status"] == "accepted", (trace["acceptance_decision"], [(r.get("aggregate_signal"), r.get("actors")) for r in trace["review_runs"]])
 
 
-
 def test_final_seal_rechecks_input_arriving_after_early_review(full_loop, monkeypatch):
     f = full_loop
     f.release.set()
@@ -874,7 +876,6 @@ def test_cold_loop_resume_collects_saved_roster_and_request_once(full_loop, monk
     assert trace["acceptance_decision"]["status"] == "accepted"
 
 
-
 def test_automatic_completion_uses_the_same_retained_candidate_and_free_collect(full_loop, monkeypatch):
     f = full_loop
     def main(_llm, messages, *_a, **_kw):
@@ -889,7 +890,6 @@ def test_automatic_completion_uses_the_same_retained_candidate_and_free_collect(
     assert result == ANSWER and len(f.review_sends) == 1
     assert trace["acceptance_decision"]["status"] == "accepted"
     assert f.waits and f.waits[0]["reason"] == "review"
-
 
 
 @pytest.mark.parametrize("failure", ["pending", "fail", "late_fail", "unavailable", "evidence_unavailable"])

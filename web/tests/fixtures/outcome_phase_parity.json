@@ -442,7 +442,7 @@
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "pass", "acceptance_decision": {"status": "accepted", "reason": "previous_revision_accepted"}}, "objective": {"status": "pass", "source": "task_acceptance_review", "review_status": "pass"}}},
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "The reviewers approved the earlier version of this answer; it changed before they finished."
+      "acceptance_clause": "The reviewers approved an earlier version of this answer; the current version was not re-reviewed."
     },
     {
       "name": "current informed Advisory author finish preserves raw critic fail",

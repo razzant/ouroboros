@@ -69,7 +69,7 @@ test('an accepted decision with a sentence still states its cause', () => {
             review: { status: 'pass', acceptance_decision: { status: 'accepted', reason } } },
     });
     assert.equal(accepted('previous_revision_accepted'),
-        'The reviewers approved the earlier version of this answer; it changed before they finished.');
+        'The reviewers approved an earlier version of this answer; the current version was not re-reviewed.');
     assert.equal(accepted('clean_pass'), '');
     assert.equal(accepted(''), '');
 });

@@ -49,6 +49,48 @@ def _seed_acceptance_root(tmp_path, task_id: str, ctx: SimpleNamespace):
     return contract
 
 
+def _order_acceptance_feedback(fixture, monkeypatch, subject, order):
+    """Run a real panel either before host release or after its pending return."""
+    from ouroboros import loop, review_custody, review_substrate
+    from ouroboros.loop_acceptance_review import acceptance_run_pending
+
+    released = threading.Event()
+    completed_before = len(fixture.review_sends)
+    original_factory = review_substrate._review_route_executor
+    original_register = review_custody._register_released_roster
+    original_panel = loop._execute_task_acceptance_panel
+
+    def factory(assignment, **kwargs):
+        executor = original_factory(assignment, **kwargs)
+        if assignment.request.subject == subject and order == "pending":
+            execute = executor.execute
+            def held():
+                assert released.wait(10), "host did not release the pending panel"
+                return execute()
+            executor.execute = held
+        return executor
+
+    def register(request, *args, **kwargs):
+        if request.subject == subject and order == "ready":
+            fixture.release.set()
+            with fixture.condition:
+                assert fixture.condition.wait_for(
+                    lambda: fixture.settled_count > completed_before, timeout=10,
+                ), "review did not settle before host release"
+        return original_register(request, *args, **kwargs)
+
+    def panel(ctx):
+        result = original_panel(ctx)
+        if ctx.content == subject:
+            assert acceptance_run_pending(result) is (order == "pending")
+            released.set()
+        return result
+
+    monkeypatch.setattr(review_substrate, "_review_route_executor", factory)
+    monkeypatch.setattr(review_custody, "_register_released_roster", register)
+    monkeypatch.setattr(loop, "_execute_task_acceptance_panel", panel)
+
+
 def test_set_acceptance_decision_preserves_agent_stance():
     trace = {
         "acceptance_decision": {
