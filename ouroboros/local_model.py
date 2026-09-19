@@ -732,9 +732,16 @@ class LocalModelManager:
             return self._context_length
         try:
             info = self.health_check()
-            self._context_length = info.get("context_length", 4096)
-        except Exception:
-            self._context_length = 4096
+            self._context_length = int(info.get("context_length") or 0)
+        except Exception as exc:
+            self._context_length = 0
+            log.warning(
+                "Local model context length unknown (server unreachable: %s). "
+                "Verify LOCAL_MODEL_SOURCE is set and the llama.cpp server is "
+                "running, or set USE_LOCAL_* to false to route away from the "
+                "local lane.",
+                exc,
+            )
         return self._context_length
 
     def test_tool_calling(self) -> Dict[str, Any]:
