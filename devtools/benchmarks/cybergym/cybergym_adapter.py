@@ -27,6 +27,8 @@ from devtools.benchmarks.cybergym.cybergym_dispatch import (  # noqa: F401
     GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
     BudgetCapReached,
     GatewayCircuitOpen,
+    WorkspaceCustodyPending,
+    WorkspaceCustodyTimeout,
     run_dispatched,
 )
 from devtools.benchmarks.cybergym.cybergym_cost_evidence import (
@@ -100,9 +102,6 @@ LEDGER_SCHEMA = "ouroboros.benchmark.cybergym.ledger.v1"
 RESULT_SCHEMA = "ouroboros.benchmark.cybergym.task_result.v1"
 CAPABILITY_FINAL_POC_MISSING = "final_poc_missing_after_fair_completion"
 PROTOCOL_FAIL = "protocol_fail"
-OFFICIAL_PIN_SKIPS = {
-    "arvo:64622": "broken_symlink_official_pin",
-}
 
 
 class CyberGymIntegrationUnavailable(CyberGymError):
@@ -273,11 +272,6 @@ def final_poc_hash(value: pathlib.Path | str | bytes | bytearray | memoryview) -
     if isinstance(value, (bytes, bytearray, memoryview)):
         return hashlib.sha256(bytes(value)).hexdigest()
     return final_poc_record(value).sha256
-
-
-def official_pin_skip_reason(task_id: str) -> str:
-    """Return the explicit official-pin skip reason, or empty if the task runs."""
-    return str(OFFICIAL_PIN_SKIPS.get(safe_task_id(task_id), "") or "")
 
 
 def build_task_result_row(
@@ -1075,12 +1069,13 @@ class BudgetLedger:
                 }
             )
 
-    def release(self, attempt_id: str) -> None:
+    def release(self, attempt_id: str, *, reason: str = "") -> None:
         attempt = str(attempt_id or "").strip()
         with self._lock():
             if attempt not in self.projection().active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
-            self._append({"schema": LEDGER_SCHEMA, "event": "release", "attempt_id": attempt, "ts_unix": time.time()})
+            event = {"schema": LEDGER_SCHEMA, "event": "release", "attempt_id": attempt, "ts_unix": time.time()}
+            self._append({**event, "reason": reason} if reason else event)
 
 
 def _task_spec(value: TaskSpec | Mapping[str, Any] | str) -> TaskSpec:
@@ -1323,6 +1318,9 @@ def run_campaign(
     ``gateway_circuit_threshold`` consecutive transport-class failures opens
     the dispatch circuit breaker: admission stops, in-flight tasks settle,
     and ``GatewayCircuitOpen`` carries the landed rows and undispatched ids.
+    A zero-send ``WorkspaceCustodyPending`` releases its claim and requeues
+    the task row-free behind the executor's ``probe_workspace_custody`` gate;
+    ``WorkspaceCustodyTimeout`` ends a campaign whose gate expired.
     """
     if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= MAX_CROSS_TASK_WORKERS:
         raise ValueError(
@@ -1350,20 +1348,6 @@ def run_campaign(
     def _run_one(task: TaskSpec) -> dict[str, Any]:
         contract = task.metadata.get("task_contract") if isinstance(task.metadata, Mapping) else None
         task_dir = safe_task_path(root, task.task_id)
-        skip_reason = official_pin_skip_reason(task.task_id)
-        if skip_reason:
-            task_dir.mkdir(parents=True, exist_ok=True)
-            row = build_task_result_row(
-                task.task_id,
-                status="infra_failed",
-                lifecycle=skip_reason,
-                level=task.level,
-                infra_reason=skip_reason,
-                artifact_refs={"task_dir": str(task_dir)},
-                error="official pin skipped: " + skip_reason,
-                task_contract=contract if isinstance(contract, Mapping) else None,
-            )
-            return row
         if executor is None:
             task_dir.mkdir(parents=True, exist_ok=True)
             row = build_task_result_row(
@@ -1424,6 +1408,13 @@ def run_campaign(
                 # settlements to free headroom, and either resumes or ends the
                 # campaign with BudgetCapReached (run 20260907T233516Z flushed
                 # 1145 undispatched tasks into infra rows here).
+                raise
+            if isinstance(exc, WorkspaceCustodyPending) and claim is not None:
+                # Zero-send collateral of a sibling's unresolved start: the
+                # claim is durably released before the dispatcher requeues the
+                # task row-free.  A failed release propagates as fatal instead
+                # of letting a live reservation meet its own retry.
+                ledger.release(str(claim["attempt_id"]), reason="workspace_custody_pending")
                 raise
             if claim is not None and not overspend:
                 terminal_accounting = _terminal_gateway_accounting(
@@ -1537,6 +1528,9 @@ def run_campaign(
     gateway_probe = getattr(dispatch_owner, "probe_gateway_alive", None)
     if not callable(gateway_probe):
         gateway_probe = None
+    custody_probe = getattr(dispatch_owner, "probe_workspace_custody", None)
+    if not callable(custody_probe):
+        custody_probe = None
 
     def _budget_probe() -> bool:
         """Read-only replay of the claim admission check.
@@ -1584,5 +1578,6 @@ def run_campaign(
             on_row=_land_and_settle,
             gateway_probe=gateway_probe,
             budget_probe=_budget_probe,
+            custody_probe=custody_probe,
             on_event=_record_dispatch_event,
         )

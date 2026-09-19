@@ -28,7 +28,6 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     directory_tree_digest,
     final_poc_record,
     final_submission,
-    official_pin_skip_reason,
     parse_strict_bool,
     pre_admission_report,
     project_budget,
@@ -65,28 +64,29 @@ def test_safe_ids_and_argv_are_path_safe(tmp_path):
     assert all(isinstance(part, str) for part in argv)
 
 
-def test_official_pin_skips_arvo_64622_without_calling_executor(tmp_path):
-    assert official_pin_skip_reason("arvo:64622") == "broken_symlink_official_pin"
-    assert official_pin_skip_reason("arvo:1065") == ""
+def test_arvo_64622_is_dispatched_like_every_pinned_task(tmp_path, monkeypatch):
+    """Its dangling link now extracts, so neither skip call site remains."""
+    from devtools.benchmarks.cybergym.cybergym_executor import CyberGymExecutor, ExecutorFailure
+    from tests.test_cybergym_executor import _config
 
-    called: list[str] = []
+    executor = CyberGymExecutor(_config(tmp_path))
+    started: list[bool] = []
 
-    def boom(task, task_dir):
-        called.append(task.task_id)
-        raise AssertionError("executor must not run a skipped official pin")
+    def start():
+        started.append(True)
+        raise ExecutorFailure("fixture stops after dispatch")
 
+    monkeypatch.setattr(executor, "start", start)
     rows = run_campaign(
-        ["arvo:64622", "arvo:1"],
-        run_root=tmp_path / "pin-skip",
-        executor=boom,
+        ["arvo:64622"],
+        run_root=tmp_path / "run",
+        executor=executor.run_task,
         estimated_cost_usd=1,
         budget_cap_usd=5,
     )
-    assert called == ["arvo:1"]
-    assert rows[0]["task_id"] == "arvo:64622"
-    assert rows[0]["status"] == "infra_failed"
-    assert rows[0]["lifecycle"] == "broken_symlink_official_pin"
-    assert rows[0]["infra_reason"] == "broken_symlink_official_pin"
+    assert started == [True]
+    assert (rows[0]["task_id"], rows[0]["lifecycle"]) == ("arvo:64622", "executor_failed")
+    assert rows[0]["error"] == "fixture stops after dispatch"
 
 
 def test_applied_server_provenance_rewrites_manifest_command(tmp_path):
@@ -393,7 +393,7 @@ def test_launcher_paid_limits_and_immutable_hash_declarations_are_bounded():
         values = dict(
             model=OFFICIAL_MODEL,
             budget_usd=3500.0,
-            timeout_sec=14_400,
+            timeout_sec=21_600,
             max_rounds=200,
             per_task_cost_usd=20.0,
             workers=64,
@@ -411,7 +411,7 @@ def test_launcher_paid_limits_and_immutable_hash_declarations_are_bounded():
 
     for kwargs, message in (
         ({"budget_usd": 3500.01}, "budget_usd"),
-        ({"timeout_sec": 14_401}, "timeout_sec"),
+        ({"timeout_sec": 21_601}, "timeout_sec"),
         ({"max_rounds": 0}, "max_rounds"),
         ({"per_task_cost_usd": 0}, "per_task_cost_usd"),
         ({"per_task_cost_usd": 3500.01}, "per_task_cost_usd"),

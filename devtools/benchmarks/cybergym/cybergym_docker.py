@@ -27,10 +27,13 @@ import urllib.parse
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
+from ouroboros.utils import atomic_write_json
+
 from devtools.benchmarks.cybergym.cybergym_adapter import (
     OFFICIAL_MODEL,
     TaskSpec,
 )
+from devtools.benchmarks.cybergym.cybergym_dispatch import WorkspaceCustodyPending
 from devtools.benchmarks.cybergym.cybergym_sidecar import (
     API_KEY_ENV,
     CleanupPlan,
@@ -477,10 +480,10 @@ def _initialize_generated_workspace_git(
 
 
 def _write_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(dict(value), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    """Publish a JSON receipt through the engine's atomic writer: a per-writer
+    temporary removed on failure, one atomic replace, and the bounded Windows
+    sharing-violation retry that concurrent healer receipts need."""
+    atomic_write_json(path, dict(value), trailing_newline=True)
 
 
 def _install_workspace_backend_alias(workspace_root: pathlib.Path) -> pathlib.Path:
@@ -935,101 +938,167 @@ class _DockerRuntimeMixin:
         except Exception as exc:
             failure_reason += f"; name inspect failed: {type(exc).__name__}"
         if observed is not None:
-            observed_id = str(observed.get("Id") or "").strip()
-            actual_name = str(observed.get("Name") or "").lstrip("/")
-            config = observed.get("Config")
-            labels = config.get("Labels", {}) if isinstance(config, Mapping) else {}
-            networks = ((observed.get("NetworkSettings") or {}).get("Networks") or {})
-            network = networks.get("cybergym-internal") if isinstance(networks, Mapping) else None
-            try:
-                bound = _bind_container_image(
-                    observed,
-                    self._workspace_image_observation,
-                    self.config.workspace_image_digest,
-                    "workspace",
-                )
-            except Exception as exc:
-                bound = None
-                failure_reason += f"; image custody failed: {type(exc).__name__}"
-            if (
-                observed_id
-                and _GATEWAY_TASK_ID.fullmatch(observed_id)
-                and actual_name == container_name
-                and isinstance(labels, Mapping)
-                and labels.get("com.ouroboros.campaign") == self.config.campaign_id
-                and labels.get("com.ouroboros.role") == "workspace"
-                and labels.get("com.ouroboros.agent_id") == plan.opaque_agent_id
-                and isinstance(network, Mapping)
-                and (not self.network_id or str(network.get("NetworkID") or "") == self.network_id)
-                and bound is not None
-            ):
+            bound, missing = self._workspace_attestation(observed, container_name, plan.opaque_agent_id)
+            if bound is not None:
                 with self._registry_condition:
-                    self._task_containers[container_name] = observed_id
+                    self._task_containers[container_name] = str(observed.get("Id")).strip()
                     self._workspace_observations[container_name] = bound
                     self._unresolved_workspace_custody.pop(container_name, None)
                 return True
-            failure_reason += "; inspected container did not prove ownership"
+            failure_reason += f"; inspected container did not prove its {missing}"
         with self._registry_condition:
             self._unresolved_workspace_custody[container_name] = failure_reason
         return False
 
-    def _heal_unresolved_workspace_custody(self) -> None:
-        """Best-effort release of provably-terminal unresolved custody entries.
+    def _workspace_attestation(
+        self, observed: Mapping[str, Any], container_name: str, agent_id: str
+    ) -> tuple[Mapping[str, Any] | None, str]:
+        """Prove an inspected workspace is exactly this campaign's startup object.
 
-        A single container whose startup custody could not be proven (for
-        example a daemon hiccup that left it in ``Created``) must not poison
-        every later lane for the rest of the campaign — run 20260907T233516Z
-        burned 107 tasks on one such entry.  For each recorded name:
-        re-inspect; if the object is gone, drop the entry; if it is provably
-        owned by this campaign and in a removable terminal state
-        (``created``/``exited``/``dead``), remove it by exact id and drop the
-        entry.  A running container, a daemon that cannot be read, or failed
-        ownership proof keeps its entry latched — nothing is ever removed on
-        a guess.  Safe under concurrent lanes: names are per-attempt opaque
-        and removal is idempotent.
+        The one ownership predicate of failed-start recovery and the healer: a
+        safe immutable id, the exact generated name, campaign/role/agent
+        labels, this campaign's network and the pinned image.  Returns the
+        image-bound observation, or ``None`` with the first missing proof.
         """
-        with self._registry_condition:
-            pending = sorted(self._unresolved_workspace_custody)
-        for container_name in pending:
-            try:
-                observed = self._inspect_optional("container", container_name)
-            except Exception:  # noqa: BLE001 - unreadable daemon keeps the latch
-                continue
-            if observed is None:
-                with self._registry_condition:
-                    self._unresolved_workspace_custody.pop(container_name, None)
-                continue
-            observed_id = str(observed.get("Id") or "").strip()
-            actual_name = str(observed.get("Name") or "").lstrip("/")
-            config = observed.get("Config")
-            labels = config.get("Labels", {}) if isinstance(config, Mapping) else {}
-            state = observed.get("State")
-            status = (
-                str(state.get("Status") or "").strip().lower()
-                if isinstance(state, Mapping)
-                else ""
+        observed_id = str(observed.get("Id") or "").strip()
+        config = observed.get("Config")
+        labels = config.get("Labels", {}) if isinstance(config, Mapping) else {}
+        networks = ((observed.get("NetworkSettings") or {}).get("Networks") or {})
+        network = networks.get("cybergym-internal") if isinstance(networks, Mapping) else None
+        if not observed_id or not _GATEWAY_TASK_ID.fullmatch(observed_id):
+            return None, "immutable id"
+        if str(observed.get("Name") or "").lstrip("/") != container_name:
+            return None, "exact name"
+        if not isinstance(labels, Mapping) or (
+            labels.get("com.ouroboros.campaign"),
+            labels.get("com.ouroboros.role"),
+            labels.get("com.ouroboros.agent_id"),
+        ) != (self.config.campaign_id, "workspace", agent_id):
+            return None, "campaign, role and agent labels"
+        if not isinstance(network, Mapping) or (
+            self.network_id and str(network.get("NetworkID") or "") != self.network_id
+        ):
+            return None, "campaign network"
+        try:
+            bound = _bind_container_image(
+                observed,
+                self._workspace_image_observation,
+                self.config.workspace_image_digest,
+                "workspace",
             )
-            owned = (
-                bool(observed_id)
-                and actual_name == container_name
-                and isinstance(labels, Mapping)
-                and labels.get("com.ouroboros.campaign") == self.config.campaign_id
-                and labels.get("com.ouroboros.role") == "workspace"
-            )
-            if not owned or status not in {"created", "exited", "dead"}:
-                continue
-            try:
-                result = self._docker("rm", "--force", observed_id, timeout=60)
-                if result.returncode not in {0, 1}:
-                    continue
-                if self._inspect_optional("container", observed_id) is not None:
-                    continue
-            except Exception:  # noqa: BLE001 - a failed removal keeps the latch
-                continue
+        except Exception as exc:  # noqa: BLE001 - an unbound image is missing proof
+            return None, f"pinned image ({type(exc).__name__})"
+        return bound, ""
+
+    def _heal_unresolved_workspace_custody(self) -> None:
+        """Release recorded startup custody that this campaign provably owns.
+
+        One container whose startup custody could not be proven must not poison
+        every later lane — run 20260907T233516Z burned 107 tasks on one such
+        entry.  For each recorded name: re-inspect; an absent object drops its
+        entry; an owned ``created``/``exited``/``dead`` container (exact id,
+        name, campaign and role) is removed by exact id; a ``running`` one —
+        typically the ``tail -f /dev/null`` left by a timed-out ``docker run`` —
+        only after the full startup attestation and proof that no gateway
+        attempt of this process holds it, i.e. exactly the authority of the
+        immediate failed-start cleanup.  Anything unreadable, foreign,
+        partially proven, gateway-held, or whose removal or absence
+        postcondition failed stays latched.
+
+        A dispatch probe and every ``_workspace`` lane reach this healer at
+        once, so passes are serialized per executor: two of them over one name
+        would remove the same container twice and land a stale ``retained``
+        receipt after the newer ``resolved`` one.  The healer lock is always
+        taken before the registry lock and never under it, and Docker runs
+        under the healer lock but never under the registry lock, so lanes that
+        are not healing keep starting in parallel.  The durable
+        per-name receipt is why a latch may be dropped, so it is written first;
+        a failed receipt keeps the name latched for the next pass — whose
+        removal and absence are both idempotent — rather than resuming
+        admission on an observation nobody recorded.
+        """
+        with self._workspace_healer_lock:
             with self._registry_condition:
-                self._task_containers.pop(container_name, None)
-                self._workspace_observations.pop(container_name, None)
-                self._unresolved_workspace_custody.pop(container_name, None)
+                pending = sorted(self._unresolved_workspace_custody)
+            for container_name in pending:
+                resolved, observation = self._heal_workspace_name(container_name)
+                try:
+                    _write_json(
+                        self.config.run_root / "workspaces" / f"{container_name}.startup_custody.json",
+                        {
+                            "schema": "ouroboros.benchmark.cybergym.workspace_startup_custody.v1",
+                            "container_name": container_name,
+                            "status": "resolved" if resolved else "retained",
+                            "observation": observation,
+                            "ts_unix": time.time(),
+                        },
+                    )
+                except Exception:  # noqa: BLE001 - an unwritten receipt keeps the latch
+                    continue
+                if resolved:
+                    with self._registry_condition:
+                        self._task_containers.pop(container_name, None)
+                        self._workspace_observations.pop(container_name, None)
+                        self._unresolved_workspace_custody.pop(container_name, None)
+
+    def _heal_workspace_name(self, container_name: str) -> tuple[bool, str]:
+        """Decide one latched name for the healer: ``(resolved, observation)``."""
+        try:
+            observed = self._inspect_optional("container", container_name)
+        except Exception as exc:  # noqa: BLE001 - an unreadable daemon keeps the latch
+            return False, f"daemon unreadable: {type(exc).__name__}"
+        if observed is None:
+            return True, "absent"
+        observed_id = str(observed.get("Id") or "").strip()
+        config = observed.get("Config")
+        labels = config.get("Labels", {}) if isinstance(config, Mapping) else {}
+        state = observed.get("State")
+        status = str(state.get("Status") or "").strip().lower() if isinstance(state, Mapping) else ""
+        if not (
+            observed_id
+            and str(observed.get("Name") or "").lstrip("/") == container_name
+            and isinstance(labels, Mapping)
+            and labels.get("com.ouroboros.campaign") == self.config.campaign_id
+            and labels.get("com.ouroboros.role") == "workspace"
+        ):
+            return False, f"{status or 'unknown'} container ownership is unproven"
+        if status == "running":
+            with self._registry_condition:
+                # Fenced by the same three custody facts as
+                # `_cleanup_owned_resources` and `_attest_runtime`, not by
+                # `_workspace`'s latch-drop ordering alone.
+                held = (
+                    container_name in self._terminal_uncommitted_workspaces
+                    or container_name in self._workspace_starting
+                    or any(
+                        isinstance(entry, Mapping) and entry.get("workspace_name") == container_name
+                        for entry in tuple(self._gateway_attempts.values())
+                    )
+                )
+            if held:
+                return False, "running container is held by a live attempt"
+            agent_id = container_name.removeprefix("cybergym-workspace-")
+            bound, missing = self._workspace_attestation(observed, container_name, agent_id)
+            if bound is None:
+                return False, f"running container lacks proof of its {missing}"
+        elif status not in {"created", "exited", "dead"}:
+            return False, f"{status or 'unknown'} container is not removable"
+        try:
+            result = self._docker("rm", "--force", observed_id, timeout=60)
+            if result.returncode not in {0, 1}:
+                return False, f"removal of {status} {observed_id} failed"
+            if self._inspect_optional("container", observed_id) is not None:
+                return False, f"{status} {observed_id} survived removal"
+        except Exception as exc:  # noqa: BLE001 - a failed removal keeps the latch
+            return False, f"removal of {status} {observed_id} failed: {type(exc).__name__}"
+        return True, f"removed {status} {observed_id}"
+
+    def probe_workspace_custody(self) -> bool:
+        """Custody-gate probe for the dispatcher: heal once, then report
+        whether admission may resume (no startup custody remains unresolved)."""
+        self._heal_unresolved_workspace_custody()
+        with self._registry_condition:
+            return not self._unresolved_workspace_custody
 
     def _workspace(self, task: TaskSpec, task_dir: pathlib.Path, plan: NetworkPlan) -> str:
         container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
@@ -1039,8 +1108,9 @@ class _DockerRuntimeMixin:
             self._heal_unresolved_workspace_custody()
         with self._registry_condition:
             if self._unresolved_workspace_custody:
-                names = ", ".join(sorted(self._unresolved_workspace_custody))
-                raise ExecutorFailure(f"workspace startup custody is unresolved: {names}")
+                # A sibling's start is unresolved: pause and requeue this
+                # zero-send attempt instead of turning it into an infra row.
+                raise WorkspaceCustodyPending(self._unresolved_workspace_custody)
         runtime_dir: pathlib.Path | None = None
         if self.config.expose_vulnerable_runtime:
             if self.config.binary_dir is None:

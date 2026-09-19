@@ -182,6 +182,9 @@ def execute_regrade_inventory(
     ``result_index.jsonl`` below ``run_root``; already-recorded task ids are
     skipped so an interrupted regrade resumes without repeating verifier work.
     Historical zeroes without a final marker are carried as passthrough rows.
+    A sibling's unresolved workspace start is deliberately one typed
+    ``WorkspaceCustodyPending`` error row: regrade has no dispatch gate to
+    requeue behind, and a new regrade root re-runs that task.
     """
 
     if config.provider_probe:

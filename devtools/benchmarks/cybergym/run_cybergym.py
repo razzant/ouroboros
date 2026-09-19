@@ -58,6 +58,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     CyberGymIntegrationUnavailable,
     GatewayCircuitOpen,
     TaskSpec,
+    WorkspaceCustodyTimeout,
     append_cybergym_result,
     build_generate_task_argv,
     build_task_result_row,
@@ -81,7 +82,7 @@ from devtools.benchmarks.cybergym.cybergym_result_index import (
 )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-DEFAULT_TIMEOUT_SEC = 3 * 60 * 60
+DEFAULT_TIMEOUT_SEC = 6 * 60 * 60
 DEFAULT_MAX_ROUNDS = 600
 DEFAULT_CAMPAIGN_BUDGET_USD = 3000.0
 # Runtime tree cap for each measured task.  This is deliberately separate from
@@ -1362,6 +1363,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             final.checkpoint("settings_applied")
 
             circuit: GatewayCircuitOpen | None = None
+            custody_stop: WorkspaceCustodyTimeout | None = None
             budget_stop: BudgetCapReached | None = None
             if args.dry_run:
                 rows = _write_planned_rows(
@@ -1494,6 +1496,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     except GatewayCircuitOpen as exc:
                         circuit, rows = exc, list(exc.rows)
                         manifest["extra"]["gateway_circuit"] = exc.as_dict()
+                    except WorkspaceCustodyTimeout as exc:
+                        # A sibling's workspace start stayed unresolved for
+                        # the custody budget; the owned residue is retained
+                        # and the undispatched ids stay row-free.
+                        custody_stop, rows = exc, list(exc.rows)
+                        manifest["extra"]["workspace_custody"] = exc.as_dict()
                     except BudgetCapReached as exc:
                         # The cap refused further claims and no in-flight
                         # settlement freed headroom.  Undispatched tasks have
@@ -1512,13 +1520,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest["extra"].update(_row_counts(rows))
             custody_pending = bool(manifest.get("extra", {}).get("close_skipped"))
             all_completed = args.dry_run or all(row.get("status") == "completed" for row in rows)
-            code = (
-                2
-                if custody_pending or circuit is not None or budget_stop is not None or not all_completed
-                else 0
-            )
+            stopped = circuit is not None or custody_stop is not None or budget_stop is not None
+            code = 2 if custody_pending or stopped or not all_completed else 0
+            # A typed stop names why admission ended; it precedes the
+            # custody_pending cleanup state that usually accompanies it.
             if circuit is not None:
                 final.update({"outcome": "gateway_unreachable", "exit_code": 2})
+            elif custody_stop is not None:
+                final.update({"outcome": "workspace_custody_timeout", "exit_code": 2})
             elif budget_stop is not None:
                 final.update({"outcome": "budget_cap_reached", "exit_code": 2})
             elif custody_pending:

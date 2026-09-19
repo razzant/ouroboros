@@ -1,8 +1,11 @@
-"""CyberGym campaign dispatch engine: bounded fan-out plus a dead-gateway breaker.
+"""CyberGym campaign dispatch engine: bounded fan-out plus its admission gates.
 
 Extracted from ``cybergym_adapter.run_campaign`` so the stateful adapter stays
 inside its module-size band.  This module owns only dispatch policy: it never
-touches the budget ledger, the result index, workspaces, or containers.
+touches the budget ledger, the result index, workspaces, or containers.  Three
+gates can pause admission — a dead gateway, a refused budget claim, and a
+sibling's unresolved workspace startup — and each ends a campaign with a typed
+stop whose never-dispatched task ids stay row-free.
 """
 from __future__ import annotations
 
@@ -35,14 +38,55 @@ GATEWAY_PAUSE_BUDGET_SEC = 3600.0
 # here would close an import cycle (wire <- adapter <- this module).
 GATEWAY_TRANSPORT_INFRA_REASON = "GatewayTransportError"
 
+# A sibling's unresolved pre-gateway workspace pauses admission instead of
+# turning innocent tasks into infra rows (the 2026-09-13 campaign turned 11
+# failed starts into 12 collateral rows).  The gate re-runs the executor's
+# healer every 30 s; a contiguous five-minute pause without a clean heal stops
+# the campaign.  This logical budget is its own rail, distinct from the Docker
+# command timeout, the gateway transport budget, the task deadline, the
+# finalization grace, and the campaign budget.
+WORKSPACE_CUSTODY_BUDGET_SEC = 300.0
+WORKSPACE_CUSTODY_PROBE_INTERVAL_SEC = 30.0
 
-class GatewayCircuitOpen(CyberGymError):
-    """Dispatch halted: the isolate gateway is unreachable at transport level.
 
-    Carries every row that landed before the breaker opened so the launcher
-    can still account for each dispatched task; never-dispatched tasks are
-    named in ``remaining_task_ids`` and deliberately have no result row.
+class _DispatchStop(CyberGymError):
+    """Admission halted: every row that landed plus the row-free remainder.
+
+    The launcher still accounts for each dispatched task; never-dispatched
+    tasks are named in ``remaining_task_ids`` and deliberately have no result
+    row, so a later append-only campaign runs them without any retry flag.
     """
+
+    outcome = ""
+    reason = ""
+
+    def __init__(
+        self,
+        *,
+        rows: Sequence[Mapping[str, Any]],
+        remaining: Sequence[str],
+        pause: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.rows = [dict(row) for row in rows]
+        self.remaining_task_ids = [str(task_id) for task_id in remaining]
+        self.pause = dict(pause or {})
+        super().__init__(f"{self.reason}: {len(self.remaining_task_ids)} task(s) not dispatched")
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {
+            "outcome": self.outcome,
+            "dispatched_rows": len(self.rows),
+            "remaining_task_ids": list(self.remaining_task_ids),
+        }
+        if self.pause:
+            payload["pause"] = dict(self.pause)
+        return payload
+
+
+class GatewayCircuitOpen(_DispatchStop):
+    """Dispatch halted: the isolate gateway is unreachable at transport level."""
+
+    outcome = "gateway_unreachable"
 
     def __init__(
         self,
@@ -52,25 +96,35 @@ class GatewayCircuitOpen(CyberGymError):
         remaining: Sequence[str],
         pause: Mapping[str, Any] | None = None,
     ) -> None:
-        self.rows = [dict(row) for row in rows]
         self.threshold = int(threshold)
-        self.remaining_task_ids = [str(task_id) for task_id in remaining]
-        self.pause = dict(pause or {})
-        super().__init__(
-            f"gateway unreachable: {self.threshold} consecutive transport "
-            f"failures, {len(self.remaining_task_ids)} task(s) not dispatched"
-        )
+        self.reason = f"gateway unreachable after {self.threshold} consecutive transport failures"
+        super().__init__(rows=rows, remaining=remaining, pause=pause)
 
     def as_dict(self) -> dict[str, Any]:
-        payload = {
-            "outcome": "gateway_unreachable",
-            "consecutive_transport_failures": self.threshold,
-            "dispatched_rows": len(self.rows),
-            "remaining_task_ids": list(self.remaining_task_ids),
-        }
-        if self.pause:
-            payload["pause"] = dict(self.pause)
-        return payload
+        return {**super().as_dict(), "consecutive_transport_failures": self.threshold}
+
+
+class WorkspaceCustodyPending(CyberGymError):
+    """Zero-send pause: a sibling's pre-gateway workspace custody is unresolved.
+
+    Raised before gateway admission by an attempt that met another start's
+    latch, never by the failed start itself (which keeps its honest infra
+    row).  ``run_campaign`` durably releases the attempt's claim and re-raises;
+    the dispatcher requeues the task row-free and pauses the custody gate.
+    """
+
+    def __init__(self, unresolved: Mapping[str, str]) -> None:
+        self.unresolved = {str(name): str(reason) for name, reason in unresolved.items()}
+        super().__init__(
+            "workspace startup custody is unresolved: " + ", ".join(sorted(self.unresolved))
+        )
+
+
+class WorkspaceCustodyTimeout(_DispatchStop):
+    """Dispatch halted: startup custody stayed unresolved for the whole budget."""
+
+    outcome = "workspace_custody_timeout"
+    reason = "workspace startup custody stayed unresolved"
 
 
 def is_gateway_transport_row(row: Mapping[str, Any]) -> bool:
@@ -95,60 +149,49 @@ def is_gateway_transport_row(row: Mapping[str, Any]) -> bool:
 BUDGET_REFUSED_ERROR_NAME = "BudgetRefused"
 
 
-class BudgetCapReached(CyberGymError):
+class BudgetCapReached(_DispatchStop):
     """Dispatch halted: the budget projection refuses every further claim.
 
     Raised only after admission paused on a claim refusal and no in-flight
     settlement freed enough headroom for the next reservation (or the caller
-    supplied no probe at all).  Carries every row that landed before the stop
-    so the launcher can still account for each dispatched task;
-    never-dispatched tasks are named in ``remaining_task_ids`` and
-    deliberately have no result row, so a later resume campaign re-runs them
-    without any retry flag.
+    supplied no probe at all).
+    """
+
+    outcome = "budget_cap_reached"
+    reason = "campaign budget cap reached"
+
+
+class _Breaker:
+    """Failure signal -> pause-and-probe -> open, under one lock.
+
+    One timed gate serves two rails: the gateway breaker trips on a streak of
+    transport rows (``record``), the workspace-custody gate on a zero-send
+    custody signal (``trip``).  Further signals never reset a live pause; only
+    a healthy probe resumes admission, and a contiguous pause that exhausts
+    ``pause_budget_sec`` opens the gate for good.  A ``hard_budget`` (the
+    custody gate) is a deadline: a probe that turns healthy only at or after
+    it cannot resume, while the gateway still resumes on any healthy probe.
     """
 
     def __init__(
         self,
         *,
-        rows: Sequence[Mapping[str, Any]],
-        remaining: Sequence[str],
-        pause: Mapping[str, Any] | None = None,
-    ) -> None:
-        self.rows = [dict(row) for row in rows]
-        self.remaining_task_ids = [str(task_id) for task_id in remaining]
-        self.pause = dict(pause or {})
-        super().__init__(
-            "campaign budget cap reached: "
-            f"{len(self.remaining_task_ids)} task(s) not dispatched"
-        )
-
-    def as_dict(self) -> dict[str, Any]:
-        payload = {
-            "outcome": "budget_cap_reached",
-            "dispatched_rows": len(self.rows),
-            "remaining_task_ids": list(self.remaining_task_ids),
-        }
-        if self.pause:
-            payload["pause"] = dict(self.pause)
-        return payload
-
-
-class _Breaker:
-    """Transport-failure streak -> pause-and-probe -> open, under one lock."""
-
-    def __init__(
-        self,
-        *,
+        kind: str,
+        open_event: str,
         threshold: int,
         probe: Callable[[], bool] | None,
         pause_budget_sec: float,
+        hard_budget: bool = False,
         backoff_sec: Sequence[float],
         clock: Callable[[], float],
         on_event: Callable[[Mapping[str, Any]], None] | None,
     ) -> None:
+        self.kind = kind
+        self.open_event = open_event
         self.threshold = int(threshold)
         self.probe = probe
         self.pause_budget_sec = float(pause_budget_sec)
+        self.hard_budget = bool(hard_budget)
         self.backoff_sec = tuple(float(value) for value in backoff_sec) or (30.0,)
         self.clock = clock
         self.on_event = on_event
@@ -160,8 +203,8 @@ class _Breaker:
         self.probe_failures = 0
         self.pauses: list[dict[str, Any]] = []
 
-    def _emit(self, event: dict[str, Any]) -> None:
-        if self.on_event is None:
+    def _emit(self, event: dict[str, Any] | None) -> None:
+        if self.on_event is None or event is None:
             return
         try:
             self.on_event(dict(event))
@@ -181,22 +224,32 @@ class _Breaker:
             if self.open:
                 return
             self.streak = self.streak + 1 if is_gateway_transport_row(row) else 0
-            if self.streak < self.threshold or self.paused_since is not None:
+            if self.streak < self.threshold:
                 return
-            if self.probe is None:
-                self.open = True
-                return
-            now = self.clock()
-            self.paused_since = now
-            self.probe_failures = 0
-            self.next_probe_at = now + self.backoff_sec[0]
-            event = {
-                "event": "gateway_pause",
-                "consecutive_transport_failures": self.streak,
-                "first_probe_in_sec": self.backoff_sec[0],
-                "pause_budget_sec": self.pause_budget_sec,
-            }
+            event = self._trip_locked({"consecutive_transport_failures": self.streak})
         self._emit(event)
+
+    def trip(self, detail: Mapping[str, Any]) -> None:
+        with self.lock:
+            event = self._trip_locked(detail)
+        self._emit(event)
+
+    def _trip_locked(self, detail: Mapping[str, Any]) -> dict[str, Any] | None:
+        if self.open or self.paused_since is not None:
+            return None
+        if self.probe is None:
+            self.open = True
+            return None
+        now = self.clock()
+        self.paused_since = now
+        self.probe_failures = 0
+        self.next_probe_at = now + self.backoff_sec[0]
+        return {
+            "event": f"{self.kind}_pause",
+            **dict(detail),
+            "first_probe_in_sec": self.backoff_sec[0],
+            "pause_budget_sec": self.pause_budget_sec,
+        }
 
     def seconds_until_probe(self) -> float | None:
         with self.lock:
@@ -224,9 +277,10 @@ class _Breaker:
                 return
             now = self.clock()
             paused_for = now - self.paused_since
-            if healthy:
+            expired = paused_for >= self.pause_budget_sec
+            if healthy and not (self.hard_budget and expired):
                 summary = {
-                    "event": "gateway_resume",
+                    "event": f"{self.kind}_resume",
                     "paused_sec": round(paused_for, 3),
                     "failed_probes": self.probe_failures,
                 }
@@ -237,12 +291,14 @@ class _Breaker:
                 self.probe_failures = 0
                 event = summary
             else:
-                self.probe_failures += 1
-                if paused_for >= self.pause_budget_sec:
+                # A heal landing at a hard deadline is not a failed probe.
+                if not healthy:
+                    self.probe_failures += 1
+                if expired:
                     self.open = True
                     self.next_probe_at = None
                     event = {
-                        "event": "gateway_circuit_open",
+                        "event": self.open_event,
                         "paused_sec": round(paused_for, 3),
                         "failed_probes": self.probe_failures,
                     }
@@ -251,7 +307,7 @@ class _Breaker:
                     step = min(self.probe_failures, len(self.backoff_sec) - 1)
                     self.next_probe_at = now + self.backoff_sec[step]
                     event = {
-                        "event": "gateway_probe_failed",
+                        "event": f"{self.kind}_probe_failed",
                         "paused_sec": round(paused_for, 3),
                         "failed_probes": self.probe_failures,
                         "next_probe_in_sec": self.backoff_sec[step],
@@ -407,6 +463,7 @@ def run_dispatched(
     on_row: Callable[[Mapping[str, Any]], None] | None = None,
     gateway_probe: Callable[[], bool] | None = None,
     budget_probe: Callable[[], bool] | None = None,
+    custody_probe: Callable[[], bool] | None = None,
     pause_budget_sec: float = GATEWAY_PAUSE_BUDGET_SEC,
     probe_backoff_sec: Sequence[float] = GATEWAY_PROBE_BACKOFF_SEC,
     on_event: Callable[[Mapping[str, Any]], None] | None = None,
@@ -434,9 +491,21 @@ def run_dispatched(
     admission once a further claim fits the cap.  When the pool has drained
     and the probe still refuses, the campaign ends with ``BudgetCapReached``
     and the undispatched ids stay row-free for a later resume campaign.
+
+    ``WorkspaceCustodyPending`` is the third: a sibling's pre-gateway start
+    left unresolved custody, so this zero-send attempt (its claim already
+    released) is re-queued row-free and admission pauses.  ``custody_probe``
+    re-runs the executor's healer every ``WORKSPACE_CUSTODY_PROBE_INTERVAL_SEC``
+    and a clean heal before the deadline resumes admission; a contiguous pause
+    that reaches ``WORKSPACE_CUSTODY_BUDGET_SEC`` (at once without a probe)
+    drains in-flight work and ends the campaign with
+    ``WorkspaceCustodyTimeout``, even if its last probe healed.  When stops
+    coincide, custody precedes the budget, which precedes the gateway.
     """
 
     breaker = _Breaker(
+        kind="gateway",
+        open_event="gateway_circuit_open",
         threshold=threshold,
         probe=gateway_probe,
         pause_budget_sec=pause_budget_sec,
@@ -444,15 +513,36 @@ def run_dispatched(
         clock=clock,
         on_event=on_event,
     )
+    custody = _Breaker(
+        kind="workspace_custody",
+        open_event="workspace_custody_timeout",
+        threshold=1,
+        probe=custody_probe,
+        pause_budget_sec=WORKSPACE_CUSTODY_BUDGET_SEC,
+        hard_budget=True,
+        backoff_sec=(WORKSPACE_CUSTODY_PROBE_INTERVAL_SEC,),
+        clock=clock,
+        on_event=on_event,
+    )
     gate = _BudgetGate(probe=budget_probe, clock=clock, on_event=on_event)
-    refused: list[int] = []
+    # Never-dispatched positions (budget refusals, custody pauses) are
+    # re-admitted in source order before fresh ones, so a pause never
+    # reorders work; while unadmitted they are part of the row-free remainder.
+    requeued: list[int] = []
 
     def remaining_ids(submitted: int) -> list[str]:
-        return [str(tasks[position].task_id) for position in sorted(refused)] + [
+        return [str(tasks[position].task_id) for position in sorted(requeued)] + [
             str(task.task_id) for task in tasks[submitted:]
         ]
 
     def settle(rows: list[dict[str, Any]], submitted: int) -> list[dict[str, Any]]:
+        if custody.open:
+            summary = custody.pause_summary()
+            raise WorkspaceCustodyTimeout(
+                rows=rows,
+                remaining=remaining_ids(submitted),
+                pause=summary if summary["pauses"] else None,
+            )
         if gate.closed:
             summary = gate.pause_summary()
             raise BudgetCapReached(
@@ -470,27 +560,33 @@ def run_dispatched(
             )
         return rows
 
-    def wait_out_pause() -> None:
+    def wait_out(paused: _Breaker) -> None:
         """Block the admission loop while paused; returns when resumed or open."""
 
-        while breaker.paused and not breaker.open:
-            due_in = breaker.seconds_until_probe()
+        while paused.paused and not paused.open:
+            due_in = paused.seconds_until_probe()
             if due_in is None:
                 break
             if due_in > 0:
                 sleep(due_in)
-            breaker.tick()
+            paused.tick()
 
     if max_workers == 1 or len(tasks) <= 1:
         rows: list[dict[str, Any]] = []
-        submitted = 0
-        for task in tasks:
-            if breaker.paused:
-                wait_out_pause()
-            if breaker.open or gate.closed:
+        position = 0
+        while position < len(tasks):
+            for paused in (custody, breaker):
+                if paused.paused:
+                    wait_out(paused)
+            if breaker.open or gate.closed or custody.open:
                 break
             try:
-                row = run_one(task)
+                row = run_one(tasks[position])
+            except WorkspaceCustodyPending as exc:
+                # Zero-send and already released: retry this same position
+                # once the custody gate resumes.
+                custody.trip({"unresolved": dict(exc.unresolved)})
+                continue
             except Exception as exc:
                 if not _is_budget_refusal(exc):
                     raise
@@ -503,8 +599,8 @@ def run_dispatched(
             if on_row is not None:
                 on_row(row)
             rows.append(row)
-            submitted += 1
-        return settle(rows, submitted)
+            position += 1
+        return settle(rows, position)
 
     dispatched: dict[int, dict[str, Any]] = {}
     completed: dict[int, dict[str, Any]] = {}
@@ -518,16 +614,17 @@ def run_dispatched(
             # lane: counting them made every window of ``max_workers`` tasks
             # wait for its slowest member (a 2 h deadline task idled 63 lanes
             # for up to 2 h — r7/r8 ran near single-digit effective
-            # concurrency for long stretches).  Budget-refused positions are
-            # re-admitted before fresh ones so a pause never reorders work.
+            # concurrency for long stretches).
+            requeued.sort()
             while (
                 breaker.admission_allowed()
+                and custody.admission_allowed()
                 and gate.admission_allowed()
                 and len(in_flight) < max_workers
-                and (refused or submitted < len(tasks))
+                and (requeued or submitted < len(tasks))
             ):
-                if refused:
-                    position = refused.pop(0)
+                if requeued:
+                    position = requeued.pop(0)
                 else:
                     position = submitted
                     submitted += 1
@@ -540,30 +637,39 @@ def run_dispatched(
                     if gate.paused:
                         gate.close()
                         break
-                    refused.sort()
                     continue
-                if gate.closed:
+                if gate.closed or custody.open or breaker.open:
                     break
-                if breaker.paused and not breaker.open and submitted < len(tasks):
-                    wait_out_pause()
+                # A requeued last position is still undispatched work: wait
+                # out the pause for it instead of ending the campaign early.
+                paused = next((item for item in (custody, breaker) if item.paused), None)
+                if paused is not None and (requeued or submitted < len(tasks)):
+                    wait_out(paused)
                     continue
                 break
-            timeout = breaker.seconds_until_probe() if breaker.paused else None
+            due = [item.seconds_until_probe() for item in (custody, breaker) if item.paused]
+            due = [value for value in due if value is not None]
             done, _pending = wait(
-                tuple(in_flight), timeout=timeout, return_when=FIRST_COMPLETED
+                tuple(in_flight), timeout=min(due) if due else None, return_when=FIRST_COMPLETED
             )
             newly_completed: list[dict[str, Any]] = []
             for future in done:
                 position = in_flight.pop(future)
                 try:
                     row = future.result()
+                except WorkspaceCustodyPending as exc:
+                    # Zero-send and already released: requeue row-free while
+                    # the custody gate pauses (a live pause is never reset).
+                    requeued.append(position)
+                    custody.trip({"unresolved": dict(exc.unresolved)})
+                    continue
                 except Exception as exc:
                     if not _is_budget_refusal(exc):
                         raise
                     # Claim refused before dispatch: the task was never
                     # attempted, gets no row, and is re-admitted once a
                     # settlement frees headroom under the cap.
-                    refused.append(position)
+                    requeued.append(position)
                     gate.record_refusal()
                     continue
                 # The breaker sees rows as they settle, so a transport failure
@@ -584,8 +690,6 @@ def run_dispatched(
             # so the budget probe runs exactly here instead of on a timer.
             if gate.paused:
                 gate.probe_now()
-                if not gate.paused:
-                    refused.sort()
             # Source order remains a reporting/provenance property.  The
             # caller receives a stable ordered sequence after all completed
             # rows have already been settled.
@@ -593,12 +697,13 @@ def run_dispatched(
                 row = completed.pop(next_record)
                 dispatched[next_record] = row
                 next_record += 1
-            if breaker.paused:
-                breaker.tick()
-    # A budget-refused position never produces a row, so the source-order
-    # drain above can strand later completed rows behind that row-less
-    # position in ``completed``.  The campaign's landed rows are the union of
-    # both maps (they are disjoint: ``dispatched`` is drained FROM
-    # ``completed``), still reported in source order.
+            for paused in (custody, breaker):
+                if paused.paused:
+                    paused.tick()
+    # A requeued position never produces a row, so the source-order drain
+    # above can strand later completed rows behind that row-less position in
+    # ``completed``.  The campaign's landed rows are the union of both maps
+    # (they are disjoint: ``dispatched`` is drained FROM ``completed``), still
+    # reported in source order.
     landed = {**completed, **dispatched}
     return settle([landed[position] for position in sorted(landed)], submitted)

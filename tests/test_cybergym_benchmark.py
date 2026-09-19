@@ -70,7 +70,7 @@ def test_profile_records_safe_runtime_and_budget_defaults():
     assert settings["OUROBOROS_MAX_SUBAGENT_DEPTH"] == 0
     assert settings["OUROBOROS_MAX_WORKERS"] > 1
     assert settings["OUROBOROS_MAX_ROUNDS"] == 600
-    assert settings["OUROBOROS_TASK_ABS_CEILING_SEC"] == 10_800
+    assert settings["OUROBOROS_TASK_ABS_CEILING_SEC"] == 21_600
     assert settings["TOTAL_BUDGET"] == 3_000.0
     assert settings["OUROBOROS_RUNTIME_MODE"] == "pro"
     assert settings["OUROBOROS_SAFETY_MODE"] == "off"
@@ -147,6 +147,7 @@ def test_benchmark_inventory_points_to_cybergym_docs():
     architecture = architecture_text(REPO)
     assert "cybergym/" in common_readme
     assert "devtools/benchmarks/cybergym/" in architecture
+    assert "workspace-custody gate" in architecture
 
 
 def test_cybergym_docs_pin_the_owner_approved_contract():
@@ -180,16 +181,19 @@ def test_cybergym_docs_pin_the_owner_approved_contract():
         "schedule_subagent",
         "delegate_start",
         "claude_code_edit",
-        "OUROBOROS_TASK_ABS_CEILING_SEC=10800",
+        "OUROBOROS_TASK_ABS_CEILING_SEC=21600",
         "USD 3,000",
-        "three hours",
+        "six hours",
         "admit_benchmark_run",
         "finalize_run_manifest",
         "append-only",
         "cleanup",
+        "verbatim",
+        "workspace_custody_timeout",
     )
     for phrase in required:
         assert phrase in combined, phrase
     assert "template" in readme.lower()
     assert "applied" in readme.lower()
     assert "leaderboard" in readme.lower()
+    assert "workspace_custody_timeout" in readme and "verbatim" in readme
