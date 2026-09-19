@@ -291,8 +291,8 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
              # The census pointer is the same complete row history and the live delivery carry
              # (project_dialogue.project_question_pointer): display fields ride along.
              "quiz": {key: quiz[key] for key in ("quiz_id", "state", "asked_at", "wait_for_answer", "question",
-                                                 "options", "assumption", "recommended_index",
-                                                 "answered_index", "comment", "wait_ended_at")
+                                                 "options", "option_details", "stake", "assumption",
+                                                 "recommended_index", "answered_index", "comment", "wait_ended_at")
                       if isinstance(quiz, dict) and key in quiz}}
     if len(_FINALIZING_MEMO) >= _FINALIZING_MEMO_MAX:
         _FINALIZING_MEMO.clear()

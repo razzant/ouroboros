@@ -1043,8 +1043,9 @@ class LocalChatBridge:
                         "source_status": pointer.get("source_status", ""),
                     }
                     # The complete pointer row (ChatOutbound mirrors): present only when known.
-                    for key in ("question", "options", "assumption", "recommended_index", "answered_index",
-                                "comment", "wait_for_answer", "wait_ended_at", "owner_wait_resume_reason"):
+                    for key in ("question", "options", "option_details", "stake", "assumption", "recommended_index",
+                                "answered_index", "comment", "wait_for_answer", "wait_ended_at",
+                                "owner_wait_resume_reason"):
                         if key in pointer:
                             frame[key] = pointer[key]
                     self._broadcast_fn(frame)

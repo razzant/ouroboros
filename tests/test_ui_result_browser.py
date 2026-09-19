@@ -143,14 +143,16 @@ def test_ui_results_and_required_question_journey(wait_clone, tmp_path, monkeypa
                         assert task
                         wait = wait_until(lambda: (block if (block := oracle.task_result(task["id"]).get("owner_wait", {})).get("state") == "waiting" else None), 90)
                         assert wait
-                        pointer = page.locator(f'.project-question-pointer[data-task-id="{task["id"]}"]')
-                        pointer.get_by_text("Waiting for your answer").wait_for(timeout=30000)
-                        # Main's contract for a question the task waits on: the ready options, one touch
-                        # each; the owner's own words, the option details and the stake stay in Project.
-                        main_question = page.locator('#chat-messages .chat-bubble.project-question').filter(has=pointer)
-                        assert main_question.get_attribute("data-question-mode") == "card"
+                        pointer = page.locator(f'#chat-messages .project-question-card[data-task-id="{task["id"]}"]')
+                        pointer.get_by_text("Waiting for your answer", exact=True).wait_for(timeout=30000)
+                        # Main mirrors the Project's own form: the options with their details, the
+                        # stake and the own-answer field, plus the chip that opens the Project.
+                        main_question = page.locator('#chat-messages .chat-bubble.project-question').filter(
+                            has=page.locator(f'.project-question-card[data-task-id="{task["id"]}"]'))
                         assert main_question.locator('.chat-quiz-option').count() == 2
-                        assert main_question.locator('.chat-quiz-comment, .chat-quiz-option-detail, .chat-quiz-stake').count() == 0
+                        assert main_question.locator('.chat-quiz-comment').count() == 1
+                        main_question.get_by_text("Include the independent replication too.", exact=True).wait_for()
+                        main_question.get_by_text("At stake: The answer determines the report's evidence.", exact=True).wait_for()
                         page.screenshot(animations="disabled", path=str(screenshots / "chromium-main-question-pointer.png"), full_page=True)
                         # Age the original question beyond the ordinary Project
                         # window. Navigation must reconstruct this exact task/quiz
@@ -161,8 +163,9 @@ def test_ui_results_and_required_question_journey(wait_clone, tmp_path, monkeypa
                             log_chat("in", project["chat_id"], 1, f"Retained later project note {index}", drive_root=root)
                         project_history = _api(server.base_url, "GET", f"/api/chat/history?chat_id={project['chat_id']}")["messages"]
                         assert not any(row.get("msg_type") == "quiz" for row in project_history)
-                        pointer.get_by_role("button", name="Details and own answer").click()
-                        quiz = page.locator(f'.chat-quiz-card[data-task-id="{task["id"]}"][data-quiz-id="{wait["quiz_id"]}"]')
+                        pointer.locator('.chat-quiz-project').click()
+                        quiz = page.locator(f'.chat-quiz-card[data-task-id="{task["id"]}"][data-quiz-id="{wait["quiz_id"]}"]'
+                                            ':not(.project-question-card)')
                         quiz.get_by_text("Include the independent replication too.", exact=True).wait_for()
                         # This new Project instance cold-replayed cancelable history;
                         # current activity must restore the existing Stop control.
@@ -174,17 +177,18 @@ def test_ui_results_and_required_question_journey(wait_clone, tmp_path, monkeypa
                         # restore the quiz for the overview after its viewport assertion.
                         quiz.scroll_into_view_if_needed()
                         page.screenshot(animations="disabled", path=str(screenshots / "chromium-project-question.png"), full_page=True)
-                        # One touch in Main answers it: the durable record and the Main line settle on
-                        # the same answer (the Project card replays it below, in a fresh browser).
+                        # One touch in Main answers it: the Main copy shows the recorded answer, then
+                        # leaves; the Project card keeps the record (replayed below, in a fresh browser).
                         page.locator('#project-panel-close').click()
                         main_question.get_by_role("button", name="Both sources").click()
                         result = wait_durable_result(oracle, task["id"], timeout=90)
                         assert result["owner_quiz"][wait["quiz_id"]]["answered_index"] == 1
-                        pointer.get_by_text("You answered:", exact=True).wait_for(timeout=30000)
-                        pointer.get_by_text("Both sources", exact=True).wait_for(timeout=30000)
-                        assert main_question.get_attribute("data-question-mode") == "row"
-                        # The settled line opens the same question again, now as a record.
-                        pointer.click()
+                        pointer.get_by_text("You answered", exact=True).wait_for(timeout=30000)
+                        pointer.locator('.chat-quiz-option.chosen').filter(has_text="Both sources").wait_for(timeout=30000)
+                        main_question.wait_for(state="detached", timeout=15000)
+                        # Only the Main copy went: the exact question still opens in its Project.
+                        page.evaluate("""([project, task, quiz]) => window.dispatchEvent(new CustomEvent('ouro:open-project',
+                            {detail: {project, task_id: task, quiz_id: quiz}}))""", [project, task["id"], wait["quiz_id"]])
                         quiz.locator('.chat-quiz-option.chosen').filter(has_text="Both sources").wait_for(timeout=30000)
                         task_card = page.locator(f'.chat-live-card[data-task-id="{task["id"]}"]')
                         task_card.locator('[data-live-meta]').filter(has_text="Last solve response:").wait_for(timeout=30000)
@@ -200,8 +204,11 @@ def test_ui_results_and_required_question_journey(wait_clone, tmp_path, monkeypa
                     page = browser.new_page(viewport=viewport, has_touch=viewport["width"] < 500, reduced_motion="reduce")
                     try:
                         page.goto(server.base_url, wait_until="domcontentloaded")
-                        pointer = page.locator('.project-question-pointer').filter(has_text="You answered")
-                        pointer.click(timeout=30000)
+                        # An answered question never enters Main again; its Project replays the record.
+                        page.locator('#chat-messages .chat-live-card[data-task-id="parent1"]').wait_for(timeout=30000)
+                        assert page.locator('#chat-messages .project-question-card').count() == 0
+                        page.evaluate("""([project, task, quiz]) => window.dispatchEvent(new CustomEvent('ouro:open-project',
+                            {detail: {project, task_id: task, quiz_id: quiz}}))""", [project, task["id"], wait["quiz_id"]])
                         replay_quiz = page.locator('.chat-quiz-card').filter(has_text="Which evidence should the report use?")
                         replay_quiz.wait_for()
                         replay_quiz.locator('.chat-quiz-option.chosen').filter(has_text="Both sources").wait_for()

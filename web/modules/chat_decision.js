@@ -5,12 +5,18 @@
 // answer. Both read as a record after settlement. The routing picker
 // settles into the plain routing ack line once its dispatch is confirmed.
 import { MAX_DECISION_COMMENT, MAX_QUIZ_OPTIONS } from './api_types.js';
-import { bindContentButton, renderRoutingAnnotation, routingOptionLabel } from './chat_activity.js';
-import { createSystemMessageAction, createSystemMessageActions, renderProjectChip } from './ui_helpers.js';
+import { renderRoutingAnnotation, routingOptionLabel } from './chat_activity.js';
+import { renderProjectChip } from './ui_helpers.js';
 
-import { ANSWERABLE_QUIZ_STATES, QUIZ_LIFECYCLE, questionPresentation, questionRow, waitFacts } from './question_presentation.js';
+import { ANSWERABLE_QUIZ_STATES, QUIZ_LIFECYCLE, questionPresentation, waitFacts } from './question_presentation.js';
 
 const WAIT_FIELDS = ['wait_for_answer', 'wait_ended_at', 'owner_wait_state', 'owner_wait_resume_reason'];
+// What one observation of a question carries: its identity, lifecycle, recorded answer and wait facts.
+const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'state', 'answered_index', 'comment', ...WAIT_FIELDS];
+const lifecycleOf = (row) => Object.fromEntries(LIFECYCLE_FIELDS.filter((field) => Object.hasOwn(row, field))
+    .map((field) => [field, row[field]]));
+// How many questions one chat instance remembers; least recently touched first.
+const OBSERVATION_LIMIT = 2000;
 // The signature line after a bounded wait closed says the same thing the host notice
 // does (DESIGN "Quiz card"): the default path the task took, and that silence was not
 // read as consent. The card stays answerable either way.
@@ -39,14 +45,20 @@ export function createChatDecision({
     isMain = false,
     chatId = 1,
     insertMessageNode = null,
+    // Main's own node retirement (viewport-stable; media, decision views and markdown released).
+    removeMessageNode = null,
+    focusAfterRemoval = null,
 }) {
     const observations = new Map();
     const quizViews = new Map();
-    const pointerViews = new Map();
+    const mirrors = new Map();
     const detailReads = new Map();
     const questionKey = (taskId, quizId) => JSON.stringify([String(taskId || ''), String(quizId || '')]);
     let disposed = false;
     let questionNavigation = 0;
+    // The memory is bounded: the question touched least recently goes first. Once one has gone,
+    // a question absent from it is no longer proven new to this tab (buildQuestionPointer).
+    let forgotten = false;
     // One lifecycle observation per question, merged from every source (history rows,
     // the live quiz_state frame, a detail read). Lifecycle only moves forward: a settled
     // state never reopens, an answer is never downgraded to expiry, an unknown row
@@ -63,29 +75,34 @@ export function createChatDecision({
         if (previous && previous.state !== 'open' && frame.state === 'open') return { ...frame, ...previous };
         if (previous?.state === 'answered' && frame.state === 'expired_terminal') return { ...frame, ...previous };
         const next = { ...previous };
-        for (const field of ['task_id', 'quiz_id', 'state', 'answered_index', 'comment', ...WAIT_FIELDS])
+        for (const field of LIFECYCLE_FIELDS)
             if (Object.hasOwn(frame, field)) next[field] = frame[field];
         if (!live && previous?.live_wait && frame.state === 'open')
             for (const field of WAIT_FIELDS) {
                 if (Object.hasOwn(previous, field)) next[field] = previous[field]; else delete next[field];
             }
         if (live && WAIT_FIELDS.some((field) => Object.hasOwn(frame, field))) next.live_wait = true;
+        observations.delete(key);
         observations.set(key, next);
-        if (observations.size > 2000) observations.delete(observations.keys().next().value);
+        if (observations.size > OBSERVATION_LIMIT) {
+            observations.delete(observations.keys().next().value);
+            forgotten = true;
+        }
         return { ...frame, ...next };
     }
 
-    // The exact source of one question, read from task detail only when navigation
-    // needs the original form outside the loaded Project history. One in-flight read
-    // per task; the result is a snapshot, so observe() keeps any newer live fact.
-    async function readQuestion(taskId, quizId, projectId) {
+    // Navigation single-flights per task. A revalidation is its own read, begun after the copy it
+    // validates mounted: it never joins a navigation read or a sibling copy's earlier validation,
+    // either of which may predate an answer this tab missed. The copy's pending flag shares it
+    // among repeated deliveries (buildQuestionPointer).
+    async function readQuestion(taskId, quizId, projectId, { fresh = false } = {}) {
         if (!fetchDetail || disposed) return null;
-        if (!detailReads.has(taskId)) {
-            const promise = Promise.resolve().then(() => fetchDetail(taskId))
-                .finally(() => { if (detailReads.get(taskId) === promise) detailReads.delete(taskId); });
+        const read = () => Promise.resolve().then(() => disposed ? null : fetchDetail(taskId));
+        if (!fresh && !detailReads.has(taskId)) {
+            const promise = read().finally(() => { if (detailReads.get(taskId) === promise) detailReads.delete(taskId); });
             detailReads.set(taskId, promise);
         }
-        const detail = await detailReads.get(taskId);
+        const detail = await (fresh ? read() : detailReads.get(taskId));
         const block = detail?.owner_quiz?.[quizId];
         if (disposed || String(detail?.task_id || detail?.id || '') !== String(taskId)
             || (projectId && String(detail?.project_id || '') !== String(projectId))
@@ -124,115 +141,192 @@ export function createChatDecision({
         return true;
     }
 
-    // One Main row per Project question, and its size follows the owner's attention (DESIGN
-    // "Project question row"): a card with the option buttons only while the task waits on
-    // it, one line that opens the question in every other state. The view is a pure function
-    // of the row — history, the live delivery and the activity census carry the question, the
-    // option labels, the assumption, the recommendation, the recorded answer and the wait
-    // facts (project_dialogue.project_question_pointer) — so an unchanged row writes nothing.
-    // Freshness reuses history, quiz_state and the existing activity census; no new poller.
+    // The Main mirror of a Project question (DESIGN "Project question mirror") is the Project's
+    // own form — this module's buildQuizCard with the question, option details, recommendation,
+    // stake, assumption, status and own-answer field — plus one chip that opens the question in
+    // its Project. History, the live delivery and the activity census carry that form in the
+    // pointer row (project_dialogue.project_question_pointer), so an unchanged row writes
+    // nothing. The first confirmed answer from any source — a press here, the Project form or
+    // another device (quiz_state), a history or census snapshot — shows the recorded result for
+    // MIRROR_SETTLE_MS and then removes only this Main copy: one countdown, never restarted. A
+    // question already answered never enters Main, and lifecycle only moves forward, so a stale
+    // open snapshot cannot bring a removed copy back — while the bounded observation memory
+    // holds the answer, and after it let that go, through one canonical read (revalidateMirror).
+    // No new store, reader or poller.
+    const MIRROR_SETTLE_MS = 5000;
+    // Display fields a narrower delivery (the census, a lifecycle frame) may lack: an empty value
+    // there never blanks what a complete row already carried.
+    const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index'];
+    const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', ...WAIT_FIELDS];
     const openQuestion = (row) => window.dispatchEvent(new CustomEvent('ouro:open-project', { detail: {
         project: { id: row.project_id, name: row.project_name, chat_id: row.project_chat_id },
         task_id: row.task_id, quiz_id: row.quiz_id,
     } }));
+    // The pointer row in the shape of the Project's quiz row, so one normalizer reads both.
+    const mirrorQuiz = (row) => ({ ...row, type: 'quiz', role: 'assistant', state: row.quiz_state });
+    // An empty recorded comment and no comment are the same fact.
+    const mirrorSignature = (row) => JSON.stringify(MIRROR_SIGNATURE.map((field) => (row[field] === '' ? null : row[field] ?? null)));
+    // What the copy can offer: the form needs the question and its options; only a known open or
+    // finished question takes an answer. Either may arrive later than the first delivery.
+    const mirrorShape = (row) => {
+        const complete = Boolean(row.question) && (row.options?.length || 0) >= 2;
+        return { complete, answerable: complete && ANSWERABLE_QUIZ_STATES.includes(row.quiz_state) };
+    };
 
-    function updatePointer(view, frame, live = false) {
-        const current = observe({ ...frame, state: frame.state || frame.quiz_state }, live);
-        // A narrower re-delivery (the activity census, a lifecycle frame) never blanks what a
-        // complete row already painted.
-        for (const field of ['question', 'options', 'project_name', 'assumption', 'recommended_index'])
-            if (field in current && (current[field] == null || current[field] === '' || current[field]?.length === 0)) delete current[field];
-        view.row = { ...view.row, ...current, quiz_state: current.state };
-        const model = { ...questionRow(view.row), state: current.state, project: view.row.project_name || 'Project',
-            options: (view.row.options || []).map(String), recommended: view.row.recommended_index ?? null };
-        const signature = JSON.stringify(model);
-        if (view.signature === signature) return false;
-        view.signature = signature;
-        return onDomWrite(() => { paintPointer(view, model); return true; });
+    // A copy on screen is its question's lifecycle memory too: an observation the bounded memory
+    // let go is taken back from the copy, so a stale snapshot still cannot move it backwards.
+    function rememberMirror(view) {
+        if (QUIZ_LIFECYCLE.includes(view.row.quiz_state) && !observations.has(view.key))
+            observe({ ...lifecycleOf(view.row), state: view.row.quiz_state });
     }
 
-    function paintPointer(view, model) {
-        const { card, bubble, time } = view;
-        const part = (name, text, tag = 'span') => {
-            const node = document.createElement(tag); node.className = `project-question-${name}`; node.textContent = text; return node;
-        };
-        // Settling removes the option button the owner just pressed: focus follows to the row.
-        // A repaint that stays a card (a renamed Project, labels that arrived late) keeps the
-        // focus on the same option.
-        const focused = card.contains?.(document.activeElement);
-        const focusedOption = focused ? [...card.querySelectorAll('.chat-quiz-option')].indexOf(document.activeElement) : -1;
-        // The rendered question may own charts and timers: release them before the node goes.
+    function mirrorRow(view, frame, live = false) {
+        rememberMirror(view);
+        const state = frame.state || frame.quiz_state;
+        // After eviction, neither repeated snapshots nor a stale detail observation
+        // can authorize this form. Only its fresh canonical read clears the gate;
+        // a positive answer can still settle the navigation-only copy normally.
+        const current = view.needsValidation && state !== 'answered'
+            ? { ...frame, state: 'unknown' } : observe({ ...frame, state }, live);
+        for (const field of MIRROR_FIELDS)
+            if (field in current && (current[field] == null || current[field] === '' || current[field]?.length === 0)) delete current[field];
+        view.row = { ...view.row, ...current, quiz_state: current.state };
+        return view.row;
+    }
+
+    function mirrorChip(view) {
+        const name = view.row.project_name || 'Project';
+        view.chip = renderProjectChip({ name, status: '↗', className: 'chat-quiz-project', onClick: () => openQuestion(view.row) });
+        view.chip.title = `Open this question in ${name}`;
+        view.chip.querySelector('.chat-live-project-status')?.setAttribute('aria-hidden', 'true');
+        return view.chip;
+    }
+
+    function mountMirror(view) {
+        const bubble = buildQuizCard(mirrorQuiz(view.row), view);
+        if (!bubble) return null;
+        bubble.classList.add('project-question');
+        view.bubble = bubble;
+        view.shape = mirrorShape(view.row);
+        view.signature = mirrorSignature(view.row);
+        return bubble;
+    }
+
+    function updateMirror(view, frame, live = false) {
+        mirrorRow(view, frame, live);
+        const signature = mirrorSignature(view.row);
+        if (view.signature === signature) return false;
+        view.signature = signature;
+        return onDomWrite(() => {
+            if (disposed || mirrors.get(view.key) !== view) return false;
+            const shape = mirrorShape(view.row);
+            if ((shape.complete && !view.shape.complete) || (shape.answerable && !view.shape.answerable)) {
+                // The form arrived, or a question of unknown state proved answerable: the whole
+                // card mounts in place of the partial one.
+                const { bubble, card } = view;
+                const focused = card.contains?.(document.activeElement);
+                view.disposeMarkdown?.();
+                if (quizViews.get(view.key) === card) quizViews.delete(view.key);
+                const next = mountMirror(view);
+                if (!next) return false;
+                bubble.replaceWith(next);
+                if (focused) view.chip.focus?.({ preventScroll: true });
+                return true;
+            }
+            const name = view.row.project_name || 'Project';
+            const label = view.chip.querySelector('.chat-live-project-name');
+            if (label && label.textContent !== name) { label.textContent = name; view.chip.title = `Open this question in ${name}`; }
+            buildQuizCard(mirrorQuiz(view.row), view);
+            return true;
+        });
+    }
+
+    function settleMirror(view) {
+        if (view.settling || mirrors.get(view.key) !== view) return;
+        view.settling = true;
+        view.timer = setTimeout(() => removeMirror(view), MIRROR_SETTLE_MS);
+    }
+
+    function releaseMirror(view) {
+        clearTimeout(view.timer);
+        view.timer = null;
         view.disposeMarkdown?.();
         view.disposeMarkdown = null;
-        [...card.children].forEach((node) => node.remove());
-        bubble.dataset.questionMode = model.waiting ? 'card' : 'row';
-        card.dataset.state = model.state;
-        if (!model.waiting) {
-            card.setAttribute('role', 'button');
-            card.tabIndex = 0;
-            const status = part('status', '');
-            const dot = document.createElement('span');
-            dot.className = 'chat-quiz-dot';
-            status.append(dot, part('status-text', model.lead));
-            card.append(status, ...(model.detail ? [part('answer', model.detail)] : []),
-                part('preview', model.question || 'Open the original question for its text.'),
-                part('source', model.project), part('go', '↗'), ...(time ? [time] : []));
-            card.querySelector('.project-question-go').setAttribute('aria-hidden', 'true');
-            if (focused) card.focus?.({ preventScroll: true });
-            return;
-        }
-        card.removeAttribute('role');
-        card.removeAttribute('tabindex');
-        const question = part('question chat-quiz-question', '', 'div');
-        const text = view.row.question || 'Open the original question for its text.';
-        if (renderMarkdown) question.innerHTML = renderMarkdown(text);
-        else question.textContent = text;
-        const options = part('options chat-quiz-options', '', 'div');
-        model.options.forEach((label, index) => {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.className = 'chat-quiz-option';
-            const name = part('option-label chat-quiz-option-label', label);
-            if (model.recommended === index) appendRecommendedBadge(name);
-            button.append(name);
-            // Main takes a ready option only; own words, option details and the stake stay in Project.
-            button.addEventListener('click', () => submitAnswer(card,
-                { taskId: view.row.task_id, quizId: view.row.quiz_id, options: model.options }, index, '',
-                (node, state, answered) => updatePointer(view, { task_id: view.row.task_id, quiz_id: view.row.quiz_id,
-                    state, answered_index: answered, comment: node.dataset.ownerComment || '' }, true)));
-            options.append(button);
-        });
-        const foot = part('foot', '', 'div');
-        foot.append(createSystemMessageActions(createSystemMessageAction({
-            label: 'Details and own answer', onClick: () => openQuestion(view.row) })), ...(time ? [time] : []));
-        const body = part('body', '', 'div');
-        body.append(question, options, foot);
-        card.append(renderProjectChip({ name: model.project, status: questionPresentation(view.row).status,
-            onClick: () => openQuestion(view.row) }), body);
-        if (enhanceMarkdown && renderMarkdown) view.disposeMarkdown = enhanceMarkdown(question);
-        if (focusedOption >= 0) card.querySelectorAll('.chat-quiz-option')[focusedOption]?.focus?.({ preventScroll: true });
+        if (mirrors.get(view.key) === view) mirrors.delete(view.key);
+        if (quizViews.get(view.key) === view.card) quizViews.delete(view.key);
+    }
+
+    function removeMirror(view) {
+        if (disposed || mirrors.get(view.key) !== view) return;
+        const { bubble } = view;
+        const active = document.activeElement;
+        const focused = bubble.contains?.(active);
+        // Focus that was inside moves on to the next Main question below; the composer takes a
+        // keyboard owner's focus only, so a touch owner never gets a keyboard it did not ask for.
+        const others = new Map([...mirrors.values()].filter((other) => other !== view).map((other) => [other.bubble, other]));
+        let next = bubble.nextElementSibling;
+        while (next && !others.has(next)) next = next.nextElementSibling;
+        const target = others.get(next)?.card.querySelector('.chat-quiz-question');
+        let keyboard = focused;
+        try { keyboard = focused && active.matches?.(':focus-visible') !== false; } catch { /* an engine without the selector */ }
+        releaseMirror(view);
+        if (removeMessageNode) removeMessageNode(bubble);
+        else onDomWrite(() => { bubble.remove(); return true; });
+        if (target && focused) target.focus?.({ preventScroll: true });
+        else if (keyboard) focusAfterRemoval?.();
     }
 
     function buildQuestionPointer(msg) {
-        if (!msg.task_id || !msg.quiz_id || !msg.project_id || !msg.project_chat_id) return null;
+        if (disposed || !msg.task_id || !msg.quiz_id || !msg.project_id || !msg.project_chat_id) return null;
         const key = questionKey(msg.task_id, msg.quiz_id);
-        const prior = pointerViews.get(key);
-        if (prior) { updatePointer(prior, msg); return null; }
-        const card = document.createElement('div');
-        card.className = 'project-question-pointer';
-        card.dataset.taskId = String(msg.task_id);
-        card.dataset.quizId = String(msg.quiz_id);
-        const bubble = frameNode(msg, card);
-        bubble.classList.remove('assistant');
-        bubble.classList.add('project-question');
-        bubble.querySelector('.sender')?.remove();
-        const view = { row: { ...msg }, card, bubble, observedAt: Date.now(), time: bubble.querySelector('.msg-time') };
-        // The whole line is one control whose text stays selectable. The waiting card is not
-        // one: its buttons own their clicks and the rest of it lets every event through.
-        bindContentButton(card, () => openQuestion(view.row), () => bubble.dataset.questionMode === 'row');
-        pointerViews.set(key, view);
-        updatePointer(view, msg);
+        const prior = mirrors.get(key);
+        if (prior) {
+            updateMirror(prior, msg);
+            if (prior.needsValidation && prior.revalidationFailed && !prior.revalidationPending)
+                revalidateMirror(prior);
+            return null;
+        }
+        // An answered pointer never enters Main. Once memory has evicted anything,
+        // every unmounted non-answered question needs canonical confirmation: an
+        // old in-flight read can have re-seeded its stale open observation meanwhile.
+        if (msg.quiz_state === 'answered' || observations.get(key)?.state === 'answered') {
+            observe(msg); return null;
+        }
+        const view = { key, row: {}, observedAt: Date.now(), timer: null, needsValidation: forgotten,
+            revalidationPending: false, revalidationFailed: false };
+        mirrorRow(view, msg);
+        const bubble = mountMirror(view);
+        if (bubble) {
+            mirrors.set(key, view);
+            if (view.needsValidation) revalidateMirror(view);
+        }
         return bubble;
+    }
+
+    // Mount the safe unknown copy synchronously so history owns its normal node
+    // retirement and its Project chip stays accessible on a failed/foreign read.
+    // No late insertion, retry poller or tombstones: only this still-owned view can
+    // acquire the canonical form. Repeated stale pointers cannot unlock it.
+    function revalidateMirror(view) {
+        if (disposed || mirrors.get(view.key) !== view) return;
+        const { task_id: taskId, quiz_id: quizId, project_id: projectId } = view.row;
+        // Distinguish canonical answers merged by observe() from live confirmation during the read.
+        const answeredBeforeRead = view.row.quiz_state === 'answered'
+            || observations.get(view.key)?.state === 'answered';
+        view.revalidationPending = true;
+        view.revalidationFailed = false;
+        readQuestion(taskId, quizId, projectId, { fresh: true }).catch(() => null).then((question) => {
+            if (disposed || mirrors.get(view.key) !== view) return;
+            view.revalidationPending = false;
+            if (!question) { view.revalidationFailed = true; return; }
+            // Removal is its own viewport transaction, the one that keeps the leaving node out of
+            // the scroll anchor (removeMessageNode); nested in another write it would anchor there.
+            if (question.state === 'answered' && !answeredBeforeRead
+                && view.row.quiz_state !== 'answered') { removeMirror(view); return; }
+            view.needsValidation = false;
+            view.revalidationFailed = false;
+            updateMirror(view, question);
+        });
     }
 
     function appendQuestionPointer(msg) {
@@ -248,24 +342,19 @@ export function createChatDecision({
         // nothing. A read begun before a card arrived cannot end that newer wait.
         if (!isMain || !msg?.task_id || !msg.quiz_id
             || !['waiting', 'resumed'].includes(msg.owner_wait_state)) return false;
-        // Ordering is proven by the questions themselves, never by the time the read
-        // started: the task publishes a new quiz BEFORE its owner_wait row is written,
-        // so a census taken in that window still names the PREVIOUS question. A named
-        // wait can therefore only end a question asked STRICTLY before it. The stamps
-        // carry sub-millisecond precision that Date.parse truncates, so two different
-        // questions can read as equal — equality is no order, and neither is a missing
-        // or unreadable stamp. An unproven card stays a card: an extra card is
-        // answerable, a wrongly folded one loses its buttons until a reload.
+        // A quiz is published before its wait record. Only strictly earlier asked_at
+        // proves an older wait; equal/missing stamps (including millisecond truncation)
+        // cannot close a newer card. Request time alone proves no question ordering.
         const namedAt = Date.parse(msg.ts ?? '');
         return onDomWrite(() => {
             let changed = false;
-            for (const view of pointerViews.values()) {
+            for (const view of [...mirrors.values()]) {
                 const viewAt = Date.parse(view.row.ts ?? '');
                 if (view.row.task_id !== msg.task_id || view.row.quiz_id === msg.quiz_id
                     || view.row.project_id !== msg.project_id || view.observedAt > requestedAt
                     || !Number.isFinite(namedAt) || !Number.isFinite(viewAt) || viewAt >= namedAt
-                    || !questionRow(view.row).waiting) continue;
-                changed = updatePointer(view, { task_id: msg.task_id, quiz_id: view.row.quiz_id,
+                    || view.row.quiz_state !== 'open' || !waitFacts(view.row).waiting) continue;
+                changed = updateMirror(view, { task_id: msg.task_id, quiz_id: view.row.quiz_id,
                     state: 'open', owner_wait_state: 'resumed' }, true) || changed;
             }
             return appendQuestionPointer(msg) || changed;
@@ -426,16 +515,22 @@ export function createChatDecision({
 
     function setCardState(card, state, answeredIndex) {
         if (!card) return false;
-        const current = observe({ task_id: card.dataset.taskId, quiz_id: card.dataset.quizId,
-            state, answered_index: answeredIndex, comment: card.dataset.ownerComment || '' });
+        const mirror = mirrors.get(questionKey(card.dataset.taskId, card.dataset.quizId));
+        const frame = { task_id: card.dataset.taskId, quiz_id: card.dataset.quizId,
+            state, answered_index: answeredIndex, comment: card.dataset.ownerComment || '' };
+        const current = state === 'unknown' && (mirror?.needsValidation || !mirror) ? frame : observe(frame);
         state = current.state;
         answeredIndex = Number.isInteger(current.answered_index) ? current.answered_index : null;
         if (current.comment) card.dataset.ownerComment = current.comment;
         else if (Object.hasOwn(current, 'comment')) delete card.dataset.ownerComment;
-        const pointer = pointerViews.get(questionKey(card.dataset.taskId, card.dataset.quizId));
-        if (pointer) updatePointer(pointer, current);
+        const mirrored = mirror?.card === card;
+        if (mirrored) {
+            mirror.row = { ...mirror.row, ...current, quiz_state: state };
+            mirror.signature = mirrorSignature(mirror.row);
+        }
+        const focused = mirrored && card.contains?.(document.activeElement);
         const answerable = ANSWERABLE_QUIZ_STATES.includes(state);
-        return onDomWrite(() => {
+        const written = onDomWrite(() => {
             let changed = card.dataset.state !== state;
             if (changed) card.dataset.state = state;
             if (!answerable) {
@@ -474,14 +569,27 @@ export function createChatDecision({
             });
             return changed;
         });
+        if (mirrored) {
+            // Settling disables or removes the control the owner used: focus stays in this copy
+            // for the moment it still shows the result.
+            const active = document.activeElement;
+            if (focused && (!card.contains?.(active) || active?.disabled)) card.querySelector('.chat-quiz-question')?.focus?.({ preventScroll: true });
+            if (state === 'answered') settleMirror(mirror);
+        }
+        return written;
     }
 
-    function buildQuizCard(msg) {
+    function buildQuizCard(msg, mirror = null) {
         const quiz = normalizeQuiz(msg);
-        if (!quiz.quizId || !quiz.taskId || !quiz.question || quiz.options.length < 2) return null;
+        // A Main mirror keeps its way to the Project even while its row cannot carry the whole
+        // form yet: then it shows what is known and takes no answer (never a guessed one).
+        const complete = Boolean(quiz.question) && quiz.options.length >= 2;
+        if (!quiz.quizId || !quiz.taskId || !(complete || mirror)) return null;
         const key = questionKey(quiz.taskId, quiz.quizId);
-        const current = observe({ task_id: quiz.taskId, quiz_id: quiz.quizId, state: quiz.state,
-            ...quiz.waitRow, ...quiz.answerFields });
+        const frame = { task_id: quiz.taskId, quiz_id: quiz.quizId, state: quiz.state,
+            ...quiz.waitRow, ...quiz.answerFields };
+        const current = mirror?.needsValidation && quiz.state !== 'answered'
+            ? { ...frame, state: 'unknown' } : observe(frame);
         quiz.state = current.state;
         quiz.answeredIndex = Number.isInteger(current.answered_index) ? current.answered_index : null;
         quiz.comment = current.comment || '';
@@ -513,11 +621,14 @@ export function createChatDecision({
         }
 
         const card = document.createElement('div');
-        card.className = 'chat-quiz-card';
+        card.className = mirror ? 'chat-quiz-card project-question-card' : 'chat-quiz-card';
         card.dataset.quizId = quiz.quizId;
         card.dataset.taskId = quiz.taskId;
         if (quiz.assumption) card.dataset.assumption = quiz.assumption;
         quizViews.set(key, card);
+        // The copy owns its card before the card's first settlement below: a form that arrives
+        // already answered still starts the copy's countdown (setCardState -> settleMirror).
+        if (mirror) mirror.card = card;
 
         const head = document.createElement('div');
         head.className = 'chat-quiz-head';
@@ -531,7 +642,8 @@ export function createChatDecision({
         const statusLabel = document.createElement('span');
         statusLabel.className = 'chat-quiz-status-text';
         status.append(dot, statusLabel);
-        head.append(chip, status);
+        // The mirror's one addition to the Project form: the chip that opens it in its Project.
+        head.append(chip, ...(mirror ? [mirrorChip(mirror)] : []), status);
         card.append(head);
 
         // DRY with the chat surface (owner requirement): question and stake go
@@ -540,8 +652,9 @@ export function createChatDecision({
         const question = document.createElement('div');
         question.className = 'chat-quiz-question';
         question.tabIndex = -1;
-        if (renderMarkdown) question.innerHTML = renderMarkdown(quiz.question);
-        else question.textContent = quiz.question;
+        const questionText = quiz.question || 'Open the original question for its text.';
+        if (renderMarkdown) question.innerHTML = renderMarkdown(questionText);
+        else question.textContent = questionText;
         card.append(question);
 
         if (quiz.stake) {
@@ -560,7 +673,7 @@ export function createChatDecision({
 
         const optionsBox = document.createElement('div');
         optionsBox.className = 'chat-quiz-options';
-        quiz.options.forEach((option, index) => {
+        (complete ? quiz.options : []).forEach((option, index) => {
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'chat-quiz-option';
@@ -584,8 +697,8 @@ export function createChatDecision({
             });
             optionsBox.append(btn);
         });
-        card.append(optionsBox);
-        if (quiz.detailsUnavailable) {
+        if (complete) card.append(optionsBox);
+        if (complete && quiz.detailsUnavailable) {
             const note = document.createElement('div');
             note.className = 'chat-quiz-stake chat-quiz-details-unavailable';
             note.textContent = 'Option details were not retained for this older question.';
@@ -596,7 +709,7 @@ export function createChatDecision({
         // forced to pick the least wrong one. Always visible while the card
         // still takes an answer (no disclosure to discover), removed once it
         // settles — a finished task's card is still answerable.
-        if (ANSWERABLE_QUIZ_STATES.includes(quiz.state)) {
+        if (complete && ANSWERABLE_QUIZ_STATES.includes(quiz.state)) {
             const box = document.createElement('div');
             box.className = 'chat-quiz-comment-box';
             commentField = document.createElement('textarea');
@@ -652,7 +765,8 @@ export function createChatDecision({
         if (quiz.comment) card.dataset.ownerComment = quiz.comment;
         setCardState(card, quiz.state, quiz.answeredIndex);
         const framed = frameNode(msg, card);
-        if (enhanceMarkdown && renderMarkdown) enhanceMarkdown(card);
+        const disposeMarkdown = enhanceMarkdown && renderMarkdown ? enhanceMarkdown(card) : null;
+        if (mirror) mirror.disposeMarkdown = disposeMarkdown;
         return framed;
     }
 
@@ -829,13 +943,16 @@ export function createChatDecision({
         // resumed wait, and as a live fact it outranks any snapshot that still waits.
         if (frame.wait_for_answer === false && frame.state === 'open')
             frame = { ...frame, owner_wait_state: 'resumed' };
-        frame = observe(frame, true);
         const key = questionKey(taskId, quizId);
-        const pointer = pointerViews.get(key);
-        // Observed once above as live; the pointer repaints from the merged observation.
-        const changed = pointer ? updatePointer(pointer, frame) : false;
+        const mirror = mirrors.get(key);
+        if (mirror) rememberMirror(mirror);
+        frame = observe(frame, true);
+        // Observed once above as live; a Main mirror repaints from the merged observation. Only
+        // the lifecycle rides along: the frame's own send time is not when the question was asked.
+        if (mirror) return updateMirror(mirror, Object.fromEntries(LIFECYCLE_FIELDS
+            .filter((field) => Object.hasOwn(frame, field)).map((field) => [field, frame[field]])));
         const card = quizViews.get(key);
-        if (!card) return changed;
+        if (!card) return false;
         const index = Number.isInteger(frame.answered_index) ? frame.answered_index : null;
         // The owner's recorded free-text answer rides the frame (#471) so the
         // live card shows `Owner's answer:` exactly as the replayed card does.
@@ -856,14 +973,21 @@ export function createChatDecision({
                 waitChanged = true;
             }
         }
-        return setCardState(card, String(frame.state || ''), index) || changed || waitChanged;
+        return setCardState(card, String(frame.state || ''), index) || waitChanged;
+    }
+
+    // A released node takes its views with it: a mirror's countdown and rendered markdown go too.
+    function releaseViews(root) {
+        for (const [key, card] of quizViews) if (root.contains(card)) quizViews.delete(key);
+        for (const view of [...mirrors.values()]) if (root.contains(view.bubble)) releaseMirror(view);
     }
 
     return { buildQuizCard, buildQuestionPointer, appendQuestionPointer, appendActivityQuestion, readQuestion, revealQuestion, setCardState, applyQuizStateFrame, renderRoutingDecision,
-        releaseViews(root) {
-            for (const [key, card] of quizViews) if (root.contains(card)) quizViews.delete(key);
-            for (const [key, view] of pointerViews) if (root.contains(view.card)) pointerViews.delete(key);
+        releaseViews,
+        destroy() {
+            disposed = true;
+            for (const view of [...mirrors.values()]) releaseMirror(view);
+            observations.clear(); quizViews.clear(); detailReads.clear();
         },
-        destroy() { disposed = true; observations.clear(); quizViews.clear(); pointerViews.clear(); detailReads.clear(); },
     };
 }

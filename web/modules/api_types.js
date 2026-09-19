@@ -281,6 +281,8 @@
  * @property {string=} wait_ended_at
  * @property {string=} question
  * @property {string[]=} options
+ * @property {string[]=} option_details
+ * @property {string=} stake
  * @property {string=} assumption
  * @property {number=} recommended_index
  * @property {number=} answered_index

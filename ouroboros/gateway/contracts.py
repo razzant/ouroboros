@@ -110,8 +110,7 @@ class ChatOutbound(TypedDict):
     is_progress: NotRequired[bool]
     task_id: NotRequired[str]
     origin_message_ref: NotRequired[Dict[str, Any]]
-    # X3: a repair receipt whose managed task id does not exist yet (the router
-    # mints it at promotion). Typed truth instead of an invented id.
+    # X3: a repair receipt whose managed task id the router mints only at promotion (typed truth, no invented id).
     task_id_pending: NotRequired[bool]
     # "finalizing" on a root's early final answer: the answer is delivered
     # while post-task synthesis still runs, so the frame is NOT the task's
@@ -125,7 +124,7 @@ class ChatOutbound(TypedDict):
     rounds: NotRequired[int]
     suggested_name: NotRequired[str]
     model_execution: NotRequired[Dict[str, Any]]
-    # Project question projection into Main; the durable question stays in Project.
+    # Project question mirrored into Main as the Project's own form; the durable question stays in Project.
     quiz_id: NotRequired[str]
     quiz_state: NotRequired[str]
     project_chat_id: NotRequired[int]
@@ -136,13 +135,14 @@ class ChatOutbound(TypedDict):
     wait_ended_at: NotRequired[str]
     question: NotRequired[str]
     options: NotRequired[List[str]]
+    option_details: NotRequired[List[str]]  # aligned with options; absent for a legacy label-only ask
+    stake: NotRequired[str]
     assumption: NotRequired[str]
     recommended_index: NotRequired[int]
     answered_index: NotRequired[int]
     comment: NotRequired[str]
     task_incident: NotRequired[str]
-    # A cancellation fault names the PHYSICAL task it could not settle when that
-    # differs from the displayed (logical) task id.
+    # A cancellation fault names the PHYSICAL task it could not settle when it differs from the logical task id.
     cancel_physical_task_id: NotRequired[str]
     toast_once: NotRequired[str]
     # #628: the incident's valence for the one-shot toast (warn/ok/error),

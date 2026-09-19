@@ -106,9 +106,9 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
                              owner_wait: Any = None) -> Optional[Dict[str, Any]]:
     """Read projection of one Project question into Main; never another ask.
 
-    The row is complete for display: question, option labels, the recorded answer and the
-    wait facts ride with the pointer, so the browser paints it from history or the live
-    frame alone and reads task detail only to open the original form."""
+    The row is complete for display: question, option labels and details, stake, the recorded
+    answer and the wait facts ride with the pointer, so the browser paints the Project's own form
+    from history, the live frame or the census alone; task detail only opens the original."""
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else row
@@ -124,14 +124,18 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
     still_required = bool(block.get("wait_for_answer")) if block else bool(quiz.get("wait_for_answer"))
     name = str(project.get("name") or "Project")
     lead = question_status(state if known else "unknown", facts, still_required)
-    options = quiz.get("options") if isinstance(quiz.get("options"), list) else block.get("options")
-    labels = [str(option.get("label") if isinstance(option, dict) else option or "")
-              for option in (options if isinstance(options, list) else [])]
+    options = next((value for value in (quiz.get("options"), block.get("options")) if isinstance(value, list)), [])
+    labels = [str(option.get("label") if isinstance(option, dict) else option or "") for option in options]
+    # Aligned details from the row's option objects or the block's own list (a legacy ask has none).
+    details = ([str(option.get("detail") or "") if isinstance(option, dict) else "" for option in options]
+               if any(isinstance(option, dict) for option in options) else block.get("option_details"))
+    details = [str(v or "") for v in details] if isinstance(details, list) and 0 < len(labels) == len(details) else None
     question = str(quiz.get("question") or row.get("text") or block.get("question") or "")
     assumption = str(quiz.get("assumption") or block.get("assumption") or "")
+    stake = str(quiz.get("stake") or block.get("stake") or "")
     recommended = block.get("recommended_index")
     if not isinstance(recommended, int) or isinstance(recommended, bool):
-        recommended = next((i for i, option in enumerate(options if isinstance(options, list) else [])
+        recommended = next((i for i, option in enumerate(options)
                             if isinstance(option, dict) and option.get("recommended") is True), None)
     pointer: Dict[str, Any] = {
         "role": "system", "system_type": "project_question_pointer", "task_id": task_id,
@@ -143,6 +147,8 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
         # Display fields only when known: a narrower producer must never blank a complete row.
         **({"question": question} if question else {}),
         **({"options": labels} if labels else {}),
+        **({"option_details": details} if details else {}),
+        **({"stake": stake} if stake else {}),
         **({"assumption": assumption} if assumption else {}),
         **({"recommended_index": recommended} if recommended is not None else {}),
         **facts,

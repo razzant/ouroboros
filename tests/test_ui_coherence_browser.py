@@ -342,13 +342,27 @@ def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(
     capture(page,'shell-mcp-shared-fields')
 
 
+# One structural reading of a quiz card for the "same form" comparison: every element's class,
+# its own text and its disabled state, in document order; the Main-only Project chip is skipped.
+CARD_FORM_JS = """card => { const out = []; const walk = (el) => {
+    if (el.classList.contains('chat-quiz-project')) return;
+    out.push([[...el.classList].filter(name => name !== 'project-question-card').join(' '),
+        el.children.length ? '' : el.textContent.trim(), el.disabled ?? null, el.getAttribute('placeholder')]);
+    [...el.children].forEach(walk); }; walk(card); return out; }"""
+
+
 @pytest.mark.parametrize('width,height', [(1100, 722), (390, 844)])
-def test_question_rows_burst_answer_from_main_navigation_and_reload(subscription_ui, width, height):
+def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, height):
     """Real SPA readers and WebSocket handlers; disposable source data, no owner writes.
 
-    A realistic burst: one task asked three questions in a row and another question of the same
-    Project was passed under its assumption. Every settled or passed question is one line; only
-    the question the task waits on is a card, and one touch on it answers from Main."""
+    A realistic burst of one task's Project questions in Main: every unanswered, passed, finished
+    or replaced question is the Project's own form plus one Project chip; an answered one never
+    enters Main. The first confirmed answer from any source — a press in Main, the Project form
+    over quiz_state, a keyboard press — shows the result for five seconds and removes only the
+    Main copy, keeping the reading position. A copy that learns its form together with its answer
+    gets the same five seconds; stale snapshots and a reconnect never bring a removed copy back,
+    also after Main's bounded question memory forgot it (one canonical task-detail read decides)."""
+    import copy
     from urllib.parse import parse_qs
 
     ui = subscription_ui
@@ -356,42 +370,80 @@ def test_question_rows_burst_answer_from_main_navigation_and_reload(subscription
     page.set_viewport_size({'width': width, 'height': height})
     project = {'id': 'question-proof', 'name': 'Evidence project with a deliberately long descriptive name',
                'chat_id': 42, 'lifecycle': 'active', 'visible_revision': 0}
+    details = ['Preserve the full original measurements.', 'Compare the independent run.']
     blocks = {
         'exact-question': {'state': 'answered', 'question': 'Which evidence should we retain?', 'answered_index': 0,
-            'options': ['Keep the primary source', 'Use the replication'], 'wait_for_answer': True,
-            'option_details': ['Preserve the full original measurements.', 'Compare the independent run.'],
-            'comment': 'Retain the provenance and the original source.', 'asked_at': '2026-09-16T00:00:00Z'},
+            'options': ['Keep the primary source', 'Use the replication'], 'option_details': details,
+            'wait_for_answer': True, 'comment': 'Retain the provenance.', 'asked_at': '2026-09-16T00:00:00Z'},
         'second': {'state': 'open', 'question': 'Second of three: publish the interim table as well?',
-            'options': ['Publish it now', 'Hold it until the replication lands'], 'wait_for_answer': True,
-            'asked_at': '2026-09-16T00:01:00Z'},
+            'options': ['Publish it now', 'Hold it until the replication lands'], 'option_details': ['', ''],
+            'wait_for_answer': True, 'asked_at': '2026-09-16T00:01:00Z'},
         'passed': {'state': 'open', 'question': 'Which figure format keeps the appendix small?', 'options': ['PNG', 'WebP'],
-            'assumption': 'WebP at quality 82', 'recommended_index': 1, 'asked_at': '2026-09-16T00:02:00Z'},
-        # The longest status sentence, a long Project name and a dated time on one line.
+            'option_details': ['Lossless, larger', 'Smaller at quality 82'], 'assumption': 'WebP at quality 82',
+            'recommended_index': 1, 'asked_at': '2026-09-16T00:02:00Z'},
         'finished': {'state': 'expired_terminal', 'question': 'Should the archive keep the raw instrument logs?',
-            'options': ['Keep them', 'Drop them'], 'wait_for_answer': True, 'asked_at': '2026-09-16T00:02:30Z'},
+            'options': ['Keep them', 'Drop them'], 'option_details': ['', ''], 'wait_for_answer': True,
+            'asked_at': '2026-09-16T00:02:30Z'},
+        'replaced': {'state': 'superseded', 'question': 'Which appendix order reads best?', 'options': ['By date', 'By topic'],
+            'option_details': ['', ''], 'assumption': 'By date', 'asked_at': '2026-09-16T00:02:45Z'},
         'waiting': {'state': 'open', 'wait_for_answer': True, 'recommended_index': 0, 'asked_at': '2026-09-16T00:03:00Z',
             'question': 'Third of three. The **licence** of the external dataset forbids redistribution, so the archive '
                         'can either ship without it and link to the source, or wait for written permission, which the '
                         'maintainers usually grant within a week. Which way do we go?',
-            'options': ['Ship without it and link the source', 'Wait for written permission']},
+            'options': ['Ship without it and link the source', 'Wait for written permission'],
+            'option_details': ['Readers follow one extra link.', 'Publication slips by about a week.'],
+            'stake': 'Whether the archive ships this week.'},
     }
+    asked = copy.deepcopy(blocks)
     wait = {'quiz_id': 'waiting', 'state': 'waiting'}
-    decisions = []
-    activities = []
-    history_reads = []
-    page.route_web_socket('**/ws', lambda ws: ws.send(json.dumps({'type': 'heartbeat'})))
+    decisions, activities, history_reads, sockets, detail_reads = [], [], [], [], []
+    mode = {'stale': False}
+    # A second task of the same Project whose form reaches Main only after its wait did.
+    late = {'state': 'open', 'question': 'Which licence notice goes on the cover?', 'options': ['Short notice', 'Full notice'],
+            'option_details': ['One line with a link.', 'The whole licence text.'], 'stake': 'The cover layout.',
+            'wait_for_answer': True, 'asked_at': '2026-09-16T00:06:00Z'}
+
+    def connect(ws):
+        sockets.append(ws)
+        ws.send(json.dumps({'type': 'heartbeat'}))
+    page.route_web_socket('**/ws', connect)
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [project]}))
-    page.route('**/api/state', lambda r: r.fulfill(json={'supervisor_ready': True,
+    # A stable served SHA: a reconnect re-reads history in place instead of reloading the window.
+    page.route('**/api/state', lambda r: r.fulfill(json={'sha': 'browser-fixture', 'supervisor_ready': True,
         'active_chat_activities': activities, 'projects': [project], 'project_chat_ids': [42]}))
-    page.route('**/api/tasks/proof-task', lambda r: r.fulfill(json={'task_id': 'proof-task', 'project_id': project['id'],
-        'owner_quiz': {qid: {'quiz_id': qid, **block} for qid, block in blocks.items()}, 'owner_wait': wait}))
+
+    def detail(route):
+        # The canonical record (GET /api/tasks/{id}) the Project form and a revalidating Main read.
+        task_id = urlparse(route.request.url).path.rsplit('/', 1)[-1]
+        detail_reads.append(task_id)
+        quizzes = blocks if task_id == 'proof-task' else {'late-form': late}
+        route.fulfill(json={'task_id': task_id, 'project_id': project['id'],
+            'owner_quiz': {qid: {'quiz_id': qid, **block} for qid, block in quizzes.items()},
+            'owner_wait': wait if task_id == 'proof-task' else {'quiz_id': 'late-form', 'state': 'resumed'}})
+    page.route('**/api/tasks/proof-task', detail)
+    page.route('**/api/tasks/late-task', detail)
+
+    def pointer(qid, block):
+        # The row the Python producer emits (project_question_pointer): complete for the form.
+        return {'role': 'system', 'system_type': 'project_question_pointer', 'task_id': 'proof-task', 'quiz_id': qid,
+            'quiz_state': block['state'], 'project_id': project['id'], 'project_name': project['name'],
+            'project_chat_id': 42, 'chat_id': 1, 'ts': block['asked_at'],
+            **({'owner_wait_state': wait['state']} if qid == wait['quiz_id'] else
+               {'owner_wait_state': 'resumed'} if activities and block.get('wait_for_answer') else {}),
+            **{key: block[key] for key in ('question', 'options', 'option_details', 'stake', 'assumption',
+                                           'recommended_index', 'wait_for_answer', 'answered_index', 'comment') if key in block}}
 
     def decide(route):
         sent = route.request.post_data_json
         decisions.append(sent)
-        blocks['waiting'].update(state='answered', answered_index=sent['option_index'])
-        wait['state'] = 'resumed'
-        route.fulfill(json={'ok': True, 'state': 'answered', 'answered_index': sent['option_index']})
+        qid = sent['decision_id'].split(':')[2]
+        blocks[qid].update(state='answered', answered_index=sent['option_index'])
+        if qid == wait['quiz_id']:
+            wait['state'] = 'resumed'
+            activities[0]['required_question'].update(quiz_state='answered', answered_index=sent['option_index'],
+                                                      owner_wait_state='resumed')
+        route.fulfill(json={'ok': True, 'state': 'answered', 'answered_index': sent['option_index'],
+                            **({'answered_after_terminal': True, 'forwarded': True} if qid == 'finished' else {})})
     page.route('**/api/decisions', decide)
 
     def history(route):
@@ -401,105 +453,196 @@ def test_question_rows_burst_answer_from_main_navigation_and_reload(subscription
             # Source questions are outside this window: exact navigation must read detail.
             rows = [{'role': 'assistant', 'text': 'Later retained project message.', 'ts': '2026-09-16T01:00:00Z'}]
         else:
-            # The rows the Python producer emits: complete for display, no detail read needed.
-            rows = [{'role': 'system', 'system_type': 'project_question_pointer', 'task_id': 'proof-task',
-                'quiz_id': qid, 'quiz_state': block['state'], 'project_id': project['id'],
-                'project_name': project['name'], 'project_chat_id': 42, 'ts': block['asked_at'],
-                **({'owner_wait_state': wait['state']} if qid == wait['quiz_id'] else
-                   {'owner_wait_state': 'resumed'} if activities and block.get('wait_for_answer') else {}),
-                **{key: block[key] for key in ('question', 'options', 'assumption', 'recommended_index',
-                                               'wait_for_answer', 'answered_index', 'comment') if key in block}}
-                for qid, block in blocks.items()]
+            source = asked if mode['stale'] else blocks
+            rows = [pointer(qid, block) for qid, block in source.items()]
+            # Later Main reading below the questions, so a removal can happen above the reader.
+            rows += [{'role': 'assistant', 'text': f'Later Main note {i}. ' + 'Reading continues below the questions. ' * 4,
+                      'ts': f'2026-09-16T00:1{i}:00Z'} for i in range(8)]
         route.fulfill(json={'messages': rows, 'progress': []})
     page.route('**/api/chat/history*', history)
     open_app(ui)
-    rows = page.locator('#chat-messages .chat-bubble.project-question')
-    rows.nth(4).wait_for()
-    assert rows.evaluate_all("els => els.map(el => el.dataset.questionMode)") == ['row', 'card', 'row', 'row', 'card']
-    # Both asks arrived before the single wait was published. Its next ordinary
-    # census names only the last quiz: the older card must fold without history.
+    mirrors = page.locator('#chat-messages .chat-bubble.project-question')
+    card = lambda qid: page.locator(f'#chat-messages .project-question-card[data-quiz-id="{qid}"]')
+    ids = lambda: mirrors.evaluate_all("els => els.map(el => el.querySelector('.chat-quiz-card').dataset.quizId)")
+    card('waiting').wait_for()
+    assert ids() == ['second', 'passed', 'finished', 'replaced', 'waiting'], 'an answered question never enters Main'
+    forms = page.evaluate("""() => [...document.querySelectorAll('#chat-messages .project-question-card')].map(el => ({
+        id: el.dataset.quizId, status: el.querySelector('.chat-quiz-status-text').textContent,
+        chip: el.querySelector('.chat-quiz-project .chat-live-project-name')?.textContent,
+        question: el.querySelector('.chat-quiz-question').textContent.trim().slice(0, 24),
+        details: [...el.querySelectorAll('.chat-quiz-option-detail')].map(n => n.textContent),
+        stake: el.querySelector('.chat-quiz-stake')?.textContent.trim() || '',
+        own: !!el.querySelector('.chat-quiz-comment'), disabled: [...el.querySelectorAll('.chat-quiz-option')].every(b => b.disabled),
+        recommended: [...el.querySelectorAll('.chat-quiz-option')].findIndex(b => b.querySelector('.chat-quiz-option-recommended'))}))""")
+    by_id = {form['id']: form for form in forms}
+    assert {form['chip'] for form in forms} == {project['name']}
+    assert by_id['waiting']['status'] == 'Waiting for your answer' and by_id['waiting']['own']
+    assert by_id['waiting']['stake'] == 'At stake: Whether the archive ships this week.'
+    assert by_id['waiting']['details'] == ['Readers follow one extra link.', 'Publication slips by about a week.']
+    assert by_id['waiting']['recommended'] == 0 and by_id['passed']['recommended'] == 1
+    assert by_id['passed']['details'] == ['Lossless, larger', 'Smaller at quality 82'] and by_id['passed']['own']
+    assert by_id['finished']['status'].startswith('Unanswered · the task finished') and by_id['finished']['own']
+    assert by_id['replaced']['status'] == 'Replaced by a newer question'
+    assert by_id['replaced']['disabled'] and not by_id['replaced']['own'], 'a replaced question is a read-only record'
+    assert card('waiting').locator('.chat-quiz-question strong').inner_text() == 'licence'
+    geometry = page.evaluate("""() => {
+        const scroller = document.querySelector('#chat-messages');
+        const cards = [...document.querySelectorAll('#chat-messages .project-question-card')];
+        const box = el => el.getBoundingClientRect();
+        return {overflow: scroller.scrollWidth - scroller.clientWidth, page: document.documentElement.scrollWidth - innerWidth,
+            right: Math.max(...cards.map(el => box(el).right)), viewport: innerWidth,
+            chipInside: cards.every(el => box(el.querySelector('.chat-quiz-project')).right <= box(el).right + 0.5),
+            chipCut: (() => { const n = cards[0].querySelector('.chat-quiz-project .chat-live-project-name'); return n.scrollWidth > n.clientWidth; })(),
+            sizes: [...new Set(cards.flatMap(el => [el.querySelector('.chat-quiz-status'), el.querySelector('.chat-quiz-project')])
+                .map(el => getComputedStyle(el).fontSize))]};
+    }""")
+    print(json.dumps({'question_mirror_geometry': geometry, 'viewport': [width, height]}))
+    assert geometry['overflow'] <= 1 and geometry['page'] <= 0 and geometry['right'] <= width, geometry
+    assert geometry['chipInside'] and geometry['sizes'] == ['12px'], geometry
+    card('second').scroll_into_view_if_needed()
+    setup_browser.capture(page, f'question-mirrors-burst-{width}')
+
+    # Both asks arrived before the single wait was published. Its next ordinary census names
+    # only the last quiz: the older wait ends in place, the question stays answerable.
     read_count = len(history_reads)
     activities.append({'activity_id': 'proof-task', 'chat_id': 42, 'project_id': project['id'],
-        'kind': 'direct_chat', 'phase': 'working', 'required_question': {
-            'task_id': 'proof-task', 'quiz_id': 'waiting', 'quiz_state': 'open',
-            'project_id': project['id'], 'project_chat_id': 42, 'owner_wait_state': 'waiting',
-            # The producer always stamps the named question's own asked_at, and folding an
-            # older card needs that proof of order (project_question_pointer).
-            'ts': blocks['waiting']['asked_at']}})
-    page.wait_for_function("() => document.querySelectorAll('#chat-messages .chat-bubble.project-question')[1]?.dataset.questionMode === 'row'", timeout=15000)
+        'kind': 'direct_chat', 'phase': 'working', 'required_question': pointer('waiting', blocks['waiting'])})
+    page.wait_for_function("() => document.querySelector('[data-quiz-id=\"second\"] .chat-quiz-status-text')"
+                           "?.textContent.includes('task continued')", timeout=15000)
     assert len(history_reads) == read_count, 'census freshness must not require history refetch'
-    assert rows.evaluate_all("els => els.map(el => el.dataset.questionMode)") == ['row', 'row', 'row', 'row', 'card']
-    assert 'task continued' in rows.nth(1).inner_text()
-    comment = blocks['exact-question']['comment']
-    first = rows.nth(0).locator('.project-question-pointer')
-    first.get_by_text('You answered:', exact=True).wait_for()
-    first.get_by_text('Keep the primary source — ' + comment, exact=True).wait_for()
-    rows.nth(2).get_by_text('Unanswered · continuing with:', exact=True).wait_for()
-    rows.nth(2).get_by_text('WebP at quality 82', exact=True).wait_for()
-    finished = rows.nth(3).locator('.project-question-status-text')
-    assert finished.inner_text() == 'Unanswered · the task finished; a late answer is accepted as your message'
-    card = rows.nth(4)
-    card.get_by_text('Waiting for your answer', exact=True).wait_for()
-    assert 'usually grant within a week' in card.locator('.chat-quiz-question').inner_text(), 'the waiting card shows the whole question'
-    assert card.locator('.chat-quiz-question strong').inner_text() == 'licence'
-    assert card.locator('.chat-quiz-option').count() == 2 and card.locator('.chat-quiz-comment').count() == 0
-    assert card.locator('.chat-quiz-option').nth(0).locator('.chat-quiz-option-recommended').count() == 1
-    geometry = page.evaluate("""() => {
-        const rows=[...document.querySelectorAll('#chat-messages .chat-bubble.project-question')];
-        const box=(el)=>el.getBoundingClientRect();
-        const lines=rows.filter(el=>el.dataset.questionMode==='row');
-        const source=rows[1].querySelector('.project-question-source'), go=rows[1].querySelector('.project-question-go');
-        return {heights: rows.map(el=>Math.round(box(el).height)),
-            burst: Math.round(box(lines[2]).bottom-box(lines[0]).top),
-            overflow: Math.max(...rows.map(el=>el.scrollWidth-el.clientWidth)),
-            page: document.documentElement.scrollWidth-innerWidth,
-            right: Math.max(...rows.map(el=>box(el).right)), viewport: innerWidth,
-            sourceCut: source.scrollWidth>source.clientWidth, arrow: box(go).width>0 && box(go).right<=innerWidth,
-            previewOneLine: lines.every(el=>box(el.querySelector('.project-question-preview')).height<28),
-            previewWidth: Math.min(...lines.map(el=>Math.round(box(el.querySelector('.project-question-preview')).width))),
-            statusCut: (()=>{const el=rows[3].querySelector('.project-question-status-text'); return el.scrollWidth>el.clientWidth;})(),
-            statusSizes: [...new Set(rows.map(el=>getComputedStyle(el.querySelector('.project-question-status, .chat-live-project-status')).fontSize))]};
-    }""")
-    print(json.dumps({'question_rows_geometry': geometry, 'viewport': [width, height]}))
-    setup_browser.capture(page, f'question-rows-burst-{width}')
-    assert geometry['overflow'] <= 1 and geometry['page'] <= 0 and geometry['right'] <= width, geometry
-    assert geometry['previewOneLine'] and geometry['arrow'] and geometry['sourceCut'], geometry
-    assert geometry['statusSizes'] == ['12px'], geometry
-    # One line on a wide column; status and answer over question, project and time on a phone.
-    # The longest status yields with an ellipsis instead of pushing the time onto another line,
-    # and the question keeps a readable share of a phone line beside a dated time.
-    assert geometry['heights'][1] <= (48 if width >= 980 else 90), geometry
-    assert geometry['heights'][3] <= (48 if width >= 980 else 90) and geometry['statusCut'], geometry
-    assert geometry['previewWidth'] >= 70, geometry
-    assert geometry['burst'] <= (150 if width >= 980 else 300), geometry
-    # The line is one keyboard control with a visible ring.
-    first.focus()
-    # WebKit on macOS follows native keyboard navigation: Option+Tab includes
-    # buttons even when the OS's full-keyboard-access preference is disabled.
-    page.keyboard.press('Alt+Tab')
-    page.keyboard.press('Alt+Shift+Tab')
-    assert first.evaluate('el=>el===document.activeElement'), page.evaluate('document.activeElement.outerHTML')
-    assert first.evaluate("el=>getComputedStyle(el).outlineStyle") != 'none'
-    # One touch answers the waiting question from Main: one request, and the card folds into a line.
-    card.locator('.chat-quiz-option').nth(1).click()
-    page.locator('#chat-messages .chat-bubble.project-question[data-question-mode="row"]').nth(4).wait_for()
-    rows.nth(4).locator('.project-question-answer').get_by_text('Wait for written permission', exact=True).wait_for()
-    assert rows.nth(4).locator('.chat-quiz-option').count() == 0
+    assert card('second').locator('.chat-quiz-comment').count() == 1
+    assert card('second').locator('.chat-quiz-wait-ended').count() == 1
+
+    # The chip opens the exact question in its Project: the same form, node for node.
+    card('waiting').locator('.chat-quiz-project').click()
+    own = page.locator('.chat-quiz-card[data-task-id="proof-task"][data-quiz-id="waiting"]:not(.project-question-card)')
+    own.get_by_text('Publication slips by about a week.', exact=True).wait_for()
+    assert own.evaluate(CARD_FORM_JS) == card('waiting').evaluate(CARD_FORM_JS)
+    setup_browser.capture(page, f'question-mirror-same-form-{width}')
+    page.locator('#project-panel-close').click()
+
+    # One touch answers from Main: the recorded result reads for five seconds, then only the
+    # Main copy goes. A duplicate live frame and the census's own answer never restart it.
+    card('waiting').locator('.chat-quiz-option').nth(1).click()
+    page.locator('#chat-messages .project-question-card[data-quiz-id="waiting"][data-state="answered"]').wait_for()
+    confirmed = page.evaluate('performance.now()')
+    assert card('waiting').locator('.chat-quiz-option.chosen').inner_text().startswith('Wait for written permission')
+    assert card('waiting').locator('.chat-quiz-status-text').inner_text() == 'You answered'
+    assert card('waiting').locator('.chat-quiz-comment').count() == 0
     assert [(sent['decision_id'], sent['option_index'], 'comment' in sent) for sent in decisions] == [
         ('quiz:proof-task:waiting', 1, False)]
-    setup_browser.capture(page, f'question-rows-answered-{width}')
-    # A line opens its exact question in the Project, with the details Main never shows.
-    first.click()
-    quiz = page.locator('.chat-quiz-card[data-task-id="proof-task"][data-quiz-id="exact-question"]')
-    quiz.get_by_text('Preserve the full original measurements.', exact=True).wait_for()
-    quiz.get_by_text("Owner's answer: " + comment, exact=True).wait_for()
-    assert quiz.locator('.chat-quiz-option.chosen').inner_text().startswith('Keep the primary source')
-    assert quiz.locator('.chat-quiz-comment').count() == 0
-    setup_browser.capture(page, f'question-exact-navigation-{width}')
+    card('waiting').evaluate("el => el.scrollIntoView({block: 'center'})")
+    setup_browser.capture(page, f'question-mirror-answered-{width}')
+    page.wait_for_timeout(3000)
+    sockets[-1].send(json.dumps({'type': 'quiz_state', 'task_id': 'proof-task', 'quiz_id': 'waiting', 'state': 'answered',
+                                 'answered_index': 1, 'ts': '2026-09-16T00:04:00Z'}))
+    assert card('waiting').count() == 1, 'the result stays readable for the whole moment'
+    page.wait_for_function("() => !document.querySelector('#chat-messages [data-quiz-id=\"waiting\"]')", timeout=10000)
+    elapsed = page.evaluate('performance.now()') - confirmed
+    assert 4700 <= elapsed <= 6500, elapsed
+    setup_browser.capture(page, f'question-mirror-removed-{width}')
+    # Only the Main copy went: the Project keeps its answered card.
+    page.evaluate("""p => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project: p,
+        task_id: 'proof-task', quiz_id: 'waiting'}}))""", project)
+    own.locator('.chat-quiz-option.chosen').filter(has_text='Wait for written permission').wait_for()
+    page.locator('#project-panel-close').click()
+
+    # The Project form answers another question while the owner reads further down: the copy
+    # above the reader settles and leaves without moving the reading position.
+    card('finished').evaluate("el => el.scrollIntoView({block: 'start'})")
+    anchor = card('finished').evaluate('el => el.getBoundingClientRect().top')
+    frame = {'type': 'quiz_state', 'task_id': 'proof-task', 'quiz_id': 'passed', 'state': 'answered', 'answered_index': 0,
+             'comment': 'PNG for the print edition.', 'ts': '2026-09-16T00:05:00Z'}
+    blocks['passed'].update(state='answered', answered_index=0, comment=frame['comment'])
+    sockets[-1].send(json.dumps(frame))
+    card('passed').locator('.chat-quiz-answer').get_by_text("Owner's answer: PNG for the print edition.", exact=True).wait_for()
+    started = page.evaluate('performance.now()')
+    page.wait_for_timeout(2500)
+    sockets[-1].send(json.dumps(frame))
+    page.wait_for_function("() => !document.querySelector('#chat-messages [data-quiz-id=\"passed\"]')", timeout=10000)
+    elapsed = page.evaluate('performance.now()') - started
+    assert 4500 <= elapsed <= 6500, elapsed
+    assert abs(card('finished').evaluate('el => el.getBoundingClientRect().top') - anchor) <= 2
+
+    # A keyboard answer: focus stays in the settled copy, then moves on to the next question.
+    card('finished').locator('.chat-quiz-question').focus()
+    page.keyboard.press('Alt+Tab')
+    assert page.evaluate("document.activeElement.classList.contains('chat-quiz-option')"), \
+        page.evaluate('document.activeElement.outerHTML')
+    page.keyboard.press('Enter')
+    page.locator('#chat-messages .project-question-card[data-quiz-id="finished"][data-state="answered"]').wait_for()
+    assert page.evaluate("document.activeElement.closest('.chat-quiz-card')?.dataset.quizId") == 'finished'
+    page.wait_for_function("() => !document.querySelector('#chat-messages [data-quiz-id=\"finished\"]')", timeout=10000)
+    assert page.evaluate("document.activeElement.closest('.chat-quiz-card')?.dataset.quizId") == 'replaced'
+    assert ids() == ['second', 'replaced']
+
+    # The census names another task's wait before any row carries its form: a partial copy with
+    # its way to the Project. The complete row then arrives already answered (the Project form
+    # answered meanwhile): the whole form shows the recorded result for five seconds, then goes.
+    base = {'role': 'system', 'system_type': 'project_question_pointer', 'task_id': 'late-task', 'quiz_id': 'late-form',
+            'project_id': project['id'], 'project_name': project['name'], 'project_chat_id': 42, 'chat_id': 1,
+            'ts': late['asked_at'], 'wait_for_answer': True}
+    activities.append({'activity_id': 'late-task', 'chat_id': 42, 'project_id': project['id'], 'kind': 'direct_chat',
+        'phase': 'working', 'required_question': {**base, 'quiz_state': 'open', 'owner_wait_state': 'waiting'}})
+    card('late-form').wait_for(timeout=15000)
+    assert card('late-form').locator('.chat-quiz-option').count() == 0
+    assert card('late-form').locator('.chat-quiz-question').inner_text() == 'Open the original question for its text.'
+    assert card('late-form').locator('.chat-quiz-project').count() == 1
+    setup_browser.capture(page, f'question-mirror-partial-{width}')
+    late.update(state='answered', answered_index=1)
+    sockets[-1].send(json.dumps({'type': 'chat', 'content': f"You answered in {project['name']}", 'is_progress': False,
+        'markdown': False, **base, **{key: late[key] for key in ('question', 'options', 'option_details', 'stake',
+                                                                    'answered_index')},
+        'quiz_state': 'answered', 'owner_wait_state': 'resumed'}))
+    page.locator('#chat-messages .project-question-card[data-quiz-id="late-form"][data-state="answered"]'
+                 ' .chat-quiz-option.chosen').wait_for()
+    started = page.evaluate('performance.now()')
+    assert card('late-form').locator('.chat-quiz-option').count() == 2
+    assert card('late-form').locator('.chat-quiz-option.chosen').inner_text().startswith('Full notice')
+    assert card('late-form').locator('.chat-quiz-status-text').inner_text() == 'You answered'
+    assert card('late-form').locator('.chat-quiz-stake').inner_text() == 'At stake: The cover layout.'
+    card('late-form').evaluate("el => el.scrollIntoView({block: 'center'})")
+    setup_browser.capture(page, f'question-mirror-late-form-answered-{width}')
+    page.wait_for_function("() => !document.querySelector('#chat-messages [data-quiz-id=\"late-form\"]')", timeout=10000)
+    elapsed = page.evaluate('performance.now()') - started
+    assert 4500 <= elapsed <= 6500, elapsed
+    assert ids() == ['second', 'replaced']
+    assert 'late-task' not in detail_reads, 'a question this tab remembers is never re-read'
+
+    # Stale snapshots — the census and a reconnect's history re-read taken before the answers —
+    # never bring a removed copy back, also after Main's bounded question memory (2000) let the
+    # answers go: every quiz_state frame is one more remembered question.
+    for index in range(2001):
+        sockets[-1].send(json.dumps({'type': 'quiz_state', 'task_id': 'noise-task', 'quiz_id': f'noise-{index}',
+                                     'state': 'open'}))
+    page.wait_for_timeout(500)
+    detail_count = len(detail_reads)
+    mode['stale'] = True
+    activities[0]['required_question'] = pointer('waiting', asked['waiting'])
+    read_count = len(history_reads)
+    page.evaluate('window.sameDocument = true')
+    sockets[-1].close()
+    deadline = page.evaluate('performance.now()') + 15000
+    while len(history_reads) == read_count and page.evaluate('performance.now()') < deadline:
+        page.wait_for_timeout(200)
+    assert len(history_reads) > read_count and len(sockets) == 2, 'the reconnect re-read history'
+    page.wait_for_timeout(3500)
+    assert page.evaluate('window.sameDocument === true'), 'the reconnect re-read history in place'
+    card('second').scroll_into_view_if_needed()
+    setup_browser.capture(page, f'question-mirrors-after-stale-reconnect-{width}')
+    assert ids() == ['second', 'replaced']
+    # The forgotten questions were settled by their canonical record, one read per task.
+    assert {'proof-task', 'late-task'} <= set(detail_reads[detail_count:]), detail_reads[detail_count:]
+    assert len(decisions) == 2, 'observing answers never sends one'
+
+    # A reload paints durable history: answered questions stay out, the rest keep their form.
+    mode['stale'] = False
+    activities[0]['required_question'] = pointer('waiting', blocks['waiting'])
+    activities[1]['required_question'].update(quiz_state='answered', answered_index=1, owner_wait_state='resumed')
     page.reload()
-    rows.nth(4).get_by_text('Wait for written permission', exact=True).wait_for()
-    assert rows.evaluate_all("els => els.map(el => el.dataset.questionMode)") == ['row', 'row', 'row', 'row', 'row']
-    first.click()
-    quiz.get_by_text("Owner's answer: " + comment, exact=True).wait_for()
-    setup_browser.capture(page, f'question-reloaded-{width}')
-    assert len(decisions) == 1, 'a reload and a navigation never answer anything'
+    page.wait_for_selector('#chat-input', state='attached')
+    card('replaced').wait_for()
+    assert ids() == ['second', 'replaced']
+    card('second').scroll_into_view_if_needed()
+    setup_browser.capture(page, f'question-mirrors-reloaded-{width}')
+    assert len(decisions) == 2, 'a reload and a navigation never answer anything'

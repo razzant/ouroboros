@@ -310,93 +310,28 @@ body.resizing-panels { user-select: none; }
     overflow-wrap: anywhere;
 }
 
-/* === design-system:migrated-begin (chat: Project question row) === */
-/* One Main row per Project question, in the project chip's own language (docs/DESIGN.md
-   "Project question row"): a line in every settled or passed state, a card with the option
-   buttons only while the task waits. Consecutive rows sit closer by adjacency alone. */
-.chat-bubble.project-question {
-    align-self: flex-start;
-    width: min(100%, 760px);
-    max-width: min(100%, 760px);
-    margin-right: 0;
-    padding: 0;
+/* === design-system:migrated-begin (chat: Project question mirror) === */
+/* A Project question mirrored into Main is the Project's own quiz card (docs/DESIGN.md
+   "Project question mirror"). The one addition is the Project chip in its head: a pill in
+   the project chip's own language that opens the exact question, with the card's shared
+   keyboard ring. A long Project name yields first (the chip is capped and ellipsized, its
+   title names it whole), so the status keeps its place; a phone column wraps the head. */
+.project-question-card .chat-quiz-head { flex-wrap: wrap; }
+.chat-quiz-project.chat-live-project-card-btn {
+    flex: 0 1 auto; width: auto; min-width: 0; max-width: min(100%, 32ch);
+    margin-inline-end: auto;
+    padding: 1px 8px;
+    gap: var(--space-1);
     border: 1px solid var(--project-18);
+    border-radius: var(--pill-radius);
     background: var(--project-08);
+    color: var(--project); font-size: var(--type-meta); line-height: var(--line-meta);
 }
-.chat-bubble.project-question + .chat-bubble.project-question { margin-top: -4px; }
-.project-question-pointer {
-    min-width: 0;
-    border-radius: inherit;
-    overflow-wrap: anywhere;
-    color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body);
-}
-[data-question-mode="row"] > .project-question-pointer {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    column-gap: var(--space-2);
-    padding: var(--space-2) 14px;
-    cursor: pointer;
-}
-[data-question-mode="row"] > .project-question-pointer:hover { background: var(--project-12); }
-/* The bubble clips nothing, but the ring sits inside like the project chip's. */
-[data-question-mode="row"] > .project-question-pointer:focus-visible {
-    outline: 2px solid var(--focus-accent-border);
-    outline-offset: -2px;
-}
-/* The owner reads the status to act on it: meta ink, never the quieter secondary step. A long
-   status sentence yields to the line; the Project card keeps it whole. */
-.project-question-status {
-    display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; max-width: 42ch;
-    color: var(--text-meta); font-size: var(--type-meta); white-space: nowrap;
-}
-.project-question-status-text { overflow: hidden; text-overflow: ellipsis; }
-.project-question-pointer[data-state="answered"] .chat-quiz-dot { background: var(--status-ok-fg); }
-.project-question-pointer[data-state="superseded"] .chat-quiz-dot,
-.project-question-pointer[data-state="expired_terminal"] .chat-quiz-dot { background: var(--text-disabled); }
-/* The answer (or the assumption the task took) is the one primary thing and is never cut
-   to one line; the question is context and is. */
-.project-question-answer { color: var(--text-primary); font-size: var(--type-body); font-weight: 600; }
-.project-question-preview {
-    flex: 1 1 6ch; min-width: 0;
-    color: var(--text-meta); font-size: var(--type-body);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.project-question-pointer[data-state="superseded"] .project-question-preview { color: var(--text-disabled); }
-.project-question-source {
-    max-width: 22ch;
-    color: var(--project); font-size: var(--type-meta);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.project-question-go { color: var(--project); font-size: var(--type-meta); }
-.chat-bubble.project-question .msg-time { margin-top: 0; opacity: 1; color: var(--text-meta); white-space: nowrap; }
-@container chatcol (max-width: 620px) {
-    .chat-bubble.project-question { width: 100%; max-width: 100%; }
-    /* Two lines: status and answer, then question, project and time. */
-    [data-question-mode="row"] > .project-question-pointer::before { content: ''; flex: 0 0 100%; height: 0; order: 2; }
-    [data-question-mode="row"] > .project-question-pointer > .project-question-status,
-    [data-question-mode="row"] > .project-question-pointer > .project-question-answer { order: 1; }
-    [data-question-mode="row"] > .project-question-pointer > .project-question-preview,
-    [data-question-mode="row"] > .project-question-pointer > .project-question-source,
-    [data-question-mode="row"] > .project-question-pointer > .project-question-go,
-    [data-question-mode="row"] > .project-question-pointer > .msg-time { order: 3; }
-    /* The question keeps a readable share beside the Project and a dated time. */
-    .project-question-status { max-width: 100%; }
-    .project-question-preview { flex: 1 1 0; min-width: 12ch; font-size: var(--type-meta); }
-    .project-question-source { flex: 0 1 auto; max-width: 26%; }
-}
-/* The waiting card: the same chip, opened. Its head states the wait as dot + text. */
-.project-question-pointer .chat-live-project-status {
-    display: inline-flex; align-items: center; gap: var(--space-2);
-    color: var(--text-meta); font-size: var(--type-meta);
-}
-.project-question-pointer .chat-live-project-status::before {
-    content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--status-neutral-fg);
-}
-.project-question-body { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-1) 14px var(--space-3); }
-.project-question-body .chat-quiz-question { font-weight: 400; }
-.project-question-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-.project-question-foot .system-message-actions { padding-block: 0; }
+.chat-quiz-project.chat-live-project-card-btn:hover { background: var(--project-12); }
+.chat-quiz-project.chat-live-project-card-btn:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.chat-quiz-project .chat-live-project-icon { color: var(--project); font-size: var(--type-meta); }
+.chat-quiz-project .chat-live-project-name { font-weight: 500; color: var(--project); font-size: var(--type-meta); }
+.chat-quiz-project .chat-live-project-status { margin-inline-start: 0; color: var(--project); font-size: var(--type-meta); }
 /* === design-system:migrated-end === */
 
 

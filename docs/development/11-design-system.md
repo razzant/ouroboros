@@ -13,20 +13,28 @@ This chapter owns the engineering rules that preserve the visual and interaction
 - **Containment.** A control never widens its column. Horizontal overflow lives in the wrapper that owns the wide content and declares `overflow-x: auto` (code block, `.md-table-wrap`, tab strip, Costs table cells) — never in a page scroll body, whose `overflow-y: auto` alone already makes `overflow-x` compute to `auto`. The shared `select.ui-control` recipe therefore clips its own value (`overflow: hidden`): WebKit computes `overflow: visible` on a native select, so an unclipped option label becomes scrollable overflow of the page scroller. A grid track holding controls takes a minimum that yields to its container — `minmax(0, …)` or `repeat(auto-fit, minmax(min(100%, Npx), 1fr))`; a fixed px minimum rescued only by a viewport media query is review debt, because the viewport does not know how wide the content column is. The global webkit scrollbar recipe sizes both axes. Enforced by `tests/test_web_typography_static.py::test_select_control_clips_its_value` and its `::test_webkit_scrollbar_recipe_covers_both_axes` neighbour, `tests/test_ui_settings_overflow_browser.py` (WebKit, the native-select clip) and `tests/test_ui_settings_grid_tracks_browser.py` (Chromium, yielding tracks). Two gaps stay open: the wizard document loads `ui.css` without `style.css` and keeps native scrollbars, and an element setting the standard `scrollbar-width`/`scrollbar-color` opts out of the webkit recipe on Blink.
 - **One semantic button variant expresses one action role**: neutral Settings and onboarding controls use the existing `.btn.btn-default`; a one-action result row uses the named `.settings-action-row` contract (status first, action docked right); notifications use the shared toast host. Working, warning, error and destructive states keep one meaning across Chat, Logs, Settings and Skills. Enforced by `web/tests/settings_action_row.test.js` (the shared `.btn-default` role in both shells, the `.settings-action-row` contract and shared busy/status semantics); the toast-host and cross-page state-meaning clauses are review-only (CHECKLISTS item 30).
 - System-message actions use `ui_helpers.createSystemMessageActions` around the
-  shared button: Project lifecycle and routing receipts, and the waiting question
-  card's `Details and own answer` (a settled question line is itself the control). Spacing above/below, wrap and focus clearance belong to this one
-  composition, never a global button margin or a nowrap text ancestor.
-  Question lifecycle words live once in `question_presentation.js` (Main row and
-  quiz header) and their Python twin `project_dialogue.QUESTION_STATUS`; a new
-  state is added to both sides in the same commit with a row in
-  `question_presentation_parity.json` (the row's data flow and precedence:
-  ARCHITECTURE "Chat and Projects"). The Main row's own lead for a passed
-  question lives only in `questionRow`, because Python never emits it. The row
-  is judged on a realistic burst: `web/tests/question_rows.test.js` pins the
-  line/card projection, the one-touch answer and its races; geometry at desktop
-  and phone width, exact-question navigation and reload are exercised by
-  `test_ui_coherence_browser.py`; the one-touch answer against a real server and
-  the settled line by `test_ui_result_browser.py`.
+  shared button: Project lifecycle and routing receipts. Spacing above/below,
+  wrap and focus clearance belong to this one composition, never a global
+  button margin or a nowrap text ancestor.
+  Question lifecycle words live once in `question_presentation.js` (every quiz
+  header, the Project's and its Main mirror's) and their Python twin
+  `project_dialogue.QUESTION_STATUS`; a new state is added to both sides in the
+  same commit with a row in `question_presentation_parity.json` (the row's data
+  flow and precedence: ARCHITECTURE "Chat and Projects"). A Project question in
+  Main is the Project's own form: `chat_decision.buildQuizCard` renders the
+  mirror too, and its one addition is the Project chip — never a second,
+  reduced Main form, and a field the Project form gains reaches Main by
+  riding the pointer row (`project_question_pointer`, the census and the live
+  frame together). The settle-then-remove countdown lives in the decision
+  controller and leaves through chat.js's one `releaseMessageNode` path inside
+  the stable-viewport transaction; `releaseViews`/`destroy` own its timer and
+  markdown. The mirror is judged on a realistic burst:
+  `web/tests/question_mirrors.test.js` pins the same form node for node, every
+  lifecycle state, the countdown from each answer source, stale snapshots,
+  focus and release; `test_ui_coherence_browser.py` drives the burst, the
+  countdown, the reading anchor, keyboard focus, a reconnect and a reload in
+  Chromium and WebKit at desktop and phone width; `test_ui_result_browser.py`
+  answers from Main against a real server and replays the Project record.
 - **A list editor** reveals the entry it just added through `ui_helpers.revealNewRow(row, field)` — the one seam for "scrolled into view, caret in the first field" — and a freshly added entry shows no error before the owner tries to save. `tests/test_available_subagents_ui_static.py` pins the seam; the `ui_browser` acceptance in `tests/test_ui_smoke_agents_panel.py` pins the behaviour.
 - **A host fact about a task is a row of that task's card**, never a standalone bubble beside it: the producer stamps the placement (`card_row` with `card_row_id`) and the browser attaches the row to the card record through one helper shared by the live branch and replay, falling back to a standalone System row only when the task has no card record in the page (mechanism: ARCHITECTURE §3 "Main rows and host-stamped card rows"). A host fact that belongs in the card but is produced without a placement fact is review debt under this rule (CHECKLISTS item 30 scores conformance); the untyped terminal host notice and the origin-addressed routing notices stay ordinary rows by design. A client-side list of row types is not the rule (`docs/development/02`, an open default behind a closed exception list).
 - **Task outcome truth** stays in `log_events.js::taskOutcomeSeverity` and `taskTerminalPhase`; `taskPresentation` is the one compact factual projection consumed by chips, live completion, history replay and child terminal presentation. Its host mirror is `project_dialogue.outcome_phase`, pinned to the browser by one shared fixture (`web/tests/fixtures/outcome_phase_parity.json`): a new axis, reason or acceptance status is added to both sides in the same commit, with a row in that fixture. The detail line under the headline comes from `taskReasonDetail` alone (precedence: ARCHITECTURE §3 "Task cards, errors and reason lines") — never from a second producer. A non-terminal diagnostic may add a timeline fact but must not promote the whole task, and an unknown event name never acquires Chat severity from `error`/`crash`/`fail` keyword matching. The Chat header reports connection, the `/api/state` activity census, the owner's own unconfirmed sends and live task cards only; a failed task status does not synthesize header attention, a toast, unread state or an owner action. Never derive header liveness from a WS frame: a typing frame is a submission receipt, and the `/api/state` census is the only inserter into the client live-activity set (contract and residuals: ARCHITECTURE §3 "Liveness census and the chat header"; enforced by `web/tests/chat_header_census.test.js`).

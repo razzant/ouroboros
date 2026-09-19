@@ -1,4 +1,4 @@
-// Shared by chat_decision.test.js and question_rows.test.js: a small DOM stub (descendant lookup
+// Shared by chat_decision.test.js and question_mirrors.test.js: a small DOM stub (descendant lookup
 // by class), the chat-decision fixture and one quiz frame.
 import { createChatDecision } from '../modules/chat_decision.js';
 
@@ -43,6 +43,21 @@ export class NodeStub {
         node.parentNode = parent;
         parent.children.splice(parent.children.indexOf(this), 0, node);
     }
+    replaceWith(node) {
+        const parent = this.parentNode;
+        if (!parent) return;
+        node.parentNode = parent;
+        parent.children.splice(parent.children.indexOf(this), 1, node);
+        this.parentNode = null;
+    }
+    get nextElementSibling() {
+        const siblings = this.parentNode?.children || [];
+        return siblings[siblings.indexOf(this) + 1] || null;
+    }
+    // Like a browser, :focus-visible follows the last input modality, not the element.
+    matches(selector) {
+        return selector === ':focus-visible' && globalThis.document.activeElement === this && !globalThis.document.pointerModality;
+    }
     addEventListener(type, handler) { this.listeners.set(type, handler); }
     click(event = {}) {
         const handler = this.listeners.get('click');
@@ -79,7 +94,8 @@ export function countPropertyWrites(target, key) {
     return () => writes;
 }
 
-export function fixture({ fetchImpl, renderMarkdown, enhanceMarkdown, onDomWrite, fetchDetail, isMain = false } = {}) {
+export function fixture({ fetchImpl, renderMarkdown, enhanceMarkdown, onDomWrite, fetchDetail, isMain = false,
+    frameNode = (_msg, node) => node, insertMessageNode = null, removeMessageNode = null, focusAfterRemoval = null } = {}) {
     const prior = { document: globalThis.document, crypto: globalThis.crypto, window: globalThis.window };
     globalThis.document = { createElement: (tag) => new NodeStub(tag) };
     const opened = [];
@@ -98,13 +114,16 @@ export function fixture({ fetchImpl, renderMarkdown, enhanceMarkdown, onDomWrite
                 ...(Number.isInteger(sent.option_index) ? { answered_index: sent.option_index } : {}),
                 ...(sent.comment ? { comment: sent.comment } : {}) }) };
         },
-        frameNode: (_msg, node) => node,
+        frameNode,
         renderMarkdown,
         enhanceMarkdown: enhanceMarkdown || (renderMarkdown ? () => {} : null),
         showToast: (text, tone) => toasts.push({ text, tone }),
         onDomWrite,
         fetchDetail,
         isMain,
+        insertMessageNode,
+        removeMessageNode,
+        focusAfterRemoval,
     });
     return { decision, toasts, calls, opened, restore: () => {
         globalThis.document = prior.document;

@@ -312,6 +312,10 @@ export function createChatInstance({
         onDomWrite: withStableViewport,
         isMain, chatId,
         insertMessageNode,
+        // A settled Main question mirror leaves through the ordinary retirement path.
+        removeMessageNode: (node) => withStableViewport(() => { releaseMessageNode(node); return true; },
+            { excludeAnchorNode: node }),
+        focusAfterRemoval: () => input?.focus?.({ preventScroll: true }),
     });
 
     async function loadUiPreferences() {
@@ -2428,7 +2432,7 @@ export function createChatInstance({
                         pendingHistoryUpserts.set(row.history_id, row); return false;
                     }
                     pendingHistoryUpserts.delete(row.history_id);
-                    chatMedia.release(old); chatDecision.releaseViews(old); destroyChatMarkdown(old); old.remove();
+                    releaseMessageNode(old);
                     return true;
                 });
                 // Retire only local echoes this source snapshot confirms.
@@ -3354,6 +3358,11 @@ export function createChatInstance({
             && [record.summaryButtonEl, record.reviewsHostEl].some(node => historyNodeIsProtected(node, messagesDiv)));
     }
 
+    // One retirement path for a message node: its media, decision views and markdown go with it.
+    function releaseMessageNode(node) {
+        chatMedia.release(node); chatDecision.releaseViews(node); destroyChatMarkdown(node); node.remove();
+    }
+
     function releaseHistoryIds(ids) {
         if (!(ids.size || ids.length)) return;
         const retained = retainedHistoryIds();
@@ -3372,11 +3381,8 @@ export function createChatInstance({
             }
             pendingHistoryEvictions.delete(id);
             for (const node of nodes) {
-                chatMedia.release(node);
-                chatDecision.releaseViews(node);
-                destroyChatMarkdown(node);
                 const wrapper = node.closest('.chat-bubble');
-                node.remove();
+                releaseMessageNode(node);
                 if (wrapper && wrapper !== node && !wrapper.querySelector('.chat-gallery-item, .chat-file-item, .chat-quiz-card')) {
                     chatMedia.release(wrapper); wrapper.remove();
                 }
