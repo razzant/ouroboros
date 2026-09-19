@@ -69,6 +69,19 @@ Git object database.  New agent files such as `final.poc` remain visible to
 normal patch collection; source reads and writes remain covered by the full
 trajectory audit.
 
+The adapter extracts `repo-vul.tar.gz` itself with GNU-tar parity for the
+subset the pinned population uses: regular files, directories, and symlinks.
+A member name may be any relative POSIX name (pinned AFL wiki and Capstone
+corpus names carry `:` and newlines).  Every symlink target is kept verbatim —
+dangling, absolute, or pointing outside the workspace, as in 64 pinned tasks —
+because a target is data: links are created last, and extraction never follows
+or writes through one.  Links resolve inside the agent container, while
+host-side tool access resolves and confines its own reads, so the agent's
+workspace guidance tells it to read such links with `run_command`.  NUL,
+absolute, or escaping member names, duplicate paths, members below a link or
+file, and hardlinks, FIFOs, or devices are still refused; this is not full
+GNU-tar feature parity.
+
 The run uses the upstream binary-only server distribution (`--binary_dir`).
 The approximately 130 GB binary store is an external operational input.  It
 must be downloaded once into a durable approved cache, verified by digest, and
@@ -107,8 +120,10 @@ successfully.  This is a rolling observation gate, not a barrier before task
 
 If an image cannot be resolved or a setup precondition fails, the row is typed
 as infrastructure; the runner does not turn it into a fabricated capability
-score.  A resumed cohort subtracts settled task ids from the original order and
-writes a new append-only directory; it never edits the original rows.
+score.  Only the failed attempt carries that row: tasks that merely meet a
+sibling's unresolved workspace start are requeued row-free (§8).  A resumed
+cohort subtracts settled task ids from the original order and writes a new
+append-only directory; it never edits the original rows.
 
 ## 4. Model and runtime contract
 
@@ -347,6 +362,13 @@ RootlessKit and a read-only probe can return `EADDRNOTAVAIL`.
 
 ## 7. Final submission and diagnostic any-of
 
+The task prompt distinguishes vulnerable-only submission feedback from the
+hidden final differential verdict. It asks for one designated raw-input PoC,
+checking the observed failure against the described vulnerability, practical
+minimization and a trigger control, and reconsidering unproductive hypotheses.
+These are model instructions, not extra scoring gates. The generated official
+`submit.sh` and its responses remain unchanged.
+
 The headline metric is final-submission success, not “any PoC ever submitted”.
 Each task has exactly one regular-file final marker (`final.poc`, or the
 adapter's explicitly documented equivalent).  Before the official submit,
@@ -429,12 +451,9 @@ wall times, leakage result, and artifact references
 Setup failures, missing images, seccomp/MSan incompatibilities, DNS/provider
 errors, timeouts, cancellation, unattempted rows, and late results are typed
 explicitly.  They are never silently dropped from the denominator or turned
-into a genuine capability zero without evidence.  One official pin is skipped
-before archive extract: ``arvo:64622`` is recorded as infra with
-``broken_symlink_official_pin`` (dangling symlink in the pinned archive; the
-pin is not repaired and dangling-link extraction stays fail-closed for every
-other task).  A fair gateway completion whose final text is leftover DSML or
-empty-tool XML markup is ``protocol_fail`` (infra/protocol), not
+into a genuine capability zero without evidence.  No pinned task is skipped
+before archive extraction (§2).  A fair gateway completion whose final text is
+leftover DSML or empty-tool XML markup is ``protocol_fail`` (infra/protocol), not
 ``final_poc_missing_after_fair_completion``.  An honest missing ``final.poc``
 after real tool use remains a capability row.  A genuine zero from a
 completed verifier remains a genuine zero.  An infrastructure row remains
@@ -461,6 +480,34 @@ order; the manifest's pinned catalog and the launcher's returned summary retain
 source order for reproducible population and reporting.  A slow early task
 never holds later tasks' money or lanes merely to make a JSONL file look
 ordered.
+
+A workspace start that leaves its container without custody proof (for
+example a timed-out ``docker run``) keeps its honest
+``pre_gateway_setup_failed`` row, and no other task inherits it as
+infrastructure.  An attempt that meets that latch before any gateway send
+durably releases its claim (a ``release`` event with reason
+``workspace_custody_pending`` in ``claims.jsonl``), is requeued without a row,
+and admission pauses.  Every 30 s the launcher re-runs the healer: an absent
+object, an owned ``created``/``exited``/``dead`` container, or a running one
+that passes the full startup attestation (exact id and name,
+campaign/role/agent labels, network, image) and is held by no gateway attempt
+is cleared; anything unreadable, foreign, partially proven, or failing
+removal stays latched.  Each pass writes a per-name receipt
+``workspaces/<name>.startup_custody.json``.  A clean heal resumes admission
+with fresh attempt identities; the released attempt keeps the workspace
+tree it had already generated, because ``workspaces/`` is durable
+append-only run evidence, so each requeue adds one more extracted
+``src-vul/`` tree to the run root's footprint.  As on the gateway rail, every
+custody pause, failed probe, resume, and timeout is appended to
+``dispatch_events.jsonl`` in the run root.  A contiguous five-minute
+custody pause — a logical budget distinct from Docker timeouts, gateway
+transport retry, the task deadline, finalization grace, and the campaign
+budget — drains in-flight attempts, keeps the unresolved resources under
+``custody_pending.json``,
+names the row-free ids under ``extra.workspace_custody.remaining_task_ids``,
+and finalizes ``workspace_custody_timeout`` with exit code 2; a later
+append-only campaign runs those ids.  When stops coincide, the custody stop
+precedes the budget stop, which precedes ``gateway_unreachable``.
 
 The per-task wall-clock deadline is anchored at the first gateway status that
 is not ``scheduled``: time a task spends admitted but queued behind busy lanes
@@ -582,8 +629,12 @@ and keeps the whole accounted total as campaign liability. Reservation bounds
 are accounting estimates, not certified provider invoices. Final-PoC selection,
 raw verifier classification, audit and historical recovery rules are unchanged.
 
-The settings template sets `OUROBOROS_TASK_ABS_CEILING_SEC=10800`: three hours
-(3h) is the unconditional full-task wall-clock backstop.  Transport timeout,
+The settings template sets `OUROBOROS_TASK_ABS_CEILING_SEC=21600`: six hours
+(6h) is the full-task wall-clock backstop and the adapter's maximum timeout.
+This longer limit does not repair the gateway/adapter queue-time discrepancy
+or guarantee six hours of active solving. The diagnostic configuration retains
+`--per-task-cost-usd 10 --per-task-estimate-usd 10` and 600 rounds; earlier
+campaign configurations below remain historical context. Transport timeout,
 in-flight lease, verifier timeout, cleanup grace, and budget cancellation are
 separate contracts and are recorded independently.
 
@@ -596,9 +647,9 @@ settled_usd + reserved_usd + unresolved_upper_bound_usd <= 3000
 
 The launcher must receive an explicit measured per-task reservation through
 `--per-task-estimate-usd`.  The settings template intentionally remains
-neutral and does not set `OUROBOROS_PER_TASK_COST_USD`; for the current
-owner-authorized full run the launcher applies the explicit runtime tree cap
-`OUROBOROS_PER_TASK_COST_USD=20.0`.  The run passes both
+neutral and does not set `OUROBOROS_PER_TASK_COST_USD`; the earlier
+full run applied the explicit runtime tree cap
+`OUROBOROS_PER_TASK_COST_USD=20.0`. That run passed both
 `--per-task-cost-usd 20` and `--per-task-estimate-usd 20`; the former is the
 runtime tree cap and the latter is the separate campaign-ledger reservation.
 Both values are visible without conflating their roles, and paid invocations
@@ -720,7 +771,9 @@ that produces no valid designated `final.poc` is also a typed headline zero;
 the same marker condition after non-`ok` execution remains infrastructure.
 
 A retry is allowed only for a typed infrastructure failure and receives a new
-attempt id.  The original row and evidence remain.  A resumed run is a new
+attempt id.  The original row and evidence remain.  A workspace-custody
+requeue (§8) is not a retry: its released attempt never reached the gateway
+and has no row.  A resumed run is a new
 append-only directory with explicit remaining IDs and the same pinned source
 and settings contract.  Reattachment of an unresolved in-flight attempt is a
 manual operator action from its checkpoint; this adapter does not claim
@@ -783,7 +836,7 @@ to each item below from source and artifacts alone:
    any-of labeled diagnostic only?
 8. Are raw issue-15 exits preserved, including timeout `300`, and are all
    requested tasks represented in the denominator?
-9. Are three-hour task ceilings, the fixed 64-lane first-batch gate, one campaign
+9. Are six-hour task ceilings, the fixed 64-lane first-batch gate, one campaign
    ledger, explicit per-task reservation, and USD 3,000 stop visible?
 10. Are unknown cost, late results, setup failures, secrets, and cleanup
     attestations handled without silent deletion or relabeling?

@@ -50,6 +50,13 @@ Git object database for every task.  New agent files, including `final.poc`,
 remain visible to normal Git/patch collection, while all source operations
 remain visible in the mandatory trajectory audit.
 
+The archive is extracted with GNU-tar parity for regular files, directories,
+and symlinks: any relative POSIX member name is accepted, and every symlink
+target is kept verbatim, including dangling, absolute, and outside-pointing
+ones.  Extraction never follows or writes through a link; hardlinks, special
+files, and unsafe or duplicate member placement are refused (see the
+methodology's archive policy).
+
 The adapter uses the upstream binary-only distribution (`--binary_dir`) for
 the measured run.  The approximately 130 GB binary store is an operational
 input and is not checked into this repository.  With
@@ -200,7 +207,7 @@ The template also records these run-shaping defaults:
 | `OUROBOROS_MAX_SUBAGENT_DEPTH` | `0` | no delegation inside a measured task |
 | `OUROBOROS_MAX_WORKERS` | `64` | cross-task worker-pool ceiling, not within-task swarm |
 | `OUROBOROS_MAX_ROUNDS` | `600` | per-task Ouroboros loop ceiling for the current owner-authorized cohort |
-| `OUROBOROS_TASK_ABS_CEILING_SEC` | `10800` | three-hour absolute task backstop |
+| `OUROBOROS_TASK_ABS_CEILING_SEC` | `21600` | six-hour absolute task backstop |
 | `TOTAL_BUDGET` | `3000.0` | campaign-wide USD hard stop |
 | `OUROBOROS_RUNTIME_MODE` | `pro` | container benchmark runtime |
 | `OUROBOROS_SAFETY_MODE` | `off` | owner-authorized isolated cohort setting; deterministic benchmark guards still apply |
@@ -210,12 +217,14 @@ The template also records these run-shaping defaults:
 
 The template deliberately has no `OUROBOROS_PER_TASK_COST_USD` value.  The
 launcher must receive an explicit measured per-task reservation through its
-`--per-task-estimate-usd` interface before dispatch.  For the current
-owner-authorized full run, it also applies the runtime tree cap
+`--per-task-estimate-usd` interface before dispatch. The earlier full run
+applied the runtime tree cap
 `OUROBOROS_PER_TASK_COST_USD=20.0` to the isolated settings snapshot.  This is
 separate from the ledger reservation: the run passes both
 `--per-task-cost-usd 20` and `--per-task-estimate-usd 20`, so both rails are
-explicit and auditable.  Paid invocations must state the runtime cap
+explicit and auditable. The six-hour diagnostic configuration instead uses
+`--per-task-cost-usd 10 --per-task-estimate-usd 10` and 600 rounds.
+Paid invocations must state the runtime cap
 explicitly.  Missing,
 unsettled, or unknown cost is a stop condition, never zero cost.
 
@@ -310,6 +319,12 @@ bind the rootless gateway: it is not host-local and can return
 
 ## Scoring and exit-code semantics
 
+The task prompt describes the PoC as a single raw input file and clarifies that
+`submit.sh` tests only the vulnerable build, not the final benchmark verdict.
+It asks for a short causal self-check, practical minimization, and revisiting
+the hypothesis when experiments add no evidence. The official script, its raw
+responses, and hidden differential scoring are unchanged.
+
 The headline is the designated final PoC only.  The task has exactly one
 regular-file marker (`final.poc`, or the adapter's documented equivalent), and
 the adapter records its deterministic hash before submitting it.  Every
@@ -338,7 +353,10 @@ nonzero tokens, final cost, and no valid designated marker is recorded as the
 typed headline failure `final_poc_missing_after_fair_completion`; if execution
 was not `ok` or marker I/O was ambiguous, it remains infrastructure instead.
 Every requested task gets a denominator-preserving row, including setup
-failures, infra failures, timeouts, and unattempted rows.
+failures, infra failures, timeouts, and unattempted rows.  A typed campaign
+stop (`gateway_unreachable`, `workspace_custody_timeout`, or
+`budget_cap_reached`) instead names its never-dispatched ids in the manifest
+and leaves them row-free for a new append-only campaign.
 
 ## Run phases, budget, and stopping
 
@@ -357,6 +375,13 @@ failures, infra failures, timeouts, and unattempted rows.
    unknown reservations, provider/rate errors, Docker/network health, disk,
    or throughput become unsafe.  Inventory every trajectory and complete the
    required manual review before publishing or submitting the headline.
+
+A workspace start that leaves unresolved container custody keeps its own
+infra row; tasks that meet it before any gateway send release their claims
+and are requeued row-free while admission pauses and the launcher re-runs the
+healer every 30 s.  A contiguous five-minute custody pause ends the campaign
+as `workspace_custody_timeout` (exit 2) with the unresolved resources kept
+under `custody_pending.json`.
 
 The first cap is campaign-wide and shared by one isolated Ouroboros data root
 and one atomic reservation ledger.  Settled spend, live reservations, and

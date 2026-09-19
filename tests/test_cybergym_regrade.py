@@ -219,3 +219,37 @@ def test_execute_regrade_records_executor_failures_without_stopping(tmp_path):
     assert summary["counts"]["regraded"] == 0
     rows = read_result_index(tmp_path / "regrade-run")
     assert {row["error_type"] for row in rows} == {"RuntimeError"}
+
+
+def test_execute_regrade_records_a_workspace_custody_pause_as_its_error_row(tmp_path, monkeypatch):
+    """Regrade has no dispatch gate: a sibling's unresolved start is one typed
+    error row by design, never a verifier result; a later regrade root reruns it."""
+    from devtools.benchmarks.cybergym.cybergym_executor import CyberGymExecutor
+    from tests.test_cybergym_executor import _config
+
+    payload = _inventory_payload(tmp_path)
+    payload["candidates"] = payload["candidates"][:1]
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps(payload))
+    executor = CyberGymExecutor(_config(tmp_path, provider_probe=False))
+    executor._unresolved_workspace_custody["cybergym-workspace-sibling"] = "run timed out"
+    monkeypatch.setattr(executor, "start", lambda: None)
+    monkeypatch.setattr(executor, "_generate", lambda *_args, **_kwargs: None)
+
+    def unreadable(*_args):
+        raise RuntimeError("daemon unreadable")
+
+    monkeypatch.setattr(executor, "_inspect_optional", unreadable)
+    summary = execute_regrade_inventory(
+        inventory,
+        config=executor.config,
+        run_root=tmp_path / "regrade-run",
+        workers=1,
+        executor_factory=lambda _config: executor,
+    )
+
+    rows = read_result_index(tmp_path / "regrade-run")
+    assert [(row["regrade_status"], row["error_type"]) for row in rows] == [
+        ("error", "WorkspaceCustodyPending")
+    ]
+    assert summary["counts"]["error"] == 1

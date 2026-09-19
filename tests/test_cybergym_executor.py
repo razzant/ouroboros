@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import pathlib
 import subprocess
@@ -139,24 +138,82 @@ def test_safe_extract_preserves_confined_relative_symlinks(tmp_path):
     )
 
 
-def test_safe_extract_resolves_symlink_components(tmp_path):
+def test_safe_extract_preserves_every_symlink_target_verbatim(tmp_path):
+    """GNU-tar parity for links: 64 pinned tasks (arvo:1236, arvo:10628,
+    arvo:64622, ...) carry absolute, dangling or outside-pointing targets.
+    A target is data: kept byte-for-byte, never followed or written through."""
     if not _DESCRIPTOR_SAFE_EXTRACT:
         pytest.skip("platform has no descriptor-safe archive primitives")
-    archive = tmp_path / "component-links.tar.gz"
+    outside = tmp_path / "outside-target"
+    outside.write_text("untouched", encoding="utf-8")
+    links = {
+        "src-vul/wireshark/install-sh": "/usr/share/automake-1.15/install-sh",
+        "src-vul/botan/.travis.yml": "src-vul/scripts/ci/travis.yml",
+        "src-vul/pigweed/.dockerignore": ".gitignore",
+        "src-vul/escape": "../../outside-target",
+        "src-vul/absolute-outside": str(outside),
+        "src-vul/dirlink": "real",
+        "src-vul/filelink": "dirlink/file",
+    }
+    archive = tmp_path / "repo-vul.tar.gz"
     _write_archive(
         archive,
-        [
-            ("root", "dir", ""),
-            ("root/real", "dir", ""),
-            ("root/real/file", "file", "payload"),
-            ("root/dirlink", "symlink", "real"),
-            ("root/filelink", "symlink", "dirlink/file"),
-        ],
+        [("src-vul", "dir", ""), ("src-vul/real/file", "file", "payload")]
+        + [(name, "symlink", target) for name, target in links.items()],
     )
     destination = tmp_path / "workspace"
     _safe_extract(archive, destination)
-    assert (destination / "root/filelink").is_symlink()
-    assert (destination / "root/filelink").read_text(encoding="utf-8") == "payload"
+    assert {name: os.readlink(destination / name) for name in links} == links
+    assert (destination / "src-vul/filelink").read_text(encoding="utf-8") == "payload"
+    assert outside.read_text(encoding="utf-8") == "untouched"
+
+
+def test_safe_extract_accepts_posix_member_names_and_refuses_escapes(tmp_path):
+    """Pinned AFL wiki pages carry ``:`` and Capstone fuzz corpora ``\\n``."""
+    if not _DESCRIPTOR_SAFE_EXTRACT:
+        pytest.skip("platform has no descriptor-safe archive primitives")
+    names = ("src-vul/AFL/docs/wiki:Home.md", "src-vul/capstone/corpus/id\n0", "src-vul/win\\name")
+    archive = tmp_path / "names.tar.gz"
+    _write_archive(archive, [(name, "file", name) for name in names])
+    _safe_extract(archive, tmp_path / "workspace")
+    for name in names:
+        assert (tmp_path / "workspace" / name).read_text(encoding="utf-8") == name
+    for name, message in (("/abs", "must be relative"), ("a/../../up", "escapes"), ("a\x00b", "NUL")):
+        with pytest.raises(ExecutorFailure, match=message):
+            executor_module._archive_relative(name)  # noqa: SLF001 - member-name contract
+
+
+@pytest.mark.parametrize("filter_api", [True, False], ids=["filter-api", "legacy-api"])
+def test_safe_extract_preserves_regular_file_modes_on_every_tarfile_api(tmp_path, monkeypatch, filter_api):
+    """Python 3.14's default ``data`` filter rewrote a 0444 member as 0644.
+    Only prevalidated regular files reach tarfile, so extraction is fully
+    trusted wherever the filter API exists (3.14's default is forced on older
+    filter-API runtimes) and keeps the legacy call where the API is absent."""
+    if not _DESCRIPTOR_SAFE_EXTRACT:
+        pytest.skip("platform has no descriptor-safe archive primitives")
+    has_api = hasattr(tarfile, "data_filter")
+    if filter_api and not has_api:
+        pytest.skip("interpreter predates the tarfile filter API")
+    if filter_api:
+        monkeypatch.setattr(tarfile.TarFile, "extraction_filter", staticmethod(tarfile.data_filter))
+    else:
+        real_extract, trusted = tarfile.TarFile.extract, {"filter": "fully_trusted"} if has_api else {}
+
+        def legacy_extract(self, member, path="", set_attrs=True, *, numeric_owner=False):
+            real_extract(self, member, path, set_attrs, numeric_owner=numeric_owner, **trusted)
+
+        for name in ("data_filter", "fully_trusted_filter"):
+            monkeypatch.delattr(tarfile, name, raising=False)
+        monkeypatch.setattr(tarfile.TarFile, "extract", legacy_extract)
+    modes = {"src-vul/readonly.txt": 0o444, "src-vul/tool.sh": 0o755}
+    archive = tmp_path / "modes.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for name, mode in modes.items():
+            member = tarfile.TarInfo(name)
+            member.mode = mode
+            tar.addfile(member, io.BytesIO(b""))
+    _safe_extract(archive, tmp_path / "workspace")
+    assert {name: (tmp_path / "workspace" / name).stat().st_mode & 0o7777 for name in modes} == modes
 
 
 def test_safe_extract_rolls_back_staging_on_extraction_error(tmp_path, monkeypatch):
@@ -531,54 +588,45 @@ def test_safe_extract_requires_descriptor_cleanup_capability(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize(
-    ("linkname", "message"),
+    ("entries", "message"),
     [
-        ("/tmp/cybergym-outside", "must be relative"),
-        ("../../cybergym-outside", "escapes its workspace"),
-        ("missing", "broken symlink"),
+        ([("root/member", "hardlink", "root/target")], "special member"),
+        ([("root/member", "fifo", "")], "special member"),
+        ([("root/twice", "file", "a"), ("root/./twice", "file", "b")], "duplicate member"),
+        ([("/root/absolute", "file", "x")], "must be relative"),
+        ([("root/../../escape", "file", "x")], "escapes its workspace"),
     ],
 )
-def test_safe_extract_rejects_absolute_escaping_and_broken_links(tmp_path, linkname, message):
+def test_safe_extract_refuses_unsafe_member_placement(tmp_path, entries, message):
     if not _DESCRIPTOR_SAFE_EXTRACT:
         pytest.skip("platform has no descriptor-safe archive primitives")
-    archive = tmp_path / "bad.tar.gz"
-    _write_archive(archive, [("root", "dir", ""), ("root/link", "symlink", linkname)])
-    destination = tmp_path / "workspace"
-    outside = tmp_path / "cybergym-outside"
-    outside.write_text("untouched", encoding="utf-8")
+    archive = tmp_path / "unsafe.tar.gz"
+    _write_archive(archive, [("root", "dir", ""), *entries])
     with pytest.raises(ExecutorFailure, match=message):
-        _safe_extract(archive, destination)
-    assert outside.read_text(encoding="utf-8") == "untouched"
-    assert not (destination / "root/link").exists()
-
-
-@pytest.mark.parametrize("kind", ["hardlink", "fifo"])
-def test_safe_extract_rejects_special_link_members(tmp_path, kind):
-    if not _DESCRIPTOR_SAFE_EXTRACT:
-        pytest.skip("platform has no descriptor-safe archive primitives")
-    archive = tmp_path / "special.tar.gz"
-    _write_archive(archive, [("root", "dir", ""), ("root/member", kind, "root/target")])
-    with pytest.raises(ExecutorFailure, match="special member"):
         _safe_extract(archive, tmp_path / "workspace")
+    assert not (tmp_path / "workspace" / "root").exists()
+    assert not (tmp_path / "escape").exists()
 
 
 def test_safe_extract_rejects_link_parent_conflict_and_destination_symlink(tmp_path):
     if not _DESCRIPTOR_SAFE_EXTRACT:
         pytest.skip("platform has no descriptor-safe archive primitives")
-    archive = tmp_path / "conflict.tar.gz"
-    _write_archive(
-        archive,
-        [
-            ("root", "dir", ""),
-            ("root/link", "symlink", "."),
-            ("root/link/payload", "file", "must not write"),
-        ],
-    )
-    with pytest.raises(ExecutorFailure, match="parent is not a directory"):
-        _safe_extract(archive, tmp_path / "workspace")
-
     outside = tmp_path / "outside"
     outside.mkdir()
+    for target in (".", str(outside)):
+        archive = tmp_path / "conflict.tar.gz"
+        _write_archive(
+            archive,
+            [
+                ("root", "dir", ""),
+                ("root/link", "symlink", target),
+                ("root/link/payload", "file", "must not write"),
+            ],
+        )
+        with pytest.raises(ExecutorFailure, match="parent is not a directory"):
+            _safe_extract(archive, tmp_path / "workspace")
+    assert list(outside.iterdir()) == []
+
     redirected = tmp_path / "redirected"
     redirected.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ExecutorFailure, match="must not traverse a symlink"):
@@ -1359,61 +1407,6 @@ def test_workspace_registration_and_attestation_share_registry_lock(tmp_path, mo
 
 
 @_requires_posix_mount_paths
-def test_workspace_start_error_recovers_name_custody_by_inspect(tmp_path):
-    config = _config(tmp_path)
-    executor = CyberGymExecutor(config)
-    executor.network_id = "network-id"
-    agent_id = "agent-" + "c" * 24
-    plan = executor._task_network_plan("task-c", agent_id)
-    name = "cybergym-workspace-" + agent_id
-    container_id = "c" * 64
-    observed = {
-        "Id": container_id,
-        "Name": "/" + name,
-        "Config": {
-            "Image": config.workspace_image_digest,
-            "Labels": {
-                "com.ouroboros.campaign": config.campaign_id,
-                "com.ouroboros.role": "workspace",
-                "com.ouroboros.agent_id": plan.opaque_agent_id,
-            },
-        },
-        "NetworkSettings": {
-            "Networks": {"cybergym-internal": {"NetworkID": executor.network_id}}
-        },
-    }
-
-    removed = []
-
-    def command(argv, *, cwd=None, env=None, timeout=None):
-        if "inspect" in argv and "container" in argv:
-            target = argv[-1]
-            if target in removed:
-                return CommandResult(1, "", f"Error: No such container: {target}")
-            if target in {name, container_id}:
-                return CommandResult(0, json.dumps([observed]), "")
-        if "rm" in argv and container_id in argv:
-            removed.append(container_id)
-            removed.append(name)
-            return CommandResult(0, "", "")
-        if "run" in argv and name in argv:
-            raise ExecutorFailure("docker run transport timeout")
-        raise AssertionError(argv)
-
-    executor.config = dataclasses_replace(config, command_runner=command)
-    with pytest.raises(ExecutorFailure, match="transport timeout"):
-        executor._workspace(  # noqa: SLF001 - startup custody assertion
-            type("Task", (), {"task_id": "task-c"})(),
-            config.run_root / "task-c",
-            plan,
-        )
-    assert name not in executor._task_containers
-    assert name not in executor._unresolved_workspace_custody
-    assert container_id in removed
-    assert not executor._workspace_starting
-
-
-@_requires_posix_mount_paths
 def test_workspace_starts_remain_concurrent_while_registry_publishes_atomically(tmp_path):
     config = _config(tmp_path)
     executor = CyberGymExecutor(config)
@@ -1564,7 +1557,7 @@ def test_task_body_states_wall_clock_budget_derived_from_ceiling(tmp_path):
         "attempt-1",
     )
     guidance = body["description"]
-    assert "Time budget: you have at most 3 hours of wall time" in guidance
+    assert "Time budget: you have at most 6 hours of wall time" in guidance
     assert "best-effort /workspace/final.poc before the deadline" in guidance
 
 

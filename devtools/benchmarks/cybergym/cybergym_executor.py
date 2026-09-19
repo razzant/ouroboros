@@ -38,12 +38,12 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     MAX_TASK_TIMEOUT_SEC,
     TaskSpec,
     build_generate_task_argv,
-    official_pin_skip_reason,
     safe_task_path,
 )
 from devtools.benchmarks.cybergym.cybergym_custody import (  # noqa: F401
     _CustodyMixin,
 )
+from devtools.benchmarks.cybergym.cybergym_dispatch import WorkspaceCustodyPending
 from devtools.benchmarks.cybergym.cybergym_docker import (  # noqa: F401
     _EXPECTED_MODEL,
     _GATEWAY_TASK_ID,
@@ -164,7 +164,7 @@ class ExecutorConfig:
     settings_path: pathlib.Path | None = None
     server_port: int = 8666
     verifier_host_port: int = 0
-    task_timeout_sec: int = 10_800
+    task_timeout_sec: int = 21_600
     difficulty: str = DEFAULT_LEVEL
     api_key_env: str = API_KEY_ENV
     provider_key_env: str = _OPENROUTER_KEY_ENV
@@ -343,38 +343,25 @@ class ExecutorConfig:
             )
 
 
-_ARCHIVE_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+def _archive_relative(value: Any) -> str:
+    """Normalize one POSIX member name and keep it inside the destination.
 
-
-def _archive_relative(value: Any, *, field: str) -> str:
-    """Normalize one POSIX archive path and keep it relative."""
+    Any non-NUL relative POSIX name is valid, including the colon, backslash
+    and newline of pinned AFL and Capstone inputs; extraction refuses on
+    platforms without POSIX descriptor primitives before names matter.
+    """
     if not isinstance(value, str) or not value:
-        raise ExecutorFailure(f"task archive {field} is empty")
-    if "\x00" in value or "\\" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise ExecutorFailure(f"task archive {field} contains unsafe characters")
-    if value.startswith("/") or _ARCHIVE_DRIVE_PREFIX.match(value):
-        raise ExecutorFailure(f"task archive {field} must be relative")
+        raise ExecutorFailure("task archive member name is empty")
+    if "\x00" in value:
+        raise ExecutorFailure("task archive member name contains NUL")
+    if value.startswith("/"):
+        raise ExecutorFailure("task archive member name must be relative")
     normalized = posixpath.normpath(value)
     if normalized in {"", "."}:
         return "."
     if normalized.startswith("../") or normalized == "..":
-        raise ExecutorFailure(f"task archive {field} escapes its workspace")
-    # A colon is legal on POSIX but has drive/alternate-stream meaning on
-    # Windows; reject it in every component so the same archive contract holds
-    # on both Python 3.10 worker platforms.
-    if any(":" in component for component in normalized.split("/")):
-        raise ExecutorFailure(f"task archive {field} contains a platform path separator")
+        raise ExecutorFailure("task archive member name escapes its workspace")
     return normalized
-
-
-def _archive_link_target(member_name: str, linkname: Any) -> str:
-    """Resolve a symlink target lexically inside the archive."""
-    if not isinstance(linkname, str) or not linkname:
-        raise ExecutorFailure("task archive symlink target is empty")
-    return _archive_relative(
-        posixpath.join(posixpath.dirname(member_name), linkname),
-        field="symlink target",
-    )
 
 
 def _archive_path(root: pathlib.Path, relative: str) -> pathlib.Path:
@@ -408,52 +395,6 @@ def _assert_archive_root_is_not_symlink(path: pathlib.Path) -> None:
         raise ExecutorFailure("task archive destination cannot be inspected") from exc
     if resolved != absolute:
         raise ExecutorFailure("task archive destination must not traverse a symlink")
-
-
-def _archive_resolve(
-    relative: str,
-    member_types: Mapping[str, str],
-    link_targets: Mapping[str, str],
-    implicit_dirs: set[str],
-) -> tuple[str, str]:
-    """Resolve path components and symlink chains inside an archive graph."""
-    pending = [] if relative == "." else list(pathlib.PurePosixPath(relative).parts)
-    resolved: list[str] = []
-    seen: set[str] = set()
-    while pending:
-        component = pending.pop(0)
-        candidate = "/".join((*resolved, component))
-        kind = member_types.get(candidate)
-        if kind == "link":
-            if candidate in seen:
-                raise ExecutorFailure("task archive contains a symlink cycle")
-            seen.add(candidate)
-            target = link_targets.get(candidate)
-            if target is None:  # pragma: no cover - graph construction invariant
-                raise ExecutorFailure("task archive contains a broken symlink")
-            # Link targets are already normalized relative to the archive root;
-            # replace the resolved prefix and continue with any suffix components.
-            pending = ([] if target == "." else list(pathlib.PurePosixPath(target).parts)) + pending
-            resolved = []
-            continue
-        resolved.append(component)
-    canonical = "/".join(resolved) or "."
-    kind = member_types.get(canonical)
-    if kind is None and canonical in implicit_dirs:
-        kind = "dir"
-    if kind is None:
-        raise ExecutorFailure("task archive contains a broken symlink")
-    return canonical, kind
-
-
-def _archive_link_kind(
-    relative: str,
-    member_types: Mapping[str, str],
-    link_targets: Mapping[str, str],
-    implicit_dirs: set[str],
-) -> str:
-    """Return the terminal type of a link target, including component links."""
-    return _archive_resolve(relative, member_types, link_targets, implicit_dirs)[1]
 
 
 def _remove_archive_entry_at(
@@ -506,11 +447,16 @@ def _remove_archive_entry_at(
 
 
 def _safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
-    """Extract a confined tree while preserving safe CyberGym symlinks.
+    """Extract a task tree with GNU-tar parity for files, directories and links.
 
-    Python 3.10 has no dependable extraction filter.  Validate the complete
-    member/link graph, extract directories/files before links, and create only
-    canonical relative symlinks.
+    Python 3.10 has no dependable extraction filter.  Every member name is
+    validated first (relative, no NUL, no lexical escape, no duplicate, no
+    hardlink/FIFO/device, no member below a link or file).  Directories and
+    files are written into private staging, then every symlink is created last
+    with its archive target verbatim: a dangling, absolute or outside-pointing
+    target is data, exactly as GNU tar keeps it, and extraction never follows
+    or writes through one.  Validated top-level entries are published by
+    descriptor-relative rename with identity-checked rollback.
     """
 
     destination = pathlib.Path(destination).expanduser()
@@ -595,7 +541,7 @@ def _safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
             implicit_dirs: set[str] = {"."}
             link_targets: dict[str, str] = {}
             for member in tar.getmembers():
-                relative = _archive_relative(member.name, field="member name")
+                relative = _archive_relative(member.name)
                 if relative in members:
                     raise ExecutorFailure("task archive contains duplicate member paths")
                 if member.isdir():
@@ -615,24 +561,19 @@ def _safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
                     if parent_text != ".":
                         implicit_dirs.add(parent_text)
                 if kind == "link":
-                    link_targets[relative] = _archive_link_target(relative, member.linkname)
+                    linkname = member.linkname
+                    if not isinstance(linkname, str) or not linkname or "\x00" in linkname:
+                        raise ExecutorFailure("task archive symlink target is empty or contains NUL")
+                    link_targets[relative] = linkname
 
-            # Reject file/link parents before any filesystem write.  Archive
-            # contents are published only after the complete graph is valid.
+            # Reject file/link parents before any filesystem write, so no
+            # member is ever placed through a link.  Archive contents are
+            # published only after every member is valid.
             for relative in member_types:
                 for parent in pathlib.PurePosixPath(relative).parents:
                     parent_text = parent.as_posix()
                     if parent_text != "." and member_types.get(parent_text) not in {None, "dir"}:
                         raise ExecutorFailure("task archive member parent is not a directory")
-
-            link_resolutions: dict[str, tuple[str, str]] = {}
-            for relative, target in link_targets.items():
-                resolved_target, kind = _archive_resolve(
-                    target, member_types, link_targets, implicit_dirs
-                )
-                if kind not in {"dir", "file"}:
-                    raise ExecutorFailure("task archive symlink target is not a regular path")
-                link_resolutions[relative] = (resolved_target, kind)
 
             top_levels = sorted(
                 {
@@ -670,8 +611,11 @@ def _safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
                 path.mkdir()
 
             # Keep tar stream order; repeated backward seeks make gzip archives
-            # unexpectedly expensive.  Only regular files/directories reach
-            # tarfile, so Python 3.10 cannot create an unvalidated link here.
+            # unexpectedly expensive.  Only validated regular files reach
+            # tarfile, so extract fully trusted wherever the filter API exists:
+            # Python 3.14's default ``data`` filter rewrites a 0444 mode to 0644.
+            # Runtimes without the API keep the equivalent legacy call.
+            trusted = {"filter": "fully_trusted"} if hasattr(tarfile, "data_filter") else {}
             for relative, member in members.items():
                 # Directories were created above with writable mode.  Do not
                 # let tarfile apply an archive directory mode (for example
@@ -681,35 +625,17 @@ def _safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
                 _assert_archive_parent_is_directory(root, relative)
                 extracted = copy.copy(member)  # TarInfo uses slots on Python 3.10.
                 extracted.name = relative
-                tar.extract(extracted, root)
+                tar.extract(extracted, root, **trusted)
 
-            # Create links manually, after all regular members, and preserve the
-            # archive's relative target spelling.
+            # Links come last, after every regular member, with the archive's
+            # exact target: nothing is written below or through them.  A link
+            # resolves later in the agent container's namespace, while
+            # host-side tools resolve and confine their own reads.
             for relative in sorted(link_targets):
-                path = _archive_path(root, relative)
-                target = link_targets[relative]
-                link_from = posixpath.dirname(relative) or "."
-                linkname = posixpath.relpath(target, link_from)
                 try:
-                    os.symlink(linkname, path)
+                    os.symlink(link_targets[relative], _archive_path(root, relative))
                 except FileExistsError as exc:
                     raise ExecutorFailure("task archive symlink would overwrite an existing path") from exc
-
-            for relative, (_resolved_target, expected) in link_resolutions.items():
-                path = _archive_path(root, relative)
-                try:
-                    info = path.lstat()
-                    resolved = path.resolve(strict=True)
-                    resolved.relative_to(root)
-                    resolved_info = resolved.stat()
-                except (OSError, RuntimeError, ValueError) as exc:
-                    raise ExecutorFailure("task archive produced a broken or external symlink") from exc
-                if not stat.S_ISLNK(info.st_mode):
-                    raise ExecutorFailure("task archive symlink was not preserved")
-                if (expected == "dir" and not stat.S_ISDIR(resolved_info.st_mode)) or (
-                    expected == "file" and not stat.S_ISREG(resolved_info.st_mode)
-                ):
-                    raise ExecutorFailure("task archive symlink target changed type")
 
         # Publish only validated top-level entries.  On POSIX use directory
         # descriptors opened with O_NOFOLLOW so a replaced destination path
@@ -878,6 +804,10 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
         self._registry_condition = threading.Condition(self._registry_lock)
         self._workspace_starting: dict[str, int] = {}
         self._unresolved_workspace_custody: dict[str, str] = {}
+        # One healer pass at a time: a dispatch probe and every _workspace lane
+        # can enter it at once.  Taken before the registry lock and never under
+        # it, so a pass serializes healers without blocking parallel starts.
+        self._workspace_healer_lock = threading.Lock()
         # Gateway ids are registered before the admission POST and retained
         # until a settled status is observed.  This is the custody boundary:
         # a transport error after the server accepted a task must not let
@@ -946,8 +876,9 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
             while self._workspace_starting:
                 self._registry_condition.wait()
             if self._unresolved_workspace_custody:
-                names = ", ".join(sorted(self._unresolved_workspace_custody))
-                raise ExecutorFailure(f"workspace startup custody is unresolved: {names}")
+                # A sibling's start is unresolved: this zero-send attempt is
+                # requeued; the dispatcher's probe heals outside this lock.
+                raise WorkspaceCustodyPending(self._unresolved_workspace_custody)
             cached_server = self._server_observation
             cached_workspace = self._workspace_observations.get(workspace_name)
             if not isinstance(cached_server, Mapping) or not isinstance(cached_workspace, Mapping):
@@ -1107,15 +1038,6 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
     def run_task(self, task: TaskSpec, task_dir: pathlib.Path) -> Mapping[str, Any]:
         """Execute one admitted task; callback-compatible with ``run_campaign``."""
 
-        skip_reason = official_pin_skip_reason(task.task_id)
-        if skip_reason:
-            return {
-                "status": "infra_failed",
-                "lifecycle": skip_reason,
-                "infra_reason": skip_reason,
-                "error": "official pin skipped: " + skip_reason,
-                "artifact_refs": {"task_dir": str(task_dir)},
-            }
         self.start()
         attempt_id = str(task.metadata.get("attempt_id") or uuid.uuid4().hex)
         agent_id = make_opaque_agent_id(self.config.campaign_id, task.task_id, attempt_id)
@@ -1214,6 +1136,10 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
                 sidecar_attestation=sidecar_attestation,
                 terminal_evidence=terminal_evidence,
             )
+        except WorkspaceCustodyPending:
+            # Collateral of a sibling's unresolved start, before any gateway
+            # send: no row.  ``run_campaign`` releases the claim for a requeue.
+            raise
         except Exception as exc:
             if not gateway_admission_started or isinstance(
                 exc, GatewayAdmissionRejected
