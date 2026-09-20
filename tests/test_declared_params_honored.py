@@ -1,7 +1,7 @@
 """#447: a parameter declared in a tool's public schema is honored on EVERY
 dispatch branch that accepts the call (or that branch refuses by name).
 
-Three regressions of the same class are pinned here:
+Regressions of the same class are pinned here:
   D1 - read_file(start_char=...) was silently dropped by the active_workspace /
        system_repo / runtime_data branches (only task_drive & co honored it), so a
        long one-line file re-read the identical head forever; the reread-nudge
@@ -11,15 +11,24 @@ Three regressions of the same class are pinned here:
        large-file write while reporting success.
   D6 - query_code(op=structural) collected only `limit` rows before slicing
        rows[offset:], so page 2 was always empty and blamed the query.
+  D7 - the mirror image: an UNDECLARED per-item key inside a `files`/`edits`
+       payload was silently dropped, so write_file(files=[{..., "root":
+       "task_drive"}]) bound every item to the ONE top-level root and wrote
+       into the Ouroboros repo instead. A target the tool cannot honor is
+       refused by name, atomically, never dropped.
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
 from unittest.mock import MagicMock
 
+import pytest
+
 from ouroboros.tools.core import _data_read, _read_file, _write_file
-from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.edit_ops import _edit_batch
+from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 _NUDGE = "This exact view is unchanged"
 
@@ -191,3 +200,182 @@ def test_structural_pagination_beyond_cap_is_typed_truncation_not_no_results(tmp
     beyond = _structural_page(ctx, offset=400)
     assert beyond.startswith("⚠️ QUERY_CODE_TRUNCATED"), beyond[:200]
     assert "No results" not in beyond
+
+
+# ---------------------------------------------------------------------------
+# D7: a payload item key the tool does NOT read is refused, never dropped
+# ---------------------------------------------------------------------------
+
+@pytest.mark.serial
+def test_write_file_batch_refuses_a_per_item_root_it_cannot_honor(tmp_path):
+    """Live defect: write_file(files=[{path, content, root}]) reads only path and
+    content, binding every item to the ONE top-level root, so a per-item
+    `root="task_drive"` was dropped and two scratch files landed in the
+    Ouroboros repo while the call reported success."""
+    ctx = _ctx(tmp_path)
+    out = _write_file(ctx, files=[
+        {"path": "scratch.py", "content": "print(1)\n", "root": "task_drive"},
+    ])
+    assert "TOOL_ARG_ERROR" in out, out
+    assert "root" in out, out
+    assert not (ctx.repo_dir / "scratch.py").exists(), "a refused write must not land in the repo"
+    assert not (ctx.drive_root / "scratch.py").exists(), "nor on the drive it named"
+
+
+@pytest.mark.serial
+def test_write_file_batch_item_key_refusal_aborts_the_whole_batch(tmp_path):
+    """All-or-nothing, like edit_batch's count mismatch: a clean sibling item is
+    not written when another item declares a target this tool cannot honor."""
+    ctx = _ctx(tmp_path)
+    out = _write_file(ctx, files=[
+        {"path": "clean.txt", "content": "A\n"},
+        {"path": "stray.txt", "content": "B\n", "root": "task_drive"},
+    ])
+    assert "TOOL_ARG_ERROR" in out, out
+    assert not (ctx.repo_dir / "clean.txt").exists(), "nothing is written before the refusal"
+    assert not (ctx.repo_dir / "stray.txt").exists(), out
+
+
+@pytest.mark.serial
+def test_edit_batch_refuses_a_per_item_root_it_cannot_honor(tmp_path):
+    """The sibling surface shares the class: edit items declare
+    {path, old_str, new_str, count} and the tool's root enum is repo-only, so a
+    per-item root would silently edit the repo instead of the named target."""
+    ctx = _ctx(tmp_path)
+    target = ctx.repo_dir / "mod.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    out = _edit_batch(ctx, edits=[
+        {"path": "mod.txt", "old_str": "alpha", "new_str": "beta", "root": "task_drive"},
+    ])
+    assert "TOOL_ARG_ERROR" in out, out
+    assert "root" in out, out
+    assert target.read_text(encoding="utf-8") == "alpha\n", "a refused edit leaves the file untouched"
+
+
+def test_published_item_schemas_are_derived_from_the_one_declaration():
+    """The published schema is DERIVED from the same declaration the guard reads,
+    so the two cannot drift: agreeing key sets are not enough, because a literal
+    schema beside the constant is a second definition that can silently diverge."""
+    from ouroboros.tools.core import _WRITE_FILE_ITEM_KEYS, _WRITE_FILE_ITEM_PROPERTIES
+    from ouroboros.tools.core import get_tools as core_tools
+    from ouroboros.tools.edit_ops import _EDIT_BATCH_ITEM_KEYS, _EDIT_BATCH_ITEM_PROPERTIES
+    from ouroboros.tools.edit_ops import _EDIT_BATCH_ITEM_REQUIRED
+    from ouroboros.tools.edit_ops import get_tools as edit_tools
+
+    for tools, tool_name, payload_key, declared, allowed, required in (
+        (core_tools(), "write_file", "files",
+         _WRITE_FILE_ITEM_PROPERTIES, _WRITE_FILE_ITEM_KEYS, _WRITE_FILE_ITEM_KEYS),
+        (edit_tools(), "edit_batch", "edits",
+         _EDIT_BATCH_ITEM_PROPERTIES, _EDIT_BATCH_ITEM_KEYS, _EDIT_BATCH_ITEM_REQUIRED),
+    ):
+        entry = next(e for e in tools if e.name == tool_name)
+        item_shape = entry.schema["parameters"]["properties"][payload_key]["items"]
+        # Whole-property equality, not just the key set: a type or description that
+        # drifts from the declaration is the same silent-divergence class.
+        assert item_shape["properties"] == declared, tool_name
+        assert item_shape["additionalProperties"] is False, tool_name
+        assert tuple(allowed) == tuple(declared), tool_name
+        assert item_shape["required"] == list(required), tool_name
+        assert set(required) <= set(allowed), tool_name
+
+
+def test_published_item_schema_is_a_copy_the_caller_cannot_corrupt():
+    """get_tools() hands out schemas that other layers narrow in place (the acting
+    subagent rewrites `root`), so the item properties must be a copy: sharing the
+    module declaration would let one caller's edit rewrite the guard's vocabulary."""
+    from ouroboros.tools.core import _WRITE_FILE_ITEM_PROPERTIES
+    from ouroboros.tools.core import get_tools as core_tools
+
+    def item_properties():
+        entry = next(e for e in core_tools() if e.name == "write_file")
+        return entry.schema["parameters"]["properties"]["files"]["items"]["properties"]
+
+    mutated = item_properties()
+    mutated["root"] = {"type": "string"}
+    mutated["path"]["type"] = "corrupted"
+
+    assert "root" not in _WRITE_FILE_ITEM_PROPERTIES
+    assert _WRITE_FILE_ITEM_PROPERTIES["path"] == {"type": "string"}
+    assert item_properties() == {"path": {"type": "string"}, "content": {"type": "string"}}
+
+
+@pytest.mark.serial
+def test_non_dict_batch_item_refuses_the_whole_call_on_every_root(tmp_path):
+    """Same class as the per-item root, on the item's own shape rather than its
+    keys: a `files` entry that is not an object was silently DROPPED by the
+    runtime_data and generic loops while its siblings reported success (the repo
+    lane refused with its own separate code). One pre-write guard now refuses the
+    whole call, by name, identically on every root — nothing is written anywhere."""
+    ctx = _ctx(tmp_path)
+    ctx.task_id = "batch-argument-test"
+    for root in ("runtime_data", "task_drive", "active_workspace", "artifact_store"):
+        out = _write_file(ctx, files=[
+            {"path": "kept.txt", "content": "A\n"},
+            "not-an-object",
+        ], root=root)
+        assert "TOOL_ARG_ERROR" in out, (root, out)
+        assert "file 2: not an object" in out, (root, out)
+        assert "OK: wrote" not in out and "✅" not in out, (root, out)
+    # The clean sibling never landed on the two roots whose base path is known here.
+    assert not (ctx.repo_dir / "kept.txt").exists()
+    assert not (ctx.drive_root / "kept.txt").exists()
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
+                                 "task_drive", "artifact_store", "user_files", "skill_payload"])
+def test_declared_batch_items_keep_write_and_append_on_every_root(tmp_path, monkeypatch, root):
+    ctx = _ctx(tmp_path)
+    ctx.task_id = "batch-argument-test"
+    owner_home = tmp_path / "owner"
+    owner_home.mkdir()
+    monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(owner_home))
+    selectors = {}
+    if root == "skill_payload":
+        from tests.test_skill_exec import _build_skill
+
+        _build_skill(ctx.drive_root / "skills" / "external", "alpha")
+        selectors = {"bucket": "external", "skill_name": "alpha"}
+    for mode, contents in [("overwrite", ("hello ", "first ")), ("append", ("мир", "second"))]:
+        result = _write_file(ctx, files=[
+            {"path": "a.txt", "content": contents[0]},
+            {"path": "b.txt", "content": contents[1]},
+        ], root=root, mode=mode, **selectors)
+        assert "TOOL_ARG_ERROR" not in result and "PARTIAL_FAILURE" not in result, result
+        assert result.startswith(("✅", "OK: wrote")), result
+    assert "hello мир" in _read_file(ctx, "a.txt", root=root, **selectors)
+    assert "first second" in _read_file(ctx, "b.txt", root=root, **selectors)
+
+
+@pytest.mark.serial
+def test_declared_edit_batch_items_keep_count_and_sequential_edits(tmp_path):
+    ctx = _ctx(tmp_path)
+    target = ctx.repo_dir / "edit.txt"
+    target.write_text("alpha alpha\n", encoding="utf-8")
+    result = _edit_batch(ctx, edits=[
+        {"path": "edit.txt", "old_str": "alpha", "new_str": "beta", "count": 2},
+        {"path": "edit.txt", "old_str": "beta beta", "new_str": "done"},
+    ])
+    assert result.startswith("✅ edit_batch applied 2 edit(s)"), result
+    assert target.read_text(encoding="utf-8") == "done\n"
+
+
+@pytest.mark.serial
+def test_write_file_registry_refuses_json_string_batch_once_and_keeps_list_valid(tmp_path, monkeypatch):
+    from ouroboros import safety
+
+    ctx = _ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    monkeypatch.setattr(safety, "check_safety", lambda *_args, **_kwargs: (True, ""))
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    files = [{"path": "batch.txt", "content": "x" * 5000}]
+    result = registry.execute_result("write_file", {"root": "runtime_data", "files": json.dumps(files)})
+    assert result.text.count("TOOL_ARG_ERROR") == 1
+    assert result.status == "error"
+    assert not (ctx.drive_root / "batch.txt").exists()
+    assert not (ctx.repo_dir / "batch.txt").exists()
+
+    result = registry.execute_result("write_file", {"root": "runtime_data", "files": files})
+    assert result.status == "ok", result.text
+    assert (ctx.drive_root / "batch.txt").read_text(encoding="utf-8") == files[0]["content"]

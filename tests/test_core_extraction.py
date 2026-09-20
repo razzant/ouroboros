@@ -117,8 +117,9 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # next step, or a choice that is the owner's to make) and that waiting questions of one
     # batch share one wait, ended by the first incoming message; 935 -> 932 bytes. Diffing the
     # whole catalog base to head shows exactly those edits and nothing else.
+    # Batch-argument repair closes write_file.files items with additionalProperties=false.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "0f72df2827a90d691d5c3fd1107170b050489061e9d55201a1feda0da647f82b"
+        "102a780576bf869baa1f2b0bce61511f7e72623acc6522c12736cb2712cb8d61"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

@@ -17,6 +17,7 @@ from ouroboros.project_facts import filter_out_project_store as _filter_out_proj
 from ouroboros.project_facts import project_store_access_block as _project_store_access_block
 from ouroboros.protected_artifacts import block_reason_for_path
 from ouroboros.secret_masking import mask_secret_bytes
+from ouroboros.tools.edit_ops import payload_item_key_refusal
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for  # noqa: F401
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
@@ -530,11 +531,25 @@ def _data_write(
     return result
 
 
+_ITEM_SHAPE_ERROR = "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
+
+
 def _join_write_results(results: List[str]) -> str:
-    rendered = "\n".join(results) if results else "⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects."
+    rendered = "\n".join(results) if results else _ITEM_SHAPE_ERROR
     if any(str(line).lstrip().startswith("⚠️") for result in results for line in str(result).splitlines()):
         return "⚠️ WRITE_FILE_BATCH_PARTIAL_FAILURE: one or more writes failed.\n" + rendered
     return rendered
+
+
+# The ONE declaration of the `files` item shape: the published schema below and
+# the pre-write guard both DERIVE from it, so the declared shape cannot drift from
+# what the tool reads. Every item is bound to the ONE top-level `root`, so a
+# per-item `root` is refused rather than dropped.
+_WRITE_FILE_ITEM_PROPERTIES: Dict[str, Dict[str, str]] = {
+    "path": {"type": "string"},
+    "content": {"type": "string"},
+}
+_WRITE_FILE_ITEM_KEYS: tuple[str, ...] = tuple(_WRITE_FILE_ITEM_PROPERTIES)
 
 
 def _write_file(
@@ -552,6 +567,10 @@ def _write_file(
     normalized, block = _access_or_block(ctx, root, "write")
     if block:
         return block
+    if files:
+        item_refusal = payload_item_key_refusal(files, _WRITE_FILE_ITEM_KEYS, item_label="file")
+        if item_refusal:
+            return item_refusal
     try:
         if _resolved_binding is None and files:
             bindings: ResolvedResourceBinding | tuple[ResolvedResourceBinding, ...] = tuple(
@@ -584,46 +603,24 @@ def _write_file(
             ctx, path=path, content=content, files=files or [], mode=mode, force=force,
             display_root=normalized, _resolved_binding=bindings,
         )
-    if normalized == "runtime_data":
+    if normalized in {"runtime_data", "skill_payload"}:
+        # One loop for both data roots: bucket/skill_name reach _data_write only to
+        # synthesize a payload short form when `_resolved_binding is None`, and every
+        # call below passes a resolved binding, so forwarding them is a no-op for
+        # runtime_data. A non-dict item is REPORTED, never silently skipped, and it
+        # consumes no binding (bindings are built for dict items only).
         if files:
             results = []
             binding_iter = iter(binding_items)
             for item in files:
-                if not isinstance(item, dict):
-                    continue
-                item_binding = next(binding_iter, None)
+                item_binding = next(binding_iter, None) if isinstance(item, dict) else None
                 if item_binding is None:
-                    results.append("⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects.")
+                    results.append(_ITEM_SHAPE_ERROR)
                     continue
                 results.append(_data_write(
                     ctx,
                     str(item.get("path") or ""),
                     str(item.get("content") or ""),
-                    mode=mode,
-                    display_root=normalized,
-                    force=force,
-                    _resolved_binding=item_binding,
-                ))
-            return _join_write_results(results)
-        return _data_write(
-            ctx, path=path, content=content, mode=mode, display_root=normalized,
-            force=force, _resolved_binding=binding_items[0],
-        )
-    if normalized == "skill_payload":
-        if files:
-            results = []
-            binding_iter = iter(binding_items)
-            for item in files:
-                rel = str(item.get("path") or "") if isinstance(item, dict) else ""
-                body = str(item.get("content") or "") if isinstance(item, dict) else ""
-                item_binding = next(binding_iter, None) if isinstance(item, dict) else None
-                if item_binding is None:
-                    results.append("⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects.")
-                    continue
-                results.append(_data_write(
-                    ctx,
-                    rel,
-                    body,
                     mode=mode,
                     bucket=bucket,
                     skill_name=skill_name,
@@ -642,13 +639,11 @@ def _write_file(
             results = []
             binding_iter = iter(binding_items)
             for item in files:
-                if not isinstance(item, dict):
+                item_binding = next(binding_iter, None) if isinstance(item, dict) else None
+                if item_binding is None:
+                    results.append(_ITEM_SHAPE_ERROR)
                     continue
                 rel_path = str(item.get("path") or "")
-                item_binding = next(binding_iter, None)
-                if item_binding is None:
-                    results.append("⚠️ TOOL_ARG_ERROR: files must contain {path, content} objects.")
-                    continue
                 target = item_binding.target_path
                 if normalized == "artifact_store":
                     block_reason = artifact_store_path_block_reason(
@@ -1343,9 +1338,9 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
-                "files": {"type": "array", "items": {"type": "object", "properties": {
-                    "path": {"type": "string"}, "content": {"type": "string"},
-                }, "required": ["path", "content"]}},
+                "files": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                    "properties": {k: dict(v) for k, v in _WRITE_FILE_ITEM_PROPERTIES.items()},
+                    "required": list(_WRITE_FILE_ITEM_KEYS)}},
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
                 "force": {"type": "boolean", "default": False, "description": "Bypass the shrink guard for an intentional full rewrite on any root where it applies (active_workspace via the repo guard; runtime_data/task_drive/skill_payload/artifact_store/user_files via the data-plane guard)."},

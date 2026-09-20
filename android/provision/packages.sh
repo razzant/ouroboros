@@ -39,7 +39,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-    python3 python3-venv python3-pip python3-dev git curl ca-certificates \
+    python3 python3-venv python3-pip python3-dev git rsync curl ca-certificates \
     build-essential cmake ninja-build bison flex pkg-config libfmt-dev libgtest-dev \
     libexpat1-dev libpng-dev libprotobuf-dev protobuf-compiler zlib1g-dev \
     openjdk-17-jdk-headless util-linux procps patch unzip

@@ -73,6 +73,66 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Payload item vocabulary (shared with core._write_file)
+# ---------------------------------------------------------------------------
+
+# The ONE declaration of the `edits` item shape: the published schema in
+# get_tools() and the pre-edit guard both DERIVE from it, so the declared shape
+# cannot drift from what the tool reads. `count` is optional; the rest are required.
+_EDIT_BATCH_ITEM_PROPERTIES: Dict[str, Dict[str, Any]] = {
+    "path": {"type": "string"},
+    "old_str": {"type": "string"},
+    "new_str": {"type": "string"},
+    "count": {"type": "integer", "default": 1,
+              "description": "Exact number of occurrences expected AND replaced."},
+}
+_EDIT_BATCH_ITEM_KEYS: Tuple[str, ...] = tuple(_EDIT_BATCH_ITEM_PROPERTIES)
+_EDIT_BATCH_ITEM_REQUIRED: Tuple[str, ...] = ("path", "old_str", "new_str")
+
+
+def payload_item_key_refusal(
+    items: Any,
+    allowed: Tuple[str, ...],
+    *,
+    item_label: str,
+) -> str:
+    """Refuse a payload item this tool cannot honor exactly as declared.
+
+    These tools take their targets INSIDE the payload but bind every item to the
+    ONE top-level ``root``, so an item key outside the declared vocabulary is not
+    a harmless extra: a dropped per-item ``root`` silently redirects the write to
+    a different resource root while the call reports success. The declared item
+    shape is therefore CLOSED in both directions — an undeclared key, and an item
+    that is not an object at all, refuse the whole call before anything is
+    written, so a caller's stated target can never be ignored and a malformed
+    item can never vanish while its siblings report success.
+
+    Returns the typed refusal, or "" when every item is clean.
+    """
+    if not isinstance(items, list):
+        return f"⚠️ TOOL_ARG_ERROR: {item_label} payload must be an array of objects."
+    offenders: List[str] = []
+    for idx, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            offenders.append(f"{item_label} {idx}: not an object")
+            continue
+        extra = sorted(str(key) for key in item if str(key) not in allowed)
+        if extra:
+            offenders.append(
+                f"{item_label} {idx} ({item.get('path') or '?'}): unread key(s) {', '.join(extra)}"
+            )
+    if not offenders:
+        return ""
+    return (
+        "⚠️ TOOL_ARG_ERROR: payload item(s) this tool cannot honor as declared — "
+        + "; ".join(offenders)
+        + f". A {item_label} declares only: {', '.join(allowed)}, and every item is bound "
+        "to the ONE top-level root. Nothing was written: fix the item(s), or make "
+        "one call per target root."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Shared target resolution (mirrors the edit_text guard chain)
 # ---------------------------------------------------------------------------
 
@@ -592,6 +652,9 @@ def _edit_batch(
 ) -> str:
     if not edits or not isinstance(edits, list):
         return "⚠️ EDIT_BATCH_ERROR: edits must be a non-empty array."
+    item_refusal = payload_item_key_refusal(edits, _EDIT_BATCH_ITEM_KEYS, item_label="edit")
+    if item_refusal:
+        return item_refusal
     contents: Dict[str, str] = {}
     targets: Dict[str, pathlib.Path] = {}
     applied: List[str] = []
@@ -786,13 +849,9 @@ def get_tools() -> List[ToolEntry]:
                 "use count>1 for identical repeated edits instead of many edit_text calls."
             ),
             "parameters": {"type": "object", "properties": {
-                "edits": {"type": "array", "items": {"type": "object", "properties": {
-                    "path": {"type": "string"},
-                    "old_str": {"type": "string"},
-                    "new_str": {"type": "string"},
-                    "count": {"type": "integer", "default": 1,
-                              "description": "Exact number of occurrences expected AND replaced."},
-                }, "required": ["path", "old_str", "new_str"]}},
+                "edits": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                    "properties": {k: dict(v) for k, v in _EDIT_BATCH_ITEM_PROPERTIES.items()},
+                    "required": list(_EDIT_BATCH_ITEM_REQUIRED)}},
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo"], "default": "active_workspace"},
             }, "required": ["edits"]},
         }, _edit_batch, is_code_tool=True, mutates_worktree=True),
