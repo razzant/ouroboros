@@ -561,9 +561,13 @@ def _telegram_html_to_plain(value: str) -> str:
 
 
 class TelegramClient:
-    def __init__(self, token: str, *, trust_env: bool = False):
+    def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None):
         self.token = str(token or "").strip()
         self.trust_env = bool(trust_env)
+        # Explicit skill-local egress proxy (settings.json TELEGRAM_PROXY). None keeps
+        # the client direct; when set it is honored independent of ambient env, so the
+        # host process needs no proxy env vars at all.
+        self.proxy = str(proxy or "").strip() or None
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN is missing")
         self.api_base = f"https://api.telegram.org/bot{self.token}"
@@ -575,7 +579,7 @@ class TelegramClient:
         try:
             # trust_env trades ambient-proxy/SSL_CERT isolation for a proxy-routed install's
             # only egress; decided once by the caller via net_transport.env_proxies_configured.
-            async with httpx.AsyncClient(timeout=timeout, trust_env=self.trust_env) as client:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=self.trust_env, proxy=self.proxy) as client:
                 response = await client.post(f"{self.api_base}/{method_text}", data=data, files=files)
         except httpx.TimeoutException:
             raise TelegramTransportError(f"Telegram API timed out during {safe_method}.") from None
@@ -621,7 +625,7 @@ class TelegramClient:
 
     async def _download_bytes(self, file_path: str) -> bytes:
         try:
-            async with httpx.AsyncClient(timeout=30, trust_env=self.trust_env) as client:
+            async with httpx.AsyncClient(timeout=30, trust_env=self.trust_env, proxy=self.proxy) as client:
                 async with client.stream("GET", f"{self.file_base}/{file_path}") as response:
                     if response.status_code >= 400:
                         raise RuntimeError(f"Telegram file download returned HTTP {response.status_code}")

@@ -19,6 +19,7 @@ from .telegram_state import (
     _load_settings,
     _read_json_file,
     _state_file,
+    _telegram_proxy,
 )
 
 
@@ -61,7 +62,7 @@ async def _push_notification(
     owner-visible line per episode.
     """
     protected = api.get_settings(["TELEGRAM_BOT_TOKEN"])
-    client = TelegramClient(protected.get("TELEGRAM_BOT_TOKEN", ""), trust_env=trust_env)
+    client = TelegramClient(protected.get("TELEGRAM_BOT_TOKEN", ""), trust_env=trust_env, proxy=_telegram_proxy(api))
     try:
         await client.send_message(int(chat_id), text, parse_mode="")
         return "sent", None
