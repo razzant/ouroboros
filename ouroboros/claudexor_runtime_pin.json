@@ -2,11 +2,11 @@
  "schema_version": 1,
  "release": {
   "version": "3.12.9",
-  "build_sha": "447ffee59d74fdf190f6bc14a035bba99b0af251",
+  "build_sha": "391499fa44ddf633493f264c24ed00b0addaafd6",
   "protocol_major": 3,
   "archive_url": "https://github.com/razzant/claudexor/releases/download/v3.12.9/claudexor-runtime-3.12.9.tar.gz",
-  "sha256": "fd242299dbb135d83eb61357af68658eb72d18262d2810ba5a484acdbd3beb91",
-  "size_bytes": 7837757,
+  "sha256": "fc92e5d3ac41beccf516051d70843c2a7693062b24b2f1decdb8ed8ac75e0283",
+  "size_bytes": 7692348,
   "node_version": "24.16.0",
   "node_artifacts": {
    "darwin-arm64": {
