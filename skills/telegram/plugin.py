@@ -27,7 +27,7 @@ from .lib.telegram_api import (
     _MAX_TELEGRAM_UPLOAD_BYTES,
 )
 from .lib.telegram_state import (
-    _state_file, _load_settings, _is_silent_mode_enabled,
+    _state_file, _load_settings, _telegram_proxy, _is_silent_mode_enabled,
     _get_silent_msg, _set_silent_msg, _clear_silent_msg, _subagent_cards_enabled,
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
     _jsonl_tail, _load_runtime_state, _read_json_file, _child_row_held_for_root,
@@ -630,7 +630,7 @@ async def _start_poller(api):
     try:
         protected_settings = api.get_settings(["TELEGRAM_BOT_TOKEN"])
         _settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
-        client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES)
+        client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES, proxy=_telegram_proxy(api))
         offset = _load_offset(api)
         try:
             await _validate_bot(api, client, command_mode, lang)
@@ -1021,7 +1021,7 @@ def _make_outbound(api):
         try:
             protected_settings = api.get_settings(["TELEGRAM_BOT_TOKEN"])
             local_settings = _load_settings(api)
-            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES)
+            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES, proxy=_telegram_proxy(api))
             chat_id = _target_chat(local_settings, event)
             if not chat_id:
                 return
@@ -1115,7 +1115,7 @@ def _make_typing(api):
         try:
             protected_settings = api.get_settings(["TELEGRAM_BOT_TOKEN"])
             local_settings = _load_settings(api)
-            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES)
+            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES, proxy=_telegram_proxy(api))
             chat_id = _target_chat(local_settings, event)
             if chat_id:
                 await client.send_chat_action(chat_id, "typing")
@@ -1129,7 +1129,7 @@ def _make_photo(api):
         try:
             protected_settings = api.get_settings(["TELEGRAM_BOT_TOKEN"])
             local_settings = _load_settings(api)
-            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES)
+            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES, proxy=_telegram_proxy(api))
             chat_id = _target_chat(local_settings, event)
             image_base64 = str(event.get("image_base64") or "").strip()
             if chat_id and image_base64:
@@ -1152,7 +1152,7 @@ def _make_video(api):
         try:
             protected_settings = api.get_settings(["TELEGRAM_BOT_TOKEN"])
             local_settings = _load_settings(api)
-            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES)
+            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES, proxy=_telegram_proxy(api))
             chat_id = _target_chat(local_settings, event)
             video_base64 = str(event.get("video_base64") or "").strip()
             if chat_id and video_base64:
@@ -1175,7 +1175,7 @@ def _make_document(api):
         try:
             protected_settings = api.get_settings(["TELEGRAM_BOT_TOKEN"])
             local_settings = _load_settings(api)
-            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES)
+            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES, proxy=_telegram_proxy(api))
             chat_id = _target_chat(local_settings, event)
             file_base64 = str(event.get("file_base64") or "").strip()
             file_ref = event.get("file_ref") if isinstance(event.get("file_ref"), dict) else None
@@ -1263,7 +1263,7 @@ def _make_links(api):
         try:
             protected_settings = api.get_settings(["TELEGRAM_BOT_TOKEN"])
             local_settings = _load_settings(api)
-            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES)
+            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES, proxy=_telegram_proxy(api))
             chat_id = _target_chat(local_settings, event)
             if not chat_id:
                 return
@@ -1301,7 +1301,7 @@ def _make_quiz(api):
         try:
             protected_settings = api.get_settings(["TELEGRAM_BOT_TOKEN"])
             local_settings = _load_settings(api)
-            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES)
+            client = TelegramClient(protected_settings.get("TELEGRAM_BOT_TOKEN", ""), trust_env=_HONOR_ENV_PROXIES, proxy=_telegram_proxy(api))
             chat_id = _target_chat(local_settings, event)
             if not chat_id:
                 return

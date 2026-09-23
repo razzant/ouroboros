@@ -92,6 +92,11 @@ def _load_settings(api) -> Dict[str, Any]:
     return load_settings(pathlib.Path(api.get_state_dir()))
 
 
+def _telegram_proxy(api) -> str:
+    """The skill-local egress proxy (settings.json TELEGRAM_PROXY); empty when unset."""
+    return str(_load_settings(api).get("TELEGRAM_PROXY") or "").strip()
+
+
 def _is_silent_mode_enabled(settings: Dict[str, Any]) -> bool:
     """Silent mode replaces successive outbound thoughts via editMessageText
     rather than spamming new messages. Default: off."""

@@ -53,6 +53,12 @@ Version 1.2.4 always sends one short line when a task does not finish cleanly, w
 the same status word and reason sentence the task card shows; the task-completion
 toggle now only adds the clean finishes.
 
+Version 1.2.4 routes every Telegram API call (poller, outbound, budget
+notifier) through the skill-local `TELEGRAM_PROXY` setting (e.g.
+`socks5://host:port`), so the bridge keeps working on a host whose only
+ingress/egress is a proxy. No host-wide proxy environment is set; the
+Mini App menu client is a separate, secondary path and is unchanged.
+
 The Mini App exposes the unchanged Ouroboros SPA through the established
 owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled
 by default after owner binding and can be turned off independently without
