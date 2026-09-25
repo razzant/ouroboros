@@ -129,7 +129,7 @@ subscribe_events: [{", ".join(topics)}]
         requested_keys=[],
         granted_permissions=list(permissions or []),
         requested_permissions=[
-            *(permission for permission in ("inject_chat", "presence") if permission in manifest_perms),
+            *(permission for permission in ("inject_chat", "presence", "notify_owner") if permission in manifest_perms),
             *(
                 f"subscribe_event:{topic}"
                 for topic in topics
@@ -911,3 +911,4 @@ def test_chat_inject_allows_slash_command_caption_even_with_text(tmp_path: pathl
     assert response.status_code == 202
     assert bridge.messages[0]["text"] == "photo"
     assert bridge.messages[0]["image_caption"] == "/panic"
+

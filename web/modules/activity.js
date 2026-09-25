@@ -172,7 +172,12 @@ export function initActivity({ mount, ws } = {}) {
         const consumed = status === 'consumed';
         const suppressed = status === 'suppressed';
         const id = esc(s.id || '');
-        const sub = `${timing}${next && !consumed ? ` · next ${next}` : ''} · ${esc(status)}${managed && s.skill ? ` · ${esc(s.skill)}` : ''}`;
+        // A notify row rings the owner instead of starting a task; say so, and
+        // name the skill that owns it (its `source`, never a skill-managed marker).
+        const notify = String(s.kind || '') === 'notify';
+        const origin = String(s.source || '');
+        const owner = notify && origin.startsWith('skill:') ? ` · ${esc(origin.slice(6))}` : '';
+        const sub = `${notify ? 'notification · ' : ''}${timing}${next && !consumed ? ` · next ${next}` : ''} · ${esc(status)}${managed && s.skill ? ` · ${esc(s.skill)}` : ''}${owner}`;
         // A consumed one-shot cannot be re-armed, so it carries no Enable: the
         // only honest control left is removing the receipt. A suppressed skill
         // row offers Restore, which asks the server to re-evaluate the skill.
@@ -185,9 +190,10 @@ export function initActivity({ mount, ws } = {}) {
             : readinessHeld
                 ? '<span class="activity-tag">disabled by skill readiness</span>'
                 : `<button type="button" class="btn btn-xs btn-default" data-act="schedule-toggle" data-id="${id}" data-action="${suppressed || !enabled ? 'restore' : 'disable'}">${enabled ? 'Disable' : (suppressed ? 'Restore' : 'Enable')}</button>`;
+        const title = notify && s.notification && s.notification.text ? s.notification.text : (s.name || s.id || 'schedule');
         return `<div class="activity-row${enabled ? '' : ' off'}">
             <div class="activity-row-main">
-                <span class="activity-name">${esc(s.name || s.id || 'schedule')}</span>
+                <span class="activity-name">${esc(title)}</span>
                 <span class="activity-sub">${sub}</span>
             </div>
             <div class="activity-row-actions">${lifecycle}

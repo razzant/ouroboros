@@ -20,7 +20,19 @@ CHAT_DOCUMENT = "chat.document"
 CHAT_LINKS = "chat.links"
 CHAT_QUIZ = "chat.quiz"
 SKILL_LIFECYCLE = "skill.lifecycle"
-VALID_TOPICS = frozenset({CHAT_OUTBOUND, CHAT_TYPING, CHAT_PHOTO, CHAT_VIDEO, CHAT_DOCUMENT, CHAT_LINKS, CHAT_QUIZ, SKILL_LIFECYCLE})
+# One owner-notification fact ("come back, there is something here for you"):
+# a durable `owner_notification` row in logs/events.jsonl — which the server
+# log sink already turns into ONE live `log` frame for browsers — plus this
+# topic for skill subscribers (the Telegram skill mirrors it to the phone).
+# Never a chat row, never model context.
+OWNER_NOTIFICATION = "owner.notification"
+VALID_TOPICS = frozenset({
+    CHAT_OUTBOUND, CHAT_TYPING, CHAT_PHOTO, CHAT_VIDEO, CHAT_DOCUMENT, CHAT_LINKS, CHAT_QUIZ,
+    SKILL_LIFECYCLE, OWNER_NOTIFICATION,
+})
+OWNER_NOTIFICATION_TEXT_CHARS = 1000
+_OWNER_NOTIFICATION_KEY_CHARS = 128
+_OWNER_NOTIFICATION_CATEGORY_CHARS = 32
 
 
 @dataclass
@@ -130,6 +142,67 @@ def publish_event(topic: str, data: Dict[str, Any]) -> None:
     get_global_event_bus().publish(topic, data)
 
 
+def emit_owner_notification(
+    drive_root: Any, *, chat_id: int, category: str, text: str, source: str,
+    key: str = "", scheduled_for: str = "", publish: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Emit one owner notification: the durable row, the live frame, the topic.
+
+    Returns the row when the durable append landed (the live browser frame is
+    that append's log-sink copy, so it exists exactly when the row does) and
+    ``None`` when it did not — the caller words its status honestly. The topic
+    publish is best-effort after the row; ``publish=False`` leaves it to the
+    caller (the scheduler tick appends under its table lock and publishes the
+    collected rows after releasing it, so a slow subscriber never holds the
+    supervisor).
+
+    SERVER PROCESS ONLY: the bus is process-local, so a worker-side call would
+    persist the row (and reach browsers through the worker sink) while the
+    topic publish silently reaches no subscriber. A producer inside a task must
+    hand the fact to the supervisor instead (the skill.lifecycle event queue is
+    the precedent). ``chat_id`` must be a positive owner-visible chat: the
+    browser notifier refuses the hidden partition and A2A ids, and a row
+    without ``task_id`` never joins any task's model context.
+    """
+    from ouroboros.utils import append_jsonl, utc_now_iso
+
+    body = str(text or "").strip()
+    kind = str(category or "").strip()
+    origin = str(source or "").strip()
+    if not body or len(body) > OWNER_NOTIFICATION_TEXT_CHARS:
+        raise ValueError(f"notification text must be 1..{OWNER_NOTIFICATION_TEXT_CHARS} characters")
+    if not kind or len(kind) > _OWNER_NOTIFICATION_CATEGORY_CHARS:
+        raise ValueError("notification category is required")
+    if not origin:
+        raise ValueError("notification source is required")
+    dedupe = str(key or "").strip()
+    if len(dedupe) > _OWNER_NOTIFICATION_KEY_CHARS:
+        raise ValueError(f"notification key must be at most {_OWNER_NOTIFICATION_KEY_CHARS} characters")
+    if type(chat_id) is not int or chat_id <= 0:
+        raise ValueError("notification chat_id must be a positive owner chat id")
+    row: Dict[str, Any] = {
+        "ts": utc_now_iso(), "type": "owner_notification", "category": kind,
+        "text": body, "source": origin, "key": dedupe, "chat_id": int(chat_id),
+    }
+    if str(scheduled_for or "").strip():
+        row["scheduled_for"] = str(scheduled_for).strip()
+    import pathlib
+
+    if not append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", dict(row)):
+        return None
+    if publish:
+        publish_owner_notification(row)
+    return row
+
+
+def publish_owner_notification(row: Dict[str, Any]) -> None:
+    """Best-effort topic publish of an already-persisted notification row."""
+    try:
+        publish_event(OWNER_NOTIFICATION, dict(row))
+    except Exception:
+        log.debug("owner notification topic publish failed", exc_info=True)
+
+
 __all__ = [
     "CHAT_DOCUMENT",
     "CHAT_LINKS",
@@ -139,9 +212,13 @@ __all__ = [
     "CHAT_TYPING",
     "CHAT_VIDEO",
     "EventBus",
+    "OWNER_NOTIFICATION",
+    "OWNER_NOTIFICATION_TEXT_CHARS",
     "SKILL_LIFECYCLE",
     "VALID_TOPICS",
+    "emit_owner_notification",
     "get_global_event_bus",
     "init_global_event_bus",
     "publish_event",
+    "publish_owner_notification",
 ]

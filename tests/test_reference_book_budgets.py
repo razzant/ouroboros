@@ -33,7 +33,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # (measured 165470 on the merged chapter).
     # 165500 -> 165550: the long-work continuity merge landed the chapter at 165507 (over by
     # 7 bytes on the official line); re-based here, no text of this chapter was touched.
-    "docs/architecture/01-high-level-architecture.md": 165550,
+    # 165550 -> 165650: the scheduled_tasks.json tree line names the table's second row kind
+    # (`kind:"notify"`, a model-free owner notification); the base sat 20 bytes under.
+    "docs/architecture/01-high-level-architecture.md": 165650,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -71,7 +73,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # vocabulary (#931/#1061); the touched descriptions were REPLACED and
     # compressed (net chapter growth is under the added owner's paragraph size),
     # and the merged #1236 base already sat 5 bytes under the previous budget.
-    "docs/architecture/03-web-ui-pages-and-buttons.md": 107000,
+    # 107000 -> 107300: the owner-notification log frame joins the notification
+    # sources sentence (one clause); the base sat 119 bytes under the budget.
+    "docs/architecture/03-web-ui-pages-and-buttons.md": 107300,
     "docs/architecture/04-server-api-endpoints.md": 26833,
     # 27137 -> 30400: the schedule table gains a documented write contract the
     # chapter had no text for — one transaction owning the lock ORDER, the strict
@@ -86,7 +90,11 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # bounded authored focus (cross-focus awareness).
     # 30900 -> 31150 (issue #1142): the crash counter's shutdown exemption names WHERE the stop
     # event is set (the uvicorn signal handler, then the lifespan teardown) and why both are needed.
-    "docs/architecture/05-supervisor-loop.md": 31150,
+    # 31150 -> 32300: the schedule table's second dispatch verb (`kind: "notify"`:
+    # a model-free owner notification, its receipt, lock discipline, silence of a
+    # disabled skill, per-occurrence frame key) is a mechanism the chapter had no
+    # text for; the base sat 20 bytes under the previous budget.
+    "docs/architecture/05-supervisor-loop.md": 32300,
     # 286850 -> 287600: "an answer that has not arrived is a gap" is a new invariant of
     # plan review and task acceptance (the slot census vocabulary, the `awaiting`
     # projection, the only-awaited task outcome); the in-flight sentence it grew from is
@@ -183,7 +191,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # conversation key, placeholder re-run and its lost-attempt facts, presence-local liveness,
     # previous-turn pointer and its replay repair, split in-flight budgets, silent orphaned work,
     # presence room label); the base sat 2 bytes under.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 12500,
+    # 12500 -> 13200: `POST /notify` joins the frozen route family with its contract
+    # (grant, the events-row fact, deferred `kind: "notify"` rows keyed by the
+    # skill); the base sat 10 bytes under the previous budget.
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 13200,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.

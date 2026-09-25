@@ -592,9 +592,10 @@ calls and runtime behaviours:
 | `read_settings` | The skill may call `api.get_settings([...])`. |
 | `supervised_task` | The skill may register an in-process host-supervised async task. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
-| `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. Chat topics require owner permission grants; `skill.lifecycle` does not. |
+| `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound`, `skill.lifecycle` or `owner.notification`. Chat topics require owner permission grants; `skill.lifecycle` and `owner.notification` (the host's owner notifications, which a transport skill mirrors) do not. |
 | `inject_chat` | The skill may request Host Service chat injection after an explicit owner permission grant: `POST /chat/inject` carries text, an inline image, or `attachments` (`[{path, name?, mime?}]` — regular files under the skill's own state root, at most 25 per message, which the host copies without the former 50 MiB upload cap into the shared `data/uploads` chat-upload store and stages for the task; a file-only message needs no text). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
+| `notify_owner` | The skill may hand the owner one system notification through `POST /notify` after an explicit owner permission grant (see "System notifications for the owner" below): a bounded plain sentence that becomes a banner in a running web client and, when the Telegram skill's toggle is on, one line on the phone — never a chat row, never a model turn. Strictly weaker than `inject_chat`; a skill that only reminds does not ask to wake the agent. |
 
 A missing permission causes the matching `register_*` call to raise
 `ExtensionRegistrationError`, surfaced as a skill load error in the
@@ -825,6 +826,40 @@ subscribe_events: [skill.lifecycle]
 permission grant. Skills that perform multi-step external work should still
 print a concise success/failure marker or write structured state under
 `OUROBOROS_SKILL_STATE_DIR` so the agent can decide whether to fix or report.
+
+## System notifications for the owner (`POST /notify`)
+
+A skill that must reach the owner with a finished sentence — a calendar's
+"meeting in 15 minutes", a long external job that ended — does not wake the
+agent and does not write to the chat. It declares `notify_owner`, waits for the
+owner's grant, checks `notify_version` on `GET /identity` (absent on an older
+host: degrade to your own widget), and posts one plain sentence:
+
+```json
+{"text": "⏰ 14:45 · Meeting with Ivan (in 15 min)", "key": "cal:evt_123:2026-09-25T14:45"}
+```
+
+The host answers `200 {ok, ts, chat_id}` once one `owner_notification` row is
+in `logs/events.jsonl`: that row is the live banner in a running web client
+(category "Reminders and notices from skills and Ouroboros", titled "Reminder
+from <skill>", the sentence shown only when the owner turned message text on),
+the `owner.notification` topic for transport skills (Telegram mirrors it to the
+pinned chat when its notices toggle is on), and nothing else — no chat row, no
+model turn, no history the mind can read. `text` is at most 1000 characters,
+plain; `key` (at most 128) is your own identity for the notice, so a repeat
+after a lost acknowledgement rings once. `403` is a missing grant, `429` the
+60-per-minute lane, `503` a failed durable write (retry the same notice).
+
+A deferred reminder is the same request with a time: `"at": "<ISO 8601
+instant>"` (once) or `"cron": "<5-field>"` plus optional `"timezone"`. The host
+stores a `kind: "notify"` row in the one schedule table (visible under Activity
+→ Scheduled, where the owner can disable or delete it) and the supervisor tick
+fires it at its instant without a model — a reminder whose instant passed while
+Ouroboros was off fires once on the next tick, like any one-shot. With a `key`
+the row is yours to move: the same key posted again replaces its time and
+text; `{"key": ..., "cancel": true}` removes it (`404` when there is no such
+row of yours). Without a key each post is a new fire-and-forget row. A
+disabled or removed skill's rows stay silent until it is enabled again.
 
 ## Iterative skill development
 

@@ -735,3 +735,138 @@ def test_schedule_followup_registration_surfaces():
     # Reading the table is research; changing it is refused inside the tool.
     assert "manage_schedules" in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
     assert "manage_schedules" not in ACTING_SUBAGENT_TOOL_NAMES
+
+
+# ------------------------------------------------- kind: "notify" rows (5B)
+
+
+def _events(tmp_path):
+    import json
+
+    path = tmp_path / "logs" / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _notify_row(schedule_id, *, source="task_followup", trigger=None, key="k1", text="Call mother"):
+    return {
+        "id": schedule_id, "name": f"Reminder ({key})", "kind": "notify", "enabled": True, "source": source,
+        "trigger": trigger or {"type": "once", "run_at": "2000-01-01T00:00:00+00:00"},
+        "notification": {"text": text, "key": key},
+    }
+
+
+def test_notify_once_row_emits_one_owner_notification_and_is_consumed(tmp_path):
+    """The second dispatch verb of the one table: a due ``kind: "notify"`` row
+    becomes an ``owner_notification`` events row (its live frame rides the log
+    sink) plus a topic publish AFTER the table lock — never a queued task."""
+    from ouroboros import event_bus
+
+    queue, pending = _queue(tmp_path)
+    bus = event_bus.init_global_event_bus()
+    seen: list = []
+    bus.subscribe("telegram", event_bus.OWNER_NOTIFICATION, seen.append)
+    queue.upsert_scheduled_task(_notify_row("n-due"))
+    queue.upsert_scheduled_task(_notify_row("n-future", trigger={"type": "once", "run_at": "2999-01-01T00:00:00+00:00"}))
+    queue.check_scheduled_tasks()
+    queue.check_scheduled_tasks()  # a consumed one-shot never re-fires
+    assert pending == [], "a notify row admits no task"
+    notices = [row for row in _events(tmp_path) if row.get("type") == "owner_notification"]
+    assert len(notices) == 1
+    notice = notices[0]
+    assert notice["text"] == "Call mother" and notice["source"] == "task_followup"
+    assert notice["chat_id"] == 1 and "task_id" not in notice
+    assert notice["scheduled_for"] == "2000-01-01T00:00:00+00:00"
+    # The frame key carries the due instant: a re-armed or recurring reminder
+    # rings on every occurrence, a crash replay of the same one collapses.
+    assert notice["key"] == f"k1@{notice['scheduled_for']}"
+    assert len(seen) == 1 and seen[0]["key"] == notice["key"]
+    records = {r["id"]: r for r in queue.list_scheduled_tasks(tmp_path)["tasks"]}
+    done = records["n-due"]
+    assert done["enabled"] is False and done["completed_at"] and done["last_run_at"]
+    assert done.get("last_task_id") is None and done["next_run_at"] == ""
+    assert records["n-future"]["enabled"] is True and not records["n-future"].get("last_run_at")
+    event_bus.init_global_event_bus()
+
+
+def test_notify_cron_row_fires_and_advances_like_a_task_row(tmp_path):
+    queue, pending = _queue(tmp_path)
+    queue.upsert_scheduled_task(_notify_row(
+        "n-cron", trigger={"type": "cron", "expr": "* * * * *"}, key="daily"))
+    # Force the first occurrence into the past, as an offline gap would.
+    store = queue.load_schedule_store(tmp_path)
+    store["tasks"][0]["next_run_at"] = "2000-01-01T00:00:00+00:00"
+    from supervisor import queue_schedules
+
+    queue_schedules._write_scheduled_tasks(store, tmp_path)
+    queue.check_scheduled_tasks()
+    queue.check_scheduled_tasks()  # the next occurrence is in the future now
+    assert pending == []
+    notices = [row for row in _events(tmp_path) if row.get("type") == "owner_notification"]
+    assert len(notices) == 1 and notices[0]["key"] == "daily@2000-01-01T00:00:00+00:00"
+    record = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert record["enabled"] is True and not record.get("completed_at")
+    assert record["next_run_at"] > "2000-01-02"
+
+
+def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path):
+    """The resync never touches ``skill:`` rows, so the tick itself must not
+    ring for a skill the owner switched off or removed."""
+    from ouroboros.skill_loader import save_enabled
+
+    queue, pending = _queue(tmp_path)
+    skill_dir = tmp_path / "skills" / "external" / "cal"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: cal\ndescription: calendar\nversion: 0.1\ntype: extension\nentry: plugin.py\n"
+        "permissions: [notify_owner]\n---\n# cal\n", encoding="utf-8")
+    (skill_dir / "plugin.py").write_text("def register(api): pass\n", encoding="utf-8")
+    queue.upsert_scheduled_task(_notify_row("n-ghost", source="skill:ghost", key="g"))
+    queue.upsert_scheduled_task(_notify_row("n-cal", source="skill:cal", key="c"))
+    save_enabled(tmp_path, "cal", False)
+    queue.check_scheduled_tasks()
+    assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []
+    save_enabled(tmp_path, "cal", True)
+    queue.check_scheduled_tasks()
+    notices = [row for row in _events(tmp_path) if row.get("type") == "owner_notification"]
+    assert [n["source"] for n in notices] == ["skill:cal"]
+    records = {r["id"]: r for r in queue.list_scheduled_tasks(tmp_path)["tasks"]}
+    assert records["n-ghost"]["enabled"] is True and not records["n-ghost"].get("completed_at")
+    assert records["n-cal"]["enabled"] is False and records["n-cal"]["completed_at"]
+
+
+def test_notify_row_survives_a_failed_append_and_retries(tmp_path, monkeypatch):
+    from ouroboros import utils
+
+    queue, pending = _queue(tmp_path)
+    queue.upsert_scheduled_task(_notify_row("n-retry"))
+    real_append = utils.append_jsonl
+    monkeypatch.setattr(utils, "append_jsonl", lambda path, obj, **kw: False if path.name == "events.jsonl" and obj.get("type") == "owner_notification" else real_append(path, obj, **kw))
+    queue.check_scheduled_tasks()
+    record = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert record["enabled"] is True and not record.get("completed_at")
+    assert "notification log write failed" in str(record.get("last_error") or "")
+    monkeypatch.setattr(utils, "append_jsonl", real_append)
+    queue.check_scheduled_tasks()
+    record = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert record["enabled"] is False and record["completed_at"] and record.get("last_error") == ""
+    assert len([row for row in _events(tmp_path) if row.get("type") == "owner_notification"]) == 1
+
+
+def test_notify_row_projects_its_text_as_the_model_preview_and_audits_its_kind(tmp_path):
+    queue, _pending = _queue(tmp_path)
+    queue.upsert_scheduled_task(_notify_row("n-view", text="Dentist at 9"))
+    from supervisor.queue_schedules import _schedule_projection_row
+
+    row = _schedule_projection_row(queue.list_scheduled_tasks(tmp_path)["tasks"][0])
+    assert row["kind"] == "notify" and row["objective_preview"] == "Dentist at 9"
+    audits = [row for row in _events(tmp_path) if row.get("type") == "schedule_mutation"]
+    assert audits and all("Dentist" not in json_dumps(a) for a in audits), "the sentence never enters the audit"
+    assert any((a.get("after") or {}).get("kind") == "notify" for a in audits)
+
+
+def json_dumps(value):
+    import json
+
+    return json.dumps(value, ensure_ascii=False)

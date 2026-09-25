@@ -52,7 +52,9 @@ confirmed lifecycle facts (a question carrying a positive wait; a SETTLED
 finished — or the authored summary, which with the turn's ordinary reply share
 one key per task), lineage is learned from the delegation facts frames
 carry because the terminal log frame has none, importance rides the existing
-`system_type='proactive_message'` discriminator plus optional questions, and
+`system_type='proactive_message'` discriminator plus optional questions, a
+host `owner_notification` log frame (a skill's notice or a model-free
+reminder) is the skill-first category titled by its source, and
 ordinary Main replies are a separate off-by-default toggle. Where the
 Notification API is missing or denied, delivery degrades to the in-app toast
 plus one tone; when the optional desktop bridge exists, the shell also requests

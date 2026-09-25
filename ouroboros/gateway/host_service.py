@@ -21,8 +21,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, is_a2a_chat_id
-from ouroboros.event_bus import get_global_event_bus
+from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, WEB_UI_CHAT_ID, is_a2a_chat_id
+from ouroboros.event_bus import OWNER_NOTIFICATION_TEXT_CHARS, emit_owner_notification, get_global_event_bus
 from ouroboros.config import WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC
 from ouroboros.gateway._helpers import run_sync_to_completion
 from ouroboros.gateway.files import store_chat_upload
@@ -43,6 +43,9 @@ _json_error = lambda message, status=500: JSONResponse({"ok": False, "error": me
 DEFAULT_HOST_SERVICE_HOST = "127.0.0.1"
 DEFAULT_HOST_SERVICE_PORT = 8767
 AUTH_TOKEN_FILENAME = "auth_token.json"
+# ``/identity`` advertises the owner-notification contract (``POST /notify``) so a
+# skill can degrade on an older host without a side-effecting probe.
+NOTIFY_VERSION = 1
 
 # The out-of-process WS progress relay (``POST /ui/ws-message``) is the one
 # token-bucket lane: a 60-message burst reserve that refills one message per
@@ -379,7 +382,8 @@ async def _api_identity(request: Request) -> JSONResponse:
     except Exception:
         log.debug("Failed to read identity for host service", exc_info=True)
     return JSONResponse({"ok": True, "name": name, "description": description,
-                         "presence_delivery_version": DELIVERY_VERSION})
+                         "presence_delivery_version": DELIVERY_VERSION,
+                         "notify_version": NOTIFY_VERSION})
 
 
 async def _api_tool_schemas(request: Request) -> JSONResponse:
@@ -640,6 +644,165 @@ def _presence_staged_files(
             raise ValueError(f"staged_files[{index}] is outside this skill's state") from exc
         files.append(path)
     return tuple(files)
+
+
+def _owner_notification_chat_id() -> int:
+    """The owner's canonical chat, or Main while no owner is bound.
+
+    Deliberately not ``notification_chat_route``: that helper keeps chat 0 as a
+    real destination (the Skill Review panel), and a notification addressed
+    there would be refused by the browser notifier's room gate and read by
+    nobody.
+    """
+    from supervisor.state import load_state
+
+    try:
+        owner = int(load_state().get("owner_chat_id") or 0)
+    except (TypeError, ValueError):
+        owner = 0
+    return owner if owner > 0 else WEB_UI_CHAT_ID
+
+
+async def _api_notify(request: Request) -> JSONResponse:
+    """One owner notification from a skill: never a chat row, never a model turn.
+
+    The host, not the skill, stamps the source; the fact is one durable
+    ``owner_notification`` events row (its live browser frame is that append's
+    log-sink copy) plus the ``owner.notification`` topic for transport skills.
+    ``key`` is the producer's own identity for the notice, so a redelivery
+    after a lost acknowledgement collapses on the client instead of ringing
+    twice. A failed durable write is 503 — the skill retries the same notice.
+    """
+    ctx: HostServiceContext = request.app.state.host_service_context
+    try:
+        skill_name, token_payload = ctx.authenticate_token_payload(
+            request.headers.get("x-skill-token", "")
+        )
+        ctx.require_permission(skill_name, token_payload, "notify_owner")
+    except HostServiceAuthError as exc:
+        return _json_error(str(exc), 403)
+    if not ctx.rate_limiter.allow(f"{skill_name}:notify"):
+        return _json_error("rate limit exceeded", 429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return _json_error("invalid json", 400)
+    if not isinstance(payload, dict):
+        return _json_error("request body must be a JSON object", 400)
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return _json_error("text is required", 400)
+    if len(text.strip()) > OWNER_NOTIFICATION_TEXT_CHARS:
+        return _json_error(f"text must be at most {OWNER_NOTIFICATION_TEXT_CHARS} characters", 400)
+    key = payload.get("key", "")
+    if key is not None and not isinstance(key, str):
+        return _json_error("key must be a string", 400)
+    key = (key or "").strip()
+    if len(key) > 128:
+        return _json_error("key must be at most 128 characters", 400)
+    at_raw = payload.get("at")
+    cron_raw = payload.get("cron")
+    cancel = payload.get("cancel", False)
+    if cancel not in (True, False):
+        return _json_error("cancel must be a boolean", 400)
+    if at_raw is not None or cron_raw is not None or cancel:
+        return await run_sync_to_completion(
+            _schedule_owner_notification, ctx, skill_name, text.strip(), key,
+            at_raw, cron_raw, payload.get("timezone"), bool(cancel),
+        )
+    try:
+        row = emit_owner_notification(
+            ctx.data_dir, chat_id=_owner_notification_chat_id(), category="notice",
+            text=text, source=f"skill:{skill_name}", key=key,
+        )
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+    if row is None:
+        return _json_error("notification log write failed; retry the same notice", 503)
+    return JSONResponse({"ok": True, "ts": row["ts"], "chat_id": row["chat_id"]})
+
+
+def _notify_schedule_id(skill_name: str, key: str) -> str:
+    """One row per (skill, key): the slug for humans, a hash so two keys that
+    slug alike (`встреча 1` / `встреча-1`) never replace each other."""
+    from hashlib import sha256
+
+    from ouroboros.schedule_contract import schedule_slug
+
+    return f"{schedule_slug('notify', skill_name, key)}-{sha256(key.encode('utf-8')).hexdigest()[:8]}"
+
+
+def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, text: str, key: str,
+                                 at_raw: Any, cron_raw: Any, timezone_raw: Any, cancel: bool) -> JSONResponse:
+    """A deferred notice is a ``kind: "notify"`` row of the ONE schedule table.
+
+    The scheduler tick fires it without a model turn; ``key`` is the row's
+    identity, so the same key re-posted moves the reminder and ``cancel`` with
+    that key removes it through the audited delete. Without a key a row is
+    fire-and-forget (a fresh id each time).
+    """
+    from ouroboros.deadline_utils import parse_deadline_ts
+    from ouroboros.schedule_contract import cron_error, timezone_error
+    from supervisor.queue import (
+        ScheduleRefused, ScheduleStoreUnreadable, load_schedule_store, remove_scheduled_task,
+        schedule_transaction, upsert_scheduled_task,
+    )
+
+    source = f"skill:{skill_name}"
+    if cancel:
+        if at_raw is not None or cron_raw is not None:
+            return _json_error("cancel cannot be combined with at or cron", 400)
+        if not key:
+            return _json_error("cancel requires the key of the scheduled notification", 400)
+        schedule_id = _notify_schedule_id(skill_name, key)
+        try:
+            with schedule_transaction(ctx.data_dir):
+                rows = load_schedule_store(ctx.data_dir).get("tasks") or []
+                current = next((row for row in rows if str(row.get("id") or "") == schedule_id), None)
+                if current is None or str(current.get("source") or "") != source:
+                    return _json_error("no scheduled notification with that key", 404)
+                changed = remove_scheduled_task(
+                    schedule_id, drive_root=ctx.data_dir, actor=source,
+                    reason="notification cancelled by its skill")
+        except ScheduleStoreUnreadable as exc:
+            return _json_error(str(exc), 503)
+        return JSONResponse({"ok": True, "cancelled": bool(changed), "id": schedule_id})
+    if (at_raw is None) == (cron_raw is None):
+        return _json_error("supply exactly one of at (ISO 8601 instant) or cron (5-field expression)", 400)
+    timezone = str(timezone_raw or "").strip()
+    if at_raw is not None:
+        if not isinstance(at_raw, str) or parse_deadline_ts(at_raw.strip()) is None:
+            return _json_error("at must be a parseable ISO 8601 instant", 400)
+        trigger = {"type": "once", "run_at": parse_deadline_ts(at_raw.strip()).isoformat()}
+    else:
+        if not isinstance(cron_raw, str):
+            return _json_error("cron must be a 5-field expression", 400)
+        if err := cron_error(cron_raw.strip()):
+            return _json_error(err, 400)
+        trigger = {"type": "cron", "expr": cron_raw.strip()}
+    if err := timezone_error(timezone):
+        return _json_error(err, 400)
+    schedule_id = _notify_schedule_id(skill_name, key) if key else f"notify-{skill_name}-{utc_now_iso()[:19].replace(':', '')}-{os.urandom(3).hex()}"
+    # ``name`` is audit material (schedule_mutation rows carry it); the sentence
+    # is not, so the row is named by its owner and the UI reads the sentence
+    # from ``notification`` itself.
+    record = {
+        "id": schedule_id, "name": f"Reminder from {skill_name}", "kind": "notify", "source": source,
+        "enabled": True, "timezone": timezone, "trigger": trigger,
+        "notification": {"text": text, "key": key},
+    }
+    try:
+        stored = upsert_scheduled_task(
+            record, drive_root=ctx.data_dir, actor=source,
+            reason="notification scheduled by its skill")
+    except ScheduleRefused as refusal:
+        return _json_error(refusal.message, 409 if refusal.status == "audit_unavailable" else 400)
+    except ScheduleStoreUnreadable as exc:
+        return _json_error(str(exc), 503)
+    return JSONResponse({
+        "ok": stored.get("audit") == "recorded", "scheduled": True, "id": schedule_id,
+        "next_run_at": stored.get("next_run_at") or trigger.get("run_at") or "",
+    })
 
 
 async def _api_presence_delivery(request: Request) -> JSONResponse:
@@ -1284,6 +1447,7 @@ def create_host_service_app(
             Route("/presence/delivery", _api_presence_delivery, methods=["POST"]),
             Route("/presence/work/{work_ref}", _api_presence_work, methods=["GET"]),
             Route("/ui/ws-message", _api_ws_message, methods=["POST"]),
+            Route("/notify", _api_notify, methods=["POST"]),
             WebSocketRoute("/events", _ws_events),
         ]
     )

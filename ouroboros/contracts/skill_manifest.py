@@ -42,6 +42,10 @@ VALID_SKILL_PERMISSIONS = frozenset(
         "subscribe_event",
         "inject_chat",
         "presence",
+        # Owner notifications through the Host Service (`POST /notify`): a
+        # finished sentence for the owner's banner/Telegram, never a chat row
+        # and never a model turn. Weaker than inject_chat, granted separately.
+        "notify_owner",
     }
 )
 _EVENT_TOPIC_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")

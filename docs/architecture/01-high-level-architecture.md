@@ -638,7 +638,7 @@ Bundled resources use the CLI / Headless Boundary lookup order rather than assum
 │   │   ├── evolution_checkpoints.jsonl ← append-only per-cycle checkpoints
 │   │   ├── post_task_evolution_request.json ← worker-written one-shot promotion signal; consumed + deleted by the supervisor idle tick; dropped while evolution_owner_stopped
 │   │   ├── post_task_evolution_counter.json ← per-drive every_n counter
-│   │   ├── scheduled_tasks.json   ← cron (5-field + tz) and one-shot {type:"once", run_at} schedules; consumed one-shot receipts age out past the unified GC retention
+│   │   ├── scheduled_tasks.json   ← cron (5-field + tz) and one-shot {type:"once", run_at} schedules, each a task row or a `kind:"notify"` owner-notification row; consumed one-shot receipts age out past the unified GC retention
 │   │   ├── claudexor_rotation_provisioning.json ← receipt of the last rotation-reconcile settings POST
 │   │   ├── subagent_last_delegation.json ← bounded dated helper observations owned by subagent_history.py, with the compatible latest receipt; never live health or dispatch authority
 │   │   ├── update_letter.json     ← the last update letter (key = base/target/channel/ref, state, text, `last_good`); kept after apply and projected against the live HEAD (update_letter.py)

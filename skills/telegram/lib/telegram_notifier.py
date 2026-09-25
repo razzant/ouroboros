@@ -266,6 +266,29 @@ async def _check_tasks_notify(
     return transient, delivered
 
 
+def _make_notice(api, *, trust_env: bool = False):
+    """Mirror one host owner notification (a skill's notice, a model-free
+    reminder) to the pinned chat, best-effort and opt-in like the periodic
+    lanes: no pinned chat or ``TELEGRAM_NOTIFY_NOTICES`` off means silence, and
+    a transient send failure is logged, not retried — the durable
+    ``owner_notification`` events row is the record, this is a push."""
+    async def handle(event: Dict[str, Any]) -> None:
+        try:
+            settings = _load_settings(api)
+            chat_id = _pinned_chat_id(settings)
+            if not chat_id or not _notify_enabled(settings, "TELEGRAM_NOTIFY_NOTICES"):
+                return
+            text = str(event.get("text") or "").strip()
+            if not text:
+                return
+            source = str(event.get("source") or "")
+            origin = source[len("skill:"):] if source.startswith("skill:") and len(source) > 6 else "Ouroboros"
+            await _push_notification(api, chat_id, f"🔔 {origin}: {text}", trust_env=trust_env)
+        except Exception as exc:
+            api.log("error", f"Telegram notice error: {exc}")
+    return handle
+
+
 def _make_notifier(api, *, trust_env: bool = False):
     """Periodic, file-based proactive notifications (task done / budget threshold).
     Read-only over durable files; sends only when a pinned chat + toggle are set."""

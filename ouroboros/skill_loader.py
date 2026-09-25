@@ -700,6 +700,7 @@ def requested_core_setting_keys(env_keys: List[str]) -> List[str]:
 _GRANTABLE_SKILL_PERMISSIONS = frozenset({
     "inject_chat",
     "presence",
+    "notify_owner",
     "subscribe_event:chat.outbound",
     "subscribe_event:chat.typing",
     "subscribe_event:chat.photo",
@@ -718,6 +719,8 @@ def requested_skill_permissions(
         requested.append("inject_chat")
     if "presence" in permission_set:
         requested.append("presence")
+    if "notify_owner" in permission_set:
+        requested.append("notify_owner")
     if "subscribe_event" in permission_set:
         for raw_topic in subscribe_events or []:
             topic = str(raw_topic or "").strip()
