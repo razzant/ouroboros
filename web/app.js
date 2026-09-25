@@ -29,6 +29,7 @@ import { initUpdateStatus } from './modules/update_status.js';
 import { initDashboard } from './modules/dashboard.js';
 import { hydrateNavIcons } from './modules/page_icons.js';
 
+import { setLanguage, storedLanguage } from './modules/i18n.js';
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './modules/ui_helpers.js';
 import { nameProjectReference, projectReference } from './modules/project_reference.js';
@@ -824,10 +825,11 @@ apiFetch('/api/ui/preferences', { cache: 'no-store' })
     .then((prefs) => {
         state.projectSeenRevision = (prefs && prefs.project_seen_revision) || {};
         setupResizablePanels(prefs || {});
+        setLanguage((prefs && prefs.language) || 'en');
         // Re-evaluate unread now that revision cursors are known.
         if (Array.isArray(lastProjectRows)) { knownProjectsJson = null; renderProjectsNav(lastProjectRows, Array.from(state.projectChatIds || [])); }
     })
-    .catch(() => setupResizablePanels({}));
+    .catch(() => { setupResizablePanels({}); setLanguage(storedLanguage()); });
 
 ws.on('open', () => {
     activitySocketDisconnected = false;

@@ -22,5 +22,10 @@
     window.__OURO_ONBOARDING_BOOTSTRAP__ = __ONBOARDING_BOOTSTRAP__;
   </script>
   <script type="module" src="/static/modules/onboarding_wizard.js"></script>
+  <script type="module">
+    // Onboarding predates /api/ui/preferences: the browser's last language choice is the only source.
+    import { setLanguage, storedLanguage } from '/static/modules/i18n.js';
+    if (storedLanguage() !== 'en') setLanguage('ru');
+  </script>
 </body>
 </html>

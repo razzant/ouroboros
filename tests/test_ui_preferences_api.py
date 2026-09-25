@@ -25,6 +25,7 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
             "widget_order": [],
             "widget_start_mode": {},
             "nested_subagents_expanded": False,
+            "language": "en",
             "sidebar_width": 0,
             "project_panel_width": 0,
             "project_seen_revision": {},
@@ -121,6 +122,16 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
         assert client.post("/api/ui/preferences", json={"widget_order": "bad"}).status_code == 400
         assert client.post("/api/ui/preferences", json={"project_seen_revision": {"racer": "bad"}}).status_code == 400
         assert client.post("/api/ui/preferences", json={"unknown": True}).status_code == 400
+
+        # Language is a two-value enum; anything else is a 400, like every other key.
+        language = client.post("/api/ui/preferences", json={"language": "ru"})
+        assert language.status_code == 200
+        assert language.json()["language"] == "ru"
+        assert client.get("/api/ui/preferences").json()["language"] == "ru"
+        assert client.post("/api/ui/preferences", json={"widget_order": []}).json()["language"] == "ru"
+        assert client.post("/api/ui/preferences", json={"language": "de"}).status_code == 400
+        assert client.post("/api/ui/preferences", json={"language": None}).status_code == 400
+        assert client.post("/api/ui/preferences", json={"language": "en"}).json()["language"] == "en"
 
 
 def test_ui_preferences_concurrent_paint_acks_are_monotonic(tmp_path):

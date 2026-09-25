@@ -20,6 +20,9 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # the owner's choice instead of losing it with the next discovery.
     "widget_start_mode": {},
     "nested_subagents_expanded": False,
+    # UI language of the browser overlay (web/modules/i18n.js). English is the
+    # authored source; "ru" turns the runtime translation overlay on.
+    "language": "en",
     # Resizable side sections (0 = use the CSS default). Clamped to sane ranges so
     # a stored value can never collapse or run away with the layout.
     "sidebar_width": 0,
@@ -33,6 +36,7 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     "project_seen_revision": {},
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
+_LANGUAGES = ("en", "ru")
 _MAX_WIDGET_ORDER_ITEMS = 200
 _MAX_WIDGET_START_MODE_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
@@ -119,6 +123,11 @@ def _normalize_preferences(
         if not isinstance(value, bool):
             raise ValueError("nested_subagents_expanded must be a boolean")
         prefs["nested_subagents_expanded"] = value
+    if "language" in raw:
+        value = raw.get("language")
+        if value not in _LANGUAGES:
+            raise ValueError(f"language must be one of {list(_LANGUAGES)}")
+        prefs["language"] = value
     if "sidebar_width" in raw:
         prefs["sidebar_width"] = _normalize_width(raw.get("sidebar_width"), _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX)
     if "project_panel_width" in raw:

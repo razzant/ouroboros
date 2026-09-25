@@ -28,6 +28,7 @@ import { createModelRolesEditor, modelRoleMap } from './model_roles.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY } from './route_editor_primitives.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow } from './ui_helpers.js';
 import { extensionActionStatus } from './extension_status_text.js';
+import { bindLanguageSegments } from './i18n.js';
 
 let markSettingsDirty = () => {};
 const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
@@ -464,6 +465,9 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     // Notification preferences are client-local for the same reason; the module
     // owns delegated handlers, so mounting only paints current state.
     getNotifier().mountSettings(page);
+    // Language applies on click and persists on its own; it never marks the page dirty.
+    bindLanguageSegments(page, (language) => apiClient.saveUiPreferences({ language })
+        .catch(() => showToast('Language choice could not be saved.', 'error')));
     const disposeLocalModel = bindLocalModelControls({ state,
         onApplication: (local) => syncRestartState({ ...restartState, local_model: local }) });
     // Best-effort About version from /api/health.

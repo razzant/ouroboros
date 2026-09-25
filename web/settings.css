@@ -713,6 +713,11 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* Language toggle: 2 columns. */
+[data-language-group].settings-effort-group {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 [data-update-channel-group].settings-effort-group {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }

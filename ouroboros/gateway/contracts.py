@@ -915,6 +915,7 @@ class UiPreferencesResponse(TypedDict):
     widget_order: list[str]
     widget_start_mode: dict[str, Literal["auto", "manual", "retain"]]  # owner per-card launch-policy override
     nested_subagents_expanded: bool
+    language: Literal["en", "ru"]  # UI overlay language (web/modules/i18n.js)
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
     project_seen_revision: dict[str, int]  # monotonic paint ACK per active Project

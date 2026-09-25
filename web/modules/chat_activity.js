@@ -6,6 +6,7 @@ import { compactModel, formatLogDuration, modelExecutionLabel } from './log_even
 import { createSystemMessageActions } from './ui_helpers.js';
 import { projectReference } from './project_reference.js';
 import { joinMarkdownHeadings } from './utils.js';
+import { monthNames } from './i18n.js';
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import {
     accountedUpperBound,
@@ -1023,7 +1024,12 @@ export function formatMsgTime(isoStr) {
         const now = new Date();
         const pad = n => String(n).padStart(2, '0');
         const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        // Chat timestamps live inside the i18n overlay's excluded subtree, so the
+        // month names come from the dictionary as data (loaded by setLanguage), not a call-site string.
+        const months = monthNames()
+            || ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        // ponytail: months only; "Yesterday" and "at" stay English until a full
+        // Intl.DateTimeFormat pass is worth it.
         const todayStr = now.toDateString();
         const yesterday = new Date(now);
         yesterday.setDate(now.getDate() - 1);

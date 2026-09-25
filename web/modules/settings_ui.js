@@ -727,6 +727,18 @@ export function renderSettingsPage() {
 
                 <section class="settings-panel" data-settings-panel="appearance">
                     <div class="form-section">
+                        <h3>Language</h3>
+                        <div class="settings-section-copy">Interface language, saved with your UI preferences. Applies immediately; strings without a translation stay English.</div>
+                        <div class="settings-effort-card">
+                            <label>Interface Language</label>
+                            <div class="ui-segment-group settings-effort-group" data-language-group role="group" aria-label="Interface Language">
+                                <button type="button" class="ui-segment settings-effort-btn" data-language-value="en">English</button>
+                                <button type="button" class="ui-segment settings-effort-btn" data-language-value="ru">Русский</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
                         <h3>Theme</h3>
                         <div class="settings-section-copy">
                             <code>System</code> follows this device's OS appearance and is the default for a new client.

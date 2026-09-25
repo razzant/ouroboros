@@ -1393,6 +1393,7 @@
  * @property {string[]} widget_order
  * @property {Object.<string,'auto'|'manual'|'retain'>} widget_start_mode  // owner per-card launch-policy override, keyed "<skill>:<tab_id>"
  * @property {boolean} nested_subagents_expanded
+ * @property {'en'|'ru'} language  // UI overlay language (web/modules/i18n.js)
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
  * @property {Object.<string,number>} project_seen_revision  // monotonic paint ACK

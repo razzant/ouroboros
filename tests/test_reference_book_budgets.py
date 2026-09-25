@@ -33,7 +33,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # (measured 165470 on the merged chapter).
     # 165500 -> 165550: the long-work continuity merge landed the chapter at 165507 (over by
     # 7 bytes on the official line); re-based here, no text of this chapter was touched.
-    "docs/architecture/01-high-level-architecture.md": 165550,
+    # 165550 -> 165950: one module-map row for the new `i18n.js` + `i18n/ru.js` translation
+    # overlay; a new leaf with no older row to replace.
+    "docs/architecture/01-high-level-architecture.md": 165950,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -71,7 +73,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # vocabulary (#931/#1061); the touched descriptions were REPLACED and
     # compressed (net chapter growth is under the added owner's paragraph size),
     # and the merged #1236 base already sat 5 bytes under the previous budget.
-    "docs/architecture/03-web-ui-pages-and-buttons.md": 107000,
+    # 107000 -> 107150: the Settings Appearance sentence names the Language control, a
+    # server-persisted preference the chapter lacked; the theme clause is kept, not duplicated.
+    "docs/architecture/03-web-ui-pages-and-buttons.md": 107150,
     "docs/architecture/04-server-api-endpoints.md": 26833,
     # 27137 -> 30400: the schedule table gains a documented write contract the
     # chapter had no text for — one transaction owning the lock ORDER, the strict
