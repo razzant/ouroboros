@@ -309,7 +309,9 @@ class HostServiceContext:
             topic = permission.split(":", 1)[1]
             declared = set(str(item or "").strip() for item in (loaded.manifest.subscribe_events or []))
             permissions = set(str(item or "").strip() for item in (loaded.manifest.permissions or []))
-            if topic == "skill.lifecycle" and "subscribe_event" in permissions and topic in declared:
+            # Not conversation content, so no owner grant: lifecycle facts and the
+            # host's own owner notifications (a transport mirrors them).
+            if topic in ("skill.lifecycle", "owner.notification") and "subscribe_event" in permissions and topic in declared:
                 return
         if permission not in granted:
             raise HostServiceAuthError(f"skill {skill_name!r} lacks grant {permission!r}")
@@ -711,9 +713,11 @@ async def _api_notify(request: Request) -> JSONResponse:
             at_raw, cron_raw, payload.get("timezone"), bool(cancel),
         )
     try:
-        row = emit_owner_notification(
-            ctx.data_dir, chat_id=_owner_notification_chat_id(), category="notice",
-            text=text, source=f"skill:{skill_name}", key=key,
+        # The append takes the log's file lock: off the event loop, like every
+        # other durable write this service performs.
+        row = await run_sync_to_completion(
+            emit_owner_notification, ctx.data_dir, chat_id=_owner_notification_chat_id(),
+            category="notice", text=text, source=f"skill:{skill_name}", key=key,
         )
     except ValueError as exc:
         return _json_error(str(exc), 400)
@@ -792,9 +796,20 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
         "notification": {"text": text, "key": key},
     }
     try:
-        stored = upsert_scheduled_task(
-            record, drive_root=ctx.data_dir, actor=source,
-            reason="notification scheduled by its skill")
+        with schedule_transaction(ctx.data_dir):
+            rows = load_schedule_store(ctx.data_dir).get("tasks") or []
+            current = next((row for row in rows if str(row.get("id") or "") == schedule_id), None)
+            if current is not None:
+                if str(current.get("source") or "") != source:
+                    return _json_error("that schedule id belongs to another source", 409)
+                if str(current.get("manual_override") or "") in ("disabled", "deleted"):
+                    # The owner switched this reminder off; a skill's repeat of the
+                    # same key does not lift that — only the owner's restore does.
+                    return JSONResponse({"ok": True, "scheduled": False, "id": schedule_id,
+                                         "status": "suppressed"})
+            stored = upsert_scheduled_task(
+                record, drive_root=ctx.data_dir, actor=source,
+                reason="notification scheduled by its skill")
     except ScheduleRefused as refusal:
         return _json_error(refusal.message, 409 if refusal.status == "audit_unavailable" else 400)
     except ScheduleStoreUnreadable as exc:

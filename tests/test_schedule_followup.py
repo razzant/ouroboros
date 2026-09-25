@@ -870,3 +870,21 @@ def json_dumps(value):
     import json
 
     return json.dumps(value, ensure_ascii=False)
+
+
+def test_suppressed_notify_row_never_fires_until_the_owner_restores_it(tmp_path):
+    queue, pending = _queue(tmp_path)
+    queue.upsert_scheduled_task(_notify_row("n-off"))
+    off = queue.mutate_scheduled_task("delete", "n-off", reason="owner: stop", actor="owner:gateway", drive_root=tmp_path)
+    assert off["status"] == "suppressed"
+    queue.check_scheduled_tasks()
+    assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []
+    record = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert queue.schedule_lifecycle_status(record) == "suppressed" and record["enabled"] is False
+    # An upsert of the same row (the skill re-posting) cannot re-arm it either.
+    queue.upsert_scheduled_task({**_notify_row("n-off"), "trigger": {"type": "once", "run_at": "2000-01-02T00:00:00+00:00"}})
+    queue.check_scheduled_tasks()
+    assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []
+    assert queue.mutate_scheduled_task("restore", "n-off", reason="owner: back", actor="owner:gateway", drive_root=tmp_path)["ok"] is True
+    queue.check_scheduled_tasks()
+    assert len([row for row in _events(tmp_path) if row.get("type") == "owner_notification"]) == 1

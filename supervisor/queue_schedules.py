@@ -268,8 +268,11 @@ def _is_consumed_once(record: Dict[str, Any]) -> bool:
 
 
 def _is_suppressed(record: Dict[str, Any]) -> bool:
-    """A skill row the owner disabled or deleted and the resync may not re-arm."""
-    return (str(record.get("source") or "") == "skill_manifest"
+    """A skill row the owner disabled or deleted and the resync may not re-arm —
+    or a notify row the owner switched off, which its skill's repeat of the same
+    key may not re-arm either."""
+    return ((str(record.get("source") or "") == "skill_manifest"
+             or str(record.get("kind") or "") == SCHEDULE_KIND_NOTIFY)
             and str(record.get("manual_override") or "").strip().lower() in SUPPRESSED_OVERRIDES)
 
 

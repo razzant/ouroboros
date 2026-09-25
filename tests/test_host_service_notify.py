@@ -151,3 +151,84 @@ def test_notify_scheduling_validation(tmp_path: pathlib.Path) -> None:
     for _ in range(2):
         assert client.post("/notify", headers=headers, json={"text": "x", "at": "2999-01-01T00:00:00Z"}).status_code == 200
     assert len(queue.list_scheduled_tasks(tmp_path)["tasks"]) == 2
+
+
+def test_events_websocket_allows_manifest_declared_owner_notification_without_grant(tmp_path: pathlib.Path) -> None:
+    """The host's own owner notifications are not conversation content: a
+    companion that declares the topic may subscribe without an owner grant,
+    exactly like skill.lifecycle."""
+    from ouroboros import event_bus
+
+    _seed_token(tmp_path, skill="mirror", token="mtok", permissions=[], subscribe_events=["owner.notification"])
+    app = create_host_service_app(tmp_path)
+    client = TestClient(app)
+    event_bus.init_global_event_bus()
+    try:
+        with client.websocket_connect("/events", headers={"X-Skill-Token": "mtok"}) as ws:
+            ws.send_json({"type": "subscribe", "topic": "owner.notification"})
+            assert ws.receive_json()["type"] == "subscribed"
+            event_bus.publish_event("owner.notification", {"text": "hello", "source": "skill:cal"})
+            message = ws.receive_json()
+        assert message["type"] == "event" and message["topic"] == "owner.notification"
+        assert message["data"]["text"] == "hello"
+    finally:
+        event_bus.init_global_event_bus()
+
+
+def test_owner_disable_or_delete_of_a_notify_row_survives_the_skill_reposting_its_key(tmp_path: pathlib.Path) -> None:
+    from supervisor import queue
+
+    queue.init(tmp_path)
+    client, _app = _notify_client(tmp_path)
+    headers = {"X-Skill-Token": "tok"}
+    body = {"text": "Meeting", "key": "cal:evt-9", "at": "2999-01-01T14:45:00+00:00"}
+    first = client.post("/notify", headers=headers, json=body)
+    assert first.status_code == 200 and first.json()["scheduled"] is True
+    schedule_id = first.json()["id"]
+
+    # The owner switches the reminder off: the row keeps a marker, the skill's
+    # repeat (a moved time, a new text) is answered honestly and changes nothing.
+    outcome = queue.mutate_scheduled_task("disable", schedule_id, reason="owner: not this one", actor="owner:gateway", drive_root=tmp_path)
+    assert outcome["ok"] is True and outcome["status"] == "updated"
+    again = client.post("/notify", headers=headers, json={**body, "text": "Meeting (moved)", "at": "2999-01-02T10:00:00+00:00"})
+    assert again.status_code == 200 and again.json() == {"ok": True, "scheduled": False, "id": schedule_id, "status": "suppressed"}
+    row = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert row["enabled"] is False and row["manual_override"] == "disabled"
+    assert row["notification"]["text"] == "Meeting" and row["trigger"]["run_at"].startswith("2999-01-01T14:45")
+    assert queue.schedule_lifecycle_status(row) == "suppressed"
+
+    # Only the owner's restore lifts it; then the skill's next post moves it again.
+    restored = queue.mutate_scheduled_task("restore", schedule_id, reason="owner: changed my mind", actor="owner:gateway", drive_root=tmp_path)
+    assert restored["ok"] is True and restored["status"] == "updated"
+    row = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert row["enabled"] is True and "manual_override" not in row
+    moved = client.post("/notify", headers=headers, json={**body, "at": "2999-01-03T10:00:00+00:00"})
+    assert moved.status_code == 200 and moved.json()["scheduled"] is True
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["trigger"]["run_at"].startswith("2999-01-03T10:00")
+
+    # A delete is retained as a suppressed record for the same reason; the
+    # skill's own cancel still removes what it may.
+    deleted = queue.mutate_scheduled_task("delete", schedule_id, reason="owner: gone", actor="owner:gateway", drive_root=tmp_path)
+    assert deleted["ok"] is True and deleted["status"] == "suppressed"
+    assert client.post("/notify", headers=headers, json=body).json()["status"] == "suppressed"
+    rows = queue.list_scheduled_tasks(tmp_path)["tasks"]
+    assert len(rows) == 1 and rows[0]["manual_override"] == "deleted" and rows[0]["enabled"] is False
+
+
+def test_scheduled_notify_upsert_refuses_a_row_owned_by_another_source(tmp_path: pathlib.Path) -> None:
+    from supervisor import queue
+
+    queue.init(tmp_path)
+    client, _app = _notify_client(tmp_path)
+    from ouroboros.gateway.host_service import _notify_schedule_id
+
+    queue.upsert_scheduled_task({
+        "id": _notify_schedule_id("cal", "shared"), "name": "someone else's", "kind": "notify",
+        "source": "skill:other", "enabled": True,
+        "trigger": {"type": "once", "run_at": "2999-01-01T00:00:00+00:00"},
+        "notification": {"text": "theirs", "key": "shared"},
+    })
+    resp = client.post("/notify", headers={"X-Skill-Token": "tok"},
+                       json={"text": "mine", "key": "shared", "at": "2999-01-01T00:00:00+00:00"})
+    assert resp.status_code == 409
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["notification"]["text"] == "theirs"

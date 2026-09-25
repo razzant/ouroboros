@@ -148,6 +148,9 @@ def _merge_onto_current(existing: Dict[str, Any], incoming: Dict[str, Any]) -> D
                 "the skill resync cannot undo it")
         if _is_suppressed(merged):
             merged["enabled"] = False
+    elif _is_suppressed(merged):
+        # A suppressed notify row stays off whatever its skill re-posts.
+        merged["enabled"] = False
     return merged
 
 
@@ -249,17 +252,24 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                         "detail": "the schedule audit log could not be written; nothing was changed"}
             running = _store._schedule_running_or_queued(wanted, root)
             skill_row = str(current.get("source") or "") == "skill_manifest"
+            # A skill's notify row is re-posted by its key, so the OWNER's off
+            # switch needs the same durable marker a skill-manifest row keeps;
+            # the skill cancelling its own row (actor = the row's source) really
+            # removes it — nothing of the owner's is being overridden there.
+            notify_row = str(current.get("kind") or "") == _store.SCHEDULE_KIND_NOTIFY
+            owner_over_notify = notify_row and str(actor or "") != str(current.get("source") or "")
             detail, removed = "", False
             if operation == "disable":
                 current["enabled"] = False
-                if skill_row:
+                if skill_row or owner_over_notify:
                     current["manual_override"] = "disabled"
                 status = "updated"
             elif operation == "delete":
-                if skill_row:
+                if skill_row or owner_over_notify:
                     # Retained as a suppressed record: dropping the row would only
-                    # have it recreated by the next lifecycle resync, and the owner
-                    # would never see that their delete did not hold.
+                    # have it recreated by the next lifecycle resync (or the skill's
+                    # next post of the same key), and the owner would never see
+                    # that their delete did not hold.
                     current["enabled"] = False
                     current["manual_override"] = "deleted"
                     status = "suppressed"
@@ -269,6 +279,12 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             elif _is_consumed_once(current):
                 status = "consumed_not_rearmed"
                 detail = "a one-shot that already fired is history; schedule a new run_at instead"
+            elif notify_row:
+                # Nothing to probe: a reminder has no skill readiness, so restore
+                # is the owner lifting their own marker and re-arming the row.
+                current.pop("manual_override", None)
+                current["enabled"] = True
+                status = "updated"
             elif skill_row:
                 # Probed UNDER the transaction: readiness is skill state on disk,
                 # not a row field, so a probe taken before the lock could be

@@ -94,7 +94,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # a model-free owner notification, its receipt, lock discipline, silence of a
     # disabled skill, per-occurrence frame key) is a mechanism the chapter had no
     # text for; the base sat 20 bytes under the previous budget.
-    "docs/architecture/05-supervisor-loop.md": 32300,
+    # 32300 -> 32450: the owner's durable disable/delete of a notify row (suppression
+    # marker a skill's repeat cannot lift) joins the same paragraph — one sentence.
+    "docs/architecture/05-supervisor-loop.md": 32450,
     # 286850 -> 287600: "an answer that has not arrived is a gap" is a new invariant of
     # plan review and task acceptance (the slot census vocabulary, the `awaiting`
     # projection, the only-awaited task outcome); the in-flight sentence it grew from is

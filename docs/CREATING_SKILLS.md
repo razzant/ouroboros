@@ -859,7 +859,12 @@ Ouroboros was off fires once on the next tick, like any one-shot. With a `key`
 the row is yours to move: the same key posted again replaces its time and
 text; `{"key": ..., "cancel": true}` removes it (`404` when there is no such
 row of yours). Without a key each post is a new fire-and-forget row. A
-disabled or removed skill's rows stay silent until it is enabled again.
+disabled or removed skill's rows stay silent until it is enabled again, and an
+owner who disabled or deleted one of your rows on the Activity page keeps it
+off: the same key posted again answers `{"scheduled": false, "status":
+"suppressed"}` until the owner restores it. Every scheduled post rewrites the
+one schedule table under its lock, so keep the armed set small — the next
+occurrences, keyed, not a year of one-shots.
 
 ## Iterative skill development
 
