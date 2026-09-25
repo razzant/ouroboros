@@ -374,14 +374,14 @@ def test_telegram_owner_wait_upgrade_reseeds_current_version(tmp_path, fake_log)
     )
 
     assert upgraded == 1
-    assert "version: 1.2.4" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.2.5" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_quiz.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
 
 @pytest.mark.serial
 @pytest.mark.parametrize("name,source,old_version,new_version", [
-    ("telegram", "d5418e05b822feaf6aaa652e8cdc5b53af1232cc", "1.2.1", "1.2.4"),
+    ("telegram", "d5418e05b822feaf6aaa652e8cdc5b53af1232cc", "1.2.1", "1.2.5"),
     ("unix_computer_use", "162ad3fe6791fcaf6cf625e6b0c50d3a2a27e7f8", "0.4.1", "0.4.2"),
 ])
 def test_resync_delivers_payload_from_real_previous_seed(tmp_path, fake_log, name, source, old_version, new_version):
