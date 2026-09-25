@@ -265,7 +265,13 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                     current["manual_override"] = "disabled"
                 status = "updated"
             elif operation == "delete":
-                if skill_row or owner_over_notify:
+                if owner_over_notify and _is_suppressed(current):
+                    # The owner already switched this reminder off and now removes
+                    # the record itself: an explicit second act, so the row goes
+                    # (a later post of the same key starts a fresh row).
+                    tasks = [item for item in tasks if str(item.get("id") or "") != wanted]
+                    status, removed = "deleted", True
+                elif skill_row or owner_over_notify:
                     # Retained as a suppressed record: dropping the row would only
                     # have it recreated by the next lifecycle resync (or the skill's
                     # next post of the same key), and the owner would never see

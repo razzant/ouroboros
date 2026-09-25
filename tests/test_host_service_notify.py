@@ -213,6 +213,10 @@ def test_owner_disable_or_delete_of_a_notify_row_survives_the_skill_reposting_it
     assert client.post("/notify", headers=headers, json=body).json()["status"] == "suppressed"
     rows = queue.list_scheduled_tasks(tmp_path)["tasks"]
     assert len(rows) == 1 and rows[0]["manual_override"] == "deleted" and rows[0]["enabled"] is False
+    # A second owner delete of the suppressed record removes it for good.
+    gone = queue.mutate_scheduled_task("delete", schedule_id, reason="owner: clean up", actor="owner:gateway", drive_root=tmp_path)
+    assert gone["ok"] is True and gone["status"] == "deleted"
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"] == []
 
 
 def test_scheduled_notify_upsert_refuses_a_row_owned_by_another_source(tmp_path: pathlib.Path) -> None:
