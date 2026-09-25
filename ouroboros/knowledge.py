@@ -278,11 +278,44 @@ def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:
     return tuple(rows)
 
 
-def _write_content(current: KnowledgeNote | None, content: str, mode: str) -> bytes:
+def apply_knowledge_edits(original: str, edits: Any) -> tuple[str, str]:
+    """Compile explicit disjoint edits against the complete note the actor read.
+
+    The caller binds its own read and the existing writer CAS checks that
+    revision at publication. Unmentioned text survives byte-for-byte; this
+    helper never judges whether the authored basis is semantically correct.
+    """
+    if not isinstance(edits, list) or not edits:
+        return "", "existing_note_requires_edits"
+    spans = []
+    for edit in edits:
+        if not isinstance(edit, dict) or not all(isinstance(edit.get(k), str) for k in
+                                                  ("old_text", "new_text", "basis")):
+            return "", "invalid_knowledge_edit"
+        old, new, basis = edit["old_text"], edit["new_text"], edit["basis"]
+        start = original.find(old)
+        if (not old or not basis.strip() or old == new or start < 0
+                or original.find(old, start + 1) >= 0):
+            return "", "unanchored_knowledge_edit"
+        spans.append((start, start + len(old), new))
+    spans.sort()
+    if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
+        return "", "overlapping_knowledge_edits"
+    updated = original
+    for start, end, new in reversed(spans):
+        updated = updated[:start] + new + updated[end:]
+    return updated, ""
+
+
+def _write_content(current: KnowledgeNote | None, content: str, mode: str, *, exact: bool = False) -> bytes:
     proposed = content.encode("utf-8")
     if mode == "append" and current is not None:
         return current.raw + (b"\n" if current.raw and not current.raw.endswith(b"\n") else b"") + proposed
     source = parse_markdown_source(proposed, str(current.address.path) if current else "")
+    if exact:
+        if current is None or current.parse_error or mode != "overwrite":
+            raise ValueError("Exact edit requires a readable existing note and overwrite mode")
+        return proposed  # An automatic anchored edit may remove YAML keys; no merge or re-dump.
     old = current.metadata if current is not None else {}
     if source.frontmatter is None:
         if current is not None:
@@ -313,7 +346,7 @@ class KnowledgeWriteResult:
 
 def write_knowledge_note(
     address: KnowledgeAddress, content: str, mode: str = "overwrite",
-    expected_revision: str | None = None, task_id: str = "",
+    expected_revision: str | None = None, task_id: str = "", *, exact: bool = False,
 ) -> KnowledgeWriteResult:
     """Publish a note against the actual current source, with no inference lock."""
     if mode not in {"overwrite", "append"} or not isinstance(content, str):
@@ -335,7 +368,7 @@ def write_knowledge_note(
         if expected_revision is not None and expected_revision != revision:
             return KnowledgeWriteResult(False, "revision_conflict", current, revision)
         try:
-            raw = _write_content(current, content, mode)
+            raw = _write_content(current, content, mode, exact=exact)
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         if current is not None and raw == current.raw:

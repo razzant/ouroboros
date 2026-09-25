@@ -121,8 +121,9 @@ def correction_prompt(
     knowledge_check = ("If the draft has a `KNOWLEDGE_ENTRIES_JSON:` block, check those cumulative updates "
                        "against each complete current note you read YOURSELF and this episode. The draft is a "
                        "proposal, not a source. After the episodic memory, return only draft-nominated topics "
-                       "(including proposed new notes), or drop them. Unsupported episode claims must not survive in a note; "
-                       "independently established knowledge may remain without becoming an event or approval "
+                       "(including proposed new notes), or drop them. Remove unsupported NEW claims from a nomination; "
+                       "absence in this episode is not grounds to remove older established knowledge. "
+                       "Independently established knowledge may remain without becoming an event or approval "
                        "in this episode.\n" + knowledge_instruction if knowledge_instruction else "")
     return f"""Compare this draft memory of Ouroboros against its complete source and return the corrected memory.
 Scope: {scope}; room: {room_label}. The source below is complete for this episodic summary, not for cumulative knowledge; the host assembles rooms and headers separately.

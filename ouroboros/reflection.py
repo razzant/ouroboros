@@ -99,15 +99,17 @@ worked together, an interpretation worth testing) — append a line:
 MEMORY_ACTIONS_JSON: [...]
 A JSON array of 0-3 objects. Each object must have:
 - type: one of "scratchpad_append", "knowledge_write", "identity_update_candidate"
-- content: concise, concrete text to persist
+- content: concise text to persist (required for a new knowledge_write; use edits instead for existing notes)
 Optional field:
 - topic: REQUIRED only for knowledge_write (shelf-relative path, e.g. "review_process")
 - scope: optional global or project:<exact project id>; omission keeps this task's shelf
 Rules for memory actions:
 - scratchpad_append: a durable working-memory note useful for near-future tasks.
-- knowledge_write: complete revised Markdown understanding under `topic`. Use
-  knowledge_read to read the whole CURRENT note before replacing it. Preserve
-  evidence, uncertainty and useful links; new topics need no prior read. A repeated
+- knowledge_write: for an existing `topic`, read the whole CURRENT note and
+  supply `edits`: [{{"old_text":"exact unique passage", "new_text":"replacement or empty for removal",
+  "basis":"source and reason"}}]. Unmentioned text stays intact; insert by replacing
+  an exact anchor with itself plus new text. For a NEW topic use `content` with
+  complete Markdown. Preserve evidence, uncertainty and useful links; a repeated
   interpretation is not new independent evidence. No blind append of fragments.
 - identity_update_candidate: a PROPOSED identity refinement; it is only recorded as a
   review candidate in the scratchpad, never auto-applied to identity.md (avoid drift).
@@ -365,7 +367,8 @@ def _validate_memory_actions(raw: Any, task_id: str) -> List[Dict[str, Any]]:
             continue
         content = (str(item.get("content") or "") if action_type == "knowledge_write"
                    else _truncate_with_notice(item.get("content", ""), 1200)).strip()
-        if not content:
+        edits = item.get("edits") if action_type == "knowledge_write" else None
+        if not content and not isinstance(edits, list):
             continue
         action: Dict[str, Any] = {"type": action_type, "content": content, "task_id": task_id}
         if action_type == "knowledge_write":
@@ -373,6 +376,8 @@ def _validate_memory_actions(raw: Any, task_id: str) -> List[Dict[str, Any]]:
             if not topic:
                 continue
             action["topic"] = topic
+            if edits is not None:
+                action["edits"] = edits
             if item.get("scope") is not None:
                 action["scope"] = item["scope"]
         out.append(action)
@@ -668,7 +673,7 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
     for action in (actions or [])[:3]:
         atype = str(action.get("type") or "")
         content = str(action.get("content") or "").strip()
-        if not content:
+        if not content and not action.get("edits"):
             continue
         if pid and atype in ("scratchpad_append", "identity_update_candidate"):
             continue

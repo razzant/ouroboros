@@ -187,7 +187,12 @@ def test_pressure_uses_read_revision_to_rewrite_the_authored_overview(tmp_path, 
                 return {"tool_calls": [call("knowledge_read", {"topic": "overview", "scope": "global"}, "read-overview")]}, {"cost": 0.01}
             assert old.text in kwargs["messages"][-1]["content"]
             return {"content": json.dumps({"knowledge_entries": [{"topic": "overview", "scope": "global",
-                "content": "---\nsummary: Authored compact orientation.\n---\nFull scope retained with [detail](detail.md)."}]})}, {"cost": 0.02}
+                "edits": [{"old_text": "summary: Full authored orientation.",
+                           "new_text": "summary: Authored compact orientation.",
+                           "basis": "Pressure pass retains the full orientation via the detail link."},
+                          {"old_text": "Detailed understanding. " * 500,
+                           "new_text": "Full scope retained with [detail](detail.md).",
+                           "basis": "Complete current source is retained in the detailed note."}]}]})}, {"cost": 0.02}
     result = c.maintain_memory_pressure(memory, Overview(), ctx, fits=lambda: len(address.path.read_bytes()) < 1000)
     assert result["status"] == "fitting"
     assert result["actions"][0]["writes"][0]["ok"]

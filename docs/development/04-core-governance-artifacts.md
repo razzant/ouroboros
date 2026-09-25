@@ -127,6 +127,10 @@ ARCHITECTURE's per-delivery context/source contract for delivery, coverage and s
 `tests/test_plan_dialogue_review_regressions.py`, the acceptance ledger tests
 in `tests/test_loop_misc.py`.
 
+### Automatic cumulative knowledge edits
+
+A dialogue draft and correction, scratchpad compression, pressure maintenance and reflection may nominate changes to ordinary existing notes only as exact anchored edits against their own complete current-note read. The shared automatic publisher preserves unmentioned bytes and applies each unique nonoverlapping old-text span with its authored source/basis under the existing revision CAS. New notes take complete Markdown; the Improvement Backlog and Pattern Register retain their dedicated maintainers, and manual `knowledge_write` retains its separate authored replacement contract. The host validates explicit scope, not semantic correctness of the rationale: a fabricated broad edit can still lose facts. Ambiguous anchors, missing reads and legacy full-note automatic replacements stay as retained, visible failures, never silent omission or a mechanical length veto. Tests: `tests/test_room_knowledge_correction.py`, `tests/test_knowledge_consolidation.py`.
+
 ### Invariant: Compaction must earn its rewrite
 
 Helper compaction is deficit-driven: checkpoint the exact actor-visible source

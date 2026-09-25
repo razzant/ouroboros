@@ -303,7 +303,8 @@ def _run_block_consolidation(
     chunks_to_process = (len(new_entries) + BLOCK_SIZE - 1) // BLOCK_SIZE if force_tail else len(new_entries) // BLOCK_SIZE
     processed = 0
     knowledge_instruction = (KNOWLEDGE_MAINTENANCE_PROMPT + "\nAfter the episodic summary, optionally add "
-                             'a final line KNOWLEDGE_ENTRIES_JSON: [{"topic":"...","scope":"global","content":"complete updated Markdown"}].\n'
+                             'a final line KNOWLEDGE_ENTRIES_JSON: [{"topic":"...","scope":"global","edits":[{"old_text":"exact existing passage","new_text":"revised passage","basis":"source and reason"}]}]. '
+                             'For a NEW note use content with complete Markdown instead of edits.\n'
                              if knowledge_context is not None else "")
     block = None
 
@@ -674,35 +675,31 @@ class KnowledgeReadContext:
 
 
 KNOWLEDGE_MAINTENANCE_PROMPT = """
-You may use knowledge_list and knowledge_read to understand existing notes before
-nominating a durable revision. An episodic summary describes only its supplied source;
-a knowledge note is cumulative understanding, grounded in the complete CURRENT note
-you read in this operation together with the new episode. Absence from this episode
-does not refute prior knowledge; an earlier episode cutoff does not undo later known
-events. Preserve useful established facts, sources, uncertainty, unknown metadata and
-links. Correct, remove or reorganize stale or unsupported understanding when the
-evidence warrants it; memory is revisable, not append-only. Read the whole current
-note before replacing it, rather than merely repeating fragments. New topics may be
-created without a prior read.
-Understanding of the people involved — preferences, recurring reactions, shared history,
-tentative interpretations with their source — is ordinary knowledge to nominate in global scope;
-a pattern across several moments is worth more than one; revise the existing note rather than minting a rule,
-and an explicit standing request stays explicit. Author a YAML summary for a new or meaningfully revised note —
-the summary is what stays resident in the index — and revise it when the note's meaning changes.
-The note overview (scope global) is the shared orientation loaded into every future context; keep it
-current, and when none exists and this episode gives real understanding, create it after reading the index.
-Scope is a separate field, never a topic prefix.
-Do not treat the generated index or earlier previews as authored truth. Patterns and
-improvement-backlog retain their dedicated semantic maintainers; nominate ordinary
-knowledge here. If no memory change is useful, nominate none. This is the same memory
-operation, not another mandatory analysis or review.
-Read large notes using explicit start_char/end_char ranges. Read coverage belongs
-to one exact revision; repeat or overlapping reads do not fill unread gaps.
-Use compact_context(inspect=true) before the view fills, then give your own
-working_note and selected complete unit IDs to retain. Source checkpoints preserve
-the original reads; keep your current conclusions while reading the next range.
-This Light operation supports authored views; keep_last_n alone returns guidance
-without calling another helper. All tools remain available in this operation.
+Use knowledge_list and knowledge_read before nominating a durable revision.
+An episodic summary covers only its supplied source; a knowledge note is cumulative
+understanding from the complete CURRENT note read in this operation and the new episode.
+Absence from this episode cannot refute prior facts or undo later events. Preserve
+established facts, sources, uncertainty, unknown metadata and links; correct or remove
+stale understanding when evidence warrants it. Read the entire note, not fragments.
+For an EXISTING note nominate edits, not a whole replacement: each edit has an exact
+unique old_text, new_text (empty for removal), and a nonempty source/reason basis.
+Unmentioned text stays intact; insert by replacing an exact anchor with itself plus
+new text. The host refuses ambiguous edits against the read revision but cannot judge
+your basis. For a NEW note use content with complete Markdown; no prior read is needed.
+People's preferences, reactions, shared history and tentative sourced interpretations
+are global knowledge. Prefer patterns across moments; an explicit standing request stays explicit.
+Revise an existing note rather than minting a rule. Author and update a YAML summary
+for meaningful changes: the summary stays resident in the index.
+Global overview is shared orientation; keep it current. If absent and this episode
+offers real understanding, read the index before creating it. Scope is separate
+from the topic path. The generated index and previews are not authored truth.
+Patterns and improvement-backlog have dedicated maintainers; nominate ordinary notes
+here, or none when no change is useful. This is not another analysis or review.
+For large notes read explicit start_char/end_char ranges of ONE exact revision;
+overlap never fills a gap. Before the view fills use compact_context(inspect=true),
+then provide your working_note and selected complete unit IDs. Checkpoints preserve
+original reads; keep conclusions while paging. keep_last_n alone returns guidance,
+not another helper call. All tools remain available in this Light operation.
 """
 
 
@@ -1038,8 +1035,8 @@ def maintain_memory_pressure(memory: Any, llm_client: Any, context: Any, *,
         knowledge = KnowledgeReadContext(context, "knowledge_maintenance")
         prompt = KNOWLEDGE_MAINTENANCE_PROMPT + (
             "\nThe shared memory projection exceeds the current task's measured working window. "
-            "Read the complete global overview with knowledge_read, then nominate a shorter authored "
-            "overview preserving the whole scope of current understanding and source-relative links to details. "
+            "Read the complete global overview with knowledge_read, then nominate exact anchored edits "
+            "to its authored orientation, preserving the whole scope of current understanding and links to details. "
             "Do not remove useful uncertainty or evidence merely to save space. Use ordinary knowledge notes "
             "for detail when useful. Return JSON: {\"knowledge_entries\": [...]}.\n" + identity)
         if not (shelf / "overview.md").exists():
@@ -1337,10 +1334,13 @@ The oldest {compress_count} blocks need compression.
 
 Rules:
 1. Identify insights, patterns, lessons, and architectural decisions worth
-   preserving long-term. Output them as knowledge_entries with topic + content.
+   preserving long-term. Output them as knowledge_entries with topic + edits
+   for existing notes, or topic + content for new notes.
    Topics are source-relative Markdown paths; preserve their exact identities.
    For an existing topic, read its complete current source using knowledge_read,
-   then propose the full revised note, not a blind append of the new fragment.
+   then propose exact unique old_text/new_text edits, each with a source/basis;
+   unmentioned content stays intact. To insert, replace an exact anchor with
+   itself plus the new text. Do not blindly append the new fragment.
 2. Compress the old blocks into a SINGLE shorter summary block. Keep active
    tasks, unresolved questions, admin instructions still in force. Remove
    stale/completed items and routine status updates.
@@ -1354,7 +1354,7 @@ Identity context: {identity_text if identity_text else "(not available)"}
 {old_content}
 
 Respond with JSON only (no fences), after any useful knowledge reads:
-{{"knowledge_entries": [{{"topic": "topic/path", "scope": "global", "content": "complete Markdown note"}}], "compressed_block": "single compressed block text"}}
+{{"knowledge_entries": [{{"topic": "topic/path", "scope": "global", "edits": [{{"old_text": "exact old passage", "new_text": "updated passage", "basis": "source and reason"}}]}}], "compressed_block": "single compressed block text"}}
 """
 
     usage: Dict[str, Any] = {}
@@ -1446,7 +1446,8 @@ def _write_knowledge_entries(
     knowledge_dir: pathlib.Path, entries: List[Dict[str, Any]], *, context: Any = None,
 ) -> List[Dict[str, Any]]:
     """Publish only source-aware nominations through the common note writer."""
-    from ouroboros.knowledge import KnowledgeAddress, sanitize_topic, write_knowledge_note
+    from ouroboros.knowledge import (KnowledgeAddress, apply_knowledge_edits, read_knowledge_note,
+                                     sanitize_topic, write_knowledge_note)
     from ouroboros.tools.knowledge import _address, _record_backlog_history
 
     outcomes = []
@@ -1454,13 +1455,14 @@ def _write_knowledge_entries(
         if not isinstance(entry, dict):
             continue
         topic, content = entry.get("topic"), entry.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
         try:
             topic = sanitize_topic(topic)
             address = (_address(context, topic, str(entry.get("scope") or "")) if context is not None
                        else KnowledgeAddress(knowledge_dir.parent.parent, knowledge_dir, topic))
             if topic == "improvement-backlog":
+                if not isinstance(content, str) or not content.strip():
+                    outcomes.append({"topic": topic, "ok": False, "reason": "invalid_backlog_content"})
+                    continue
                 from ouroboros.improvement_backlog import backlog_path, merge_backlog_text
                 merged = merge_backlog_text(address.canonical_root, content)
                 if merged >= 0:
@@ -1469,8 +1471,27 @@ def _write_knowledge_entries(
                 outcomes.append({"topic": topic, "scope": "global", "ok": merged >= 0,
                                  "reason": "backlog_merge" if merged >= 0 else "unparseable_backlog"})
                 continue
+            try:
+                current = read_knowledge_note(address)
+            except FileNotFoundError:
+                current = None
+            if current is not None:
+                expected = entry.get("expected_revision")
+                reason = ("revision_required" if not expected else
+                          "revision_conflict" if expected != current.revision else "")
+                if reason:
+                    outcomes.append({"topic": topic, "scope": address.scope, "ok": False, "reason": reason})
+                    continue
+                content, reason = apply_knowledge_edits(current.text, entry.get("edits"))
+                if reason:
+                    outcomes.append({"topic": topic, "scope": address.scope, "ok": False, "reason": reason})
+                    continue
+            elif not isinstance(content, str) or not content.strip() or entry.get("edits") is not None:
+                outcomes.append({"topic": topic, "scope": address.scope, "ok": False,
+                                 "reason": "new_note_requires_content"})
+                continue
             result = write_knowledge_note(address, content, expected_revision=entry.get("expected_revision"),
-                                          task_id=str(entry.get("task_id") or ""))
+                                          task_id=str(entry.get("task_id") or ""), exact=current is not None)
             outcomes.append({"topic": topic, "scope": address.scope, "ok": result.ok,
                              "reason": result.reason,
                              "source_ref": result.current.source_ref() if result.current else None})

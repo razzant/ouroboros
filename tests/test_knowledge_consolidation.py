@@ -78,7 +78,9 @@ def test_same_light_operation_reads_complete_note_and_binds_actual_revision(tmp_
     assert "ORIGINAL EPISODE" in second[0]["content"]
     assert second[-1]["content"].endswith(original.text)
     assert "DECISIVE ORIGINAL TAIL." in second[-1]["content"]
-    entries = reads.bind_entries([{"topic": "people/alex", "scope": "global", "content": "Revised.",
+    entries = reads.bind_entries([{"topic": "people/alex", "scope": "global", "edits": [{
+        "old_text": "He asked for brevity while hurried.", "new_text": "He asked for depth today.",
+        "basis": "Today's request corrected the preference."}],
                                    "expected_revision": "invented"}])
     assert entries[0]["expected_revision"] == original.revision
     assert c._write_knowledge_entries(original.address.shelf, entries, context=ctx)[0]["ok"]
@@ -99,6 +101,16 @@ def test_unread_existing_note_is_preserved_while_new_note_can_be_created(tmp_pat
     assert k.read_knowledge_note(original.address).raw == original.raw
 
 
+def test_backlog_keeps_its_dedicated_merge_not_the_ordinary_edit_contract(tmp_path, fit):
+    item = "### ibl-ordinary-notes\n- summary: Keep cumulative notes intact.\n- category: memory\n"
+    first = c._write_knowledge_entries(tmp_path / "memory" / "knowledge", [
+        {"topic": "improvement-backlog", "content": item}])
+    second = c._write_knowledge_entries(tmp_path / "memory" / "knowledge", [
+        {"topic": "improvement-backlog", "content": item}])
+    assert first[0]["ok"] and second[0]["ok"]
+    assert first[0]["reason"] == second[0]["reason"] == "backlog_merge"
+
+
 def _scratchpad(root):
     memory = Memory(root, root)
     memory.mutate_scratchpad_blocks(lambda _: [
@@ -112,8 +124,10 @@ def _scratchpad(root):
 def test_scratchpad_source_and_failed_revisions_remain_durable(tmp_path, fit, concurrent):
     original = _initial(tmp_path)
     memory = _scratchpad(tmp_path)
-    update = "---\nsummary: Brevity while hurried; depth while exploring.\n---\nTwo original episodes, context differs."
-    answer = json.dumps({"knowledge_entries": [{"topic": "people/alex", "content": update}],
+    update = "Two original episodes, context differs."
+    edits = [{"old_text": "He asked for brevity while hurried.", "new_text": update,
+              "basis": "The original episodes establish context-specific requests."}]
+    answer = json.dumps({"knowledge_entries": [{"topic": "people/alex", "edits": edits}],
                          "compressed_block": "I learned that context matters; keep both episodes."})
     competing = lambda: k.write_knowledge_note(original.address, "A simultaneous newer observation.",
                                                expected_revision=original.revision)
@@ -127,7 +141,7 @@ def test_scratchpad_source_and_failed_revisions_remain_durable(tmp_path, fit, co
     assert blocks[0]["metadata"]["knowledge_writes"][0]["ok"] is not concurrent
     source = memory.journal_path().read_text()
     assert "ORIGINAL EPISODE 0" in source and update in json.loads(next(
-        line for line in source.splitlines() if json.loads(line).get("type") == "blocks_consolidated"))["knowledge_entries"][0]["content"]
+        line for line in source.splitlines() if json.loads(line).get("type") == "blocks_consolidated"))["knowledge_entries"][0]["edits"][0]["new_text"]
     current = k.read_knowledge_note(original.address)
     assert ("simultaneous newer" if concurrent else "Two original episodes") in current.text
     if concurrent:
@@ -139,7 +153,9 @@ def test_dialogue_consolidation_retains_nominations_and_commits_shared_note(tmp_
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat, text_size=0)
     answer = "### Block: episode\nI learned why the requested depth changes.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
-        {"topic": "people/alex", "content": "Current understanding with original episode evidence."}])
+        {"topic": "people/alex", "edits": [{"old_text": "He asked for brevity while hurried.",
+            "new_text": "Current understanding with original episode evidence.",
+            "basis": "The episode established a more precise preference."}]}])
     llm = MemoryLLM(answer)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="dialogue-memory")
     usage = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx)
@@ -159,18 +175,20 @@ def test_dialogue_consolidation_retains_nominations_and_commits_shared_note(tmp_
 def test_reflection_reads_current_note_preserves_full_update_and_counts_only_actual_write(tmp_path, fit):
     original = _initial(tmp_path)
     content = "Full revised understanding. " * 80 + "PRESERVE LAST SENTENCE."
+    edits = [{"old_text": "He asked for brevity while hurried.", "new_text": content,
+              "basis": "The full original task establishes revised understanding."}]
     answer = "Reflection.\nMEMORY_ACTIONS_JSON: " + json.dumps([
-        {"type": "knowledge_write", "topic": "people/alex", "content": content}])
+        {"type": "knowledge_write", "topic": "people/alex", "edits": edits}])
     llm = MemoryLLM(answer)
     entry = reflection.generate_reflection(
         {"id": "reflection-task", "text": "FULL ORIGINAL EPISODE " * 100, "drive_root": str(tmp_path)},
         {}, "trace", llm, {"rounds": 2, "cost": 0.1})
-    assert entry["memory_actions"][0]["content"] == content
+    assert entry["memory_actions"][0]["edits"] == edits
     assert entry["memory_actions"][0]["expected_revision"] == original.revision
     assert "FULL ORIGINAL EPISODE " * 100 in llm.calls[1]["messages"][0]["content"]
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
     assert reflection.apply_memory_actions(env, entry["memory_actions"]) == 1
-    assert k.read_knowledge_note(original.address).text.endswith("PRESERVE LAST SENTENCE.")
+    assert "PRESERVE LAST SENTENCE." in k.read_knowledge_note(original.address).text
     assert reflection.apply_memory_actions(env, entry["memory_actions"]) == 0
 
 

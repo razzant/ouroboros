@@ -212,7 +212,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 23400 -> 23500: the long-work continuity merge landed the chapter at 23471 on the
     # official line; re-based here, no text of this chapter was touched.
     "docs/development/03-module-size-and-complexity.md": 23500,
-    "docs/development/04-core-governance-artifacts.md": 16431,
+    # 16431 -> 17500: automatic ordinary-note publication gains its first
+    # structural edit contract; no previous rule describes preserving untouched
+    # cumulative source while still allowing explicit corrections/removals.
+    "docs/development/04-core-governance-artifacts.md": 17500,
     "docs/development/05-review-and-commit-protocol.md": 12956,
     # 94197 -> 94520: the usage-ledger lock rule gains its reader contract (a display read
     # on the supervisor loop or a gateway thread rides the last validated snapshot; money

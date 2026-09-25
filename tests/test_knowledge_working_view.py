@@ -75,7 +75,9 @@ def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(
     assert estimate_context_prompt_tokens([{"role": "user", "content": original.text}], reads.tools) + 16384 > fit.window
     episode = "ORIGINAL EPISODE: reconsider the complete account."
     revised = "A coherent revised account preserving the decisive last event."
-    nomination = [{"topic": "large", "scope": "global", "content": revised}]
+    nomination = [{"topic": "large", "scope": "global", "edits": [{
+        "old_text": "DECISIVE LAST EVENT.", "new_text": revised,
+        "basis": "The complete source and new episode correct the final event."}]}]
     answer = "I read the full account and retained what changed."
     if room_correction:
         answer += "\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(nomination)
