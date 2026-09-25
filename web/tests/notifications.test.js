@@ -459,3 +459,29 @@ test('settings controls paint current state and gate on the master switch', asyn
     await notifier.setPref('nope', true);
     assert.equal('nope' in notifier.prefs, false);
 });
+
+test('an owner notification log frame is the skill-first category, titled by its source', () => {
+    const frame = {
+        type: 'owner_notification', category: 'notice', text: 'Meeting with Ivan in 15 min',
+        source: 'skill:calendar', key: 'cal:evt-1', ts: '2026-09-25T14:30:00+00:00', chat_id: 1,
+    };
+    const hit = classifyLiveFrame(frame, { kind: 'log' });
+    assert.equal(hit.category, 'notice');
+    assert.equal(hit.title, 'Reminder from calendar');
+    assert.equal(hit.body, 'Meeting with Ivan in 15 min');
+    assert.equal(hit.key, 'notice:skill:calendar:cal:evt-1', 'the producer key collapses a redelivery');
+    assert.deepEqual(hit.target, { chatId: 1 });
+    // A model-free scheduler row of the agent's own is a reminder from Ouroboros;
+    // without a producer key the instant is the identity.
+    const own = classifyLiveFrame({ ...frame, source: 'task_followup', key: '' }, { kind: 'log' });
+    assert.equal(own.title, 'Reminder from Ouroboros');
+    assert.equal(own.key, 'notice:task_followup:2026-09-25T14:30:00+00:00');
+    // The category is its own toggle and the sentence stays behind show_text.
+    const seen = new Set();
+    assert.equal(decideNotification(hit, { ...ON, notice: false }, seen).reason, 'category_off');
+    const decision = decideNotification(hit, ON, seen);
+    assert.equal(decision.deliver, true);
+    assert.equal(decision.body, '', 'title only until the owner turns text on');
+    assert.equal(decideNotification(hit, { ...ON, show_text: true }, seen).body, 'Meeting with Ivan in 15 min');
+    assert.equal(DEFAULT_NOTIFY_PREFS.notice, true, 'on by default once notifications are on');
+});
