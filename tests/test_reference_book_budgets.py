@@ -40,7 +40,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # settlement's staging/trash; the artifact-route sentence was replaced, not appended to.
     # 166450 -> 166700 (steer sprint 2026-09-26, measured 166595 on the merged tree: delegate_message,
     # truthful waiting A-E, low-water reclaim; see the sprint ledger).
-    "docs/architecture/01-high-level-architecture.md": 166700,
+    # 166700 -> 166760 (PR #1301 tray split rebase, measured 166716: module-map rows for
+    # launcher_tray.py and launcher_bridge.py, compressed to their minimal form).
+    "docs/architecture/01-high-level-architecture.md": 166760,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.

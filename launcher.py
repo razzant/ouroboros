@@ -66,6 +66,7 @@ from ouroboros.launcher_onboarding import (
 from ouroboros.launcher_server_reaper import (
     reap_same_install_strays as _reap_same_install_strays_impl,
 )
+from ouroboros import launcher_tray
 from ouroboros.launcher_windows_runtime import (  # noqa: F401  (re-exported: same objects, prior launcher surface)
     _prepare_windows_webview_runtime,
     _show_windows_message,
@@ -200,6 +201,13 @@ def _bootstrap_context() -> BootstrapContext:
         save_settings=lambda settings: save_settings(settings, allow_elevation=True),
         log=log,
     )
+
+
+def _stop_agent_and_children(port: int) -> None:
+    stop_agent()
+    _kill_orphaned_children(port)
+    release_pid_lock()
+    os._exit(0)
 
 
 def check_git() -> bool:
@@ -1415,138 +1423,20 @@ def main(argv=()):
         webview.start(private_mode=False)
         return
 
-    def _resolve_bridge_file_url(raw_url: str) -> str:
-        """Validate a loopback file-bridge URL, returning the resolved full URL.
-
-        Shared SSOT for both the download-to-Downloads and open-in-default-app
-        bridge methods so the loopback guard cannot drift between them.
-        """
-        full_url = urllib.parse.urljoin(f"http://127.0.0.1:{actual_port}", str(raw_url or ""))
-        parsed = urllib.parse.urlparse(full_url)
-        if parsed.scheme != "http":
-            raise ValueError("file URL must be http://")
-        if parsed.hostname not in {"127.0.0.1", "localhost"}:
-            raise ValueError("desktop file access is limited to the local Ouroboros server")
-        if parsed.port != actual_port:
-            raise ValueError("file URL port must match the local Ouroboros server")
-        if parsed.path != "/api/files/download" and not parsed.path.startswith(("/api/extensions/", "/api/tasks/")):
-            raise ValueError("file URL path must be /api/files/download, /api/extensions/<skill>/... or /api/tasks/...")
-        return full_url
-
-    def _unique_bridge_target(directory: pathlib.Path, filename: str) -> pathlib.Path:
-        safe_name = pathlib.Path(str(filename or "download")).name or "download"
-        directory.mkdir(parents=True, exist_ok=True)
-        target = directory / safe_name
-        stem, suffix = target.stem, target.suffix
-        counter = 1
-        while target.exists():
-            target = directory / f"{stem}-{counter}{suffix}"
-            counter += 1
-        return target
-
-    def _fetch_bridge_url_to(full_url: str, target: pathlib.Path) -> None:
-        with urllib.request.urlopen(full_url, timeout=60) as resp, target.open("wb") as fh:  # noqa: S310 - localhost validated above
-            shutil.copyfileobj(resp, fh)
-
-    class MainApi:
-        @staticmethod
-        def _native_confirm(title: str, message: str) -> bool:
-            return bool(_webview_window and _webview_window.create_confirmation_dialog(title, message))
-
-        def request_runtime_mode_change(self, mode: str) -> dict:
-            try:
-                return _request_runtime_mode_change(mode, self._native_confirm)
-            except Exception as exc:
-                log.warning("Runtime mode native confirmation failed: %s", exc, exc_info=True)
-                return {"ok": False, "error": f"Native confirmation failed: {exc}"}
-
-        def confirm_runtime_mode_change(self, mode: str) -> dict:
-            """Confirm a mode change without writing it.
-
-            The SPA persists the selected mode through the owner HTTP endpoint.
-            Keeping this bridge side-effect free lets older shells fall back to
-            the same in-app confirmation instead of normalizing newer modes
-            such as Cyber Pro through their stale local enum.
-            """
-            try:
-                mode_text = str(mode or "").strip().lower()
-                if mode_text not in {"light", "advanced", "pro", "cyber_pro"}:
-                    return {"confirmed": False, "error": "Unknown runtime mode."}
-                settings = _load_settings()
-                current = normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE"))
-                message = (
-                    f"Change Ouroboros runtime mode from {current} to {mode_text}?\n\n"
-                    "The new mode is saved through the owner endpoint and takes effect after restart."
-                )
-                return {"confirmed": bool(self._native_confirm("Confirm Runtime Mode Change", message))}
-            except Exception as exc:
-                log.warning("Runtime mode native confirmation failed: %s", exc, exc_info=True)
-                return {"confirmed": False, "error": f"Native confirmation failed: {exc}"}
-
-        def request_auto_grant_reviewed_skills_change(self, enabled: bool) -> dict:
-            try:
-                return _request_auto_grant_reviewed_skills_change(bool(enabled), self._native_confirm)
-            except Exception as exc:
-                log.warning("Reviewed-skill auto-grant confirmation failed: %s", exc, exc_info=True)
-                return {"ok": False, "error": f"Native confirmation failed: {exc}"}
-
-        def request_skill_key_grant(self, skill: str, keys: list) -> dict:
-            try:
-                return _request_skill_key_grant(skill, keys, self._native_confirm)
-            except Exception as exc:
-                log.warning("Skill grant native confirmation failed: %s", exc, exc_info=True)
-                return {"ok": False, "error": f"Native confirmation failed: {exc}"}
-
-        def download_file_to_downloads(self, url: str, filename: str, open_external: bool = False) -> dict:
-            try:
-                full_url = _resolve_bridge_file_url(url)
-                target = _unique_bridge_target(pathlib.Path.home() / "Downloads", filename)
-                _fetch_bridge_url_to(full_url, target)
-                if open_external:
-                    open_path_external(target)
-                return {"ok": True, "path": str(target)}
-            except Exception as exc:
-                log.warning("Desktop file download failed: %s", exc, exc_info=True)
-                return {"ok": False, "error": str(exc)}
-
-        def open_external_url(self, url: str) -> dict:
-            return _open_external_url(url)
-        def request_attention(self, sound: bool = True) -> dict:
-            return request_native_attention(_webview_window.show if _webview_window else None, sound=bool(sound))
-
-        def save_bytes_to_downloads(self, filename: str, b64: str) -> dict:
-            try:
-                target = _unique_bridge_target(pathlib.Path.home() / "Downloads", filename)
-                target.write_bytes(base64.b64decode(str(b64 or ""), validate=True))
-                return {"ok": True, "path": str(target)}
-            except Exception as exc:
-                log.warning("Desktop save-to-Downloads failed: %s", exc, exc_info=True)
-                return {"ok": False, "error": str(exc)}
-
-        def open_file_with_default_app(self, url: str, filename: str) -> dict:
-            """Open a delivered file in the OS default app (external window).
-
-            Fetches the loopback file into a private temp dir (NOT ~/Downloads)
-            and hands it to the platform default handler. This never navigates
-            the in-app WKWebView, which was the original fullscreen-lockup bug.
-            """
-            try:
-                full_url = _resolve_bridge_file_url(url)
-                # Per-open private dir: mkdtemp atomically creates a fresh 0700
-                # directory, so a pre-placed symlink/dir at a shared temp path
-                # cannot redirect the write (hardens over a fixed shared root).
-                open_root = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-open-"))
-                target = _unique_bridge_target(open_root, filename)
-                _fetch_bridge_url_to(full_url, target)
-                open_path_external(target)
-                return {"ok": True, "path": str(target)}
-            except Exception as exc:
-                log.warning("Desktop open-in-default-app failed: %s", exc, exc_info=True)
-                return {"ok": False, "error": str(exc)}
-
-    # Prune stale externally-opened temp copies from previous sessions (privacy + disk).
     for _stale_open in pathlib.Path(tempfile.gettempdir()).glob("ouroboros-open-*"):
         shutil.rmtree(_stale_open, ignore_errors=True)
+
+    import ouroboros.launcher_bridge as _bridge
+
+    _bridge._request_runtime_mode_change = _request_runtime_mode_change
+    _bridge._request_auto_grant_reviewed_skills_change = _request_auto_grant_reviewed_skills_change
+    _bridge._request_skill_key_grant = _request_skill_key_grant
+    _bridge._load_settings = _load_settings
+    _bridge._open_external_url = _open_external_url
+    _bridge._request_native_attention = request_native_attention
+    _bridge.get_window = lambda: _webview_window
+    _bridge._actual_port = actual_port
+    js_api_class = _bridge.MainApi
 
     url = f"http://127.0.0.1:{actual_port}"
 
@@ -1557,7 +1447,7 @@ def main(argv=()):
     window = webview.create_window(
         f"Ouroboros v{APP_VERSION}",
         url=url,
-        js_api=MainApi(),
+        js_api=js_api_class(),
         width=1100,
         height=750,
         min_size=(800, 500),
@@ -1565,18 +1455,52 @@ def main(argv=()):
         text_select=True,
     )
 
-    def _on_closing() -> None:
+    def _on_closing() -> bool:
+        # Windows only: close-to-tray by default. The pywebview WinForms backend
+        # cancels the OS close when this handler returns True (on_closing sets
+        # args.Cancel); every other backend ignores the return value and closes,
+        # so non-Windows behavior is unchanged. _tray_ready guards against a
+        # failed tray: without a live tray icon there is nothing to restore the
+        # window, so we fall through to the ordinary graceful shutdown.
+        if IS_WINDOWS and launcher_tray.tray_ready.is_set():
+            log.info("Window closing — hiding to tray (Windows default).")
+            if _webview_window is not None:
+                _webview_window.hide()
+            return True
         log.info("Window closing — graceful shutdown.")
         _shutdown_event.set()
-        stop_agent()
-        _kill_orphaned_children(port)
-        release_pid_lock()
-        os._exit(0)
+        _stop_agent_and_children(port)
+        return False
 
     window.events.closing += _on_closing
     _webview_window = window  # Persist cookies and website data (ouroboros.theme); rebuild/limits: ARCHITECTURE §3.
 
+    tray_thread: Optional[threading.Thread] = None
+    if IS_WINDOWS:
+        # Wire the tray module to this launcher's shutdown sequence and window,
+        # then bootstrap it (the STA pump lives on a .NET Thread inside
+        # run_tray_icon; this outer python thread only reports readiness).
+        launcher_tray.shutdown_event = _shutdown_event
+        launcher_tray.get_window = lambda: _webview_window
+        tray_thread = threading.Thread(
+            target=launcher_tray.run_tray_icon,
+            args=(actual_port,),
+            kwargs={"exit_handler": _stop_agent_and_children},
+            name="ouroboros-tray",
+            daemon=True,
+        )
+        tray_thread.start()
+        launcher_tray.tray_ready.wait(timeout=10)
+
     webview.start(debug=False, private_mode=False)
+
+    # webview.start returns when the window is gone. With the tray alive the
+    # window close was cancelled, so reaching here means the window died some
+    # other way (logoff, WebView crash): run the ordinary graceful shutdown.
+    # The tray Exit path never returns here — _graceful_exit calls os._exit.
+    if tray_thread is not None:
+        _shutdown_event.set()
+        _stop_agent_and_children(port)
 
 
 if __name__ == "__main__":

@@ -288,6 +288,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── launcher_onboarding.py ← First-run onboarding as the desktop launcher presents it (serves the gateway /onboarding page; §2)
       ├── launcher_server_reaper.py ← POSIX same-install server discovery, pre-signal descendant capture, root-first termination, live identity revalidation; PID-lock-owning launcher only (Runtime topology below)
       ├── launcher_windows_runtime.py ← Windows-only pythonnet/pywebview runtime preparation
+      ├─ launcher_tray.py ← Win tray (NotifyIcon, STA)
+      └─ launcher_bridge.py ← MainApi JS bridge (§2)
       ├── provider_models.py   ← Model-ID helpers; the `ACTIVE_MODEL_SETTING_KEYS` vs `LEGACY_MODEL_SETTING_KEYS` split keeps Heavy out of startup/Provider Test/new consumers while migration/history still read it
       ├── runtime_mode_policy.py ← Protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by the registry, git tools, and gateway guards (§6 Safety and runtime mode)
       ├── schedule_contract.py ← Schedule id, 5-field cron, IANA timezone validation SSOT

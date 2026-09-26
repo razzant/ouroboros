@@ -31,13 +31,11 @@ def test_setup_and_main_bridge_share_the_bounded_external_opener(monkeypatch, se
         {}, 8765, open_external_url=launcher._open_external_url,
     )
     # Evaluate the actual main-window API class without launching a server/UI.
-    source = inspect.getsource(launcher.main)
-    node = next(node for node in ast.walk(ast.parse(source))
-                if isinstance(node, ast.ClassDef) and node.name == "MainApi")
-    namespace = {"_open_external_url": launcher._open_external_url}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "MainApi", "exec"), namespace)
-    assert "open_external_url=_open_external_url" in source
-    for api in (created["js_api"], namespace["MainApi"]()):
+    from ouroboros import launcher_bridge
+
+    launcher_bridge._open_external_url = launcher._open_external_url
+    MainApi = launcher_bridge.MainApi
+    for api in (created["js_api"], MainApi()):
         for url in ("https://example.test/signin", "http://example.test/", "mailto:owner@example.test"):
             answer = api.open_external_url(url)
             assert answer["ok"] is (settled is True or settled is None)
@@ -67,16 +65,16 @@ def test_external_opener_returns_thread_start_failure(monkeypatch):
 def test_main_bridge_request_attention_delegates_window_and_sound(monkeypatch):
     import launcher
 
-    source = inspect.getsource(launcher.main)
-    node = next(node for node in ast.walk(ast.parse(source))
-                if isinstance(node, ast.ClassDef) and node.name == "MainApi")
+    from ouroboros import launcher_bridge
+
     shown = []
-    namespace = {
-        "_open_external_url": launcher._open_external_url,
-        "_webview_window": type("Window", (), {"show": lambda self: shown.append(True)})(),
-        "request_native_attention": lambda show, sound=True: (show(), {"ok": True, "sound": sound})[1],
-    }
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "MainApi", "exec"), namespace)
-    result = namespace["MainApi"]().request_attention(False)
+    launcher_bridge._open_external_url = launcher._open_external_url
+    launcher_bridge.get_window = lambda: type(
+        "Window", (), {"show": lambda self: shown.append(True)}
+    )()
+    launcher_bridge._request_native_attention = lambda show, sound=True: (
+        show(), {"ok": True, "sound": sound}
+    )[1]
+    result = launcher_bridge.MainApi().request_attention(False)
     assert result == {"ok": True, "sound": False}
     assert shown == [True]
