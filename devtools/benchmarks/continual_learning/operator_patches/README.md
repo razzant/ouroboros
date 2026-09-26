@@ -237,3 +237,78 @@ the external checkout root (a clean clone at `549998d` plus the patches above).
     Public implementation for the ablation run: branch `ouroboros-luna-ablation` of
     `razzant/continual-learning-bench`. PR #10's `ouroboros-submission` branch is left
     untouched so the sonnet-4.6 submission keeps matching the code that produced it.
+
+## Addendum (6.113.5 evolution campaign, 2026-09-06)
+
+12. `adapter_evolution_campaign.v61135.patch`: the adapter as it stood after the
+    evolution-arm pilots of 2026-08-27 to 2026-09-06 on Ouroboros 6.113.5, as one delta
+    against PR #10 head `a691cf3` (branch `ouroboros-submission` of
+    `razzant/continual-learning-bench`). Apply with `git apply` onto a clean checkout of
+    `a691cf3`. It already contains the one-line `_rb` import fix of
+    `adapter_luna_ablation.v6870.patch` and does not touch `src/systems/codex/system.py`,
+    so do not also apply the luna patch's `_live_bridge.py` hunk.
+
+    This delta diverges from the current code and is published for its methodology, not
+    as a drop-in adapter. It branched before the regeneration of
+    `adapter_official_submission.v681.patch` that added the `OUROBOROS_SUBAGENTS` transport
+    from `run_clb.py` and removed the legacy HEAVY/CODE pins: it does not apply on top of
+    that patch (conflict in `_docker_launcher.py`), keeps the old pins, and writes its own
+    one-row roster instead of forwarding the launcher's. Its restart-refusal handling
+    targets an admission fence that exists only in the local engine build it ran on. It
+    was never run on a 7.x engine, and the 7.4.5 code shows two breaks: the injected
+    `remote_work` manifest lacks `plugin_api: "2.0"`, so the engine refuses its native-seed
+    trust and the live loop has no tools; and the task record no longer carries `cost_usd`
+    or `cost_usd_with_children`, so engine-task UsageEvents lose their cost. On 6.113.5 as
+    on 7.4.5 a fresh image build is expected to fail, because the engine's
+    `requirements.txt` has been a pointer to a lock file the Dockerfile does not copy since
+    v6.97.0; the 2026-09-03 run used a previously built image.
+
+    The methodological changes, which are what this delta is for:
+    - The next question waits for the evolution round. The boundary wait used to end while
+      a cycle was still running (over the 12 completed cycles of the 2026-09-03
+      treatment run, 464 s at the median and 920 s at most; the pilots capped the wait at
+      300 s), and 14 of 22 questions in the 2026-09-03 treatment
+      run were submitted into a running cycle, where the restart that cycle requests can
+      kill them. The engine starts an evolution task only when its queue is idle, so the
+      overlap came entirely from the adapter. `on_instance_boundary` now waits until a
+      host-visible predicate says the engine is quiet: no promotion request, evolution
+      disarmed, no queued or running task, no active direct-chat activity (the post-restart
+      auto-resume task runs as one), no pending or claimed restart marker, and no
+      unresolved restart obligation. It needs two consecutive quiet samples, has one 1800 s
+      budget per boundary, and on expiry logs the blockers and submits anyway.
+    - On the forced arm, evolution cycles come only from the benchmark boundary: the adapter
+      sets `OUROBOROS_POST_TASK_EVOLUTION_CADENCE=off` there. Under the adapter's default
+      `every_n:1` (the engine's own default is `llm`) every finished task, including the engine's own post-restart auto-resume task, files
+      the next promotion, so cycles chained between questions (13 evolution tasks against
+      11 boundaries in the 2026-09-03 treatment run).
+    - A restart no longer silently costs a question: the drain deadline is raised to
+      1800 s (engine default 120 s), a question cancelled by a restart is retried once, and
+      submits wait out a pending restart. The earlier form of this gate held 8 submits in
+      the 2026-09-03 treatment run.
+    - The answer is located with the same code as the official Claude Code and Codex
+      adapters (`_json_candidates` and `_parse_action_text`, copied verbatim and pinned by a
+      test) over the task's assistant transcript, so a complete answer followed by a
+      delivery-control envelope is not lost.
+    - The sales sandbox outlives the 2 h library default (`container_timeout` raised to
+      24 h at import), which every stateful Ouroboros sales rollout of the submitted run
+      exceeded; pgasawa/continual-learning-bench#22 proposes the bench-side fix.
+    - Reviewer slots are pinned to the solve model (`OUROBOROS_REVIEWER_SLOTS`: the triad as
+      `api_chat` rows, scope and advisory through a same-model scout row). Without the pin
+      the isolated settings inherit the host's structured slots, which override the flat
+      single-model review keys.
+    - Turn-1 responses attest the resolved configuration in `Response.metadata`.
+
+    Last end-to-end run: 2026-09-03, CL-Bench `run-all` groups
+    `2026-09-03T05-22-33.505496Z` (control) and `2026-09-03T05-22-33.505495Z` (treatment),
+    `sales_prediction`, `openrouter/anthropic/claude-sonnet-4.6`,
+    on Ouroboros 6.113.5 built from a local engine-fix branch (head `1ffa14d5`, not
+    published; public ancestor `8d13373b`), runtime attestation
+    `clone_version=6.113.5 head=5fd3157e`. Active in that run: the earlier restart gate and
+    retry, the 1800 s drain, the reviewer-slot pin, the sandbox lifetime override and the
+    config attestation. Added afterwards and exercised by unit tests only: the
+    official-parser answer locator, the boundary readiness wait, the cadence `off` and the
+    current restart gate. The patch also rewrites the post-submission section of the
+    adapter's `METHODOLOGY.md` with the full account.
+    Verified: the patch reproduces its source tree byte for byte on `a691cf3`;
+    `tests/test_ouroboros_submission_ports.py` 140 passed and
+    `tests/test_ouroboros_live_parity.py` 76 passed in the bench venv.

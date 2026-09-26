@@ -1,0 +1,3994 @@
+diff --git a/src/systems/ouroboros/METHODOLOGY.md b/src/systems/ouroboros/METHODOLOGY.md
+index a9a10a5..52d6366 100644
+--- a/src/systems/ouroboros/METHODOLOGY.md
++++ b/src/systems/ouroboros/METHODOLOGY.md
+@@ -1,7 +1,10 @@
+ # Ouroboros on CL-Bench — run methodology
+ 
+ This documents the submitted run `final_results/runs/ouroboros-claude-sonnet-4.6`
+-(2026-07-28/29, wall-clock 10h07m) and how to reproduce it.
++(2026-07-28/29, wall-clock 10h07m) and how to reproduce it. The submission is
++pgasawa/continual-learning-bench#10 (open, not on the public leaderboard as of
++2026-09-03). Sections up to "Reproduce" describe that run as scored; "Tests" describes
++the current tree; harness changes made after the run are listed in the final section.
+ 
+ ## System topology
+ 
+@@ -35,8 +38,15 @@ System params (as recorded in `manifest.json.system_args`):
+  "final_answer_delivery":true,"ouroboros_repo":"<ENGINE_CLONE>"}
+ ```
+ 
+-Non-secret environment (every knob is mirrored into the isolated server settings and
+-attested at container boot):
++Non-secret environment as exported on the host. The launcher mirrors most keys into the
++isolated server settings; five of the nineteen are not server settings.
++`OUROBOROS_NET_OUTAGE_HOLD_SEC` and `OUROBOROS_REVIEW_MAX_PASSES` are consumed by the
++bridge (the latter becomes the per-task `max_improvement_passes` budget when review is
++required and blocking, as it is here). `OUROBOROS_TRANSIENT_RETRY_MAX` did not reach the
++container, so the engine ran on its default (6). `CLBENCH_SCOPE_CREDENTIALS` is a
++host-side launcher switch, and `CLBENCH_SOLVE_DISABLED_TOOLS` travels as a per-task
++`disabled_tools` field. `CLBENCH_SHIM_BIND` is the host-side shim bind. Container boot
++attests the engine version and repository head, not knob values.
+ 
+ ```
+ OUROBOROS_TASK_REVIEW_MODE=required   OUROBOROS_REVIEW_ENFORCEMENT=blocking
+@@ -80,10 +90,12 @@ worker pool; delegation is disabled so this is not a swarm).
+ ## Reproduce
+ 
+ ```bash
+-# 0) engine clone at the pinned SHA + docker image
++# 0) engine clone at the pinned SHA + docker image. The build context must be the
++#    ENGINE clone (the Dockerfile copies the engine's requirements.txt; the bench repo
++#    root has none). The original image was built on arm64; rebuild on other hosts.
+ git clone https://github.com/razzant/ouroboros ouroboros-clone
+ git -C ouroboros-clone checkout 3f9d504b76af447e647139a141b8a76b6c62b114
+-docker build -t clbench-ouroboros:dev -f src/systems/ouroboros/docker/Dockerfile .
++docker build -t clbench-ouroboros:dev -f "$PWD/src/systems/ouroboros/docker/Dockerfile" ouroboros-clone
+ 
+ # 1) env: the block above, plus OPENROUTER_API_KEY, plus
+ export OUROBOROS_BENCH_CLONE="$PWD/ouroboros-clone"
+@@ -106,7 +118,165 @@ python scripts/analyze_final_results.py --out analysis.json
+ 
+ ## Tests
+ 
+-`tests/test_ouroboros_live_parity.py` (47 tests: live-loop behavioral parity and
+-failure containment) and `tests/test_ouroboros_submission_ports.py` (4 contract
+-tests: engine-task cost harvesting into UsageEvents, env override tri-state,
+-single-model vision pin). Both are in the default pytest collection.
++`tests/test_ouroboros_live_parity.py` (61 test functions, 76 collected cases: live-loop
++behavioural parity, failure containment, the restart gate and resubmit windows, the
++evolution-boundary hook, format repair) and `tests/test_ouroboros_submission_ports.py`
++(57 functions, 140 collected cases: engine-task cost harvesting into UsageEvents, env
++override tri-state, single-model pins for the vision slot and the reviewer/scope slots,
++turn-1 config attestation, the evolution-boundary readiness predicate, promotion cadence on
++the forced arm, the sandbox lifetime override, the official-parser copy drift guard,
++transcript order and latest-valid answer selection, format repair through the official
++parser). Both are in the default pytest collection. The live-parity file takes about ten
++minutes, mostly in the bounded cost harvest that `close()` runs against an unreachable
++test server.
++
++## Harness changes after the submitted run (as of 2026-09-06)
++
++These changes were made between 2026-08-27 and 2026-09-06 for evolution-arm pilots on
++Ouroboros 6.113.5 and are published as the operator patch
++`adapter_evolution_campaign.v61135.patch` (razzant/ouroboros,
++`devtools/benchmarks/continual_learning/operator_patches/`). None of them was active in the
++submitted run. They branch from PR #10 (`a691cf3`) and do not include the later upstream
++regeneration of `adapter_official_submission.v681.patch` (the `OUROBOROS_SUBAGENTS`
++transport from `run_clb.py` and the removal of the legacy HEAVY/CODE pins).
++
++### What ran, and on which engine
++
++The last end-to-end run of this adapter was on 2026-09-03: CL-Bench `run-all` groups
++`2026-09-03T05-22-33.505496Z` (control) and `2026-09-03T05-22-33.505495Z` (treatment),
++`sales_prediction`,
++`openrouter/anthropic/claude-sonnet-4.6`. The engine was Ouroboros 6.113.5 built from a
++local engine-fix branch, head `1ffa14d5`, 135 commits over the public
++razzant/ouroboros@`8d13373b` (VERSION 6.113.5) and not published. The runtime attestation
++recorded `clone_version=6.113.5` and `head=5fd3157e`, which is that head plus the
++harness-injected commit that seeds the `remote_work` skill. On the treatment arm the engine
++commits its own absorbed cycles into the read-write mount; that run ended at VERSION
++6.113.16. The runtime image `clbench-ouroboros:dev` was a pre-existing local build: the
++engine code is mounted from the clone and the image carries only dependencies. The upstream
++fix for stale delivery-control envelopes (`88948116`) is not in the evaluated engine's
++history.
++
++Active in that run: the restart gate in its earlier form (marker file plus health probe,
++900 s bound; it held 8 submits in the treatment arm), the single retry of a question
++cancelled by a restart, the 1800 s restart drain, the single-model reviewer slots with the
++scope scout, the sandbox lifetime override (the treatment arm ran 2 h 25 min and lost no
++container), and the turn-1 config attestation.
++
++Added after that run and exercised only by the unit tests above: the answer locator built
++on the official parser (2026-09-03, after the run finished); the evolution-boundary
++readiness wait with its shared budget, the current form of the restart gate, the promotion
++cadence `off` on the forced arm, the fail-closed forced request, and the handling of
++restart-shaped 503 refusals (2026-09-06).
++
++This adapter has not been run on any 7.x engine. Reading the code of razzant/ouroboros
++7.4.5 (`33da7a4f`, 2026-09-23) shows two breaks: the engine refuses native-seed trust to a
++skill manifest without `plugin_api: "2.0"`, so `remote_work` is not enabled and the live
++loop has no tools; and the task record no longer carries `cost_usd` or
++`cost_usd_with_children`, so the engine-task UsageEvents lose their cost. Independently of
++the engine version, a fresh image build is expected to fail: the engine's `requirements.txt`
++has been a pointer to `requirements-runtime.lock` since v6.97.0, on 6.113.5 as on 7.4.5, and
++the Dockerfile does not copy the lock. The 2026-09-03 run used a previously built image. The
++restart-refusal handling targets an admission fence that exists only in the local engine
++build and stays dormant on public engines.
++
++### Evolution arms and pilot shape
++
++Post-submission pilots run two arms per model that differ in exactly one system parameter:
++`evolution:false` (control) and `evolution:true` (treatment). Both carry
++`evolution_trigger:"forced"`, which is inert on the control arm (`on_instance_boundary`
++returns before any evolution work when evolution is off). Since 2026-09-06 the treatment
++arm sets `OUROBOROS_POST_TASK_EVOLUTION_CADENCE=off` while keeping
++`OUROBOROS_POST_TASK_EVOLUTION=true`, so a cycle starts only from the request the adapter
++files at a question boundary. The runs up to 2026-09-03 used the adapter's default cadence
++`every_n:1` (the engine's own default is `llm`), under which every finished task, including the auto-resume task the engine
++starts after a restart, files the next promotion, so cycle, restart, auto-resume and the
++next cycle can chain between two questions. The pilots are not the submitted recipe:
++`sales_prediction` only, `--runs 1`, `--task-parallelism 1 --per-task-parallelism 1`,
++stateless baseline skipped (`OUROBOROS_BENCH_SKIP_BASELINE=1`). The engine repository is
++mounted read-write on the treatment arm and read-only on the control arm.
++
++### Question boundary: the next question waits for the evolution round
++
++In PR #10 the boundary wait runs until the task timeout (900 s by default), and its early
++exit (request file gone and nothing running) does not tell a consumed request whose cycle
++is not yet enqueued from a finished cycle. The 2026-09-02 and 2026-09-03 pilots capped the
++wait at 300 s. Over the 12 completed cycles of the 2026-09-03 treatment run a cycle took
++464 s at the median and 920 s at most, and 14 of its 22 questions were submitted while an evolution task was running. That is the
++only way a benchmark task can be caught by the restart the cycle requests, because the
++engine enqueues an evolution task only when its queue is idle
++(`enqueue_evolution_task_if_needed` in `supervisor/evolution_lifecycle.py`).
++
++Now `on_instance_boundary` captures a baseline (server sha, campaign identity, both cycle
++counters) before publishing the forced request, publishes at most once per boundary, and
++then polls every 8 s until the engine is quiet by a host-visible predicate: no promotion
++request on disk and `evolution_mode_enabled` false; `/api/state` healthy with
++`evolution_enabled` false, zero pending and running tasks, empty `evolution_state` ids and
++no active direct-chat activity (the post-restart auto-resume task runs as one); no
++`pending_restart_verify` marker, claimed or not, and no unresolved restart obligation on
++the active transaction. Two consecutive quiet samples are required; any activity,
++unreadable state or sha change resets the count. If the `/api/state` payload does not carry
++the expected fields, the missing names are logged once and the boundary falls back to the
++previous counter-based early exits. The wait has one 1800 s monotonic budget per boundary;
++repeated cycles and restart retries inside it do not renew it, while a later wait that
++begins after the budget expired (a resubmit late in a long question, a format-repair
++submit) starts its own window. On the treatment arm the same predicate also runs before
++every question submit. On expiry the gate returns `reason="timeout"` with the blockers
++logged and the question is submitted anyway.
++
++### Engine restarts
++
++The engine's restart drain deadline is raised to 1800 s through
++`OUROBOROS_RESTART_DRAIN_MAX_SEC`; the engine default is 120 s, which the submitted run used.
++A question whose task record says it was cancelled by a restart is retried once. Before each
++submit `_await_pending_restart` waits out a pending restart: on the treatment arm through the
++readiness predicate above, elsewhere through the marker files and a health probe, inside the
++same budget. A restart-shaped HTTP 503 re-enters that wait without consuming a submit
++attempt. Restart-kill detection matches the word "restart" in the free-text task result,
++because the engine exposes no typed reason for it. Every boundary and pre-submit gate result
++(reason, cycle outcome, elapsed time, counters, blockers) is logged by the bridge.
++
++### Answer extraction
++
++The final action is located with the official adapters' candidate enumeration:
++`_json_candidates` and `_parse_action_text` are copied verbatim from
++`src/systems/claude/system.py` into `src/systems/ouroboros/action_parse.py` (the Codex
++adapter carries the same two functions), and a test pins the copies equal to the claude
++adapter. The live locator (`_final_answer_action`) walks `_json_candidates` from the most
++recent span and accepts the first that passes the shared `validate_with_coercion`. It
++re-implements the walk inline rather than calling `_parse_action_text`, and so differs from
++it in two ways: a candidate equal, ignoring `notes`, to the previously delivered payload is
++skipped while the current benchmark question has recorded no protocol step, and a walk that
++finds nothing returns None instead of raising the last validation error or retrying on
++`extract_json` of the whole text. `_parse_action_text` itself is used on the format-repair
++path and in the per-action loop. One property is inherited from the official parser: a
++fenced block is enumerated before the raw spans and duplicates keep their first position,
++so when the final answer is fenced and an earlier unfenced draft also validates, the draft
++wins the walk.
++
++The source text is up to the last 40 assistant outputs of the engine task, oldest to newest
++(`_task_assistant_text`; an unreadable observability directory degrades the source to the
++engine fields alone), followed by the engine's `result` and `final_answer`. If the walk finds
++nothing, two fallbacks follow: a schema-coercion model call over the final text
++(`_coerce_final`; cost recorded), which has no Claude Code analogue, and one in-container
++format-repair task (`_format_repair_action`; `OUROBOROS_FORMAT_REPAIR=0` disables), which
++mirrors the repair turn the Claude and Codex adapters run on a parse failure. Every pilot
++result produced so far, including the 2026-09-03 pair, used the previous locator (typed
++`final_answer`, then the last JSON span in the final text, strict schema validation).
++
++### Configuration deltas
++
++The pilot environment differs from the submitted block in `OUROBOROS_EFFORT_TASK=low`
++(submitted: `high`; the launcher applies one effort to all task types),
++`OUROBOROS_RESTART_DRAIN_MAX_SEC=1800`, `OUROBOROS_BENCH_SKIP_BASELINE=1`, and
++`CLBENCH_SHIM_BIND` unset on the pilot host (Docker Desktop, where the adapter default
++`127.0.0.1` is rewritten to `host.docker.internal` for the container). The remaining 17 of
++the 19 published keys are identical; the pilot scripts additionally export
++`OUROBOROS_BENCH_RUNS_ROOT`. Since 2026-08-30 `_overrides` also writes a same-model
++configured-subagent roster (`clbench-scope-scout`) into `OUROBOROS_SUBAGENTS` and pins
++`OUROBOROS_REVIEWER_SLOTS`: the triad as three `api_chat` rows on the solve model, scope and
++advisory through the scout. Without the pin the isolated settings inherit the host's
++structured reviewer slots, which then override the flat single-model review keys. A
++subagent route is therefore in use even though the solving agent still delegates nothing
++(depth 0 gates the `schedule_subagent` tool, and every route resolves to the same model).
++Turn-1 responses carry a `config_attestation` of the resolved host keys in
++`Response.metadata`.
+diff --git a/src/systems/ouroboros/_docker_launcher.py b/src/systems/ouroboros/_docker_launcher.py
+index af9165e..0019d84 100644
+--- a/src/systems/ouroboros/_docker_launcher.py
++++ b/src/systems/ouroboros/_docker_launcher.py
+@@ -182,11 +182,9 @@ def _write_forced_evolution_request(data_root: pathlib.Path, objective: str) ->
+     try:
+         if req.exists():
+             return False
+-        st = {}
+-        try:
+-            st = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
+-        except Exception:
+-            pass
++        st = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
++        if not isinstance(st, dict):
++            raise ValueError("state.json is not an object")
+         if bool(st.get("evolution_mode_enabled")):
+             return False  # a previous window's cycle is still in flight
+         payload = {
+@@ -208,6 +206,85 @@ def _write_forced_evolution_request(data_root: pathlib.Path, objective: str) ->
+         return False
+ 
+ 
++_BOUNDARY_WAIT_CAP_SEC = 1800.0  # shared evolution/restart/auto-resume budget
++_BOUNDARY_POLL_SEC = 8.0
++_BOUNDARY_BASELINE_CAP_SEC = 32.0  # leave time for request consumption after telemetry recovery
++_CYCLE_OUTCOMES = {"absorbed", "waiting_for_restart", "no_op", "abandoned"}
++
++
++def _boundary_api_shape_issues(state: dict) -> list[str]:
++    """Check the gateway field contract separately from observed activity."""
++    issues = []
++    fields = {
++        "supervisor_ready": bool,
++        "workers_alive": int,
++        "evolution_enabled": bool,
++        "pending_count": int,
++        "running_count": int,
++        "evolution_state": dict,
++        "active_direct_turns": list,
++        "active_chat_activities": list,
++    }
++    for key, expected in fields.items():
++        if key not in state:
++            issues.append(f"missing API field: {key}")
++        elif type(state[key]) is not expected:
++            issues.append(f"invalid API field: {key}")
++    evolution = state.get("evolution_state")
++    if isinstance(evolution, dict):
++        for key in ("queued_task_id", "running_task_id"):
++            if key not in evolution:
++                issues.append(f"missing API field: evolution_state.{key}")
++            elif evolution[key] is not None and not isinstance(evolution[key], str):
++                issues.append(f"invalid API field: evolution_state.{key}")
++    return issues
++
++
++def _transaction_restart_unresolved(tx: dict) -> bool:
++    """Match the engine's committed-transaction restart obligation."""
++    return bool(str(tx.get("commit_sha") or "").strip()) and (
++        bool(tx.get("restart_required")) or not bool(tx.get("restart_verified"))
++    )
++
++
++def _campaign_transactions(campaign: dict, blockers: list[str]) -> dict:
++    """Index durable transactions by campaign, transaction AND task identity."""
++    transactions = {}
++    rows = []
++    for field in ("history", "transaction_history"):
++        history = campaign.get(field, [])
++        if not isinstance(history, list):
++            blockers.append(f"invalid campaign {field}")
++            continue
++        for index, row in enumerate(history):
++            location = f"{field}[{index}]"
++            if field == "history" and isinstance(row, dict):
++                # The lifecycle explicitly preserves legacy history-only rows.
++                if "transaction" not in row:
++                    continue
++                tx = row["transaction"]
++                if not isinstance(tx, dict) or row.get("task_id") != tx.get("task_id"):
++                    blockers.append(f"invalid campaign {location} transaction")
++                    continue
++                row = tx
++            rows.append((location, row))
++    active = campaign.get("active_transaction", {})
++    if not isinstance(active, dict):
++        raise ValueError("invalid active transaction")
++    if active:
++        rows.append(("active_transaction", active))
++    for location, tx in rows:
++        if not isinstance(tx, dict):
++            blockers.append(f"invalid campaign {location}")
++            continue
++        key = tuple(tx.get(k) for k in ("campaign_id", "transaction_id", "task_id"))
++        if not all(isinstance(k, str) and k.strip() for k in key):
++            blockers.append(f"missing transaction identity in {location}")
++            continue
++        transactions[key] = tx
++    return transactions
++
++
+ class DockerOuroborosEngine:
+     def __init__(self, *, ouroboros_repo: str, model: str, mode: str, evolution: bool,
+                  steer: str = "", task_timeout_sec: int = 900, primer: str = "",
+@@ -230,6 +307,7 @@ class DockerOuroborosEngine:
+         self._server = None
+         self._cname = None
+         self._started = False
++        self._boundary_wait = None
+         self.runtime_attestation: dict = {}
+         # chain conversation-resume across run_turn calls (CC single_conversation).
+         # DEFAULT mode = continuation (true CC --resume analog: stored system verbatim,
+@@ -239,12 +317,11 @@ class DockerOuroborosEngine:
+         self.resume_mode = ("splice" if _r == "splice" else "continuation") if self.resume else ""
+         self._last_task_id = None
+         from devtools.benchmarks.common.server_runner import (  # noqa: E402
+-            build_isolated_settings, seed_owner_state, free_port, absorbed_cycles_done)
++            build_isolated_settings, seed_owner_state, free_port)
+         from supervisor.state import reset_per_task_budget, ISOLATED_BENCHMARK_SENTINEL  # noqa: E402
+         self._build_isolated_settings = build_isolated_settings
+         self._seed_owner_state = seed_owner_state
+         self._free_port = free_port
+-        self._absorbed_cycles_done = absorbed_cycles_done
+         self._reset_per_task_budget = reset_per_task_budget
+         self._SENTINEL = ISOLATED_BENCHMARK_SENTINEL
+ 
+@@ -277,6 +354,13 @@ class DockerOuroborosEngine:
+             OPENROUTER_API_KEY=os.environ.get("OPENROUTER_API_KEY", ""),
+             OUROBOROS_RUNTIME_MODE="advanced", OUROBOROS_PRE_PUSH_TESTS="0",
+             OUROBOROS_POST_TASK_EVOLUTION="true" if self.evolution else "false",
++            # Absorption-restart drain: the core DOES defer a requested restart while
++            # tasks run, but its default deadline is 120s (config.py SETTINGS_DEFAULTS)
++            # — far shorter than a bench question task (~6 min observed). At the
++            # deadline it proceeds fail-closed and chopped a reviewed answer 6s after
++            # its acceptance PASS (2026-08-30, q_index=3). 1800 = the server's own
++            # clamp ceiling; with it the drain outlives any in-flight question.
++            OUROBOROS_RESTART_DRAIN_MAX_SEC="1800",
+             OUROBOROS_MODEL=m, OUROBOROS_MODEL_HEAVY=m, OUROBOROS_MODEL_LIGHT=m, OUROBOROS_MODEL_CODE=m,
+             OUROBOROS_MODEL_CONSCIOUSNESS=m, OUROBOROS_MODEL_FALLBACK=m, OUROBOROS_MODEL_FALLBACKS=m,
+             OUROBOROS_MODEL_DEEP_SELF_REVIEW=m, OUROBOROS_REVIEW_MODELS=",".join([m, m, m]),
+@@ -288,7 +372,10 @@ class DockerOuroborosEngine:
+             OUROBOROS_SERVER_HOST="0.0.0.0", OUROBOROS_SERVER_PORT="8765", OUROBOROS_HOST_SERVICE_PORT="8767",
+         )
+         if self.evolution:
+-            ov["OUROBOROS_POST_TASK_EVOLUTION_CADENCE"] = self.cadence
++            # Keep request consumption enabled, but let only the boundary adapter
++            # publish forced promotions; worker completion must not chain campaigns.
++            ov["OUROBOROS_POST_TASK_EVOLUTION_CADENCE"] = (
++                "off" if self.evolution_trigger == "forced" else self.cadence)
+             # Opt-in lost-update guard (engine ≥ our 655 clone): at task-done, an
+             # ahead HEAD descending from tx.base_head restores a clobbered commit
+             # registration instead of no_op'ing a good reviewed commit. Safe here:
+@@ -328,6 +415,61 @@ class DockerOuroborosEngine:
+         for _rk, _dflt in (("OUROBOROS_TASK_REVIEW_MODE", "auto"),
+                            ("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")):
+             ov[_rk] = os.environ.get(_rk, "").strip() or _dflt
++        # SINGLE-MODEL PIN, part 2: the DESKTOP's structured reviewer slots leak in via
++        # the isolated-settings allowlist (server_runner.py lists OUROBOROS_REVIEWER_SLOTS)
++        # and reviewer_slot_config.py:583-608 projects them OVER the flat
++        # OUROBOROS_REVIEW_MODELS / OUROBOROS_SCOPE_REVIEW_MODEL(S) keys we set above —
++        # so a desktop triad (e.g. gpt-5.6-luna / gemini-3.6-flash / sonnet-5 at effort
++        # high) silently becomes the reviewer set of a run declared single-model.
++        # Observed live: CL-Bench evolution arm 2026-08-27, scope reviewer resolved to
++        # openai/gpt-5.6-luna despite every flat key pinning claude-sonnet-4.6.
++        # Reviewer routing, pinned EXPLICITLY (was: blanked). Two desktop keys leak into
++        # the isolated settings through the allowlist (server_runner.py lists both
++        # OUROBOROS_REVIEWER_SLOTS and OUROBOROS_SUBAGENTS) and reviewer_slot_config
++        # projects the structured slots OVER the flat model keys — observed live
++        # 2026-08-27: a run declared single-model reviewed with gpt-5.6-luna /
++        # gemini-3.6-flash / sonnet-5 at effort high.
++        #
++        # Blanking restored the pin but also forfeited the RETRIEVES delivery class:
++        # a scope row that references a configured-subagent roster id on an api_model
++        # route gets native_retrieval=True (reviewer_slot_config: "a session row and a
++        # native-retrieval actor row are one class here, and neither receives an
++        # assembled packet"), which is the only way a commit can pass the blocking
++        # scope gate on a repo this size — the assembled pack needs ~677K tokens of
++        # mandatory artifacts against a ~576K budget. The retrieving row's floor is
++        # 200K with sourced provenance instead of the api row's 1M.
++        #
++        # So: pin BOTH keys to the solve model, and route the scope slot through a
++        # one-row roster on that same model. Single-model holds; the scope reviewer
++        # retrieves instead of being handed a pack it cannot fit.
++        _scout_id = "clbench-scope-scout"
++        ov["OUROBOROS_SUBAGENTS"] = json.dumps({
++            "enabled": True,
++            "items": [{
++                "subagent_id": _scout_id,
++                "name": "CL-Bench scope scout",
++                "recommended_use": "Blocking scope review for the benchmark run; retrieves "
++                                   "the subject with its own tools instead of a packed atlas.",
++                "route": {"kind": "api_model", "target_id": m},
++                "effort": _eff,
++            }],
++        }, ensure_ascii=False)
++        ov["OUROBOROS_REVIEWER_SLOTS"] = json.dumps({
++            "triad": [
++                {"slot_id": f"clbench_t{i}",
++                 "route": {"kind": "api_chat", "target_id": m},
++                 "effort": _eff}
++                for i in (1, 2, 3)
++            ],
++            "scope": [{"slot_id": "clbench_scope", "subagent_id": _scout_id, "effort": _eff}],
++            # Advisory too: absent section defaults to api_chat, whose inline
++            # else-branch loads docs/ARCHITECTURE.md (~640KB) unconditionally and
++            # overflowed the route window mid-evolution (the agent diagnosed and
++            # patched exactly this in its own cycle, commit 97b8c6be). The
++            # subagent reference puts advisory on the same retrieving class.
++            "advisory": {"subagent_id": _scout_id, "effort": _eff},
++        }, ensure_ascii=False)
++
+         # Operator env overrides (campaign knobs, ported from the v6.81.0 bridge campaign).
+         # Parity defaults above stay authoritative unless the host explicitly exports one of
+         # these — then the export wins, so a campaign can pin e.g. runtime=pro / split
+@@ -596,8 +738,446 @@ class DockerOuroborosEngine:
+         transcript — so the rollout is memory-driven, not whole-rollout ICL (bounds cost/disk/time too)."""
+         self._last_task_id = None
+ 
++    def _boundary_file_blockers(self) -> list[str]:
++        """Request consumption and restart claiming are not completion signals."""
++        state_dir = self._data_root / "state"
++        blockers = []
++        try:
++            if (state_dir / "post_task_evolution_request.json").exists():
++                blockers.append("promotion request pending")
++            markers = [
++                p.name
++                for p in state_dir.iterdir()
++                if p.name == "pending_restart_verify.json"
++                or (
++                    p.name.startswith("pending_restart_verify.claimed.")
++                    and p.name.endswith(".json")
++                )
++            ]
++            blockers.extend(f"restart marker: {name}" for name in sorted(markers))
++            state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
++            if not isinstance(state, dict):
++                raise ValueError("state.json is not an object")
++            # The engine defaults an absent flag to off, including at publication.
++            if bool(state.get("evolution_mode_enabled")):
++                blockers.append("evolution_mode_enabled true")
++        except (OSError, ValueError) as exc:
++            blockers.append(f"state files unreadable: {exc}")
++        return blockers
++
++    def _boundary_observation(self, ctx: dict, *, probe_deadline=None) -> dict:
++        """Read campaign and activity, retaining legacy compatibility per boundary."""
++        blockers = self._boundary_file_blockers()
++        campaign, transactions, campaign_valid = None, {}, True
++        try:
++            raw = (self._data_root / "state" / "evolution_campaign.json").read_text(
++                encoding="utf-8"
++            )
++            ctx["campaign_seen"] = True
++            campaign = json.loads(raw)
++            if (
++                not isinstance(campaign, dict)
++                or not isinstance(campaign.get("id"), str)
++                or not campaign["id"].strip()
++            ):
++                raise ValueError("missing campaign identity")
++            for key in ("cycles_done", "absorbed_cycles_done"):
++                if type(campaign.get(key)) is not int or campaign[key] < 0:
++                    raise ValueError(f"invalid {key}")
++            transaction_blockers = []
++            transactions = _campaign_transactions(campaign, transaction_blockers)
++            blockers.extend(transaction_blockers)
++            campaign_valid = not transaction_blockers
++            active = campaign.get("active_transaction", {})
++            # Retain identity evidence even while the baseline API is unavailable;
++            # a later missing campaign/transaction cannot become a zero baseline.
++            for key, tx in transactions.items():
++                if tx is not active and tx.get("cycle_outcome") in (
++                    "absorbed",
++                    "no_op",
++                    "abandoned",
++                ):
++                    # Startup abandonment retains commit_sha without verification.
++                    # Its terminal archive discharges the previously observed work.
++                    ctx["outstanding"].discard(key)
++                elif _transaction_restart_unresolved(tx) and (
++                    tx is active or key in ctx["outstanding"]
++                ):
++                    ctx["outstanding"].add(key)
++                    if tx is not active:
++                        blockers.append("observed transaction restart unresolved")
++                elif tx.get("cycle_outcome") in _CYCLE_OUTCOMES:
++                    ctx["outstanding"].discard(key)
++                elif tx is active:
++                    ctx["outstanding"].add(key)
++            if ctx["outstanding"] - transactions.keys():
++                campaign_valid = False
++                blockers.append("known transaction missing without terminal outcome")
++            # Match the engine's CURRENT-transaction restart predicate. An archived
++            # waiting_for_restart record must not block an unrelated later round.
++            if active and _transaction_restart_unresolved(active):
++                blockers.append("active transaction restart unresolved")
++        except FileNotFoundError:
++            if ctx.get("campaign_seen"):
++                campaign_valid = False
++                blockers.append("known campaign missing")
++        except (OSError, ValueError, TypeError) as exc:
++            campaign = None
++            campaign_valid = False
++            blockers.append(f"campaign unreadable: {exc}")
++        st = {}
++        remaining = (
++            ctx["deadline"] if probe_deadline is None else probe_deadline
++        ) - time.monotonic()
++        if remaining > 0:
++            try:
++                st = _api(
++                    self._server.base_url,
++                    "GET",
++                    "/api/state",
++                    timeout=min(_BOUNDARY_POLL_SEC, remaining),
++                )
++                if not isinstance(st, dict):
++                    raise ValueError("state API is not an object")
++                # Recheck legacy telemetry until the full contract is observed.
++                # Once established, missing fields remain blockers in this window.
++                if not ctx["api_shape_checked"] or ctx["legacy_readiness"]:
++                    ctx["api_shape_checked"] = True
++                    issues = _boundary_api_shape_issues(st)
++                    was_legacy = ctx["legacy_readiness"]
++                    ctx["legacy_readiness"] = bool(issues)
++                    if was_legacy != ctx["legacy_readiness"]:
++                        ctx["quiet"] = 0
++                    if issues and not was_legacy:
++                        print(
++                            "[ouroboros-docker] unrecognized /api/state shape: "
++                            f"{', '.join(issues)}; using legacy counter-based readiness "
++                            "until full telemetry returns or this wait window ends",
++                            file=sys.stderr,
++                            flush=True,
++                        )
++                    elif not issues and was_legacy:
++                        print(
++                            "[ouroboros-docker] /api/state shape recovered; "
++                            "using full readiness checks",
++                            file=sys.stderr,
++                            flush=True,
++                        )
++                legacy = ctx["legacy_readiness"]
++                # Readiness must be the literal True while the shape is trusted. Under
++                # legacy a MISSING key is unknown (the shape check already named it and
++                # the counter fallback carries the boundary), and a truthy value of the
++                # wrong type ("true", 1) is positive evidence in an unexpected shape;
++                # a PRESENT falsy value ("", 0, False) is a "not ready" answer and blocks
++                # in both modes, so legacy never reads a negative as readiness.
++                ready = st.get("supervisor_ready")
++                if ready is not True and not (
++                    legacy
++                    and ("supervisor_ready" not in st
++                         or (not isinstance(ready, bool) and bool(ready)))
++                ):
++                    blockers.append("supervisor not ready")
++                if st.get("supervisor_error"):
++                    blockers.append(f"supervisor error: {st['supervisor_error']}")
++                alive = st.get("workers_alive")
++                if legacy and alive is None:
++                    alive = st.get("workers_total")
++                if type(alive) is not int or alive <= 0:
++                    blockers.append("no live workers or unknown")
++                # Decide by type first: only a bool answers the question. A truthy
++                # non-bool ("true", 1, [..]) is positive evidence in an unexpected
++                # shape and blocks even under legacy; a falsy non-bool ("", [], 0)
++                # is unknown, which blocks only while the shape is trusted.
++                enabled = st.get("evolution_enabled")
++                if enabled is True:
++                    blockers.append("API evolution_enabled true")
++                elif enabled is not False and not isinstance(enabled, bool) and enabled:
++                    blockers.append("API evolution_enabled true in unexpected shape")
++                elif enabled is not False and not legacy:
++                    blockers.append("API evolution_enabled unknown")
++                for key in ("pending_count", "running_count"):
++                    if legacy:
++                        count = st.get(key, 0)
++                        try:
++                            if isinstance(count, str):
++                                count = int(count)
++                            idle = type(count) is int and count == 0
++                        except ValueError:
++                            idle = False
++                    else:
++                        idle = type(st.get(key)) is int and st[key] == 0
++                    if not idle:
++                        blockers.append(f"{key}={st.get(key)!r}")
++                evolution = st.get("evolution_state")
++                # The gateway emits these fields even while idle. Missing activity
++                # telemetry is unknown; name it separately from observed work.
++                if "evolution_state" not in st:
++                    if not legacy:
++                        blockers.append("missing API field: evolution_state")
++                elif not isinstance(evolution, dict):
++                    if evolution:
++                        blockers.append("evolution_state activity in unexpected shape")
++                    elif not legacy or (
++                        evolution is not None and not isinstance(evolution, (str, list))
++                    ):
++                        blockers.append("invalid API field: evolution_state")
++                else:
++                    for key in ("queued_task_id", "running_task_id"):
++                        if key not in evolution:
++                            if not legacy:
++                                blockers.append(f"missing API field: evolution_state.{key}")
++                        elif evolution[key]:
++                            activity = (
++                                "active" if isinstance(evolution[key], str)
++                                else "activity in unexpected shape"
++                            )
++                            blockers.append(f"evolution_state.{key} {activity}")
++                        elif evolution[key] is not None and not isinstance(evolution[key], str):
++                            if not legacy or not isinstance(evolution[key], (list, dict)):
++                                blockers.append(f"invalid API field: evolution_state.{key}")
++                for key in ("active_direct_turns", "active_chat_activities"):
++                    if key not in st:
++                        if not legacy:
++                            blockers.append(f"missing API field: {key}")
++                    elif st[key]:
++                        activity = (
++                            "active" if isinstance(st[key], list)
++                            else "activity in unexpected shape"
++                        )
++                        blockers.append(f"{key} {activity}")
++                    elif not isinstance(st[key], list):
++                        if not legacy or (
++                            st[key] is not None and not isinstance(st[key], (str, dict))
++                        ):
++                            blockers.append(f"invalid API field: {key}")
++            except Exception as exc:  # noqa: BLE001 — transient server re-exec
++                st = {}
++                blockers.append(f"state API unreadable: {exc}")
++        else:
++            blockers.append("state API probe deadline expired")
++        # The API call can span request consumption or marker publication. Recheck
++        # host guards before counting even the first quiet sample.
++        if not blockers:
++            blockers.extend(self._boundary_file_blockers())
++        return {
++            "campaign": campaign,
++            "campaign_valid": campaign_valid,
++            "transactions": transactions,
++            "state": st,
++            "blockers": blockers,
++        }
++
++    def _begin_boundary_wait(self) -> dict:
++        started = time.monotonic()
++        ctx = {
++            "started": started,
++            "deadline": started + _BOUNDARY_WAIT_CAP_SEC,
++            "quiet": 0,
++            "campaign_seen": False,
++            "api_shape_checked": False,
++            "legacy_readiness": False,
++            "outstanding": set(),
++            "cycle_outcome": "",
++            "cycle_done": False,
++            "absorbed": False,
++            "cycles": None,
++            "cycles_done": None,
++            "last": None,
++        }
++        self._boundary_wait = ctx
++        # Baseline must precede publication: a fast consumer can complete a new
++        # campaign (whose counters reset) before the next host observation.
++        baseline_deadline = min(ctx["deadline"], started + _BOUNDARY_BASELINE_CAP_SEC)
++        baseline = self._boundary_observation(ctx, probe_deadline=baseline_deadline)
++        captured = baseline if baseline["campaign_valid"] else None
++        captured_state = baseline["state"]
++        while time.monotonic() < baseline_deadline:
++            st = baseline["state"]
++            if baseline["campaign_valid"] and st:
++                break
++            remaining = baseline_deadline - time.monotonic()
++            if remaining <= 0:
++                break
++            time.sleep(min(_BOUNDARY_POLL_SEC, remaining))
++            baseline = self._boundary_observation(ctx, probe_deadline=baseline_deadline)
++            if baseline["state"]:
++                captured_state = baseline["state"]
++            if baseline["campaign_valid"]:
++                captured = baseline
++        # Keep every readable pre-publication identity/counter even if its API read
++        # failed. An unknown campaign baseline must never become zero progress.
++        ctx["baseline"] = dict(captured or baseline, state=captured_state)
++        ctx["progress_baseline"] = (
++            ctx["baseline"] if baseline["campaign_valid"] else baseline
++        )
++        ctx["baseline_uncertain"] = not baseline["campaign_valid"]
++        campaign = ctx["baseline"]["campaign"]
++        if campaign is not None:
++            ctx["cycles"] = campaign["absorbed_cycles_done"]
++            ctx["cycles_done"] = campaign["cycles_done"]
++        if not captured or not baseline["state"]:
++            print(
++                f"[ouroboros-docker] baseline capture incomplete after "
++                f"{time.monotonic() - started:.1f}s; BLOCKERS: {', '.join(baseline['blockers'])}; "
++                "continuing with observed baseline only",
++                file=sys.stderr,
++                flush=True,
++            )
++        self._track_boundary_observation(ctx, baseline)
++        ctx["quiet"] = 0  # the pre-publication sample never confirms the new window
++        return ctx
++
++    def _track_boundary_observation(self, ctx: dict, observation: dict) -> None:
++        campaign, st = observation["campaign"], observation["state"]
++        blockers = observation["blockers"]
++        if campaign is not None:
++            ctx["campaign_seen"] = True
++            ctx["cycles"] = campaign["absorbed_cycles_done"]
++            ctx["cycles_done"] = campaign["cycles_done"]
++            if (
++                not ctx["progress_baseline"]["campaign_valid"]
++                and observation["campaign_valid"]
++            ):
++                # A recovered snapshot is a baseline, never evidence of progress.
++                # Idle readiness does not require attribution to a new cycle.
++                ctx["progress_baseline"] = observation
++            progress_baseline = ctx["progress_baseline"]
++            baseline = progress_baseline["campaign"]
++            same_campaign = baseline is not None and campaign["id"] == baseline["id"]
++            prev_cycles = baseline["cycles_done"] if same_campaign else 0
++            prev_absorbed = baseline["absorbed_cycles_done"] if same_campaign else 0
++            can_compare = progress_baseline["campaign_valid"]
++            ctx["cycle_done"] |= can_compare and campaign["cycles_done"] > prev_cycles
++            if (
++                can_compare
++                and campaign["absorbed_cycles_done"] > prev_absorbed
++                and st.get("sha")
++                and progress_baseline["state"].get("sha")
++                and st["sha"] != progress_baseline["state"]["sha"]
++            ):
++                ctx["absorbed"] = True
++            transactions = observation["transactions"]
++            for key, tx in transactions.items():
++                if key[0] != campaign["id"]:
++                    continue  # archived campaigns cannot earn this boundary's outcome
++                outcome = tx.get("cycle_outcome")
++                if can_compare and outcome in _CYCLE_OUTCOMES:
++                    previous = progress_baseline["transactions"].get(key, {})
++                    if not previous or (
++                        previous is (baseline or {}).get("active_transaction")
++                        and outcome != previous.get("cycle_outcome")
++                    ):
++                        ctx["cycle_outcome"] = outcome
++                        ctx["cycle_done"] = True
++                        ctx["absorbed"] |= outcome == "absorbed"
++        if observation["campaign_valid"] or ctx["cycle_done"]:
++            ctx["baseline_uncertain"] = False
++        if ctx["baseline_uncertain"]:
++            blockers.append(
++                "pre-publication campaign baseline unavailable; outcome unconfirmed"
++            )
++        last = ctx["last"]
++        if last:
++            sha, prev_sha = st.get("sha"), last["state"].get("sha")
++            if sha and prev_sha and sha != prev_sha:
++                blockers.append("SHA changed")
++            uptime, prev_uptime = st.get("uptime"), last["state"].get("uptime")
++            if (
++                type(uptime) in (int, float)
++                and type(prev_uptime) in (int, float)
++                and 0 <= uptime < float("inf")
++                and 0 <= prev_uptime < float("inf")
++                and uptime < prev_uptime
++            ):
++                blockers.append("uptime reset")
++            # Even disarmed snapshots must be stable across the confirmation window.
++            # Counter/campaign churn cannot preserve an earlier quiet observation.
++            if campaign != last["campaign"]:
++                ctx["quiet"] = 0
++        ctx["quiet"] = 0 if blockers else ctx["quiet"] + 1
++        ctx["last"] = observation
++        ctx["blockers"] = blockers
++
++    def _boundary_result(
++        self, ctx: dict, *, timed_out: bool = False, started=None
++    ) -> dict:
++        absorbed = ctx["absorbed"] and not timed_out
++        reason = (
++            "timeout"
++            if timed_out
++            else "absorbed"
++            if absorbed
++            else "cycle_done_unabsorbed"
++            if ctx["cycle_done"]
++            else "no_promotion"
++        )
++        result = {
++            "absorbed": absorbed,
++            "new_sha": str(ctx["last"]["state"].get("sha") or "")[:8],
++            "cycles": ctx["cycles"],
++            "reason": reason,
++            "cycle_outcome": ctx["cycle_outcome"],
++            "cycles_done": ctx["cycles_done"],
++            "elapsed": time.monotonic()
++            - (ctx["started"] if started is None else started),
++            "budget_elapsed": time.monotonic() - ctx["started"],
++            "blockers": list(ctx["blockers"]),
++        }
++        if timed_out:
++            result["blockers"] = list(
++                dict.fromkeys(result["blockers"] + self._boundary_file_blockers())
++            )
++            if not result["blockers"]:
++                result["blockers"] = ["quiet confirmation incomplete at deadline"]
++            print(
++                f"[ouroboros-docker] BOUNDARY TIMEOUT after {result['elapsed']:.1f}s; "
++                f"budget_elapsed={result['budget_elapsed']:.1f}s; "
++                f"cycle_outcome={result['cycle_outcome'] or 'unknown'} "
++                f"cycles_done={result['cycles_done']} absorbed_cycles={result['cycles']}; "
++                f"BLOCKERS: {', '.join(result['blockers'])}; proceeding at boundary limit",
++                file=sys.stderr,
++                flush=True,
++            )
++        return result
++
++    def _wait_for_boundary_readiness(self, *, renew_expired: bool = True) -> dict:
++        """Read-only gate reused by restart, reopen and immediate pre-POST checks.
++
++        A later invocation can outlive the stored window and needs its own budget.
++        Polling and explicit continuations of an existing wait never renew it.
++        """
++        started = time.monotonic()
++        ctx = getattr(self, "_boundary_wait", None)
++        if ctx is None:
++            ctx = self._begin_boundary_wait()
++        elif renew_expired and started >= ctx["deadline"]:
++            ctx["started"] = started
++            ctx["deadline"] = started + _BOUNDARY_WAIT_CAP_SEC
++            ctx["api_shape_checked"] = False
++            ctx["legacy_readiness"] = False
++        ctx["quiet"] = 0  # each invocation needs its own confirmation window
++        if time.monotonic() >= ctx["deadline"]:
++            # Refresh host guards at expiry, but do not grant another HTTP timeout.
++            # The timeout exception permits submission with API readiness unknown.
++            observation = self._boundary_observation(ctx)
++            self._track_boundary_observation(ctx, observation)
++            return self._boundary_result(ctx, timed_out=True, started=started)
++        while time.monotonic() < ctx["deadline"]:
++            observation = self._boundary_observation(ctx)
++            self._track_boundary_observation(ctx, observation)
++            if time.monotonic() >= ctx["deadline"]:
++                break
++            if ctx["quiet"] >= 2 or (
++                ctx["legacy_readiness"] and ctx["cycle_done"] and not ctx["blockers"]
++            ):
++                return self._boundary_result(ctx, started=started)
++            remaining = ctx["deadline"] - time.monotonic()
++            if remaining > 0:
++                time.sleep(min(_BOUNDARY_POLL_SEC, remaining))
++        return self._boundary_result(ctx, timed_out=True, started=started)
++
+     def on_instance_boundary(self) -> dict:
+-        """Stateful+evolution: reset per-task budget + await an absorbed cycle (host-side data dir)."""
++        """Reset the task budget, publish once, then wait for evolution and restart idle."""
+         if not self._started:
+             return {}
+         try:
+@@ -606,32 +1186,19 @@ class DockerOuroborosEngine:
+             pass
+         if not self.evolution:
+             return {}
++        ctx = self._begin_boundary_wait()
++        if time.monotonic() >= ctx["deadline"]:
++            return self._boundary_result(ctx, timed_out=True)
+         if self.evolution_trigger == "forced":
+-            # Deterministic window: file the promotion signal ourselves instead of
+-            # relying on the native post-task daemon thread (races the worker
+-            # lifecycle at boundaries; declines on an empty backlog even forced).
+             wrote = _write_forced_evolution_request(self._data_root, self.steer)
+-            print(f"[ouroboros-docker] forced evolution window: request "
+-                  f"{'written' if wrote else 'skipped (pending/in-flight)'}", file=sys.stderr)
+-        prev_sha = self._server.current_sha()
+-        prev_abs = self._absorbed_cycles_done(self._data_root)
+-        deadline = time.time() + self.task_timeout
+-        req = self._data_root / "state" / "post_task_evolution_request.json"
+-        while time.time() < deadline:
+-            cur_abs = self._absorbed_cycles_done(self._data_root)
+-            cur_sha = self._server.current_sha()
+-            if cur_abs > prev_abs and cur_sha and cur_sha != prev_sha:
+-                return {"absorbed": True, "new_sha": cur_sha[:8], "cycles": cur_abs}
+-            # honest no-promotion early-out: nothing queued + queue idle
+-            if not req.exists():
+-                try:
+-                    st = _api(self._server.base_url, "GET", "/api/state", timeout=8)
+-                    if int(st.get("running_count") or 0) == 0:
+-                        return {"absorbed": False, "reason": "no_promotion", "cycles": cur_abs}
+-                except Exception:
+-                    pass
+-            time.sleep(8)
+-        return {"absorbed": False, "reason": "timeout", "cycles": self._absorbed_cycles_done(self._data_root)}
++            print(
++                f"[ouroboros-docker] forced evolution window: request "
++                f"{'written' if wrote else 'skipped (pending/in-flight)'}",
++                file=sys.stderr,
++            )
++        result = self._wait_for_boundary_readiness(renew_expired=False)
++        result["elapsed"] = time.monotonic() - ctx["started"]
++        return result
+ 
+     def close(self) -> None:
+         if self._cname:
+diff --git a/src/systems/ouroboros/_live_bridge.py b/src/systems/ouroboros/_live_bridge.py
+index 5f9d3b7..09f52ce 100644
+--- a/src/systems/ouroboros/_live_bridge.py
++++ b/src/systems/ouroboros/_live_bridge.py
+@@ -48,6 +48,8 @@ from typing import Any, Optional
+ 
+ from pydantic import BaseModel, ValidationError
+ 
++from ._docker_launcher import _BOUNDARY_WAIT_CAP_SEC
++
+ # How long the /step handler waits for the runner to deliver the next observation.
+ # The runner's turnaround (task.step on SQLite + bookkeeping) is milliseconds; this
+ # only trips if the run is wedged. Must stay below the skill's curl --max-time 120.
+@@ -361,6 +363,24 @@ class LiveBridge:
+         return {"message": self._message_locked(), "done": self._done}
+ 
+ 
++def _restart_pending_refusal(exc: Exception) -> bool:
++    """True when the engine refused a submit because a restart is armed.
++
++    The restart-admission fence (present in the local 6.113.5 engine branch, supervisor/task_admission.py; not in public releases through 6.114.0) answers
++    503 with a retryable receipt and writes no durable row. Match on the HTTP status plus
++    the typed hint so an ordinary 503 (server re-exec) keeps the fast-retry path.
++    """
++    import urllib.error
++    if not isinstance(exc, urllib.error.HTTPError) or exc.code != 503:
++        return False
++    try:
++        body = exc.read().decode("utf-8", "replace")
++    except Exception:  # noqa: BLE001 — body already consumed or unreadable
++        return True     # a 503 we cannot inspect: prefer waiting over burning retries
++    low = body.lower()
++    return ("restart" in low) or ('"retryable": true' in low.replace(" ", "")) or ("retryable" in low)
++
++
+ class LiveController:
+     """Per-System orchestration: engine + bridge + one live Ouroboros task per scope.
+ 
+@@ -419,7 +439,10 @@ class LiveController:
+         self._published = False
+         self._boundary_pending = False   # question scope: previous question just ended
+         self._reopen_pending = False     # dead-task recovery: reopen scope in ANY conversation mode
++        self._restart_retry_done = False # one retry per scope when an absorption restart kills the task
+         self._evolution_window_due = False  # set ONLY at legit boundaries, never on abandon
++        self._restart_wait_deadline: Optional[float] = None
++        self._restart_wait_started: Optional[float] = None
+         self._turns = 0
+         self._consec_fallbacks = 0
+         self._fallback_instance: Optional[int] = None
+@@ -568,10 +591,12 @@ class LiveController:
+                 try:
+                     # Mirrors the per-action path's boundary hook (#6): per-task budget
+                     # reset (docker: best-effort no-op) + evolution absorb wait if enabled.
+-                    self.engine.on_instance_boundary()
++                    result = self.engine.on_instance_boundary()
++                    self._log_boundary_result("evolution boundary", result)
+                 except Exception as exc:  # noqa: BLE001
+                     _log(f"on_instance_boundary failed (continuing): {exc}")
+             self._evolution_window_due = False
++            self._restart_retry_done = False
+             self.bridge.begin(query)
+             self._submit_task(query)
+             self._boundary_pending = False
+@@ -638,6 +663,20 @@ class LiveController:
+                             _log(f"task {self._task_id} terminal ({status}) but a typed FINAL "
+                                  f"ANSWER survived — salvaged instead of abandoning")
+                         return final_action
++                if (status == "cancelled" and not self._restart_retry_done
++                        and query is not None and self._cancelled_by_restart()):
++                    # Absorption-restart casualty (2026-08-30): the answer existed and
++                    # passed review, the restart tore down workers before the latch.
++                    # One retry per scope: wait out the restart, reopen, resubmit.
++                    self._restart_retry_done = True
++                    _log(f"task {self._task_id} cancelled BY ENGINE RESTART — retrying the "
++                         f"scope once instead of abandoning")
++                    self._await_pending_restart()
++                    self.bridge.begin(query)
++                    self._submit_task(query)
++                    start = time.time()
++                    elapsed = 0.0
++                    continue
+                 _log(f"task {self._task_id} terminal ({status}) without a protocol action — "
+                      f"abandoning scope")
+                 return None
+@@ -661,6 +700,42 @@ class LiveController:
+                  f"abandoning scope (respond() will fall back/escalate)")
+             return None
+ 
++    def _task_assistant_text(self, tid: str) -> str:
++        """All of the task's assistant outputs as one text, oldest first — the analogue of
++        the official adapters' _extract_assistant_text, read from the engine's host-visible
++        observability (calls/<task>/llm_*_response.json -> blobs/<sha>.json.gz). Read-only,
++        bounded, fail-quiet: any I/O problem yields "" and the caller falls back to the task
++        record (final_answer / result)."""
++        import gzip as _gz
++        import json as _json
++        import pathlib as _pl
++        parts: list[str] = []
++        try:
++            root = _pl.Path(str(self.engine.data_root))
++            calls = sorted((root / "observability" / "calls" / str(tid)).glob("llm_*_response.json*"),
++                           key=lambda p: p.stat().st_mtime)[-40:]
++        except Exception:  # noqa: BLE001
++            return ""
++        for call in calls:
++            try:
++                meta = _json.loads(call.read_text(encoding="utf-8", errors="replace"))
++                sha = str(((meta.get("full_payload_ref") or {}).get("sha256")) or "")
++                blob = next((root / "observability" / "blobs").glob(sha + "*"), None) if sha else None
++                if blob is None:
++                    continue
++                opener = _gz.open if blob.suffix == ".gz" else open
++                with opener(blob, "rt", encoding="utf-8", errors="replace") as fh:
++                    payload = _json.load(fh)
++                msg = payload.get("message")
++                if not isinstance(msg, dict):
++                    msg = ((payload.get("choices") or [{}])[0] or {}).get("message") or {}
++                text = str(msg.get("content") or payload.get("content") or "")
++                if text.strip():
++                    parts.append(text)
++            except Exception:  # noqa: BLE001
++                continue
++        return "\n".join(parts)
++
+     def _final_answer_action(self, query: Any):
+         """CC-style delivery: parse the completed task's FINAL ANSWER into the query's
+         action schema. Source order (re-emission fix): (1) the task record's typed
+@@ -683,29 +758,39 @@ class LiveController:
+         typed = str(res.get("final_answer") or "").strip()
+         if not raw.strip() and not typed:
+             return None
+-        from .system import _extract_last_json  # lazy: avoid module cycle
+-        # Candidate ladder (adversarial-review finding: a bad typed blob must never
+-        # SHADOW a good text one): each source is tried strictly in order; a candidate
+-        # that fails JSON-shape, echo-guard, or schema falls through to the next
+-        # source, and only after both fail does the coercion net see the raw text.
+-        candidates = [("typed final_answer", _extract_last_json(typed))] if typed else []
+-        candidates.append(("final text", _extract_last_json(raw)))
++        from .action_parse import _json_candidates  # official CC/Codex candidate scan, verbatim copy
++        from ..utils.structured_output import validate_with_coercion  # shared validator (CC/Codex)
++        # Locate the answer the way the official adapters do: ONE assistant text for the
++        # whole task (every model output, oldest->newest, like Claude Code's
++        # _extract_assistant_text), every JSON span a candidate (_json_candidates), walked
++        # most-recent-first, first candidate that validates (validate_with_coercion) wins —
++        # exactly _parse_action_text's walk, with one bridge rule spliced into it: a
++        # candidate equal to the previously DELIVERED answer is an echo of the relayed
++        # verdict, not a new answer, so the walk continues to the next candidate instead
++        # of stopping (CC has no relayed-verdict echo, hence no such rule). The engine's
++        # result text and typed final_answer are appended last so the committed answer is
++        # the most recent candidate and the locator still works when observability is
++        # unavailable. A control envelope ({"delivery_control": "keep"}) fails the schema
++        # and the walk moves back to the real answer (2026-09-02: 8 zeros recovered).
++        assistant_text = self._task_assistant_text(tid)
++        combined = "\n".join(x for x in (assistant_text, raw, typed) if x and x.strip())
+         action = source = seen_blob = None
+         echoed = failed = None
+-        for src, blob in candidates:
+-            if not isinstance(blob, dict):
++        for candidate in reversed(_json_candidates(combined)):
++            try:
++                parsed = validate_with_coercion(candidate, schema)
++            except Exception as exc:  # noqa: BLE001 — not this candidate
++                failed = failed or f"latest JSON: {type(exc).__name__}"
+                 continue
++            blob = parsed.model_dump() if hasattr(parsed, "model_dump") else dict(parsed)
+             blob.pop("notes", None)
+             if (self._last_delivered_blob is not None and blob == self._last_delivered_blob
+                     and not self._item_had_steps):
+-                echoed = src
+-                continue
+-            try:
+-                action = schema.model_validate(blob)
+-            except Exception as exc:  # noqa: BLE001
+-                failed = f"{src}: {type(exc).__name__}"
++                echoed = echoed or "latest valid JSON"
+                 continue
+-            source, seen_blob = src, blob
++            action, seen_blob = parsed, blob
++            source = ("typed final_answer" if typed and candidate.strip() in typed else
++                      ("final text" if candidate.strip() in raw else "assistant text"))
+             break
+         if action is None:
+             why = (f"echo of previous action ({echoed})" if echoed
+@@ -776,6 +861,7 @@ class LiveController:
+         asks to re-emit strictly the JSON payload. Mirrors v6.71's own in-engine
+         'second send is an extraction/format repair' idea at the bridge boundary.
+         Env: OUROBOROS_FORMAT_REPAIR=0 disables; one attempt per question, never loops."""
++        from . import run_clbench_bridge_agent as _rb  # lazy: avoid import cycles (fix: NameError when this rung fires)
+         if os.environ.get("OUROBOROS_FORMAT_REPAIR", "1").strip() == "0":
+             return None
+         try:
+@@ -805,6 +891,7 @@ class LiveController:
+             "answer_protocol": "final_answer_line",
+         }
+         try:
++            self._await_pending_restart()
+             created = _rb._api(self.engine.server.base_url, "POST", "/api/tasks", body, timeout=60)
+             rep_tid = str(created.get("task_id") or "")
+             if not rep_tid:
+@@ -823,17 +910,20 @@ class LiveController:
+         except Exception:  # noqa: BLE001
+             _log(f"format-repair: task {tid} repair submission failed — giving up")
+             return None
+-        from .system import _extract_last_json  # lazy: avoid module cycle
+-        for src_label, source_text in (("typed", str(res.get("final_answer") or "")),
+-                                       ("text", str(res.get("result") or ""))):
+-            blob = _extract_last_json(source_text)
+-            if not isinstance(blob, dict) or not blob:
+-                continue
+-            blob.pop("notes", None)
++        from .action_parse import _parse_action_text  # official CC/Codex parser, verbatim copy
++        # Locate the repaired answer exactly as the official adapters locate a repaired
++        # answer: latest schema-valid JSON in the repair turn's assistant text (plus the
++        # engine's committed fields as a fallback view when observability is unavailable).
++        repair_text = "\n".join(x for x in (self._task_assistant_text(rep_tid),
++                                            str(res.get("final_answer") or ""),
++                                            str(res.get("result") or "")) if x and x.strip())
++        for src_label, source_text in (("repair text", repair_text),):
+             try:
+-                action = schema.model_validate(blob)
++                action = _parse_action_text(source_text, schema)
+             except Exception:  # noqa: BLE001
+                 continue
++            blob = action.model_dump() if hasattr(action, "model_dump") else {}
++            blob.pop("notes", None)
+             # empty-payload guard (parity with coercion): repair that carries no data fails
+             dumped = action.model_dump()
+             _CHAFF = {"thought", "reasoning", "rationale", "notes"}
+@@ -939,6 +1029,135 @@ class LiveController:
+         if seq_done:
+             self._ensure_task_dead(bounded=120.0)
+ 
++    def _pending_restart_path(self):
++        import pathlib as _pl
++        try:
++            return _pl.Path(str(self.engine.data_root)) / "state" / "pending_restart_verify.json"
++        except Exception:  # noqa: BLE001
++            return None
++
++    def _log_boundary_result(self, stage: str, result: Any) -> None:
++        if not isinstance(result, dict):
++            _log(f"{stage}: result={result!r}")
++            return
++        prefix = "TIMEOUT " if result.get("reason") == "timeout" else ""
++        _log(
++            f"{prefix}{stage}: reason={result.get('reason')} "
++            f"cycle_outcome={result.get('cycle_outcome')} elapsed={result.get('elapsed')}s "
++            f"budget_elapsed={result.get('budget_elapsed')}s "
++            f"cycles={result.get('cycles')} cycles_done={result.get('cycles_done')} "
++            f"blockers={result.get('blockers', [])}"
++        )
++
++    def _await_pending_restart(
++        self, bound_sec: float = _BOUNDARY_WAIT_CAP_SEC, *, renew_expired: bool = True
++    ) -> Optional[dict]:
++        """Wait for restart verification and auto-resume within one bounded window.
++
++        Docker owns the complete readiness predicate and monotonic deadline. Reusing
++        its read-only gate also catches late activity without publishing another request.
++        Other engines retain a marker/health gate, sharing one bound across retries;
++        a claimed marker remains pending until startup verification removes it.
++        A later invocation can renew an expired window; an ongoing refusal wait cannot.
++        """
++        wait = getattr(self.engine, "_wait_for_boundary_readiness", None)
++        if getattr(self.engine, "evolution", False) and callable(wait):
++            result = wait(renew_expired=renew_expired)
++            self._log_boundary_result("pre-submit readiness", result)
++            return result
++        from . import run_clbench_bridge_agent as _rb  # lazy: avoid import cycles
++
++        marker = self._pending_restart_path()
++        if marker is None:
++            return
++
++        def markers():
++            return ([marker] if marker.exists() else []) + list(
++                marker.parent.glob("pending_restart_verify.claimed.*.json")
++            )
++
++        started = time.monotonic()
++        pending = markers()
++        deadline = getattr(self, "_restart_wait_deadline", None)
++        # A boundary alone does not imply a restart on engines without Docker's
++        # complete gate. Start health recovery only after observing a marker.
++        if not pending:
++            return
++        if deadline is None or (renew_expired and started >= deadline):
++            self._restart_wait_started = started
++            self._restart_wait_deadline = started + bound_sec
++        deadline = self._restart_wait_deadline
++        if pending:
++            _log(
++                f"restart pending ({', '.join(p.name for p in pending)}) — holding task "
++                f"submit (remaining {max(0.0, deadline - started):.0f}s)"
++            )
++
++        def result(reason, blockers):
++            observed = time.monotonic()
++            outcome = {
++                "reason": reason,
++                "elapsed": observed - started,
++                "budget_elapsed": observed - self._restart_wait_started,
++                "blockers": blockers,
++            }
++            self._log_boundary_result("restart readiness", outcome)
++            return outcome
++
++        blockers = [p.name for p in pending]
++        while time.monotonic() < deadline:
++            pending = markers()
++            blockers = [p.name for p in pending]
++            if not pending:
++                remaining = deadline - time.monotonic()
++                if remaining <= 0:
++                    blockers.append("restart health unconfirmed")
++                    break
++                try:
++                    st = _rb._api(
++                        self.engine.server.base_url,
++                        "GET",
++                        "/api/state",
++                        timeout=min(8.0, remaining),
++                    )
++                    if (
++                        isinstance(st, dict)
++                        and st.get("supervisor_ready") is True
++                        and not st.get("supervisor_error")
++                        and type(st.get("workers_alive")) is int
++                        and st["workers_alive"] > 0
++                    ):
++                        blockers = [p.name for p in markers()]
++                        if not blockers and time.monotonic() < deadline:
++                            _log(
++                                f"engine restarted and healthy after "
++                                f"{(time.monotonic() - started):.0f}s — "
++                                "resuming task submit"
++                            )
++                            return result("no_promotion", [])
++                    else:
++                        blockers.append("restart health unconfirmed")
++                except Exception:  # noqa: BLE001
++                    blockers.append("restart API unavailable")
++            remaining = deadline - time.monotonic()
++            if remaining > 0:
++                time.sleep(min(8.0, remaining))
++        return result("timeout", blockers or ["restart readiness deadline exhausted"])
++
++    def _cancelled_by_restart(self) -> bool:
++        """True when the current task's record says the SERVER RESTART interrupted it
++        (the engine writes that reason verbatim); network errors fail closed to False."""
++        from . import run_clbench_bridge_agent as _rb  # lazy: avoid import cycles
++        if not self._task_id:
++            return False
++        try:
++            rec = _rb._api(self.engine.server.base_url, "GET",
++                           "/api/tasks/" + self._task_id, timeout=8) or {}
++        except Exception:  # noqa: BLE001
++            return False
++        blob = " ".join(str(rec.get(k) or "") for k in ("result", "reason_code", "status_reason"))
++        return "restart" in blob.lower()
++
+     def _submit_task(self, query: Any) -> None:
+         from . import run_clbench_bridge_agent as _rb  # lazy: avoid import cycles
+ 
+@@ -1043,12 +1262,67 @@ class LiveController:
+             time.sleep(30)
+             _held += 30
+         created, last_exc = None, None
+-        for _attempt in range(6):
++        attempts = 0
++        restart_waiting = False
++        while attempts < 6:
++            readiness = None
+             try:
++                # Connectivity holds can outlast the quiet observation. Recheck every
++                # POST. Once restart admission refuses, retries share that wait's cap.
++                readiness = self._await_pending_restart(renew_expired=not restart_waiting)
+                 created = _rb._api(self.engine.server.base_url, "POST", "/api/tasks", body, timeout=60)
+                 break
+             except Exception as exc:  # noqa: BLE001 — transient 503/URLError during recovery
+                 last_exc = exc
++                # Engines carrying the restart-admission fence answer a submit made while a
++                # restart is ARMED with 503 + retryable, and that window lasts from
++                # request_restart until the restart completes (7 min observed 2026-08-30) —
++                # far longer than this loop's 6x5s. Burning the retries there would raise and
++                # kill the run on the very fix that protects us, so a restart-shaped refusal
++                # re-enters the same marker wait the submit gate uses and does not consume an
++                # attempt. Any other error keeps the original fast-retry behaviour.
++                if _restart_pending_refusal(exc):
++                    ctx = getattr(self.engine, "_boundary_wait", None)
++                    deadline = (
++                        ctx["deadline"]
++                        if getattr(self.engine, "evolution", False)
++                        and isinstance(ctx, dict)
++                        else self._restart_wait_deadline
++                    )
++                    now = time.monotonic()
++                    # Timeout permits one POST, but cannot override engine admission.
++                    # A persistent refusal must terminate instead of renewing the wait.
++                    if (restart_waiting and deadline is not None and deadline <= now) or (
++                        isinstance(readiness, dict)
++                        and readiness.get("reason") == "timeout"
++                    ):
++                        _log(
++                            "TIMEOUT submit refused: engine restart admission remains armed "
++                            "after the readiness wait budget; stopping submission retries"
++                        )
++                        raise RuntimeError(
++                            "/api/tasks submit failed after readiness timeout: restart "
++                            "admission remains armed"
++                        ) from exc
++                    if deadline is None or deadline <= now:
++                        # The first refused POST can cross a previously quiet window's
++                        # deadline. Admission recovery begins here and needs its own cap.
++                        deadline = now + _BOUNDARY_WAIT_CAP_SEC
++                        if getattr(self.engine, "evolution", False) and isinstance(ctx, dict):
++                            ctx["started"], ctx["deadline"] = now, deadline
++                            ctx["api_shape_checked"], ctx["legacy_readiness"] = False, False
++                        else:
++                            self._restart_wait_started = now
++                            self._restart_wait_deadline = deadline
++                    restart_waiting = True
++                    remaining = deadline - now
++                    _log(
++                        "submit refused: engine restart armed (503 retryable) — "
++                        "re-entering the restart wait instead of burning retries"
++                    )
++                    time.sleep(min(5.0, remaining))
++                    continue
++                attempts += 1
+                 time.sleep(5)
+         if created is None:
+             raise RuntimeError(f"/api/tasks submit failed after retries: {last_exc}")
+diff --git a/src/systems/ouroboros/action_parse.py b/src/systems/ouroboros/action_parse.py
+new file mode 100644
+index 0000000..952647a
+--- /dev/null
++++ b/src/systems/ouroboros/action_parse.py
+@@ -0,0 +1,66 @@
++"""Action extraction identical to the official CL-Bench system adapters.
++
++`_json_candidates` and `_parse_action_text` are copied VERBATIM from
++src/systems/claude/system.py (the Codex adapter carries the same two functions) so that
++the way Ouroboros's answer is located in model output is byte-for-byte the way Claude
++Code's and Codex's answers are: every JSON-like span in the assistant text is a
++candidate, the most recent candidate that validates against the response schema wins,
++and validation uses the shared `validate_with_coercion`. Do not edit here — re-copy
++from the claude adapter if upstream changes; tests/test_ouroboros_submission_ports.py
++pins the copies equal.
++"""
++from __future__ import annotations
++
++import json
++from typing import Any
++
++from ..utils.structured_output import extract_json, validate_with_coercion
++
++
++def _json_candidates(text: str) -> list[str]:
++    """Return JSON-like candidates from an assistant message, most recent last."""
++    stripped = text.strip()
++    if not stripped:
++        return []
++
++    candidates: list[str] = [stripped]
++    if "```" in stripped:
++        parts = stripped.split("```")
++        for part in parts[1::2]:
++            part = part.strip()
++            if part.startswith("json"):
++                part = part[4:].strip()
++            if part.startswith("{") or part.startswith("["):
++                candidates.append(part)
++
++    decoder = json.JSONDecoder()
++    for idx, char in enumerate(stripped):
++        if char not in "{[":
++            continue
++        try:
++            _, end = decoder.raw_decode(stripped[idx:])
++        except json.JSONDecodeError:
++            continue
++        candidates.append(stripped[idx : idx + end])
++
++    deduped: list[str] = []
++    seen: set[str] = set()
++    for candidate in candidates:
++        if candidate in seen:
++            continue
++        seen.add(candidate)
++        deduped.append(candidate)
++    return deduped
++
++
++def _parse_action_text(text: str, schema: type[Any]) -> Any:
++    """Parse assistant text into the target schema, preferring the latest JSON."""
++    last_error: Exception | None = None
++    for candidate in reversed(_json_candidates(text)):
++        try:
++            return validate_with_coercion(candidate, schema)
++        except Exception as exc:
++            last_error = exc
++    if last_error is not None:
++        raise last_error
++    return validate_with_coercion(extract_json(text), schema)
+diff --git a/src/systems/ouroboros/system.py b/src/systems/ouroboros/system.py
+index 5a394a8..6823d5b 100644
+--- a/src/systems/ouroboros/system.py
++++ b/src/systems/ouroboros/system.py
+@@ -34,6 +34,25 @@ from ..utils import completion_with_structured_output
+ from . import _launcher, _docker_launcher, _live_bridge
+ 
+ 
++# --- bench sandbox lifetime -------------------------------------------------------
++# The CL-Bench task sandboxes (sales_prediction, codebase_adaptation) are minisweagent
++# DockerEnvironments started as `docker run --rm ... sleep <container_timeout>` with the
++# library default of "2h" and no task-level override. Every stateful sales rollout of
++# the submitted Ouroboros run (232-437 min) crossed 2h and lost its container mid-run
++# ("No such container" on every later command; the 82-min stateless baseline was
++# unaffected; later instances answered blind). Non-Ouroboros
++# systems finish in <=38 min and never reach the cliff. The task classes are built after
++# this module is imported (registry imports the system first), so raising the library
++# default here covers both call sites without touching bench task code. Bench-side fix
++# (explicit container_timeout + recreate-on-loss): pgasawa/continual-learning-bench#22.
++try:  # pragma: no cover - exercised by test_sandbox_lifetime_override
++    from minisweagent.environments.docker import DockerEnvironmentConfig as _DEC
++    _DEC.model_fields["container_timeout"].default = "24h"
++    _DEC.model_rebuild(force=True)
++except Exception:  # noqa: BLE001 - minisweagent absent or API changed: keep the default
++    pass
++
++
+ @register_system("ouroboros")
+ class OuroborosSystem(ContinualLearningSystem):
+     """Bridge the Ouroboros agent into CL-Bench."""
+@@ -338,9 +357,24 @@ class OuroborosSystem(ContinualLearningSystem):
+         # convention into the Response metadata — domain-generic zero-credit forfeit.
+         _forfeit = self._live.forfeit_metadata or {}
+         self._live.forfeit_metadata = None
++        # Turn-1 config attestation: the published reference rows record their effort
++        # knob in artifacts (claude-code: reasoning_effort=low) while ours lived only in
++        # prose — un-reviewable from the shipped run. Stamp the resolved env once so the
++        # exact configuration is verifiable from final_results alone.
++        _attest = {}
++        if self._turns == 1:
++            import os as _os
++            _attest = {"config_attestation": {
++                k.rsplit("OUROBOROS_", 1)[-1].lower(): _os.environ.get(k, "")
++                for k in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_REVIEW",
++                          "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_RUNTIME_MODE",
++                          "OUROBOROS_SAFETY_MODE", "OUROBOROS_CONTEXT_MODE",
++                          "OUROBOROS_TASK_REVIEW_MODE", "OUROBOROS_REVIEW_ENFORCEMENT",
++                          "OUROBOROS_REVIEW_MAX_PASSES", "OUROBOROS_TOTAL_BUDGET",
++                          "OUROBOROS_MAX_SUBAGENT_DEPTH")}}
+         return Response(action=action, metadata={"engine": "ouroboros-live", "mode": self.mode,
+                                                  "conversation": self.conversation,
+-                                                 "turn": self._turns, **_forfeit})
++                                                 "turn": self._turns, **_attest, **_forfeit})
+ 
+     # ------------------------------------------------------------------ engines
+     def _engine_llm(self, messages: list[dict], response_schema: type[BaseModel]) -> BaseModel:
+@@ -387,14 +421,15 @@ class OuroborosSystem(ContinualLearningSystem):
+     def _parse_action_notes(self, raw: str, response_schema: type[BaseModel]):
+         """Extract the agent's action + its compact 'notes' (carried forward). 'notes' is popped before
+         validating the action against the (notes-free) CL-Bench response schema."""
++        from .action_parse import _parse_action_text  # official CC/Codex parser, verbatim copy
+         blob = _extract_last_json(raw)
+-        notes = ""
+-        if isinstance(blob, dict):
+-            notes = str(blob.pop("notes", "") or "").strip()
+-            try:
+-                return response_schema.model_validate(blob), notes
+-            except Exception:
+-                pass
++        notes = str(blob.pop("notes", "") or "").strip() if isinstance(blob, dict) else ""
++        try:
++            # Same locator as the official adapters: most recent JSON span that validates
++            # (with coercion); the notes side-channel is read separately above.
++            return _parse_action_text(raw, response_schema), notes
++        except Exception:
++            pass
+         return self._parse_action(raw, response_schema), notes
+ 
+     def _coerce_final_answer(self, raw: str, response_schema: type[BaseModel]):
+diff --git a/tests/test_ouroboros_live_parity.py b/tests/test_ouroboros_live_parity.py
+index a134af8..fa1d8e7 100644
+--- a/tests/test_ouroboros_live_parity.py
++++ b/tests/test_ouroboros_live_parity.py
+@@ -15,6 +15,8 @@ import threading
+ import time
+ from types import SimpleNamespace
+ 
++import pytest
++
+ from src.systems.utils.structured_output import schema_to_prompt_instruction
+ from src.tasks.database_exploration.task import DatabaseAction
+ from src.systems.ouroboros import run_clbench_bridge_agent as rb
+@@ -22,6 +24,15 @@ from src.systems.ouroboros._live_bridge import LiveBridge, LiveController
+ from src.systems.ouroboros.system import _fallback_action
+ 
+ 
++@pytest.fixture(autouse=True)
++def _fake_engine_connectivity(monkeypatch):
++    """In-process engines do not depend on provider DNS in the test environment."""
++    from src.systems.ouroboros import _live_bridge as live
++
++    # Connectivity scenarios replace this probe with their own scripted outage.
++    monkeypatch.setattr(live, "_net_ok", lambda: True)
++
++
+ def _q(prompt="Question 1/1\nHow many rows?", queries_used=0, idx=0):
+     return SimpleNamespace(
+         prompt=prompt, response_schema=DatabaseAction, instance_id=f"q{idx}",
+@@ -464,6 +475,7 @@ def test_forced_evolution_request_writer(tmp_path):
+         _FORCED_EVOLUTION_OBJECTIVE, _write_forced_evolution_request,
+     )
+     (tmp_path / "state").mkdir()
++    (tmp_path / "state" / "state.json").write_text("{}")
+     # 1. fresh state → writes; steer empty → default generic objective
+     assert _write_forced_evolution_request(tmp_path, "") is True
+     req = json.loads((tmp_path / "state" / "post_task_evolution_request.json").read_text())
+@@ -483,36 +495,823 @@ def test_forced_evolution_request_writer(tmp_path):
+     assert req["objective"] == "custom objective"
+ 
+ 
+-def test_abandon_reopen_does_not_open_evolution_window():
+-    """Abandon-recovery scope reopen must NOT call on_instance_boundary (forced
+-    evolution window): during a provider outage every failed task would file a
+-    request -> cycle -> restart -> kill the retry -> another abandon (observed
+-    restart storm). Only a legit chunk/question boundary earns the window."""
+-    calls = []
++def _boundary_controller(tmp_path, monkeypatch):
++    from src.systems.ouroboros import _live_bridge as live
++    from src.systems.ouroboros._docker_launcher import _write_forced_evolution_request
++
++    events = []
++    result = {
++        "absorbed": True,
++        "new_sha": "new",
++        "cycles": 2,
++        "cycles_done": 3,
++        "reason": "absorbed",
++        "cycle_outcome": "absorbed",
++        "elapsed": 24.0,
++        "blockers": [],
++    }
++    (tmp_path / "state").mkdir()
++    (tmp_path / "state" / "state.json").write_text("{}")
+ 
+-    class _SpyEngine:
++    class _Engine:
+         mm = "shared"
++        evolution = True
++        data_root = tmp_path
++
+         def __init__(self):
+             self.server = self
++            self.base_url = "http://127.0.0.1:1"
++            self._boundary_wait = {"started": 0.0, "deadline": 1800.0}
++
++        def _start(self):
++            pass
++
+         def cancel_task(self, tid):
+-            return {}
++            events.append("cancel")
++
+         def wait_task(self, tid, timeout=10):
+             return {"status": "cancelled"}
++
+         def on_instance_boundary(self):
+-            calls.append(1)
+-            return {}
++            events.append("boundary")
++            assert _write_forced_evolution_request(tmp_path, "")
++            events.append("request")
++            (tmp_path / "state" / "post_task_evolution_request.json").unlink()
++            return dict(result)
++
++        def _wait_for_boundary_readiness(self, *, renew_expired=True):
++            events.append("ready")
++            return dict(result)
++
++    ctl = LiveController(
++        engine=_Engine(),
++        conversation="rollout",
++        memory_mode=None,
++        chunk_questions=1,
++        chunk_resume_mode="splice",
++        fallback_action_fn=_fallback_action,
++        action_timeout_sec=1,
++        task_timeout_sec=5,
++    )
++    ctl.bridge.url = "http://127.0.0.1:1"
++    ctl._published = True
++    monkeypatch.setattr(
++        ctl, "_take_action_patient", lambda query: _fallback_action(DatabaseAction)
++    )
++    monkeypatch.setattr(ctl, "_harvest_task_usage", lambda *a, **k: None)
++    monkeypatch.setattr(ctl, "finalize_usage", lambda *a, **k: None)
++    monkeypatch.setattr(live, "_net_ok", lambda: True)
+ 
+-    ctl = LiveController(engine=_SpyEngine(), conversation="rollout", memory_mode=None,
+-                         chunk_questions=8, chunk_resume_mode="splice",
+-                         fallback_action_fn=_fallback_action,
+-                         action_timeout_sec=1, task_timeout_sec=5)
+-    ctl._task_id = "dead-task"
+-    ctl._abandon_task()             # abandon: boundary_pending=True, window NOT due
++    def api(base, method, path, body=None, timeout=60):
++        assert (method, path) == ("POST", "/api/tasks")
++        events.append("post")
++        return {"task_id": f"tid-{events.count('post')}"}
++
++    monkeypatch.setattr(rb, "_api", api)
++    return ctl, events
++
++
++def test_abandon_reopen_does_not_open_evolution_window(tmp_path, monkeypatch):
++    """Recovery reopens the real submit path without earning a promotion request."""
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    ctl.respond(_q())
++    ctl._abandon_task()
+     assert ctl._boundary_pending is True
+-    assert ctl._evolution_window_due is False, "abandon must not earn an evolution window"
+-    # legit chunk boundary DOES arm it
+-    ctl._evolution_window_due = True
++    assert ctl._evolution_window_due is False
++    ctl.respond(_q(queries_used=1))
++    assert events.count("post") == 2
++    assert "boundary" not in events and "request" not in events
++    assert not (tmp_path / "state" / "post_task_evolution_request.json").exists()
++    assert ctl._reopen_pending is False and ctl._boundary_pending is False
++    assert ctl._resume_root == "tid-1"
++    ctl.close()
++
++
++def test_genuine_boundary_requests_once_before_submission(
++    tmp_path, monkeypatch, capsys
++):
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    ctl.respond(_q())
++    # A completed item at a chunk seam earns one window; another turn does not.
++    ctl.observe(SimpleNamespace(content="verdict", instance_complete=True), _q(idx=1))
+     assert ctl._evolution_window_due is True
++    ctl.respond(_q(idx=1))
++    ctl.respond(_q(idx=1, queries_used=1))
++    assert events.count("boundary") == events.count("request") == 1
++    assert events.count("post") == 2
++    assert events.index("request") < len(events) - 1
++    assert events[-2:] == ["ready", "post"]
++    assert ctl._evolution_window_due is False
++    logged = capsys.readouterr().err
++    for value in (
++        "reason=absorbed",
++        "cycle_outcome=absorbed",
++        "elapsed=24",
++        "cycles=2",
++        "cycles_done=3",
++        "blockers=",
++    ):
++        assert value in logged
++    ctl.close()
++
++
++def test_late_activity_after_connectivity_is_checked_before_post(tmp_path, monkeypatch):
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    marker = tmp_path / "state" / "pending_restart_verify.claimed.1.json"
++    active = []
++    probes = iter([False, True])
++
++    def net_ok():
++        available = next(probes)
++        events.append("connected" if available else "offline")
++        if available:
++            marker.write_text("{}")
++            active.append("auto-resume")
++        return available
++
++    def ready(*, renew_expired=True):
++        events.append("ready")
++        if marker.exists() or active:
++            events.append("wait-late-work")
++            marker.unlink()
++            active.clear()
++        return {
++            "reason": "no_promotion",
++            "cycle_outcome": None,
++            "elapsed": 8,
++            "cycles": 0,
++            "cycles_done": 0,
++            "blockers": [],
++        }
++
++    def api(base, method, path, body=None, timeout=60):
++        assert not marker.exists() and not active
++        assert events[-1] == "wait-late-work"
++        events.append("post")
++        return {"task_id": "tid-next"}
++
++    monkeypatch.setattr(live, "_NET_OUTAGE_HOLD_SEC", 60)
++    monkeypatch.setattr(live, "_net_ok", net_ok)
++    monkeypatch.setattr(live.time, "sleep", lambda seconds: events.append("sleep"))
++    monkeypatch.setattr(ctl.engine, "_wait_for_boundary_readiness", ready)
++    monkeypatch.setattr(rb, "_api", api)
++    ctl._submit_task(_q())
++    assert events[-4:] == ["connected", "ready", "wait-late-work", "post"]
++    assert events.count("ready") == 1
++    assert "request" not in events and "boundary" not in events
++    ctl.close()
++
++
++@pytest.mark.parametrize("late_activity", [False, True])
++def test_real_docker_gate_confirms_fresh_quiet_after_connectivity_hold(
++    tmp_path, monkeypatch, late_activity
++):
++    from src.systems.ouroboros import _docker_launcher as docker
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, _ = _boundary_controller(tmp_path, monkeypatch)
++    engine = docker.DockerOuroborosEngine.__new__(docker.DockerOuroborosEngine)
++    engine._started = True
++    engine._data_root = tmp_path
++    engine._server = SimpleNamespace(base_url="http://docker-fake")
++    engine._cname = None
++    engine.mm = "shared"
++    engine.evolution = True
++    ctl.engine = engine
++    (tmp_path / "state" / "state.json").write_text('{"evolution_mode_enabled":false}')
++    marker = tmp_path / "state" / "pending_restart_verify.claimed.5.json"
++    now, reads, posts = [0.0], [], []
++    connections = iter([False, True])
++
++    def sleep(seconds):
++        assert seconds in (8, 30)
++        now[0] += seconds
++        if now[0] >= 46:
++            marker.unlink(missing_ok=True)
++
++    def net_ok():
++        connected = next(connections)
++        if connected and late_activity:
++            marker.write_text("{}")
++        return connected
++
++    def api(base, method, path, body=None, timeout=60):
++        if method == "POST":
++            assert path == "/api/tasks"
++            assert not marker.exists()
++            assert reads[-2:] == [now[0] - 8, now[0]]
++            posts.append(now[0])
++            return {"task_id": "tid-after-confirmation"}
++        assert (method, path) == ("GET", "/api/state")
++        assert timeout <= min(8, 1830 - now[0])
++        reads.append(now[0])
++        return {
++            "supervisor_ready": True,
++            "supervisor_error": None,
++            "workers_alive": 1,
++            "evolution_enabled": False,
++            "pending_count": 0,
++            "running_count": 0,
++            "evolution_state": {"queued_task_id": "", "running_task_id": ""},
++            "active_direct_turns": ["auto-resume"] if marker.exists() else [],
++            "active_chat_activities": [],
++            "sha": "a" * 40,
++            "uptime": 1000 + now[0],
++        }
++
++    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
++    monkeypatch.setattr(live.time, "sleep", sleep)
++    monkeypatch.setattr(live, "_NET_OUTAGE_HOLD_SEC", 60)
++    monkeypatch.setattr(live, "_net_ok", net_ok)
++    monkeypatch.setattr(docker, "_api", api)
++    monkeypatch.setattr(rb, "_api", api)
++    monkeypatch.setattr(
++        docker,
++        "_write_forced_evolution_request",
++        lambda *a: pytest.fail("readiness must not publish"),
++    )
++
++    ctl._submit_task(_q())
++
++    assert posts == [54 if late_activity else 38]
++    assert min(reads) == 30
++    assert engine._boundary_wait["deadline"] == 1830
++    assert not (tmp_path / "state" / "post_task_evolution_request.json").exists()
++    ctl.close()
++
++
++def test_restart_refusal_rechecks_readiness_without_new_boundary(tmp_path, monkeypatch):
++    import io
++    import urllib.error
++
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    monkeypatch.setattr(live.time, "monotonic", lambda: 0.0)
++    monkeypatch.setattr(live.time, "sleep", lambda seconds: events.append("backoff"))
++    context = ctl.engine._boundary_wait
++    deadlines = []
++    marker = tmp_path / "state" / "pending_restart_verify.claimed.2.json"
++    attempts = []
++
++    def ready(*, renew_expired=True):
++        assert ctl.engine._boundary_wait is context
++        deadlines.append(context["deadline"])
++        events.append("ready")
++        if marker.exists():
++            events.append("wait-claimed")
++            marker.unlink()
++        return {
++            "reason": "cycle_done_unabsorbed",
++            "cycle_outcome": "waiting_for_restart",
++            "elapsed": 920,
++            "cycles": 0,
++            "cycles_done": 1,
++            "blockers": [],
++        }
++
++    def api(base, method, path, body=None, timeout=60):
++        assert events[-1] in ("ready", "wait-claimed") and not marker.exists()
++        attempts.append(body)
++        events.append("post")
++        if len(attempts) == 1:
++            marker.write_text("{}")
++            raise urllib.error.HTTPError(
++                base + path,
++                503,
++                "restart armed",
++                {},
++                io.BytesIO(b'{"retryable":true,"reason":"restart"}'),
++            )
++        return {"task_id": "tid-retry"}
++
++    monkeypatch.setattr(ctl.engine, "_wait_for_boundary_readiness", ready)
++    monkeypatch.setattr(rb, "_api", api)
++    ctl._submit_task(_q())
++    assert len(attempts) == 2 and attempts[0] == attempts[1]
++    assert "wait-claimed" in events
++    assert events[-2:] == ["wait-claimed", "post"]
++    assert all(deadline == 1800 for deadline in deadlines)
++    assert "boundary" not in events and "request" not in events
++    assert ctl._task_id == "tid-retry"
++    ctl.close()
++
++
++@pytest.mark.parametrize("never_clears", [False, True])
++def test_restart_refusals_do_not_consume_attempts_or_hot_loop(
++    tmp_path, monkeypatch, never_clears
++):
++    import io
++    import urllib.error
++
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    context = ctl.engine._boundary_wait
++    now, sleeps, posts = [1758.0], [], []
++
++    def sleep(seconds):
++        assert len(sleeps) < 9, "restart refusal wait exceeded its poll bound"
++        assert seconds == min(5, 1800 - now[0]) and seconds > 0
++        sleeps.append(seconds)
++        now[0] += seconds
++
++    def ready(*, renew_expired=True):
++        assert ctl.engine._boundary_wait is context
++        assert context["deadline"] == 1800
++        events.append("ready")
++        return {
++            "reason": "timeout" if now[0] >= 1800 else "no_promotion",
++            "elapsed": 0.0,
++            "budget_elapsed": now[0],
++            "blockers": ["pending restart"] if now[0] >= 1800 else [],
++        }
++
++    def api(base, method, path, body=None, timeout=60):
++        assert events[-1] == "ready"
++        events.append("post")
++        posts.append(now[0])
++        if never_clears or len(posts) <= 8:
++            raise urllib.error.HTTPError(
++                base + path,
++                503,
++                "restart armed",
++                {},
++                io.BytesIO(b'{"retryable":true,"reason":"restart"}'),
++            )
++        return {"task_id": "tid-after-restart"}
++
++    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
++    monkeypatch.setattr(live.time, "sleep", sleep)
++    monkeypatch.setattr(ctl.engine, "_wait_for_boundary_readiness", ready)
++    monkeypatch.setattr(rb, "_api", api)
++
++    if never_clears:
++        with pytest.raises(RuntimeError, match="readiness timeout.*restart"):
++            ctl._submit_task(_q())
++        assert now[0] == context["deadline"] == 1800
++    else:
++        ctl._submit_task(_q())
++        assert now[0] == 1798
++        assert ctl._task_id == "tid-after-restart"
++    assert posts == [1758 + 5 * attempt for attempt in range(9)] + (
++        [1800] if never_clears else []
++    )
++    assert sleeps == [5] * 8 + ([2] if never_clears else [])
++    assert context["deadline"] == 1800
++    assert "boundary" not in events and "request" not in events
++    ctl.close()
++
++
++@pytest.mark.parametrize("docker_gate", [False, True])
++@pytest.mark.parametrize("resubmit_entry", ["late_submit", "late_cancel", "crossing_submit"])
++@pytest.mark.parametrize("never_clears", [False, True])
++def test_late_question_resubmit_gets_one_fresh_restart_window(
++    tmp_path, monkeypatch, capsys, docker_gate, resubmit_entry, never_clears
++):
++    import io
++    import urllib.error
++
++    from src.systems.ouroboros import _docker_launcher as docker
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    first_post_crosses_deadline = resubmit_entry == "crossing_submit"
++    ctl.conversation = "question"
++    ctl._task_id = "long-running-question"
++    ctl._restart_wait_started = 0.0
++    ctl._restart_wait_deadline = 1800.0
++    ctl.engine.evolution = docker_gate
++    if docker_gate:
++        engine = docker.DockerOuroborosEngine.__new__(docker.DockerOuroborosEngine)
++        engine._started = True
++        engine._data_root = tmp_path
++        engine._server = SimpleNamespace(base_url="http://docker-fake")
++        engine._cname = None
++        engine.mm = "shared"
++        engine.evolution = True
++        ctl.engine = engine
++        (tmp_path / "state" / "state.json").write_text(
++            '{"evolution_mode_enabled":false}'
++        )
++    marker = tmp_path / "state" / "pending_restart_verify.claimed.7.json"
++    now, posts, probes, sleeps = [0.0], [], [], []
++    refusals_armed = [never_clears]
++    healthy = {
++        "supervisor_ready": True,
++        "workers_alive": 1,
++        "evolution_enabled": False,
++        "pending_count": 0,
++        "running_count": 0,
++        "evolution_state": {"queued_task_id": "", "running_task_id": ""},
++        "active_direct_turns": [],
++        "active_chat_activities": [],
++        "sha": "a" * 40,
++        "uptime": 1000,
++    }
++
++    def sleep(seconds):
++        assert 0 < seconds <= 8
++        assert len(sleeps) < 500, "restart wait renewed or stopped advancing"
++        sleeps.append(seconds)
++        now[0] += seconds
++        if posts and not refusals_armed[0] and now[0] >= posts[0] + 40:
++            marker.unlink(missing_ok=True)
++
++    def api(base, method, path, body=None, timeout=60):
++        if method == "GET":
++            assert path == "/api/state" and timeout > 0
++            probes.append(now[0])
++            if docker_gate and first_post_crosses_deadline and posts:
++                # The restarted gateway has older telemetry in the renewed window.
++                return {
++                    key: value for key, value in healthy.items()
++                    if key != "active_direct_turns"
++                }
++            return healthy
++        assert (method, path) == ("POST", "/api/tasks")
++        if not posts and first_post_crosses_deadline:
++            # The gate was quiet, then the POST overlapped the old deadline.
++            now[0] = 1803.0
++        posts.append(now[0])
++        if len(posts) == 1 or refusals_armed[0]:
++            marker.write_text("{}")
++            raise urllib.error.HTTPError(
++                base + path, 503, "restart armed", {},
++                io.BytesIO(b'{"retryable":true,"reason":"restart"}'),
++            )
++        assert not marker.exists()
++        return {"task_id": "recovered-question"}
++
++    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
++    monkeypatch.setattr(live.time, "sleep", sleep)
++    monkeypatch.setattr(docker, "_api", api)
++    monkeypatch.setattr(rb, "_api", api)
++    monkeypatch.setattr(
++        docker, "_write_forced_evolution_request",
++        lambda *a: pytest.fail("resubmission must not publish an evolution request"),
++    )
++    if docker_gate:
++        ctl.engine._begin_boundary_wait()
++        assert ctl.engine._boundary_wait["api_shape_checked"] is True
++        assert ctl.engine._boundary_wait["legacy_readiness"] is False
++    now[0] = 1790.0 if first_post_crosses_deadline else 2000.0
++
++    def resubmit():
++        if resubmit_entry == "late_cancel":
++            monkeypatch.setattr(
++                ctl, "_task_status",
++                lambda: "cancelled" if ctl._task_id == "long-running-question" else "completed",
++            )
++            monkeypatch.setattr(ctl, "_cancelled_by_restart", lambda: True)
++            answer = DatabaseAction(action="ANSWER", content="42")
++            monkeypatch.setattr(
++                ctl.bridge, "take_action",
++                lambda *a: None if ctl._task_id == "long-running-question" else answer,
++            )
++            assert LiveController._take_action_patient(ctl, _q(queries_used=1)) == answer
++            assert ctl._restart_retry_done
++        else:
++            ctl._submit_task(_q(queries_used=1))
++
++    if never_clears:
++        with pytest.raises(RuntimeError, match="readiness timeout.*restart"):
++            resubmit()
++        assert "TIMEOUT submit refused" in capsys.readouterr().err
++    else:
++        resubmit()
++        assert ctl._task_id == "recovered-question"
++
++    deadline = (
++        ctl.engine._boundary_wait["deadline"]
++        if docker_gate else ctl._restart_wait_deadline
++    )
++    expected_start = 1803.0 if first_post_crosses_deadline else 2000.0
++    assert deadline == expected_start + 1800
++    assert len(posts) == 2 and 0 < posts[-1] - posts[0] <= 1800
++    assert now[0] <= deadline
++    assert (now[0] >= deadline) is never_clears
++    assert "boundary" not in events and "request" not in events
++    if docker_gate:
++        assert any(probe >= expected_start for probe in probes)
++        assert ctl.engine._boundary_wait["legacy_readiness"] is first_post_crosses_deadline
++    if never_clears:
++        # A later, independent submit is a new wait even after this one exhausted its cap.
++        refusals_armed[0] = False
++        ctl._submit_task(_q(queries_used=2))
++        fresh_deadline = (
++            ctl.engine._boundary_wait["deadline"]
++            if docker_gate else ctl._restart_wait_deadline
++        )
++        assert fresh_deadline == deadline + 1800
++        assert deadline < now[0] < fresh_deadline
++        assert ctl._task_id == "recovered-question"
++    ctl.close()
++
++
++def test_submit_ordinary_failures_still_stop_after_six(tmp_path, monkeypatch):
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    sleeps, posts = [], []
++
++    def api(base, method, path, body=None, timeout=60):
++        assert events[-1] == "ready"
++        posts.append(body)
++        raise OSError("ordinary connection failure")
++
++    monkeypatch.setattr(live.time, "sleep", sleeps.append)
++    monkeypatch.setattr(rb, "_api", api)
++
++    with pytest.raises(RuntimeError, match="submit failed after retries"):
++        ctl._submit_task(_q())
++
++    assert len(posts) == 6
++    assert sleeps == [5] * 6
++    assert "boundary" not in events and "request" not in events
++    ctl.close()
++
++
++@pytest.mark.parametrize("restart_pending", [False, True])
++def test_control_submit_skips_evolution_gate_but_respects_restart_markers(
++    tmp_path, monkeypatch, restart_pending
++):
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    ctl.engine.evolution = False
++    (tmp_path / "state" / "state.json").unlink()
++    monkeypatch.setattr(
++        ctl.engine,
++        "_wait_for_boundary_readiness",
++        lambda: pytest.fail("control must not read evolution telemetry"),
++    )
++    marker = tmp_path / "state" / "pending_restart_verify.claimed.8.json"
++    if restart_pending:
++        marker.write_text("{}")
++    now, sleeps, probes = [0.0], [], []
++
++    def sleep(seconds):
++        assert restart_pending and seconds == 8
++        sleeps.append(seconds)
++        now[0] += seconds
++        marker.unlink()
++
++    def api(base, method, path, body=None, timeout=60):
++        assert not marker.exists()
++        if method == "GET":
++            assert restart_pending and path == "/api/state"
++            probes.append(now[0])
++            # No supervisor_error field means no reported error.
++            return {"supervisor_ready": True, "workers_alive": 1}
++        assert (method, path) == ("POST", "/api/tasks")
++        events.append("post")
++        return {"task_id": "tid-control"}
++
++    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
++    monkeypatch.setattr(live.time, "sleep", sleep)
++    monkeypatch.setattr(rb, "_api", api)
++
++    ctl._submit_task(_q())
++
++    assert events == ["post"]
++    assert sleeps == ([8] if restart_pending else [])
++    assert probes == ([8] if restart_pending else [])
++    assert ctl._restart_wait_deadline == (1800 if restart_pending else None)
++    assert not (tmp_path / "state" / "state.json").exists()
++    ctl.close()
++
++
++@pytest.mark.parametrize("now", [500.0, 2000.0])
++def test_restart_gate_without_markers_does_not_start_health_wait(
++    tmp_path, monkeypatch, now
++):
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, _ = _boundary_controller(tmp_path, monkeypatch)
++    ctl.engine = SimpleNamespace(
++        data_root=tmp_path, server=SimpleNamespace(base_url="http://127.0.0.1:1")
++    )
++    ctl._restart_wait_started = 0.0
++    ctl._restart_wait_deadline = 1800.0
++    monkeypatch.setattr(live.time, "monotonic", lambda: now)
++    monkeypatch.setattr(live.time, "sleep", lambda seconds: pytest.fail("no restart"))
++    monkeypatch.setattr(rb, "_api", lambda *a, **k: pytest.fail("no restart to probe"))
++
++    assert ctl._await_pending_restart() is None
++    assert ctl._restart_wait_deadline == 1800
++    ctl.close()
++
++
++def test_expired_restart_gate_gives_late_markers_a_fresh_window(
++    tmp_path, monkeypatch, capsys
++):
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, _ = _boundary_controller(tmp_path, monkeypatch)
++    ctl.engine = SimpleNamespace(
++        data_root=tmp_path, server=SimpleNamespace(base_url="http://127.0.0.1:1")
++    )
++    ctl._restart_wait_started = 0.0
++    ctl._restart_wait_deadline = 1800.0
++    marker = tmp_path / "state" / "pending_restart_verify.claimed.4.json"
++    marker.write_text("{}")
++    now = [2000.0]
++
++    def sleep(seconds):
++        assert 0 < seconds <= 8
++        now[0] += seconds
++        marker.unlink(missing_ok=True)
++
++    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
++    monkeypatch.setattr(live.time, "sleep", sleep)
++    monkeypatch.setattr(
++        rb, "_api", lambda *a, **k: {"supervisor_ready": True, "workers_alive": 1}
++    )
++
++    late = ctl._await_pending_restart()
++    cleared = ctl._await_pending_restart()
++
++    assert late["reason"] == "no_promotion" and cleared is None
++    assert late["blockers"] == []
++    assert 0 < late["elapsed"] == late["budget_elapsed"] < 1800
++    assert ctl._restart_wait_deadline == 3800
++    logged = capsys.readouterr().err
++    assert "resuming task submit" in logged and "TIMEOUT" not in logged
++    ctl.close()
++
++
++def test_restart_gate_clamps_last_api_probe_and_reports_call_elapsed(
++    tmp_path, monkeypatch
++):
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, _ = _boundary_controller(tmp_path, monkeypatch)
++    ctl.engine = SimpleNamespace(
++        data_root=tmp_path, server=SimpleNamespace(base_url="http://127.0.0.1:1")
++    )
++    ctl._restart_wait_started = 0.0
++    ctl._restart_wait_deadline = 1800.0
++    now = [1797.0]
++    marker = tmp_path / "state" / "pending_restart_verify.json"
++    marker.write_text("{}")
++    reads = []
++    real_exists = type(marker).exists
++
++    def exists(path):
++        if path == marker:
++            reads.append(path)
++            if len(reads) == 2:
++                marker.unlink()
++        return real_exists(path)
++
++    def api(base, method, path, body=None, timeout=60):
++        assert (method, path) == ("GET", "/api/state")
++        assert timeout == 3
++        now[0] += timeout
++        raise OSError("engine unavailable")
++
++    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
++    monkeypatch.setattr(live.time, "sleep", lambda seconds: pytest.fail("renewed wait"))
++    monkeypatch.setattr(type(marker), "exists", exists)
++    monkeypatch.setattr(rb, "_api", api)
++
++    result = ctl._await_pending_restart()
++
++    assert result["reason"] == "timeout"
++    assert result["elapsed"] == 3 and result["budget_elapsed"] == 1800
++    assert result["blockers"] == ["restart API unavailable"]
++    assert ctl._restart_wait_deadline == 1800
++    ctl.close()
++
++
++def test_restart_markers_then_api_recovery_share_one_deadline(
++    tmp_path, monkeypatch, capsys
++):
++    from src.systems.ouroboros import _live_bridge as live
++
++    engine = SimpleNamespace(
++        data_root=tmp_path, server=SimpleNamespace(base_url="http://127.0.0.1:1")
++    )
++    ctl = LiveController(
++        engine=engine,
++        conversation="question",
++        memory_mode=None,
++        fallback_action_fn=_fallback_action,
++        action_timeout_sec=1,
++        task_timeout_sec=5,
++    )
++    state = tmp_path / "state"
++    state.mkdir()
++    marker = state / "pending_restart_verify.json"
++    claimed = state / "pending_restart_verify.claimed.3.json"
++    marker.write_text("{}")
++    now, sleeps, probes = [0.0], [], []
++    healthy = {"supervisor_ready": True, "supervisor_error": None, "workers_alive": 1}
++    health_states = [
++        {},
++        healthy | {"supervisor_ready": False},
++        healthy | {"supervisor_error": "worker startup failed"},
++        healthy | {"workers_alive": 0},
++        healthy | {"workers_alive": True},
++        healthy | {"workers_alive": "1"},
++        {"supervisor_ready": True, "workers_alive": 1},
++        healthy,
++    ]
++
++    def sleep(seconds):
++        assert len(sleeps) < 12, "restart readiness exceeded its poll bound"
++        assert 0 < seconds <= min(8, 96 - now[0])
++        sleeps.append(seconds)
++        now[0] += seconds
++        if now[0] == 8:
++            marker.rename(claimed)
++        elif now[0] == 16:
++            claimed.unlink()
++
++    def api(base, method, path, body=None, timeout=60):
++        assert (method, path) == ("GET", "/api/state")
++        assert not marker.exists() and not claimed.exists()
++        assert timeout <= 96 - now[0]
++        probes.append((now[0], timeout))
++        if len(probes) == 1:
++            raise OSError("server restarting")
++        return health_states[len(probes) - 2]
++
++    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
++    monkeypatch.setattr(live.time, "sleep", sleep)
++    monkeypatch.setattr(rb, "_api", api)
++    ctl._await_pending_restart(bound_sec=96)
++    assert probes == [(moment, 8) for moment in range(16, 73, 8)]
++    assert now[0] == 72 and ctl._restart_wait_deadline == 96
++    # A late restart consumes the original remainder, including after health recovered.
++    marker.write_text("{}")
++    ctl._await_pending_restart(bound_sec=900)
++    assert now[0] == ctl._restart_wait_deadline == 96
++    assert sleeps == [8] * 12
++    logged = capsys.readouterr().err
++    assert "engine restarted and healthy after" in logged
++    assert "TIMEOUT" in logged and "pending_restart_verify.json" in logged
++
++
++def test_format_repair_checks_readiness_without_promotion(tmp_path, monkeypatch):
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    monkeypatch.setenv("OUROBOROS_FORMAT_REPAIR", "1")
++    monkeypatch.setattr(
++        ctl.engine,
++        "wait_task",
++        lambda *a, **k: {
++            "status": "completed",
++            "final_answer": '{"action":"ANSWER","content":"42"}',
++        },
++    )
++    action = ctl._format_repair_action(_q(), DatabaseAction, "previous-task", "no JSON")
++    assert action.content == "42"
++    assert events == ["ready", "post"]
++    ctl.close()
++
++
++def test_format_repair_after_long_question_waits_in_fresh_restart_window(
++    tmp_path, monkeypatch
++):
++    from src.systems.ouroboros import _live_bridge as live
++
++    ctl, events = _boundary_controller(tmp_path, monkeypatch)
++    ctl.engine.evolution = False
++    ctl._restart_wait_started = 0.0
++    ctl._restart_wait_deadline = 1800.0
++    marker = tmp_path / "state" / "pending_restart_verify.claimed.9.json"
++    marker.write_text("{}")
++    now = [2000.0]
++
++    def sleep(seconds):
++        assert 0 < seconds <= 8 and now[0] < 3800
++        now[0] += seconds
++        marker.unlink(missing_ok=True)
++
++    def api(base, method, path, body=None, timeout=60):
++        assert not marker.exists()
++        if method == "GET":
++            return {"supervisor_ready": True, "workers_alive": 1}
++        events.append("post")
++        return {"task_id": "format-repair"}
++
++    monkeypatch.setenv("OUROBOROS_FORMAT_REPAIR", "1")
++    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
++    monkeypatch.setattr(live.time, "sleep", sleep)
++    monkeypatch.setattr(rb, "_api", api)
++    monkeypatch.setattr(
++        ctl.engine, "wait_task",
++        lambda *a, **k: {
++            "status": "completed", "final_answer": '{"action":"ANSWER","content":"42"}'
++        },
++    )
++    action = ctl._format_repair_action(_q(), DatabaseAction, "previous-task", "no JSON")
++
++    assert action.content == "42" and events == ["post"]
++    assert 0 < now[0] - 2000 < 1800 and ctl._restart_wait_deadline == 3800
+     ctl.close()
+ 
+ 
+@@ -559,6 +1358,8 @@ def test_dead_rollout_task_reopens_scope_with_resume_stitch():
+ 
+     ctl._submit_task = _fake_submit
+ 
++    # Submission is in-process here; reopening does not need an HTTP listener.
++    ctl.bridge.url = "http://127.0.0.1:1"
+     t0 = time.time()
+     a1 = ctl.respond(_q())                      # scope 1: task dies without an action
+     assert isinstance(a1, DatabaseAction)       # degraded to fallback, no exception
+@@ -645,6 +1446,8 @@ def _final_delivery_controller(final_result: str, final_answer: str = "",
+         ctl._task_id = f"tid-{len(submits)}"
+ 
+     ctl._submit_task = _fake_submit
++    # Fake task delivery uses the bridge queues without opening a network listener.
++    ctl.bridge.url = "http://127.0.0.1:1"
+     return ctl, submits
+ 
+ 
+diff --git a/tests/test_ouroboros_submission_ports.py b/tests/test_ouroboros_submission_ports.py
+index 144b8f6..74f3b5e 100644
+--- a/tests/test_ouroboros_submission_ports.py
++++ b/tests/test_ouroboros_submission_ports.py
+@@ -11,8 +11,12 @@ Covers the three review-mandated contracts:
+ from __future__ import annotations
+ 
+ import time
++import copy
++import json
+ from types import SimpleNamespace
+ 
++import pytest
++
+ from src.systems.ouroboros import run_clbench_bridge_agent as rb
+ from src.systems.ouroboros._live_bridge import LiveController
+ from src.systems.ouroboros.system import _fallback_action
+@@ -158,3 +162,1568 @@ def test_single_model_pin_overrides_foreign_live_vision_slot(monkeypatch):
+     live = {"OUROBOROS_MODEL_VISION": "openai::foreign-model", "TOTAL_BUDGET": 60.0}
+     merged = {**live, **ov}  # build_isolated_settings applies overrides after live settings
+     assert merged["OUROBOROS_MODEL_VISION"] == "anthropic/claude-sonnet-4.6"
++
++
++def test_reviewer_slots_blanked_so_the_single_model_pin_holds():
++    """The desktop's structured reviewer slots must never reach the isolated server.
++
++    ouroboros/reviewer_slot_config.py projects OUROBOROS_REVIEWER_SLOTS OVER the flat
++    OUROBOROS_REVIEW_MODELS / OUROBOROS_SCOPE_REVIEW_MODEL(S) keys, so a leaked desktop
++    triad silently replaces the pinned single model. Observed live 2026-08-27: the scope
++    reviewer resolved to openai/gpt-5.6-luna in a run whose every flat key said
++    anthropic/claude-sonnet-4.6.
++    """
++    from src.systems.ouroboros._docker_launcher import DockerOuroborosEngine
++
++    srv = DockerOuroborosEngine.__new__(DockerOuroborosEngine)
++    srv.model = "anthropic/claude-sonnet-4.6"
++    srv.max_workers = 3
++    srv.evolution = False
++    srv.cadence = "every_n:1"
++    srv.steer = ""
++    srv.resume = False
++    ov = srv._overrides()
++
++    import json as _json
++
++    slots = _json.loads(ov["OUROBOROS_REVIEWER_SLOTS"])
++    roster = _json.loads(ov["OUROBOROS_SUBAGENTS"])
++
++    # Every api reviewer route is the solve model: the desktop's triad must not win.
++    for row in slots["triad"]:
++        assert row["route"]["target_id"] == srv.model, "triad row escaped the single-model pin"
++    for row in roster["items"]:
++        assert row["route"]["target_id"] == srv.model, "roster row escaped the single-model pin"
++
++    # The scope row references the roster instead of carrying an inline route: that is
++    # what puts it in the RETRIEVES class (native_retrieval), so no packet is assembled
++    # and the 200K sourced floor applies instead of the 1M api floor.
++    scope = slots["scope"][0]
++    assert scope.get("subagent_id") == roster["items"][0]["subagent_id"], (
++        "scope slot must reference the roster row; an inline route would take the "
++        "api pack path, which cannot assemble on a repo this size"
++    )
++    assert "route" not in scope, "subagent reference and inline route are mutually exclusive"
++    for key in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODELS"):
++        if key in ov:
++            assert set(ov[key].split(",")) == {srv.model}, f"{key} must pin the solve model"
++
++
++def test_turn1_metadata_attests_the_resolved_config(monkeypatch):
++    """The exact effort/safety/runtime config must be verifiable from the artifacts.
++
++    The published reference rows carry their knob in recorded params
++    (claude-code: reasoning_effort=low); ours previously lived only in prose.
++    Turn 1's Response.metadata now stamps the resolved env.
++    """
++    monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "low")
++    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
++    import re
++    src = open("src/systems/ouroboros/system.py").read()
++    m = re.search(r"_attest = \{\"config_attestation\":", src)
++    assert m, "turn-1 attestation block missing"
++    for key in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_SAFETY_MODE",
++                "OUROBOROS_CONTEXT_MODE", "OUROBOROS_TOTAL_BUDGET"):
++        assert key in src, f"{key} not attested"
++
++
++def test_restart_gate_waits_through_claimed_marker_and_reuses_deadline(
++    tmp_path, monkeypatch, capsys
++):
++    """Renaming a verification marker transfers ownership; it does not finish restart."""
++    from src.systems.ouroboros import _live_bridge as lb
++
++    state = tmp_path / "state"
++    state.mkdir()
++    marker = state / "pending_restart_verify.json"
++    claimed = state / "pending_restart_verify.claimed.42.json"
++    marker.write_text("{}")
++    clock = SimpleNamespace(now=0.0, sleeps=[])
++
++    def sleep(duration):
++        assert 0 < duration <= min(8.0, 19.0 - clock.now)
++        clock.sleeps.append(duration)
++        clock.now += duration
++        if marker.exists():
++            marker.rename(claimed)
++
++    ctl = lb.LiveController.__new__(lb.LiveController)
++    ctl.engine = SimpleNamespace(
++        data_root=tmp_path, server=SimpleNamespace(base_url="http://restart-fake")
++    )
++    monkeypatch.setattr(
++        lb, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)
++    )
++    probes = []
++
++    def api(*args, timeout, **kwargs):
++        probes.append(timeout)
++        pytest.fail("an expired restart budget cannot fund another API probe")
++
++    monkeypatch.setattr(rb, "_api", api)
++
++    ctl._await_pending_restart(bound_sec=19)
++    deadline = ctl._restart_wait_deadline
++    ctl._await_pending_restart(bound_sec=900, renew_expired=False)
++
++    assert clock.now == 19
++    assert clock.sleeps == [8, 8, 3]
++    assert ctl._restart_wait_deadline == deadline == 19
++    assert probes == []
++    log = capsys.readouterr().err
++    assert "TIMEOUT" in log
++    assert claimed.name in log
++
++
++def test_restart_gate_returns_fast_without_marker(tmp_path):
++    """No marker == no wait: the gate must be a no-op on the happy path."""
++    import time
++    from src.systems.ouroboros import _live_bridge as lb
++
++    class _Srv:  # pragma: no cover - trivial stub
++        base_url = "http://127.0.0.1:1"
++
++    class _Eng:
++        data_root = tmp_path
++        server = _Srv()
++
++    ctl = lb.LiveController.__new__(lb.LiveController)
++    ctl.engine = _Eng()
++    t0 = time.time()
++    ctl._await_pending_restart(bound_sec=5)
++    assert time.time() - t0 < 1.0, "gate must not sleep when no restart is pending"
++
++
++def test_restart_503_refusal_re_enters_the_wait_not_the_retry_burn():
++    """Engines >=6.113.5 refuse a submit made while a restart is armed with 503+retryable,
++    and that window outlasts the 6x5s submit retry loop — so the refusal must route back
++    into the marker wait, never consume the retry budget."""
++    import urllib.error, io
++    from src.systems.ouroboros import _live_bridge as lb
++
++    def _err(code, body):
++        return urllib.error.HTTPError("http://x/api/tasks", code, "n/a", {},
++                                      io.BytesIO(body.encode()))
++
++    assert lb._restart_pending_refusal(_err(503, '{"error":"restart_pending","retryable":true}'))
++    assert lb._restart_pending_refusal(_err(503, "server restarting"))
++    # an ordinary 503 with no restart hint keeps the fast-retry path only if it also
++    # carries no retryable marker; an unreadable body prefers waiting (fail-safe)
++    assert not lb._restart_pending_refusal(_err(500, "restart"))
++    assert not lb._restart_pending_refusal(ValueError("boom"))
++
++def _campaign(
++    *,
++    campaign_id="campaign-a",
++    cycles=0,
++    absorbed=0,
++    outcome="",
++    transaction_id="tx-a",
++    task_id="task-a",
++    active=False,
++    **tx_fields,
++):
++    campaign = {
++        "id": campaign_id,
++        "status": "active",
++        "cycles_done": cycles,
++        "absorbed_cycles_done": absorbed,
++        "last_task_id": task_id if outcome else "",
++    }
++    if outcome or active:
++        tx = {
++            "campaign_id": campaign_id,
++            "transaction_id": transaction_id,
++            "task_id": task_id,
++            "cycle_outcome": outcome,
++            **tx_fields,
++        }
++        if active:
++            campaign["active_transaction"] = tx
++        else:
++            campaign["history"] = [{"task_id": task_id, "transaction": tx}]
++            campaign["transaction_history"] = [tx]
++    return campaign
++
++
++def _boundary_frame(
++    *,
++    campaign=None,
++    enabled=False,
++    request=False,
++    markers=(),
++    api_error=False,
++    **api_fields,
++):
++    api = {
++        "supervisor_ready": True,
++        "supervisor_error": "",
++        "workers_alive": 2,
++        "evolution_enabled": False,
++        "pending_count": 0,
++        "running_count": 0,
++        "evolution_state": {"queued_task_id": "", "running_task_id": ""},
++        "active_direct_turns": [],
++        "active_chat_activities": [],
++        "sha": "a" * 40,
++        "uptime": 1000.0,
++    }
++    api.update(api_fields)
++    return {
++        "campaign": campaign,
++        "enabled": enabled,
++        "request": request,
++        "markers": markers,
++        "api_error": api_error,
++        "api": api,
++    }
++
++
++class _BoundaryScript:
++    """Advance host files and API telemetry together on each fake polling sleep."""
++
++    def __init__(self, root, initial, frames):
++        self.root = root / "state"
++        self.root.mkdir()
++        self.frames = frames
++        self.index = -1
++        self.now = 0.0
++        self.sleeps = []
++        self.reads = []
++        self.publications = 0
++        self.api_cost = 0.0
++        self.apply(initial)
++
++    def apply(self, frame):
++        self.frame = copy.deepcopy(frame)
++        (self.root / "state.json").write_text(
++            json.dumps({"evolution_mode_enabled": frame["enabled"]})
++        )
++        campaign_path = self.root / "evolution_campaign.json"
++        campaign = frame["campaign"]
++        if campaign is None:
++            campaign_path.unlink(missing_ok=True)
++        else:
++            campaign_path.write_text(
++                campaign if isinstance(campaign, str) else json.dumps(campaign)
++            )
++        request = self.root / "post_task_evolution_request.json"
++        if frame["request"]:
++            request.write_text("{}")
++        else:
++            request.unlink(missing_ok=True)
++        for marker in self.root.glob("pending_restart_verify*.json"):
++            marker.unlink()
++        for name in frame["markers"]:
++            (self.root / name).write_text("{}")
++
++    def advance(self):
++        self.index = min(self.index + 1, len(self.frames) - 1)
++        self.apply(self.frames[self.index])
++
++    def monotonic(self):
++        return self.now
++
++    def sleep(self, duration):
++        assert 0 < duration <= min(8.0, self.deadline() - self.now)
++        assert len(self.sleeps) < 1000, "readiness polling must remain bounded"
++        self.sleeps.append((self.now, duration))
++        self.now += duration
++        self.advance()
++
++    def api(self, base, method, path, body=None, timeout=30.0):
++        assert method == "GET" and path == "/api/state"
++        assert 0 < timeout <= min(8.0, self.deadline() - self.now)
++        assert len(self.reads) < 1000, "readiness probes must remain bounded"
++        self.reads.append((self.now, timeout))
++        self.now += min(self.api_cost, timeout)
++        if self.frame["api_error"]:
++            raise OSError("scripted supervisor restart")
++        return copy.deepcopy(self.frame["api"])
++
++    def publish(self, root, objective):
++        self.publications += 1
++        # Consumption can complete immediately; the baseline must already be captured.
++        self.advance()
++        return True
++
++
++def _scripted_boundary(
++    tmp_path, monkeypatch, frames, *, initial=None, trigger="forced"
++):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    script = _BoundaryScript(
++        tmp_path, initial or _boundary_frame(campaign=_campaign()), frames
++    )
++    engine = dl.DockerOuroborosEngine.__new__(dl.DockerOuroborosEngine)
++    engine._started = True
++    engine._data_root = tmp_path
++    engine._server = SimpleNamespace(base_url="http://boundary-fake")
++    engine._cname = None
++    engine.evolution = True
++    engine.evolution_trigger = trigger
++    engine.steer = ""
++    engine.task_timeout = 1
++    engine._reset_per_task_budget = lambda *a, **k: None
++    script.deadline = lambda: engine._boundary_wait["deadline"]
++    monkeypatch.setattr(
++        dl, "time", SimpleNamespace(monotonic=script.monotonic, sleep=script.sleep)
++    )
++    monkeypatch.setattr(dl, "_api", script.api)
++    monkeypatch.setattr(dl, "_write_forced_evolution_request", script.publish)
++    return engine, script
++
++
++@pytest.mark.parametrize(
++    "state,expected",
++    [({}, True), ({"evolution_mode_enabled": False}, True),
++     ({"evolution_mode_enabled": True}, False), ([], False), ("{malformed", False)],
++)
++def test_forced_request_and_readiness_agree_on_state_flag(tmp_path, state, expected):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    state_dir = tmp_path / "state"
++    state_dir.mkdir()
++    (state_dir / "state.json").write_text(
++        state if isinstance(state, str) else json.dumps(state)
++    )
++    engine = dl.DockerOuroborosEngine.__new__(dl.DockerOuroborosEngine)
++    engine._data_root = tmp_path
++    engine._cname = None
++
++    assert (not engine._boundary_file_blockers()) is expected
++    assert dl._write_forced_evolution_request(tmp_path, "Improve the workflow") is expected
++    assert (state_dir / "post_task_evolution_request.json").exists() is expected
++
++
++@pytest.mark.parametrize(
++    "activity",
++    [
++        {"running_count": 1},
++        {"pending_count": 1},
++        {"evolution_state": {"queued_task_id": "queued", "running_task_id": ""}},
++        {"evolution_state": {"queued_task_id": "", "running_task_id": "running"}},
++        {"active_direct_turns": [{"task_id": "resumed"}]},
++        {"active_chat_activities": [{"chat_id": 3}]},
++        {"evolution_enabled": True},
++    ],
++)
++def test_boundary_counters_never_bypass_activity(tmp_path, monkeypatch, activity):
++    campaign = _campaign(cycles=1, absorbed=1, outcome="absorbed")
++    quiet = _boundary_frame(campaign=campaign, sha="b" * 40)
++    busy = _boundary_frame(campaign=campaign, sha="b" * 40, **activity)
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [busy, quiet, quiet])
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "absorbed"
++    assert result["absorbed"] is True
++    assert result["cycles"] == 1
++    assert result["cycle_outcome"] == "absorbed"
++    assert script.now >= 16
++    assert script.publications == 1
++
++
++def test_boundary_consumed_request_still_waits_for_disarm(tmp_path, monkeypatch):
++    campaign = _campaign(cycles=1, outcome="no_op")
++    engine, script = _scripted_boundary(
++        tmp_path,
++        monkeypatch,
++        [
++            _boundary_frame(campaign=campaign, enabled=True),
++            _boundary_frame(campaign=campaign),
++            _boundary_frame(campaign=campaign),
++        ],
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert script.now >= 16
++    assert script.publications == 1
++
++
++@pytest.mark.parametrize(
++    "outcome", ["absorbed", "no_op", "abandoned", "waiting_for_restart"]
++)
++def test_boundary_terminal_outcomes_still_require_two_quiet_samples(
++    tmp_path, monkeypatch, outcome
++):
++    absorbed = int(outcome == "absorbed")
++    campaign = _campaign(
++        cycles=1,
++        absorbed=absorbed,
++        outcome=outcome,
++        commit_sha="b" * 40 if absorbed else "",
++        restart_verified=True,
++    )
++    quiet = _boundary_frame(campaign=campaign, sha="b" * 40 if absorbed else "a" * 40)
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [quiet, quiet, quiet])
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == ("absorbed" if absorbed else "cycle_done_unabsorbed")
++    assert result["cycle_outcome"] == outcome
++    assert result["absorbed"] is bool(absorbed)
++    assert result["new_sha"] == ("b" * 8 if absorbed else "a" * 8)
++    assert script.now >= 8
++
++
++def test_boundary_restart_claim_api_outage_and_auto_resume_all_block(
++    tmp_path, monkeypatch
++):
++    pending = _campaign(
++        cycles=1,
++        outcome="waiting_for_restart",
++        active=True,
++        commit_sha="b" * 40,
++        restart_required=True,
++        restart_verified=False,
++    )
++    completed = _campaign(
++        cycles=1,
++        absorbed=1,
++        outcome="absorbed",
++        commit_sha="b" * 40,
++        restart_required=False,
++        restart_verified=True,
++    )
++    quiet = _boundary_frame(campaign=completed, sha="b" * 40, uptime=2)
++    engine, script = _scripted_boundary(
++        tmp_path,
++        monkeypatch,
++        [
++            _boundary_frame(campaign=pending, markers=("pending_restart_verify.json",)),
++            _boundary_frame(
++                campaign=pending, markers=("pending_restart_verify.claimed.42.json",)
++            ),
++            _boundary_frame(campaign=pending, api_error=True),
++            _boundary_frame(campaign=pending),
++            _boundary_frame(
++                campaign=completed,
++                sha="b" * 40,
++                uptime=1,
++                active_direct_turns=[{"task_id": "auto-resume"}],
++            ),
++            quiet,
++            quiet,
++        ],
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "absorbed"
++    assert result["cycle_outcome"] == "absorbed"
++    assert script.now >= 48
++    assert result["blockers"] == []
++
++
++def test_boundary_captures_campaign_and_counters_before_immediate_consumption(
++    tmp_path, monkeypatch
++):
++    initial = _boundary_frame(campaign=_campaign(cycles=7, absorbed=5, outcome="no_op"))
++    new = _campaign(
++        campaign_id="campaign-b",
++        cycles=1,
++        absorbed=1,
++        outcome="absorbed",
++        transaction_id="tx-b",
++        task_id="task-b",
++        commit_sha="b" * 40,
++        restart_verified=True,
++    )
++    quiet = _boundary_frame(campaign=new, sha="b" * 40)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet, quiet], initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "absorbed"
++    assert result["cycle_outcome"] == "absorbed"
++    assert result["cycles"] == 1
++    assert result["cycles_done"] == 1
++    assert script.publications == 1
++
++
++def test_boundary_new_transaction_outcome_does_not_need_counter_growth(
++    tmp_path, monkeypatch
++):
++    initial = _boundary_frame(
++        campaign=_campaign(cycles=7, absorbed=5, outcome="absorbed")
++    )
++    new = _campaign(
++        campaign_id="campaign-b",
++        cycles=1,
++        outcome="abandoned",
++        transaction_id="tx-b",
++        task_id="task-b",
++    )
++    quiet = _boundary_frame(campaign=new)
++    engine, _ = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet], initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert result["cycle_outcome"] == "abandoned"
++    assert result["absorbed"] is False
++
++
++def test_boundary_missing_campaign_can_only_finish_as_independently_idle(
++    tmp_path, monkeypatch
++):
++    initial = _boundary_frame()
++    quiet = _boundary_frame()
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet], initial=initial, trigger="native"
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "no_promotion"
++    assert result["cycle_outcome"] in ("", None)
++    assert script.now == 8
++    assert script.publications == 0
++
++
++@pytest.mark.parametrize("bad_campaign", ["{malformed", {}, None])
++def test_boundary_unreadable_or_disappearing_campaign_resets_confirmation(
++    tmp_path, monkeypatch, bad_campaign
++):
++    completed = _campaign(cycles=1, outcome="no_op")
++    quiet = _boundary_frame(campaign=completed)
++    engine, script = _scripted_boundary(
++        tmp_path,
++        monkeypatch,
++        [
++            quiet,
++            _boundary_frame(campaign=bad_campaign),
++            quiet,
++            quiet,
++        ],
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert script.now >= 24
++
++
++def test_boundary_malformed_baseline_does_not_turn_historic_counters_into_progress(
++    tmp_path, monkeypatch
++):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    initial = _boundary_frame(campaign="{malformed")
++    quiet = _boundary_frame(
++        campaign=_campaign(cycles=7, absorbed=5, outcome="absorbed")
++    )
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet], initial=initial
++    )
++
++    def publish(*args):
++        assert isinstance(script.frame["campaign"], dict)
++        assert len(script.reads) >= 2
++        return script.publish(*args)
++
++    monkeypatch.setattr(dl, "_write_forced_evolution_request", publish)
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "no_promotion"
++    assert result["cycle_outcome"] in ("", None)
++    assert result["cycles"] == 5
++
++
++def test_boundary_recovers_api_baseline_before_request_publication(
++    tmp_path, monkeypatch
++):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    campaign = _campaign(cycles=7, absorbed=5, outcome="absorbed")
++    initial = _boundary_frame(campaign=campaign, api_error=True)
++    quiet = _boundary_frame(campaign=campaign)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet], initial=initial
++    )
++
++    def publish(*args):
++        assert script.frame["api_error"] is False
++        assert len(script.reads) >= 2
++        return script.publish(*args)
++
++    monkeypatch.setattr(dl, "_write_forced_evolution_request", publish)
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "no_promotion"
++    assert result["absorbed"] is False
++    assert result["cycle_outcome"] in ("", None)
++    assert script.publications == 1
++
++
++@pytest.mark.parametrize("missing", ["campaign", "transaction"])
++@pytest.mark.parametrize("recovers", [True, False])
++def test_boundary_baseline_retry_preserves_observed_campaign_and_transaction(
++    tmp_path, monkeypatch, missing, recovers
++):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    initial = _boundary_frame(campaign=_campaign(active=True), api_error=True)
++    disappeared = _boundary_frame(
++        campaign=None if missing == "campaign" else _campaign()
++    )
++    terminal = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    frames = [disappeared, disappeared]
++    if recovers:
++        frames.extend([terminal, terminal])
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, frames, initial=initial)
++
++    def publish(*args):
++        # An unavailable API must not erase host identities from the first baseline read.
++        if recovers:
++            assert script.frame["campaign"] == terminal["campaign"]
++            assert script.now >= 24
++        else:
++            assert script.now == 32
++        return script.publish(*args)
++
++    monkeypatch.setattr(dl, "_write_forced_evolution_request", publish)
++
++    result = engine.on_instance_boundary()
++
++    if recovers:
++        assert result["reason"] == "no_promotion"
++        assert script.now >= 32
++        assert script.publications == 1
++    else:
++        assert result["reason"] == "timeout"
++        assert any(missing in blocker for blocker in result["blockers"])
++        assert script.now == 1800
++        assert script.publications == 1
++
++
++@pytest.mark.parametrize(
++    "bad_baseline",
++    [
++        _boundary_frame(campaign="{malformed"),
++        _boundary_frame(api_error=True),
++    ],
++)
++def test_boundary_unreadable_baseline_publishes_once_after_short_capture_budget(
++    tmp_path, monkeypatch, bad_baseline
++):
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [bad_baseline], initial=bad_baseline
++    )
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    def publish(*args):
++        assert script.now == 32
++        return script.publish(*args)
++
++    monkeypatch.setattr(dl, "_write_forced_evolution_request", publish)
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "timeout"
++    assert result["blockers"]
++    assert script.now == 1800
++    assert script.publications == 1
++
++
++@pytest.mark.parametrize("later_progress", [False, True])
++def test_boundary_recovered_unknown_baseline_never_claims_historical_progress(
++    tmp_path, monkeypatch, later_progress
++):
++    unreadable = _boundary_frame(campaign="{malformed")
++    historical = _boundary_frame(
++        campaign=_campaign(cycles=7, absorbed=5, outcome="absorbed")
++    )
++    frames = [unreadable] * 5 + [historical, historical]
++    if later_progress:
++        historical["request"] = True
++        finished = _boundary_frame(
++            campaign=_campaign(
++                cycles=8,
++                absorbed=5,
++                outcome="no_op",
++                transaction_id="tx-later",
++                task_id="task-later",
++            )
++        )
++        frames.extend([finished, finished])
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, frames, initial=unreadable
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == (
++        "cycle_done_unabsorbed" if later_progress else "no_promotion"
++    )
++    assert result["cycle_outcome"] == ("no_op" if later_progress else "")
++    assert result["absorbed"] is False
++    assert script.publications == 1
++    assert 32 < script.now < 1800
++    assert engine._boundary_wait["baseline_uncertain"] is False
++
++
++def test_native_boundary_recovers_baseline_without_waiting_for_new_cycle(
++    tmp_path, monkeypatch
++):
++    unreadable = _boundary_frame(campaign="{malformed")
++    historical = _boundary_frame(campaign=_campaign(cycles=7, absorbed=5))
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [unreadable] * 5 + [historical, historical],
++        initial=unreadable, trigger="native"
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "no_promotion"
++    assert result["absorbed"] is False
++    assert 32 < result["elapsed"] < 1800
++    assert script.publications == 0
++    assert not result["blockers"]
++
++
++def test_boundary_disappearing_active_transaction_waits_for_terminal_record(
++    tmp_path, monkeypatch
++):
++    initial = _boundary_frame(campaign=_campaign(active=True))
++    missing = _boundary_frame(campaign=_campaign())
++    finished = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [missing, missing, finished, finished], initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert result["cycle_outcome"] == "no_op"
++    assert script.now >= 24
++
++
++@pytest.mark.parametrize("archived", [False, True])
++def test_boundary_unverified_restart_transaction_cannot_disappear(
++    tmp_path, monkeypatch, archived
++):
++    waiting = _campaign(
++        cycles=1,
++        outcome="waiting_for_restart",
++        active=True,
++        commit_sha="b" * 40,
++        restart_required=True,
++        restart_verified=False,
++    )
++    initial = _boundary_frame(campaign=waiting)
++    disappeared = _campaign(cycles=1)
++    if archived:
++        disappeared["transaction_history"] = [waiting["active_transaction"]]
++    quiet = _boundary_frame(campaign=disappeared)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet], initial=initial, trigger="native"
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "timeout"
++    assert any("transaction" in blocker for blocker in result["blockers"])
++    assert script.now == 1800 and script.publications == 0
++
++
++def test_boundary_archived_abandonment_resolves_observed_restart(tmp_path, monkeypatch):
++    waiting = _campaign(
++        cycles=1,
++        outcome="waiting_for_restart",
++        active=True,
++        commit_sha="b" * 40,
++        restart_required=True,
++        restart_verified=False,
++    )
++    # Startup can abandon verification while preserving the committed SHA in history.
++    abandoned = _campaign(
++        cycles=1,
++        outcome="abandoned",
++        commit_sha="b" * 40,
++        restart_required=False,
++        restart_verified=False,
++    )
++    quiet = _boundary_frame(campaign=abandoned)
++    engine, script = _scripted_boundary(
++        tmp_path,
++        monkeypatch,
++        [quiet, quiet],
++        initial=_boundary_frame(campaign=waiting),
++        trigger="native",
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert result["cycle_outcome"] == "abandoned"
++    assert result["blockers"] == []
++    assert script.now == 16 and script.publications == 0
++
++
++@pytest.mark.parametrize("guard", ["request", "marker", "enabled"])
++def test_boundary_rereads_host_guards_after_api_snapshot(tmp_path, monkeypatch, guard):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    quiet = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [quiet, quiet, quiet])
++
++    def api(*args, **kwargs):
++        result = script.api(*args, **kwargs)
++        if len(script.reads) == 2:
++            if guard == "request":
++                (script.root / "post_task_evolution_request.json").write_text("{}")
++            elif guard == "marker":
++                (script.root / "pending_restart_verify.claimed.42.json").write_text(
++                    "{}"
++                )
++            else:
++                (script.root / "state.json").write_text(
++                    '{"evolution_mode_enabled": true}'
++                )
++        return result
++
++    monkeypatch.setattr(dl, "_api", api)
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert script.now >= 16
++
++
++@pytest.mark.parametrize(
++    "field",
++    [
++        "supervisor_ready",
++        "workers_alive",
++        "pending_count",
++        "running_count",
++        "evolution_enabled",
++        "evolution_state",
++        "active_direct_turns",
++        "active_chat_activities",
++    ],
++)
++def test_boundary_missing_activity_telemetry_is_not_quiet(tmp_path, monkeypatch, field):
++    campaign = _campaign(cycles=1, outcome="no_op")
++    missing = _boundary_frame(campaign=campaign)
++    missing["api"].pop(field)
++    quiet = _boundary_frame(campaign=campaign)
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [missing, quiet, quiet])
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert script.now >= 16
++
++
++def test_boundary_absent_supervisor_error_is_healthy(tmp_path, monkeypatch):
++    quiet = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    quiet["api"].pop("supervisor_error")
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [quiet, quiet])
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert result["blockers"] == []
++    assert script.now == 8
++
++
++@pytest.mark.parametrize(
++    "field", ["evolution_state", "active_direct_turns", "active_chat_activities"]
++)
++def test_boundary_missing_telemetry_names_the_field_at_timeout(
++    tmp_path, monkeypatch, capsys, field
++):
++    missing = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    missing["api"].pop(field)
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [missing])
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "timeout"
++    assert f"missing API field: {field}" in result["blockers"]
++    assert f"missing API field: {field}" in capsys.readouterr().err
++    assert script.now == 1800
++
++
++@pytest.mark.parametrize(
++    "field",
++    [
++        "supervisor_ready", "workers_alive", "pending_count", "running_count",
++        "evolution_enabled", "evolution_state", "evolution_state.queued_task_id",
++        "evolution_state.running_task_id", "active_direct_turns", "active_chat_activities",
++    ],
++)
++def test_boundary_unknown_initial_api_shape_uses_counter_fallback_once(
++    tmp_path, monkeypatch, capsys, field
++):
++    initial = _boundary_frame(campaign=_campaign())
++    completed = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    for frame in (initial, completed):
++        parent, _, key = field.rpartition(".")
++        (frame["api"][parent] if parent else frame["api"]).pop(key)
++        if field == "workers_alive":
++            frame["api"]["workers_total"] = 2
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [completed], initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert result["elapsed"] < 1800
++    assert engine._boundary_wait["legacy_readiness"] is True
++    assert script.publications == 1
++    log = capsys.readouterr().err
++    assert log.count("legacy counter-based readiness") == 1
++    assert f"missing API field: {field}" in log
++
++
++@pytest.mark.parametrize(
++    "fields",
++    [
++        {"evolution_state": []},
++        {"evolution_state": {"queued_task_id": [], "running_task_id": ""}},
++        {"active_direct_turns": {}},
++        {"workers_alive": None, "workers_total": 2},
++        {"evolution_enabled": ""},
++        {"supervisor_ready": "true"},
++    ],
++)
++def test_boundary_wrong_api_shape_fallback_allows_idle_no_promotion(
++    tmp_path, monkeypatch, capsys, fields
++):
++    idle = _boundary_frame(campaign=_campaign(), **fields)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [idle], initial=idle, trigger="native"
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "no_promotion"
++    assert 0 < result["elapsed"] < 1800
++    assert script.publications == 0
++    assert "invalid API field:" in capsys.readouterr().err
++
++
++def test_boundary_api_shape_fallback_preserves_known_restart_and_activity_guards(
++    tmp_path, monkeypatch
++):
++    initial = _boundary_frame(campaign=_campaign())
++    initial["api"].pop("active_direct_turns")
++    completed = _campaign(cycles=1, outcome="no_op")
++    frames = [
++        _boundary_frame(campaign=completed, markers=("pending_restart_verify.json",)),
++        _boundary_frame(campaign=completed, running_count=1),
++        _boundary_frame(campaign=completed, request=True),
++        _boundary_frame(campaign=completed),
++    ]
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, frames, initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert script.index == len(frames) - 1
++    assert 0 < result["elapsed"] < 1800
++
++
++@pytest.mark.parametrize(
++    "field,value",
++    [
++        ("evolution_enabled", 1),
++        ("evolution_enabled", "true"),
++        ("evolution_state.queued_task_id", 7),
++        ("evolution_state.queued_task_id", ["queued"]),
++        ("evolution_state.running_task_id", 7),
++        ("evolution_state.running_task_id", ["running"]),
++        ("active_direct_turns", {"turn": {}}),
++        ("active_chat_activities", {"chat": {}}),
++        ("evolution_state", '{"running_task_id": "running"}'),
++        ("evolution_state", ["running"]),
++        ("evolution_state.queued_task_id", 0),
++        ("evolution_state.running_task_id", False),
++        ("active_direct_turns", 0),
++        ("active_chat_activities", False),
++        ("evolution_state", 0),
++        ("evolution_state", False),
++        ("evolution_enabled", "true"),
++        ("evolution_enabled", 1),
++        ("supervisor_ready", ""),
++        ("supervisor_ready", 0),
++    ],
++)
++def test_boundary_legacy_invalid_activity_shapes_block(
++    tmp_path, monkeypatch, field, value
++):
++    initial = _boundary_frame(campaign=_campaign())
++    active = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    for frame in (initial, active):
++        parent, _, key = field.rpartition(".")
++        (frame["api"][parent] if parent else frame["api"])[key] = value
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [active], initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert engine._boundary_wait["legacy_readiness"] is True
++    assert result["reason"] == "timeout"
++    blocker = (
++        f"{field} activity in unexpected shape" if value
++        else f"invalid API field: {field}"
++    )
++    if field == "evolution_enabled":
++        blocker = "API evolution_enabled true in unexpected shape"
++    if field == "supervisor_ready":
++        blocker = "supervisor not ready"  # a present falsy answer blocks in both modes
++    assert blocker in result["blockers"]
++    assert script.now == 1800
++
++
++@pytest.mark.parametrize(
++    "fields,ready",
++    [
++        ({"workers_alive": None, "workers_total": 2}, True),
++        ({"workers_alive": None, "workers_total": 0}, False),
++        ({"workers_alive": None, "workers_total": None}, False),
++        ({"workers_alive": None, "workers_total": "2"}, False),
++        ({"workers_alive": None}, False),
++        ({"workers_alive": "2"}, False),
++    ],
++)
++def test_boundary_legacy_worker_liveness_requires_usable_count(
++    tmp_path, monkeypatch, fields, ready
++):
++    idle = _boundary_frame(campaign=_campaign(), **fields)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [idle], initial=idle, trigger="native"
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == ("no_promotion" if ready else "timeout")
++    assert ("no live workers or unknown" in result["blockers"]) is not ready
++    assert script.now == (8 if ready else 1800)
++
++
++@pytest.mark.parametrize("cycle_done", [False, True])
++def test_boundary_legacy_mode_recovers_with_two_shaped_quiet_samples(
++    tmp_path, monkeypatch, capsys, cycle_done
++):
++    initial = _boundary_frame(campaign=_campaign(), active_direct_turns={})
++    campaign = _campaign(cycles=1, outcome="no_op") if cycle_done else _campaign()
++    quiet = _boundary_frame(campaign=campaign)
++    frames = [quiet, quiet] if cycle_done else [initial, quiet, quiet]
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, frames, initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == ("cycle_done_unabsorbed" if cycle_done else "no_promotion")
++    assert script.now == (8 if cycle_done else 16)
++    assert engine._boundary_wait["legacy_readiness"] is False
++    engine._wait_for_boundary_readiness()
++    log = capsys.readouterr().err
++    assert log.count("legacy counter-based readiness") == 1
++    assert log.count("using full readiness checks") == 1
++
++
++@pytest.mark.parametrize("renew", [False, True])
++@pytest.mark.parametrize("initial_legacy", [False, True])
++def test_boundary_new_wait_resets_api_shape_mode(
++    tmp_path, monkeypatch, capsys, renew, initial_legacy
++):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    legacy = _boundary_frame(campaign=_campaign(), active_direct_turns={})
++    initial = legacy if initial_legacy else _boundary_frame(campaign=_campaign())
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [initial], initial=initial, trigger="native"
++    )
++    engine.on_instance_boundary()
++    ctx = engine._boundary_wait
++    assert ctx["api_shape_checked"] is True
++    assert ctx["legacy_readiness"] is initial_legacy
++    script.apply(legacy)
++    script.frames = [legacy]
++    capsys.readouterr()
++    api = script.api
++
++    def observe_reset(*args, **kwargs):
++        assert engine._boundary_wait["api_shape_checked"] is False
++        assert engine._boundary_wait["legacy_readiness"] is False
++        monkeypatch.setattr(dl, "_api", api)
++        return api(*args, **kwargs)
++
++    monkeypatch.setattr(dl, "_api", observe_reset)
++    if renew:
++        script.now = ctx["deadline"] + 1
++        engine._wait_for_boundary_readiness()
++        assert engine._boundary_wait is ctx
++    else:
++        engine.on_instance_boundary()
++        assert engine._boundary_wait is not ctx
++
++    assert engine._boundary_wait["legacy_readiness"] is True
++    assert capsys.readouterr().err.count("legacy counter-based readiness") == 1
++
++
++@pytest.mark.parametrize("count", [0.5, [], {}, None, "unknown"])
++def test_boundary_api_shape_fallback_does_not_truncate_invalid_queue_counts(
++    tmp_path, monkeypatch, count
++):
++    initial = _boundary_frame(campaign=_campaign(), pending_count=count)
++    completed = _campaign(cycles=1, outcome="no_op")
++    invalid = _boundary_frame(campaign=completed, pending_count=count)
++    idle = _boundary_frame(campaign=completed)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [invalid, idle], initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert 0 < result["elapsed"] < 1800
++    assert script.index == 1
++
++
++def test_boundary_sha_change_and_uptime_reset_break_quiet_confirmation(
++    tmp_path, monkeypatch
++):
++    campaign = _campaign(cycles=1, outcome="no_op")
++    engine, script = _scripted_boundary(
++        tmp_path,
++        monkeypatch,
++        [
++            _boundary_frame(campaign=campaign),
++            _boundary_frame(campaign=campaign, sha="b" * 40),
++            _boundary_frame(campaign=campaign, sha="b" * 40),
++            _boundary_frame(campaign=campaign, sha="b" * 40, uptime=1),
++            _boundary_frame(campaign=campaign, sha="b" * 40, uptime=2),
++            _boundary_frame(campaign=campaign, sha="b" * 40, uptime=3),
++        ],
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert script.now >= 40
++
++
++def test_boundary_repeated_promotion_uses_one_shared_deadline_and_logs_timeout(
++    tmp_path, monkeypatch, capsys
++):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    frames = [
++        _boundary_frame(
++            campaign=_campaign(cycles=n, absorbed=n, outcome="absorbed"),
++            enabled=True,
++            evolution_enabled=True,
++            running_count=1,
++            sha=f"{n:040x}",
++        )
++        for n in range(1, 240)
++    ]
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, frames)
++    script.api_cost = 0.25
++
++    result = engine.on_instance_boundary()
++    deadline = engine._boundary_wait["deadline"]
++    # Expiry still rereads host guards, but cannot grant another HTTP allowance.
++    marker = script.root / "pending_restart_verify.claimed.99.json"
++    marker.write_text("{}")
++    monkeypatch.setattr(
++        dl, "_api", lambda *a, **k: pytest.fail("API probe after boundary expiry")
++    )
++    again = engine._wait_for_boundary_readiness(renew_expired=False)
++
++    assert result["reason"] == again["reason"] == "timeout"
++    assert script.now == 1800
++    assert result["elapsed"] == 1800
++    assert deadline == engine._boundary_wait["deadline"] == 1800
++    assert script.publications == 1
++    assert script.sleeps[-1][1] < 8
++    assert script.reads[-1][1] < 8
++    assert result["blockers"]
++    assert f"restart marker: {marker.name}" in again["blockers"]
++    log = capsys.readouterr().err
++    assert "TIMEOUT" in log
++    assert "blockers" in log.lower()
++
++
++@pytest.mark.parametrize("recovers", [True, False])
++def test_boundary_expired_gate_starts_a_fresh_bounded_wait(
++    tmp_path, monkeypatch, capsys, recovers
++):
++    idle = _boundary_frame(campaign=_campaign())
++    busy = _boundary_frame(
++        campaign=_campaign(), markers=("pending_restart_verify.claimed.42.json",)
++    )
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [idle])
++    engine.on_instance_boundary()
++    old_deadline = engine._boundary_wait["deadline"]
++    script.now = old_deadline + 600  # a question can outlive its boundary window
++    script.apply(busy)
++    script.frames = [busy, idle] if recovers else [busy]
++    script.index = -1
++    started, probes = script.now, len(script.reads)
++
++    result = engine._wait_for_boundary_readiness()
++
++    assert 0 < script.now - started <= 1800
++    assert result["budget_elapsed"] == script.now - started
++    assert engine._boundary_wait["deadline"] == started + 1800
++    assert len(script.reads) > probes
++    assert script.publications == 1
++    assert result["reason"] == ("no_promotion" if recovers else "timeout")
++    if not recovers:
++        assert script.now == started + 1800
++        assert "TIMEOUT" in capsys.readouterr().err
++
++
++def test_boundary_publication_cannot_renew_an_exhausted_wait(tmp_path, monkeypatch):
++    from src.systems.ouroboros import _docker_launcher as dl
++
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [_boundary_frame()])
++
++    def publish(*args):
++        script.publications += 1
++        script.now = engine._boundary_wait["deadline"]
++        return True
++
++    monkeypatch.setattr(dl, "_write_forced_evolution_request", publish)
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "timeout"
++    assert result["budget_elapsed"] == 1800
++    assert engine._boundary_wait["deadline"] == 1800
++    assert script.publications == 1
++
++
++def test_control_boundary_resets_budget_without_reading_evolution(
++    tmp_path, monkeypatch
++):
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [_boundary_frame(api_error=True)]
++    )
++    resets = []
++    engine.evolution = False
++    engine._reset_per_task_budget = lambda *a, **k: resets.append(k)
++    monkeypatch.setattr(
++        engine, "_begin_boundary_wait", lambda: pytest.fail("control read a baseline")
++    )
++
++    assert engine.on_instance_boundary() == {}
++    assert resets == [{"confirm_isolated": True}]
++    assert script.now == 0 and script.publications == 0
++
++
++def test_boundary_each_gate_requires_fresh_quiet_samples(tmp_path, monkeypatch):
++    quiet = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [quiet, quiet])
++    engine.on_instance_boundary()
++    deadline = engine._boundary_wait["deadline"]
++    script.now += 300  # a connectivity hold cannot preserve old confirmation
++    started, reads = script.now, len(script.reads)
++
++    result = engine._wait_for_boundary_readiness()
++
++    assert len(script.reads) == reads + 2
++    assert script.now == started + 8
++    assert result["elapsed"] == 8
++    assert result["budget_elapsed"] == script.now
++    assert engine._boundary_wait["deadline"] == deadline
++
++
++@pytest.mark.parametrize("field", ["sha", "uptime"])
++def test_boundary_optional_comparison_telemetry_does_not_block_publication(
++    tmp_path, monkeypatch, field
++):
++    initial = _boundary_frame(campaign=_campaign())
++    quiet = _boundary_frame(campaign=_campaign(cycles=1, outcome="no_op"))
++    initial["api"].pop(field)
++    quiet["api"].pop(field)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet], initial=initial
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert script.now == 8 and script.publications == 1
++
++
++@pytest.mark.parametrize(
++    "evolution,trigger,expected",
++    [
++        (True, "forced", "off"),
++        (True, "native", "every_n:3"),
++        (False, "forced", None),
++        (False, "native", None),
++    ],
++)
++def test_boundary_cadence_only_disarms_autonomous_forced_treatment(
++    evolution, trigger, expected
++):
++    from src.systems.ouroboros._docker_launcher import DockerOuroborosEngine
++
++    engine = DockerOuroborosEngine.__new__(DockerOuroborosEngine)
++    engine.model = "anthropic/claude-sonnet-4.6"
++    engine.evolution = evolution
++    engine.evolution_trigger = trigger
++    engine.cadence = "every_n:3"
++    engine.resume = False
++    engine.steer = ""
++
++    overrides = engine._overrides()
++
++    assert overrides["OUROBOROS_POST_TASK_EVOLUTION"] == str(evolution).lower()
++    assert overrides.get("OUROBOROS_POST_TASK_EVOLUTION_CADENCE") == expected
++
++
++def test_boundary_archived_restart_obligation_does_not_block_later_round(
++    tmp_path, monkeypatch
++):
++    historical = _campaign(
++        cycles=1,
++        outcome="waiting_for_restart",
++        commit_sha="b" * 40,
++        restart_required=True,
++        restart_verified=False,
++    )
++    quiet = _boundary_frame(campaign=historical)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet], initial=quiet, trigger="native"
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "no_promotion"
++    assert result["cycle_outcome"] in ("", None)
++    assert script.now == 8
++    assert script.publications == 0
++
++
++def test_boundary_legacy_history_and_foreign_archives_preserve_current_progress(
++    tmp_path, monkeypatch
++):
++    campaign = _campaign(cycles=1, outcome="no_op")
++    campaign["history"].insert(0, {"task_id": "legacy", "status": "completed"})
++    campaign["transaction_history"].append(
++        {
++            "campaign_id": "old-campaign",
++            "transaction_id": "old-tx",
++            "task_id": "old-task",
++            "cycle_outcome": "absorbed",
++        }
++    )
++    quiet = _boundary_frame(campaign=campaign)
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [quiet, quiet])
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert result["cycle_outcome"] == "no_op"
++    assert result["cycles_done"] == 1
++    assert script.now == 8
++
++
++def test_boundary_bad_history_row_keeps_counters_and_readable_transactions(
++    tmp_path, monkeypatch
++):
++    campaign = _campaign(cycles=1, outcome="abandoned")
++    campaign["transaction_history"].append({"task_id": "broken"})
++    busy = _boundary_frame(campaign=campaign)
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [busy])
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "timeout"
++    assert result["cycle_outcome"] == "abandoned"
++    assert result["cycles_done"] == 1
++    assert any("transaction_history[1]" in blocker for blocker in result["blockers"])
++    assert script.publications == 1
++
++
++def test_boundary_repaired_baseline_transaction_is_not_new_progress(
++    tmp_path, monkeypatch
++):
++    campaign = _campaign(cycles=7, absorbed=5, outcome="absorbed")
++    repaired = _boundary_frame(campaign=copy.deepcopy(campaign))
++    campaign["history"][0]["transaction"].pop("transaction_id")
++    malformed = _boundary_frame(campaign=campaign)
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [malformed] * 5 + [repaired, repaired], initial=malformed
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "no_promotion"
++    assert result["cycle_outcome"] == ""
++    assert result["absorbed"] is False
++    assert result["cycles_done"] == 7 and result["cycles"] == 5
++    assert script.publications == 1
++    assert 0 < result["elapsed"] < 1800
++
++
++def test_boundary_verified_active_transaction_uses_engine_restart_predicate(
++    tmp_path, monkeypatch
++):
++    quiet = _boundary_frame(
++        campaign=_campaign(
++            cycles=1,
++            outcome="no_op",
++            active=True,
++            commit_sha="b" * 40,
++            restart_verified=True,
++        )
++    )
++    engine, script = _scripted_boundary(tmp_path, monkeypatch, [quiet, quiet])
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "cycle_done_unabsorbed"
++    assert script.now == 8
++
++
++def test_boundary_historical_active_outcome_is_not_new_progress(tmp_path, monkeypatch):
++    quiet = _boundary_frame(
++        campaign=_campaign(
++            cycles=1,
++            absorbed=1,
++            outcome="absorbed",
++            active=True,
++            commit_sha="b" * 40,
++            restart_verified=True,
++        )
++    )
++    engine, script = _scripted_boundary(
++        tmp_path, monkeypatch, [quiet, quiet], initial=quiet, trigger="native"
++    )
++
++    result = engine.on_instance_boundary()
++
++    assert result["reason"] == "no_promotion"
++    assert result["cycle_outcome"] == ""
++    assert script.now == 8
++
++
++def test_sandbox_lifetime_override():
++    """Importing our system must raise minisweagent's 2h sandbox lifetime: the bench never
++    overrides it and every >2h Ouroboros sales run lost its container mid-run."""
++    import importlib
++    importlib.import_module("src.systems.ouroboros.system")
++    from minisweagent.environments.docker import DockerEnvironmentConfig
++    assert DockerEnvironmentConfig(image="x").container_timeout == "24h"
++
++
++def _fake_observability(tmp_path, tid, outputs):
++    """outputs: list of (name, content, age_sec) — writes engine-shaped call/blob pairs."""
++    import gzip, json, os, time
++    calls = tmp_path / "observability" / "calls" / tid; calls.mkdir(parents=True)
++    blobs = tmp_path / "observability" / "blobs"; blobs.mkdir(parents=True, exist_ok=True)
++    for k, (name, content, age) in enumerate(outputs):
++        sha = f"{k:064x}"
++        with gzip.open(blobs / f"{sha}.json.gz", "wt") as fh:
++            json.dump({"message": {"content": content}, "usage": {}}, fh)
++        p = calls / name; p.write_text(json.dumps({"full_payload_ref": {"sha256": sha}}))
++        ts = time.time() - age; os.utime(p, (ts, ts))
++
++
++def test_official_parser_copy_matches_claude_adapter():
++    """Our answer locator must stay byte-identical to the Claude Code adapter's."""
++    import re
++    def func(src, name):
++        i = src.find(f"\ndef {name}(") + 1
++        m = re.search(r"\n(?=(def |class |@|[A-Za-z_]))", src[i + 1:])
++        end = i + 1 + m.start() if m else len(src)   # last construct in file: run to EOF
++        return src[i:end].rstrip()
++    claude = open("src/systems/claude/system.py").read()
++    ours = open("src/systems/ouroboros/action_parse.py").read()
++    for name in ("_json_candidates", "_parse_action_text"):
++        assert func(claude, name) == func(ours, name), f"{name} drifted from the claude adapter"
++
++
++def test_task_assistant_text_is_oldest_first_and_parser_prefers_latest_valid(tmp_path):
++    """2026-09-02: a complete schema-valid answer written as plain text (no marker) ended as
++    final_answer="" / result={"delivery_control":"keep"}. Assembling the task's assistant text
++    like the official adapters and applying their parser recovers it: the trailing control
++    envelope fails the schema and the parser walks back to the latest valid JSON."""
++    from pydantic import BaseModel
++    from src.systems.ouroboros import _live_bridge as lb
++    from src.systems.ouroboros.action_parse import _parse_action_text
++
++    class Schema(BaseModel):
++        predictions: list[dict]
++
++    good = '{"predictions": [{"locality": "SF", "furniture_name": "Chair", "year": 2032, "items_sold": 3}]}'
++    _fake_observability(tmp_path, "abc123", [
++        ("llm_a_response.json", "thinking about the data", 30),
++        ("llm_b_response.json", "analysis...\n" + good, 20),
++        ("llm_c_response.json", '{"delivery_control":"keep"}', 1),
++    ])
++
++    class _Eng: data_root = tmp_path
++    ctl = lb.LiveController.__new__(lb.LiveController); ctl.engine = _Eng()
++    text = ctl._task_assistant_text("abc123")
++    assert text.index("thinking") < text.index('"predictions"') < text.index("delivery_control")
++    combined = text + "\n" + '{"delivery_control":"keep"}'   # result text appended like the ladder does
++    out = _parse_action_text(combined, Schema)
++    assert out.predictions[0]["items_sold"] == 3
++
++    src = open("src/systems/ouroboros/_live_bridge.py").read()
++    body = src.split("def _final_answer_action", 1)[1]
++    # the official walk (most-recent candidate first, shared validator) runs before coercion/repair
++    assert "reversed(_json_candidates(combined))" in body
++    assert "validate_with_coercion(candidate, schema)" in body
++    assert body.index("reversed(_json_candidates(combined))") < body.index("self._coerce_final(raw, schema, tid, why)")
++
++
++def test_format_repair_locates_answer_with_the_official_parser(monkeypatch):
++    """The repair turn's answer is located exactly like the official adapters locate a
++    repaired answer (latest schema-valid JSON in the repair assistant text); also pins that
++    the repair path references the repair task id correctly (a NameError here killed a
++    probe in August)."""
++    from pydantic import BaseModel
++    from src.systems.ouroboros import _live_bridge as lb
++    from src.systems.ouroboros import run_clbench_bridge_agent as rb
++
++    class Schema(BaseModel):
++        predictions: list[dict]
++
++    class _Srv:
++        base_url = "http://127.0.0.1:1"
++        def wait_task(self, tid, timeout=30):
++            return {"status": "completed", "final_answer": "", "result": '{"delivery_control":"keep"}'}
++    class _Eng:
++        server = _Srv(); data_root = "/nonexistent"; mm = "tools"
++    class _Q:
++        prompt = "brief"; instance_index = 3
++        response_schema = Schema
++
++    ctl = lb.LiveController.__new__(lb.LiveController)
++    ctl.engine = _Eng(); ctl._task_id = "main1"; ctl.conversation = "question"; ctl.final_delivery = True
++    ctl.memory_mode = "tools"; ctl.discipline = ""; ctl.task_timeout_sec = 60
++    for attr in ("_last_delivered_blob", "_item_had_steps", "_resume_root"):
++        setattr(ctl, attr, None)
++    monkeypatch.setattr(rb, "_api", lambda *a, **k: {"task_id": "rep1"})
++    good = '{"predictions": [{"locality": "SF", "furniture_name": "Chair", "year": 2032, "items_sold": 7}]}'
++    monkeypatch.setattr(ctl, "_task_assistant_text", lambda tid: (good + '\n{"delivery_control":"keep"}') if tid == "rep1" else "")
++    out = ctl._format_repair_action(_Q(), Schema, "main1", "schema final text: ValidationError")
++    assert out is not None and out.predictions[0]["items_sold"] == 7
