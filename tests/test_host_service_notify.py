@@ -267,6 +267,36 @@ def test_a_refused_cancel_is_not_reported_as_a_cancellation(tmp_path: pathlib.Pa
     assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["enabled"] is True
 
 
+def test_a_cancel_that_landed_with_a_lost_outcome_audit_says_both(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """Only the outcome audit failed: the row is gone, so the answer is
+    ``cancelled: true`` with ``ok: false`` and the audit status — never a 503
+    that invites a retry into a 404."""
+    from supervisor import queue, schedule_lifecycle
+
+    queue.init(tmp_path)
+    client, _app = _notify_client(tmp_path)
+    headers = {"X-Skill-Token": "tok"}
+    body = {"text": "Meeting", "key": "cal:evt-12", "at": "2999-01-01T14:45:00+00:00"}
+    schedule_id = client.post("/notify", headers=headers, json=body).json()["id"]
+    monkeypatch.setattr(schedule_lifecycle, "_audit_schedule_mutation", lambda **kwargs: kwargs.get("phase") != "outcome")
+    answer = client.post("/notify", headers=headers, json={"key": "cal:evt-12", "cancel": True})
+    assert answer.status_code == 200
+    assert answer.json() == {"ok": False, "cancelled": True, "id": schedule_id, "status": "changed_audit_incomplete"}
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"] == []
+
+
+def test_a_scheduled_post_refused_for_an_unwritable_audit_is_503(tmp_path: pathlib.Path, monkeypatch) -> None:
+    from supervisor import queue, schedule_lifecycle
+
+    queue.init(tmp_path)
+    client, _app = _notify_client(tmp_path)
+    monkeypatch.setattr(schedule_lifecycle, "_audit_schedule_mutation", lambda **kwargs: False)
+    refused = client.post("/notify", headers={"X-Skill-Token": "tok"},
+                          json={"text": "Meeting", "key": "cal:evt-13", "at": "2999-01-01T14:45:00+00:00"})
+    assert refused.status_code == 503 and refused.json()["ok"] is False
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"] == []
+
+
 def test_the_agents_manage_schedules_is_the_owners_hand_on_a_skill_reminder(tmp_path: pathlib.Path) -> None:
     """Ouroboros switching a skill's reminder off at the owner's word (actor
     ``agent``, as manage_schedules calls it) leaves the same durable marker as

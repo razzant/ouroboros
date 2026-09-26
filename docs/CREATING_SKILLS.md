@@ -845,7 +845,9 @@ in `logs/events.jsonl`: that row is the live banner in a running web client
 from <skill>", the sentence shown only when the owner turned message text on),
 the `owner.notification` topic for transport skills (Telegram mirrors it to the
 pinned chat when its notices toggle is on), and nothing else — no chat row, no
-model turn, no history the mind can read. `text` is at most 1000 characters,
+model turn, no history the mind can read (a deferred reminder's sentence does
+sit in the schedule table, where Ouroboros can list and cancel it at the owner's
+word). `text` is at most 1000 characters,
 plain; `key` (at most 128) is your own identity for the notice, so a repeat
 after a lost acknowledgement rings once. `403` is a missing grant, `429` the
 60-per-minute lane, `503` a failed durable write or a schedule audit the host
@@ -853,7 +855,9 @@ could not record (retry the same request), `409` a keyed row that belongs to
 another skill.
 
 A deferred reminder is the same request with a time: `"at": "<ISO 8601
-instant>"` (once) or `"cron": "<5-field>"` plus optional `"timezone"`. The host
+instant>"` (once) or `"cron": "<5-field>"` plus optional `"timezone"`, answered
+`200 {ok, scheduled: true, id, next_run_at}` (`ok: false` there means the row is
+stored but its audit outcome could not be recorded — no retry needed). The host
 stores a `kind: "notify"` row in the one schedule table (visible under Activity
 → Scheduled, where the owner can disable or delete it) and the supervisor tick
 fires it at its instant without a model — a reminder whose instant passed while
@@ -867,7 +871,8 @@ owner who disabled or deleted one of your rows — on the Activity page, or by
 asking Ouroboros — keeps it off: the same key posted again answers `{"scheduled": false, "status":
 "suppressed"}` and your cancel `{"cancelled": false, "status": "suppressed"}`
 until the owner restores the row — or deletes the retained record a second
-time, which removes it and frees the key. Every scheduled post rewrites the
+time, which removes it and frees the key. A reminder that already fired is a
+receipt: your cancel or the owner's Delete removes it at once. Every scheduled post rewrites the
 one schedule table under its lock, so keep the armed set small — the next
 occurrences, keyed, not a year of one-shots.
 

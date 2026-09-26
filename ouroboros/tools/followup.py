@@ -218,7 +218,7 @@ def get_tools() -> List[ToolEntry]:
                 "A kind='notify' row is a skill's model-free reminder (its sentence is the preview): "
                 "disable or delete (yours at the owner's word, or the owner's from Activity) keeps it "
                 "suppressed so the skill cannot re-arm that key, and a second delete of the suppressed "
-                "record removes it. "
+                "record removes it; a reminder that already fired is removed at once. "
                 "Only your own root turn may change a schedule; a delegated task may only list. "
                 "list accepts offset and limit (bounded pages) and returns total/next_offset; "
                 "each row contains only a bounded objective preview, never full context."

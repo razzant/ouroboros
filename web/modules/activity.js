@@ -35,6 +35,26 @@ function isSkillManaged(s) {
     return Boolean(s && (String(s.source || '') === 'skill_manifest' || String(s.skill || '')));
 }
 
+// The Delete dialog for a schedule row, decided from what its button says the
+// row is: a skill-declared schedule and an armed reminder are SUPPRESSED (the
+// manifest resync or the skill's re-post would recreate a removed row); a
+// suppressed reminder's retained record, a reminder that already fired (a
+// receipt) and any other row are removed.
+export function scheduleDeleteDialog(dataset) {
+    const managedRow = dataset.managed === '1';
+    const reminderRow = dataset.notify === '1' && dataset.suppressed !== '1' && dataset.consumed !== '1';
+    return {
+        title: managedRow ? 'Suppress skill schedule' : reminderRow ? 'Suppress reminder' : 'Delete schedule',
+        body: managedRow
+            ? 'This schedule is declared by an installed skill and cannot be removed; Delete keeps it suppressed until you Restore it. Suppress it?'
+            : reminderRow
+                ? 'This reminder is re-posted by its skill under the same key; Delete keeps it suppressed until you Restore it, and deleting the retained record again removes it. Suppress it?'
+                : 'Delete this schedule?',
+        confirmLabel: managedRow || reminderRow ? 'Suppress' : 'Delete',
+        danger: true,
+    };
+}
+
 export function initActivity({ mount, ws } = {}) {
     if (!mount) return { refresh: () => {} };
     let busy = false;
@@ -404,24 +424,9 @@ export function initActivity({ mount, ws } = {}) {
         btn.disabled = true;
         try {
             if (act === 'schedule-delete') {
-                // A skill-declared schedule cannot be removed: the skill's manifest
-                // would recreate it. Delete SUPPRESSES it durably, and the dialog
-                // says so before anything is sent. A skill's reminder is re-posted
-                // under its key the same way, so its first Delete suppresses too;
-                // deleting the retained record again really removes it. A reminder
-                // that already fired is a receipt: Delete removes it at once.
-                const managedRow = btn.dataset.managed === '1';
-                const reminderRow = btn.dataset.notify === '1' && btn.dataset.suppressed !== '1' && btn.dataset.consumed !== '1';
-                const confirmedDelete = await openConfirmDialog({
-                    title: managedRow ? 'Suppress skill schedule' : reminderRow ? 'Suppress reminder' : 'Delete schedule',
-                    body: managedRow
-                        ? 'This schedule is declared by an installed skill and cannot be removed; Delete keeps it suppressed until you Restore it. Suppress it?'
-                        : reminderRow
-                            ? 'This reminder is re-posted by its skill under the same key; Delete keeps it suppressed until you Restore it, and deleting the retained record again removes it. Suppress it?'
-                            : 'Delete this schedule?',
-                    confirmLabel: managedRow || reminderRow ? 'Suppress' : 'Delete',
-                    danger: true,
-                });
+                // The dialog says what Delete will do to THIS row before anything
+                // is sent (scheduleDeleteDialog decides it from the button's data).
+                const confirmedDelete = await openConfirmDialog(scheduleDeleteDialog(btn.dataset));
                 if (!confirmedDelete) return;
                 await scheduleAction(id, 'delete', 'owner deleted the schedule from Activity');
             } else if (act === 'schedule-toggle') {

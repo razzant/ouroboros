@@ -11,6 +11,8 @@ re-fired).
 
 from __future__ import annotations
 
+import pytest
+
 import datetime
 import pathlib
 
@@ -810,18 +812,35 @@ def test_notify_cron_row_fires_and_advances_like_a_task_row(tmp_path):
     assert record["next_run_at"] > "2000-01-02"
 
 
-def test_a_fired_reminder_is_removed_outright_by_either_hand(tmp_path):
-    """A consumed one-shot reminder is a receipt: the owner's Delete (or the
-    skill's) removes it at once instead of retaining a suppressed record that
-    Activity would still show as consumed with no Restore."""
+@pytest.mark.parametrize("actor", ["owner:gateway", "task_followup"], ids=["owner", "its-own-source"])
+def test_a_fired_reminder_is_removed_outright_by_either_hand(tmp_path, actor):
+    """A consumed one-shot reminder is a receipt: the owner's Delete or the
+    producer's own cancel removes it at once instead of retaining a suppressed
+    record that Activity would still show as consumed with no Restore."""
     queue, _pending = _queue(tmp_path)
     queue.upsert_scheduled_task(_notify_row("n-fired", key="fired"))
     queue.check_scheduled_tasks()
     assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["completed_at"]
-    outcome = queue.mutate_scheduled_task("delete", "n-fired", reason="owner cleared history",
-                                          actor="owner:gateway", drive_root=tmp_path)
+    outcome = queue.mutate_scheduled_task("delete", "n-fired", reason="cleared the receipt",
+                                          actor=actor, drive_root=tmp_path)
     assert outcome["ok"] and outcome["status"] == "deleted"
     assert queue.list_scheduled_tasks(tmp_path)["tasks"] == []
+
+
+def test_a_fired_reminder_the_owner_switched_off_keeps_its_marker_against_the_skill(tmp_path):
+    """The receipt shortcut never undoes the owner: a fired reminder the owner
+    disabled (through manage_schedules or the action API) stays for the owner's
+    own delete; the skill's cancel is answered as the suppression it is."""
+    queue, _pending = _queue(tmp_path)
+    queue.upsert_scheduled_task(_notify_row("n-fired-off", key="fired-off"))
+    queue.check_scheduled_tasks()
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["completed_at"]
+    queue.mutate_scheduled_task("disable", "n-fired-off", reason="owner: off", actor="owner:gateway", drive_root=tmp_path)
+    skill = queue.mutate_scheduled_task("delete", "n-fired-off", reason="skill cancel", actor="task_followup", drive_root=tmp_path)
+    assert skill["status"] == "suppressed" and not skill["changed"]
+    assert len(queue.list_scheduled_tasks(tmp_path)["tasks"]) == 1
+    owner = queue.mutate_scheduled_task("delete", "n-fired-off", reason="owner: clear", actor="owner:gateway", drive_root=tmp_path)
+    assert owner["status"] == "deleted" and queue.list_scheduled_tasks(tmp_path)["tasks"] == []
 
 
 def test_notify_cron_row_that_cannot_advance_never_rings(tmp_path):

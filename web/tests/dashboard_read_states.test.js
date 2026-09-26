@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { initActivity } from '../modules/activity.js';
+import { initActivity, scheduleDeleteDialog } from '../modules/activity.js';
 import { initLogs } from '../modules/logs.js';
 import { initCosts } from '../modules/costs.js';
 import { initDashboard } from '../modules/dashboard.js';
@@ -730,4 +730,12 @@ test('Activity shows a notify row by its sentence with the notification tag and 
     const firedDelete = retained[1].querySelector('[data-act="schedule-delete"]');
     assert.match(retained[1].textContent, /Fired already[\s\S]*consumed once/);
     assert.equal(firedDelete.dataset.consumed, '1');
+    // And the dialog each button opens says what the server will do.
+    assert.equal(scheduleDeleteDialog(armedDelete.dataset).title, 'Suppress reminder');
+    assert.equal(scheduleDeleteDialog(armedDelete.dataset).confirmLabel, 'Suppress');
+    assert.equal(scheduleDeleteDialog(retained[0].querySelector('[data-act="schedule-delete"]').dataset).title, 'Delete schedule');
+    assert.equal(scheduleDeleteDialog(firedDelete.dataset).title, 'Delete schedule');
+    assert.equal(scheduleDeleteDialog(firedDelete.dataset).body, 'Delete this schedule?');
+    assert.equal(scheduleDeleteDialog({ managed: '1' }).title, 'Suppress skill schedule');
+    assert.equal(scheduleDeleteDialog({}).title, 'Delete schedule');
 });

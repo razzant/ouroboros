@@ -230,6 +230,8 @@ def publish_owner_notification(row: Dict[str, Any]) -> None:
 
 
 __all__ = [
+    "OWNER_NOTIFICATION_KEY_CHARS",
+    "owner_notification_chat_id",
     "CHAT_DOCUMENT",
     "CHAT_LINKS",
     "CHAT_OUTBOUND",

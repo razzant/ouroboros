@@ -765,13 +765,17 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
                     reason="notification cancelled by its skill")
         except ScheduleStoreUnreadable as exc:
             return _json_error(str(exc), 503)
-        if not outcome.get("ok"):
+        if not outcome.get("ok") and not outcome.get("changed"):
             # The lifecycle refused (its audit could not be written): nothing
             # changed, and the skill must not read that as a cancellation.
             return _json_error(str(outcome.get("detail") or outcome.get("status") or "cancel refused"), 503)
         if outcome.get("status") == "suppressed" and not outcome.get("changed"):
             # The owner's off switch outlives the skill's cancel (see lifecycle).
             return JSONResponse({"ok": True, "cancelled": False, "id": schedule_id, "status": "suppressed"})
+        if not outcome.get("ok"):
+            # Removed, but the outcome audit was lost: both facts, no retry.
+            return JSONResponse({"ok": False, "cancelled": True, "id": schedule_id,
+                                 "status": str(outcome.get("status") or "changed_audit_incomplete")})
         return JSONResponse({"ok": True, "cancelled": bool(outcome.get("changed")), "id": schedule_id})
     if (at_raw is None) == (cron_raw is None):
         return _json_error("supply exactly one of at (ISO 8601 instant) or cron (5-field expression)", 400)

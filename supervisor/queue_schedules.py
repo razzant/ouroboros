@@ -757,16 +757,16 @@ def _fire_owner_notification(record: Dict[str, Any],
     """
     import hashlib
 
-    from ouroboros.event_bus import emit_owner_notification
+    from ouroboros.event_bus import OWNER_NOTIFICATION_KEY_CHARS, emit_owner_notification
 
     notification = record.get("notification") if isinstance(record.get("notification"), dict) else {}
     source = str(record.get("source") or "")
     # UTC, so the occurrence key does not depend on the host's zone setting.
     due_iso = scheduled_for.astimezone(datetime.timezone.utc).isoformat()
     producer_key = str(notification.get("key") or "") or str(record.get("id") or "")
-    if len(producer_key) + 1 + len(due_iso) > 128:
-        # The producer may use the whole 128-character key; the occurrence key
-        # must still fit the same cap, so a long key rides as its digest.
+    if len(producer_key) + 1 + len(due_iso) > OWNER_NOTIFICATION_KEY_CHARS:
+        # The producer may use the whole key; the occurrence key must still
+        # fit the same cap, so a long key rides as its digest.
         producer_key = hashlib.sha256(producer_key.encode("utf-8")).hexdigest()[:32]
     try:
         row = emit_owner_notification(

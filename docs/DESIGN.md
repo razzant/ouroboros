@@ -1104,8 +1104,9 @@ to interrupt you. Judge it by use and turn it off if it is too chatty.
 *Skill-first* is a sentence somebody else finished: a reviewed skill with the
 `notify_owner` grant (a calendar's "meeting in 15 minutes"), or a reminder the
 scheduler fires at its instant without a model turn. The host delivers it as
-one event and never judges it; it is not a chat row, so nothing about it enters
-the transcript or the mind's context, and the banner names its source
+one event and never judges it; it is not a chat row, so nothing about the
+delivered notice enters the transcript or the mind's context (a deferred
+reminder's sentence is a schedule row Ouroboros can list and cancel), and the banner names its source
 ("Reminder from calendar") while the sentence itself stays behind the text
 toggle. Having no source in the transcript, a click opens the conversation.
 While no client is running the same event still reaches the owner through the
