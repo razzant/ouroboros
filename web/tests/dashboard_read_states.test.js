@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { initActivity } from '../modules/activity.js';
+import { initActivity, scheduleDeleteDialog } from '../modules/activity.js';
 import { initLogs } from '../modules/logs.js';
 import { initCosts } from '../modules/costs.js';
 import { initDashboard } from '../modules/dashboard.js';
@@ -689,4 +689,53 @@ test('Activity offers no Enable on a skill row held back by readiness alone', as
     assert.match(row.textContent, /disabled by skill readiness/);
     // Delete stays (it suppresses) and is marked as a skill row for the dialog.
     assert.equal(row.querySelector('[data-act="schedule-delete"]').dataset.managed, '1');
+});
+
+test('Activity shows a notify row by its sentence with the notification tag and the owner controls', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    routes.set(schedulesUrl, response({ tasks: [
+        { id: 'notify-cal-evt-1-abc', name: 'Reminder from cal', kind: 'notify', source: 'skill:cal', enabled: true, status: 'active',
+          trigger: { type: 'once', run_at: '2999-01-01T09:00:00+00:00' }, notification: { text: 'Dentist at 9', key: 'evt-1' } },
+        { id: 'notify-cal-evt-2-def', name: 'Reminder from cal', kind: 'notify', source: 'skill:cal', enabled: false,
+          manual_override: 'disabled', status: 'suppressed', retained: true, restorable: true, trigger: { type: 'once', run_at: '2999-01-02T09:00:00+00:00' },
+          notification: { text: 'Standup', key: 'evt-2' } },
+        { id: 'notify-cal-evt-3-ghi', name: 'Reminder from cal', kind: 'notify', source: 'skill:cal', enabled: false,
+          completed_at: '2026-09-25T09:00:05+00:00', status: 'consumed', retained: true, trigger: { type: 'once', run_at: '2026-09-25T09:00:00+00:00' },
+          notification: { text: 'Fired already', key: 'evt-3' } },
+    ] }));
+    await initActivity({ mount, ws }).refresh();
+    const schedules = section(mount, 'schedules');
+    const history = schedules.querySelector('[data-activity-history]');
+    const standing = [...schedules.querySelectorAll('.activity-row')].filter((row) => !history.contains(row));
+    assert.equal(standing.length, 1);
+    // The sentence is the title; the row says it is a notification and names its skill,
+    // never a skill-managed marker (no readiness caveat), and offers Disable.
+    assert.match(standing[0].textContent, /Dentist at 9[\s\S]*notification · one-shot[\s\S]*· cal/);
+    assert.doesNotMatch(standing[0].textContent, /Reminder from cal|readiness/);
+    assert.equal(standing[0].querySelector('button').textContent, 'Disable');
+    // The owner's disabled reminder is a suppressed record with Restore, like a skill row.
+    const retained = history.querySelectorAll('.activity-row');
+    assert.equal(retained.length, 2);
+    assert.match(retained[0].textContent, /Standup[\s\S]*suppressed/);
+    assert.equal(retained[0].querySelector('button').textContent, 'Restore');
+    // Delete carries what the dialog needs to tell the truth: the first Delete of
+    // an armed reminder suppresses it, deleting the retained record removes it,
+    // and a reminder that already fired is a receipt Delete removes at once.
+    const armedDelete = standing[0].querySelector('[data-act="schedule-delete"]');
+    assert.equal(armedDelete.dataset.notify, '1');
+    assert.equal(armedDelete.dataset.suppressed, '');
+    assert.equal(armedDelete.dataset.consumed, '');
+    assert.equal(retained[0].querySelector('[data-act="schedule-delete"]').dataset.suppressed, '1');
+    const firedDelete = retained[1].querySelector('[data-act="schedule-delete"]');
+    assert.match(retained[1].textContent, /Fired already[\s\S]*consumed once/);
+    assert.equal(firedDelete.dataset.consumed, '1');
+    // And the dialog each button opens says what the server will do.
+    assert.equal(scheduleDeleteDialog(armedDelete.dataset).title, 'Suppress reminder');
+    assert.equal(scheduleDeleteDialog(armedDelete.dataset).confirmLabel, 'Suppress');
+    assert.equal(scheduleDeleteDialog(retained[0].querySelector('[data-act="schedule-delete"]').dataset).title, 'Delete schedule');
+    assert.equal(scheduleDeleteDialog(firedDelete.dataset).title, 'Delete schedule');
+    assert.equal(scheduleDeleteDialog(firedDelete.dataset).body, 'Delete this schedule?');
+    assert.equal(scheduleDeleteDialog({ managed: '1' }).title, 'Suppress skill schedule');
+    assert.equal(scheduleDeleteDialog({}).title, 'Delete schedule');
 });

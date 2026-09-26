@@ -1100,13 +1100,14 @@ reason the subscription belongs to the client rather than to a room. That is
 deliberate for the first version: we measure how it feels before adding clever
 exceptions.
 
-**Two authorities, one surface.** Every category is one of two kinds:
+**Three authorities, one surface.** Every category is one of three kinds:
 
 | Category | Kind | What decides |
 |---|---|---|
 | A question or decision is waiting | required | a confirmed lifecycle fact: the question carries a positive wait |
 | A task finished or stopped | required | a positive typed terminal fact on a ROOT task |
 | Messages Ouroboros sends while working | LLM-first | Ouroboros chose to speak outside the turn's answer (a proactive message, or an optional question) |
+| Reminders and notices from skills and Ouroboros | skill-first | a reviewed skill, or a model-free schedule, handed the host one finished sentence for the owner (an `owner_notification` event) |
 | Ordinary replies in Main | separate toggle | an ordinary finished reply in the Main thread |
 
 *Required* means the application asks for delivery from its own state rather
@@ -1121,6 +1122,18 @@ mind's; the client only carries it. Stated precisely because the tool contract
 asks for such a message at the START of long work as well: this category means
 "Ouroboros said something while working", not a claim that it weighed whether
 to interrupt you. Judge it by use and turn it off if it is too chatty.
+
+*Skill-first* is a sentence somebody else finished: a reviewed skill with the
+`notify_owner` grant (a calendar's "meeting in 15 minutes"), or a reminder the
+scheduler fires at its instant without a model turn. The host delivers it as
+one event and never judges it; it is not a chat row, so nothing about the
+delivered notice enters the transcript or the mind's context (a deferred
+reminder's sentence is a schedule row Ouroboros can list and cancel), and the banner names its source
+("Reminder from calendar") while the sentence itself stays behind the text
+toggle. Having no source in the transcript, a click opens the conversation.
+While no client is running the same event still reaches the owner through the
+Telegram skill's own subscription (its off-by-default "notices" toggle) — the
+separate path above, not an escalation by this client.
 
 **What never notifies.** Progress, a transient failure, one tool's error and a
 reviewer's finding are not notifications; they stay in the transcript. A child

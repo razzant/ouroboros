@@ -232,3 +232,17 @@ test('attach without a socket is a no-op disposer, never a throw', () => {
     assert.equal(typeof release, 'function');
     release();
 });
+
+test('an owner notification rings from the log lane for the owner chat, never the hidden partition', () => {
+    const { notifier, handlers, built } = fixture();
+    const release = notifier.attach({ ws: { on: (event, fn) => { handlers.set(event, fn); return () => {}; } } });
+    const row = { type: 'owner_notification', text: 'Meeting in 15 min', source: 'skill:calendar', key: 'k1', ts: '2026-09-25T14:30:00+00:00' };
+    handlers.get('log')({ type: 'log', data: { ...row, chat_id: 0 }, chat_id: 0 });
+    assert.equal(built.length, 0, 'chat 0 is machine traffic');
+    handlers.get('log')({ type: 'log', data: { ...row, chat_id: 1 }, chat_id: 1 });
+    assert.equal(built.length, 1);
+    assert.equal(built[0].title, 'Reminder from calendar');
+    handlers.get('log')({ type: 'log', data: { ...row, chat_id: 1 }, chat_id: 1 });
+    assert.equal(built.length, 1, 'the same producer key rings once');
+    release();
+});

@@ -131,7 +131,7 @@ subscribe_events: [{", ".join(topics)}]
         requested_keys=[],
         granted_permissions=list(permissions or []),
         requested_permissions=[
-            *(permission for permission in ("inject_chat", "presence") if permission in manifest_perms),
+            *(permission for permission in ("inject_chat", "presence", "notify_owner") if permission in manifest_perms),
             *(
                 f"subscribe_event:{topic}"
                 for topic in topics

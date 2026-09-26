@@ -109,7 +109,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── dialogue_provenance.py ← Shared exact transport-provenance rendering for history, memory, and consolidation
       ├── extension_companion.py ← Host-supervised companion processes for transport skills (§12)
       ├── extension_reconcile_queue.py ← Durable worker→server extension reconcile markers + server pickup loop
-      ├── event_bus.py         ← Typed in-process event bus for skill subscriptions
+      ├── event_bus.py         ← Typed in-process event bus for skill subscriptions; emits the owner-notification fact (`owner_notification` events row, `owner.notification` topic) and owns the owner-chat rule
       ├── evolution_checkpoints.py ← Append-only campaign/eval checkpoint ledger for evolution progress
       ├── evolution_fingerprint.py ← Canonical fingerprint for evolution-campaign objectives; SSOT for repeat gating
       ├── improvement_backlog.py ← Durable advisory improvement backlog: recurrence-counted dedup (never drop), priority+recurrence+recency ranking, `close_backlog_items`, size-triggered `groom_backlog`; parser-safe locked writer
@@ -404,6 +404,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── claudexor_accounts.py ← Agent accounts HTTP surface: six thin proxies (by handler) over the owned daemon, with zero auth logic or vendor recipes and no browser exposure of its token. GET /api/claudexor/status[?include=models] stamps facet read states; `unified_accounts` follows the engine catalog's `get:account-pools` capability (unreadable catalog retains legacy rendering). POST /api/claudexor/wake and /api/claudexor/login, login-job actions, and /api/claudexor/credential-profiles preserve the opaque `{job, cursor, sequence, deviceCode?}` envelope. Complete routes: §4; Connect/install/retry/custody: §3 Agent accounts
       │   ├── claudexor_quota.py ← Explicit owner quota refresh: POST /api/claudexor/quota/refresh discovers the already-owned daemon, handshakes (60 s control-plane read bound) and delegates exactly once to the engine's quota POST (90 s foreground bound); no lifecycle start, retry, policy or daemon token crosses this boundary; GET /api/claudexor/status stays passive
       │   ├── host_service.py  ← Loopback-only Host Service API (§12)
+      │   ├── host_notify.py   ← POST /notify beside the Host Service: one owner notification, immediate or a kind:"notify" schedule row (§12)
       │   ├── history.py       ← Shared Chat room/quiz/media/review/terminal projection + cost breakdown factories
       │   ├── history_contracts.py ← Descriptive paged Chat history response, re-exported by contracts.py
       │   ├── schedule_contracts.py ← Typed schedule list/upsert/lifecycle-action responses, re-exported by contracts.py
@@ -640,7 +641,7 @@ Bundled resources use the CLI / Headless Boundary lookup order rather than assum
 │   │   ├── evolution_checkpoints.jsonl ← append-only per-cycle checkpoints
 │   │   ├── post_task_evolution_request.json ← worker-written one-shot promotion signal; consumed + deleted by the supervisor idle tick; dropped while evolution_owner_stopped
 │   │   ├── post_task_evolution_counter.json ← per-drive every_n counter
-│   │   ├── scheduled_tasks.json   ← cron (5-field + tz) and one-shot {type:"once", run_at} schedules; consumed one-shot receipts age out past the unified GC retention
+│   │   ├── scheduled_tasks.json   ← cron (5-field + tz) and one-shot {type:"once", run_at} schedules, each a task row or a `kind:"notify"` owner-notification row; consumed one-shot receipts age out past the unified GC retention
 │   │   ├── claudexor_rotation_provisioning.json ← receipt of the last rotation-reconcile settings POST
 │   │   ├── subagent_last_delegation.json ← bounded dated helper observations owned by subagent_history.py, with the compatible latest receipt; never live health or dispatch authority
 │   │   ├── update_letter.json     ← the last update letter (key = base/target/channel/ref, state, text, `last_good`); kept after apply and projected against the live HEAD (update_letter.py)

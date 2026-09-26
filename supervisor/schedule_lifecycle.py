@@ -148,6 +148,9 @@ def _merge_onto_current(existing: Dict[str, Any], incoming: Dict[str, Any]) -> D
                 "the skill resync cannot undo it")
         if _is_suppressed(merged):
             merged["enabled"] = False
+    elif _is_suppressed(merged):
+        # A suppressed notify row stays off whatever its skill re-posts.
+        merged["enabled"] = False
     return merged
 
 
@@ -249,17 +252,46 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                         "detail": "the schedule audit log could not be written; nothing was changed"}
             running = _store._schedule_running_or_queued(wanted, root)
             skill_row = str(current.get("source") or "") == "skill_manifest"
-            detail, removed = "", False
+            # A skill's notify row is re-posted by its key, so the owner's off
+            # switch needs the same durable marker a skill-manifest row keeps.
+            # The owner acts from Activity (`owner:gateway`) or through
+            # Ouroboros's manage_schedules at their word (`agent`) — both are
+            # the owner's hand here, as for a skill-manifest row; only the row's
+            # own source is the skill, and its cancel of its own row really
+            # removes it — nothing of the owner's is being overridden there.
+            notify_row = str(current.get("kind") or "") == _store.SCHEDULE_KIND_NOTIFY
+            owner_over_notify = notify_row and str(actor or "") != str(current.get("source") or "")
+            detail, removed, kept = "", False, False
             if operation == "disable":
                 current["enabled"] = False
-                if skill_row:
+                if skill_row or owner_over_notify:
                     current["manual_override"] = "disabled"
                 status = "updated"
             elif operation == "delete":
-                if skill_row:
+                if notify_row and _is_consumed_once(current) and (owner_over_notify or not _is_suppressed(current)):
+                    # A fired reminder is a receipt, not a standing row: removing
+                    # it re-arms nothing of the owner's, so either hand removes it
+                    # outright, as a consumed task one-shot goes — unless the owner
+                    # switched even the receipt off, which the skill may not undo.
+                    tasks = [item for item in tasks if str(item.get("id") or "") != wanted]
+                    status, removed = "deleted", True
+                elif owner_over_notify and _is_suppressed(current):
+                    # The owner already switched this reminder off and now removes
+                    # the record itself: an explicit second act, so the row goes
+                    # (a later post of the same key starts a fresh row).
+                    tasks = [item for item in tasks if str(item.get("id") or "") != wanted]
+                    status, removed = "deleted", True
+                elif notify_row and not owner_over_notify and _is_suppressed(current):
+                    # The skill cancelling a row the OWNER switched off: the marker
+                    # is the owner's, so the record stays untouched — otherwise
+                    # cancel plus a repeat of the same key would lift the owner's
+                    # decision. Reported as the suppression it is, and unchanged.
+                    status, kept = "suppressed", True
+                elif skill_row or owner_over_notify:
                     # Retained as a suppressed record: dropping the row would only
-                    # have it recreated by the next lifecycle resync, and the owner
-                    # would never see that their delete did not hold.
+                    # have it recreated by the next lifecycle resync (or the skill's
+                    # next post of the same key), and the owner would never see
+                    # that their delete did not hold.
                     current["enabled"] = False
                     current["manual_override"] = "deleted"
                     status = "suppressed"
@@ -269,6 +301,12 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             elif _is_consumed_once(current):
                 status = "consumed_not_rearmed"
                 detail = "a one-shot that already fired is history; schedule a new run_at instead"
+            elif notify_row:
+                # Nothing to probe: a reminder has no skill readiness, so restore
+                # is the owner lifting their own marker and re-arming the row.
+                current.pop("manual_override", None)
+                current["enabled"] = True
+                status = "updated"
             elif skill_row:
                 # Probed UNDER the transaction: readiness is skill state on disk,
                 # not a row field, so a probe taken before the lock could be
@@ -303,7 +341,7 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             else:
                 current["enabled"] = True
                 status = "updated"
-            changed = status not in UNCHANGED_STATUSES
+            changed = status not in UNCHANGED_STATUSES and not kept
             if changed:
                 if not removed:
                     current["updated_at"] = utc_now_iso()

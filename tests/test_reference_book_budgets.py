@@ -35,7 +35,11 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 7 bytes on the official line); re-based here, no text of this chapter was touched.
     # 165550 -> 165900 (PR #1300): the net_transport row and the data-layout row for the merged
     # extra-CA bundle; the base sat 174 bytes under the previous budget.
-    "docs/architecture/01-high-level-architecture.md": 165900,
+    # 165900 -> 166100 (owner notifications merged onto #1300's tree, measured 165977): the
+    # scheduled_tasks.json tree line names the table's second row kind (`kind:"notify"`) and
+    # the event_bus.py row names the owner-notification fact and the owner-chat rule it owns.
+    # 166100 -> 166300: the host_notify.py tree row (the /notify family beside the Host Service).
+    "docs/architecture/01-high-level-architecture.md": 166300,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -73,7 +77,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # vocabulary (#931/#1061); the touched descriptions were REPLACED and
     # compressed (net chapter growth is under the added owner's paragraph size),
     # and the merged #1236 base already sat 5 bytes under the previous budget.
-    "docs/architecture/03-web-ui-pages-and-buttons.md": 107000,
+    # 107000 -> 107300: the owner-notification log frame joins the notification
+    # sources sentence (one clause); the base sat 119 bytes under the budget.
+    "docs/architecture/03-web-ui-pages-and-buttons.md": 107300,
     "docs/architecture/04-server-api-endpoints.md": 26833,
     # 27137 -> 30400: the schedule table gains a documented write contract the
     # chapter had no text for — one transaction owning the lock ORDER, the strict
@@ -110,7 +116,13 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # typed timeout-cause sentence join TZ-1's bridge-intake paragraph; TZ-2 had compressed the
     # owner-wait and heartbeat paragraphs it touched in place (+103 bytes alone), TZ-1's
     # paragraph is new, so the union displaces nothing.
-    "docs/architecture/05-supervisor-loop.md": 33700,
+    # 33700 -> 35400 (owner notifications merged onto the TZ-1/TZ-2 tree, measured 35243): the
+    # schedule table's second dispatch verb (`kind: "notify"`: a model-free owner notification,
+    # its receipt, lock discipline, silence of a disabled skill, per-occurrence frame key) and
+    # the owner's durable disable/delete of such a row (both of the owner's hands, what the
+    # skill's repeat and cancel get, the second delete, the fired-receipt exception) are one
+    # paragraph the chapter had no text for; the TZ paragraphs it joins displace nothing.
+    "docs/architecture/05-supervisor-loop.md": 35400,
     # 286850 -> 287600: "an answer that has not arrived is a gap" is a new invariant of
     # plan review and task acceptance (the slot census vocabulary, the `awaiting`
     # projection, the only-awaited task outcome); the in-flight sentence it grew from is
@@ -243,7 +255,8 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # room comparison protected nothing; the earlier one-clause form is replaced, and
     # the base sat 34 bytes under the previous budget.
     "docs/architecture/10-key-invariants.md": 21700,
-    "docs/architecture/11-frozen-contracts-v1.md": 24194,
+    # 24194 -> 24300: the host-mediated permission list names `notify_owner` (measured 24193).
+    "docs/architecture/11-frozen-contracts-v1.md": 24300,
     # +400 (#1213): Presence turns are named as actors without cross-focus catalogue or focus authority.
     # 11400 -> 12500: presence PR0 adds rules the chapter lacked, one sentence each (unified
     # conversation key, placeholder re-run and its lost-attempt facts, presence-local liveness,
@@ -267,14 +280,20 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # carried separately from prior speech in the same previous-turn pointer.
     # 14100/14800 -> 17500: TZ2 binding authority and TZ3 Host retry custody
     # coexist in one current Host/Presence map; neither overwrites the other.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 17500,
+    # 17500 -> 18300 (owner notifications merged onto the TZ2/TZ3 tree, measured 18147): `POST
+    # /notify` joins the frozen route family with its contract (grant, the events-row fact,
+    # deferred `kind: "notify"` rows keyed by the skill, the suppressed-cancel exception).
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 18300,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.
     # Dispatcher producer/annotation separation and its retained-source lifetime.
     "docs/architecture/13-external-skills-layer.md": 9500,
     "docs/development/01-role-and-authority.md": 2437,
-    "docs/development/02-naming-and-boundaries.md": 36372,
+    # 36372 -> 36600 (owner notifications merged onto the current tree, measured 36512): the
+    # chat-id paragraph names its one addressed exception, event_bus.owner_notification_chat_id
+    # (a banner sent to chat 0 reaches nobody), beside the two normalizers it keeps.
+    "docs/development/02-naming-and-boundaries.md": 36600,
     # 22873 -> 23100: one new invariant (notifications ring for live events
     # only). Its text was compressed to the load-bearing facts first; the
     # remainder is the cost of stating a rule that did not exist before.

@@ -304,7 +304,11 @@ def pytest_sessionstart(session):
 def _nested_env(**overrides):
     import os
 
-    env = {key: value for key, value in os.environ.items() if key != "OUROBOROS_TEST_TEMP_ROOT"}
+    # The nested run is its own session: when THIS test runs inside an xdist
+    # worker, the inherited worker id would make the nested controller write
+    # its probe as that worker and the record set would never show "controller".
+    dropped = {"OUROBOROS_TEST_TEMP_ROOT", "PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID"}
+    env = {key: value for key, value in os.environ.items() if key not in dropped}
     env.update(overrides)
     return env
 

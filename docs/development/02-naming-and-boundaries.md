@@ -355,7 +355,10 @@ notice AND re-routes hidden work to the owner's main chat, so a whole
 `ouroboros run` goes invisible while its children surface in Main as a nameless
 card. Use the two normalizers, never a third:
 `message_bus.notification_chat_route` for where a notice goes,
-`message_bus.coerce_chat_identity` for a row's address. Address a task once at
+`message_bus.coerce_chat_identity` for a row's address. An owner notification
+is the one addressed exception and has one home, `event_bus.owner_notification_chat_id`:
+a banner sent to chat 0 reaches nobody, so it goes to the bound owner, else Main.
+Address a task once at
 admission (`log_addressing.ingress_chat_id`) and pass the value downstream; a
 producer sending to the owner DIRECTLY resolves the task's durable project
 binding AT EMISSION through `log_addressing.resolve_project_chat` and puts it ahead

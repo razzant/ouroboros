@@ -36,9 +36,11 @@ import { shellBridgeApi } from './ui_helpers.js';
 export const NOTIFY_PREFS_KEY = 'ouroboros.notifications';
 
 /* Categories, in owner-facing order. The first two are the agreed REQUIRED
-   signals (confirmed lifecycle state); `important` is the LLM-first one and
-   `main_reply` is the separate, quieter toggle. */
-export const NOTIFY_CATEGORIES = ['needs_answer', 'task_done', 'important', 'main_reply'];
+   signals (confirmed lifecycle state); `important` is the LLM-first one,
+   `notice` is the skill-first one (a reviewed skill or a model-free schedule
+   handed the host one finished sentence) and `main_reply` is the separate,
+   quieter toggle. */
+export const NOTIFY_CATEGORIES = ['needs_answer', 'task_done', 'important', 'notice', 'main_reply'];
 
 /* Ordinary Main replies start OFF and message text starts HIDDEN. Both are my
    recommendation rather than an owner decision, and both are one click away. */
@@ -47,6 +49,7 @@ export const DEFAULT_NOTIFY_PREFS = Object.freeze({
     needs_answer: true,
     task_done: true,
     important: true,
+    notice: true,
     main_reply: false,
     sound: true,
     show_text: false,
@@ -56,8 +59,17 @@ export const NOTIFY_TITLES = Object.freeze({
     needs_answer: 'Ouroboros is waiting for your answer',
     task_done: 'Task finished',
     important: 'Message from Ouroboros',
+    notice: 'Reminder from Ouroboros',
     main_reply: 'Ouroboros replied',
 });
+
+/* The banner names the SOURCE of a notice, never its sentence (DESIGN §9:
+   content is private by default): `skill:calendar` → "Reminder from calendar",
+   anything else is the host's own model-free schedule. */
+export function noticeTitle(source) {
+    const origin = String(source == null ? '' : source);
+    return origin.startsWith('skill:') && origin.length > 6 ? `Reminder from ${origin.slice(6)}` : NOTIFY_TITLES.notice;
+}
 
 const BODY_CHARS = 140;
 /* Bounded only for hygiene in a page that may live for days. A key evicted
@@ -172,8 +184,22 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
     }
 
     if (kind === 'log') {
-        // Log frames carry runtime diagnostics, not owner-facing prose, so this
-        // one stays title-only even when message text is switched on.
+        // An owner notification is the one log row that IS owner-facing prose:
+        // the host addressed it to the owner's chat and it carries no task, so
+        // no lineage is read here. Its key is the producer's own (a repeated
+        // delivery after a lost acknowledgement rings once), else its instant.
+        if (text(frame.type) === 'owner_notification') {
+            const source = text(frame.source);
+            return {
+                category: 'notice',
+                key: `notice:${source}:${text(frame.key) || text(frame.ts)}`,
+                title: noticeTitle(source),
+                body: trimBody(frame.text),
+                target: { chatId: frame.chat_id },
+            };
+        }
+        // Other log frames carry runtime diagnostics, not owner-facing prose,
+        // so the terminal stays title-only even when message text is on.
         if (text(frame.type || frame.event) !== 'task_done') return null;
         if (!rootEligible(taskId)) return null;
         // A task_done frame is not always an ending: an update or restart

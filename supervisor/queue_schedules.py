@@ -1,8 +1,10 @@
-"""Recurring schedules: the durable file, the skill sync, and what they enqueue.
+"""Recurring schedules: the durable file, the skill sync, and what they dispatch.
 
 Owns state/scheduled_tasks.json and the periodic reconciliation of skill-declared
 schedules into it, then turns a schedule that is due into a queued task — skipping
-any whose previous run is still pending or running.
+any whose previous run is still pending or running — or, for a ``kind: "notify"``
+row, into one owner notification with no model turn (the same table, the same
+tick and the same lifecycle; only the dispatch verb differs).
 
 The sync throttle is this module's own clock, not queue state: the writer and the
 reader are both here.
@@ -84,10 +86,15 @@ _RUNTIME_OWNED_FIELDS: tuple[str, ...] = (
 # What an audit event may say about a row: lifecycle facts only. The task template
 # is a private objective, never audit material, and would also be unbounded.
 _AUDIT_ROW_KEYS: tuple[str, ...] = (
-    "id", "name", "enabled", "source", "skill", "trigger", "timezone",
+    "id", "name", "kind", "enabled", "source", "skill", "trigger", "timezone",
     "created_at", "updated_at", "last_run_at", "last_task_id", "completed_at",
     "next_run_at", "manual_override",
 )
+# The second dispatch verb of the one table: a ``kind: "notify"`` row emits one
+# owner notification when due instead of enqueueing a task — no model turn, no
+# task result; its receipt is the ``owner_notification`` events row itself. An
+# absent ``kind`` (every row written before this verb existed) is a task row.
+SCHEDULE_KIND_NOTIFY = "notify"
 # ``manage_schedules`` is a model-facing tool.  Keep one page comfortably below
 # the tool result cap even when a schedule table contains many rows or hostile
 # (but valid) long strings.  The owner HTTP surface retains its own full rows.
@@ -262,8 +269,11 @@ def _is_consumed_once(record: Dict[str, Any]) -> bool:
 
 
 def _is_suppressed(record: Dict[str, Any]) -> bool:
-    """A skill row the owner disabled or deleted and the resync may not re-arm."""
-    return (str(record.get("source") or "") == "skill_manifest"
+    """A skill row the owner disabled or deleted and the resync may not re-arm —
+    or a notify row the owner switched off, which its skill's repeat of the same
+    key may not re-arm either."""
+    return ((str(record.get("source") or "") == "skill_manifest"
+             or str(record.get("kind") or "") == SCHEDULE_KIND_NOTIFY)
             and str(record.get("manual_override") or "").strip().lower() in SUPPRESSED_OVERRIDES)
 
 
@@ -293,7 +303,7 @@ def _schedule_projection_row(raw: Dict[str, Any]) -> Dict[str, Any]:
     # Keep only lifecycle facts useful to a model.  In particular, the durable
     # task template (including context/attachments) never crosses this seam.
     projection_keys = (
-        "id", "name", "enabled", "source", "skill", "trigger",
+        "id", "name", "kind", "enabled", "source", "skill", "trigger",
         "created_at", "last_run_at", "last_task_id", "completed_at", "next_run_at",
     )
     for key in projection_keys:
@@ -319,8 +329,10 @@ def _schedule_projection_row(raw: Dict[str, Any]) -> Dict[str, Any]:
             row[key] = _bounded_projection_text(value)
 
     template = raw.get("task") if isinstance(raw.get("task"), dict) else {}
+    notification = raw.get("notification") if isinstance(raw.get("notification"), dict) else {}
     objective_source = ""
-    for candidate in (template.get("objective"), template.get("text"),
+    for candidate in (notification.get("text") if str(raw.get("kind") or "") == SCHEDULE_KIND_NOTIFY else None,
+                      template.get("objective"), template.get("text"),
                       template.get("description"), raw.get("description"), raw.get("name")):
         if candidate is not None and str(candidate).strip():
             objective_source = str(candidate)
@@ -705,9 +717,82 @@ def _task_from_schedule(record: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
+def _notification_chat_id(record: Dict[str, Any]) -> int:
+    """The row's own positive chat, else where any owner notification goes
+    (``event_bus.owner_notification_chat_id``: the bound owner, else Main)."""
+    try:
+        pinned = int(record.get("chat_id") or 0)
+    except (TypeError, ValueError):
+        pinned = 0
+    if pinned > 0:
+        return pinned
+    from ouroboros.event_bus import owner_notification_chat_id
+
+    return owner_notification_chat_id(_queue().DRIVE_ROOT)
+
+
+def _notify_source_silenced(source: str, seen: Dict[str, bool]) -> bool:
+    """A skill's standing reminders fall silent with the skill — disabled,
+    removed, or its ``notify_owner`` grant revoked: the resync never touches
+    ``skill:`` rows, so they would otherwise keep ringing while the card says
+    off. ``seen`` memoises one tick's answers so a burst of due rows costs one
+    discovery per skill, not one per row."""
+    if not source.startswith("skill:"):
+        return False
+    if source not in seen:
+        from ouroboros.skill_loader import find_skill, load_enabled, load_skill_grants
+
+        name, root = source[len("skill:"):], _queue().DRIVE_ROOT
+        # The owner's grant is the consent that armed the row; a grant the owner
+        # withdrew silences the row exactly as disabling the skill does. This
+        # reads the recorded grant itself, not the Host route's content-hash
+        # binding: a payload edit stops NEW posts until the owner re-grants,
+        # but does not withdraw the consent behind reminders already armed.
+        seen[source] = (find_skill(root, name) is None or not load_enabled(root, name)
+                        or "notify_owner" not in load_skill_grants(root, name).get("granted_permissions", []))
+    return seen[source]
+
+
+def _fire_owner_notification(record: Dict[str, Any],
+                             scheduled_for: datetime.datetime) -> tuple[Dict[str, Any] | None, str]:
+    """Persist one due ``kind: "notify"`` row's notification: ``(row, "")`` when
+    fired, ``(None, why)`` when not.
+
+    The durable append happens here, under the table lock the tick already
+    holds (a local file write, like a task row's result); the topic publish is
+    the caller's, after the lock. The frame key carries the due instant, so a
+    recurring or re-armed reminder rings on every occurrence while a crash
+    replay of the same occurrence still collapses on the client.
+    """
+    import hashlib
+
+    from ouroboros.event_bus import OWNER_NOTIFICATION_KEY_CHARS, emit_owner_notification
+
+    notification = record.get("notification") if isinstance(record.get("notification"), dict) else {}
+    source = str(record.get("source") or "")
+    # UTC, so the occurrence key does not depend on the host's zone setting.
+    due_iso = scheduled_for.astimezone(datetime.timezone.utc).isoformat()
+    producer_key = str(notification.get("key") or "") or str(record.get("id") or "")
+    if len(producer_key) + 1 + len(due_iso) > OWNER_NOTIFICATION_KEY_CHARS:
+        # The producer may use the whole key; the occurrence key must still
+        # fit the same cap, so a long key rides as its digest.
+        producer_key = hashlib.sha256(producer_key.encode("utf-8")).hexdigest()[:32]
+    try:
+        row = emit_owner_notification(
+            _queue().DRIVE_ROOT, chat_id=_notification_chat_id(record), category="notice",
+            text=str(notification.get("text") or ""), source=source or "scheduler",
+            key=f"{producer_key}@{due_iso}", scheduled_for=due_iso, publish=False,
+        )
+    except ValueError as exc:
+        return None, f"invalid notification: {exc}"
+    return row, ("" if row is not None else "notification log write failed; retrying")
+
+
 def check_scheduled_tasks() -> None:
-    """Queue due cron/on-idle schedules using the normal supervisor queue."""
+    """Dispatch due schedules: a task row enqueues an ordinary root task, a
+    ``kind: "notify"`` row emits one owner notification without a model turn."""
     global _last_skill_schedule_sync
+    fired: List[Dict[str, Any]] = []
     with schedule_transaction(_queue().DRIVE_ROOT):
         now_monotonic = time.monotonic()
         if now_monotonic - _last_skill_schedule_sync >= _SKILL_SCHEDULE_SYNC_INTERVAL_SEC:
@@ -725,6 +810,7 @@ def check_scheduled_tasks() -> None:
             return
         changed = False
         collision_names = None
+        silenced_sources: Dict[str, bool] = {}
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         for record in list(data.get("tasks") or []):
             if not isinstance(record, dict) or not record.get("enabled", True):
@@ -736,7 +822,15 @@ def check_scheduled_tasks() -> None:
                 changed = True
             trigger = record.get("trigger") if isinstance(record.get("trigger"), dict) else {}
             trigger_type = str(trigger.get("type") or "cron").strip().lower()
-            if _schedule_running_or_queued(schedule_id, _queue().DRIVE_ROOT) is not False:
+            kind = str(record.get("kind") or "task").strip().lower()
+            notify_row = kind == SCHEDULE_KIND_NOTIFY
+            if kind not in ("task", SCHEDULE_KIND_NOTIFY):
+                # A verb this tick does not know is not a task in disguise: the
+                # row is left untouched with a typed error, never dispatched.
+                changed = _record_last_error(record, f"unsupported schedule kind: {kind}") or changed
+                continue
+            # A notify row admits no task, so nothing of it can be in flight.
+            if not notify_row and _schedule_running_or_queued(schedule_id, _queue().DRIVE_ROOT) is not False:
                 # Unknown reads as "still in flight": re-dispatching a schedule
                 # whose previous run may be alive is worse than waiting a pass.
                 continue
@@ -779,6 +873,37 @@ def check_scheduled_tasks() -> None:
                     collision_names = skill_identity_collision_names(_queue().DRIVE_ROOT)
                 if str(record.get("skill") or "") in collision_names:
                     continue
+            if notify_row:
+                if _notify_source_silenced(str(record.get("source") or ""), silenced_sources):
+                    continue
+                due_at = _parse_schedule_time(trigger.get("run_at"), tz) if trigger_type == "once" else next_run
+                successor = None
+                if trigger_type == "cron":
+                    # The successor is settled BEFORE the owner is rung: a durable
+                    # row whose expression cannot advance would otherwise keep its
+                    # stale due instant and ring again on every pass.
+                    try:
+                        successor = _next_cron_time(expr, now)
+                    except Exception as exc:
+                        changed = _record_last_error(record, f"{type(exc).__name__}: {exc}") or changed
+                        continue
+                row, why = _fire_owner_notification(record, due_at or now)
+                if row is None:
+                    # Not fired: the row stays armed and its last_error says why;
+                    # the next pass retries it.
+                    changed = _record_last_error(record, why) or changed
+                    continue
+                fired.append(row)
+                record["last_run_at"] = now.isoformat()
+                record["last_error"] = ""
+                if trigger_type == "once":
+                    record["enabled"] = False
+                    record["completed_at"] = now.isoformat()
+                    record["next_run_at"] = ""
+                else:
+                    record["next_run_at"] = successor.isoformat()
+                changed = True
+                continue
             task = _task_from_schedule(record)
             try:
                 from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
@@ -845,3 +970,10 @@ def check_scheduled_tasks() -> None:
         if changed:
             _write_scheduled_tasks(data)
             _queue().persist_queue_snapshot(reason="scheduled_tasks")
+    if fired:
+        # Subscribers (the Telegram skill) run outside the table lock: their
+        # handlers are not this tick's business, and the rows are already durable.
+        from ouroboros.event_bus import publish_owner_notification
+
+        for row in fired:
+            publish_owner_notification(row)

@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.2.6
+version: 1.2.7
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -9,7 +9,7 @@ runtime: python3
 os: any
 permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
 env_from_settings: [TELEGRAM_BOT_TOKEN]
-subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state]
+subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state, owner.notification]
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
@@ -62,6 +62,9 @@ waiting line while the buttons stay, and a finished task says a late answer stil
 counts as your message. The card only moves forward — nothing reopens an answer.
 An open question (no options) is the same whole card without buttons; it asks for
 a reply in your own words.
+Version 1.2.7 mirrors owner notices and reminders (the `owner.notification`
+event) to the pinned chat as `🔔 <source>: <text>` behind the off-by-default
+"Notify on skill notices and reminders" toggle.
 
 The Mini App exposes the unchanged Ouroboros SPA through the established
 owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled

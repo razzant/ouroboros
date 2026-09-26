@@ -43,7 +43,7 @@ def test_notification_controls_are_client_local():
     block = panel[panel.index("data-notify-settings"):]
     prefs = set(re.findall(r'data-notify-pref="([a-z_]+)"', block))
     assert prefs == {
-        "enabled", "needs_answer", "task_done", "important", "main_reply", "sound", "show_text",
+        "enabled", "needs_answer", "task_done", "important", "notice", "main_reply", "sound", "show_text",
     }, prefs
     assert "data-notify-test" in block, "a test notification is the honest way to see the surface"
     # The cause of "never posted to the server": no settings field at all.

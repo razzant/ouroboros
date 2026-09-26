@@ -44,6 +44,9 @@ _json_error = lambda message, status=500: JSONResponse({"ok": False, "error": me
 DEFAULT_HOST_SERVICE_HOST = "127.0.0.1"
 DEFAULT_HOST_SERVICE_PORT = 8767
 AUTH_TOKEN_FILENAME = "auth_token.json"
+# ``/identity`` advertises the owner-notification contract (``POST /notify``) so a
+# skill can degrade on an older host without a side-effecting probe.
+NOTIFY_VERSION = 1
 
 # The out-of-process WS progress relay (``POST /ui/ws-message``) is the one
 # token-bucket lane: a 60-message burst reserve that refills one message per
@@ -429,7 +432,8 @@ async def _api_identity(request: Request) -> JSONResponse:
         return _json_error(str(exc), 403)
     name, description = await asyncio.to_thread(_identity_facts, ctx)
     return JSONResponse({"ok": True, "name": name, "description": description,
-                         "presence_delivery_version": DELIVERY_VERSION})
+                         "presence_delivery_version": DELIVERY_VERSION,
+                         "notify_version": NOTIFY_VERSION})
 
 
 async def _api_tool_schemas(request: Request) -> JSONResponse:
@@ -1384,6 +1388,9 @@ def create_host_service_app(
     ws_broadcaster_getter: Optional[Callable[[], Callable[[dict], None]]] = None,
     presence_runner: Optional[Callable[..., Any]] = None,
 ) -> Starlette:
+    # host_notify imports this module's helpers; mounted here, imported lazily.
+    from ouroboros.gateway.host_notify import _api_notify
+
     app = Starlette(
         routes=[
             Route("/identity", _api_identity, methods=["GET"]),
@@ -1397,6 +1404,7 @@ def create_host_service_app(
             Route("/presence/delivery", _api_presence_delivery, methods=["POST"]),
             Route("/presence/work/{work_ref}", _api_presence_work, methods=["GET"]),
             Route("/ui/ws-message", _api_ws_message, methods=["POST"]),
+            Route("/notify", _api_notify, methods=["POST"]),
             WebSocketRoute("/events", _ws_events),
         ]
     )

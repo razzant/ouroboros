@@ -35,6 +35,26 @@ function isSkillManaged(s) {
     return Boolean(s && (String(s.source || '') === 'skill_manifest' || String(s.skill || '')));
 }
 
+// The Delete dialog for a schedule row, decided from what its button says the
+// row is: a skill-declared schedule and an armed reminder are SUPPRESSED (the
+// manifest resync or the skill's re-post would recreate a removed row); a
+// suppressed reminder's retained record, a reminder that already fired (a
+// receipt) and any other row are removed.
+export function scheduleDeleteDialog(dataset) {
+    const managedRow = dataset.managed === '1';
+    const reminderRow = dataset.notify === '1' && dataset.suppressed !== '1' && dataset.consumed !== '1';
+    return {
+        title: managedRow ? 'Suppress skill schedule' : reminderRow ? 'Suppress reminder' : 'Delete schedule',
+        body: managedRow
+            ? 'This schedule is declared by an installed skill and cannot be removed; Delete keeps it suppressed until you Restore it. Suppress it?'
+            : reminderRow
+                ? 'This reminder is re-posted by its skill under the same key; Delete keeps it suppressed until you Restore it, and deleting the retained record again removes it. Suppress it?'
+                : 'Delete this schedule?',
+        confirmLabel: managedRow || reminderRow ? 'Suppress' : 'Delete',
+        danger: true,
+    };
+}
+
 export function initActivity({ mount, ws } = {}) {
     if (!mount) return { refresh: () => {} };
     let busy = false;
@@ -172,7 +192,12 @@ export function initActivity({ mount, ws } = {}) {
         const consumed = status === 'consumed';
         const suppressed = status === 'suppressed';
         const id = esc(s.id || '');
-        const sub = `${timing}${next && !consumed ? ` · next ${next}` : ''} · ${esc(status)}${managed && s.skill ? ` · ${esc(s.skill)}` : ''}`;
+        // A notify row rings the owner instead of starting a task; say so, and
+        // name the skill that owns it (its `source`, never a skill-managed marker).
+        const notify = String(s.kind || '') === 'notify';
+        const origin = String(s.source || '');
+        const owner = notify && origin.startsWith('skill:') ? ` · ${esc(origin.slice(6))}` : '';
+        const sub = `${notify ? 'notification · ' : ''}${timing}${next && !consumed ? ` · next ${next}` : ''} · ${esc(status)}${managed && s.skill ? ` · ${esc(s.skill)}` : ''}${owner}`;
         // A consumed one-shot cannot be re-armed, so it carries no Enable: the
         // only honest control left is removing the receipt. A suppressed skill
         // row offers Restore, which asks the server to re-evaluate the skill.
@@ -185,13 +210,14 @@ export function initActivity({ mount, ws } = {}) {
             : readinessHeld
                 ? '<span class="activity-tag">disabled by skill readiness</span>'
                 : `<button type="button" class="btn btn-xs btn-default" data-act="schedule-toggle" data-id="${id}" data-action="${suppressed || !enabled ? 'restore' : 'disable'}">${enabled ? 'Disable' : (suppressed ? 'Restore' : 'Enable')}</button>`;
+        const title = notify && s.notification && s.notification.text ? s.notification.text : (s.name || s.id || 'schedule');
         return `<div class="activity-row${enabled ? '' : ' off'}">
             <div class="activity-row-main">
-                <span class="activity-name">${esc(s.name || s.id || 'schedule')}</span>
+                <span class="activity-name">${esc(title)}</span>
                 <span class="activity-sub">${sub}</span>
             </div>
             <div class="activity-row-actions">${lifecycle}
-               <button type="button" class="btn btn-xs btn-danger" data-act="schedule-delete" data-id="${id}" data-managed="${managed ? '1' : ''}">Delete</button></div>
+               <button type="button" class="btn btn-xs btn-danger" data-act="schedule-delete" data-id="${id}" data-managed="${managed ? '1' : ''}" data-notify="${notify ? '1' : ''}" data-suppressed="${suppressed ? '1' : ''}" data-consumed="${consumed ? '1' : ''}">Delete</button></div>
         </div>`;
     }
 
@@ -398,18 +424,9 @@ export function initActivity({ mount, ws } = {}) {
         btn.disabled = true;
         try {
             if (act === 'schedule-delete') {
-                // A skill-declared schedule cannot be removed: the skill's manifest
-                // would recreate it. Delete SUPPRESSES it durably, and the dialog
-                // says so before anything is sent.
-                const managedRow = btn.dataset.managed === '1';
-                const confirmedDelete = await openConfirmDialog({
-                    title: managedRow ? 'Suppress skill schedule' : 'Delete schedule',
-                    body: managedRow
-                        ? 'This schedule is declared by an installed skill and cannot be removed; Delete keeps it suppressed until you Restore it. Suppress it?'
-                        : 'Delete this schedule?',
-                    confirmLabel: managedRow ? 'Suppress' : 'Delete',
-                    danger: true,
-                });
+                // The dialog says what Delete will do to THIS row before anything
+                // is sent (scheduleDeleteDialog decides it from the button's data).
+                const confirmedDelete = await openConfirmDialog(scheduleDeleteDialog(btn.dataset));
                 if (!confirmedDelete) return;
                 await scheduleAction(id, 'delete', 'owner deleted the schedule from Activity');
             } else if (act === 'schedule-toggle') {
