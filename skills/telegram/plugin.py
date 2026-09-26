@@ -34,7 +34,7 @@ from .lib.telegram_state import (
 )
 from .lib import telegram_inbound, telegram_quiz
 from .lib.telegram_health import _collect_health, _build_menu_tasks
-from .lib.telegram_notifier import NOTICES_SETTING, _make_notice, _make_notifier
+from .lib.telegram_notifier import NOTIFIER_SETTINGS, _make_notice, _make_notifier
 from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .scripts.telegram_settings import (
     TelegramSettingsError,
@@ -75,8 +75,10 @@ _SAFE_TRANSLATION_KEYS = frozenset({"/status", "/bg status", "/bg"})
 # the GET that hydrates the form returns only these. The bot token belongs to
 # Secrets and is deliberately absent from both directions.
 _SETTINGS_FORM_KEYS = (
-    "TELEGRAM_CHAT_ID", "TELEGRAM_MAX_UPDATES_PER_POLL", "TELEGRAM_MIRROR_MODE", "TELEGRAM_COMMAND_MODE", "TELEGRAM_LANGUAGE", "TELEGRAM_SILENT_MODE",
-    "TELEGRAM_SUBAGENT_CARDS", "TELEGRAM_MIRROR_PROGRESS", "TELEGRAM_NOTIFY_TASKS", "TELEGRAM_NOTIFY_BUDGET", "TELEGRAM_NOTIFY_NOTICES", "TELEGRAM_MINIAPP_ENABLED",
+    "TELEGRAM_CHAT_ID", "TELEGRAM_MAX_UPDATES_PER_POLL", "TELEGRAM_MIRROR_MODE",
+    "TELEGRAM_COMMAND_MODE", "TELEGRAM_LANGUAGE", "TELEGRAM_SILENT_MODE",
+    "TELEGRAM_SUBAGENT_CARDS", "TELEGRAM_MIRROR_PROGRESS", "TELEGRAM_NOTIFY_TASKS",
+    "TELEGRAM_NOTIFY_BUDGET", "TELEGRAM_NOTIFY_NOTICES", "TELEGRAM_MINIAPP_ENABLED",
 )
 
 def _setting_int(settings: Dict[str, Any], key: str, default: int, *, minimum: int = 1, maximum: int = 100) -> int:
@@ -1464,21 +1466,7 @@ def register(api):
                              {"value": "off", "label": "Off — keep text bridge only"},
                          ],
                          "placeholder": "on"},
-                        {"name": "TELEGRAM_NOTIFY_TASKS", "label": "Notify on task completion", "type": "select",
-                         "options": [
-                             {"value": "off", "label": "Off — non-clean finishes only"},
-                             {"value": "on", "label": "On — ✅ Task done · cost · rounds"},
-                         ],
-                         "help": "A task that ends with warnings, fails or is cancelled always sends one short "
-                                 "line, because Telegram has no task card. On adds the clean finishes.",
-                         "placeholder": "off"},
-                        {"name": "TELEGRAM_NOTIFY_BUDGET", "label": "Notify on budget thresholds", "type": "select",
-                         "options": [
-                             {"value": "off", "label": "Off"},
-                             {"value": "on", "label": "On — ⚠️ at 80% / 90% / 100%"},
-                         ],
-                         "placeholder": "off"},
-                        NOTICES_SETTING,
+                        *NOTIFIER_SETTINGS,
                     ],
                     "submit_label": "Save Telegram settings",
                 },

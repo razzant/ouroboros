@@ -249,7 +249,8 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # room comparison protected nothing; the earlier one-clause form is replaced, and
     # the base sat 34 bytes under the previous budget.
     "docs/architecture/10-key-invariants.md": 21700,
-    "docs/architecture/11-frozen-contracts-v1.md": 24194,
+    # 24194 -> 24300: the host-mediated permission list names `notify_owner` (measured 24193).
+    "docs/architecture/11-frozen-contracts-v1.md": 24300,
     # +400 (#1213): Presence turns are named as actors without cross-focus catalogue or focus authority.
     # 11400 -> 12500: presence PR0 adds rules the chapter lacked, one sentence each (unified
     # conversation key, placeholder re-run and its lost-attempt facts, presence-local liveness,

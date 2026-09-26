@@ -690,7 +690,6 @@ def _presence_staged_files(
     return tuple(files)
 
 
-
 async def _api_presence_delivery(request: Request) -> JSONResponse:
     """Record exact provider receipts without sending or starting model work."""
     ctx: HostServiceContext = request.app.state.host_service_context

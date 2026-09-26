@@ -732,17 +732,21 @@ def _notification_chat_id(record: Dict[str, Any]) -> int:
 
 
 def _notify_source_silenced(source: str, seen: Dict[str, bool]) -> bool:
-    """A skill's standing reminders fall silent with the skill: the resync never
-    touches ``skill:`` rows, so a disabled or removed skill would otherwise keep
-    ringing while its card says off. ``seen`` memoises one tick's answers so a
-    burst of due rows costs one discovery per skill, not one per row."""
+    """A skill's standing reminders fall silent with the skill — disabled,
+    removed, or its ``notify_owner`` grant revoked: the resync never touches
+    ``skill:`` rows, so they would otherwise keep ringing while the card says
+    off. ``seen`` memoises one tick's answers so a burst of due rows costs one
+    discovery per skill, not one per row."""
     if not source.startswith("skill:"):
         return False
     if source not in seen:
-        from ouroboros.skill_loader import find_skill, load_enabled
+        from ouroboros.skill_loader import find_skill, load_enabled, load_skill_grants
 
-        name = source[len("skill:"):]
-        seen[source] = find_skill(_queue().DRIVE_ROOT, name) is None or not load_enabled(_queue().DRIVE_ROOT, name)
+        name, root = source[len("skill:"):], _queue().DRIVE_ROOT
+        # The owner's grant is the consent that armed the row; revoking it
+        # silences the row exactly as disabling the skill does.
+        seen[source] = (find_skill(root, name) is None or not load_enabled(root, name)
+                        or "notify_owner" not in load_skill_grants(root, name).get("granted_permissions", []))
     return seen[source]
 
 

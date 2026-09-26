@@ -236,9 +236,10 @@ def test_long_keys_yield_ids_the_owner_lifecycle_endpoints_accept(tmp_path: path
     from supervisor import queue
 
     queue.init(tmp_path)
-    for key in ("k" * 128, "встреча 1", "встреча-1", "a"):
+    for key in ("k" * 128, "встреча 1", "встреча-1", "a", "a..b", "..", "x...y", "cal:evt..7"):
         assert schedule_id_error(_notify_schedule_id("cal", key)) == ""
     assert _notify_schedule_id("cal", "встреча 1") != _notify_schedule_id("cal", "встреча-1")
+    assert _notify_schedule_id("cal", "a..b") != _notify_schedule_id("cal", "a.b"), "the digest keeps dotted keys apart"
     assert schedule_id_error(_notify_schedule_id("s" * 200, "k" * 128)) == ""
     assert schedule_id_error(_notify_fresh_schedule_id("s" * 200)) == ""
     client, _app = _notify_client(tmp_path)

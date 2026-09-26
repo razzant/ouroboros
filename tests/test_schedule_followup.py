@@ -934,7 +934,7 @@ def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path, monkey
     ring for a skill the owner switched off or removed; and it asks about each
     skill once per pass, not once per due row."""
     import ouroboros.skill_loader as skill_loader
-    from ouroboros.skill_loader import save_enabled
+    from ouroboros.skill_loader import save_enabled, save_skill_grants
 
     queue, pending = _queue(tmp_path)
     skill_dir = tmp_path / "skills" / "external" / "cal"
@@ -946,6 +946,8 @@ def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path, monkey
     queue.upsert_scheduled_task(_notify_row("n-ghost", source="skill:ghost", key="g"))
     queue.upsert_scheduled_task(_notify_row("n-cal", source="skill:cal", key="c"))
     queue.upsert_scheduled_task(_notify_row("n-cal-2", source="skill:cal", key="c2"))
+    save_skill_grants(tmp_path, "cal", [], content_hash="h", requested_keys=[],
+                      granted_permissions=["notify_owner"], requested_permissions=["notify_owner"])
     save_enabled(tmp_path, "cal", False)
     looked_up: list[str] = []
     real_find_skill = skill_loader.find_skill
@@ -962,6 +964,29 @@ def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path, monkey
     assert records["n-ghost"]["enabled"] is True and not records["n-ghost"].get("completed_at")
     assert records["n-cal"]["enabled"] is False and records["n-cal"]["completed_at"]
     assert records["n-cal-2"]["enabled"] is False and records["n-cal-2"]["completed_at"]
+
+
+def test_notify_row_of_a_skill_whose_grant_was_revoked_stays_silent(tmp_path):
+    """The owner's grant is the consent that armed the row: revoking it keeps
+    the row silent (and visible in Activity) exactly as disabling the skill."""
+    from ouroboros.skill_loader import save_enabled, save_skill_grants
+
+    queue, _pending = _queue(tmp_path)
+    skill_dir = tmp_path / "skills" / "external" / "cal"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: cal\ndescription: calendar\nversion: 0.1\ntype: extension\nentry: plugin.py\n"
+        "permissions: [notify_owner]\n---\n# cal\n", encoding="utf-8")
+    (skill_dir / "plugin.py").write_text("def register(api): pass\n", encoding="utf-8")
+    save_enabled(tmp_path, "cal", True)
+    queue.upsert_scheduled_task(_notify_row("n-cal", source="skill:cal", key="c"))
+    queue.check_scheduled_tasks()  # no grant yet: silent, still armed
+    assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["enabled"] is True
+    save_skill_grants(tmp_path, "cal", [], content_hash="h", requested_keys=[],
+                      granted_permissions=["notify_owner"], requested_permissions=["notify_owner"])
+    queue.check_scheduled_tasks()
+    assert len([row for row in _events(tmp_path) if row.get("type") == "owner_notification"]) == 1
 
 
 def test_notify_row_survives_a_failed_append_and_retries(tmp_path, monkeypatch):

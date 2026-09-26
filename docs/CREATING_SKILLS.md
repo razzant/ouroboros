@@ -886,7 +886,8 @@ fires it at its instant without a model — a reminder whose instant passed whil
 Ouroboros was off fires once on the next tick, like any one-shot, and a crash
 between the durable receipt and the table write can replay one occurrence. With a `key`
 the row is yours to move: the same key posted again replaces its time and
-text; `{"key": ..., "cancel": true}` removes it (`404` when there is no such
+text (a one-shot that already fired needs a new `at` — the same instant answers
+`400 consumed_not_rearmed`); `{"key": ..., "cancel": true}` removes it (`404` when there is no such
 row of yours). Without a key each post is a new fire-and-forget row. A
 disabled or removed skill's rows stay silent until it is enabled again, and an
 owner who disabled or deleted one of your rows — on the Activity page, or by

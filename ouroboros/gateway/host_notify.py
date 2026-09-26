@@ -1,15 +1,17 @@
 """``POST /notify``: one owner notification from a reviewed skill.
 
 Immediate, or — with ``at``/``cron`` — a ``kind: "notify"`` row of the ONE
-schedule table that the supervisor tick fires without a model turn. The route
-family lives beside ``host_service.py`` (same loopback trust boundary, same
-token and grant checks, mounted by ``create_host_service_app``) so the
-boundary module stays inside its size band.
+schedule table that the supervisor tick fires without a model turn. Its own
+contract (grant, the events-row fact, keyed deferred rows, the owner's
+suppression answers) and its own reason to change; it lives beside
+``host_service.py`` on the same loopback trust boundary, under the same token
+and grant checks, and ``create_host_service_app`` mounts it.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, Optional
 
 from starlette.requests import Request
@@ -97,7 +99,11 @@ def _notify_schedule_id(skill_name: str, key: str) -> str:
     from ouroboros.schedule_contract import schedule_slug
 
     digest = sha256(f"{skill_name}\n{key}".encode("utf-8")).hexdigest()[:8]
-    return f"{schedule_slug('notify', skill_name, key)[:72].rstrip('-._')}-{digest}"
+    slug = schedule_slug("notify", skill_name, key)[:72]
+    # The slug keeps single dots; the id contract refuses ".." (a path guard), so
+    # a key like "a..b" collapses its dot runs — the digest keeps it distinct.
+    slug = re.sub(r"\.{2,}", ".", slug).rstrip("-._")
+    return f"{slug}-{digest}"
 
 
 def _notify_fresh_schedule_id(skill_name: str) -> str:
