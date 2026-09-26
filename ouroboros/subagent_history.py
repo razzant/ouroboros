@@ -90,6 +90,10 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
         try:
             old = subagent_last_delegation(drive_root)
             rows = dict(old.get("latest_by_subagent") or {})
+            legacy_actor = str(old.get("selected_subagent_id") or "")
+            if legacy_actor and legacy_actor not in rows:
+                rows[legacy_actor] = {key: value for key, value in old.items()
+                                      if key != "latest_by_subagent"}
             old_actor = rows.get(selected_subagent_id) or {}
             previous = old_actor if old_actor.get("run_id") == run_id else old if old.get("run_id") == run_id else {}
             if run_id and previous and (not occurred_at or (

@@ -96,6 +96,42 @@ def test_recovery_settlement_and_refused_start_share_history(tmp_path, monkeypat
     assert subagent_last_delegation(tmp_path) == row
 
 
+def test_first_post_upgrade_write_preserves_legacy_subagent_row(tmp_path):
+    path = tmp_path / "state" / "subagent_last_delegation.json"
+    path.parent.mkdir()
+    legacy = {
+        "ts": "2026-09-17T12:00:00Z",
+        "observed_at": "2026-09-17T12:00:00Z",
+        "occurred_at": "2026-09-17T12:00:00Z",
+        "route": "api_model",
+        "requested_model": "openai::legacy",
+        "applied_model": "openai::legacy",
+        "requested_profile": "",
+        "applied_profile": "",
+        "selected_subagent_id": "legacy-worker",
+        "run_id": "legacy-run",
+        "outcome": "succeeded",
+    }
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    record_last_delegation(
+        route="api_model",
+        requested_model="openai::new",
+        applied_model="openai::new",
+        run_id="new-run",
+        selected_subagent_id="new-worker",
+        drive_root=tmp_path,
+        occurred_at="2026-09-20T12:00:00Z",
+        outcome="succeeded",
+    )
+
+    row = subagent_last_delegation(tmp_path)
+    assert row["selected_subagent_id"] == "new-worker"
+    assert row["latest_by_subagent"]["new-worker"]["run_id"] == "new-run"
+    assert row["latest_by_subagent"]["legacy-worker"]["run_id"] == "legacy-run"
+    assert "latest_by_subagent" not in row["latest_by_subagent"]["legacy-worker"]
+
+
 def test_old_corrupt_missing_and_unknown_time_are_not_health(tmp_path):
     assert subagent_last_delegation(tmp_path) == {}
     path = tmp_path / "state" / "subagent_last_delegation.json"
