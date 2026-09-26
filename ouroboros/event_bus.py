@@ -32,7 +32,7 @@ VALID_TOPICS = frozenset({
     SKILL_LIFECYCLE, OWNER_NOTIFICATION,
 })
 OWNER_NOTIFICATION_TEXT_CHARS = 1000
-_OWNER_NOTIFICATION_KEY_CHARS = 128
+OWNER_NOTIFICATION_KEY_CHARS = 128
 _OWNER_NOTIFICATION_CATEGORY_CHARS = 32
 
 
@@ -195,8 +195,8 @@ def emit_owner_notification(
     if not origin:
         raise ValueError("notification source is required")
     dedupe = str(key or "").strip()
-    if len(dedupe) > _OWNER_NOTIFICATION_KEY_CHARS:
-        raise ValueError(f"notification key must be at most {_OWNER_NOTIFICATION_KEY_CHARS} characters")
+    if len(dedupe) > OWNER_NOTIFICATION_KEY_CHARS:
+        raise ValueError(f"notification key must be at most {OWNER_NOTIFICATION_KEY_CHARS} characters")
     if type(chat_id) is not int or chat_id <= 0:
         raise ValueError("notification chat_id must be a positive owner chat id")
     row: Dict[str, Any] = {

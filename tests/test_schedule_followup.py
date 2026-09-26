@@ -810,6 +810,20 @@ def test_notify_cron_row_fires_and_advances_like_a_task_row(tmp_path):
     assert record["next_run_at"] > "2000-01-02"
 
 
+def test_a_fired_reminder_is_removed_outright_by_either_hand(tmp_path):
+    """A consumed one-shot reminder is a receipt: the owner's Delete (or the
+    skill's) removes it at once instead of retaining a suppressed record that
+    Activity would still show as consumed with no Restore."""
+    queue, _pending = _queue(tmp_path)
+    queue.upsert_scheduled_task(_notify_row("n-fired", key="fired"))
+    queue.check_scheduled_tasks()
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["completed_at"]
+    outcome = queue.mutate_scheduled_task("delete", "n-fired", reason="owner cleared history",
+                                          actor="owner:gateway", drive_root=tmp_path)
+    assert outcome["ok"] and outcome["status"] == "deleted"
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"] == []
+
+
 def test_notify_cron_row_that_cannot_advance_never_rings(tmp_path):
     """A durable cron row whose expression no longer parses but whose stored
     due instant is in the past must not ring the owner on every pass: the

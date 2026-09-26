@@ -35,7 +35,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 7 bytes on the official line); re-based here, no text of this chapter was touched.
     # 165550 -> 165650: the scheduled_tasks.json tree line names the table's second row kind
     # (`kind:"notify"`, a model-free owner notification); the base sat 20 bytes under.
-    "docs/architecture/01-high-level-architecture.md": 165650,
+    # 165650 -> 165800: the event_bus.py tree row names the owner-notification fact and
+    # the owner-chat rule the module now owns (the §1 row is the grep target for its events).
+    "docs/architecture/01-high-level-architecture.md": 165800,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.

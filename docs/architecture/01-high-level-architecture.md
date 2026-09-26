@@ -109,7 +109,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── dialogue_provenance.py ← Shared exact transport-provenance rendering for history, memory, and consolidation
       ├── extension_companion.py ← Host-supervised companion processes for transport skills (§12)
       ├── extension_reconcile_queue.py ← Durable worker→server extension reconcile markers + server pickup loop
-      ├── event_bus.py         ← Typed in-process event bus for skill subscriptions
+      ├── event_bus.py         ← Typed in-process event bus for skill subscriptions; emits the owner-notification fact (`owner_notification` events row, `owner.notification` topic) and owns the owner-chat rule
       ├── evolution_checkpoints.py ← Append-only campaign/eval checkpoint ledger for evolution progress
       ├── evolution_fingerprint.py ← Canonical fingerprint for evolution-campaign objectives; SSOT for repeat gating
       ├── improvement_backlog.py ← Durable advisory improvement backlog: recurrence-counted dedup (never drop), priority+recurrence+recency ranking, `close_backlog_items`, size-triggered `groom_backlog`; parser-safe locked writer

@@ -22,8 +22,8 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, is_a2a_chat_id
-from ouroboros.event_bus import (OWNER_NOTIFICATION_TEXT_CHARS, emit_owner_notification, get_global_event_bus,
-                                 owner_notification_chat_id)
+from ouroboros.event_bus import (OWNER_NOTIFICATION_KEY_CHARS, OWNER_NOTIFICATION_TEXT_CHARS, emit_owner_notification,
+                                 get_global_event_bus, owner_notification_chat_id)
 from ouroboros.config import WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC
 from ouroboros.gateway._helpers import run_sync_to_completion
 from ouroboros.gateway.files import store_chat_upload
@@ -686,8 +686,8 @@ async def _api_notify(request: Request) -> JSONResponse:
     if key is not None and not isinstance(key, str):
         return _json_error("key must be a string", 400)
     key = (key or "").strip()
-    if len(key) > 128:
-        return _json_error("key must be at most 128 characters", 400)
+    if len(key) > OWNER_NOTIFICATION_KEY_CHARS:
+        return _json_error(f"key must be at most {OWNER_NOTIFICATION_KEY_CHARS} characters", 400)
     at_raw = payload.get("at")
     cron_raw = payload.get("cron")
     if at_raw is not None or cron_raw is not None or cancel:
@@ -737,8 +737,9 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
                                  at_raw: Any, cron_raw: Any, timezone_raw: Any, cancel: bool) -> JSONResponse:
     """A deferred notice is a ``kind: "notify"`` row of the ONE schedule table:
     the tick fires it without a model turn; ``key`` is the row's identity (a
-    repeat moves it, ``cancel`` removes it through the audited delete); without
-    a key a row is fire-and-forget."""
+    repeat moves it, ``cancel`` removes it through the audited delete — unless
+    the owner suppressed the row, which stays and answers ``suppressed``);
+    without a key a row is fire-and-forget."""
     from ouroboros.deadline_utils import parse_deadline_ts
     from ouroboros.schedule_contract import cron_error, timezone_error
     from supervisor.queue import (
@@ -764,6 +765,10 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
                     reason="notification cancelled by its skill")
         except ScheduleStoreUnreadable as exc:
             return _json_error(str(exc), 503)
+        if not outcome.get("ok"):
+            # The lifecycle refused (its audit could not be written): nothing
+            # changed, and the skill must not read that as a cancellation.
+            return _json_error(str(outcome.get("detail") or outcome.get("status") or "cancel refused"), 503)
         if outcome.get("status") == "suppressed" and not outcome.get("changed"):
             # The owner's off switch outlives the skill's cancel (see lifecycle).
             return JSONResponse({"ok": True, "cancelled": False, "id": schedule_id, "status": "suppressed"})
@@ -807,7 +812,8 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
                 record, drive_root=ctx.data_dir, actor=source,
                 reason="notification scheduled by its skill")
     except ScheduleRefused as refusal:
-        return _json_error(refusal.message, 409 if refusal.status == "audit_unavailable" else 400)
+        # An audit that could not be written is the host failing, not the skill: retry.
+        return _json_error(refusal.message, 503 if refusal.status == "audit_unavailable" else 400)
     except ScheduleStoreUnreadable as exc:
         return _json_error(str(exc), 503)
     return JSONResponse({

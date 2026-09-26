@@ -268,7 +268,13 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                     current["manual_override"] = "disabled"
                 status = "updated"
             elif operation == "delete":
-                if owner_over_notify and _is_suppressed(current):
+                if notify_row and _is_consumed_once(current):
+                    # A fired reminder is a receipt, not a standing row: removing
+                    # it re-arms nothing of the owner's, so either hand removes it
+                    # outright, as a consumed task one-shot goes.
+                    tasks = [item for item in tasks if str(item.get("id") or "") != wanted]
+                    status, removed = "deleted", True
+                elif owner_over_notify and _is_suppressed(current):
                     # The owner already switched this reminder off and now removes
                     # the record itself: an explicit second act, so the row goes
                     # (a later post of the same key starts a fresh row).

@@ -251,6 +251,22 @@ def test_long_keys_yield_ids_the_owner_lifecycle_endpoints_accept(tmp_path: path
     assert off["ok"] is True and off["status"] == "updated"
 
 
+def test_a_refused_cancel_is_not_reported_as_a_cancellation(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """When the lifecycle refuses (its audit intent could not be written) the
+    row stays armed and the skill hears 503, never `ok: true`."""
+    from supervisor import queue, schedule_lifecycle
+
+    queue.init(tmp_path)
+    client, _app = _notify_client(tmp_path)
+    headers = {"X-Skill-Token": "tok"}
+    body = {"text": "Meeting", "key": "cal:evt-11", "at": "2999-01-01T14:45:00+00:00"}
+    assert client.post("/notify", headers=headers, json=body).status_code == 200
+    monkeypatch.setattr(schedule_lifecycle, "_audit_schedule_mutation", lambda **kwargs: False)
+    refused = client.post("/notify", headers=headers, json={"key": "cal:evt-11", "cancel": True})
+    assert refused.status_code == 503 and refused.json()["ok"] is False
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["enabled"] is True
+
+
 def test_the_agents_manage_schedules_is_the_owners_hand_on_a_skill_reminder(tmp_path: pathlib.Path) -> None:
     """Ouroboros switching a skill's reminder off at the owner's word (actor
     ``agent``, as manage_schedules calls it) leaves the same durable marker as

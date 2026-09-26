@@ -52,6 +52,9 @@ form shows saved values before Save, and shortens the four long option labels.
 Version 1.2.4 always sends one short line when a task does not finish cleanly, with
 the same status word and reason sentence the task card shows; the task-completion
 toggle now only adds the clean finishes.
+Version 1.2.5 mirrors owner notices and reminders (the `owner.notification`
+event) to the pinned chat as `🔔 <source>: <text>` behind the off-by-default
+"Notify on skill notices and reminders" toggle.
 
 The Mini App exposes the unchanged Ouroboros SPA through the established
 owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled
