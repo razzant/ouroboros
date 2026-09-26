@@ -89,6 +89,13 @@ function byId(id) {
     return document.getElementById(id);
 }
 
+// A stored 0 is a value, not an absence: `fallback && !value` rendered a saved
+// 0 (e.g. OUROBOROS_CONSCIOUSNESS_DAILY_USD) as its fallback, and the next save
+// of ANY tab wrote the fallback back. Only a missing value takes the fallback.
+export function storedOrFallback(value, fallback) {
+    return fallback && (value === undefined || value === null || value === '') ? fallback : value;
+}
+
 function applyInputValue(id, value) {
     const el = byId(id);
     el.value = value === undefined || value === null ? '' : value;
@@ -670,7 +677,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         });
         page.querySelectorAll('[data-provider-test-status]').forEach((el) => setInlineStatus(el, '', 'muted'));
         applySecretInputs(page, s);
-        INPUT_FIELDS.forEach(([id, key, fallback = '']) => applyInputValue(id, fallback && !s[key] ? fallback : s[key]));
+        INPUT_FIELDS.forEach(([id, key, fallback = '']) => applyInputValue(id, storedOrFallback(s[key], fallback)));
         VALUE_FIELDS.forEach(([id, key, fallback]) => { byId(id).value = s[key] || fallback; });
         modelRoles.load(s, { ...setupContract, modelSlots: setupModelSlots().map((slot) => ({
             ...slot, inputId: slot.settingsInputId,
