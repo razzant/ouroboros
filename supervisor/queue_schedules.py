@@ -744,7 +744,7 @@ def _notify_source_silenced(source: str, seen: Dict[str, bool]) -> bool:
     return seen[source]
 
 
-def _fire_owner_notification(record: Dict[str, Any], now: datetime.datetime,
+def _fire_owner_notification(record: Dict[str, Any],
                              scheduled_for: datetime.datetime) -> tuple[Dict[str, Any] | None, str]:
     """Persist one due ``kind: "notify"`` row's notification: ``(row, "")`` when
     fired, ``(None, why)`` when not.
@@ -868,7 +868,17 @@ def check_scheduled_tasks() -> None:
                 if _notify_source_silenced(str(record.get("source") or ""), silenced_sources):
                     continue
                 due_at = _parse_schedule_time(trigger.get("run_at"), tz) if trigger_type == "once" else next_run
-                row, why = _fire_owner_notification(record, now, due_at or now)
+                successor = None
+                if trigger_type == "cron":
+                    # The successor is settled BEFORE the owner is rung: a durable
+                    # row whose expression cannot advance would otherwise keep its
+                    # stale due instant and ring again on every pass.
+                    try:
+                        successor = _next_cron_time(expr, now)
+                    except Exception as exc:
+                        changed = _record_last_error(record, f"{type(exc).__name__}: {exc}") or changed
+                        continue
+                row, why = _fire_owner_notification(record, due_at or now)
                 if row is None:
                     # Not fired: the row stays armed and its last_error says why;
                     # the next pass retries it.
@@ -882,10 +892,7 @@ def check_scheduled_tasks() -> None:
                     record["completed_at"] = now.isoformat()
                     record["next_run_at"] = ""
                 else:
-                    try:
-                        record["next_run_at"] = _next_cron_time(expr, now).isoformat()
-                    except Exception as exc:
-                        record["last_error"] = f"{type(exc).__name__}: {exc}"
+                    record["next_run_at"] = successor.isoformat()
                 changed = True
                 continue
             task = _task_from_schedule(record)

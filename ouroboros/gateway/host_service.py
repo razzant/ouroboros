@@ -772,9 +772,10 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
         return _json_error("supply exactly one of at (ISO 8601 instant) or cron (5-field expression)", 400)
     timezone = str(timezone_raw or "").strip()
     if at_raw is not None:
-        if not isinstance(at_raw, str) or parse_deadline_ts(at_raw.strip()) is None:
+        at_instant = parse_deadline_ts(at_raw.strip()) if isinstance(at_raw, str) else None
+        if at_instant is None:
             return _json_error("at must be a parseable ISO 8601 instant", 400)
-        trigger = {"type": "once", "run_at": parse_deadline_ts(at_raw.strip()).isoformat()}
+        trigger = {"type": "once", "run_at": at_instant.isoformat()}
     else:
         if not isinstance(cron_raw, str):
             return _json_error("cron must be a 5-field expression", 400)

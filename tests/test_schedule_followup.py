@@ -810,6 +810,27 @@ def test_notify_cron_row_fires_and_advances_like_a_task_row(tmp_path):
     assert record["next_run_at"] > "2000-01-02"
 
 
+def test_notify_cron_row_that_cannot_advance_never_rings(tmp_path):
+    """A durable cron row whose expression no longer parses but whose stored
+    due instant is in the past must not ring the owner on every pass: the
+    successor is settled before the notification goes out."""
+    queue, pending = _queue(tmp_path)
+    queue.upsert_scheduled_task(_notify_row(
+        "n-bad-cron", trigger={"type": "cron", "expr": "* * * * *"}, key="broken"))
+    store = queue.load_schedule_store(tmp_path)
+    store["tasks"][0]["trigger"]["expr"] = "not-a-cron"
+    store["tasks"][0]["next_run_at"] = "2000-01-01T00:00:00+00:00"
+    from supervisor import queue_schedules
+
+    queue_schedules._write_scheduled_tasks(store, tmp_path)
+    queue.check_scheduled_tasks()
+    queue.check_scheduled_tasks()
+    assert pending == []
+    assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []
+    record = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert record["enabled"] is True and record["last_error"] and "2000-01-01" in record["next_run_at"]
+
+
 def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path, monkeypatch):
     """The resync never touches ``skill:`` rows, so the tick itself must not
     ring for a skill the owner switched off or removed; and it asks about each
