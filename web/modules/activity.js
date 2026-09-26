@@ -197,7 +197,7 @@ export function initActivity({ mount, ws } = {}) {
                 <span class="activity-sub">${sub}</span>
             </div>
             <div class="activity-row-actions">${lifecycle}
-               <button type="button" class="btn btn-xs btn-danger" data-act="schedule-delete" data-id="${id}" data-managed="${managed ? '1' : ''}" data-notify="${notify ? '1' : ''}" data-suppressed="${suppressed ? '1' : ''}">Delete</button></div>
+               <button type="button" class="btn btn-xs btn-danger" data-act="schedule-delete" data-id="${id}" data-managed="${managed ? '1' : ''}" data-notify="${notify ? '1' : ''}" data-suppressed="${suppressed ? '1' : ''}" data-consumed="${consumed ? '1' : ''}">Delete</button></div>
         </div>`;
     }
 
@@ -408,9 +408,10 @@ export function initActivity({ mount, ws } = {}) {
                 // would recreate it. Delete SUPPRESSES it durably, and the dialog
                 // says so before anything is sent. A skill's reminder is re-posted
                 // under its key the same way, so its first Delete suppresses too;
-                // deleting the retained record again really removes it.
+                // deleting the retained record again really removes it. A reminder
+                // that already fired is a receipt: Delete removes it at once.
                 const managedRow = btn.dataset.managed === '1';
-                const reminderRow = btn.dataset.notify === '1' && btn.dataset.suppressed !== '1';
+                const reminderRow = btn.dataset.notify === '1' && btn.dataset.suppressed !== '1' && btn.dataset.consumed !== '1';
                 const confirmedDelete = await openConfirmDialog({
                     title: managedRow ? 'Suppress skill schedule' : reminderRow ? 'Suppress reminder' : 'Delete schedule',
                     body: managedRow

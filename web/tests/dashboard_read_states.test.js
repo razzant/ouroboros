@@ -700,6 +700,9 @@ test('Activity shows a notify row by its sentence with the notification tag and 
         { id: 'notify-cal-evt-2-def', name: 'Reminder from cal', kind: 'notify', source: 'skill:cal', enabled: false,
           manual_override: 'disabled', status: 'suppressed', retained: true, restorable: true, trigger: { type: 'once', run_at: '2999-01-02T09:00:00+00:00' },
           notification: { text: 'Standup', key: 'evt-2' } },
+        { id: 'notify-cal-evt-3-ghi', name: 'Reminder from cal', kind: 'notify', source: 'skill:cal', enabled: false,
+          completed_at: '2026-09-25T09:00:05+00:00', status: 'consumed', retained: true, trigger: { type: 'once', run_at: '2026-09-25T09:00:00+00:00' },
+          notification: { text: 'Fired already', key: 'evt-3' } },
     ] }));
     await initActivity({ mount, ws }).refresh();
     const schedules = section(mount, 'schedules');
@@ -713,13 +716,18 @@ test('Activity shows a notify row by its sentence with the notification tag and 
     assert.equal(standing[0].querySelector('button').textContent, 'Disable');
     // The owner's disabled reminder is a suppressed record with Restore, like a skill row.
     const retained = history.querySelectorAll('.activity-row');
-    assert.equal(retained.length, 1);
+    assert.equal(retained.length, 2);
     assert.match(retained[0].textContent, /Standup[\s\S]*suppressed/);
     assert.equal(retained[0].querySelector('button').textContent, 'Restore');
     // Delete carries what the dialog needs to tell the truth: the first Delete of
-    // a reminder suppresses it, deleting the retained record removes it.
+    // an armed reminder suppresses it, deleting the retained record removes it,
+    // and a reminder that already fired is a receipt Delete removes at once.
     const armedDelete = standing[0].querySelector('[data-act="schedule-delete"]');
     assert.equal(armedDelete.dataset.notify, '1');
     assert.equal(armedDelete.dataset.suppressed, '');
+    assert.equal(armedDelete.dataset.consumed, '');
     assert.equal(retained[0].querySelector('[data-act="schedule-delete"]').dataset.suppressed, '1');
+    const firedDelete = retained[1].querySelector('[data-act="schedule-delete"]');
+    assert.match(retained[1].textContent, /Fired already[\s\S]*consumed once/);
+    assert.equal(firedDelete.dataset.consumed, '1');
 });
