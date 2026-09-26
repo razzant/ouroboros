@@ -34,7 +34,7 @@ from .lib.telegram_state import (
 )
 from .lib import telegram_inbound, telegram_quiz
 from .lib.telegram_health import _collect_health, _build_menu_tasks
-from .lib.telegram_notifier import _make_notice, _make_notifier
+from .lib.telegram_notifier import NOTICES_SETTING, _make_notifier
 from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .scripts.telegram_settings import (
     TelegramSettingsError,
@@ -75,10 +75,9 @@ _SAFE_TRANSLATION_KEYS = frozenset({"/status", "/bg status", "/bg"})
 # the GET that hydrates the form returns only these. The bot token belongs to
 # Secrets and is deliberately absent from both directions.
 _SETTINGS_FORM_KEYS = (
-    "TELEGRAM_CHAT_ID", "TELEGRAM_MAX_UPDATES_PER_POLL", "TELEGRAM_MIRROR_MODE",
-    "TELEGRAM_COMMAND_MODE", "TELEGRAM_LANGUAGE", "TELEGRAM_SILENT_MODE",
-    "TELEGRAM_SUBAGENT_CARDS", "TELEGRAM_MIRROR_PROGRESS", "TELEGRAM_NOTIFY_TASKS",
-    "TELEGRAM_NOTIFY_BUDGET", "TELEGRAM_NOTIFY_NOTICES", "TELEGRAM_MINIAPP_ENABLED",
+    "TELEGRAM_CHAT_ID", "TELEGRAM_MAX_UPDATES_PER_POLL", "TELEGRAM_MIRROR_MODE", "TELEGRAM_COMMAND_MODE",
+    "TELEGRAM_LANGUAGE", "TELEGRAM_SILENT_MODE", "TELEGRAM_SUBAGENT_CARDS", "TELEGRAM_MIRROR_PROGRESS",
+    "TELEGRAM_NOTIFY_TASKS", "TELEGRAM_NOTIFY_BUDGET", "TELEGRAM_NOTIFY_NOTICES", "TELEGRAM_MINIAPP_ENABLED",
 )
 
 def _setting_int(settings: Dict[str, Any], key: str, default: int, *, minimum: int = 1, maximum: int = 100) -> int:
@@ -1390,7 +1389,6 @@ def register(api):
     api.subscribe_event("chat.links", _make_links(api))
     api.subscribe_event("chat.quiz", _make_quiz(api))
     api.subscribe_event("chat.quiz_state", _make_quiz_state(api))
-    api.subscribe_event("owner.notification", _make_notice(api, trust_env=_HONOR_ENV_PROXIES))
     # GET hydrates the declarative form with what is stored; POST saves it.
     api.register_route("settings/save", handler=_make_settings_save(api), methods=("GET", "POST"))
     api.register_route("miniapp/status", handler=_make_status(api), methods=("POST",))
@@ -1480,14 +1478,7 @@ def register(api):
                              {"value": "on", "label": "On — ⚠️ at 80% / 90% / 100%"},
                          ],
                          "placeholder": "off"},
-                        {"name": "TELEGRAM_NOTIFY_NOTICES", "label": "Notify on skill notices and reminders", "type": "select",
-                         "options": [
-                             {"value": "off", "label": "Off"},
-                             {"value": "on", "label": "On — 🔔 one line per notice, e.g. a calendar reminder"},
-                         ],
-                         "help": "Owner notifications a reviewed skill or a model-free schedule hands the host. "
-                                 "They never appear in the chat; this is the phone copy.",
-                         "placeholder": "off"},
+                        NOTICES_SETTING,
                     ],
                     "submit_label": "Save Telegram settings",
                 },

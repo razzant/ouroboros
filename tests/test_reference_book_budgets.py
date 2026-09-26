@@ -38,7 +38,8 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 165900 -> 166100 (owner notifications merged onto #1300's tree, measured 165977): the
     # scheduled_tasks.json tree line names the table's second row kind (`kind:"notify"`) and
     # the event_bus.py row names the owner-notification fact and the owner-chat rule it owns.
-    "docs/architecture/01-high-level-architecture.md": 166100,
+    # 166100 -> 166300: the host_notify.py tree row (the /notify family beside the Host Service).
+    "docs/architecture/01-high-level-architecture.md": 166300,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -282,7 +283,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # Dispatcher producer/annotation separation and its retained-source lifetime.
     "docs/architecture/13-external-skills-layer.md": 9500,
     "docs/development/01-role-and-authority.md": 2437,
-    "docs/development/02-naming-and-boundaries.md": 36372,
+    # 36372 -> 36600 (owner notifications merged onto the current tree, measured 36512): the
+    # chat-id paragraph names its one addressed exception, event_bus.owner_notification_chat_id
+    # (a banner sent to chat 0 reaches nobody), beside the two normalizers it keeps.
+    "docs/development/02-naming-and-boundaries.md": 36600,
     # 22873 -> 23100: one new invariant (notifications ring for live events
     # only). Its text was compressed to the load-bearing facts first; the
     # remainder is the cost of stating a rule that did not exist before.

@@ -289,9 +289,23 @@ def _make_notice(api, *, trust_env: bool = False):
     return handle
 
 
+# The notices toggle, declared beside the reader that honours it.
+NOTICES_SETTING = {
+    "name": "TELEGRAM_NOTIFY_NOTICES", "label": "Notify on skill notices and reminders", "type": "select",
+    "options": [{"value": "off", "label": "Off"},
+                {"value": "on", "label": "On — 🔔 one line per notice, e.g. a calendar reminder"}],
+    "help": "Owner notifications a reviewed skill or a model-free schedule hands the host. "
+            "They never appear in the chat; this is the phone copy.",
+    "placeholder": "off",
+}
+
+
 def _make_notifier(api, *, trust_env: bool = False):
-    """Periodic, file-based proactive notifications (task done / budget threshold).
-    Read-only over durable files; sends only when a pinned chat + toggle are set."""
+    """Periodic, file-based proactive notifications (task done / budget threshold),
+    plus the owner-notice mirror subscription (`owner.notification`, behind
+    NOTICES_SETTING). Read-only over durable files; sends only when a pinned chat
+    + toggle are set."""
+    api.subscribe_event("owner.notification", _make_notice(api, trust_env=trust_env))
     async def notifier() -> None:
         retry_delay = TELEGRAM_RETRY_INITIAL_SEC
         degraded_cause = ""

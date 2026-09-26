@@ -136,7 +136,7 @@ Every `/api/files/*` operation resolves its requested path and refuses the opera
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/delivery` | `gateway.host_service._api_presence_delivery` |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/work/{work_ref}` | `gateway.host_service._api_presence_work` |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/ui/ws-message` | `gateway.host_service._api_ws_message` |
-| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/notify` | `gateway.host_service._api_notify` (one owner notification under the `notify_owner` grant: a durable `owner_notification` events row, its live browser frame and the `owner.notification` topic; never a chat row, never a model turn) |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/notify` | `gateway.host_notify._api_notify` (one owner notification under the `notify_owner` grant: a durable `owner_notification` events row, its live browser frame and the `owner.notification` topic; never a chat row, never a model turn) |
 | WS | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/events` | `gateway.host_service._ws_events` |
 
 Rationale: `server.py` owns process startup/lifespan/static mounting, while `gateway/*` owns browser-facing HTTP/WS contracts; this keeps UI and runtime coupling explicit and testable.

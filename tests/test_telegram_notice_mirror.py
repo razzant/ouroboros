@@ -98,5 +98,6 @@ def test_manifest_and_settings_form_declare_the_notice_lane():
     manifest = (REPO / "skills" / "telegram" / "SKILL.md").read_text(encoding="utf-8")
     assert "owner.notification" in manifest.split("---", 2)[1]
     plugin = (REPO / "skills" / "telegram" / "plugin.py").read_text(encoding="utf-8")
-    assert 'api.subscribe_event("owner.notification"' in plugin
+    notifier = (pathlib.Path("skills/telegram/lib/telegram_notifier.py")).read_text(encoding="utf-8")
+    assert 'api.subscribe_event("owner.notification"' in notifier and "_make_notifier(api" in plugin
     assert '"TELEGRAM_NOTIFY_NOTICES"' in plugin.split("_SETTINGS_FORM_KEYS", 1)[1].split(")", 1)[0]

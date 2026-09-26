@@ -203,7 +203,7 @@ def test_scheduled_notify_upsert_refuses_a_row_owned_by_another_source(tmp_path:
 
     queue.init(tmp_path)
     client, _app = _notify_client(tmp_path)
-    from ouroboros.gateway.host_service import _notify_schedule_id
+    from ouroboros.gateway.host_notify import _notify_schedule_id
 
     queue.upsert_scheduled_task({
         "id": _notify_schedule_id("cal", "shared"), "name": "someone else's", "kind": "notify",
@@ -231,7 +231,7 @@ def test_notify_reports_an_unwritable_log_as_503_not_500(tmp_path: pathlib.Path)
 
 
 def test_long_keys_yield_ids_the_owner_lifecycle_endpoints_accept(tmp_path: pathlib.Path) -> None:
-    from ouroboros.gateway.host_service import _notify_fresh_schedule_id, _notify_schedule_id
+    from ouroboros.gateway.host_notify import _notify_fresh_schedule_id, _notify_schedule_id
     from ouroboros.schedule_contract import schedule_id_error
     from supervisor import queue
 
@@ -333,7 +333,7 @@ def test_companions_on_the_events_socket_are_not_served_owner_notifications(tmp_
 def test_two_skills_with_look_alike_long_names_never_share_a_schedule_id() -> None:
     """The slug is truncated to fit the id contract, so two 64-character names
     that differ only past the cut must still get their own row per key."""
-    from ouroboros.gateway.host_service import _notify_schedule_id
+    from ouroboros.gateway.host_notify import _notify_schedule_id
 
     first, second = "a" * 60 + "0007", "a" * 60 + "0008"
     ids = {_notify_schedule_id(first, "2"), _notify_schedule_id(second, "2")}

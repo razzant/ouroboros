@@ -214,6 +214,7 @@ BAND_PATHS = {
     "tests/test_review_session_scope_wiring.py": "Scope-session integration scenarios share transport fixtures and verify exact subject delivery, manifest identity, and diagnostic coverage across native and delegated routes.",
     "tests/test_review_verification_v6544.py": None,
     "tests/test_safety_policy.py": None,
+    "tests/test_schedule_followup.py": "Entered the band with the notify-row suite (the schedule table's second dispatch verb: firing, cron successor before the ring, silence of a disabled skill, the owner's suppression, receipts) beside the follow-up tests it extends; one table, one test file.",
     "tests/test_skill_review_runner.py": "Skill lifecycle/review terminal-state regression coverage stays one focused suite below the 1500-line band cap.",
     "tests/test_swe_pro_e1v2.py": None,
     "tests/test_telegram_miniapp_lifecycle.py": None,
