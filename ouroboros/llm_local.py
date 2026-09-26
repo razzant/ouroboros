@@ -221,6 +221,13 @@ class _LocalLaneMixin:
         ctx_len, local_max = local_context_limits(max_tokens)
         if ctx_len > 0:
             clean_messages = self._prepare_messages_for_local_context(clean_messages, ctx_len, local_max)
+        else:
+            log.warning(
+                "Local lane dispatching with unknown context window (ctx_len=0); "
+                "compaction skipped. Set LOCAL_MODEL_SOURCE so the local server "
+                "can start, or set USE_LOCAL_* to false to route away from the "
+                "local lane."
+            )
         for msg in clean_messages:
             content = msg.get("content")
             if content is None and msg.get("role") == "assistant":
