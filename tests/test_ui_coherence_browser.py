@@ -709,7 +709,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
     assert len(decisions) == 2, 'a reload and a navigation never answer anything'
 
 
-@pytest.mark.parametrize('width', [1100, 320])
+@pytest.mark.parametrize('width', [1100, 375])
 def test_short_question_and_routing_cards_keep_their_width_floor(subscription_ui, width):
     """The shared card floor survives shrink-to-fit but yields to a narrow column."""
     page = subscription_ui['page']
@@ -726,6 +726,8 @@ def test_short_question_and_routing_cards_keep_their_width_floor(subscription_ui
         const column = document.querySelector('#chat-messages');
         column.append(decision.buildQuizCard({ type: 'quiz', task_id: 'width-proof', quiz_id: 'short',
             state: 'answered', answered_index: 0, question: 'Ок?', options: ['Да', 'Нет'] }));
+        column.append(decision.buildQuizCard({ type: 'quiz', task_id: 'width-proof', quiz_id: 'open',
+            state: 'open', question: 'What matters most here?', options: [], wait_for_answer: true }));
         const owner = media.bubbleFrameNode({ role: 'user' }, document.createElement('span'));
         owner.dataset.clientMessageId = 'width-route';
         decision.renderRoutingDecision(owner, { status: 'needs_manual_target', routing_token: 'width-token',
@@ -745,7 +747,9 @@ def test_short_question_and_routing_cards_keep_their_width_floor(subscription_ui
                 inside: box.right <= rect.right - parseFloat(cs.paddingRight) + 1};
         })};
     }""")
-    assert len(metrics['cards']) == 2, metrics
+    assert len(metrics['cards']) == 3, metrics
+    assert page.locator('.chat-quiz-card[data-quiz-id="open"] .chat-quiz-option').count() == 0
+    assert page.locator('.chat-quiz-card[data-quiz-id="open"] .chat-quiz-comment').count() == 1
     assert metrics['overflow'] <= 1, metrics
     assert all(card['width'] >= card['minimum'] - 1 and card['inside'] for card in metrics['cards']), metrics
     setup_browser.capture(page, f'question-routing-width-{width}')

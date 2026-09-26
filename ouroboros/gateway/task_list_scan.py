@@ -12,6 +12,7 @@ import logging
 import pathlib
 from typing import Dict, List
 
+from ouroboros.presence_authority import presence_metadata_binding, presence_record_binding
 from ouroboros.task_result_schema import (
     quarantine_task_result,
     task_result_schema_refusal,
@@ -78,6 +79,17 @@ def raw_result_facts(results_dir: pathlib.Path, *, reader=None) -> tuple[Dict[st
             malformed.append(name)
             continue
         facts = {field: str(data.get(field) or "") for field in _RESULT_FACT_KEYS}
+        # One derived scalar selects a Presence binding's own work without a
+        # second read; the full row still decides once the selection loads it.
+        facts["presence_binding_id"] = presence_record_binding(data)
+        # An empty scalar is not proof of absent provenance: a malformed carrier or
+        # lost metadata under an inherited ceiling must never inherit a queue claim.
+        metadata = data.get("metadata")
+        contract = data.get("task_contract")
+        facts["presence_authority_recorded"] = (
+            presence_metadata_binding(metadata) is not None
+            or isinstance(contract, dict) and "capability_ceiling" in contract
+        )
         facts["schema_refusal"] = task_result_schema_refusal(data)
         rows[name] = facts
         _RAW_TS_MEMO[key] = (signature, tuple(facts.items()))

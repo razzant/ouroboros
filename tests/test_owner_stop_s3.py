@@ -430,6 +430,33 @@ def test_tool_call_spanning_expiry_keeps_the_episode_whole(tmp_path, monkeypatch
     assert ostop.sweep_owner_stop_hold(q_isolated, "t-span", updated, now=expiry + 121.0) is False
 
 
+def test_solve_ceiling_spares_settled_root_post_work_but_not_deadline_or_closed_phase(tmp_path, monkeypatch):
+    from supervisor import queue as q
+    from ouroboros.task_results import write_task_result
+
+    now = time.time()
+    task_id = "post-ceiling"
+    task = {"id": task_id, "root_task_id": task_id, "chat_id": 0, "type": "task"}
+    meta = {"task": task, "started_at": now - 100.0, "last_heartbeat_at": now,
+            "last_progress_at": now, "attempt": 1}
+    q_isolated, workers_mod, jobs = _expiry_enforcement_queue(
+        monkeypatch, tmp_path, task_id, meta)
+    monkeypatch.setattr(q, "get_task_abs_ceiling_sec", lambda: 50.0)
+    write_task_result(tmp_path, task_id, "completed",
+                      root_phase_checkpoint={"post_task_synthesis": "running"})
+    q_isolated._enforce_task_timeouts_locked(workers_mod, now, 0, {})
+    assert not meta.get("finalization_requested_at") and not jobs
+    monkeypatch.setattr(q, "_task_deadline_ts", lambda _task: now - 1)
+    q_isolated._enforce_task_timeouts_locked(workers_mod, now, 0, {})
+    assert meta.get("finalization_requested_at") and meta.get("finalization_reason") == "deadline"
+    meta.pop("finalization_requested_at")
+    monkeypatch.setattr(q, "_task_deadline_ts", lambda _task: 0)
+    write_task_result(tmp_path, task_id, "completed",
+                      root_phase_checkpoint={"post_task_synthesis": "completed"})
+    q_isolated._enforce_task_timeouts_locked(workers_mod, now, 0, {})
+    assert meta.get("finalization_reason") == "absolute_ceiling"
+
+
 def test_non_progressing_task_at_expiry_is_not_reaped_or_cloned(tmp_path, monkeypatch):
     """MAJOR-B trace (b): a NON-progressing task at episode expiry must not be
     idle_timeout-reaped by the generic rail nor cloned into a new-id retry that

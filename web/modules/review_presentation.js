@@ -829,10 +829,10 @@ export function formatReviewProjection(projection) {
 }
 
 function authorDispositionText(author, label = '') {
-    if (!author || typeof author !== 'object' || !text(author.disposition)) return '';
+    if (!author || typeof author !== 'object' || (!text(author.disposition) && !text(author.action))) return '';
     const actionLabel = label || `Author ${author.action === 'stop' ? 'stop' : 'finish'}`;
     return [
-        `${actionLabel}: ${text(author.disposition)}`,
+        `${actionLabel}${text(author.disposition) ? `: ${text(author.disposition)}` : ''}`,
         text(author.reviewer_signal) ? `reviewer signal=${text(author.reviewer_signal)}` : '',
         text(author.rationale),
         text(author.subject_hash) ? `subject_hash=${text(author.subject_hash)}` : '',

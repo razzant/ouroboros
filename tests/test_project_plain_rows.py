@@ -657,7 +657,9 @@ def test_a_host_salvage_row_is_never_a_bare_headline_and_reason(tmp_path):
         f"{SALVAGE_EXCERPT_LABEL}: Applied Rewrote the atlas builder and reran the suite."
         in row["text"]
     )
-    assert "context_overflow." in row["text"]
+    # The execution cause is the rail's owner sentence (TASK_CAUSE_PHRASES); the code stays on the result.
+    assert "The task outgrew its context before it could finish cleanly." in row["text"]
+    assert "context_overflow" not in row["text"]
     assert "get_task_result" not in row["text"]
     for marker in ("#", "**", "`"):
         assert marker not in row["text"]

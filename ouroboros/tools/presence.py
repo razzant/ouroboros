@@ -300,9 +300,10 @@ def _initiate_presence(
 
 
 def _cancel_presence_work(ctx: ToolContext, work_ref: str, reason: str = "") -> str:
-    """Cancel only work correlated to this exact presence binding/conversation."""
+    """Cancel work started from this presence binding (any of its conversations) or this turn's own tree."""
 
-    from ouroboros.task_results import load_task_result, validate_task_id
+    from ouroboros.presence_authority import presence_caller_binding, presence_work_refusal
+    from ouroboros.task_results import validate_task_id
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tools.join_ledger import _cancel_task
 
@@ -310,21 +311,11 @@ def _cancel_presence_work(ctx: ToolContext, work_ref: str, reason: str = "") -> 
         task_id = validate_task_id(work_ref)
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"ERROR: PRESENCE_WORK_REF_INVALID: {exc}")))
-    current_meta = getattr(ctx, "task_metadata", {})
-    current = current_meta.get("presence") if isinstance(current_meta, dict) else None
-    stored = load_task_result(canonical_data_root(ctx), task_id) or {}
-    target_meta = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
-    target = target_meta.get("presence") if isinstance(target_meta.get("presence"), dict) else None
-    if not isinstance(current, dict) or not isinstance(target, dict):
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=("ERROR: PRESENCE_WORK_NOT_CORRELATED")))
-    current_event = current.get("event") if isinstance(current.get("event"), dict) else {}
-    target_event = target.get("event") if isinstance(target.get("event"), dict) else {}
-    if (
-        str(current.get("binding_id") or "") != str(target.get("binding_id") or "")
-        or str(current_event.get("conversation_key") or "")
-        != str(target_event.get("conversation_key") or "")
-    ):
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=("ERROR: PRESENCE_WORK_NOT_CORRELATED")))
+    refusal = presence_work_refusal(ctx, task_id, drive_root=canonical_data_root(ctx), same_tree=True)
+    # A speaker, or a root acting only for its binding: the binding authority decides, not speaker metadata.
+    if refusal or presence_caller_binding(ctx) is None:
+        return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
+            "ERROR: PRESENCE_WORK_NOT_CORRELATED: " + (refusal.split(": ", 1)[-1] or "this is not a presence task."))))
     return _cancel_task(ctx, task_id, reason)
 
 
@@ -440,9 +431,10 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "presence_cancel_work",
                 "description": (
-                    "Request cancellation of long work previously deferred from this exact "
-                    "presence binding and conversation. The opaque work_ref is correlation, "
-                    "not general task authority."
+                    "Request cancellation of independent work started from this presence "
+                    "binding, in this or another of its conversations (or of this turn's own "
+                    "children). The result is a request receipt, not proof the work stopped; "
+                    "work of another binding or the owner's own tasks is refused."
                 ),
                 "parameters": {
                     "type": "object",

@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.acceptance_preparation import incident_cause_clauses
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+from ouroboros.review_records import recorded_author_stop
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE
 from ouroboros.utils import append_jsonl, iter_jsonl_objects, jsonl_append_lock_path, replace_atomic, strip_markdown, utc_now_iso
 
@@ -134,6 +135,7 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
     question = str(quiz.get("question") or row.get("text") or block.get("question") or "")
     assumption = str(quiz.get("assumption") or block.get("assumption") or "")
     stake = str(quiz.get("stake") or block.get("stake") or "")
+    host_facts = str(quiz.get("host_facts") or block.get("host_facts") or "")
     recommended = block.get("recommended_index")
     if not isinstance(recommended, int) or isinstance(recommended, bool):
         recommended = next((i for i, option in enumerate(options)
@@ -147,10 +149,11 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
         "text": f"{lead} in {name}", "is_progress": False, "markdown": False,
         # Display fields only when known: a narrower producer must never blank a complete row.
         **({"question": question} if question else {}),
-        **({"options": labels} if labels else {}),
+        **({"options": labels} if isinstance(quiz.get("options"), list) or isinstance(block.get("options"), list) else {}),
         **({"option_details": details} if details else {}),
         **({"stake": stake} if stake else {}),
         **({"assumption": assumption} if assumption else {}),
+        **({"host_facts": host_facts} if host_facts else {}),
         **({"recommended_index": recommended} if recommended is not None else {}),
         **facts,
         **({"source_status": "unavailable"} if not known else {}),
@@ -779,6 +782,26 @@ TASK_CAUSE_PHRASES = {
     "host_child_status_suffix": "A child task had not settled when the answer was delivered",
     "invalid_delivery_control_after_repair": "Ouroboros's final delivery instruction could not be read even after repair, so the answer stands as delivered.",
     "budget_exhausted": "The task ran out of budget before it could finish cleanly",
+    # The other forced-finalization rails (outcomes.BEST_EFFORT_REASON_CODES and
+    # the keys of ACCEPTANCE_BYPASS_REASON_BY_RAIL): the loop's typed reason_code
+    # when a limit ended the task. Each sentence names only the limit its code
+    # states; whether an answer was still delivered is the status word's to say.
+    "round_limit": "The task hit its round limit before it could finish cleanly",
+    "finalization_grace": "The task hit a time limit and had to wrap up before it could finish cleanly",
+    "deadline_local": "The task reached its deadline before it could finish cleanly",
+    "context_overflow": "The task outgrew its context before it could finish cleanly",
+    "children_unabsorbed": "Some sub-task results were never folded in, so the task had to wrap up",
+    # The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the
+    # reaper's task_done reason_code, spoken on its grace toast, its kill notice
+    # and its salvage line through this same table, never as the code.
+    "absolute_ceiling": "The task reached its maximum running time",
+    "deadline": "The task reached its deadline",
+    "idle_timeout": "The task made no progress for too long",
+    # The reason codes outcomes.derive_loop_outcome stamps from typed terminal facts.
+    "provider_failure": "The model provider failed to answer, so the task could not finish",
+    "empty_final_text": "The task ended without a final answer",
+    "deep_self_review_unavailable": "The deep self-review could not run",
+    "deep_self_review_error": "The deep self-review stopped on an error",
     # #869: the provider-death rail's terminal words; the amount of retained text is
     # said by the notice, this clause only names why the task ended.
     "provider_unavailable": "The model provider stopped answering, so the task could not finish",
@@ -1285,7 +1308,10 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any]) -> str:
     if raw_reason == REASON_OWNER_REQUESTED_FINALIZATION:
         clause = ""  # an owner-requested stop is a success and carries its own marker
     elif (status and (status != ACCEPTANCE_ACCEPTED or cause in TASK_CAUSE_PHRASES)
-            and phase in {"done", "warn"}):
+            and (phase in {"done", "warn"} or (recorded_author_stop(decision) and phase == "error"))):
+        # An explicit author stop is the fact that ended the task (its objective is
+        # blocked, so the card is red); the decision's typed reason — its TRUE cause,
+        # not always ``author_stop`` — speaks over the delivery step.
         clause = TASK_CAUSE_PHRASES.get(cause, cause)
     elif phase == "cancelled" and isinstance(origin, dict) and origin:
         # The recorded cause and the relation the record PROVES (#1061).
@@ -1306,10 +1332,20 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any]) -> str:
         key = _plan_review_key(result, event, reason) if reason == "plan_review_advisory" else reason
         clause = (" ".join(strip_markdown(str(detail)).split()) if detail
                   else TASK_CAUSE_PHRASES.get(key, key))
-    line = _join_cause_clauses([clause, *incident_cause_clauses(decision, reason, TASK_CAUSE_PHRASES),
+    line = _join_cause_clauses([clause, _author_stop_rationale(decision),
+                                *incident_cause_clauses(decision, reason, TASK_CAUSE_PHRASES),
                                 *_terminal_limitations(result, event, reason, held=held),
                                 TASK_CAUSE_PHRASES.get(custody, custody) if custody else ""])
     return line if not line or line.endswith((".", "!", "?", "…", ")")) else line + "."
+
+
+def _author_stop_rationale(decision: Dict[str, Any]) -> str:
+    """The agent's own reason for an explicit stop, beside the typed sentence (TZ-2 C4).
+
+    Only the AUTHOR's recorded rationale reaches the row: the reviewer rationale
+    stays in the card; a finish carries none. The twin of ``authorStopRationale``."""
+    author = decision.get("author_disposition") if recorded_author_stop(decision) else None
+    return " ".join(strip_markdown(str(author.get("rationale") or "")).split()) if isinstance(author, dict) else ""
 
 
 def _run_lives_in_its_project(

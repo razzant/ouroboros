@@ -214,6 +214,38 @@ def test_schedule_followup_registers_a_one_shot_entry(tmp_path):
     assert record["task"]["context"] == "plan review for root-1 was quorum-unreachable"
 
 
+def test_a_timer_follow_up_is_framed_as_task_authored_and_its_note_never_enters_the_owner_corpus(tmp_path):
+    """TZ-2 B3: the successor of a timer follow-up reads the same ``objective_author``
+    stamp a promote / route_to_project carries, so its first turn is framed as drafted
+    by the scheduling task and the note text never becomes an owner directive. The
+    owner door's stamp (``origin_message_ref``) is still not carried (#1271)."""
+    from types import SimpleNamespace
+
+    from ouroboros.context import build_user_content
+    from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from supervisor import queue
+
+    ctx = _ctx(tmp_path)
+    ctx.task_metadata["origin_message_ref"] = {"chat_id": 1, "message_id": "owner-7"}
+    note = "Re-check the reviewer window and resume the plan."
+    assert _followup(ctx, objective=note).startswith("FOLLOWUP_SCHEDULED")
+    [record] = queue.list_scheduled_tasks(tmp_path / "data")["tasks"]
+    author = {"kind": "task", "task_id": "root-1"}
+    assert record["task"]["metadata"]["objective_author"] == author
+    assert "origin_message_ref" not in record["task"]["metadata"]
+    successor = queue._task_from_schedule(record)
+    assert successor["metadata"]["objective_author"] == author
+    origin = run_origin(successor)
+    assert (origin["owner_ingress"], origin["objective_author"]) == (False, author)
+    content = build_user_content(successor)
+    assert content.startswith("[OBJECTIVE_AUTHOR] The objective below was drafted by task root-1, "), content
+    assert content.endswith("[/OBJECTIVE_AUTHOR]\n\n" + note), content
+    live = SimpleNamespace(task_metadata=successor["metadata"])
+    _initialize_owner_directives(live, [{"role": "user", "content": content}])
+    assert getattr(live, "_owner_directives", []) == []  # the note is the task's, not the owner's
+
+
 def test_presence_followup_preserves_ceiling_and_return_context(tmp_path):
     ctx = _ctx(tmp_path)
     ctx.task_metadata["presence"] = {"binding_id": "b" * 32}
@@ -264,10 +296,43 @@ def test_presence_recurring_followup_uses_existing_cron_and_preserves_authority(
     assert record["timezone"] == "Europe/Moscow"
     assert record["next_run_at"]
     assert record["task"]["metadata"]["presence"] == ctx.task_metadata["presence"]
-    assert record["task"]["task_contract"] == ctx.task_contract
+    assert record["task"]["task_contract"] == {"capability_ceiling": payload}  # the turn's objective is not the follow-up's
     scheduled = queue._task_from_schedule(record)
     assert scheduled["metadata"]["presence"] == ctx.task_metadata["presence"]
     assert scheduled["task_contract"]["capability_ceiling"] == ctx.task_contract["capability_ceiling"]
+    assert scheduled["task_contract"]["objective"] == "Re-run the plan panel once the reviewer window resets."
+
+
+def test_a_bindings_root_follow_up_runs_its_own_objective_under_the_inherited_authority(tmp_path):
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from supervisor import queue
+    from tests.test_presence_own_work import _ceiling
+
+    ctx = _ctx(tmp_path)
+    # A root a delegated descendant promoted: binding authority only, a full contract of its own.
+    ctx.task_metadata["presence_binding_authority"] = {"binding_id": "b" * 32}
+    ceiling = presence_ceiling_payload(_ceiling())
+    ctx.task_contract = {"objective": "Compile the full audit", "context": "old audit ids 1-9",
+                         "expected_output": "Nine figures", "acceptance_claims": ["Q1 is closed"],
+                         "success_criteria": ["All nine figures reviewed"],
+                         "allowed_resources": {"network": True}, "capability_ceiling": ceiling}
+
+    assert _followup(ctx, objective="Revisit the Q2 figures", context="Q2 closes Friday").startswith(
+        "FOLLOWUP_SCHEDULED")
+    assert _followup(ctx, objective="Check the Q3 draft").startswith("FOLLOWUP_SCHEDULED")
+
+    records = queue.list_scheduled_tasks(tmp_path / "data")["tasks"]
+    scheduled = {row["task_contract"]["objective"]: row for row in map(queue._task_from_schedule, records)}
+    assert set(scheduled) == {"Revisit the Q2 figures", "Check the Q3 draft"}
+    assert scheduled["Revisit the Q2 figures"]["task_contract"]["context"] == "Q2 closes Friday"
+    assert scheduled["Check the Q3 draft"]["task_contract"]["context"] == ""  # no inherited context
+    for task in scheduled.values():
+        assert task["task_contract"]["expected_output"] == ""
+        assert task["task_contract"]["acceptance_claims"] == []
+        assert task["task_contract"]["success_criteria"] == []
+        assert task["metadata"]["presence_binding_authority"] == {"binding_id": "b" * 32}
+        assert task["task_contract"]["capability_ceiling"] == ceiling
+        assert task["task_contract"]["allowed_resources"] == {"network": True}
 
 
 def test_schedule_followup_requires_exactly_one_valid_trigger(tmp_path):

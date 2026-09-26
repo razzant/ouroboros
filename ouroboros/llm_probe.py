@@ -208,6 +208,10 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
     """Map typed transport facts to one bounded, provider-neutral reason."""
     status, code, error_type = _error_facts(exc)
     credit_codes = {
+        # Z.ai answers plan exhaustion as HTTP 429 code 1113 "Insufficient
+        # balance" (billing, not rate limiting; a Coding Plan key on the
+        # pay-as-you-go endpoint lands here too).
+        "1113",
         "billing_hard_limit_reached",
         "credit_balance_too_low",
         "credits_exhausted",
@@ -252,7 +256,11 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
             connect_types += (openai.APIConnectionError,)
         except Exception:  # pragma: no cover - dependency is shipped
             pass
-        if isinstance(exc, timeout_types):
+        from ouroboros.net_transport import ExtraCaBundleError
+
+        if isinstance(exc, ExtraCaBundleError):
+            reason = str(exc)  # the owner's trust bundle, not the provider, is what failed
+        elif isinstance(exc, timeout_types):
             reason = "Timed out"
         elif isinstance(exc, connect_types):
             reason = "Could not reach provider"
@@ -325,7 +333,7 @@ def probe_provider_readiness(
 
         if provider in {
             "openrouter", "openai", "openai-compatible", "minimax", "cloudru",
-            "deepseek",
+            "deepseek", "zai",
         }:
             remote_client = client._new_remote_client(target)
 
@@ -347,8 +355,10 @@ def probe_provider_readiness(
 
             def send_anthropic(payload):
                 from ouroboros.llm_attempt import processing_contract_headers
+                from ouroboros.net_transport import requests_verify_kwargs
                 response = requests.post(
                     url, headers={**headers, **processing_contract_headers(target, payload)}, json=payload, timeout=float(timeout),
+                    **requests_verify_kwargs(),
                 )
                 response.raise_for_status()
                 return response
@@ -456,7 +466,8 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
         # Metadata carries no cognitive in-flight lease. Reuse the ordinary
         # connection allowance for every HEAD phase, not the LLM read window.
         timeout = min(float(timeout), float(llm._no_proxy_timeout(timeout).connect))
-        with httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False) as client:
+        from ouroboros.net_transport import verify_kwargs
+        with httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False, **verify_kwargs()) as client:
             response = client.head(url)
         # An upstream HTTP refusal still proves connectivity. A gateway/server
         # outage does not. This says nothing about the old generation's outcome.

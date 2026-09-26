@@ -145,6 +145,15 @@ def _capture_on_chain(error: BaseException) -> Any:
     return capture
 
 
+def outcome_unknown_on_chain(error: BaseException) -> bool:
+    """Whether ``error``'s chain carries a dispatched attempt without a terminal provider fact.
+
+    Provider-independent: a generic API exception, or a wrapper whose explicit
+    cause carries the capture, reads exactly like the typed Claudexor error.
+    """
+    return getattr(_capture_on_chain(error), "state", None) in {"dispatched", "unresolved"}
+
+
 def _requests_protocol_death(exc: BaseException) -> Any:
     """The innermost typed death inside a requests body-disconnect wrapper, or None.
 

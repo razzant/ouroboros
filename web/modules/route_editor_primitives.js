@@ -84,13 +84,13 @@ export function composeModelSource(source, model) {
 // Owner-facing order of the direct API providers. OpenRouter first because an
 // unprefixed model id routes through it; the rest follow the settings order.
 export const API_PROVIDER_ORDER = ['openrouter', 'openai', 'anthropic', 'deepseek',
-    'minimax', 'cloudru', 'gigachat', 'openai-compatible'];
+    'zai', 'minimax', 'cloudru', 'gigachat', 'openai-compatible'];
 
 // Fallback names for providers the setup contract does not describe (GigaChat
 // has no profile spec). The contract's label wins whenever it exists.
 const API_PROVIDER_LABELS = {
     openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-    minimax: 'MiniMax', cloudru: 'Cloud.ru Foundation Models', gigachat: 'GigaChat',
+    zai: 'Z.ai (GLM)', minimax: 'MiniMax', cloudru: 'Cloud.ru Foundation Models', gigachat: 'GigaChat',
     'openai-compatible': 'OpenAI-compatible endpoint',
 };
 
@@ -103,6 +103,7 @@ const API_PROVIDER_CREDENTIALS = {
     openai: [['OPENAI_API_KEY']],
     anthropic: [['ANTHROPIC_API_KEY']],
     deepseek: [['DEEPSEEK_API_KEY']],
+    zai: [['ZAI_API_KEY']],
     minimax: [['MINIMAX_API_KEY']],
     cloudru: [['CLOUDRU_FOUNDATION_MODELS_API_KEY']],
     gigachat: [['GIGACHAT_CREDENTIALS'], ['GIGACHAT_USER', 'GIGACHAT_PASSWORD']],

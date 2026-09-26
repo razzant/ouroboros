@@ -417,10 +417,11 @@ def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):
     end through the real post-task lane. The loop's hard stop records the
     existing ``_skip_post_task_synthesis`` marker on the tool context;
     ``emit_task_results`` copies it onto the task before the root predicate
-    runs, so the summary/reflection worker is never dispatched and no open
+    runs, so the reflection worker is never dispatched and no open
     ``root_phase_checkpoint`` is seeded for the boot reconciler to re-pay. A
     positive control (the same turn, not stopped) proves the recording model
-    would have seen the paid summary + reflection calls."""
+    would have seen the paid reflection call. Neither turn buys a narrative:
+    both keep free host facts even when Stop prevents the worker from starting."""
     import ouroboros.llm as llm_mod
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
     from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
@@ -501,26 +502,28 @@ def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):
     owed_rows = [row for row in pending_deliveries(root) if row.get("task_id") == "stopped1"]
     assert owed_rows and owed_rows[0]["progress_meta"]["task_terminal_status"] == "failed", owed_rows
 
-    def _summary_rows(task_id):
+    def _summary_kinds(task_id):
         chat_log = root / "logs" / "chat.jsonl"
-        rows = chat_log.read_text(encoding="utf-8").splitlines() if chat_log.exists() else []
-        return [row for row in rows if "authored_root_summary" in row and task_id in row]
+        rows = [json.loads(line) for line in chat_log.read_text(encoding="utf-8").splitlines()] if chat_log.exists() else []
+        return [row.get("summary_kind") for row in rows if row.get("type") == "task_summary" and row.get("task_id") == task_id]
 
-    assert _summary_rows("stopped1") == []
+    stopped_kinds = _summary_kinds("stopped1")  # no paid post-task worker was dispatched
+    assert stopped_kinds == ["host_task_facts"]  # free facts still reach pruned-result readers
 
     _task, _events, control_calls = _turn("control1", stopped=False)
-    assert len(control_calls) >= 2, control_calls
-    assert len(_summary_rows("control1")) == 1  # the reader sees the phase when it does run
+    assert len(control_calls) >= 1, control_calls
+    control_kinds = _summary_kinds("control1")
+    assert control_kinds.count("host_task_facts") == 1 and "authored_root_summary" not in control_kinds
 
 
 # --- "Stop now" while the paid synthesis is ALREADY in flight (audit point 4, G18) ---
 
-_STAGES = ("chat_consolidation", "scratchpad_consolidation", "summary", "reflection", "promotion")
+_STAGES = ("chat_consolidation", "scratchpad_consolidation", "reflection", "promotion")
 
 
 def _stubbed_stages(monkeypatch, calls, *, on_first=None):
-    """Record the five paid stages in order; ``on_first`` runs INSIDE stage 1
-    (the Stop lands after the synthesis has begun, past the entry snapshot)."""
+    """Record the free facts row and the four paid stages in order; ``on_first`` runs
+    INSIDE stage 1 (the Stop lands after the synthesis has begun, past the entry snapshot)."""
     import ouroboros.llm as llm_mod
     import ouroboros.post_task_evolution as pte
 
@@ -536,7 +539,7 @@ def _stubbed_stages(monkeypatch, calls, *, on_first=None):
 
     monkeypatch.setattr(pipeline, "_run_chat_consolidation", _stage("chat_consolidation"))
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", _stage("scratchpad_consolidation"))
-    monkeypatch.setattr(pipeline, "_run_task_summary", _stage("summary"))
+    monkeypatch.setattr(pipeline, "_record_task_facts", _stage("facts"))
     monkeypatch.setattr(pipeline, "_run_reflection", _stage(
         "reflection", {"reflection": "x", "backlog_candidates": [], "memory_actions": []}))
     monkeypatch.setattr(pipeline, "_update_improvement_backlog", _stage("promotion"))
@@ -561,7 +564,7 @@ def test_stop_now_during_inflight_synthesis_skips_the_remaining_paid_stages(tmp_
     """The Stop lands AFTER stage 1 began (the loop has returned, the entry
     snapshot saw no marker): the durable immediate cancel intent every stop
     ingress mints — or the live task marker re-read — trips the per-stage gate,
-    so stages 2..5 never run, the checkpoint settles ``degraded`` and the typed
+    so stages 2..4 never run, the checkpoint settles ``degraded`` and the typed
     ``post_task_stop_reason`` NAMES the skipped stages, riding the result row
     and the ``task_cost_finalized`` event alike. The in-flight key is gone."""
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, request_cancel
@@ -583,11 +586,11 @@ def test_stop_now_during_inflight_synthesis_skips_the_remaining_paid_stages(tmp_
     pipeline._run_post_task_processing_async(
         env, task, {"rounds": 20, "cost": 0.02}, {"tool_calls": [], "reasoning_notes": []}, {}, root / "logs", blocking=True)
 
-    assert calls == ["chat_consolidation"], calls
+    assert calls == ["facts", "chat_consolidation"], calls
     checkpoint = (pipeline.load_task_result(root, task_id) or {}).get("root_phase_checkpoint") or {}
     assert checkpoint.get("post_task_synthesis") == "degraded", checkpoint
     assert checkpoint.get("post_task_stop_reason") == (
-        "owner_stopped:skipped=scratchpad_consolidation,summary,reflection,promotion"), checkpoint
+        "owner_stopped:skipped=scratchpad_consolidation,reflection,promotion"), checkpoint
     finalized = _finalized_events(root, task_id)
     assert len(finalized) == 1 and finalized[0]["post_task_status"] == "degraded", finalized
     assert finalized[0]["post_task_stop_reason"] == checkpoint["post_task_stop_reason"], finalized
@@ -595,9 +598,9 @@ def test_stop_now_during_inflight_synthesis_skips_the_remaining_paid_stages(tmp_
 
 
 def test_no_stop_runs_every_paid_stage_and_finalizes_without_a_stop_reason(tmp_path, monkeypatch):
-    """Positive control for the gate: an un-stopped synthesis runs all five
-    stages in order and the checkpoint is byte-identical to before (``completed``,
-    no ``post_task_stop_reason`` anywhere)."""
+    """Positive control for the gate: an un-stopped synthesis records its free
+    facts row, then runs all four paid stages in order, and the checkpoint is
+    byte-identical to before (``completed``, no ``post_task_stop_reason`` anywhere)."""
     root, env = _synthesis_root(tmp_path)
     task_id = "unstopped1"
     task = {"id": task_id, "type": "task", "chat_id": 1, "_is_direct_chat": True, "text": "keep listing"}
@@ -607,7 +610,7 @@ def test_no_stop_runs_every_paid_stage_and_finalizes_without_a_stop_reason(tmp_p
     pipeline._run_post_task_processing_async(
         env, task, {"rounds": 20, "cost": 0.02}, {"tool_calls": [], "reasoning_notes": []}, {}, root / "logs", blocking=True)
 
-    assert calls == list(_STAGES), calls
+    assert calls == ["facts", *_STAGES], calls
     checkpoint = (pipeline.load_task_result(root, task_id) or {}).get("root_phase_checkpoint") or {}
     assert checkpoint.get("post_task_synthesis") == "completed", checkpoint
     assert "post_task_stop_reason" not in checkpoint, checkpoint
@@ -619,7 +622,7 @@ def test_entry_marker_still_skips_every_paid_stage_and_seeds_no_checkpoint(tmp_p
     """The rc.14 path is unchanged: a Stop that landed inside the loop (marker
     on the task at entry) pays nothing and leaves no open checkpoint for the
     boot reconciler — the gate trips before stage 1 and the marker keeps the
-    checkpoint writer's root predicate False."""
+    checkpoint writer's root predicate False. The free facts row still lands."""
     root, env = _synthesis_root(tmp_path)
     task_id = "marked1"
     task = {"id": task_id, "type": "task", "chat_id": 1, "_is_direct_chat": True,
@@ -630,7 +633,7 @@ def test_entry_marker_still_skips_every_paid_stage_and_seeds_no_checkpoint(tmp_p
     pipeline._run_post_task_processing_async(
         env, task, {"rounds": 2, "cost": 0.01}, {"tool_calls": [], "reasoning_notes": []}, {}, root / "logs", blocking=True)
 
-    assert calls == [], calls
+    assert calls == ["facts"], calls
     stored = pipeline.load_task_result(root, task_id) or {}
     assert "root_phase_checkpoint" not in stored, stored
     assert not (root / "logs" / "events.jsonl").exists() or _finalized_events(root, task_id) == []

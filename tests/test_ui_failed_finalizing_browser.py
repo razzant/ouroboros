@@ -4,10 +4,12 @@ and "Finalizing…" only as the secondary phase — live, after a reload, after 
 real WebSocket reconnect and on a narrow light page — then settles once.
 
 Only model judgment is a fixture. The provider refusal is a real HTTP 401 on
-the model wire, the host's own provider-unavailable rail salvages the answer,
-and the one event-held call is the post-task summary (identified by the first
-line of the production prompt), so synthesis is provably open while the
-browser looks. Nothing is timed: every wait is an event or a bounded DOM poll.
+the model wire, the host's provider-unavailable rail preserves intermediate work,
+and the one event-held call is the post-task reflection (identified by the first
+line of the production prompt; the fixture's tool round exits nonzero, so
+the typed reflection trigger fires — there is no paid summary), so
+synthesis is provably open while the browser looks. Nothing is timed: every
+wait is an event or a bounded DOM poll.
 """
 import json
 
@@ -15,7 +17,7 @@ import pytest
 
 from devtools.benchmarks.common.server_runner import _api
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
-from ouroboros.post_task_synthesis import _TASK_SUMMARY_PROMPT
+from ouroboros.reflection import _REFLECTION_PROMPT_HEAD
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
 from tests.system_e2e.harness import (
     ArtifactOracle, KeylessIsolatedServer, ModelGate, ScriptedStubModel, body_text,
@@ -26,10 +28,8 @@ wait_clone = clone_fixture
 pytestmark = [pytest.mark.serial, pytest.mark.browser]
 
 MARKER = "FAILED_FINALIZING_REAL_ACTOR"
-SUMMARY_MARKER = _TASK_SUMMARY_PROMPT.splitlines()[0]
+REFLECTION_MARKER = _REFLECTION_PROMPT_HEAD.splitlines()[0]
 SALVAGE_MARKER = "[PROVIDER_UNAVAILABLE]"  # ouroboros/loop.py::_provider_unavailable_result
-SALVAGE = "The provider refused the next request; the VERSION read before the outage is retained."
-SUMMARY = "Episodic summary: read VERSION, then the provider refused the next round with HTTP 401."
 NEUTRAL = "Nothing further to record for this fixture."
 TITLE = "Provider outage proof"
 CARD = '#chat-messages .chat-live-card[data-task-id="{}"]'
@@ -67,13 +67,16 @@ OBSERVE_JS = """tid => { const card = document.querySelector(`#chat-messages .ch
 
 
 class _OutageModel(ScriptedStubModel):
-    """One real tool round, then a provider refusal (HTTP 401, a permanent class,
-    so no backoff retries) on every later tool round of the marked task. The host's
-    salvage call and the post-task summary get their own answers; the summary is
-    the one call the gate holds."""
+    """One real (failing) tool round, then a provider refusal (HTTP 401, a permanent
+    class, so no backoff retries) on every later tool round of the marked task AND on
+    the host's forced outage final (``[PROVIDER_UNAVAILABLE]``): the provider is down
+    for that call too, so the host's terminal incident preserves the intermediate
+    output (``host_salvage``). The post-task reflection is never refused — it is the
+    one call the gate holds."""
 
     def __init__(self, gate):
-        super().__init__([{"tool": "read_file", "arguments": {"path": "VERSION"}}],
+        super().__init__([{"tool": "run_command", "arguments": {
+            "cmd": ["python", "-c", "import sys; sys.exit(7)"]}}],
                          final_answer=NEUTRAL, gate=gate)
         self.refused = 0
         outer, base = self, self._server.RequestHandlerClass
@@ -97,22 +100,16 @@ class _OutageModel(ScriptedStubModel):
 
     def _refuse(self, body):
         text = body_text(body)
-        if not body.get("tools") or MARKER not in text or SALVAGE_MARKER in text:
+        if MARKER not in text or REFLECTION_MARKER in text:
             return False
-        if not any(isinstance(m, dict) and m.get("role") == "tool" for m in body.get("messages") or []):
+        later_tool_round = bool(body.get("tools")) and any(
+            isinstance(m, dict) and m.get("role") == "tool" for m in body.get("messages") or [])
+        if not (later_tool_round or SALVAGE_MARKER in text):
             return False
         with self._lock:
             self.refused += 1
             self.calls.append(("refused_401", body))
         return True
-
-    def _answer(self, body, seq):
-        text = body_text(body)
-        if SALVAGE_MARKER in text:
-            return "salvage", {"role": "assistant", "content": SALVAGE}
-        if SUMMARY_MARKER in text:
-            return "summary", {"role": "assistant", "content": SUMMARY}
-        return super()._answer(body, seq)
 
 
 def _open(browser, url, *, theme, viewport):
@@ -164,7 +161,7 @@ def test_failed_root_reads_failed_then_finalizing(wait_clone, tmp_path, monkeypa
     # only and must itself be a temp-root path, so the test never writes elsewhere.
     shots = tmp_path / "screenshots"
     shots.mkdir(parents=True, exist_ok=True)
-    gate = ModelGate(lambda body: SUMMARY_MARKER in body_text(body) and MARKER in body_text(body), timeout=300)
+    gate = ModelGate(lambda body: REFLECTION_MARKER in body_text(body) and MARKER in body_text(body), timeout=300)
     facts = {}
     with _OutageModel(gate) as model:
         settings_path = root / "settings.json"
@@ -181,12 +178,12 @@ def test_failed_root_reads_failed_then_finalizing(wait_clone, tmp_path, monkeypa
                     # An owner's open Main: the admission name frame must reach a live socket.
                     desk.wait_for_function("() => window.__ouroWs?.ws?.readyState === 1", timeout=60000)
                     created = _api(server.base_url, "POST", "/api/tasks", {
-                        "description": f"{MARKER}: read VERSION, then report what it says.",
+                        "description": f"{MARKER}: run one diagnostic command, then report its outcome.",
                         "title": TITLE, "chat_id": WEB_UI_CHAT_ID, "source": "web",
                         "memory_mode": "forked", "metadata": {"delegation_role": "root"}})
                     task_id = str(created.get("task_id") or "")
                     assert task_id, created
-                    # The held summary IS the open synthesis: the early final already left.
+                    # The held reflection IS the open synthesis: the early final already left.
                     assert gate.arrived.wait(180), (model.kinds(), oracle.task_result(task_id))
                     # The worker's own (forked) row already settled Failed; the canonical
                     # row stays live until task_done, and carries the open checkpoint.
@@ -205,8 +202,10 @@ def test_failed_root_reads_failed_then_finalizing(wait_clone, tmp_path, monkeypa
                     assert desk.evaluate("window.__beforeReload === undefined"), "reload kept the old document"
                     card.screenshot(animations="disabled", path=str(shots / "chromium-failed-finalizing-reload.png"))
 
-                    # A real socket close through the production client: its own reconnect
-                    # re-reads history in place (same document, new socket).
+                    # A real socket close through the production client: first bind the
+                    # serving SHA after reload, so an unknown-SHA recovery is not
+                    # mistaken for a same-document reconnect (the #1196 test seam).
+                    desk.wait_for_function("() => Boolean(window.__ouroWs?._lastSha)", timeout=30000)
                     desk.wait_for_function("() => window.__ouroWs?.ws?.readyState === 1", timeout=30000)
                     desk.evaluate("window.__sameDocument = true; window.__oldSocket = window.__ouroWs.ws")
                     with desk.expect_response(lambda r: "/api/chat/history" in r.url, timeout=60000):
@@ -246,7 +245,14 @@ def test_failed_root_reads_failed_then_finalizing(wait_clone, tmp_path, monkeypa
                     assert {chip for chip, _second, _finished in log} <= {"Failed"}, log
                     finished = [f for _c, _s, f in log]
                     assert "1" in finished and "0" not in finished[finished.index("1"):], log
-                    assert desk.locator("#chat-messages").get_by_text(SALVAGE).count() == 1
+                    # Provider death preserves intermediate work as a host incident,
+                    # not as a model-authored salvage answer. The fixture does not
+                    # assert a forced call returned when the provider cannot answer.
+                    assert settled.get("terminal_origin") == "host_salvage", settled
+                    assert not settled.get("final_answer"), settled
+                    incidents = [row for row in oracle._jsonl("logs/chat.jsonl", type_filter="terminal_incident")
+                                 if row.get("task_id") == task_id]
+                    assert len(incidents) == 1 and "intermediate output" in incidents[0]["text"], incidents
                     card.screenshot(animations="disabled", path=str(shots / "chromium-failed-settled.png"))
 
                     # Replay after synthesis closed settles too: no stale Finalizing….

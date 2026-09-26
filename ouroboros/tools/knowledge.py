@@ -12,7 +12,7 @@ from ouroboros.knowledge import INDEX_FILE, OVERVIEW_TOPIC
 from ouroboros.knowledge import sanitize_topic as _sanitize_topic
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolEntry, ToolContext
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_tool_result
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 KNOWLEDGE_DIR = "memory/knowledge"
@@ -129,15 +129,34 @@ def _record_backlog_history(backlog_file: Path, topic: str, mode: str, task_id: 
 
 
 
+def _bound_delta_meta(meta: dict) -> None:
+    """Keep the tool receipt inside its existing metadata limit; history holds the full delta."""
+    delta = meta.get("knowledge_delta") or {}
+    headings = delta.get("removed_headings")
+    if not isinstance(headings, list) or len(json.dumps(meta, ensure_ascii=True, sort_keys=True,
+                                                        separators=(",", ":")).encode("utf-8")) <= _MAX_META_BYTES:
+        return
+    meta["knowledge_delta"] = {**delta, "removed_headings": [],
+                               "removed_headings_count": len(headings), "removed_headings_omitted": True,
+                               "removed_headings_sha256": hashlib.sha256(
+                                   json.dumps(headings, ensure_ascii=False).encode("utf-8")).hexdigest()}
+
+
 def _knowledge_write(
     ctx: ToolContext, topic: str, content: str, mode: str = "overwrite",
-    scope: str = "", expected_revision: str | None = None,
+    scope: str = "", expected_revision: str | None = None, old_str: str | None = None,
 ) -> str:
     try:
         sanitized = _sanitize_topic(topic)
-        if mode not in ("overwrite", "append") or not isinstance(content, str):
-            raise ValueError("content must be Markdown; mode must be overwrite or append")
+        if mode not in ("overwrite", "append", "edit") or not isinstance(content, str):
+            raise ValueError("content must be Markdown; mode must be overwrite, append or edit")
+        if mode != "edit" and old_str is not None:
+            raise ValueError("old_str is used only with mode=edit")
+        if mode == "edit" and (not isinstance(old_str, str) or not old_str):
+            raise ValueError("mode=edit requires a non-empty old_str")
         if sanitized == BACKLOG_TOPIC:
+            if mode == "edit":
+                raise ValueError("The improvement backlog has its own merge writer; edit is not supported")
             from ouroboros.improvement_backlog import backlog_path, merge_backlog_text
             root = _backlog_root(ctx)
             merged = merge_backlog_text(root, content)
@@ -145,9 +164,13 @@ def _knowledge_write(
                 raise ValueError("The improvement-backlog requires parseable ### ibl-<id> blocks with - summary: lines; the global backlog was preserved")
             _record_backlog_history(backlog_path(root), sanitized, mode, str(getattr(ctx, "task_id", "") or ""))
             return f"✅ Knowledge '{sanitized}' merged into the global backlog ({merged} item(s))."
+        # The turn is the writer; the route stamp is the route that ANSWERED the
+        # loop's last round (provider + resolved model, account when Claudexor
+        # served it), recorded by the loop, otherwise honestly unknown.
         result = knowledge_store.write_knowledge_note(
             _address(ctx, sanitized, scope), content, mode, expected_revision,
-            str(getattr(ctx, "task_id", "") or ""),
+            str(getattr(ctx, "task_id", "") or ""), old_str, writer="turn",
+            route=(getattr(ctx, "_accumulated_usage", None) or {}).get("_observed_route") or None,
         )
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(
@@ -156,9 +179,12 @@ def _knowledge_write(
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: Knowledge write failed: {type(exc).__name__}"))
     meta = {"knowledge_write_reason": result.reason}
+    if result.delta is not None:
+        meta["knowledge_delta"] = result.delta
     if result.current is not None:
         meta["knowledge_source"] = result.current.source_ref()
     if result.ok:
+        _bound_delta_meta(meta)
         return _publish_tool_result(ctx, ToolResult(
             status="ok", code="OK",
             text=f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True),
@@ -173,6 +199,7 @@ def _knowledge_write(
         # retry or another model deciding whether the stale write was safe.
         text += "\n\n" + view
         meta["knowledge_body_start"] = len(text) - len(result.current.text)
+    _bound_delta_meta(meta)
     return _publish_tool_result(ctx, ToolResult(
         status="error", code="TOOL_REPORTED_FAILURE", text=text, meta=meta))
 
@@ -208,8 +235,9 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "topic": topic, "scope": scope,
                 "content": {"type": "string", "description": "Markdown, optionally with YAML frontmatter. Write understanding and its sources/uncertainty in your own words; no summary is generated from the body."},
-                "mode": {"type": "string", "enum": ["overwrite", "append"], "description": "overwrite (default) replaces the body; append adds to the current source. Missing notes are created."},
-                "expected_revision": {"type": "string", "description": "Source revision returned by knowledge_read. Omit or pass an empty string to create a missing note; an empty string never replaces an existing note. Required when overwriting an existing note; drift returns the newer source without replacing it."},
+                "mode": {"type": "string", "enum": ["overwrite", "append", "edit"], "description": "overwrite (default) replaces the body; append adds to the source; edit replaces one exact occurrence of old_str in the body without reconstructing the rest. Missing notes are created by overwrite/append only."},
+                "old_str": {"type": "string", "description": "Required non-empty exact body substring for mode=edit; it must occur once. content is the replacement, including empty text for a justified deletion."},
+                "expected_revision": {"type": "string", "description": "Source revision returned by knowledge_read. Omit or pass an empty string to create a missing note; an empty string never replaces an existing note. Required for overwriting or editing an existing note; drift returns the newer source without replacing it."},
             }, "required": ["topic", "content"]},
         }, _knowledge_write),
         ToolEntry("knowledge_list", {

@@ -42,7 +42,6 @@ from ouroboros.subagents import envelope_from_task, substrate_result_fields
 from ouroboros.subagent_messages import initiator_meta, subagent_message_meta
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_review_artifact as _truncate_with_notice
 from ouroboros.utils import in_worker_process
-from ouroboros.llm_claudexor import propagate_model_error
 from ouroboros.post_task_checkpoint import (
     POST_TASK_SYNTHESIS_INFLIGHT as _POST_TASK_SYNTHESIS_INFLIGHT,
     POST_TASK_SYNTHESIS_LOCK as _POST_TASK_SYNTHESIS_LOCK,
@@ -170,66 +169,131 @@ def _run_post_task_processing_async(
     def _run_scoped() -> None:
         checkpoint_status = "degraded"
         skipped: list[str] = []
+        interrupted = ""
+        free_actions_applied = False
         try:
+            # The free facts row precedes every paid stage, so neither Stop nor a
+            # failed paid stage costs the card its facts; it is not a stage.
+            _record_task_facts(env, task_snapshot, usage_snapshot, trace_snapshot, drive_logs)
             from ouroboros.llm import LLMClient
             from ouroboros.memory import Memory
 
             llm_client = LLMClient()
             task_memory = Memory(drive_root=env.drive_root, repo_dir=env.repo_dir)
 
-            def _promotion() -> None:
-                from ouroboros.project_facts import resolve_project_id
-
-                reflection_entry = result.get("reflection_entry")
-                _pid = resolve_project_id(task_snapshot)
-                _apply_reflection_memory_actions(env, reflection_entry, project_id=_pid)
-                if is_presence_task(task_snapshot):
+            def _apply_free_reflection() -> None:
+                nonlocal free_actions_applied
+                entry = result.get("reflection_entry")
+                if entry is None or free_actions_applied:
                     return
+                # An action may partially apply before raising; never replay it.
+                free_actions_applied = True
+                try:
+                    from ouroboros.project_facts import resolve_project_id
+                    _apply_reflection_memory_actions(env, entry, project_id=resolve_project_id(task_snapshot))
+                except Exception:
+                    log.warning("Completed reflection actions could not be applied for %s", stage_task_id, exc_info=True)
+
+            def _promotion() -> str:
+                reflection_entry = result.get("reflection_entry")
+                _apply_free_reflection()
+                if is_presence_task(task_snapshot):
+                    return ""
                 # Project facts stay scoped; generic process lessons remain global.
-                _update_improvement_backlog(env, reflection_entry)
+                failure = ""
+                try:
+                    _update_improvement_backlog(env, reflection_entry)
+                except Exception as error:
+                    propagate_paid_interruption(error)
+                    # A lost append or grooming pass is this stage's own typed
+                    # failure (degraded, nothing skipped); the chooser still runs.
+                    failure = "backlog_update_failed"
+                    log.warning("Improvement backlog update failed", exc_info=True)
                 try:
                     from ouroboros.post_task_evolution import maybe_promote
 
                     maybe_promote(env, task_snapshot, reflection_entry, llm_client)
                 except Exception as error:
-                    propagate_model_error(error)
-                    log.debug("Post-task evolution promotion failed", exc_info=True)
+                    propagate_paid_interruption(error)
+                    # An ordinary chooser failure is this stage's own typed failure
+                    # (degraded, nothing skipped); the global callback still runs.
+                    failure = "promotion_failed"
+                    log.warning("Post-task evolution promotion failed", exc_info=True)
                 if on_reflection is not None:
                     on_reflection(reflection_entry, llm_client)
+                return failure
 
             # All late model work belongs to this one scoped worker.  This keeps
-            # the root checkpoint non-final until consolidation, summary,
-            # reflection, and promotion have all stopped billing.  Summary
-            # before reflection: chat.jsonl is more durable than best-effort
-            # reflection/backlog.
+            # the root checkpoint non-final until consolidation, reflection,
+            # and promotion have all stopped billing.
             stages: List[tuple[str, Callable[[], Any]]] = [
                 ("chat_consolidation", lambda: _run_chat_consolidation(
                     env, task_memory, llm_client, task_snapshot, drive_logs)),
                 ("scratchpad_consolidation", lambda: _run_scratchpad_consolidation(
                     env, task_memory, llm_client)),
-                ("summary", lambda: _run_task_summary(
-                    env, llm_client, task_snapshot, usage_snapshot, trace_snapshot, drive_logs,
-                    review_evidence=review_evidence_snapshot, sealed_final=sealed_snapshot)),
                 ("reflection", lambda: result.__setitem__("reflection_entry", _run_reflection(
                     env, llm_client, task_snapshot, usage_snapshot, trace_snapshot,
-                    review_evidence_snapshot, sealed_final=sealed_snapshot))),
+                    review_evidence_snapshot, sealed_final=sealed_snapshot,
+                    publish=lambda entry: result.__setitem__("reflection_entry", entry)))),
                 ("promotion", _promotion),
             ]
-            for index, (_name, run_stage) in enumerate(stages):
+            from ouroboros.post_task_synthesis import (
+                POST_TASK_INTERRUPT_KINDS, post_task_interruption, propagate_paid_interruption,
+            )
+            from ouroboros.usage_accounting import BudgetExceeded
+
+            stage_errors = False
+            for index, (name, run_stage) in enumerate(stages):
                 if _owner_stop_requested():
-                    # Stop-now: the remaining paid stages are skipped and NAMED
-                    # in the typed disclosure below; what already ran stays.
-                    skipped = [name for name, _run in stages[index:]]
+                    interrupted = "owner_stopped"
+                    skipped = [stage for stage, _run in stages[index:]]
                     break
-                run_stage()
-            if not skipped:
+                try:
+                    stage_reason = run_stage()
+                    if name == "reflection" and isinstance(result.get("reflection_entry"), dict):
+                        stage_reason = _post_task_paid_interruption(
+                            result["reflection_entry"].get("memory_operation_errors"))
+                    if isinstance(stage_reason, str) and stage_reason in POST_TASK_INTERRUPT_KINDS:
+                        interrupted = stage_reason
+                        skipped = [stage for stage, _run in stages[index + 1:]]
+                        log.warning("Post-task paid stage %s interrupted for %s: %s",
+                                    name, stage_task_id, interrupted)
+                        break
+                    if isinstance(stage_reason, str) and stage_reason:
+                        # A returned ordinary failure is isolated to its stage: later
+                        # stages still run, the checkpoint stays degraded (TZ-2 C3).
+                        stage_errors = True
+                        log.warning("Post-task stage %s failed for %s: %s", name, stage_task_id, stage_reason)
+                except Exception as error:
+                    # The adapters' own classifier: a control, the wallet and an
+                    # unresolved attempt on any provider's chain stop later paid work.
+                    try:
+                        propagate_paid_interruption(error)
+                    except BudgetExceeded:
+                        interrupted = "budget_exhausted"
+                    except Exception as control:
+                        interrupted = post_task_interruption(control)
+                    if interrupted:
+                        skipped = [stage for stage, _run in stages[index + 1:]]
+                        log.warning("Post-task paid stage %s interrupted for %s: %s",
+                                    name, stage_task_id, interrupted)
+                        break
+                    stage_errors = True
+                    log.warning("Post-task stage %s failed for %s", name, stage_task_id, exc_info=True)
+            if not interrupted and not stage_errors:
                 checkpoint_status = "completed"
         except Exception:
-            log.warning("Async post-task processing failed", exc_info=True)
+            log.warning("Post-task setup failed for %s", stage_task_id, exc_info=True)
         finally:
+            # Applying actions already produced by reflection is free and must
+            # survive a later paid-stage refusal; never run the paid promotion here.
+            if (result.get("reflection_entry") is not None
+                    and interrupted not in {"owner_stopped", "cancelled", "finalize_requested"}
+                    and not free_actions_applied):
+                _apply_free_reflection()
             _set_root_post_task_checkpoint(
                 env, task_snapshot, checkpoint_status,
-                stop_reason=f"owner_stopped:skipped={','.join(skipped)}" if skipped else "",
+                stop_reason=(f"{interrupted}:skipped={','.join(skipped)}" if interrupted else ""),
             )
             if post_task_key is not None:
                 with _POST_TASK_SYNTHESIS_LOCK:
@@ -252,12 +316,22 @@ def _run_post_task_processing_async(
                 if post_task_key is not None and parent_wait is not None and not parent_wait.worker_slot_held:
                     with _POST_TASK_SYNTHESIS_LOCK:
                         _POST_TASK_SYNTHESIS_INFLIGHT[post_task_key] = parent_wait
-                _run_scoped()
+                # The task's optional absolute execution ceiling ends the solve
+                # phase, not already-started post-work. Calendar deadlines and
+                # logical call bounds remain checked before owner_control.
+                prior_control = parent_wait.owner_control if parent_wait is not None else None
+                if parent_wait is not None:
+                    parent_wait.owner_control = lambda: "cancelled" if _owner_stop_requested() else None
+                try:
+                    _run_scoped()
+                finally:
+                    if parent_wait is not None:
+                        parent_wait.owner_control = prior_control
             else:
                 # A detached thread must not inherit its parent's closing scope.
                 with task_model_wait_scope(task=task_snapshot, drive_root=env.drive_root,
                                            event_queue=event_queue, worker_slot_held=False,
-                                           owner_control=lambda: "owner_stopped" if _owner_stop_requested() else None) as owner:
+                                           owner_control=lambda: "cancelled" if _owner_stop_requested() else None) as owner:
                     owner.overrides.update(role_overrides)
                     if post_task_key is not None:
                         with _POST_TASK_SYNTHESIS_LOCK:
@@ -376,41 +450,39 @@ def _run_global_backlog_promotion_only(
     reflection_entry: Dict[str, Any] | None,
     llm: Any,
 ) -> None:
-    """Feed canonical improvement backlog/promotion without leaking project memory."""
+    """Feed canonical improvement backlog/promotion without leaking project memory.
+
+    Runs inside the promotion stage; a failure raises to that stage's coordinator."""
 
     if not reflection_entry:
         return
-    try:
-        candidates = [
-            item for item in (reflection_entry.get("backlog_candidates") or [])
-            if isinstance(item, dict) and str(item.get("summary") or "").strip()
-        ]
-        if not candidates:
-            return
-        sanitized_entry = {
-            "reflection": "\n".join(f"- {str(item.get('summary') or '').strip()}" for item in candidates),
-            "backlog_candidates": candidates,
-            "memory_actions": [],
-        }
-        _update_improvement_backlog(env, sanitized_entry)
-        from ouroboros.consciousness_authority import consciousness_origin_metadata
-        from ouroboros.post_task_evolution import maybe_promote
+    candidates = [
+        item for item in (reflection_entry.get("backlog_candidates") or [])
+        if isinstance(item, dict) and str(item.get("summary") or "").strip()
+    ]
+    if not candidates:
+        return
+    sanitized_entry = {
+        "reflection": "\n".join(f"- {str(item.get('summary') or '').strip()}" for item in candidates),
+        "backlog_candidates": candidates,
+        "memory_actions": [],
+    }
+    _update_improvement_backlog(env, sanitized_entry)
+    from ouroboros.consciousness_authority import consciousness_origin_metadata
+    from ouroboros.post_task_evolution import maybe_promote
 
-        global_task = {
-            "id": str(task.get("id") or ""),
-            "type": str(task.get("type") or "task"),
-            "source": "project_scoped_global_improvement",
-            # The origin survives the sanitized view: a campaign a consciousness tree
-            # promotes stays inside the consciousness limits.
-            "metadata": {"globalized_from_project_task": True, **consciousness_origin_metadata(task.get("metadata"))},
-            # The eligibility probe reads the contract (disabled_tools), so the
-            # globalized view keeps it: a level that may not evolve stays that way.
-            **({"task_contract": dict(task["task_contract"])} if isinstance(task.get("task_contract"), dict) else {}),
-        }
-        maybe_promote(env, global_task, sanitized_entry, llm)
-    except Exception as error:
-        propagate_model_error(error)
-        log.debug("Canonical post-task promotion-only path failed", exc_info=True)
+    global_task = {
+        "id": str(task.get("id") or ""),
+        "type": str(task.get("type") or "task"),
+        "source": "project_scoped_global_improvement",
+        # The origin survives the sanitized view: a campaign a consciousness tree
+        # promotes stays inside the consciousness limits.
+        "metadata": {"globalized_from_project_task": True, **consciousness_origin_metadata(task.get("metadata"))},
+        # The eligibility probe reads the contract (disabled_tools), so the
+        # globalized view keeps it: a level that may not evolve stays that way.
+        **({"task_contract": dict(task["task_contract"])} if isinstance(task.get("task_contract"), dict) else {}),
+    }
+    maybe_promote(env, global_task, sanitized_entry, llm)
 
 
 def _attach_host_mutation_projection(
@@ -521,6 +593,25 @@ def _custody_debt_event_fields(stored_result: Dict[str, Any]) -> Dict[str, Any]:
     debt = stored_result.get("delegated_runs_unreconciled")
     return {"delegated_runs_unreconciled": list(debt)} if isinstance(debt, list) else {}
 
+
+def _stamp_presence_terminal_facts(
+    task: Dict[str, Any], usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any, reason_code: str,
+) -> None:
+    """Typed Presence facts the Host guard reads back from the durable row's metadata."""
+    from ouroboros.presence_runner import presence_retry_proof, presence_unknown_outcome
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if reason_code == "resource_refusal_no_resend":
+        proof = presence_retry_proof(task, usage, llm_trace, ctx)
+        if proof:
+            task["metadata"] = metadata = {**metadata, "presence_retry_proof": proof}
+    # The loop's own no-resend predicate, stamped where the Host guard reads the row back: a
+    # dispatched attempt left unresolved is not answered by the rail's text or a salvaged draft.
+    unknown = presence_unknown_outcome(usage)
+    if unknown:
+        task["metadata"] = {**metadata, "presence_unknown_outcome": unknown}
+
+
 def emit_task_results(
     env: Any, memory: Any, llm: Any,
     pending_events: List[Dict[str, Any]],
@@ -549,7 +640,10 @@ def emit_task_results(
     if ctx is not None and failed_or_forced:
         ctx._presence_completion_accepted = False
     reason_code = str(loop_outcome.get("reason_code") or "")
-    _root_outbox = _is_root_post_task(task)   # durable outbox (no model call): pre-marker predicate
+    if is_presence_task(task):
+        _stamp_presence_terminal_facts(task, usage, llm_trace, ctx, reason_code)
+    # A Stop marker already on the task suppresses paid synthesis, not the durable outbox or free facts.
+    _root_outbox = _is_root_post_task({k: v for k, v in task.items() if k != "_skip_post_task_synthesis"})
     if getattr(ctx, "_skip_post_task_synthesis", False):   # "Stop now": paid root predicates see it
         task["_skip_post_task_synthesis"] = True
     _presence = is_presence_task(task)
@@ -617,8 +711,6 @@ def emit_task_results(
         })
     except Exception:
         log.warning("Failed to log task eval event", exc_info=True)
-        pass
-
     pending_events.append({
         "type": "task_metrics",
         "task_id": task.get("id"), "task_type": task.get("type"),
@@ -671,6 +763,15 @@ def emit_task_results(
         loop_outcome=loop_outcome, cost_fields=task_cost_fields,
     )
     stored_result = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
+    if _root_outbox and task.get("_skip_post_task_synthesis"):
+        # Stop before post-task dispatch forbids paid synthesis, not the free
+        # factual row. Record it after durable result write; the structural
+        # root predicate deliberately excludes stopped roots from recovery.
+        fact_usage = {**usage, "outcome_axes": outcome_axes, "reason_code": reason_code}
+        if _typed_routing_action:
+            fact_usage["typed_routing_action"] = _typed_routing_action
+        _record_task_facts(env, task, _pre_synthesis_usage_snapshot(env, task, fact_usage),
+                           llm_trace, drive_logs)
     artifact_bundle = stored_result.get("artifact_bundle") if isinstance(stored_result.get("artifact_bundle"), dict) else {}
     review_projection = stored_result.get("review_projection") or {}
     pending_events.append({
@@ -1303,9 +1404,9 @@ from ouroboros.post_task_synthesis import (  # noqa: E402, F401 -- intentional p
     _child_task_evidence,
     _pre_synthesis_usage_snapshot,
     _compact_review_projection,
-    _run_task_summary,
+    _record_task_facts,
+    _post_task_paid_interruption,
     _run_chat_consolidation,
     _run_scratchpad_consolidation,
     _run_reflection,
-    _TASK_SUMMARY_PROMPT,
 )

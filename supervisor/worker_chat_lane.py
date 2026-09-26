@@ -298,6 +298,15 @@ def _admit_chat_task(
             task["task_constraint"] = dict(task_constraint)
         if task_metadata:
             task["metadata"] = dict(task_metadata)
+            if task_metadata.get("late_answer") is not None:
+                # A LATE quiz answer: the owner's row holds only their words; the
+                # model reads the card they answered, rebuilt from the stored
+                # block (disclosed when unreadable) -- the one shared builder.
+                from ouroboros.owner_quiz import late_answer_model_text
+
+                task["text"] = late_answer_model_text(
+                    _pool().DRIVE_ROOT, task_metadata.get("late_answer"), str(text or ""),
+                )
             # The ingress-captured origin identity rides on the TASK RECORD so a
             # later post-hoc "Turn into project" reads it from the persisted
             # result instead of re-deriving identity from content.

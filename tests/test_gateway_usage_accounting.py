@@ -209,7 +209,7 @@ def test_api_state_unbounded_budget_does_not_expose_private_breakdown_keys(tmp_p
     monkeypatch.setattr(queue, "get_evolution_status_snapshot", lambda **_kwargs: {})
     monkeypatch.setattr(
         ua,
-        "usage_breakdown",
+        "usage_writer_snapshot",
         lambda *_args, **_kwargs: {
             "accounted_usd": 2.0,
             "physical_calls": 1,
@@ -504,3 +504,37 @@ def test_task_detail_cost_breakdown_view_discloses_unattributed_money(tmp_path, 
     # Not silently folded into the children's share; the three axes still sum.
     assert view["children_usd"] == 0.0
     assert round(view["own_usd"] + view["children_usd"] + view["unattributed_usd"], 6) == 0.50
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("limit", [7.5, 0.0])
+def test_api_state_reads_the_slim_writer_snapshot_never_the_full_breakdown(tmp_path, monkeypatch, limit):
+    """Both budget branches serve the same values without the five grouped axes."""
+    from ouroboros.gateway.state import api_state
+    from supervisor import queue, state, workers
+
+    root = _data_root(tmp_path, monkeypatch)
+    _seed_accounting(root)
+    monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", limit)
+    monkeypatch.setattr(state, "load_state", lambda: {"current_branch": "ouroboros"})
+    monkeypatch.setattr(workers, "WORKERS", {})
+    monkeypatch.setattr(workers, "PENDING", [])
+    monkeypatch.setattr(workers, "RUNNING", {})
+    monkeypatch.setattr(queue, "get_evolution_status_snapshot", lambda **_kwargs: {})
+    app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root=root, app_start=0.0))
+
+    def call():
+        request = Request({
+            "type": "http", "method": "GET", "path": "/api/state", "headers": [],
+            "query_string": b"", "scheme": "http", "server": ("test", 80), "client": ("test", 1), "app": app,
+        })
+        payload = json.loads(asyncio.run(api_state(request)).body)
+        return {key: payload[key] for key in ("spent_usd", "spent_calls", "budget_limit", "budget_pct", "accounting")}
+
+    with_full_breakdown_available = call()
+    monkeypatch.setattr(ua, "usage_breakdown",
+                        lambda *_a, **_k: pytest.fail("/api/state must not render the full breakdown"))
+    assert call() == with_full_breakdown_available
+    assert with_full_breakdown_available["spent_calls"] == 3
+    assert with_full_breakdown_available["accounting"]["accounted_usd"] == 1.75
+    assert with_full_breakdown_available["accounting"]["remaining_known_usd"] == (5.75 if limit else None)

@@ -126,6 +126,156 @@ def test_noop_does_not_publish_history_or_rewrite_index(tmp_path):
     assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
 
+def test_exact_edit_preserves_other_knowledge_and_reports_its_delta(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    target = address(tmp_path, "people/rowan")
+    original = store.write_knowledge_note(target,
+        "---\ntype: person\nsummary: Rowan maintains the service.\ncustom: [kept]\n---\n\n"
+        "# Rowan\n\n- Prefers async updates.\n- Old staging host.\n"
+        "## Open question\n- Ownership of validation unknown.\n").current
+    reply = tools._knowledge_write(ctx, "people/rowan", "- New staging host.", mode="edit",
+                                   old_str="- Old staging host.", scope="global",
+                                   expected_revision=original.revision)
+    assert reply.startswith("✅")
+    updated = store.read_knowledge_note(target)
+    assert updated.text == original.text.replace("- Old staging host.", "- New staging host.")
+    assert updated.metadata == original.metadata
+    assert "# Rowan" in updated.text and "## Open question" in updated.text
+    change = history(target)[-1]
+    assert change["mode"] == "edit" and change["old_content"] == original.text
+    assert change["new_content"] == updated.text
+    assert change["delta"] == {"old_chars": len(original.text), "new_chars": len(updated.text),
+                                "change_chars": len(updated.text) - len(original.text), "removed_headings": []}
+    assert json.loads(reply.split("\n", 1)[1])["knowledge_delta"] == change["delta"]
+
+
+def test_edit_requires_one_exact_body_anchor_and_current_revision(tmp_path):
+    target = address(tmp_path, "body")
+    original = store.write_knowledge_note(target, "# Heading\n\nRepeated. Repeated.\n").current
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    for old_str, revision in (("Repeated.", original.revision), ("Absent.", original.revision),
+                              ("# Heading", None), ("Repeated.", "stale")):
+        result = store.write_knowledge_note(target, "changed", mode="edit", old_str=old_str,
+                                            expected_revision=revision)
+        assert not result.ok
+    assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert store.write_knowledge_note(target, "changed", mode="edit", old_str="Repeated.",
+                                      expected_revision=None).reason == "revision_required"
+    assert store.write_knowledge_note(address(tmp_path, "missing"), "new", mode="edit",
+                                      old_str="old", expected_revision="").reason == "edit_source_missing"
+    overlapping = store.write_knowledge_note(address(tmp_path, "overlap"), "# Body\n\naaa").current
+    ambiguous = store.write_knowledge_note(overlapping.address, "replacement", mode="edit",
+                                           old_str="aa", expected_revision=overlapping.revision)
+    assert not ambiguous.ok and "exactly once" in ambiguous.reason
+    assert overlapping.address.path.read_bytes() == overlapping.raw
+
+
+def test_edit_cannot_turn_a_plain_note_into_frontmatter(tmp_path):
+    target = address(tmp_path, "plain")
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"# Body\n\nKnown fact.\n")  # legacy plain source, not an auto-formatted new note
+    original = store.read_knowledge_note(target)
+    # A plain note's entire text is body; editing its opening can otherwise
+    # silently acquire metadata or become a malformed frontmatter preamble.
+    for opening in ("---\ntype: person\n---\n", "---\ncustom: [bad\n---\n"):
+        result = store.write_knowledge_note(target, opening, mode="edit", old_str="# Body\n",
+                                            expected_revision=original.revision)
+        assert not result.ok and result.reason.startswith("invalid_note")
+        assert target.path.read_bytes() == original.raw
+    assert not (target.shelf.parent / "knowledge_history.jsonl").exists()
+
+
+def test_edit_accepts_recursive_yaml_alias_without_comparing_metadata_graphs(tmp_path):
+    target = address(tmp_path, "recursive")
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"---\ntype: note\ncustom: &loop [*loop]\n---\nOld.\n")
+    original = store.read_knowledge_note(target)
+    assert original.source is not None and not original.parse_error
+    result = store.write_knowledge_note(target, "New.", mode="edit", old_str="Old.",
+                                        expected_revision=original.revision)
+    assert result.ok and result.current.raw == original.raw.replace(b"Old.", b"New.")
+    assert history(target)[-1]["old_content"] == original.text
+
+
+def test_summary_revision_still_refuses_a_rerender_that_changes_a_recursive_field(tmp_path, monkeypatch):
+    target = address(tmp_path, "recursive")
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"---\ntype: note\ncustom: &loop [*loop]\n---\nOld.\n")
+    original = store.read_knowledge_note(target)
+    write_content = store._write_content
+    # A re-render that loses the alias is a changed field, not a revised summary.
+    monkeypatch.setattr(store, "_write_content", lambda *args: write_content(*args).replace(b"- *id001", b"- []"))
+    result = store.write_knowledge_note(target, "", mode="edit", summary="New view.", expected_revision=original.revision,
+                                        edits=[{"old_text": "Old.", "new_text": "New.", "basis": "This episode."}])
+    assert result.reason == "invalid_note: edit cannot change frontmatter"
+    assert target.path.read_bytes() == original.raw
+    assert not (target.shelf.parent / "knowledge_history.jsonl").exists()
+
+
+def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    target = address(tmp_path, "large-headings")
+    body = "".join(f"# Раздел {i:03d}\n" for i in range(240))
+    original = store.write_knowledge_note(target, body).current
+    reply = tools._knowledge_write(ctx, "large-headings", "# Short\n", mode="edit",
+                                   old_str=body, scope="global", expected_revision=original.revision)
+    assert reply.startswith("✅")
+    result = store.read_knowledge_note(target)
+    assert result.text.endswith("# Short\n")
+    assert len(history(target)[-1]["delta"]["removed_headings"]) == 240
+    reported = json.loads(reply.split("\n", 1)[1])["knowledge_delta"]
+    assert reported["removed_headings_count"] == 240
+    assert reported["removed_headings_omitted"] is True
+    assert reported["old_chars"] == len(original.text)
+
+
+def test_edit_preserves_crlf_and_multibyte_surroundings(tmp_path):
+    target = address(tmp_path, "legacy")
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes("# Река\r\nСтарый берег.\r\nДо встречи.\r\n".encode("utf-8"))
+    original = store.read_knowledge_note(target)
+    changed = store.write_knowledge_note(target, "Новый берег.", mode="edit", old_str="Старый берег.",
+                                         expected_revision=original.revision)
+    assert changed.ok
+    assert changed.current.raw == original.raw.replace("Старый берег.".encode(), "Новый берег.".encode())
+    assert changed.current.metadata == original.metadata == {}
+
+
+def test_edit_delta_counts_real_markdown_headings_including_duplicates(tmp_path):
+    target = address(tmp_path, "headings")
+    original = store.write_knowledge_note(target,
+        "# Repeat\n\nOnly the first section.\n\n# Repeat\n\nOther section.\n\n"
+        "Setext\n------\n\n```\n# Not a heading\n```\n").current
+    first = store.write_knowledge_note(target, "", mode="edit",
+                                       old_str="# Repeat\n\nOnly the first section.\n\n",
+                                       expected_revision=original.revision)
+    assert first.ok and first.delta["removed_headings"] == ["# Repeat"]
+    second = store.write_knowledge_note(target, "", mode="edit", old_str="Setext\n------\n\n",
+                                        expected_revision=first.current.revision)
+    assert second.ok and second.delta["removed_headings"] == ["## Setext"]
+    fenced = store.write_knowledge_note(target, "ordinary text", mode="edit", old_str="# Not a heading",
+                                        expected_revision=second.current.revision)
+    assert fenced.ok and fenced.delta["removed_headings"] == []
+    noop = store.write_knowledge_note(target, "ordinary text", mode="edit", old_str="ordinary text",
+                                      expected_revision=fenced.current.revision)
+    assert noop.ok and noop.reason == "unchanged" and noop.delta["change_chars"] == 0
+
+
+def test_edit_is_an_opt_in_tool_mode_not_a_backlog_merge(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    schema = next(entry.schema for entry in tools.get_tools() if entry.name == "knowledge_write")
+    assert "edit" in schema["parameters"]["properties"]["mode"]["enum"]
+    assert "old_str" in schema["parameters"]["properties"]
+    assert "edit is not supported" in tools._knowledge_write(
+        ctx, "improvement-backlog", "new", mode="edit", old_str="old")
+    assert not (tmp_path / "memory" / "knowledge" / "improvement-backlog.md").exists()
+    assert "old_str is used only" in tools._knowledge_write(
+        ctx, "somewhere", "new", mode="append", old_str="old")
+    assert "non-empty old_str" in tools._knowledge_write(ctx, "somewhere", "new", mode="edit", old_str="")
+    with pytest.raises(ValueError, match="old_str is used only"):
+        store.write_knowledge_note(address(tmp_path, "somewhere"), "new", old_str="old")
+
+
 def test_nested_inventory_and_links_keep_addresses_not_display_identity(tmp_path):
     for topic in ("people/a", "people/b", "work/research"):
         assert store.write_knowledge_note(address(tmp_path, topic), f"---\ntype: note\ntitle: Same name\n---\n{topic}").ok
@@ -214,6 +364,34 @@ def test_index_publication_failure_reports_actual_new_source_and_retains_capture
     assert "New state." in result.current.text
     assert history(target)[-1]["old_content"] == original.text
     assert history(target)[-1]["new_content"] == result.current.text
+    assert result.delta == history(target)[-1]["delta"]
+
+
+def test_overwrite_malformed_legacy_source_discloses_unknown_heading_delta(tmp_path):
+    target = address(tmp_path, "malformed")
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"---\ncustom: [unfinished\n---\n# Old heading\n")
+    old = store.read_knowledge_note(target)
+    assert old.parse_error and old.source is None
+    changed = store.write_knowledge_note(target, "---\ntype: note\n---\n# New heading\n",
+                                         expected_revision=old.revision)
+    assert changed.ok and changed.delta["removed_headings"] is None
+    assert history(target)[-1]["delta"]["removed_headings"] is None
+
+
+def test_append_to_malformed_legacy_source_keeps_history_without_heading_claim(tmp_path):
+    target = address(tmp_path, "malformed-append")
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"---\ncustom: [unfinished\n---\n# Old heading\n")
+    original = store.read_knowledge_note(target)
+    assert original.parse_error and original.source is None
+    appended = store.write_knowledge_note(target, "New evidence.\n", mode="append")
+    assert appended.ok and appended.current.raw.endswith(b"# Old heading\nNew evidence.\n")
+    assert appended.delta["removed_headings"] is None
+    record = history(target)[-1]
+    assert record["old_content"] == original.text
+    assert record["new_content"] == appended.current.text
+    assert record["delta"] == appended.delta
 
 
 @pytest.mark.parametrize("value", ["null", "12", "[]", "''"])

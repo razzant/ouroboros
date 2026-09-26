@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hmac
 import json
 import logging
@@ -206,8 +207,15 @@ class HostServiceContext:
         self.rate_limiter = _RateLimiter(on_burst_end=self._ws_relay_burst_ended)
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
+        # Auth and pre-turn Presence reads may both precede turn reservation.
+        # Bound their combined occupancy of the shared default executor; queued
+        # requests hold no thread, and physical completion returns the permit.
+        self._auth_capacity = threading.BoundedSemaphore(2)
         self._counter_lock = threading.Lock()
         self.presence_deliveries = PresenceDeliveryRecorder(self.data_dir)
+        from ouroboros.presence_runner import PresenceTurnExecutions
+
+        self.presence_turns = PresenceTurnExecutions()
 
     def _ws_relay_burst_ended(self, key: str, dropped: int, duration_sec: float) -> None:
         """Report one aggregated WS relay refusal burst: a warning plus one
@@ -264,12 +272,15 @@ class HostServiceContext:
             **kwargs,
         )
 
+    async def admit_presence_gate(self, conversation_key: str) -> Any:
+        """Coroutine admission into the configured presence gate; the lease the turn runs under."""
+        from ouroboros.presence_runner import admit_configured_gate
+
+        return await admit_configured_gate(self.data_dir, conversation_key)
+
     @property
     def skills_state_dir(self) -> pathlib.Path:
         return self.data_dir / "state" / "skills"
-
-    def authenticate_token(self, raw_token: str) -> str:
-        return self.authenticate_token_payload(raw_token)[0]
 
     def authenticate_token_payload(self, raw_token: str) -> tuple[str, Dict[str, Any]]:
         token = str(raw_token or "").strip()
@@ -349,6 +360,40 @@ class HostServiceContext:
             return chat_id
 
 
+async def _bounded_host_read(ctx: HostServiceContext, operation: Callable[[], Any]) -> Any:
+    """Keep pre-reservation disk work off-loop without filling the shared executor."""
+    while not ctx._auth_capacity.acquire(blocking=False):
+        await asyncio.sleep(0.01)
+    try:
+        work = asyncio.get_running_loop().run_in_executor(None, operation)
+    except BaseException:
+        ctx._auth_capacity.release()
+        raise
+    # A disconnected caller must not release a permit while its worker still runs.
+    work.add_done_callback(lambda _done: ctx._auth_capacity.release())
+    return await asyncio.shield(work)
+
+
+async def _authenticated(
+    ctx: HostServiceContext, raw_token: str, permission: str = "",
+) -> tuple[str, Dict[str, Any]]:
+    """Resolve the request's skill (and one grant) off the event loop.
+
+    Token discovery reads every registered skill's token, review, enablement and grants
+    from disk; inline, one slow walk stalled every request on the loop the owner's API
+    shares. It is short read-only work, so the default executor serves it: Presence turns
+    no longer wait there (``presence_runner.PresenceTurnExecutions``).
+    """
+
+    def resolve() -> tuple[str, Dict[str, Any]]:
+        skill_name, token_payload = ctx.authenticate_token_payload(raw_token)
+        if permission:
+            ctx.require_permission(skill_name, token_payload, permission)
+        return skill_name, token_payload
+
+    return await _bounded_host_read(ctx, resolve)
+
+
 def _token_from_websocket(websocket: WebSocket) -> str:
     header = websocket.headers.get("x-skill-token", "")
     if header:
@@ -361,12 +406,7 @@ def _token_from_websocket(websocket: WebSocket) -> str:
     return ""
 
 
-async def _api_identity(request: Request) -> JSONResponse:
-    ctx: HostServiceContext = request.app.state.host_service_context
-    try:
-        ctx.authenticate_token(request.headers.get("x-skill-token", ""))
-    except HostServiceAuthError as exc:
-        return _json_error(str(exc), 403)
+def _identity_facts(ctx: HostServiceContext) -> tuple[str, str]:
     identity_path = ctx.data_dir / "memory" / "identity.md"
     name = "Ouroboros"
     description = ""
@@ -382,6 +422,16 @@ async def _api_identity(request: Request) -> JSONResponse:
                     break
     except Exception:
         log.debug("Failed to read identity for host service", exc_info=True)
+    return name, description
+
+
+async def _api_identity(request: Request) -> JSONResponse:
+    ctx: HostServiceContext = request.app.state.host_service_context
+    try:
+        await _authenticated(ctx, request.headers.get("x-skill-token", ""))
+    except HostServiceAuthError as exc:
+        return _json_error(str(exc), 403)
+    name, description = await asyncio.to_thread(_identity_facts, ctx)
     return JSONResponse({"ok": True, "name": name, "description": description,
                          "presence_delivery_version": DELIVERY_VERSION,
                          "notify_version": NOTIFY_VERSION})
@@ -390,28 +440,26 @@ async def _api_identity(request: Request) -> JSONResponse:
 async def _api_tool_schemas(request: Request) -> JSONResponse:
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name = ctx.authenticate_token(request.headers.get("x-skill-token", ""))
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""))
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     if not ctx.rate_limiter.allow(f"{skill_name}:tools"):
         return _json_error("rate limit exceeded", 429)
-    schemas = ctx.tool_schemas_getter()
+    schemas = await asyncio.to_thread(ctx.tool_schemas_getter)
     return JSONResponse({"ok": True, "tools": schemas})
 
 
 async def _api_allocate_internal(request: Request) -> JSONResponse:
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
-    except HostServiceAuthError as exc:
-        return _json_error(str(exc), 403)
-    try:
-        ctx.require_permission(skill_name, token_payload, "inject_chat")
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "inject_chat")
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     try:
         payload = await request.json()
-        chat_id = ctx.allocate_internal_chat_id(skill_name, str(payload.get("range_name") or "a2a"))
+        chat_id = await run_sync_to_completion(
+            ctx.allocate_internal_chat_id, skill_name, str(payload.get("range_name") or "a2a"),
+        )
     except Exception as exc:
         return _json_error(str(exc), 400)
     return JSONResponse({"ok": True, "chat_id": chat_id})
@@ -430,11 +478,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
     """
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
-    except HostServiceAuthError as exc:
-        return _json_error(str(exc), 403)
-    try:
-        ctx.require_permission(skill_name, token_payload, "inject_chat")
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "inject_chat")
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     if not ctx.rate_limiter.allow(f"{skill_name}:inject"):
@@ -830,58 +874,113 @@ async def _api_presence_delivery(request: Request) -> JSONResponse:
     """Record exact provider receipts without sending or starting model work."""
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(
-            request.headers.get("x-skill-token", "")
-        )
-        ctx.require_permission(skill_name, token_payload, "presence")
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
     except HostServiceAuthError as exc:
-        return _json_error(str(exc), 403)
+        return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
+    except OSError:
+        return _presence_error("presence authentication unavailable", 500, "presence_auth_unavailable", "retry")
     if not ctx.rate_limiter.allow(f"{skill_name}:presence_delivery"):
-        return _json_error("rate limit exceeded", 429)
+        return _presence_error("rate limit exceeded", 429, "presence_rate_limited", "retry")
     # Receipts, turns and inject have separate in-flight budgets: five long turns must
     # not starve the receipts those turns' own sends produce.
     if not ctx._enter_inflight(f"{skill_name}:delivery"):
-        return _json_error("too many in-flight presence requests", 429)
+        return _presence_error("too many in-flight presence requests", 429, "presence_capacity_full", "retry")
     try:
         payload = await request.json()
         result = await run_sync_to_completion(ctx.presence_deliveries.record, skill_name, payload)
         return JSONResponse(result)
     except PresenceDeliveryConflict as exc:
-        return _json_error(str(exc), 409)
+        return _presence_error(str(exc), 409, "presence_receipt_conflict", "rejected")
     except (ValueError, TypeError) as exc:
-        return _json_error(str(exc), 400)
+        return _presence_error(str(exc), 400, "presence_receipt_invalid", "rejected")
     except Exception:
         log.warning("Presence delivery history write failed for skill %s", skill_name, exc_info=True)
-        return _json_error("presence delivery history write failed; retry the same receipt", 503)
+        return _presence_error("presence delivery history write failed; retry the same receipt", 503,
+                               "presence_receipt_unwritable", "retry")
     finally:
         ctx._leave_inflight(f"{skill_name}:delivery")
 
 
+def _presence_error(message: str, status: int, code: str, disposition: str, **facts: Any) -> JSONResponse:
+    """Add transport recovery facts without changing the legacy HTTP/error contract.
+
+    The producer chooses semantics, not the status class: a stale token is blocked,
+    an origin mismatch rejected, and a failed history write retryable.
+    """
+    return JSONResponse({"ok": False, "error": message, "code": code,
+                         "disposition": disposition, **facts}, status_code=status)
+
+
+def _presence_exception(exc: Exception, status: int) -> JSONResponse:
+    code = str(getattr(exc, "code", "presence_admission_failed"))
+    disposition = "blocked"
+    if code in {"chat_log_unwritable", "presence_result_missing", "presence_bindings_unreadable",
+                "presence_resources_unavailable", "presence_attempt_outcome_unknown",
+                "presence_result_unreadable", "presence_event_identity_unproven",
+                "presence_start_unwritable"}:
+        disposition = "retry"
+    elif code in {"presence_attachment_admission_rejected", "presence_binding_wrong_transport",
+                  "presence_conversation_key_required", "presence_admission_conversation_mismatch",
+                  "presence_event_identity_conflict"}:
+        disposition = "rejected"
+    facts = {"field": getattr(exc, "field", "presence")}
+    if getattr(exc, "turn_ref", ""):
+        facts["turn_ref"] = exc.turn_ref
+    if getattr(exc, "work_ref", ""):
+        facts["work_ref"] = exc.work_ref
+    manifest = getattr(exc, "attachment_manifest", None)
+    if isinstance(manifest, list):
+        facts["attachment_manifest"] = [dict(row) for row in manifest if isinstance(row, dict)]
+    return _presence_error(str(exc), status, code, disposition, **facts)
+
+
+def _admit_presence(ctx: HostServiceContext, skill_name: str, binding_id: str) -> Any:
+    from ouroboros.loop import _resolve_loop_max_rounds
+    from ouroboros.presence_admission import admit_presence_turn
+
+    return admit_presence_turn(
+        drive_root=ctx.data_dir,
+        authenticated_transport_skill=skill_name,
+        binding_id=binding_id,
+        global_max_rounds=_resolve_loop_max_rounds(),
+    )
+
+
 async def _api_presence_turn(request: Request) -> JSONResponse:
-    """Run one non-owner event under a host-resolved reviewed profile ceiling."""
+    """Run one non-owner event under a host-resolved reviewed profile ceiling.
+
+    Authentication, admission and file confinement run off the event loop. The turn is
+    host work this request only waits on (``presence_runner.PresenceTurnExecutions``): it
+    queues on the gate as a coroutine, runs on its own thread, keeps its in-flight slot
+    until it settles, and a retry of the same event joins it instead of running it twice.
+    """
 
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(
-            request.headers.get("x-skill-token", "")
-        )
-        ctx.require_permission(skill_name, token_payload, "presence")
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
     except HostServiceAuthError as exc:
-        return _json_error(str(exc), 403)
+        return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
+    except OSError:
+        return _presence_error("presence authentication unavailable", 500, "presence_auth_unavailable", "retry")
     if not ctx.rate_limiter.allow(f"{skill_name}:presence"):
-        return _json_error("rate limit exceeded", 429)
-    from ouroboros.presence_admission import PresenceAdmissionError, admit_presence_turn
+        return _presence_error("rate limit exceeded", 429, "presence_rate_limited", "retry")
+    from ouroboros.presence_admission import PresenceAdmissionError
     from ouroboros.presence_bindings import conversation_key
-    from ouroboros.presence_runner import PresenceTurnError, PresenceTurnEvent
+    from ouroboros.presence_runner import (
+        PresenceTurnError,
+        PresenceTurnEvent,
+        PresenceTurnNotStarted,
+        presence_turn_replay,
+        presence_turn_task_id,
+        presence_event_identity,
+    )
 
-    if not ctx._enter_inflight(f"{skill_name}:presence"):
-        return _json_error("too many in-flight presence requests", 429)
     try:
         payload = await request.json()
         if not isinstance(payload, dict) or set(payload) - {
             "binding_id", "event", "staged_files", "delivery_reporting_version",
         }:
-            return _json_error("invalid presence payload", 400)
+            return _presence_error("invalid presence payload", 400, "presence_payload_invalid", "rejected")
         reporting_version = delivery_reporting_version(payload.get("delivery_reporting_version", 0))
         event_payload = payload.get("event")
         expected = {
@@ -889,15 +988,10 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             "conversation_key", "actor", "conversation", "message", "text",
         }
         if not isinstance(event_payload, dict) or set(event_payload) != expected:
-            return _json_error("invalid presence event", 400)
+            return _presence_error("invalid presence event", 400, "presence_event_invalid", "rejected")
 
-        from ouroboros.loop import _resolve_loop_max_rounds
-        admission = admit_presence_turn(
-            drive_root=ctx.data_dir,
-            authenticated_transport_skill=skill_name,
-            binding_id=str(payload.get("binding_id") or ""),
-            global_max_rounds=_resolve_loop_max_rounds(),
-        )
+        admission = await _bounded_host_read(
+            ctx, functools.partial(_admit_presence, ctx, skill_name, str(payload.get("binding_id") or "")))
         provider = str(event_payload.get("provider") or "").strip()
         account_id = str(event_payload.get("account_id") or "").strip()
         conversation_id = str(event_payload.get("conversation_id") or "").strip()
@@ -911,7 +1005,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             )
             or (admission.origin.thread_id and thread_id != admission.origin.thread_id)
         ):
-            return _json_error("presence event does not match its owner-created binding", 403)
+            return _presence_error("presence event does not match its owner-created binding", 403,
+                                   "presence_origin_mismatch", "rejected")
         event = PresenceTurnEvent(
             source_event_id=str(event_payload["source_event_id"] or "").strip(),
             provider=provider,
@@ -933,13 +1028,29 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             delivery_reporting_version=reporting_version,
         )
         if not event.source_event_id or not event.conversation_key or not event.actor:
-            return _json_error("presence event is missing identity facts", 400)
-        result = await asyncio.to_thread(
-            ctx.presence_runner,
-            admission=admission,
-            event=event,
-            staged_files=_presence_staged_files(ctx, skill_name, payload.get("staged_files")),
-        )
+            return _presence_error("presence event is missing identity facts", 400,
+                                   "presence_identity_missing", "rejected")
+        staged_files = await _bounded_host_read(
+            ctx, functools.partial(_presence_staged_files, ctx, skill_name, payload.get("staged_files")))
+        turn_id = presence_turn_task_id(admission.binding_id, event.source_event_id)
+        identity = presence_event_identity(admission.binding_id, event)
+        # A settled turn answers from its durable row without queueing behind its conversation.
+        result = await _bounded_host_read(
+            ctx, functools.partial(presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key, identity))
+        if result is None:
+            budget = f"{skill_name}:presence"
+            execution, _started = ctx.presence_turns.start_or_join(
+                turn_id, identity=identity,
+                reserve=functools.partial(ctx._enter_inflight, budget),
+                release=functools.partial(ctx._leave_inflight, budget),
+                admit=functools.partial(ctx.admit_presence_gate, event.conversation_key),
+                run=lambda lease: ctx.presence_runner(
+                    admission=admission, event=event, staged_files=staged_files, admitted=lease,
+                ),
+            )
+            if execution is None:
+                return _presence_error("too many in-flight presence requests", 429, "presence_capacity_full", "retry")
+            result = await asyncio.wrap_future(execution.result)
         return JSONResponse({
             "ok": True,
             "status": "completed",
@@ -950,22 +1061,48 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             "delivery_reporting_version": getattr(result, "delivery_reporting_version", 0),
         })
     except json.JSONDecodeError:
-        return _json_error("invalid json", 400)
+        return _presence_error("invalid json", 400, "presence_payload_invalid", "rejected")
     except (PresenceAdmissionError, PresenceTurnError) as exc:
-        payload = {"ok": False, "error": str(exc), "code": exc.code, "field": exc.field}
-        attachment_manifest = getattr(exc, "attachment_manifest", None)
-        if isinstance(attachment_manifest, list):
-            payload["attachment_manifest"] = [
-                dict(row) for row in attachment_manifest if isinstance(row, dict)
-            ]
-        return JSONResponse(payload, status_code=409)
-    except (OSError, ValueError) as exc:
-        return _json_error(str(exc), 400)
+        return _presence_exception(exc, 409)
+    except PresenceTurnNotStarted as exc:
+        return _presence_error(str(exc), 503, "presence_turn_not_started", "retry")
+    except OSError as exc:
+        return _presence_error(str(exc), 400, "presence_io_unavailable", "retry")
+    except ValueError as exc:
+        return _presence_error(str(exc), 400, "presence_payload_invalid", "rejected")
     except Exception as exc:
         log.debug("Host service presence turn failed", exc_info=True)
-        return _json_error(str(exc), 500)
-    finally:
-        ctx._leave_inflight(f"{skill_name}:presence")
+        return _presence_error(str(exc), 500, "presence_turn_unavailable", "retry")
+
+
+def _presence_work_view(
+    ctx: HostServiceContext, skill_name: str, work_ref: str, binding_id: str,
+) -> tuple[int, Dict[str, Any]]:
+    from ouroboros.presence_bindings import load_presence_binding
+    from ouroboros.task_results import load_task_result
+
+    load_presence_binding(ctx.data_dir, skill_name, binding_id)
+    stored = load_task_result(ctx.data_dir, work_ref) or {}
+    metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
+    presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
+    if str(presence.get("binding_id") or "") != binding_id:
+        return 404, {"ok": False, "error": "presence work reference not found",
+                     "code": "presence_work_not_found", "disposition": "rejected"}
+    status = str(stored.get("status") or "")
+    if status not in {"completed", "failed", "cancelled"}:
+        return 202, {"ok": True, "status": "pending", "work_ref": work_ref,
+                     "delivery_reporting_version": presence.get("delivery_reporting_version", 0)}
+    from ouroboros.presence_runner import presence_result_from_stored
+
+    result = presence_result_from_stored(stored, work_ref)
+    return 200, {
+        "ok": True,
+        "status": status,
+        "outcome": result.outcome,
+        "text": result.text,
+        "work_ref": work_ref,
+        "delivery_reporting_version": result.delivery_reporting_version,
+    }
 
 
 async def _api_presence_work(request: Request) -> JSONResponse:
@@ -973,45 +1110,22 @@ async def _api_presence_work(request: Request) -> JSONResponse:
 
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(
-            request.headers.get("x-skill-token", "")
-        )
-        ctx.require_permission(skill_name, token_payload, "presence")
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
     except HostServiceAuthError as exc:
-        return _json_error(str(exc), 403)
+        return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
+    except OSError:
+        return _presence_error("presence authentication unavailable", 500, "presence_auth_unavailable", "retry")
     work_ref = str(request.path_params.get("work_ref") or "").strip()
     binding_id = str(request.query_params.get("binding_id") or "").strip()
     try:
-        from ouroboros.presence_bindings import load_presence_binding
-        from ouroboros.task_results import load_task_result
-
-        load_presence_binding(ctx.data_dir, skill_name, binding_id)
-        stored = load_task_result(ctx.data_dir, work_ref) or {}
-        metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
-        presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
-        if str(presence.get("binding_id") or "") != binding_id:
-            return _json_error("presence work reference not found", 404)
-        status = str(stored.get("status") or "")
-        if status not in {"completed", "failed", "cancelled"}:
-            return JSONResponse({"ok": True, "status": "pending", "work_ref": work_ref,
-                                 "delivery_reporting_version": presence.get("delivery_reporting_version", 0)}, status_code=202)
-        from ouroboros.presence_runner import presence_result_from_stored
-
-        result = presence_result_from_stored(stored, work_ref)
-        return JSONResponse({
-            "ok": True,
-            "status": status,
-            "outcome": result.outcome,
-            "text": result.text,
-            "work_ref": work_ref,
-            "delivery_reporting_version": result.delivery_reporting_version,
-        })
+        status, body = await asyncio.to_thread(_presence_work_view, ctx, skill_name, work_ref, binding_id)
     except Exception as exc:
         code = str(getattr(exc, "code", ""))
         if code:
-            return _json_error(str(exc), 404)
+            return _presence_exception(exc, 404)
         log.debug("Host service presence work lookup failed", exc_info=True)
-        return _json_error("presence work lookup failed", 500)
+        return _presence_error("presence work lookup failed", 500, "presence_work_unavailable", "retry")
+    return JSONResponse(body, status_code=status)
 
 
 async def _api_chat_decision(request: Request) -> JSONResponse:
@@ -1024,8 +1138,7 @@ async def _api_chat_decision(request: Request) -> JSONResponse:
     """
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
-        ctx.require_permission(skill_name, token_payload, "inject_chat")
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "inject_chat")
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     if not ctx.rate_limiter.allow(f"{skill_name}:decision"):
@@ -1055,10 +1168,10 @@ async def _api_ws_message(request: Request) -> JSONResponse:
     """
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, _payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
+        skill_name, _payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""))
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
-    loaded = find_skill(ctx.data_dir, skill_name)
+    loaded = await asyncio.to_thread(find_skill, ctx.data_dir, skill_name)
     if loaded is None:
         return _json_error(f"skill {skill_name!r} is not installed", 403)
     if "ws_handler" not in {str(p).strip() for p in (loaded.manifest.permissions or [])}:
@@ -1341,8 +1454,7 @@ async def _api_chat_operation(request: Request) -> JSONResponse:
     """
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
-        ctx.require_permission(skill_name, token_payload, "inject_chat")
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "inject_chat")
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     if not ctx.rate_limiter.allow(f"{skill_name}:operations"):
@@ -1374,8 +1486,7 @@ async def _api_chat_cancel(request: Request) -> JSONResponse:
     """
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
-        ctx.require_permission(skill_name, token_payload, "inject_chat")
+        skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "inject_chat")
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     if not ctx.rate_limiter.allow(f"{skill_name}:cancel"):
@@ -1404,7 +1515,7 @@ async def _api_chat_cancel(request: Request) -> JSONResponse:
 async def _ws_events(websocket: WebSocket) -> None:
     ctx: HostServiceContext = websocket.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(_token_from_websocket(websocket))
+        skill_name, token_payload = await _authenticated(ctx, _token_from_websocket(websocket))
     except HostServiceAuthError:
         await websocket.close(code=1008)
         return
@@ -1421,7 +1532,9 @@ async def _ws_events(websocket: WebSocket) -> None:
             elif message.get("type") == "subscribe":
                 topic = str(message.get("topic") or "")
                 try:
-                    ctx.require_permission(skill_name, token_payload, f"subscribe_event:{topic}")
+                    await asyncio.to_thread(
+                        ctx.require_permission, skill_name, token_payload, f"subscribe_event:{topic}",
+                    )
                 except HostServiceAuthError as exc:
                     await websocket.send_json({"type": "error", "error": str(exc)})
                     continue

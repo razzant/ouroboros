@@ -974,10 +974,23 @@ def provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
     if kind == "subscription_window_exhausted":
         reset_at = str(accumulated_usage.get("_last_llm_reset_at") or "").strip()
         when = f" It resets at {reset_at}." if reset_at else ""
+        refusal = accumulated_usage.get("resource_refusal")
+        if not refusal:
+            return (
+                " The subscription window for the delegated route is spent. This is "
+                f"TRANSIENT, not a billing refusal — waiting cures it.{when} Retrying is "
+                "scheduled against that reset time, not the ordinary short backoff."
+            )
+        rotation, tried = refusal.get("account_rotation") or {}, ", ".join(refusal.get("fallbacks_tried") or [])
+        # Only the engine's own pool verdict proves every account; any other stop claims nothing.
+        accounts = (" The engine reports every compatible account blocked." if rotation.get("pool_exhausted") else
+                    f" Account rotation stopped ({rotation.get('stop')}); other accounts are unproven."
+                    if rotation else "")
         return (
-            " The subscription window for the delegated route is spent. This is "
-            f"TRANSIENT, not a billing refusal — waiting cures it.{when} Retrying is "
-            "scheduled against that reset time, not the ordinary short backoff."
+            " The subscription quota for this model route is spent. This is "
+            f"TRANSIENT, not a billing refusal — waiting cures it.{when}{accounts}"
+            f"{f' Configured fallbacks tried without an answer: {tried}.' if tried else ''} Nothing "
+            "more was sent, and nothing sleeps to that reset."
         )
     if kind == "model_substituted":
         return (

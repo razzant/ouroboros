@@ -198,18 +198,39 @@ def test_partial_publication_records_the_batch_receipt_in_meta(tmp_path, fit, mo
                         lambda *_a, **_k: [{"topic": "people/alex", "ok": False, "reason": "revision_conflict"}])
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="partial")
     c.consolidate(chat, blocks, meta, _Nominating(), knowledge_context=ctx)
-    receipt = json.loads(meta.read_text())["last_unpublished_nominations"]
-    assert receipt["failed"] == 1 and receipt["total"] == 1 and receipt["entry_id"]
+    pending = json.loads(meta.read_text())["pending_knowledge_nominations"]
+    assert len(pending) == 1
+    assert pending[0]["topic"] == "people/alex" and pending[0]["reason"] == "revision_conflict"
+    assert pending[0]["id"].endswith(":0:0")
 
 
-def test_a_fully_published_batch_clears_the_receipt(tmp_path, fit):
+def test_new_success_does_not_erase_an_old_failed_entry_or_legacy_receipt(tmp_path, fit, monkeypatch):
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat, count=100, text_size=0)
     meta.parent.mkdir(parents=True, exist_ok=True)
-    c.atomic_write_json(meta, {"last_unpublished_nominations": {"entry_id": "old", "failed": 3, "total": 4}})
+    legacy = {"entry_id": "old", "failed": 3, "total": 4}
+    c.atomic_write_json(meta, {"last_unpublished_nominations": legacy})
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="clean")
+    original = c._write_knowledge_entries
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [{"topic": "people/alex", "scope": "global", "ok": False,
+                     "reason": "revision_conflict"}]
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(c, "_write_knowledge_entries", fail_once)
     c.consolidate(chat, blocks, meta, _Nominating(), knowledge_context=ctx)
-    assert "last_unpublished_nominations" not in json.loads(meta.read_text())
+    older = json.loads(meta.read_text())["pending_knowledge_nominations"][0]
+    _write_chat(chat, count=200, text_size=0)
+    c.consolidate(chat, blocks, meta, _Nominating(), knowledge_context=ctx)
+    saved = json.loads(meta.read_text())
+    assert saved["last_unpublished_nominations"] == legacy
+    assert saved["pending_knowledge_nominations"] == [older]
+    assert calls == 2
 
 
 def test_a_run_without_nominations_leaves_the_receipt_alone(tmp_path, fit):
@@ -235,8 +256,9 @@ def test_the_receipt_survives_era_compression(tmp_path, fit, monkeypatch):
     saved_blocks = json.loads(blocks.read_text())
     assert saved_blocks[0]["type"] == "era"
     assert "knowledge_writes" not in saved_blocks[0]
-    receipt = json.loads(meta.read_text())["last_unpublished_nominations"]
-    assert receipt["failed"] == 11 and receipt["total"] == 11
+    pending = json.loads(meta.read_text())["pending_knowledge_nominations"]
+    assert len(pending) == 11
+    assert len({row["id"] for row in pending}) == 11
 
 
 # --- the Health block is where stale memory becomes visible -----------------------
@@ -297,3 +319,99 @@ def test_unreadable_receipts_do_not_raise_or_shout(tmp_path, payload):
     env = _health_env(tmp_path)
     c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", payload)
     assert not any("DIALOGUE" in line for line in context_health._memory_health_lines(env))
+
+
+def test_invalid_legacy_receipt_does_not_impersonate_unreadable_meta(tmp_path):
+    env = _health_env(tmp_path)
+    c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json",
+                        {"last_unpublished_nominations": {"failed": "many", "total": 2}})
+    lines = context_health._memory_health_lines(env)
+    assert any("LEGACY NOMINATION RECEIPT INVALID" in line for line in lines)
+    assert not any("DIALOGUE META UNREADABLE" in line for line in lines)
+
+
+def test_pending_receipt_precedes_the_note_writer_and_cannot_be_replaced_by_corrupt_meta(tmp_path, fit, monkeypatch):
+    chat, blocks, meta = _paths(tmp_path)
+    _write_chat(chat, count=100, text_size=0)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="interrupted")
+
+    def interrupted(*_args, **_kwargs):
+        saved = json.loads(meta.read_text())
+        assert len(saved["pending_knowledge_nominations"]) == 1
+        assert saved["pending_knowledge_nominations"][0]["reason"] == "publication_pending"
+        raise RuntimeError("simulated stop after pending publication")
+
+    monkeypatch.setattr(c, "_write_knowledge_entries", interrupted)
+    with pytest.raises(RuntimeError, match="simulated stop"):
+        c.consolidate(chat, blocks, meta, _Nominating(), knowledge_context=ctx)
+    saved = json.loads(meta.read_text())
+    assert saved["pending_knowledge_nominations"][0]["reason"] == "publication_pending"
+    assert saved.get("last_consolidated_offset", 0) == 0
+
+
+def test_health_projects_three_owed_addresses_and_omission_count(tmp_path):
+    env = _health_env(tmp_path)
+    rows = [{"id": f"source{i}:0:0", "scope": "global", "topic": f"people/{i}",
+             "reason": "revision_conflict"} for i in range(5)]
+    c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json",
+                        {"pending_knowledge_nominations": rows})
+    lines = context_health._memory_health_lines(env)
+    row = next(line for line in lines if "KNOWLEDGE PUBLICATION OPEN" in line)
+    assert "5 source-addressed" in row and "first 3" in row and "omitted 2" in row
+    assert "source0" in row and "source2" in row and "source3" not in row
+    assert "memory/knowledge_history.jsonl" in row
+
+
+def test_malformed_nomination_keeps_its_position_and_cannot_retire_another_entry(tmp_path):
+    from ouroboros.memory_nomination_receipts import prepare, settle
+
+    meta = {}
+    ids = prepare(meta, "source", [({}, [None, {"topic": "people/alex", "content": "Valid"}])])
+    outcomes = c._write_knowledge_entries(tmp_path / "memory" / "knowledge", [None,
+        {"topic": "people/alex", "content": "Valid"}])
+    assert len(outcomes) == 2 and outcomes[0]["reason"] == "malformed_nomination"
+    assert outcomes[1]["ok"]
+    settle(meta, ids, outcomes)
+    assert [row["id"] for row in meta["pending_knowledge_nominations"]] == ["source:0:0"]
+
+
+def test_corrupt_obligation_index_refuses_replacement(tmp_path, fit):
+    chat, blocks, meta = _paths(tmp_path)
+    _write_chat(chat, count=100, text_size=0)
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    c.atomic_write_json(meta, {"pending_knowledge_nominations": {"not": "a list"}})
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="corrupt")
+    with pytest.raises(ValueError, match="refusing to replace"):
+        c.consolidate(chat, blocks, meta, _Nominating(), knowledge_context=ctx)
+    assert not blocks.exists()
+    assert json.loads(meta.read_text())["pending_knowledge_nominations"] == {"not": "a list"}
+
+
+@pytest.mark.parametrize("bad_bytes", [b'{"pending_knowledge_nominations":[{"id":"old"}]',
+                                       b'["wrong top-level type"]',
+                                       b'{"pending_knowledge_nominations":[],"pending_knowledge_nominations":[]}'])
+def test_unreadable_existing_meta_cannot_erase_obligations(tmp_path, fit, bad_bytes):
+    chat, blocks, meta = _paths(tmp_path)
+    _write_chat(chat, count=100, text_size=0)
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_bytes(bad_bytes)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="corrupt")
+    with pytest.raises(ValueError):
+        c.should_consolidate(meta, chat)
+    with pytest.raises(ValueError):
+        c.consolidate(chat, blocks, meta, _Nominating(), knowledge_context=ctx)
+    assert meta.read_bytes() == bad_bytes
+    assert not blocks.exists()
+    assert any("DIALOGUE META UNREADABLE" in line for line in
+               context_health._memory_health_lines(_health_env(tmp_path)))
+
+
+def test_pending_health_disambiguates_two_entries_from_one_source(tmp_path):
+    env = _health_env(tmp_path)
+    c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", {
+        "pending_knowledge_nominations": [
+            {"id": "a" * 64 + f":{index}:0", "reason": "revision_conflict"}
+            for index in (0, 1)]})
+    row = next(line for line in context_health._memory_health_lines(env)
+               if "KNOWLEDGE PUBLICATION OPEN" in line)
+    assert "aaaaaaaaaaaa:0:0" in row and "aaaaaaaaaaaa:1:0" in row

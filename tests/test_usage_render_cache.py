@@ -90,10 +90,13 @@ _FOREIGN_ROW = {
 
 
 def _install_counters(monkeypatch):
-    """Count full ledger replays AND render re-aggregations (both namespaces
-    that matter: ``ua._read_records_locked`` feeds the memo; ``ua._summary`` /
-    ``ua._breakdown_bucket`` are the aggregation entry points the render
-    closures resolve as module globals)."""
+    """Count full ledger replays AND render re-aggregations (every namespace
+    that matters: ``ua._read_records_locked`` feeds the memo; ``_summary`` /
+    ``_breakdown_bucket`` are the aggregation entry points the render closures
+    resolve as module globals, in ``ua`` and in the ``_usage_rows`` leaf where
+    ``_projection_from_final`` lives)."""
+    from ouroboros import _usage_rows
+
     counts = {"full": 0, "summary": 0, "bucket": 0}
     real_read = ua._read_records_locked
     real_summary = ua._summary
@@ -112,8 +115,9 @@ def _install_counters(monkeypatch):
         return real_bucket(rows)
 
     monkeypatch.setattr(ua, "_read_records_locked", counting_read)
-    monkeypatch.setattr(ua, "_summary", counting_summary)
-    monkeypatch.setattr(ua, "_breakdown_bucket", counting_bucket)
+    for module in (ua, _usage_rows):
+        monkeypatch.setattr(module, "_summary", counting_summary)
+        monkeypatch.setattr(module, "_breakdown_bucket", counting_bucket)
     return counts
 
 
@@ -280,9 +284,11 @@ def test_concurrent_append_between_row_read_and_publish_is_not_cached(
             ua._memoized_final_rows(data_root)
         return real_summary(rows)
 
-    monkeypatch.setattr(ua, "_summary", racing_summary)
+    from ouroboros import _usage_rows  # the projection render resolves _summary here
+
+    monkeypatch.setattr(_usage_rows, "_summary", racing_summary)
     stale = ua.usage_projection(data_root, include_roots=False)
-    monkeypatch.setattr(ua, "_summary", real_summary)
+    monkeypatch.setattr(_usage_rows, "_summary", real_summary)
 
     # The caller got a consistent snapshot of the rows it read...
     assert stale["attempt_counts"] == {"settled": 1}

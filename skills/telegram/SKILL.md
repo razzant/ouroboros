@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.2.5
+version: 1.2.7
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -9,7 +9,7 @@ runtime: python3
 os: any
 permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
 env_from_settings: [TELEGRAM_BOT_TOKEN]
-subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, owner.notification]
+subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state, owner.notification]
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
@@ -52,7 +52,17 @@ form shows saved values before Save, and shortens the four long option labels.
 Version 1.2.4 always sends one short line when a task does not finish cleanly, with
 the same status word and reason sentence the task card shows; the task-completion
 toggle now only adds the clean finishes.
-Version 1.2.5 mirrors owner notices and reminders (the `owner.notification`
+Version 1.2.5 shows the whole quiz card: its project, the host's facts about the
+asking task, and every option's detail, with localized field names; a card too
+long for one Telegram message arrives as ordered parts followed by the keyboard
+message, and nothing authored is cut.
+Version 1.2.6 edits a sent question card when the host publishes its lifecycle
+(`chat.quiz_state`): an answer given on the web settles it, a closed wait drops the
+waiting line while the buttons stay, and a finished task says a late answer still
+counts as your message. The card only moves forward — nothing reopens an answer.
+An open question (no options) is the same whole card without buttons; it asks for
+a reply in your own words.
+Version 1.2.7 mirrors owner notices and reminders (the `owner.notification`
 event) to the pinned chat as `🔔 <source>: <text>` behind the off-by-default
 "Notify on skill notices and reminders" toggle.
 

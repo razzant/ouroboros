@@ -98,22 +98,13 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         resolved_cost = None
         cost_known = False
 
-    usage_for_budget = {
-        **usage,
-        "cost": resolved_cost,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "cached_tokens": cached_tokens,
-        "cache_write_tokens": cache_write_tokens,
-        "prompt_cache_ttl": prompt_cache_ttl,
-    }
-    projection_update_status = "available"
-    try:
-        if ctx.update_budget_from_usage(usage_for_budget) is False:
-            projection_update_status = "unavailable"
-    except Exception:
-        projection_update_status = "unavailable"
-        log.error("Paid llm_usage retained but compatibility projection update failed", exc_info=True)
+    # One compatibility-projection write per supervisor loop turn: the event only
+    # marks the context dirty and the loop flushes it AFTER bridge intake
+    # (``server_liveness.flush_budget_projection``), so N events in one drain cost
+    # one ledger render and one STATE_LOCK acquisition, never N. The event row (and
+    # its live frame) therefore says ``deferred``, not the outcome of that write.
+    ctx.budget_projection_dirty = True
+    projection_update_status = "deferred"
 
     # Server-side web-search citations ({url,title,content}, capped at 20 in
     # llm.py). Persisted so post-hoc audits (e.g. the GAIA leakage audit) can see

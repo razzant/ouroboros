@@ -115,6 +115,7 @@ def _active_direct_provider(settings: dict[str, Any]) -> str:
             ("minimax", "MINIMAX_API_KEY"),
             ("cloudru", "CLOUDRU_FOUNDATION_MODELS_API_KEY"),
             ("deepseek", "DEEPSEEK_API_KEY"),
+            ("zai", "ZAI_API_KEY"),
         )
         if _setting_or_env(settings, key)
     ]

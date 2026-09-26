@@ -210,18 +210,35 @@ def test_ordinary_empty_and_failed_silent_outcomes_remain_failed():
         assert outcome["outcome_axes"]["execution"]["status"] in {"failed", "infra_failed"}
 
 
-def test_pending_children_still_require_absorption(turn, tmp_path):
+_DECLARED = json.dumps({"delivery_control": "replace", "full_answer": "Best available; child1 still running",
+                        "presence_finish": {"outcome": "message", "message": "Here is what I have so far."}})
+
+
+@pytest.mark.parametrize("forced,outcome,spoken", [
+    # Owner Q4: the forced answer is the internal record; undeclared prose never becomes speech.
+    ("Best available; child1 still running", "silent", ""),
+    (_DECLARED, "message", "Here is what I have so far."),
+])
+def test_pending_children_still_require_absorption(turn, tmp_path, forced, outcome, spoken):
     from ouroboros.task_results import write_task_result, STATUS_RUNNING
 
     _registry, calls, run = turn
+    # A real turn carries its Presence metadata; the ceiling alone does not arm the protocol.
+    _registry._ctx.task_metadata = {"presence": {"binding_id": "a" * 32, "event": {"conversation_key": "k"}}}
     write_task_result(tmp_path, "child1", STATUS_RUNNING, parent_task_id="parent1",
                       root_task_id="parent1", delegation_role="subagent", role="reviewer", result="Still running")
     text, usage, _trace = run([
         _call("silent", "Premature"),
         {"content": '{"delivery_control":"keep"}'},
-        {"content": "Best available"}, {"content": "Best available"},
+        {"content": "Best available"}, {"content": forced},
     ])
     assert len(calls) > 1
     assert usage["reason_code"] == "children_unabsorbed"
     assert "presence_completion_outcome" not in usage
-    assert build_presence_result_event({"id": "parent1"}, text, _registry._ctx, terminal_origin=usage.get("terminal_origin", ""))["outcome"] == "message"
+    assert text == "Best available; child1 still running"  # the internal record keeps the child facts
+    assert "[PRESENCE_DELIVERY]" in str(calls[-1][-1]["content"])
+    assert "name the unabsorbed" not in str(calls[-1][-1]["content"])
+    task = {"id": "parent1"}
+    result = build_presence_result_event(task, text, _registry._ctx, terminal_origin=usage.get("terminal_origin", ""))
+    assert (result["outcome"], result["text"]) == (outcome, spoken)
+    assert task["metadata"]["presence_declaration"]["status"] == ("declared" if spoken else "missing")

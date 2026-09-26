@@ -94,14 +94,27 @@ separate: 32 tasks with a $25 task limit do not automatically reserve $800.
 Choose the reserve for the expected outstanding charges; delayed billing means
 it is not a provider-enforced spending cap.
 
+`--diagnostic-eval-on-truncation` (default off) adds the audit-only
+residual-state diagnostic described in the methodology: after a proven
+time/round/budget status-gate decline it reruns the unchanged checker once, up to
+900 seconds per eligible task, and never changes official results. Use the same
+setting for the whole campaign; recovery refuses a change. Each task dump keeps
+`ouroboros_eval_claim.json`, its `ouroboros_eval_receipt-<attempt>.json` and, when
+the diagnostic ran, `ouroboros_diagnostic_*` claim, receipt, report and log files.
+
 ## Monitor, recover and audit
 
-A suspect budget-meter response is confirmed with at most three reads requesting
-cache revalidation inside one 15-second read window. Each request uses only the
-remaining time. Counters must still be finite, nonnegative and no lower than the last
-accepted value. `monitor.json` and the unit log retain rejected observations,
-the previous value, errors and any successful confirmation. Persistent meter
-failure stops the run; a known exhausted budget never waits for another poll.
+The budget meter is read every 15 seconds. `--meter-blindness-sec` (default 30,
+recorded in the manifest) bounds the time since the last accepted, saved
+reading. Each read gets at most 5 seconds; a failed or rejected read is retried
+about every 3 seconds inside that bound, and reaching it stops the run with
+`budget_meter_unavailable`. Counters must still be finite, nonnegative and no
+lower than the last accepted value. `monitor.json` and the unit log retain
+rejected observations, the previous value, errors and any successful
+confirmation. A known exhausted budget never waits for another poll. A failed
+campaign-file write stops the run with `campaign_persistence_failed`; a failed
+ledger or monitor write is reported on stderr as `cowork_diagnostic_write_failed`
+while valid work continues.
 
 Cleanup rechecks the exact run label after removing containers and networks.
 A competing cleanup's already-removed response succeeds only when that fresh
@@ -111,7 +124,9 @@ failure and keeps the campaign's unsettled custody.
 `monitor.json` records progress, key-meter spending, disk headroom and stop
 reasons. `run_manifest.json` records the seed, benchmark, immutable image ID,
 selected IDs, recovery ancestry and applied configuration; `result_index.jsonl` retains every selected task,
-including failures and tasks not started. Task artifacts live below
+including failures and tasks not started. A started task without an adapter
+summary is `infra_failed` with `interrupted:<cause>` and a `paid_activity` of
+`observed` or `unknown`, as defined in the methodology. Task artifacts live below
 `bench/dumps/`, with sanitized runtime logs in each task's `ouroboros/` folder.
 A launcher exit code is not a task score. Task polling checkpoints the selected
 scrubbed logs before its status request, so an aborted run can retain partial

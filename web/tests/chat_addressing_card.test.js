@@ -58,7 +58,7 @@ function fixture(history = [], chatId = 1) {
     const instance = createChatInstance({ ws,
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
         updateUnreadBadge() {}, chatId, idPrefix: 'chat', mountEl: mount,
-        stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+        stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
     });
     const messages = document.byId.get('chat-messages');

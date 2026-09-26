@@ -39,6 +39,14 @@ def _queue():
 
 log = logging.getLogger(__name__)
 
+# The supervisor's timeout rails in priority order: the typed ``terminal_reason``
+# the reaper stamps as the task_done ``reason_code`` and the ``task_incident`` key.
+# ``project_dialogue.TASK_CAUSE_PHRASES`` carries one owner sentence per member;
+# the code itself never reaches a chat.
+REASON_ABSOLUTE_CEILING, REASON_DEADLINE, REASON_IDLE_TIMEOUT = TIMEOUT_TERMINAL_REASONS = (
+    "absolute_ceiling", "deadline", "idle_timeout",
+)
+
 
 def _task_deadline_ts(task: Dict[str, Any]) -> float:
     raw = str(task.get("deadline_at") or "").strip()
@@ -249,6 +257,27 @@ def _enforce_task_timeouts_locked(
                        or model_waiting(meta) or waiting_on_owner
                        or _active_operation_progressing(meta, now))
         ceiling_reached = abs_ceiling is not None and runtime_sec >= float(abs_ceiling)
+        if (ceiling_reached and not task.get("parent_task_id")
+                and task_id == str(task.get("root_task_id") or task_id)):
+            # A settled answer may still own post-task memory work in this
+            # RUNNING worker. The solve ceiling cannot turn that work into a
+            # failed answer; idle, per-call, deadline and cancellation remain.
+            from ouroboros.task_results import load_task_result
+            from ouroboros.task_status import SETTLED_STATUSES
+
+            try:
+                # Solve settlement lives on the actor's own drive (a split root
+                # settles there first; canonical copyback lags); the post-work
+                # phase lives on the canonical checkpoint authority.
+                settled = load_task_result(
+                    _queue()._task_drive_for_task(task, str(task_id)), str(task_id)) or {}
+                stored = load_task_result(_queue().DRIVE_ROOT, str(task_id)) or {}
+            except Exception:
+                settled, stored = {}, {}  # unreadable terminal proof never widens the ceiling
+            checkpoint = stored.get("root_phase_checkpoint") or {}
+            if (settled.get("status") in SETTLED_STATUSES and isinstance(checkpoint, dict)
+                    and checkpoint.get("post_task_synthesis") == "running"):
+                ceiling_reached = False
 
         if (
             str(task_id) in owner_stop_held
@@ -279,11 +308,11 @@ def _enforce_task_timeouts_locked(
             continue
 
         if ceiling_reached:
-            terminal_reason = "absolute_ceiling"
+            terminal_reason = REASON_ABSOLUTE_CEILING
         elif deadline_reached:
-            terminal_reason = "deadline"
+            terminal_reason = REASON_DEADLINE
         else:
-            terminal_reason = "idle_timeout"
+            terminal_reason = REASON_IDLE_TIMEOUT
         finalization_requested_at = float(meta.get("finalization_requested_at") or 0.0)
         if finalization_requested_at <= 0 and _queue().FINALIZATION_GRACE_SEC > 0:
             meta["finalization_requested_at"] = now

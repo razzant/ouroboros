@@ -31,7 +31,7 @@ class TestValidateQuizPayload:
         assert payload["assumption"] == "continuing with the merge"
 
     @pytest.mark.parametrize("options", [
-        [], ["only-one"], ["a"] * (_MAX_QUIZ_OPTIONS + 1), "not-a-list",
+        ["a"] * (_MAX_QUIZ_OPTIONS + 1), "not-a-list",
         [{"detail": "no label"}],
     ])
     def test_bad_options_are_refused_atomically(self, options):
@@ -43,6 +43,14 @@ class TestValidateQuizPayload:
         with pytest.raises(QuizValidationError) as err:
             validate_quiz_payload("q", ["a", "b"], "", "  ")
         assert err.value.code == "QUIZ_ASSUMPTION_REQUIRED"
+
+    @pytest.mark.parametrize("options", [None, [], ["Confirm"]])
+    def test_open_and_single_choice_questions_keep_the_answer_contract(self, options):
+        payload = validate_quiz_payload("What should change?", options, "", "", wait_for_answer=True)
+        assert payload["options"] == ([] if options is None else [{"label": x} for x in options])
+        with pytest.raises(QuizValidationError) as error:
+            validate_quiz_payload("What should change?", options, "", "")
+        assert error.value.code == "QUIZ_ASSUMPTION_REQUIRED"
 
     def test_wait_bound_is_whole_minutes_capped_by_the_task_ceiling(self, monkeypatch):
         """The bound belongs to a REQUIRED wait and can never promise more time
@@ -72,11 +80,66 @@ class TestValidateQuizPayload:
                 validate_quiz_payload("q", ["a", "b"], "", "", wait_for_answer=True, max_wait_minutes=bad)
             assert "omit it for an unbounded wait" in str(err.value)
 
-    def test_empty_or_oversized_question_refused(self):
-        with pytest.raises(QuizValidationError):
-            validate_quiz_payload("", ["a", "b"], "", "assume")
-        with pytest.raises(QuizValidationError):
-            validate_quiz_payload("q" * 2001, ["a", "b"], "", "assume")
+    def test_question_has_no_length_cap_but_must_be_non_empty(self):
+        """The card may be the only explanation its reader gets: a long
+        question is accepted whole; only an empty one is refused."""
+        long_question = "q" * 2001
+        assert validate_quiz_payload(long_question, ["a", "b"], "", "assume")["question"] == long_question
+        for empty in ("", "   \n\t "):
+            with pytest.raises(QuizValidationError) as err:
+                validate_quiz_payload(empty, ["a", "b"], "", "assume")
+            assert err.value.code == "QUIZ_QUESTION_INVALID"
+            assert str(err.value) == "question must be non-empty."
+
+    def test_over_long_label_is_refused_not_sliced(self):
+        at_bound = "L" * 120
+        payload = validate_quiz_payload("q", [at_bound, "b"], "", "assume")
+        assert payload["options"][0]["label"] == at_bound
+        with pytest.raises(QuizValidationError) as err:
+            validate_quiz_payload("q", ["L" * 121, "b"], "", "assume")
+        assert err.value.code == "QUIZ_OPTIONS_INVALID"
+        assert str(err.value) == "option labels must be at most 120 characters."
+        # A dict option takes the same bound.
+        with pytest.raises(QuizValidationError) as err:
+            validate_quiz_payload("q", [{"label": "L" * 121, "detail": "d"}, "b"], "", "assume")
+        assert err.value.code == "QUIZ_OPTIONS_INVALID"
+
+    def test_detail_stake_and_assumption_survive_byte_exact(self):
+        detail = "детали🙂 " * 75 + "end"  # well past the former 500-char slice
+        stake = "stake-" * 100
+        assumption = "assumption-" * 60
+        assert min(len(detail), len(stake), len(assumption)) > 500
+        payload = validate_quiz_payload(
+            "q", [{"label": "a", "detail": detail}, "b"], stake, assumption)
+        assert payload["options"][0]["detail"] == detail.strip()
+        assert payload["stake"] == stake
+        assert payload["assumption"] == assumption
+
+    def test_multi_paragraph_unicode_question_survives_into_the_stored_block(self, tmp_path):
+        """Validator and the root ask path together: nothing between the tool
+        call and the durable owner_quiz block cuts the authored explanation."""
+        from ouroboros.owner_quiz import quiz_states
+        from tests.test_quiz_answer import _escalate, _tool_ctx
+
+        question = (
+            "## Что решаем\n\n"
+            + "Абзац с объяснением — «кавычки», emoji 🚀, 𐍈. " * 60
+            + "\n\nSecond paragraph in English, with `code` and a list:\n- one\n- two"
+        )
+        detail = "Что меняется: " + "x" * 700
+        assert len(question) > 2000
+        assert validate_quiz_payload(question, ["a", "b"], "", "assume")["question"] == question
+        ctx = _tool_ctx(tmp_path, role="root")
+        out = _escalate(ctx, question=question,
+                        options=[{"label": "A", "detail": detail}, {"label": "B"}],
+                        stake="s" * 600, assumption="a" * 600)
+        assert out.startswith("OK: quiz ")
+        event = next(e for e in ctx.pending_events if e.get("type") == "send_quiz")
+        assert event["question"] == question
+        block = quiz_states(tmp_path, "root-1")[event["quiz_id"]]
+        assert block["question"] == question
+        assert block["option_details"] == [detail, ""]
+        assert block["stake"] == "s" * 600 and block["assumption"] == "a" * 600
 
 
 @pytest.mark.parametrize("wait_for_answer", [False, True])
@@ -130,6 +193,37 @@ def test_send_quiz_broadcasts_publishes_and_persists_row(monkeypatch, tmp_path, 
     assert live["wait_for_answer"] is payload["wait_for_answer"] is row["quiz"]["wait_for_answer"] is wait_for_answer
 
 
+def test_send_quiz_accepts_a_long_question_through_the_shared_validator(monkeypatch, tmp_path):
+    bridge = _make_bridge(monkeypatch)
+    frames, events = [], []
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
+    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat_id: None)
+    monkeypatch.setattr(message_bus, "publish_event", lambda topic, data: events.append((topic, data)))
+    question = "Длинное объяснение решения. " * 200
+    detail = "consequence " * 60
+    ok, error = bridge.send_quiz(
+        123, quiz_id="qz-long", question=question,
+        options=[{"label": "Yes", "detail": detail}, {"label": "No"}],
+        assumption="continuing", task_id="task-quiz",
+    )
+    assert (ok, error) == (True, "ok")
+    live = next(frame for frame in frames if frame.get("type") == "quiz")
+    assert live["question"] == question.strip()
+    assert live["options"][0]["detail"] == detail.strip()
+    assert events[-1][1]["question"] == question.strip()
+    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert row["text"] == question.strip()
+    # The same validator still refuses an over-long label atomically.
+    ok, error = bridge.send_quiz(
+        123, quiz_id="qz-label", question="q",
+        options=[{"label": "L" * 121}, {"label": "No"}],
+        assumption="continuing", task_id="task-quiz",
+    )
+    assert not ok and "at most 120 characters" in error
+
+
 def test_send_quiz_refuses_invalid_payload_and_missing_ids(monkeypatch, tmp_path):
     bridge = _make_bridge(monkeypatch)
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
@@ -139,7 +233,7 @@ def test_send_quiz_refuses_invalid_payload_and_missing_ids(monkeypatch, tmp_path
     ok, error = bridge.send_quiz(1, quiz_id="qz", question="q", options=[{"label": "a"}, {"label": "b"}], assumption="x")
     assert not ok and "task_id" in error
     ok, error = bridge.send_quiz(1, quiz_id="qz", question="q", options=[{"label": "a"}], assumption="x", task_id="t")
-    assert not ok
+    assert (ok, error) == (True, "ok")
     ok, error = bridge.send_quiz(-5, quiz_id="qz", question="q", options=[{"label": "a"}, {"label": "b"}], assumption="x")
     assert (ok, error) == (True, "ok")  # A2A chats: silent no-op, like links
 
@@ -171,9 +265,12 @@ def test_handle_send_quiz_prefers_bound_project_chat(monkeypatch):
     assert sent[0][1]["quiz_id"] == "qz-2"
     assert sent[0][1]["assumption"] == "path A meanwhile"
 
-    # No options -> typed drop, no bridge call.
+    # An explicitly empty options list is an open question; absence is not.
     sent.clear()
     _handle_send_quiz({**evt, "options": []}, ctx)
+    assert sent and sent[0][1]["options"] == []
+    sent.clear()
+    _handle_send_quiz({key: value for key, value in evt.items() if key != "options"}, ctx)
     assert sent == []
 
     # Headless exception: an interactive card in the hidden chat-0 panel can

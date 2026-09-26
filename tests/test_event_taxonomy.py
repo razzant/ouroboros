@@ -111,8 +111,10 @@ def test_every_declared_producer_still_names_the_event_it_produces():
 def test_restart_request_is_intercepted_by_the_server_not_the_dispatcher():
     row = EVENT_DISPOSITIONS["restart_request"]
     assert row.tier == SERVER_INTERCEPT
-    assert row.answered_by == "server.py"
-    assert '"restart_request"' in (REPO / "server.py").read_text(encoding="utf-8")
+    assert row.answered_by == "ouroboros.server_liveness"
+    drain = (REPO / "ouroboros" / "server_liveness.py").read_text(encoding="utf-8")
+    assert '"restart_request"' in drain and "on_restart(evt, ctx)" in drain
+    assert "on_restart=_handle_restart_in_supervisor" in (REPO / "server.py").read_text(encoding="utf-8")
 
 
 def test_the_nested_tier_is_answered_inside_the_log_envelope():

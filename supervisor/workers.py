@@ -554,15 +554,22 @@ def _reject_promoted_after_attachment_stage(
 def _apply_presence_promotion_authority(
     evt: dict, task: dict, *, objective: str, expected_output: str,
 ) -> list[dict] | dict:
-    """Preserve inherited Presence authority while rebinding the new root."""
+    """Preserve inherited Presence authority while rebinding the new root.
 
-    presence = evt.get("presence") if isinstance(evt.get("presence"), dict) else None
-    if not presence:
-        return []
-    task["_presence_origin"] = True
-    task["source"] = "presence_promote"
-    task.setdefault("metadata", {})["presence"] = dict(presence)
+    A speaker's promote makes the root answer its conversation; a delegated
+    descendant's carries only the binding it acts for, so its root is that
+    binding's related work under the same ceiling and never a speaker.
+    """
+    from ouroboros.dialogue_provenance import presence_root_carrier
+
     contract = evt.get("task_contract") if isinstance(evt.get("task_contract"), dict) else {}
+    carrier = presence_root_carrier(evt, task_contract=contract)
+    if not carrier:
+        return []
+    if "presence" in carrier:
+        task["_presence_origin"] = True
+    task["source"] = "presence_promote"
+    task.setdefault("metadata", {}).update(carrier)
     inherited_manifest = [
         dict(row) for row in (contract.get("attachment_manifest") or [])
         if isinstance(row, dict)
@@ -573,6 +580,9 @@ def _apply_presence_promotion_authority(
         "objective": objective,
         "expected_output": expected_output,
         "attachment_manifest": [],
+        # The new root owns its objective: a delegated promoter's claims are not its premise.
+        "acceptance_claims": [],
+        "success_criteria": [],
     })
     promoted_contract.pop("lineage", None)
     promoted_contract.pop("attachment_manifest_ref", None)

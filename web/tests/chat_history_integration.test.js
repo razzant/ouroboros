@@ -32,7 +32,7 @@ function fixture(t, initial = page([]), fetchPage = null) {
         ws: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); },
             isConnected: () => true, send() {} },
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-        updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+        updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
         chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true,
     });

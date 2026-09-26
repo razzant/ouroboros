@@ -2,15 +2,21 @@
 
 Split out of ``tests/test_agent_task_pipeline.py`` when that module was divided
 by theme; every moved block is verbatim. Covers `_run_reflection` entry
-generation, `_update_improvement_backlog`, and the project-scoped channel
-split: project memory stays project-local while backlog promotion goes to the
-global drive through `_run_global_backlog_promotion_only`.
+generation, `_update_improvement_backlog`, the project-scoped channel
+split (project memory stays project-local while backlog promotion goes to the
+global drive through `_run_global_backlog_promotion_only`) and the reflection
+stage's nested paid Pattern Register write under the post-task stage protocol.
 """
 
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import ouroboros.agent_task_pipeline as pipeline
+from ouroboros import model_wait
+from ouroboros.task_results import load_task_result
+from tests.test_post_task_model_wait import _generic_unknown, phase as phase
 
 
 def test_project_scoped_post_task_processing_feeds_global_backlog_but_project_memory(tmp_path, monkeypatch):
@@ -18,7 +24,7 @@ def test_project_scoped_post_task_processing_feeds_global_backlog_but_project_me
 
     calls = []
     reflection = {"backlog_candidates": [{"summary": "tool friction"}], "memory_actions": [{"kind": "note"}]}
-    monkeypatch.setattr(pipeline, "_run_task_summary", lambda *args, **kwargs: calls.append(("summary",)))
+    monkeypatch.setattr(pipeline, "_record_task_facts", lambda *args, **kwargs: calls.append(("facts",)))
     monkeypatch.setattr(pipeline, "_run_reflection", lambda *args, **kwargs: reflection)
     monkeypatch.setattr(pipeline, "_update_improvement_backlog", lambda _env, entry: calls.append(("backlog", entry)) or 1)
     monkeypatch.setattr(
@@ -159,3 +165,82 @@ def test_run_reflection_returns_entry_when_generated(tmp_path, monkeypatch):
               (tmp_path / "logs" / "task_reflections.jsonl").read_text(encoding="utf-8").splitlines()]
     assert stored == [entry]
     assert captured["pattern_root"] == tmp_path and captured["pattern_entry"] == entry
+
+
+@pytest.mark.parametrize("scope", ["global", "project"])
+@pytest.mark.parametrize("outcome", ["reflection_unknown", "pattern_unknown", "pattern_budget",
+                                     "pattern_deadline", "pattern_ordinary", "pattern_ok"])
+def test_nested_pattern_register_follows_the_post_task_stage_protocol(phase, monkeypatch, tmp_path, scope, outcome):
+    """F-R1: the reflection stage's nested paid Pattern Register write ran even when the
+    reflection's own call had already recorded an unknown outcome, and both writers
+    (global ``append_reflection``, project branch of ``append_reflection_routed``)
+    swallowed a budget refusal, an unresolved attempt, a control and an ordinary
+    failure alike, so the promotion stage bought its paid calls and the checkpoint
+    read ``completed``. Through the REAL reflection, routing and register adapters
+    (only the provider dispatch is substituted): an interrupted reflection buys no
+    register call; a register interruption stops promotion after the reflection is
+    persisted and its free actions are applied once; an ordinary register failure
+    degrades while promotion still runs; a register success completes."""
+    from ouroboros import consolidator, context_fit, llm_observability, post_task_synthesis, project_facts
+    from ouroboros.capability_evidence import CapabilityEvidence
+    from ouroboros.usage_accounting import BudgetExceeded
+
+    f = phase
+    monkeypatch.setattr(consolidator, "_consolidation_route", lambda: ("test/model", False))
+    monkeypatch.setattr(context_fit, "resolve_context_fit_route", lambda task, *, allow_fetch: (
+        {"model": task["model"], "provider": "openrouter"},
+        CapabilityEvidence(100_000, "confirmed", "test", "route-test", model=task["model"], provider="openrouter")))
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(pipeline, "_run_reflection", post_task_synthesis._run_reflection)
+    if scope == "project":
+        monkeypatch.setattr(project_facts, "_project_store_root", lambda pid: tmp_path / "projects" / pid)
+        f.task["project_id"] = "slime"
+    failures = {"reflection_unknown": _generic_unknown("direct"), "pattern_unknown": _generic_unknown("cause"),
+                "pattern_budget": BudgetExceeded("root wallet spent"),
+                "pattern_deadline": model_wait.ModelWaitInterrupted("deadline"),
+                "pattern_ordinary": RuntimeError("pattern provider failed")}
+
+    def dispatch(*_args, call_type="", **_kwargs):
+        f.stages.append(call_type)
+        failing = "task_reflection" if outcome == "reflection_unknown" else "pattern_register_update"
+        if call_type == failing and outcome in failures:
+            raise failures[outcome]
+        content = ("| Error class | Count | Root cause | Structural fix | Status |\n|---|---|---|---|---|\n"
+                   "| run_command | 1 | boom | typed | open |") if call_type == "pattern_register_update" else "Lesson: typed."
+        return {"content": content}, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0}
+
+    monkeypatch.setattr(llm_observability, "chat_observed", dispatch)
+    applied, entries = [], []
+    monkeypatch.setattr(pipeline, "_apply_reflection_memory_actions", lambda *a, **k: applied.append(1))
+    trace = {"tool_calls": [{"tool": "run_command", "status": "error", "is_error": True, "result": "boom"}]}
+    pipeline._run_post_task_processing_async(
+        f.env, f.task, {"rounds": 3}, trace, {}, f.root / "logs", event_queue=f.events,
+        on_reflection=lambda entry, _llm: entries.append(entry))
+    assert f.done.wait(5)
+    checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
+    reflected = ["facts", "chat", "scratch", "task_reflection"]
+    stop = {"reflection_unknown": "provider_outcome_unknown", "pattern_unknown": "provider_outcome_unknown",
+            "pattern_budget": "budget_exhausted", "pattern_deadline": "deadline"}.get(outcome)
+    if stop:
+        assert checkpoint["post_task_synthesis"] == "degraded"
+        assert checkpoint["post_task_stop_reason"] == f"{stop}:skipped=promotion"
+        assert f.stages == reflected + ([] if outcome == "reflection_unknown" else ["pattern_register_update"])
+        assert entries == [], "no paid promotion after an interruption"
+    else:
+        assert checkpoint["post_task_synthesis"] == ("degraded" if outcome == "pattern_ordinary" else "completed")
+        assert not checkpoint.get("post_task_stop_reason")
+        assert f.stages == reflected + ["pattern_register_update", "backlog"]
+        [entry] = entries
+        kinds = [row["kind"] for row in entry.get("memory_operation_errors") or []]
+        assert kinds == (["pattern_register_failed"] if outcome == "pattern_ordinary" else [])
+    assert applied == [1], "the completed reflection's free actions are applied exactly once"
+    canonical = [json.loads(line) for line in (f.root / "logs" / "task_reflections.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    if scope == "project":
+        assert [row["type"] for row in canonical] == ["project_reflection_pointer"]
+        persisted = (tmp_path / "projects" / "slime" / "logs" / "task_reflections.jsonl").read_text(encoding="utf-8")
+        assert len(persisted.splitlines()) == 1
+    else:
+        assert len(canonical) == 1 and canonical[0]["task_id"] == f.task["id"]
+    patterns = f.root / "memory" / "knowledge" / "patterns.md"
+    assert patterns.exists() == (outcome == "pattern_ok")

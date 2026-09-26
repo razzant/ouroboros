@@ -29,7 +29,7 @@ test('createChatInstance renders a real assistant bubble without senderLabel sha
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true,
         apply() {},
     };
@@ -123,7 +123,7 @@ test('first task-bound review hydrates a progress-created owner once and reconci
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true,
         apply() {},
     };
@@ -347,7 +347,7 @@ test('review-only reconnect anchors stay inert until task truth arrives', async 
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true,
         apply() {},
     };
@@ -476,7 +476,7 @@ test('Plan invalidation applies terminal task detail to its review-created owner
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     let instance;
@@ -538,7 +538,7 @@ test('source-incomplete typed review lifecycle is consumed in history, live chat
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     let instance;
@@ -586,7 +586,7 @@ test('terminal task-bound review lifecycle resyncs canonical verdict without rec
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true,
         apply() {},
     };
@@ -652,7 +652,7 @@ test('duplicate lifecycle pointer never mints a task and enriches only an existi
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     const pointer = {
@@ -752,7 +752,7 @@ test('history replay keeps one duplicate lifecycle acknowledgement without a tas
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     let instance;
@@ -799,7 +799,7 @@ test('history replay keeps an ownerless duplicate acknowledgement without a task
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     let instance;
@@ -847,7 +847,7 @@ test('an alias-free subagent terminal keeps the honest amount, live and on reloa
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true,
         apply() {},
     };
@@ -963,7 +963,7 @@ test('a stopped direct turn replays its persisted terminal word, never a blanket
         const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
         let generation = 0;
         const stateSnapshots = {
-            begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+            begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {},
         };
         let instance;
@@ -1035,7 +1035,7 @@ test('history rebuild keeps a lineage-known branch nested, never appended top-le
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     let instance;
@@ -1091,7 +1091,7 @@ test('a direct turn renders tool work as an activity block and needs host author
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     let instance;
@@ -1192,7 +1192,7 @@ test(`history replay of a direct turn preserves ${execution}`, async () => {
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     let instance;
@@ -1253,7 +1253,7 @@ test('a terminal root settles its still-open child card from the child result (#
     };
     let generation = 0;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     let instance;
@@ -1321,7 +1321,7 @@ for (const order of ['final-first', 'done-first', 'cold']) {
         let instance;
         try {
             instance = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-                updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+                updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
                     isCurrent: () => true, apply() {} }, chatId: 1, idPrefix: 'chat', mountEl: mount });
             if (order === 'cold') await instance.refreshHistory({ revision: 1 });
             else {
@@ -1360,7 +1360,7 @@ for (const source of ['missing', 'failed-read']) {
         let instance;
         try {
             instance = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-                updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+                updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
                     isCurrent: () => true, apply() {} }, chatId: 1, idPrefix: 'chat', mountEl: mount });
             listActivity(instance, 'old-root', 1);
             handlers.get('chat')({ chat_id: 1, task_id: 'old-root', role: 'assistant', is_progress: true,
@@ -1396,7 +1396,7 @@ test('native terminal replay retains the actual narration as title', async () =>
     let instance;
     try {
         instance = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-            updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+            updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
                 isCurrent: () => true, apply() {} }, chatId: 1, idPrefix: 'chat', mountEl: mount });
         await instance.refreshHistory({ revision: 1 });
         const card = walkCard(globalThis.document.byId.get('chat-messages'), 'native-title');
@@ -1425,7 +1425,7 @@ test('a late acceptance settlement row without a placement fact never rewrites t
     let instance;
     try {
         instance = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-            updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+            updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
                 isCurrent: () => true, apply() {} }, chatId: 1, idPrefix: 'chat', mountEl: mount });
         await instance.refreshHistory({ revision: 1 });
         const messages = globalThis.document.byId.get('chat-messages');

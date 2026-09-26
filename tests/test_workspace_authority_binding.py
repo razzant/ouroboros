@@ -12,9 +12,9 @@ _EXPECTED_TOP_LEVEL_POLICY = {
     "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
     "system_repo": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
     "runtime_data": {"read", "list", "search", "write", "edit"},
-    "task_drive": {"read", "list", "write", "edit", "shell", "service"},
+    "task_drive": {"read", "list", "search", "write", "edit", "shell", "service"},
     "skill_payload": {"read", "list", "search", "write", "edit", "review", "shell"},
-    "artifact_store": {"read", "list", "write", "shell", "service"},
+    "artifact_store": {"read", "list", "search", "write", "edit", "shell", "service"},
     "user_files": {"read", "list", "search", "write", "edit", "shell", "service"},
     "subagent_projects": {"read", "list", "search"},
     "deliverables": {"read", "list", "search"},
@@ -36,7 +36,8 @@ def test_shared_top_level_principal_does_not_widen_specialized_profiles():
     assert "skill_repair" not in _POLICY
     assert "skill_payload" not in _POLICY["acting_subagent"]
     for profile in ("local_readonly_subagent", "acting_subagent"):
-        assert "search" not in _POLICY[profile]["runtime_data"]
+        assert {"read", "list", "search"} <= _POLICY[profile]["runtime_data"]
+        assert not {"write", "edit"} & _POLICY[profile]["runtime_data"]
     assert "delegate" in _POLICY["operator_control"]["active_workspace"]
 
 

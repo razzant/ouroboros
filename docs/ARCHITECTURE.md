@@ -1,4 +1,4 @@
-# Ouroboros v7.4.11 — Architecture & Reference
+# Ouroboros v7.5.0 — Architecture & Reference
 
 This is the present-tense operational map of Ouroboros (BIBLE P6), in three layers: structure (what exists and where), operation (files, env keys, state paths, endpoints, flows), and rationale; it is NOT a changelog, and version history lives in README.md, git tags, and the commit log. Every important WHY stays in this book at least briefly, while mechanism detail lives in the module docstring the map points to by name, and rationale must be self-contained — future maintainers should not need old commits to understand why a guard, review gate, or lifecycle exists. The chapters below are the book: each owns one section of the map, and a change replaces the description of the node it touched.
 

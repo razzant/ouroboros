@@ -143,6 +143,9 @@ def _check_budget_limits(
             # The exact probe confirmed a stop: finalize services and prepare the
             # candidate that will be dispatched (forced augmentations included).
             trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
+            tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+            presence_arm = (getattr(tools_ctx, "_presence_forced_declaration", None),
+                            getattr(tools_ctx, "_presence_forced_pending", None))
             priced_prompt = _loop()._prepare_forced_prompt(ctx, forced_prompt, trace)
             prospective_messages = [dict(message) for message in ctx.messages]
             _loop()._append_or_merge_user_message(prospective_messages, priced_prompt)
@@ -173,6 +176,10 @@ def _check_budget_limits(
                     fallback_text=finish_reason, reason_code="budget_exhausted",
                     _initial_messages=send_messages, _admitted_request=wrapup_request,
                 )
+            # Repricing admitted ordinary work after all. No forced call is committed, so the
+            # Presence arm the prepared prompt set is withdrawn: it would silence the ordinary reply.
+            if tools_ctx is not None:
+                tools_ctx._presence_forced_declaration, tools_ctx._presence_forced_pending = presence_arm
     if deciding is not None and ceiling_usd is not None and deciding > ceiling_usd:
         if spend_basis == task_pacing.SPEND_BASIS_TREE:
             spent_text = (

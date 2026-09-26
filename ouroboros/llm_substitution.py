@@ -29,6 +29,21 @@ configured fallback chain owns what happens next.
 The budget is its own counter, never the transport's no-start preparation
 loop: a repair fixes a request that was never sent, while a redo spends a
 fresh generation on an answer that already arrived.
+
+## Asking again after a vendor refused one account's quota
+
+The same question as a redo, for a refusal instead of an answer. The serving
+engine (3.14.0) resolves ONE account per model operation before dispatch and
+invokes it once, so a quota refusal before dispatch is the engine's own verdict
+on its pool or a pin: it is never asked again, and only its ``poolCause`` says
+that every compatible account is blocked. An HTTP-level vendor refusal is a
+settled fact about the one account it names, refused before any response
+stream began, so nothing was generated; the engine turns its reset evidence
+into that account's cooldown. The SAME payload, naming no account, then lets
+the engine choose again. An account it selects twice ends the rotation without
+claiming the pool is spent, and so does every reason a redo is refused. A pin,
+an unknown outcome and a stream-level refusal (generation may have begun) are
+never asked again.
 """
 
 from __future__ import annotations
@@ -234,3 +249,64 @@ def _refusal(budget: "SubstitutionBudget", invocation: Any, fact: dict,
     if invocation.capture is not None:
         error.physical_attempt_capture = invocation.capture
     return error
+
+
+class AccountRotation:
+    """One call's unpinned re-asks of the same payload after a vendor quota refusal.
+
+    A re-ask follows only a newly refused account, so the engine's pool bounds
+    it; the ceiling is defensive and, like every other stop, claims nothing
+    about the accounts that were not tried.
+    """
+
+    CEILING = 8
+
+    def __init__(self) -> None:
+        self.refused: list[str] = []
+
+    def refused_call(self, target: dict, parameters: dict, invocation: Any, error: Any) -> bool:
+        """Record one refusal; True only when this call may ask the engine again.
+
+        A refusal that reaches the caller leaves its account unpreferred for the next
+        matching dispatch; a re-ask names no account, so it remembers nothing.
+        """
+        from ouroboros.model_wait import model_wait_reason
+
+        if model_wait_reason(error) not in {"quota", "auth_quota"}:
+            remember_failed_profile(target, parameters, error)
+            return False
+        account = str((error.route or {}).get("credentialProfileId") or "")
+        repeated = account in self.refused
+        if account and not repeated:
+            self.refused.append(account)
+        state = getattr(getattr(error, "physical_attempt_capture", None), "state", None)
+        stop = ("pinned_account" if (invocation.payload.get("account") or {}).get("mode") == "pin"
+                else "pool_exhausted" if ((error.problem or {}).get("context") or {}).get("poolCause") in {"quota", "mixed"}
+                else "refused_before_dispatch" if state == "released"
+                else "outcome_not_settled" if state != "settled"
+                else "generation_not_excluded" if not error.status_code
+                else "account_unobserved" if not account
+                else "engine_reselected_refused_account" if repeated
+                else "rotation_ceiling" if len(self.refused) > self.CEILING
+                else _redo_allowed(invocation.payload))
+        append_jsonl(invocation.root / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(), "type": "model_account_rotation", "task_id": invocation.task_id,
+            "model_role": invocation.role, "operation_id": invocation.operation_id, "account": account,
+            "disposition": stop or "reask", "refused_accounts": list(self.refused)})
+        if stop:
+            remember_failed_profile(target, parameters, error)
+            error.account_rotation = {"refused_accounts": list(self.refused), "stop": stop,
+                                      "pool_exhausted": stop == "pool_exhausted"}
+        return not stop
+
+    @staticmethod
+    def reask(parameters: dict, payload: dict) -> tuple[None, dict, dict]:
+        """No preparation to rebind, and no account preference on any later request of this call."""
+        return None, {**parameters, "_no_account_preference": True}, {**payload, "account": {"mode": "auto"}}
+
+    def disclose(self, answer: tuple[dict, dict]) -> tuple[dict, dict]:
+        """An answer that followed a rotation names the accounts that refused first."""
+        message, usage = answer
+        if self.refused and isinstance(usage.get("claudexor"), dict):
+            usage["claudexor"]["account_rotation"] = {"refused_accounts": list(self.refused)}
+        return message, usage

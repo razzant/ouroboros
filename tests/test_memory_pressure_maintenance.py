@@ -186,13 +186,22 @@ def test_pressure_uses_read_revision_to_rewrite_the_authored_overview(tmp_path, 
             if self.calls == 1:
                 return {"tool_calls": [call("knowledge_read", {"topic": "overview", "scope": "global"}, "read-overview")]}, {"cost": 0.01}
             assert old.text in kwargs["messages"][-1]["content"]
+            # Pressure shortening is an explicit edit of the whole long span it replaces.
             return {"content": json.dumps({"knowledge_entries": [{"topic": "overview", "scope": "global",
-                "content": "---\nsummary: Authored compact orientation.\n---\nFull scope retained with [detail](detail.md)."}]})}, {"cost": 0.02}
+                "summary": "Authored compact orientation.",
+                "edits": [{"old_text": "Detailed understanding. " * 500,
+                           "new_text": "Full scope retained with [detail](detail.md).",
+                           "basis": "The complete current source is retained in the detailed note."}]}]})}, {"cost": 0.02}
     result = c.maintain_memory_pressure(memory, Overview(), ctx, fits=lambda: len(address.path.read_bytes()) < 1000)
     assert result["status"] == "fitting"
     assert result["actions"][0]["writes"][0]["ok"]
+    current = k.read_knowledge_note(address)
+    assert current.metadata == {"summary": "Authored compact orientation.", "type": "note"}
+    assert current.text.endswith("---\nFull scope retained with [detail](detail.md).")
     history = [json.loads(line) for line in (tmp_path / "memory/knowledge_history.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert any(row.get("old_content") == old.text for row in history)
+    change = next(row for row in history if row.get("old_content") == old.text)
+    assert change["writer"] == "knowledge_maintenance" and change["edits"][0]["basis"]
+    assert change["summary"] == "Authored compact orientation."
 
 
 def test_irreducible_identity_is_preserved_with_no_progress(tmp_path, fit):

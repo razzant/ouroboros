@@ -235,3 +235,68 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
             pytest.skip(str(exc))
         raise
+
+
+@pytest.mark.ui_browser
+@pytest.mark.serial
+def test_ui_smoke_action_only_author_finish_keeps_the_reviewer_fail(direct_server_with_data, tmp_path, monkeypatch):
+    """TZ-2 C4 in the real review renderer: Main's final response after a FAIL panel is an
+    action-only finish (no stance). The record comes from the real acceptance loop (only the
+    model and the panel are substituted); the card shows the author's act and rationale beside
+    the independent reviewer FAIL and never an invented accepted/partial/solved."""
+    import re
+
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.outcomes import derive_loop_outcome
+    from ouroboros.review_substrate import compact_review_projection
+    from tests.test_acceptance_author_stop import _run_stop_loop
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    (tmp_path / "producer").mkdir()
+    run = _run_stop_loop(tmp_path / "producer", monkeypatch, ["The export endpoint ships."] * 3, stop_services=False)
+    axes = derive_loop_outcome(run.result, run.usage, run.trace)["outcome_axes"]
+    decision = axes["review"]["acceptance_decision"]
+    assert decision["reason"] == "author_finish" and decision["author_disposition"]["disposition"] == ""
+    projection = compact_review_projection(run.trace["review_runs"])
+    data_dir = direct_server_with_data["data_dir"]
+    (data_dir / "logs").mkdir(parents=True, exist_ok=True)
+    task_id = "c4-action-only"
+    (data_dir / "logs" / "chat.jsonl").write_text(json.dumps({
+        "ts": "2026-09-26T10:00:00+00:00", "direction": "system", "type": "task_summary", "task_id": task_id,
+        "chat_id": 1, "status": "completed", "text": "", "tool_calls": 0, "rounds": 1,
+        "outcome_axes": axes, "review_projection": projection}) + "\n", encoding="utf-8")
+    (data_dir / "task_results").mkdir(parents=True, exist_ok=True)
+    (data_dir / "task_results" / f"{task_id}.json").write_text(json.dumps({
+        "_schema_version": 1, "task_id": task_id, "status": "completed", "reason_code": "final_message",
+        "result": run.result, "outcome_axes": axes, "review_projection": projection}) + "\n", encoding="utf-8")
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            try:
+                page.goto(direct_server_with_data["url"], wait_until="domcontentloaded", timeout=30_000)
+                card = page.locator(f'.chat-live-card[data-task-id="{task_id}"]')
+                card.wait_for(state="attached", timeout=30_000)
+                _open_review_checkpoint(card)
+                author = card.locator("[data-review-author-decision]")
+                author.wait_for(state="visible", timeout=10_000)
+                author_text = author.inner_text()
+                assert "Task author decision" in author_text and "Author finish" in author_text
+                assert "reviewer signal=FAIL" in author_text
+                assert "Main submitted this complete response for delivery" in author_text
+                assert not re.search(r"accepted|partial|solved|Author finish:", author_text, re.I), author_text
+                group = card.locator(f'[data-review-group="task_acceptance:{task_id}"]')
+                assert "FAIL" in group.locator(".chat-review-group-meta").inner_text()
+                assert "FAIL" in group.locator("[data-review-attempt] .chat-review-attempt-meta").first.inner_text()
+                assert not re.search(r"\bsolved\b", card.inner_text(), re.I)
+                card.scroll_into_view_if_needed()
+                card.screenshot(path=str(data_dir.parent / "c4-action-only-author-finish.png"))
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise

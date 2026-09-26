@@ -1303,12 +1303,13 @@ def _register_task_artifact_records(artifact_dir: pathlib.Path, records: Iterabl
     additions = {pathlib.Path(str(row.get("path") or row.get("name") or "")).name: dict(row)
                  for row in records}
 
-    def merge(current: Dict[str, Any]) -> Dict[str, Any]:
+    def merge(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         previous = current.get("artifacts") if isinstance(current.get("artifacts"), dict) else {}
         merged = merge_artifact_records(previous.values(), additions.values())
-        return {**current, "schema_version": 1, "artifacts": {
+        document = {**current, "schema_version": 1, "artifacts": {
             pathlib.Path(str(row.get("path") or row.get("name") or "")).name: row for row in merged
         }}
+        return None if document == current else document  # identical registration: no rewrite
 
     update_json_locked(artifact_dir / _ARTIFACT_MANIFEST, merge)
 

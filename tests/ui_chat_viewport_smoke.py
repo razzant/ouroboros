@@ -16,6 +16,54 @@ _CAPTURE_TEST_SOCKET = """() => {
         }
     };
 }"""
+# One page-wide /api/state read is in flight at a time (chat_activity.js
+# createStateSnapshotSequencer.gate): a forced refresh that lands behind an
+# in-flight read starts only after that read settles, so the socket-open census
+# can still be reading after the socket reports OPEN. A frame emitted on the test
+# socket exists nowhere on the server; a complete census whose request started
+# after that frame concludes its card by absence, exactly as it would a task the
+# queue really lost. Tests that emit such frames wait for the reads to land first.
+_OBSERVE_STATE_READS = """() => {
+    window.__stateReadsInFlight = 0;
+    window.__stateReadsSettled = 0;
+    const nativeFetch = window.fetch.bind(window);
+    const settle = () => { window.__stateReadsInFlight -= 1; window.__stateReadsSettled += 1; };
+    window.fetch = (input, init) => {
+        const raw = typeof input === 'string' ? input : input?.url || '';
+        if (new URL(raw, location.href).pathname !== '/api/state') return nativeFetch(input, init);
+        window.__stateReadsInFlight += 1;
+        return nativeFetch(input, init).then((response) => {
+            if (!response.ok) { settle(); return response; }
+            // A reader applies right after resp.json() resolves, and the gate
+            // starts the coalesced follow-up in that same microtask turn, so
+            // counting the read as settled here never exposes a false quiet gap.
+            const nativeJson = response.json.bind(response);
+            response.json = () => nativeJson().finally(settle);
+            return response;
+        }, (error) => { settle(); throw error; });
+    };
+}"""
+_STATE_READS_QUIESCENT = "() => window.__stateReadsInFlight === 0 && window.__stateReadsSettled > 0"
+
+
+def _wait_state_reads_quiescent(page, timeout=30_000):
+    """No /api/state read in flight, at least one landed; needs _OBSERVE_STATE_READS."""
+    page.wait_for_function(_STATE_READS_QUIESCENT, timeout=timeout)
+
+
+_TEST_SOCKET_OPEN = "() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)"
+
+
+def _wait_socket_open_quiescent(page, timeout=30_000):
+    """A test socket is OPEN and the socket-open census has landed (both init scripts).
+
+    A frame emitted on the test socket before that census settles is concluded
+    by absence when the census applies, exactly like a task the queue lost.
+    """
+    page.wait_for_function(_TEST_SOCKET_OPEN, timeout=timeout)
+    _wait_state_reads_quiescent(page, timeout)
+
+
 _SETTLE_TWO_FRAMES = "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
 _SETTLE_RESTORE_FRAMES = """() => new Promise(resolve => {
     let remaining = 14;

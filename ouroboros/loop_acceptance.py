@@ -265,9 +265,13 @@ def _supersede_delivery_acceptance_binding(
     The run remains in ``review_runs`` as audit evidence, but neither the
     candidate nor ``review_decision`` may keep pointing at it after answer text
     or answer-invalidating evidence changes.  Negative superseded verdicts stay
-    available to the outcome reducer's fail-closed path.
+    available to the outcome reducer's fail-closed path. An honoured author stop
+    binds no candidate or evidence, so it is never superseded here (TZ-2 C4).
     """
+    from ouroboros.review_records import recorded_author_stop
 
+    if recorded_author_stop(llm_trace.get("acceptance_decision")):
+        return False
     decision = (
         dict(llm_trace.get("review_decision") or {})
         if isinstance(llm_trace.get("review_decision"), dict)
@@ -420,8 +424,14 @@ def _supersede_task_acceptance_for_evidence_change(
     messages: List[Dict[str, Any]],
     emit_progress: Callable[[str], None],
 ) -> None:
-    """Invalidate an acceptance boundary when frozen evidence changes before delivery."""
+    """Invalidate an acceptance boundary when frozen evidence changes before delivery.
 
+    An honoured author stop is no such boundary: only the author's next decision
+    or owner input reopens it (TZ-2 C4)."""
+    from ouroboros.review_records import recorded_author_stop
+
+    if recorded_author_stop(llm_trace.get("acceptance_decision")):
+        return
     if isinstance(run_record, dict):
         run_record["superseded_by_revision"] = True
         run_record["superseded_reason"] = reason
@@ -640,7 +650,8 @@ def _set_acceptance_decision(llm_trace: Dict[str, Any], decision: Dict[str, Any]
     ``reason`` naming WHICH exit. A status outside the trio fails closed to
     ``finalized_unaccepted`` with its raw token surviving as ``reason`` — no
     fourth state, no lost token. The author's historical stance survives;
-    owner/evidence supersession consumes its controlling finish intent."""
+    owner/evidence supersession consumes its controlling finish intent and act,
+    so a later host exit never re-reads an earlier stop as its own (TZ-2 C4)."""
     previous = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
     merged = dict(decision)
     merged.setdefault("enforcement", _loop().get_review_enforcement())
@@ -650,10 +661,11 @@ def _set_acceptance_decision(llm_trace: Dict[str, Any], decision: Dict[str, Any]
         merged["status"] = ACCEPTANCE_FINALIZED_UNACCEPTED
         reason = reason or status or ACCEPTANCE_REASON_UNSPECIFIED
     merged["reason"] = reason
-    for key in ("agent_disposition", "agent_rationale", "author_disposition", "author_action"):
+    superseded = reason in {"owner_followup", "evidence_refresh"}
+    for key in ("agent_disposition", "agent_rationale", "author_disposition") + (() if superseded else ("author_action",)):
         if previous.get(key) and not merged.get(key):
             merged[key] = previous.get(key)
-    if reason not in {"owner_followup", "evidence_refresh", "author_finish", "author_stop"} and not (
+    if not superseded and reason not in {"author_finish", "author_stop"} and not (
         reason == "delivery_binding_superseded" and previous.get("reason") == "author_finish"
     ) and not merged.get("author_disposition") and previous.get("agent_finish_intent"):
         merged["agent_finish_intent"] = previous["agent_finish_intent"]
@@ -738,6 +750,10 @@ def merge_agent_acceptance_stance(trace: Dict[str, Any], decision: dict, ctx: An
             # fresh read, so an unverifiable stance is never honoured as ready.
             "evidence_fingerprint": observed_delivery_evidence(ctx, trace),
         }
+    from ouroboros.review_records import recorded_author_stop
+
+    if merged.get("agent_finish_intent") and recorded_author_stop(previous):
+        ctx._task_acceptance_reviewed = False  # the author's next decision reopens an honoured stop
     trace["acceptance_decision"] = merged
 
 

@@ -551,7 +551,7 @@ jobs:
           docker run --rm --entrypoint sh \
             -e OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
             ouroboros-web:test -c \
-            "PLAYWRIGHT_BROWSERS_PATH=0 python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short"
+            "python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short"
 
   docker-portable-test:
     if: |
@@ -565,7 +565,7 @@ jobs:
       - name: Run portable detail tests in Docker
         run: |
           docker run --rm --entrypoint sh -e OUROBOROS_EXPECT_HEADLESS_SHELL=1 ouroboros-web:test -c \
-            "PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --only-shell chromium && python -m pytest tests/ -m portable_detail -q --tb=short"
+            "python -m pytest tests/ -m portable_detail -q --tb=short"
 
   # ──────────────────────────────────────────────────────────────────
   # Scheduled: the KEYLESS system_e2e scenario lane (tests/system_e2e/).

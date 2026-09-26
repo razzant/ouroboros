@@ -375,7 +375,9 @@ def preparation_delivery_choice(tool_ctx: Any, llm_trace: Dict[str, Any]) -> boo
             intent.get("incident_id") == record.get("incident_id")
             and intent.get("preparation_identity") == record.get("source_identity")
             and intent.get("incident_attempt") == record.get("attempts")
-            and decision.get("agent_disposition") in {"accepted", "rejected", "partial", "deferred"}
+            # The act (finish|stop, checked below) is a stance by itself: an
+            # action-only nomination keeps its empty disposition (C4).
+            and str(decision.get("agent_disposition") or "") in {"", "accepted", "rejected", "partial", "deferred"}
             and bool(str(decision.get("agent_rationale") or "").strip())
         )
         choice = intent
@@ -685,9 +687,9 @@ def finish_exposed_preparation_author(ctx: Any, record: Dict[str, Any]) -> bool:
     intent = stance.get("agent_finish_intent") or {}
     action = str(intent.get("author_action") or "finish")
     disposition = str(stance.get("agent_disposition") or "")
-    if (not intent or disposition not in {"accepted", "rejected", "partial", "deferred"}
+    if (not intent or disposition not in {"", "accepted", "rejected", "partial", "deferred"}
             or action not in {"finish", "stop"} or not str(stance.get("agent_rationale") or "").strip()):
-        return False
+        return False  # an empty disposition is fine: the explicit act is the stance (C4)
     if (str(intent.get("preparation_identity") or "") != str(record.get("source_identity") or "")
             or intent.get("incident_id") != record.get("incident_id")
             or int(intent.get("incident_attempt") or 0) != int(record.get("attempts") or 0)):
@@ -708,13 +710,18 @@ def finish_exposed_preparation_author(ctx: Any, record: Dict[str, Any]) -> bool:
         reviewer_signal="",  # no reviewer ran for this attempt; claiming one would fabricate the fact
         enforcement="blocking" if blocks else "advisory",
         source="author_informed_acceptance_preparation_failure",
+        action=action,  # the record carries the act itself; no stance is invented for it
     )
-    author["action"] = action
     ended = _loop()._end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
     if ended.status == "refused":
         _loop()._supersede_task_acceptance_for_owner_followup(ctx.tools._ctx, ctx.llm_trace)
         return True
     ctx.tools._ctx._task_acceptance_reviewed = True
+    if action == "stop":
+        # Like the reviewer-bound stop, this one binds no subject: an earlier panel's
+        # must not reopen review over changed material on a later delivery pass; only
+        # the author's next decision or owner input does (TZ-2 C4).
+        ctx.tools._ctx._task_acceptance_reviewed_subject = ""
     ctx.tools._ctx._task_acceptance_pending = ""
     _loop()._mark_root_acceptance_checkpoint(
         ctx.tools._ctx, ctx.llm_trace, status="preparation_failed", pass_index=ctx.passes_done,

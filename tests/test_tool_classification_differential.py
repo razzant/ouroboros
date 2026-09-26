@@ -87,7 +87,10 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     "MCP_DISABLED": Delta(False, "ok", True, "unavailable", "A.3", "an MCP provider that is off is unavailable, not a success"),
     "MCP_TOOL_DISALLOWED": Delta(False, "ok", True, "blocked", "A.3", "an MCP tool refused by policy is a denial, not a success"),
     "MCP_TOOL_ERROR": Delta(True, "error", True, "mcp_error", "A.17", "the MCP error gets its own bucket, homed to the blocking partition"),
-    "MCP_TOOL_NOT_FOUND": Delta(False, "ok", True, "unavailable", "A.3", "a missing MCP tool is unavailable, not a success"),
+    # Owner decision on #1262 (item 3): a name the current MCP catalog does not list
+    # is the caller's unknown tool, not a provider outage; a known disabled server
+    # or an unlisted catalog keeps `unavailable` (MCP_DISABLED, MCP_CATALOG_UNAVAILABLE).
+    "MCP_TOOL_NOT_FOUND": Delta(False, "ok", True, "unknown_tool", "A.1262.3", "a name absent from the MCP catalog is an unknown tool, not a success and not an outage"),
     "MCP_TOOL_TIMEOUT": Delta(False, "ok", True, "timeout", "A.3", "an expired MCP call is a timeout, not a success"),
     "MUTATIVE_SUBAGENTS_DISABLED": Delta(False, "ok", True, "blocked", "A.4", "a disabled mutative subagent is a denial"),
     "OCR_PDF_SCANNED_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
@@ -185,7 +188,7 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     "shape:extension_async_timeout": Delta(True, "error", True, "timeout", "A.18", "an expired extension handler is named a timeout; the report bucket is unchanged"),
     "shape:extension_not_live": Delta(True, "error", True, "unavailable", "A.18", "an extension that may not dispatch is unavailable; the report bucket is unchanged"),
     "shape:mcp_disabled": Delta(False, "ok", True, "unavailable", "A.3", "same fix as MCP_DISABLED, through the native code the provider publishes"),
-    "shape:mcp_tool_not_found": Delta(False, "ok", True, "unavailable", "A.3", "same fix as MCP_TOOL_NOT_FOUND, through the native code the provider publishes"),
+    "shape:mcp_tool_not_found": Delta(False, "ok", True, "unknown_tool", "A.1262.3", "same fix as MCP_TOOL_NOT_FOUND, through the native code the provider publishes"),
     "shape:mcp_transport_timeout": Delta(False, "ok", True, "timeout", "A.3", "same fix as MCP_TOOL_TIMEOUT, through the native code the provider publishes"),
     "shape:unknown_tool_extension_down": Delta(False, "ok", True, "unavailable", "A.1",
         "a call to a tool whose extension is not live was never a success; the registry publishes the more precise `unavailable` rather than `unknown_tool`"),
@@ -389,6 +392,9 @@ CURRENT_PRODUCER_CONTRACTS = {
     "PREFLIGHT_UNAVAILABLE": (True, "unavailable"),
     # Peer admission adds current producers; the historical fixture stays intact.
     "TASK_CANCEL_STATE_UNAVAILABLE": (True, "unavailable"),
+    # #1262: an enabled MCP server with no current listing makes a name's existence
+    # unknown — the provider's unavailability, never the caller's unknown tool.
+    "MCP_CATALOG_UNAVAILABLE": (True, "unavailable"),
     "TASK_FORBIDDEN": (True, "blocked"),
     "native:LEGACY_BLOCKED:TASK_FORBIDDEN": (True, "blocked"),
 }

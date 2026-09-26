@@ -328,11 +328,16 @@ def test_project_question_pointer_display_fields_share_one_contract():
     # History: the producer itself emits every field the browser merges.
     block = {"quiz_id": "q", "state": "open", "question": "Which?", "options": ["a", "b"],
              "option_details": ["A detail", ""], "stake": "What rides on it", "assumption": "a",
-             "recommended_index": 0}
+             "recommended_index": 0, "host_facts": "Asked by task t, origin unknown."}
     pointer = project_question_pointer({"task_id": "t", "quiz_id": "q"}, block,
                                        {"id": "p", "chat_id": 12, "name": "Project"}, None)
     assert browser_fields <= set(pointer), sorted(browser_fields - set(pointer))
     assert pointer["option_details"] == ["A detail", ""] and pointer["stake"] == "What rides on it"
+    assert pointer["host_facts"] == "Asked by task t, origin unknown."
+    # A block that recorded no host sentence yields a pointer without the key, never an empty one.
+    bare = project_question_pointer({"task_id": "t", "quiz_id": "q"}, {**block, "host_facts": ""},
+                                    {"id": "p", "chat_id": 12, "name": "Project"}, None)
+    assert "host_facts" not in bare
 
     # Live delivery: the frame literal plus its copied key loop, all declared in ChatOutbound.
     send_quiz = _function_node(REPO_ROOT / "supervisor" / "message_bus.py", "send_quiz")

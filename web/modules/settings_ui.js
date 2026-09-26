@@ -136,6 +136,16 @@ const PROVIDER_CARDS = [
         note: 'Pick DeepSeek as the source in Models or Agents, then choose deepseek-v4-pro or deepseek-v4-flash.',
     },
     {
+        id: 'zai', title: 'Z.ai (GLM)', icon: '', hint: 'Direct OpenAI-compatible runtime', advanced: true,
+        fields: [
+            { id: 's-zai-key', settingKey: 'ZAI_API_KEY', label: 'API Key', placeholder: 'sk-...' },
+            { id: 's-zai-plan', label: 'Plan', placeholder: 'payg or coding' },
+        ],
+        testProvider: 'zai',
+        testInputs: { 's-zai-key': 'ZAI_API_KEY', 's-zai-plan': 'ZAI_PLAN' },
+        note: 'Pick Z.ai as the source in Models or Agents, then choose glm-5.3 or glm-5.3-flash. Coding Plan subscribers: set Plan to <code>coding</code>; the default <code>payg</code> is pay-as-you-go, and a Coding Plan key tested there reports No credits.',
+    },
+    {
         id: 'gigachat', title: 'GigaChat', icon: '/static/providers/gigachat.svg', hint: 'Sber GigaChat via the gigachat library', advanced: true,
         fields: [
             { id: 's-gigachat-credentials', settingKey: 'GIGACHAT_CREDENTIALS', label: 'Authorization Key', placeholder: 'Base64 client_id:secret (OAuth)' },
@@ -230,6 +240,7 @@ export const SECRET_KEYS = [
     ['ANTHROPIC_API_KEY', 'Anthropic API Key', 'sk-ant-...'],
     ['MINIMAX_API_KEY', 'MiniMax API Key', 'MiniMax key'],
     ['DEEPSEEK_API_KEY', 'DeepSeek API Key', 'sk-...'],
+    ['ZAI_API_KEY', 'Z.ai API Key (GLM)', 'Z.ai key'],
     ['GITHUB_TOKEN', 'GitHub Token', 'ghp_...'],
     ['OUROBOROS_NETWORK_PASSWORD', 'Network Password', 'Required for LAN/Docker binds'],
 ];
@@ -833,6 +844,18 @@ export function renderSettingsPage() {
                             <div class="form-field ui-field">
                                 <label for="s-gh-repo">GitHub Repo</label>
                                 <input id="s-gh-repo" placeholder="owner/repo-name" class="ui-control" name="s-gh-repo" type="text">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Extra CA Certificates</h3>
+                        <div class="settings-section-copy">Only for a network whose TLS certificates the default bundle does not trust: a TLS-inspecting proxy, or an endpoint behind a national CA such as GigaChat's. Ouroboros adds the file to its defaults for every provider call; everything else keeps working.</div>
+                        <div class="form-row">
+                            <div class="form-field ui-field">
+                                <label for="s-extra-ca-bundle">Extra CA bundle (PEM)</label>
+                                <input id="s-extra-ca-bundle" placeholder="/path/to/extra-ca.pem" class="ui-control" name="s-extra-ca-bundle" type="text" aria-describedby="s-extra-ca-bundle-help">
+                                <div class="settings-inline-note ui-field-help" id="s-extra-ca-bundle-help">Absolute or <code>~</code>-prefixed path to a PEM file on the machine that runs Ouroboros (its own filesystem, not the device showing this page). Leave empty unless a provider fails with a certificate error.</div>
                             </div>
                         </div>
                     </div>

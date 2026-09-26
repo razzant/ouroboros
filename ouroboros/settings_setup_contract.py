@@ -11,6 +11,7 @@ from ouroboros.provider_models import (
     ANTHROPIC_DIRECT_DEFAULTS,
     CLOUDRU_DIRECT_DEFAULTS,
     DEEPSEEK_DIRECT_DEFAULTS,
+    ZAI_DIRECT_DEFAULTS,
     MINIMAX_DIRECT_DEFAULTS,
     MINIMAX_REGION_ENDPOINTS,
     OPENAI_DIRECT_DEFAULTS,
@@ -122,6 +123,7 @@ _MODEL_DEFAULTS = {
     "cloudru": {key: value for key, value in CLOUDRU_DIRECT_DEFAULTS.items() if key != "heavy"},
     "minimax": {key: value for key, value in MINIMAX_DIRECT_DEFAULTS.items() if key != "heavy"},
     "deepseek": {key: value for key, value in DEEPSEEK_DIRECT_DEFAULTS.items() if key != "heavy"},
+    "zai": {key: value for key, value in ZAI_DIRECT_DEFAULTS.items() if key != "heavy"},
     "anthropic": {key: value for key, value in ANTHROPIC_DIRECT_DEFAULTS.items() if key != "heavy"},
     # No defaults: model names are server-specific; user must fill all slots.
     "openai-compatible": {"main": "", "light": "", "vision": "", "fallback": ""},
@@ -150,6 +152,8 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
     ("minimax-key", "minimaxKey", "MINIMAX_API_KEY", "s-minimax-key", "MiniMax API Key", "MiniMax API key", "Optional. If this is the only remote key, the next step prefills MiniMax's own model ids.", "password", "more"),
     ("minimax-region", "minimaxRegion", "MINIMAX_REGION", "s-minimax-region", "MiniMax Region", "global_en or cn_zh", "Choose global_en for the global endpoint or cn_zh for the China endpoint.", "text", "more"),
     ("deepseek-key", "deepseekKey", "DEEPSEEK_API_KEY", "s-deepseek-key", "DeepSeek API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills DeepSeek's own model ids.", "password", "more"),
+    ("zai-key", "zaiKey", "ZAI_API_KEY", "s-zai-key", "Z.ai API Key (GLM)", "...", "Optional. If this is the only remote key, the next step prefills Z.ai's own GLM model ids.", "password", "more"),
+    ("zai-plan", "zaiPlan", "ZAI_PLAN", "s-zai-plan", "Z.ai Plan", "payg or coding", "Choose payg (pay-as-you-go, default) or coding (Coding Plan endpoint; officially intended for supported coding tools only).", "text", "more"),
     ("anthropic-key", "anthropicKey", "ANTHROPIC_API_KEY", "s-anthropic", "Anthropic API Key", "sk-ant-...", "Optional. Saved for models routed straight to Anthropic, and for Claude tooling.", "password", "primary"),
     ("openai-compatible-url", "compatibleBaseUrl", "OPENAI_COMPATIBLE_BASE_URL", "s-compatible-url", "OpenAI-compatible Base URL", "http://localhost:11434/v1", "Base URL for your OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM). Required whenever a slot uses the OpenAI-compatible endpoint as its source.", "url", "more"),
     ("openai-compatible-key", "compatibleApiKey", "OPENAI_COMPATIBLE_API_KEY", "s-compatible-key", "OpenAI-compatible API Key", "Leave empty for no auth", "API key for the endpoint. Leave empty if your server does not require authentication.", "password", "more"),
@@ -164,6 +168,7 @@ _PROFILE_SPECS = {
     "cloudru": ("Cloud.ru Foundation Models", "Cloud.ru is present, so the next step prefills Cloud.ru's own model ids.", "Cloud.ru-only setup detected. These defaults use Cloud.ru's own model ids."),
     "minimax": ("MiniMax", "MiniMax is present, so the next step prefills MiniMax's own model ids.", "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M2.7."),
     "deepseek": ("DeepSeek", "DeepSeek is present, so the next step prefills DeepSeek's own model ids.", "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane."),
+    "zai": ("Z.ai (GLM)", "Z.ai is present, so the next step prefills Z.ai's own GLM model ids.", "Z.ai-only setup detected. These defaults use glm-5.3 for main work and glm-5.3-flash for the light lane. The plan setting selects the pay-as-you-go or Coding Plan endpoint."),
     "anthropic": ("Anthropic", "Anthropic is present, so the next step prefills Anthropic's own model ids.", "Anthropic-only setup detected. These defaults are explicit and official."),
     "openai-compatible": ("OpenAI-compatible endpoint", "An OpenAI-compatible base URL is configured. Enter the model names your server exposes in the next step.", "OpenAI-compatible endpoint detected. Choose the OpenAI-compatible endpoint as the source and enter the model names your server exposes. The model list is whatever your server supports."),
     "direct-multi": ("Direct multi-provider", "Multiple direct providers are present, so the next step keeps your model values editable without forcing one provider family.", "Multiple direct providers are configured. Start here, then split model slots across them if you want."),
@@ -266,7 +271,7 @@ _SUBSCRIPTION_FIELDS = _rows(("id", "payloadKey", "label", "note"), (
     ("skip-subscription-presets", SKIP_SUBSCRIPTION_PRESETS_FIELD, "Finish without agent defaults", "Completes onboarding without moving reviewers and subagents onto the connected subscriptions. Everything stays editable in Settings afterwards."),
 ))
 
-_MODEL_SUGGESTIONS = list(dict.fromkeys(("google/gemini-3.8-flash", "x-ai/grok-4.6", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai::gpt-5.6-terra", "openai::gpt-5.6-sol", "openai::gpt-5.6-luna", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic::claude-sonnet-5", "anthropic::claude-opus-5", "anthropic::claude-opus-4-6", "deepseek/deepseek-v4-pro", "deepseek::deepseek-v4-pro", "deepseek::deepseek-v4-flash", "openai-compatible::meta-llama/compatible", "cloudru::zai-org/GLM-4.7", "minimax::MiniMax-M3", "minimax::MiniMax-M2.7")))
+_MODEL_SUGGESTIONS = list(dict.fromkeys(("google/gemini-3.8-flash", "x-ai/grok-4.6", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai::gpt-5.6-terra", "openai::gpt-5.6-sol", "openai::gpt-5.6-luna", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic::claude-sonnet-5", "anthropic::claude-opus-5", "anthropic::claude-opus-4-6", "deepseek/deepseek-v4-pro", "deepseek::deepseek-v4-pro", "deepseek::deepseek-v4-flash", "zai::glm-5.3", "zai::glm-5.3-flash", "openai-compatible::meta-llama/compatible", "cloudru::zai-org/GLM-4.7", "minimax::MiniMax-M3", "minimax::MiniMax-M2.7")))
 
 
 def _string(value: Any) -> str:
@@ -342,6 +347,7 @@ def derive_provider_profile(settings: dict) -> str:
         ("CLOUDRU_FOUNDATION_MODELS_API_KEY", "cloudru"),
         ("MINIMAX_API_KEY", "minimax"),
         ("DEEPSEEK_API_KEY", "deepseek"),
+        ("ZAI_API_KEY", "zai"),
         ("ANTHROPIC_API_KEY", "anthropic"),
     ]
     configured = [name for key, name in direct if flags[key]]
@@ -556,7 +562,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     has_remote = any(
         value
         for setting_key, value in keys.items()
-        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION"}
+        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN"}
     )
     has_local = bool(local_source)
     if not has_remote and not has_local and not (pending_subscription or selected_subscription):

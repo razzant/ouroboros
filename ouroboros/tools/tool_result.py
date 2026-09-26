@@ -719,7 +719,10 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "SAFETY_VIOLATION": "SAFETY_VIOLATION",
         "CAPABILITY_UNAVAILABLE": "CAPABILITY_UNAVAILABLE",
         "MCP_DISABLED": "MCP_UNAVAILABLE",
-        "MCP_TOOL_NOT_FOUND": "MCP_UNAVAILABLE",
+        # #1262: a name absent from the current MCP catalog is the caller's unknown
+        # tool, not a provider outage; a known disabled server or a catalog that
+        # could not be listed keeps MCP_UNAVAILABLE (MCP_DISABLED, MCP_CATALOG_*).
+        "MCP_TOOL_NOT_FOUND": "UNKNOWN_TOOL",
         "MCP_TOOL_DISALLOWED": "ACCESS_BLOCKED",
         "MCP_TOOL_TIMEOUT": "MCP_TIMEOUT",
         "MCP_TOOL_ERROR": "MCP_ERROR",

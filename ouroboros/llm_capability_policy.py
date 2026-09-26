@@ -87,9 +87,11 @@ class _CapabilityPolicyMixin:
             # 5s, not 15s: this fetch sits on the synchronous capability-probe path
             # behind the max-context-mode gate (settings save / max toggle); a slow
             # probe must fail-closed quickly, never hang the save (v6.33.0 WS4).
+            from ouroboros.net_transport import requests_verify_kwargs
             resp = requests.get(
                 "https://openrouter.ai/api/v1/models",
                 timeout=5,
+                **requests_verify_kwargs(),
             )
             if resp.status_code != 200:
                 log.debug(

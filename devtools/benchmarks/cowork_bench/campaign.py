@@ -32,6 +32,10 @@ class UsageCounterError(ValueError):
                          f"observed={observed_usage!r}, previous={previous_usage!r}")
 
 
+class CampaignPersistenceError(RuntimeError):
+    """The durable campaign record was not written, so it no longer bounds spending."""
+
+
 def validate_usage(usage: float, previous_usage: float) -> None:
     if not math.isfinite(usage) or usage < 0 or usage < previous_usage:
         raise UsageCounterError(usage, previous_usage)
@@ -127,9 +131,13 @@ class CampaignBudget:
 
         self.record.update({"spent_usd": self.spent, "remaining_usd": self.remaining,
                             "observed_at": time.time()})
-        write_json(self.path, self.record)
+        try:
+            write_json(self.path, self.record)
+        except Exception as exc:
+            raise CampaignPersistenceError(f"campaign record not saved: {type(exc).__name__}: {exc}") from exc
 
     def observe(self, usage: float) -> None:
+        # Only a finite, nonnegative, nondecreasing value reaches the durable record.
         validate_usage(usage, self.record["last_usage"])
         self.record["last_usage"] = usage
         self.save()

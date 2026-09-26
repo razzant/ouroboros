@@ -31,7 +31,7 @@ def test_live_task_message_marker_uses_my_human_wording():
     assert "[Message from my human]" in system
     # The drained mailbox text (plus its optional surface note) must still go
     # through the owner-marking wrapper before injection.
-    assert "_owner_marked_content(noted_owner_text(owner_ctx, entry, dmsg))" in loop
+    assert "_owner_marked_content(noted_owner_text(owner_ctx, entry, " in loop
     # Addressed task-tree messages are peer/ancestor/peer-root communication,
     # not owner dialogue, and must never borrow the owner's priority marker.
     # Ask the render ladder itself: every provenance it can frame — including

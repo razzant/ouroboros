@@ -28,6 +28,10 @@ from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPr
 
 
 log = logging.getLogger("ouroboros.loop")
+# The typed, temporary non-success of a round whose resource refusal no route recovered and
+# no owner wait follows (inline Presence, or a chain stopped by its own fence): nothing more is sent.
+RESOURCE_REFUSAL_KEY = "resource_refusal"
+_CHAIN_STOP_KINDS = ("provider_outcome_unknown", "deadline_exhausted", "transport_unavailable")
 
 
 def _loop():
@@ -182,6 +186,13 @@ def _run_cross_model_fallback_chain(
     attempt_cap = _fcd.attempts_per_model()
     waiter = current_model_wait()
     configured_chain = parse_fallback_chain()
+    # A primary quota refusal returned here, not waited: the configured routes come
+    # first, and the owner question is that refusal's own wait, asked after them.
+    deferred, tools._ctx._deferred_resource_refusal = getattr(tools._ctx, "_deferred_resource_refusal", None), None
+    owner_question = (task_type != "presence" and deferred is not None
+                      and waiter is not None and waiter.waits_allowed)
+    deferred_candidate = None  # The route that actually refused; never replay an unrelated primary.
+    candidates, tried = fallback_candidate_targets(active_model), []
     # The notice names the model that was actually just tried. `active_model`
     # stays the primary until a candidate succeeds, so a second switch would
     # otherwise read "primary -> B" beside B's predecessor's failure reason.
@@ -193,7 +204,7 @@ def _run_cross_model_fallback_chain(
     # dispatch lane is the single global USE_LOCAL_FALLBACK flag above (the
     # pre-existing chain contract): the ladder's `provider_route` stays the ""
     # sentinel rather than fabricating a per-candidate fact nothing consumes.
-    for candidate in fallback_candidate_targets(active_model):
+    for index, candidate in enumerate(candidates):
         fallback_model = candidate.model_id
         # The role belongs to the configured row, before active-model removal
         # and deduplication. Those filters must not shift its account binding.
@@ -261,8 +272,20 @@ def _run_cross_model_fallback_chain(
                 attempt_cap=attempt_cap,
                 model_role=fallback_role,
                 emit_progress=emit_progress,
+                defer_resource_wait=(task_type == "presence" or owner_question
+                                     or _route_follows(candidates[index + 1:], fallback_use_local)),
             )
+        tried.append(fallback_model)
         msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
+        if deferred is None and msg is None:
+            # Each fallback clears the transient context slot before its own send. Keep the
+            # first actual resource refusal for this chain: a later bad request cannot
+            # erase evidence that an allowed route refused before generation.
+            deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
+            if deferred is not None:
+                deferred_candidate = candidate_call
+            owner_question = (task_type != "presence" and deferred is not None
+                              and waiter is not None and waiter.waits_allowed)
         if msg is not None:
             (
                 active_model,
@@ -296,10 +319,54 @@ def _run_cross_model_fallback_chain(
         tools._ctx.messages = messages
         tools._ctx.active_context_mode = active_context_mode
         _restore_context_fit_usage(accumulated_usage, primary_context_usage)
-        if str(accumulated_usage.get("_last_llm_error_kind") or "") in ("provider_outcome_unknown", "deadline_exhausted", "transport_unavailable"):
+        if str(accumulated_usage.get("_last_llm_error_kind") or "") in _CHAIN_STOP_KINDS:
             break
         _cooled(fallback_model, fallback_use_local)
         previous_model, previous_tag = fallback_model, ftag
+    if deferred is None:
+        deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
+    owner_question = (task_type != "presence" and deferred is not None
+                      and waiter is not None and waiter.waits_allowed)
+    accumulated_usage.pop(RESOURCE_REFUSAL_KEY, None)
+    if msg is None and owner_question and str(accumulated_usage.get("_last_llm_error_kind") or "") not in _CHAIN_STOP_KINDS:
+        # Only the refused route is eligible to re-send after the owner wait;
+        # the primary might have failed permanently before a fallback's quota refusal.
+        deferred.ask_owner(waiter)
+        retry_call = deferred_candidate or _loop()._RoundModelCallContext(
+            llm=llm, messages=messages, tools=tools, context_fit_plan=context_fit_plan,
+            active_model=active_model, tool_schemas=tool_schemas, active_effort=active_effort,
+            max_retries=max_retries, drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
+            event_queue=event_queue, accumulated_usage=accumulated_usage, task_type=task_type,
+            active_use_local=active_use_local, active_context_mode=active_context_mode,
+            drive_root=pathlib.Path(drive_logs).parent, emit_progress=emit_progress, defer_resource_wait=False)
+        retry_call.defer_resource_wait = False
+        # An owner may select a DIFFERENT account on either the primary or a
+        # fallback model. Rebind the retained call before measurement and physical
+        # send; the pre-wait account's fingerprint/capacity is not evidence for B.
+        from ouroboros.model_slots import task_model_binding
+
+        role, account = task_model_binding(
+            {"model_role": retry_call.model_role,
+             "task_metadata": getattr(tools._ctx, "task_metadata", {})},
+            context_fit_plan=retry_call.context_fit_plan, overrides=waiter.overrides)
+        retry_call.context_fit_plan, retry_call.active_context_mode = _loop()._rebind_context_fit_plan(
+            retry_call.context_fit_plan, tools, retry_call.messages,
+            model=retry_call.active_model, use_local=retry_call.active_use_local,
+            preferred_mode=retry_call.active_context_mode, tool_schemas=tool_schemas,
+            model_role=role, model_route={}, credential_profile_id=account)
+        msg, _cost, active_context_mode = _loop()._call_round_model(retry_call)
+        if msg is not None and deferred_candidate is not None:
+            active_model, active_use_local, context_fit_plan, active_context_mode = _adopt_fallback_route(
+                ctx, tools, retry_call.active_model, retry_call.active_use_local,
+                messages, retry_call.messages, retry_call.context_fit_plan, active_context_mode,
+                tool_schemas, accumulated_usage, handover_from_model=active_model,
+                handover_reason="owner_wait")
+        else:
+            active_model, active_use_local = retry_call.active_model, retry_call.active_use_local
+            context_fit_plan = retry_call.context_fit_plan
+    elif msg is None and deferred is not None:  # the refused primary buys no forced final either
+        accumulated_usage[RESOURCE_REFUSAL_KEY] = deferred.terminal(
+            fallbacks_tried=tried, owner_wait="not_asked" if owner_question else "not_allowed")
     return (
         msg,
         active_model,
@@ -459,6 +526,26 @@ class _RoundModelCallContext:
     # callable documented to accept incident=; the ToolContext ABI's
     # emit_progress_fn takes a single argument and must not carry the pair.
     emit_progress: Optional[Callable[..., None]] = None
+    # None: a primary round, which defers a resource refusal while a configured route
+    # follows or the turn may not wait. The chain sets it for each candidate.
+    defer_resource_wait: Optional[bool] = None
+
+
+def _route_follows(candidates: List[Any], use_local: bool) -> bool:
+    from ouroboros import fallback_cooldown
+
+    return any(not fallback_cooldown.is_cooling_down(item.model_id, use_local) for item in candidates)
+
+
+def _fallback_route_follows(ctx: _RoundModelCallContext) -> bool:
+    """Whether this primary round's fallback chain would still dial a configured route."""
+    from ouroboros.config import fallback_candidate_targets
+
+    if bool(getattr(ctx.tools._ctx, "exact_model_route", False)) or isinstance(
+            ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):
+        return False
+    use_local = runtime_setting("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
+    return _route_follows(fallback_candidate_targets(ctx.active_model), use_local)
 
 
 def _context_fit_round_id(ctx: _RoundModelCallContext) -> str:
@@ -587,14 +674,23 @@ def _dispatch_round_model(
         "model_role": getattr(ctx, "model_role", ""),
         "task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})},
         context_fit_plan=plan, overrides=waiter.overrides if waiter else None)
-    binding = (waiter.register_reprepare(role, lambda kwargs: _reprepare_waiting_main(ctx, kwargs))
-               if waiter is not None else contextlib.nullcontext())
+    primary = getattr(ctx, "defer_resource_wait", None) is None
+    if primary:
+        ctx.tools._ctx._deferred_resource_refusal = None
+        ctx.accumulated_usage.pop(RESOURCE_REFUSAL_KEY, None)
+    elif ctx.task_type == "presence":
+        ctx.tools._ctx._deferred_resource_refusal = None
     previous_call = ctx.accumulated_usage.get("_last_llm_call_meta")
     from ouroboros.acceptance_settlement import expose_acceptance_feedback
 
     observe_feedback = lambda sent: expose_acceptance_feedback(
         getattr(ctx.tools._ctx, "_execution_trace", {}), sent, str(ctx.task_id))
-    with binding:
+    with contextlib.ExitStack() as binding:
+        deferral = None
+        if waiter is not None:
+            binding.enter_context(waiter.register_reprepare(role, lambda kwargs: _reprepare_waiting_main(ctx, kwargs)))
+            if ((not waiter.waits_allowed or _fallback_route_follows(ctx)) if primary else ctx.defer_resource_wait):
+                deferral = binding.enter_context(waiter.defer_resource_wait(role))
         result = _loop().call_llm_with_retry(
             ctx.llm, ctx.messages, ctx.active_model, ctx.tool_schemas,
             ctx.active_effort, ctx.max_retries, ctx.drive_logs, ctx.task_id,
@@ -616,6 +712,12 @@ def _dispatch_round_model(
             model_turn_state=getattr(ctx.tools._ctx, "model_turn_state", None),
             model_context_observer=observe_feedback,
         )
+    if primary and deferral is not None and deferral.fact and result[0] is None:
+        ctx.tools._ctx._deferred_resource_refusal = deferral
+        if not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
+            ctx.accumulated_usage[RESOURCE_REFUSAL_KEY] = deferral.terminal(fallbacks_tried=[], owner_wait="not_allowed")
+    elif deferral is not None and deferral.fact and result[0] is None:
+        ctx.tools._ctx._deferred_resource_refusal = deferral
     pending_wait_handover = getattr(ctx.tools._ctx, "_pending_model_wait_handover", None)
     if pending_wait_handover is not None:
         if result[0] is not None:

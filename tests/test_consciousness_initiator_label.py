@@ -95,8 +95,8 @@ def test_the_initiator_survives_the_chat_row_the_summary_row_and_replay(tmp_path
         "direction": "out", "chat_id": 1, "user_id": 0, "text": "💬 thinking", "content": "💬 thinking",
         "format": "", "initiator": "consciousness",
     })
-    pipeline._run_task_summary(
-        env=None, llm=None,
+    pipeline._record_task_facts(
+        env=None,
         task={"id": "w1", "type": "task", "text": "wake", "chat_id": 1, "_is_direct_chat": True, "metadata": dict(WAKE_META)},
         usage={"rounds": 1, "cost": 0.0}, llm_trace={"tool_calls": [], "reasoning_notes": []},
         drive_logs=tmp_path / "logs",

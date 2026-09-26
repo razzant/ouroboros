@@ -34,6 +34,7 @@ from typing import Any, Dict, List
 
 from ouroboros.consciousness_authority import consciousness_origin_metadata
 from ouroboros.deadline_utils import parse_deadline_ts
+from ouroboros.dialogue_provenance import presence_caller_binding, presence_root_carrier
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
@@ -59,10 +60,8 @@ def _manage_schedules(
         mutate_scheduled_task, schedule_tool_projection,
     )
 
-    metadata = getattr(ctx, "task_metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
     operation = str(action or "list").strip().lower()
-    if metadata.get("presence"):
+    if presence_caller_binding(ctx) is not None:  # a speaker, or work acting for its binding
         return _publish_tool_result(ctx, ToolResult(
             status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
             text="⚠️ RESOURCE_CONSTRAINT_BLOCKED: a Presence conversation cannot read or change owner schedules.",
@@ -438,6 +437,9 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
                 # `or ""` before str(): an absent/None root_task_id must fall back
                 # to task_id, never become the literal string "None".
                 "origin_root_task_id": str(root_task_id or "") or task_id,
+                # TZ-2 B3: the same author stamp a promote carries — the successor's
+                # first turn is this task's note, framed as such, never an owner directive.
+                "objective_author": {"kind": "task", "task_id": task_id},
             },
             **({"chat_id": source_chat_id} if source_chat_id not in (None, "") else {}),
         },
@@ -445,11 +447,18 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     # A follow-up from a consciousness turn/tree starts a consciousness root: the
     # origin, category and level ride the template; admission derives the rest.
     record["task"]["metadata"].update(consciousness_origin_metadata(metadata_src))
-    presence = metadata_src.get("presence") if isinstance(metadata_src, dict) else None
+    # The same Presence carrier a promote keeps: a speaker's metadata, or the binding a
+    # promoted descendant root acts for; the ceiling rides by value and no Project is chosen.
+    # A new root authors its own objective, context and acceptance premises;
+    # only the origin's authority and general constraints survive by value.
     contract = getattr(ctx, "task_contract", None)
-    if isinstance(presence, dict) and presence and isinstance(contract, dict):
-        record["task"]["metadata"]["presence"] = dict(presence)
-        record["task"]["task_contract"] = dict(contract)
+    carrier = presence_root_carrier(metadata_src, task_contract=contract)
+    if carrier and isinstance(contract, dict):
+        record["task"]["metadata"].update(carrier)
+        record["task"]["task_contract"] = {
+            key: value for key, value in contract.items()
+            if key not in {"objective", "context", "expected_output", "acceptance_claims", "success_criteria"}}
+        record["task"].pop("project_id", None)
     from supervisor.queue import ScheduleRefused, ScheduleStoreUnreadable
 
     try:

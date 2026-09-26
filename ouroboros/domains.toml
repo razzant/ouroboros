@@ -273,6 +273,7 @@ D20 = "Presence"
 "ouroboros/mcp_client.py" = "D05"
 "ouroboros/memory.py" = "D15"
 "ouroboros/memory_journal_compaction.py" = "D15"
+"ouroboros/memory_nomination_receipts.py" = "D15"
 "ouroboros/model_concurrency.py" = "D02"
 "ouroboros/model_send_seal.py" = "D16"
 "ouroboros/mutation_attribution.py" = "D01"
@@ -844,6 +845,7 @@ lazy_only = [
   "D03->D06",
   "D03->D07",
   "D03->D08",
+  "D03->D09",
   "D03->D10",
   "D03->D11",
   "D03->D14",
@@ -856,9 +858,11 @@ lazy_only = [
   "D04->D12",
   "D04->D14",
   "D04->D15",
+  "D04->D16",
   "D04->D20",
   "D05->D06",
   "D05->D07",
+  "D05->D08",
   "D05->D14",
   "D06->D03",
   "D06->D05",

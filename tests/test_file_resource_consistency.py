@@ -330,9 +330,10 @@ def test_child_own_task_content_is_not_a_repository_credential_store(environment
     target.write_text('TASK_CONTENT_AVAILABLE', encoding='utf-8')
     assert 'TASK_CONTENT_AVAILABLE' in reg.execute('read_file', {'root': root, 'path': path})
     assert path.split('/')[0] in reg.execute('list_files', {'root': root, 'path': '.'})
-    # The profile grants read/list here, not search. Shared path policy must
-    # preserve that independent resource matrix instead of granting a new verb.
-    assert 'TOOL_ACCESS_BLOCKED' in reg.execute('search_code', {'root': root, 'path': '.', 'query': 'TASK_CONTENT_AVAILABLE'})
+    # The matrix is closed under read⇒search (TZ-1 E): the child searches its own
+    # task content exactly where it reads it, and the shared path policy still does
+    # not mistake an ordinary auth/ path in task content for a credential store.
+    assert 'TASK_CONTENT_AVAILABLE' in reg.execute('search_code', {'root': root, 'path': '.', 'query': 'TASK_CONTENT_AVAILABLE'})
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='the test SSH fixture uses a POSIX executable shim')

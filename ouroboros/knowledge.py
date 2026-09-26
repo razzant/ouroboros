@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Dict, Mapping
 from urllib.parse import quote, unquote, urlsplit
 
 import yaml
@@ -22,9 +23,47 @@ from ouroboros.platform_layer import file_lock_exclusive, file_unlock
 from ouroboros.utils import append_jsonl, utc_now_iso, write_bytes_atomic
 
 INDEX_FILE = "index-full.md"
+UNKNOWN_STAMP = "unknown"  # a history stamp the writer could not name; legacy rows read the same way
 OVERVIEW_TOPIC = "overview"
 _INDEX_HEADER = "# Knowledge Base Index\n<!-- ouroboros:knowledge-index:1 -->\n\n"
 _LEGACY_INDEX_MARKER = "\n<!-- ouroboros:legacy-knowledge-index -->\n"
+
+
+def observed_route_stamp(usage: Any) -> Any:
+    """The route a physical usage row says ANSWERED, as the history ``route`` stamp.
+
+    Every wire lane stamps ``provider`` and ``resolved_model`` on the usage it
+    returns (a model-wait override or account rotation changes them, the
+    configured route does not), and the Claudexor lane adds its ``route`` with
+    the serving ``source``/``account``. Only those physical facts are read: a
+    usage without any — a released send, a fake in a test — is the honest
+    ``unknown``, and a partial one leaves the missing field ``unknown``; the
+    configured or requested route never fills a gap, so no caller argument can.
+    An already derived stamp (``_observed_route``, forwarded by usage merges as
+    the LAST call's stamp only) is returned as is.
+    """
+    if not isinstance(usage, dict):
+        return UNKNOWN_STAMP
+    prior = usage.get("_observed_route")
+    if isinstance(prior, dict):
+        return prior
+    provider, resolved = usage.get("provider"), usage.get("resolved_model")
+    if not provider and not resolved:
+        return UNKNOWN_STAMP
+    stamp: Dict[str, Any] = {"provider": str(provider or UNKNOWN_STAMP), "model": str(resolved or UNKNOWN_STAMP)}
+    served = usage.get("claudexor")
+    if isinstance(served, dict) and isinstance(served.get("route"), dict):
+        route = served["route"]
+        if route.get("source"):
+            stamp["source"] = route["source"]
+        # The engine's served route names the account as ``credentialProfileId``
+        # (+ ``accountFingerprint``); ``account`` is the legacy/request spelling.
+        account = route.get("credentialProfileId") or route.get("account")
+        if account:
+            stamp["account"] = str(account)
+        if route.get("accountFingerprint"):
+            stamp["account_fingerprint"] = str(route["accountFingerprint"])
+    return stamp
 
 
 def sanitize_topic(topic: str) -> str:
@@ -278,9 +317,99 @@ def knowledge_links(note: KnowledgeNote) -> tuple[dict[str, Any], ...]:
     return tuple(rows)
 
 
-def _write_content(current: KnowledgeNote | None, content: str, mode: str) -> bytes:
+def compile_anchored_edits(text: str, pairs: Any, anchor: str = "old_str") -> str:
+    """Replace exact ``(old, new)`` spans of one source text atomically.
+
+    Every old text is located in the ORIGINAL ``text`` before anything changes:
+    it must be non-empty and occur exactly once (an overlapping repeat is a
+    second occurrence), and no two spans may overlap, so one edit can neither
+    create, consume nor shift another's anchor. Unmentioned characters stay
+    identical. A refusal raises ``ValueError`` naming the caller's ``anchor``
+    field and applies nothing. Manual ``mode=edit`` is the one-pair case.
+    """
+    pairs = list(pairs)
+    spans = []
+    for number, (old, new) in enumerate(pairs, 1):
+        where = f" (edit {number})" if len(pairs) > 1 else ""
+        if not isinstance(old, str) or not old:
+            raise ValueError(f"edit requires a non-empty {anchor}{where}")
+        start = text.find(old)
+        if start < 0 or text.find(old, start + 1) >= 0:
+            raise ValueError(f"edit {anchor} must occur exactly once in the note body{where}")
+        spans.append((start, start + len(old), new))
+    spans.sort()
+    if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
+        raise ValueError("edits must not overlap")
+    for start, end, new in reversed(spans):
+        text = text[:start] + new + text[end:]
+    return text
+
+
+def _authored_edit_pairs(edits: Any) -> list[tuple[str, str]]:
+    """An automatic edit states its old text, replacement and basis; the basis is required, never judged."""
+    if not isinstance(edits, list):
+        raise ValueError("edits must be a list of {old_text, new_text, basis}")
+    for number, edit in enumerate(edits, 1):
+        fields = [edit.get(key) for key in ("old_text", "new_text", "basis")] if isinstance(edit, dict) else []
+        if len(fields) != 3 or not all(isinstance(value, str) for value in fields) or not fields[2].strip():
+            raise ValueError(f"edit {number} needs string old_text and new_text and a non-empty basis")
+    return [(edit["old_text"], edit["new_text"]) for edit in edits]
+
+
+def nomination_write_form(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """The one automatic nomination contract, checked before any source is read.
+
+    Either new-note ``content`` (complete Markdown; ``edits`` absent or ``[]``)
+    or the anchored form: an ``edits`` list (empty only beside a summary) plus
+    an optional ``summary``. Present keys are judged by shape, never truthiness:
+    a non-list ``edits`` (``null``, ``""``, ``{}``) or a non-text/blank
+    ``summary`` is malformed, the legacy generic ``frontmatter`` is refused
+    rather than dropped, and non-blank content beside edits or a summary is
+    ambiguous. Returns ``write_knowledge_note`` arguments; a refusal raises
+    ``ValueError`` carrying its typed reason."""
+    edits, content = entry.get("edits", []), entry.get("content")
+    if "frontmatter" in entry:
+        raise ValueError("invalid_nomination: frontmatter is not an automatic field; revise the summary with summary")
+    if not isinstance(edits, list):
+        raise ValueError("invalid_nomination: edits must be a list of {old_text, new_text, basis}")
+    if "summary" in entry and (not isinstance(entry["summary"], str) or not entry["summary"].strip()):
+        raise ValueError("invalid_nomination: summary must be non-empty text")
+    if edits or "summary" in entry:
+        if content is not None and not (isinstance(content, str) and not content.strip()):
+            raise ValueError("ambiguous_nomination: content creates a new note; edits and summary change a read one")
+        return {"content": "", "mode": "edit", "edits": edits, "summary": entry.get("summary")}
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("empty_nomination")
+    return {"content": content, "mode": "overwrite"}
+
+
+def _yaml_form(metadata: Mapping[str, Any]) -> str:
+    """Loaded frontmatter spelled exactly, for comparison without ``==``.
+
+    Legal YAML may alias a node inside itself (``custom: &loop [*loop]``); ``==``
+    walks that cycle until RecursionError, while the dump spells a shared node
+    once and aliases it. Sorted keys keep dict equality's order blindness."""
+    return yaml.safe_dump(metadata, allow_unicode=True, sort_keys=True)
+
+
+def _write_content(current: KnowledgeNote | None, content: str, mode: str,
+                   old_str: str | None = None, edits: Any = None, summary: str | None = None) -> bytes:
     proposed = content.encode("utf-8")
-    if mode == "append" and current is not None:
+    if mode == "edit":
+        if current is None or current.parse_error:
+            raise ValueError("edit requires an existing readable note")
+        body_start = current.source.body_span.start_byte
+        body = current.raw[body_start:].decode("utf-8")
+        body = (compile_anchored_edits(body, [(old_str, content)]) if edits is None
+                else compile_anchored_edits(body, _authored_edit_pairs(edits), "old_text"))
+        if summary is None or current.metadata.get("summary") == summary:
+            return current.raw[:body_start] + body.encode("utf-8")
+        # A revised summary takes the ordinary overwrite merge below: it replaces
+        # its own field, every other field (unknown ones too) survives, and the
+        # YAML preamble is re-rendered; the edited body bytes are kept as-is.
+        front = yaml.safe_dump({"summary": summary}, allow_unicode=True)
+        proposed = f"---\n{front}---\n{body}".encode("utf-8")
+    elif mode == "append" and current is not None:
         return current.raw + (b"\n" if current.raw and not current.raw.endswith(b"\n") else b"") + proposed
     source = parse_markdown_source(proposed, str(current.address.path) if current else "")
     old = current.metadata if current is not None else {}
@@ -309,15 +438,40 @@ class KnowledgeWriteResult:
     reason: str
     current: KnowledgeNote | None
     previous_revision: str | None = None
+    delta: dict[str, Any] | None = None
 
 
 def write_knowledge_note(
     address: KnowledgeAddress, content: str, mode: str = "overwrite",
-    expected_revision: str | None = None, task_id: str = "",
+    expected_revision: str | None = None, task_id: str = "", old_str: str | None = None,
+    *, writer: str = "", route: Any = None, writer_input_ref: Any = None,
+    edits: Any = None, summary: str | None = None,
 ) -> KnowledgeWriteResult:
-    """Publish a note against the actual current source, with no inference lock."""
-    if mode not in {"overwrite", "append"} or not isinstance(content, str):
-        raise ValueError("content must be Markdown text; mode must be overwrite or append")
+    """Publish a note against the actual current source, with no inference lock.
+
+    ``writer`` names the seam that authored ``content`` (turn, consolidation,
+    scratchpad_consolidation, reflection, knowledge_maintenance), ``route`` the
+    model route it ran on and ``writer_input_ref`` what it saw. They are host
+    facts stamped on the history row, never on the note body; a caller that
+    cannot name one leaves the honest ``unknown``, which is also how rows written
+    before the stamp existed read.
+
+    ``edits`` (mode=edit, instead of ``old_str``/``content``) is the automatic
+    form: a list of ``{old_text, new_text, basis}`` applied to the body only by
+    the same anchored compiler; beside it, ``summary`` optionally revises that
+    one field in the same locked write through the ordinary metadata merge.
+    History retains the authored ``edits`` and, only when supplied, ``summary``.
+    """
+    if mode not in {"overwrite", "append", "edit"} or not isinstance(content, str):
+        raise ValueError("content must be Markdown text; mode must be overwrite, append or edit")
+    if mode != "edit" and old_str is not None:
+        raise ValueError("old_str is used only with mode=edit")
+    if mode != "edit" and (edits is not None or summary is not None):
+        raise ValueError("edits and summary are used only with mode=edit")
+    if edits is not None and (old_str is not None or content):
+        raise ValueError("edits replace old_str and content; pass one edit form")
+    if summary is not None and (edits is None or not isinstance(summary, str) or not summary.strip()):
+        raise ValueError("summary is non-empty text beside edits")
     with knowledge_write_lock(address.shelf):
         # Re-resolve inside the lock; a changed symlink cannot redirect a write.
         address.path.resolve().relative_to(address.shelf.resolve())
@@ -330,26 +484,53 @@ def write_knowledge_note(
         if current is None and expected_revision == "":
             expected_revision = None
         revision = current.revision if current else None
-        if current is not None and mode == "overwrite" and expected_revision is None:
+        if mode == "edit" and current is None:
+            return KnowledgeWriteResult(False, "edit_source_missing", current, revision)
+        if current is not None and mode in {"overwrite", "edit"} and expected_revision is None:
             return KnowledgeWriteResult(False, "revision_required", current, revision)
         if expected_revision is not None and expected_revision != revision:
             return KnowledgeWriteResult(False, "revision_conflict", current, revision)
         try:
-            raw = _write_content(current, content, mode)
+            raw = _write_content(current, content, mode, old_str, edits, summary)
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         if current is not None and raw == current.raw:
-            return KnowledgeWriteResult(True, "unchanged", current, revision)
+            return KnowledgeWriteResult(True, "unchanged", current, revision,
+                                        {"old_chars": len(current.text), "new_chars": len(current.text),
+                                         "change_chars": 0, "removed_headings": []})
         updated = _note(address, raw)
+        # A body edit keeps the preamble bytes; a revised summary may re-render
+        # them only if every other field keeps its value (``type`` defaults, in
+        # the merge's key order), compared by exact YAML spelling.
+        if mode == "edit" and (updated.parse_error or (
+                bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
+                updated.raw[:current.source.body_span.start_byte] !=
+                current.raw[:current.source.body_span.start_byte]) and (
+                summary is None or _yaml_form(updated.metadata) != _yaml_form(
+                    {**current.metadata, "summary": summary, "type": current.metadata.get("type", "note")}))):
+            return KnowledgeWriteResult(False, "invalid_note: edit cannot change frontmatter", current, revision)
         old_text = current.text if current else ""
+        before = (Counter((heading.level, heading.title) for heading in current.source.headings)
+                  if current and current.source else Counter())
+        after = (Counter((heading.level, heading.title) for heading in updated.source.headings)
+                 if updated.source else Counter())
+        removed_headings = (sorted("#" * level + " " + title for (level, title) in (before - after).elements())
+                            if (current is None or current.source) and updated.source else None)
+        delta = {"old_chars": len(old_text), "new_chars": len(updated.text),
+                 "change_chars": len(updated.text) - len(old_text), "removed_headings": removed_headings}
         # Capture both complete versions before replacing source bytes, as the
         # Pattern Register already does. A capture is not a commit receipt; a
         # failed publication returns its actual current source, never success.
         history = {"ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
                    "address": address.as_dict(), "publication": "source_capture",
+                   "writer": writer or UNKNOWN_STAMP, "route": route or UNKNOWN_STAMP,
+                   "writer_input_ref": writer_input_ref or UNKNOWN_STAMP,
+                   "old_chars": len(old_text), "new_chars": len(updated.text),
                    "old_sha256": hashlib.sha256(current.raw).hexdigest() if current and current.raw else "",
                    "new_sha256": updated.revision if raw else "", "old_content": old_text,
-                   "new_content": updated.text, "source_ref": updated.source_ref()}
+                   "new_content": updated.text, "source_ref": updated.source_ref(), "delta": delta,
+                   **({"edits": edits} if edits is not None else {}),
+                   **({"summary": summary} if summary is not None else {})}
         if not append_jsonl(address.shelf.parent / "knowledge_history.jsonl", history,
                             ensure_record_boundary=True, require_lock=True):
             return KnowledgeWriteResult(False, "history_unavailable", current, revision)
@@ -362,14 +543,6 @@ def write_knowledge_note(
                 observed = read_knowledge_note(address)
             except (OSError, UnicodeDecodeError):
                 observed = None
-            return KnowledgeWriteResult(False, "publication_incomplete", observed, revision)
-        try:
-            append_jsonl(address.shelf.parent / "knowledge_journal.jsonl", {
-                "ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
-                "address": address.as_dict(), "revision": updated.revision,
-                "file_kb": len(raw) / 1024,
-                "total_knowledge_kb": round(sum(p.stat().st_size for p in address.shelf.rglob("*.md")) / 1024, 2),
-            }, ensure_record_boundary=True)
-        except OSError:
-            pass  # Size telemetry is not source/history publication authority.
-        return KnowledgeWriteResult(True, "saved", updated, revision)
+            return KnowledgeWriteResult(False, "publication_incomplete", observed, revision,
+                                        delta if observed is not None and observed.raw == raw else None)
+        return KnowledgeWriteResult(True, "saved", updated, revision, delta)

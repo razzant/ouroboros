@@ -13,7 +13,7 @@ function openChat(rows = []) {
         isConnected: () => true, send() {} };
     const instance = createChatInstance({ ws,
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-        updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+        updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} }, chatId: 1, idPrefix: 'chat', mountEl: mount });
     return { prior, instance, handlers, messages: () => globalThis.document.byId.get('chat-messages') };
 }

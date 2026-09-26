@@ -198,7 +198,7 @@ function chatFixture() {
             isConnected: () => true, send() {} },
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
         updateUnreadBadge() {},
-        stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+        stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
         chatId, idPrefix: 'chat', mountEl: env.mount, asPanel: true,
     });

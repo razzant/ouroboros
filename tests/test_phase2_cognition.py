@@ -12,7 +12,7 @@ def _chat_rows(root):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_split_project_root_summary_lands_canonically_once_before_child_gc(tmp_path):
+def test_split_project_root_facts_row_lands_canonically_once_before_child_gc(tmp_path):
     from ouroboros import agent_task_pipeline as pipeline
 
     canonical = tmp_path / "canonical"
@@ -30,8 +30,8 @@ def test_split_project_root_summary_lands_canonically_once_before_child_gc(tmp_p
         "budget_drive_root": str(canonical),
     }
 
-    pipeline._run_task_summary(
-        env, object(), task, {"rounds": 1, "cost": 0},
+    pipeline._record_task_facts(
+        env, task, {"rounds": 1, "cost": 0},
         {"tool_calls": []}, child / "logs",
     )
 
@@ -50,7 +50,7 @@ def test_split_project_root_summary_lands_canonically_once_before_child_gc(tmp_p
     assert len([row for row in _chat_rows(canonical) if row.get("task_id") == "project-root"]) == 1
 
 
-def test_root_checkpoint_prevents_a_second_paid_authored_summary(tmp_path, monkeypatch):
+def test_root_checkpoint_prevents_a_second_facts_row_and_buys_no_summary(tmp_path, monkeypatch):
     from ouroboros import agent_task_pipeline as pipeline
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
 
@@ -60,7 +60,7 @@ def test_root_checkpoint_prevents_a_second_paid_authored_summary(tmp_path, monke
 
         def chat(self, **_kwargs):
             self.calls += 1
-            return {"content": "Authored once"}, {"cost": 0}
+            return {"content": "No paid narrative exists"}, {"cost": 0}
 
     import ouroboros.llm as llm_mod
     import ouroboros.memory as memory_mod
@@ -98,12 +98,14 @@ def test_root_checkpoint_prevents_a_second_paid_authored_summary(tmp_path, monke
     (tmp_path / "logs" / "chat.jsonl").replace(archive / "chat_rotated.jsonl")
     pipeline._run_post_task_processing_async(*args, blocking=True)
 
-    assert llm.calls == 1
+    assert llm.calls == 0
     assert not (tmp_path / "logs" / "chat.jsonl").exists()
-    assert "root-llm" in (archive / "chat_rotated.jsonl").read_text(encoding="utf-8")
+    rotated = [json.loads(line) for line in (archive / "chat_rotated.jsonl").read_text(encoding="utf-8").splitlines()]
+    kinds = [row.get("summary_kind") for row in rotated if row.get("task_id") == "root-llm"]
+    assert kinds.count("host_task_facts") == 1 and "authored_root_summary" not in kinds
 
 
-def test_authored_summary_hot_path_never_scans_rotated_biography(tmp_path, monkeypatch):
+def test_facts_row_hot_path_never_scans_rotated_biography(tmp_path, monkeypatch):
     from ouroboros import agent_task_pipeline as pipeline
     import ouroboros.project_dialogue as dialogue
 
@@ -123,22 +125,14 @@ def test_authored_summary_hot_path_never_scans_rotated_biography(tmp_path, monke
 
     monkeypatch.setattr(dialogue, "iter_jsonl_objects", forbidden_scan)
 
-    class Llm:
-        calls = 0
-
-        def chat(self, **_kwargs):
-            self.calls += 1
-            return {"content": "One paid narrative"}, {"cost": 0}
-
-    llm = Llm()
-    pipeline._run_task_summary(
-        SimpleNamespace(drive_root=tmp_path), llm,
+    pipeline._record_task_facts(
+        SimpleNamespace(drive_root=tmp_path),
         {"id": "new-root", "root_task_id": "new-root", "type": "task", "text": "work"},
         {"rounds": 2, "cost": 0}, {"tool_calls": [{"tool": "read_file"}]},
         tmp_path / "logs",
     )
 
-    assert llm.calls == 1
+    assert [row["summary_kind"] for row in _chat_rows(tmp_path)] == ["host_task_facts"]
     assert scans == 0
 
 
@@ -323,7 +317,7 @@ def test_running_async_root_truth_survives_restart_degradation_once(tmp_path):
     assert len([row for row in _chat_rows(tmp_path) if row.get("task_id") == "restart-root"]) == 1
 
 
-def test_authored_narrative_never_suppresses_final_artifact_failure_truth(tmp_path):
+def test_facts_row_never_suppresses_final_artifact_failure_truth(tmp_path):
     from ouroboros import agent_task_pipeline as pipeline
     from ouroboros.project_dialogue import append_terminal_task_projection
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
@@ -333,8 +327,8 @@ def test_authored_narrative_never_suppresses_final_artifact_failure_truth(tmp_pa
         root_task_id="artifact-root", result="Built output",
         outcome_axes={"execution": {"status": "ok"}, "artifacts": {"status": "ready"}},
     )
-    pipeline._run_task_summary(
-        SimpleNamespace(drive_root=tmp_path), object(),
+    pipeline._record_task_facts(
+        SimpleNamespace(drive_root=tmp_path),
         {"id": "artifact-root", "root_task_id": "artifact-root", "text": "build",
          "type": "task", "chat_id": 1},
         {"rounds": 1, "cost": 0, "outcome_axes": initial["outcome_axes"]},
@@ -353,14 +347,14 @@ def test_authored_narrative_never_suppresses_final_artifact_failure_truth(tmp_pa
 
     rows = [row for row in _chat_rows(tmp_path) if row.get("task_id") == "artifact-root"]
     assert [row["summary_kind"] for row in rows] == [
-        "authored_root_summary", "terminal_root_projection",
+        "host_task_facts", "terminal_root_projection",
     ]
     assert rows[-1]["outcome"] == "Failed"
     assert rows[-1]["outcome_axes"]["artifacts"]["status"] == "failed"
     assert rows[-1]["outcome_final"] is True
 
 
-def test_split_authored_narrative_keeps_only_canonical_result_ref_after_child_gc(tmp_path):
+def test_split_facts_row_keeps_only_canonical_result_ref_after_child_gc(tmp_path):
     import shutil
 
     from ouroboros import agent_task_pipeline as pipeline
@@ -384,8 +378,8 @@ def test_split_authored_narrative_keeps_only_canonical_result_ref_after_child_gc
         "budget_drive_root": str(canonical),
         "drive_root": str(child),
     }
-    pipeline._run_task_summary(
-        SimpleNamespace(drive_root=child), object(), task,
+    pipeline._record_task_facts(
+        SimpleNamespace(drive_root=child), task,
         {"rounds": 1, "cost": 0}, {"tool_calls": []}, child / "logs",
     )
     copied = copy_child_task_result(canonical, task)

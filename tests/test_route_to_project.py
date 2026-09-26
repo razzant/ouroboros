@@ -87,6 +87,7 @@ def test_route_to_existing_project_emits_event_and_receipt(tmp_path):
         "origin_message_ref": origin_ref,
         "origin_message_text": "continue the engine tuning",
     })
+    ctx.task_id = "drafter"
     out = _route_to_project(ctx, "racer", "paraphrased: keep tuning the engine", reason="follow-up", predecessor_task_id="")
     assert out.startswith("⚠️ ROUTE_UNCONFIRMED:")
     assert "do not retry automatically" in out.lower()
@@ -102,6 +103,8 @@ def test_route_to_existing_project_emits_event_and_receipt(tmp_path):
     assert evt["routing_token"]
     assert evt["source_ref"] == origin_ref
     assert evt["source_text"] == "continue the engine tuning"
+    assert evt["objective_author"] == {"kind": "task", "task_id": ctx.task_id}
+    assert evt["owner_corpus"] == [{"source": "origin_message", "content": "continue the engine tuning"}]
     assert ctx._typed_routing_action_emitted == "route_to_project"
 
 
@@ -400,3 +403,35 @@ def test_route_abstention_without_a_target_leaves_the_receipt_target_empty(tmp_p
     assert row["target"] == ""
     assert (row["status"], row["reason"]) == ("needs_manual_target", "target_unspecified")
     assert row["cause"] == "Not started: no destination was chosen"
+
+
+def test_a_suppressed_origin_still_hands_the_routed_task_the_owners_stamped_instruction(tmp_path):
+    """Finding 4: a suppressed (never-logged) owner message puts no ``source_text`` on
+    the promote event, and the corpus filter dropped the host-stamped ``initial_user``
+    row, so the routed task got ``objective_author=task`` with an EMPTY owner corpus:
+    the owner's instruction disappeared. The stamped row now rides the corpus under
+    its own label; a first turn nobody typed (``initial_text``) is never laundered."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+
+    create_project(tmp_path, "racer", name="Racer")
+    events = []
+    ctx = _ctx(tmp_path, events, is_direct_chat=True,
+               task_metadata={"client_message_id": "owner-route-2", "origin_suppressed": True})
+    ctx.task_id = "drafter"
+    ctx._owner_directives = [{"source": "initial_user", "content": "continue the engine tuning"}]
+    out = _route_to_project(ctx, "racer", "paraphrased objective", reason="follow-up", predecessor_task_id="")
+    assert out.startswith("⚠️ ROUTE_UNCONFIRMED:"), out
+    evt = events[0]
+    assert evt["origin_suppressed"] is True and "source_text" not in evt
+    assert evt["objective_author"] == {"kind": "task", "task_id": "drafter"}
+    assert evt["owner_corpus"] == [{"source": "initial_user", "content": "continue the engine tuning"}]
+    routed = types.SimpleNamespace(task_metadata={
+        "origin_suppressed": True, "objective_author": evt["objective_author"], "owner_corpus": evt["owner_corpus"]})
+    _initialize_owner_directives(routed, [{"role": "user", "content": "paraphrased objective"}])
+    assert routed._owner_directives == [{"source": "initial_user", "content": "continue the engine tuning"}]
+
+    unstamped = _ctx(tmp_path, [], task_metadata={"client_message_id": "wake-1"})
+    unstamped.task_id = "drafter"
+    unstamped._owner_directives = [{"source": "initial_text", "content": "a wake-up nobody typed"}]
+    _route_to_project(unstamped, "racer", "objective", reason="r", predecessor_task_id="")
+    assert unstamped.pending_events[0]["owner_corpus"] == []

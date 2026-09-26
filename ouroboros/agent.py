@@ -563,6 +563,7 @@ class OuroborosAgent:
             # passes the start-message identity to the next binding.
             "origin_message_ref",
             "origin_message_text",
+            "objective_author", "owner_corpus",
             # The complete work-order source reader needs the original typed
             # constraint mapping, not the normalized dataclass repr, to rebuild
             # the exact canonical serializer bytes during a source-range answer.

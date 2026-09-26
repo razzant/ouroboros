@@ -1025,7 +1025,7 @@ def test_expired_supervisor_grace_does_not_dispatch_a_paid_final_call(monkeypatc
 
     monkeypatch.setattr(loop_mod, "_forced_fallback_result", fake_fallback)
     result = loop_mod._handle_forced_finalization(ctx, "idle_timeout")
-    assert result[0].startswith("⚠️ Task reached idle_timeout")
+    assert result[0].startswith("⚠️ The task made no progress for too long; finalization grace produced no answer.")
     assert observed["source"] == "finalization_grace_window_elapsed"
     assert ctx.accumulated_usage == {
         "execution_status": "failed",

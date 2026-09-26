@@ -354,42 +354,29 @@ class TestSealedFinalPackage:
             ("report.pdf", 123),
         ]
 
-    def test_sealed_package_reaches_summary_prompt(self, tmp_path):
+    def test_facts_row_retells_nothing_of_the_sealed_final(self, tmp_path, monkeypatch):
+        """No paid narrative: the host facts row neither prompts a model nor
+        copies the delivered answer; reflection alone reads the sealed package."""
+        import pytest
+
         import ouroboros.agent_task_pipeline as atp
-        from ouroboros.task_finalization import build_sealed_final_package
 
         drive_root, logs = _make_drive(tmp_path)
         env, _memory, _ctx = _make_fake_env(drive_root)
-        art = drive_root / "task_results" / "artifacts" / "sum1"
-        art.mkdir(parents=True)
-        (art / "report.pdf").write_bytes(b"x" * 123)
-
-        prompts = []
-
-        class CapturingLLM:
-            def chat(self, **kwargs):
-                prompts.append(kwargs["messages"][0]["content"])
-                return {"content": "summary text"}, {"cost": 0}
-
-        sealed = build_sealed_final_package(
-            {"artifacts": [{"name": "report.pdf", "path": str(art / "report.pdf"),
-                            "size": 123, "status": "ready"}]},
-            "Delivered the 52-page PDF.")
-        atp._run_task_summary(
-            env, CapturingLLM(),
+        monkeypatch.setattr("ouroboros.llm_observability.chat_observed",
+                            lambda *_a, **_k: pytest.fail("the facts row buys no model call"))
+        atp._record_task_facts(
+            env,
             {"id": "sum1", "type": "task", "chat_id": 1, "text": "make a pdf"},
             {"cost": 0.01, "rounds": 3},
             {"tool_calls": [{"tool": "shell", "error": ""}], "reasoning_notes": []},
             logs,
-            review_evidence={},
-            sealed_final=sealed,
         )
 
-        assert len(prompts) == 1
-        assert "Sealed final outcome (host-attested ground truth)" in prompts[0]
-        assert "Delivered the 52-page PDF." in prompts[0]
-        assert "report.pdf (123 bytes)" in prompts[0]
-        assert "OVERRIDE impressions from the error trace" in prompts[0]
+        [row] = [json.loads(line) for line in (logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert row["summary_kind"] == "host_task_facts" and row["text"] == ""
+        assert row["tool_calls"] == 1 and row["rounds"] == 3
+        assert "Delivered" not in json.dumps(row) and "make a pdf" not in json.dumps(row)
 
     def test_sealed_package_reaches_reflection_prompt(self, tmp_path, monkeypatch):
         import ouroboros.llm_observability as obs

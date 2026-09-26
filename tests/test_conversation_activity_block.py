@@ -6,7 +6,7 @@ chat block's chrome follows the work it holds, never this fact. The block
 represents an addressing-only turn by the
 typed routing action, never by a client tool-name list. Live frames learn the
 fact from the activity census and the rebuilt ``task_done``; replay learns it
-from the terminal truth annotation and the authored summary row. These tests
+from the terminal truth annotation and the free host facts row. These tests
 pin each producer of that one fact.
 """
 
@@ -52,17 +52,18 @@ def test_summary_row_copies_direct_fact_and_typed_routing_action():
     assert "_is_direct_chat" not in plain and "addressing_only" not in plain
 
 
-def test_authored_summary_row_writes_the_facts_and_history_replays_them(tmp_path):
+def test_facts_row_writes_the_facts_and_history_replays_them(tmp_path):
     drive_logs = tmp_path / "logs"
     drive_logs.mkdir(parents=True)
-    pipeline._run_task_summary(
-        env=None, llm=None,
+    pipeline._record_task_facts(
+        env=None,
         task={"id": "direct-1", "type": "task", "text": "hi", "chat_id": 1, "_is_direct_chat": True},
-        usage={"rounds": 1, "cost": 0.0, "typed_routing_action": "promote_chat_to_task"},
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        usage={"rounds": 3, "cost": 0.0, "typed_routing_action": "promote_chat_to_task"},
+        llm_trace={"tool_calls": [{"tool": "promote_chat_to_task"}], "reasoning_notes": []},
         drive_logs=drive_logs,
     )
     row = json.loads((drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["summary_kind"] == "host_task_facts" and row["text"] == ""
     assert row["_is_direct_chat"] is True
     assert row["typed_routing_action"] == "promote_chat_to_task"
     # No task_results file: the history summary row falls back to the row's copy.
@@ -73,6 +74,7 @@ def test_authored_summary_row_writes_the_facts_and_history_replays_them(tmp_path
     summary = next(item for item in payload if item.get("system_type") == "task_summary")
     assert summary["_is_direct_chat"] is True
     assert summary["addressing_only"] == "promote_chat_to_task"
+    assert summary["tool_calls"] == 1 and summary["routing_tool_calls"] == 1 and summary["rounds"] == 3
 
 
 def _dispatch_task_done(tmp_path, *, evt_flag, stored_flag):

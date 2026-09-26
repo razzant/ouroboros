@@ -736,14 +736,15 @@ def test_manager_preserves_native_error_and_public_text_projection():
 
 
 @pytest.mark.parametrize(
-    ("setup", "name", "code"),
+    ("setup", "name", "code", "status"),
     [
-        ("disabled", "mcp_demo__anything", "MCP_UNAVAILABLE"),
-        ("missing", "mcp_demo__missing", "MCP_UNAVAILABLE"),
-        ("timeout", "mcp_svc__slow", "MCP_TIMEOUT"),
+        ("disabled", "mcp_demo__anything", "MCP_UNAVAILABLE", "unavailable"),
+        # #1262: a name no configured server lists is the caller's unknown tool.
+        ("missing", "mcp_demo__missing", "UNKNOWN_TOOL", "error"),
+        ("timeout", "mcp_svc__slow", "MCP_TIMEOUT", "timeout"),
     ],
 )
-def test_manager_host_failures_are_native(setup, name, code):
+def test_manager_host_failures_are_native(setup, name, code, status):
     mgr = mcp_client.MCPManager()
     fake = _FakeTransport()
     fake.list_response = [
@@ -759,7 +760,7 @@ def test_manager_host_failures_are_native(setup, name, code):
     result = mgr._call_tool_result(name, {})
 
     assert result.code == code
-    assert result.status in {"unavailable", "timeout"}
+    assert result.status == status
 
 
 def test_manager_call_tool_redacts_successful_result_token():
@@ -787,9 +788,11 @@ def test_manager_call_tool_returns_disabled_when_global_off():
 
 def test_manager_call_tool_returns_not_found_for_unknown():
     mgr = mcp_client.MCPManager()
+    _wire_manager(mgr, _FakeTransport())
     mgr.reconfigure(_settings(_good_server()))
-    result = mgr.call_tool("mcp_demo__missing", {})
-    assert "MCP_TOOL_NOT_FOUND" in result
+    assert mgr.refresh_server("demo")["ok"]
+    result = mgr._call_tool_result("mcp_demo__missing", {})
+    assert (result.code, result.text.startswith("⚠️ MCP_TOOL_NOT_FOUND")) == ("UNKNOWN_TOOL", True)
 
 
 def test_manager_call_tool_respects_allowlist():

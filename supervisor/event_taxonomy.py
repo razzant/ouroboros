@@ -193,10 +193,11 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
 
     # --- server_intercept -----------------------------------------------------
     "restart_request": EventDisposition(
-        SERVER_INTERCEPT, "server.py",
+        SERVER_INTERCEPT, "ouroboros.server_liveness",
         ("ouroboros/agent_task_pipeline.py", "supervisor/evolution_lifecycle.py"),
         "restarting the process is not something the supervisor thread can do to "
-        "itself, so the server's drain loop answers this one before dispatch",
+        "itself, so the loop's bounded drain routes this one to the server's restart "
+        "handler before dispatch",
     ),
 
     # --- nested_log_event -----------------------------------------------------

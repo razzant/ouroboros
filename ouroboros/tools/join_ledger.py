@@ -670,6 +670,23 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
 
     if not own and (_is_delegated_task(ctx) or is_observe_origin(getattr(ctx, "task_metadata", {}))):
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(f"⚠️ cancel_task: {tid} is not a child of this task — a delegated task may only cancel its own children, and a consciousness wake at the Observe level is held to the same rule.")))
+    from ouroboros.presence_authority import presence_caller_binding, presence_work_refusal
+
+    if not own and presence_caller_binding(ctx) is not None:
+        # A Presence caller stops only its own binding's work or its own tree, and
+        # a redirected retry is judged at its effective target too — before any intent.
+        from ouroboros.cancel_intents import _validated_single_cancel_target
+
+        refusal = presence_work_refusal(ctx, tid, drive_root=status_drive_root, same_tree=True)
+        if not refusal:
+            try:
+                effective = _validated_single_cancel_target(status_drive_root, tid)
+            except Exception:
+                effective = tid
+            if effective != tid:
+                refusal = presence_work_refusal(ctx, effective, drive_root=status_drive_root, same_tree=True)
+        if refusal:
+            return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     # Durable cancel intent — the ONE ingress (phase A, owner batch-4 1=A). The
     # canonical status never carries intent: the supervisor's cancellation
     # custody claims this intent, tears the task down, and settles the terminal

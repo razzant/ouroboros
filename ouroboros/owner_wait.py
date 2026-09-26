@@ -9,11 +9,11 @@ bytes outlive their one-use resume authority in the ordinary task result.
 
 An optional bound (``escalate(max_wait_minutes=N)``) rides the checkpoint as an
 ABSOLUTE stamp (``wait_deadline_at``), so a planned restart resumes the same
-bound instead of starting it over. Both callbacks return ``"owner_input"`` or
-``"timeout"``; the existing control axes (Stop, cancel, task deadline, absolute
-ceiling) are still checked FIRST, so the soft bound can never overtake them, and
-a timeout introduces no new wait state — the row resumes with the additive
-``resume_reason: "timeout"``.
+bound instead of starting it over. Both callbacks report a typed wake cause
+(``answer``, ``owner_text``, ``hurry``, ``mail:<task_id>``, ``timeout`` or
+``control:<reason>``). Stop, cancel, deadline and absolute ceiling are checked
+first; a timeout is not an answer and creates no new wait state, and a hurry
+is a request to finish sooner, never an answer.
 """
 
 from __future__ import annotations
@@ -32,6 +32,61 @@ from ouroboros.owner_mailbox import OwnerMailboxPeek
 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
 
 log = logging.getLogger(__name__)
+
+
+def classify_wake(entries: list[dict], quiz_id: str) -> str:
+    """The typed cause of a wake; a wake is never an answer by default.
+
+    Closed vocabulary (TZ-2 B2): ``answer`` (this card), ``owner_text`` (the
+    owner's own words, or an answer to another card), ``hurry`` (the owner's
+    typed acceleration control: a request to finish sooner, never an answer),
+    ``mail:<task_id>`` (task mail, naming its sender; ``mail:unknown`` when it
+    names none), ``unknown`` (nothing observed); the callers add ``timeout``
+    and ``control:<reason>``.
+    Precedence: control, this card's answer, owner words, hurry, mail.
+    """
+    from ouroboros.owner_mailbox import (
+        KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_TASK_MESSAGE,
+    )
+
+    kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
+    if KIND_FINALIZE_NOW in kinds:
+        return "control:finalize_now"
+    if any(kind == KIND_QUIZ_ANSWER and row.get("msg_id") == f"quiz_answer:{quiz_id}"
+           for kind, row in zip(kinds, entries)):
+        return "answer"
+    if any(kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER} for kind in kinds):
+        return "owner_text"
+    if KIND_HURRY in kinds:
+        return "hurry"
+    for kind, row in zip(kinds, entries):
+        if kind == KIND_TASK_MESSAGE:  # the first mail is the one that woke the task
+            source = str(row.get("source_task_id") or "").strip()
+            return f"mail:{source}" if source else "mail:unknown"
+    return "mail:unknown" if entries else "unknown"
+
+
+def _wait_entries(ctx: Any) -> list[dict]:
+    """Observe on a private seen-set; only the loop may ACK or deliver."""
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    return drain_owner_entries(
+        pathlib.Path(ctx.drive_root), ctx.task_id,
+        set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()), ctx.task_attempt or 1,
+    )
+
+
+def _fresh_wake(ctx: Any, quiz_id: str, outcome: str) -> str:
+    """An owner answer can land while a pooled wait is awaiting capacity.
+
+    Owner authority (this card's answer, owner words, a control) replaces the
+    reason the resume was requested with; anything else replaces only
+    ``unknown``, so a bound that ended the wait keeps saying so.
+    """
+    observed = classify_wake(_wait_entries(ctx), quiz_id)
+    if observed in {"answer", "owner_text", "control:finalize_now"}:
+        return observed
+    return observed if outcome == "unknown" else outcome
 
 
 def set_owner_wait(root: Any, task_id: str, wait: dict,
@@ -254,7 +309,7 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
     # The bound's absolute instant; None = an unbounded wait.
     deadline = parse_deadline_ts((checkpoint or {}).get("wait_deadline_at"))
     parked = resume_requested = False
-    outcome = "owner_input"
+    outcome = "unknown"
     while True:
         try:
             command = in_q.get(timeout=1.0)
@@ -266,6 +321,11 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
                 if phase == "parked":
                     parked = True
                 elif phase == "resume_granted":
+                    outcome = _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome)
+                    root = pathlib.Path(ctx.budget_drive_root or ctx.drive_root)
+                    wait = (load_task_result(root, ctx.task_id, strict=True) or {}).get("owner_wait") or {}
+                    if wait.get("wait_id") == checkpoint["wait_id"] and wait.get("state") == "resumed":
+                        set_owner_wait(root, ctx.task_id, {**wait, "resume_reason": outcome}, wait["wait_id"])
                     return outcome
                 elif phase == "refused":
                     raise RuntimeError(str(command.get("reason") or "owner wait refused"))
@@ -273,7 +333,8 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
             if peek.pending(
                     pathlib.Path(ctx.drive_root), ctx.task_id,
                     set(getattr(ctx, "_loop_mailbox_seen_ids", set())), ctx.task_attempt or 1):
-                out_q.put({**identity, "phase": "resume"})
+                outcome = classify_wake(_wait_entries(ctx), str(checkpoint.get("quiz_id") or ""))
+                out_q.put({**identity, "phase": "resume", "resume_reason": outcome})
                 resume_requested = True
             elif deadline is not None and utc_now() >= deadline:
                 outcome = "timeout"
@@ -300,7 +361,7 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
     wait = set_owner_wait(root, ctx.task_id, {**checkpoint, "state": "waiting"})
     peek = OwnerMailboxPeek()
     deadline = parse_deadline_ts((checkpoint or {}).get("wait_deadline_at"))  # None = unbounded
-    outcome = "owner_input"
+    outcome = "unknown"
     while not control.control_reason() and not peek.pending(
             pathlib.Path(ctx.drive_root), ctx.task_id,
             set(getattr(ctx, "_loop_mailbox_seen_ids", set())), ctx.task_attempt or 1):
@@ -308,11 +369,12 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
             outcome = "timeout"
             break
         time.sleep(1.0)
+    control_reason = control.control_reason()
+    outcome = (f"control:{control_reason}" if control_reason else
+               _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome))
     set_owner_wait(root, ctx.task_id,
-                   {**wait, "state": "resumed",
-                    **({"resume_reason": outcome} if outcome == "timeout" else {})},
-                   wait["wait_id"])
-    if outcome == "timeout":
+                   {**wait, "state": "resumed", "resume_reason": outcome}, wait["wait_id"])
+    if not outcome.startswith("control:"):
         announce_wait_ended(root, ctx.task_id, str(checkpoint.get("quiz_id") or ""),
                             int(getattr(ctx, "current_chat_id", 0) or 0))
     return outcome
@@ -327,9 +389,12 @@ def announce_wait_ended(root: Any, task_id: str, quiz_id: str, chat_id: int) -> 
     try:
         from ouroboros.owner_quiz import mark_wait_ended
 
-        mark_wait_ended(root, task_id, quiz_id)
+        changed = mark_wait_ended(root, task_id, quiz_id)
     except Exception:
         log.debug("owner-wait end not recorded on quiz %s", quiz_id, exc_info=True)
+        return
+    if not changed:  # an answered card must never be broadcast as open
+        return
     try:
         from supervisor.message_bus import get_bridge
 
@@ -338,14 +403,25 @@ def announce_wait_ended(root: Any, task_id: str, quiz_id: str, chat_id: int) -> 
         log.debug("owner-wait end not broadcast for quiz %s", quiz_id, exc_info=True)
 
 
-def owner_wait_timeout_notice(ctx: Any, checkpoint: dict) -> dict:
-    """Host frame for a bound that ended without an owner answer.
+def owner_wait_ended_notice(ctx: Any, checkpoint: dict, reason: str = "timeout",
+                            *, woke_by: str = "") -> dict:
+    """Host frame for a wait that ended without THIS question being answered.
 
-    A host notice, never owner-marked content: the model must not read it as
-    something the owner said. The card stays open, so the honest instruction
-    depends on whether an assumption was recorded — without one, silence is
-    explicitly NOT consent.
+    ``reason`` is ``timeout`` (the bound closed) or ``not_answered`` (something
+    else woke the task — task mail, an owner hurry request, unconfirmed input —
+    and ``woke_by`` names it). A host notice, never owner-marked content: the
+    model must not read it as something the owner said. The card stays open,
+    so the honest instruction depends on whether an assumption was recorded —
+    without one, silence is explicitly NOT consent.
     """
+    if reason == "not_answered":
+        return {"role": "user", "content": (
+            f"[SYSTEM NOTICE]\nThe wait on question {(checkpoint or {}).get('quiz_id')} ended "
+            f"after {woke_by or 'unconfirmed input'}, not a confirmed owner answer. "
+            "The question remains open and answerable. Continue by your judgment; "
+            "ask again only if you must wait.")}
+    if reason != "timeout":
+        raise ValueError(f"unknown owner wait end reason: {reason!r}")
     minutes = int((checkpoint or {}).get("wait_max_minutes") or 0)
     window = f"within {minutes} minutes" if minutes > 0 else "within the requested window"
     assumption = ""
@@ -365,6 +441,59 @@ def owner_wait_timeout_notice(ctx: Any, checkpoint: dict) -> dict:
         f"{stance} — or finish and say what is unresolved.")}
 
 
+def owner_wait_timeout_notice(ctx: Any, checkpoint: dict) -> dict:
+    """The bound's notice under its original name."""
+    return owner_wait_ended_notice(ctx, checkpoint, "timeout")
+
+
+def _wake_description(outcome: str, entries: list[dict]) -> str:
+    """What woke the task, for the notice: a hurry is named as what it is."""
+    if outcome == "hurry":
+        return "an owner hurry request (a request to finish sooner, not an answer)"
+    sources = sorted({str(row.get("source_task_id") or row.get("kind") or "mail") for row in entries})
+    return f"task mail from {', '.join(sources)}" if sources else "unconfirmed input"
+
+
+def _rendered_owner_authority(entries: list[dict]) -> bool:
+    """Whether something drained reaches the transcript AS owner authority (the
+    owner's words, a quiz answer, a principal task's message) and so explains
+    the wake by itself. A hurry is owner authority too, but it is applied
+    structurally and never rendered — the notice must name it."""
+    from ouroboros.loop_messages import owner_authority_kinds
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_HURRY
+
+    return any(kind not in {KIND_FINALIZE_NOW, KIND_HURRY} for kind in owner_authority_kinds(entries))
+
+
+def append_wake_notice(ctx: Any, checkpoint: dict, outcome: Any, messages: list) -> None:
+    """Explain a non-answer wake to the model, warm and cold alike.
+
+    Only a wake that answered nothing gets a notice: this card's answer or the
+    owner's words reach the transcript through the ordinary drain, and a
+    control reason is acted on by the loop. An answer may have landed after
+    the wake but before this round — never claim silence then. The acceptance
+    park is not an owner question and gets no notice.
+    """
+    outcome = str(outcome or "")
+    if checkpoint.get("review_binding") or not (
+            outcome in {"timeout", "hurry", "unknown"} or outcome.startswith("mail")):
+        return
+    from ouroboros.owner_quiz import quiz_states
+
+    root = pathlib.Path(ctx.budget_drive_root or ctx.drive_root)
+    block = quiz_states(root, ctx.task_id).get(str(checkpoint.get("quiz_id") or "")) or {}
+    if block.get("state") == "answered":
+        return
+    if outcome == "timeout":
+        messages.append(owner_wait_ended_notice(ctx, checkpoint, "timeout"))
+        return
+    entries = _wait_entries(ctx)
+    if _rendered_owner_authority(entries):
+        return  # the owner's or a principal's words explain the wake themselves
+    messages.append(owner_wait_ended_notice(ctx, checkpoint, "not_answered",
+                                            woke_by=_wake_description(outcome, entries)))
+
+
 def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
                      round_idx: int, tool_schemas: list, seen: set,
                      *, review_binding: str = "") -> None:
@@ -377,10 +506,7 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
     checkpoint = checkpoint_owner_wait(ctx, messages, trace, usage, round_idx, tool_schemas, seen,
                                        review_binding=review_binding)
     outcome = callback(ctx, checkpoint)
-    if outcome == "timeout" and not review_binding:
-        # The acceptance-review park shares this seam and must never receive a
-        # quiz-timeout notice.
-        messages.append(owner_wait_timeout_notice(ctx, checkpoint))
+    append_wake_notice(ctx, checkpoint, outcome, messages)
     ctx._owner_wait_requested = ""
     ctx._owner_wait_deadline_at = ""
     ctx._owner_wait_max_minutes = 0
@@ -447,10 +573,10 @@ def resume_native_loop(tools: Any, state: dict, messages: list, trace: dict,
         "Prior tool results remain recorded; do not repeat completed effects. "
         "The restart ended the previous browser process and task-local services; "
         "their recorded results remain evidence, not proof they are still running.")})
-    if outcome == "timeout":
-        # The bound survived the restart as an absolute stamp, so the cold
-        # continuation can ALSO end on it — and must say so, exactly like warm.
-        messages.append(owner_wait_timeout_notice(ctx, cold_checkpoint or {}))
+    # The bound survived the restart as an absolute stamp, so the cold
+    # continuation can ALSO end on it — and a peer wake or a hurry is no more
+    # an answer cold than warm: the same notice seam says so.
+    append_wake_notice(ctx, cold_checkpoint or {}, outcome, messages)
     return (ctx.active_model, ctx.active_effort, ctx.active_use_local,
             mode, state["round_idx"], plan)
 

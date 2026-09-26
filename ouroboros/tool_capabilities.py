@@ -114,6 +114,9 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     # Bounded media projection: writes derived frames only under artifact_store/video_frames.
     "ocr_pdf", "youtube_transcript", "extract_video_frames",
+    # Reads this child's own callable catalog (the name-miss answer points here);
+    # it grants nothing, unlike enable_tools, which stays Nano schema selection.
+    "list_available_tools",
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -254,6 +257,9 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     # live_roots pages up to 100 catalogue rows of structured JSON; the 15k
     # default would head-truncate a valid page into unparseable text.
     "live_roots": 80_000,
+    # A selected discovery namespace lists every callable tool of one MCP server
+    # or the whole built-in set with purposes; the default cap would cut it.
+    "list_available_tools": 80_000,
     # apply_patch results carry per-hunk diagnostics, edit_batch per-edit ones
     # (an aborted batch reports EVERY failed edit so one retry can fix them all);
     # write_file appends the overwrite diff.

@@ -26,7 +26,7 @@ from ouroboros.project_facts import (
     sanitize_project_id,
     explicit_project_id_ok,
 )
-from ouroboros.dialogue_provenance import is_presence_task
+from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
 from ouroboros.focus import normalize_focus
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import (
@@ -55,7 +55,7 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
     delegation_role = str(lineage.get("delegation_role") or metadata.get("delegation_role") or "").strip()
     root_task_id = str(lineage.get("root_task_id") or metadata.get("root_task_id") or "").strip()
     child = bool(parent_task_id) or delegation_role == "subagent"
-    if is_presence_task(task):
+    if is_presence_task(task) or presence_caller_binding(ctx) is not None:  # a speaker, or acting for its binding
         return "presence", metadata
     if child:
         return "child", metadata

@@ -128,7 +128,10 @@ def task_result_row(
 
     Pass ``runtime_result=<task result payload>`` (metadata or keyword) wherever the adapter
     holds one: ``runtime_outcome`` then discloses why the RUNTIME stopped, independently of
-    the adapter-stage ``reason_code`` this row's ``status`` describes."""
+    the adapter-stage ``reason_code`` this row's ``status`` describes.
+
+    An omitted or empty ``official_eval_status`` is ``unreported``: the caller made no claim.
+    ``not_run`` asserts the official evaluator never ran, so only an explicit value says it."""
     meta = dict(metadata or {})
     for key, value in overrides.items():
         if value is not None:
@@ -142,7 +145,7 @@ def task_result_row(
         "reason_code": str(meta.get("reason_code") or ""),
         "runtime_outcome": runtime_terminal_disclosure(meta.get("runtime_result")),
         "prediction_written": bool(meta.get("prediction_written")),
-        "official_eval_status": str(meta.get("official_eval_status") or "not_run"),
+        "official_eval_status": str(meta.get("official_eval_status") or "unreported"),
         "output_paths": meta.get("output_paths") or {},
         "error": str(meta.get("error") or ""),
         "details": meta.get("details") or {},

@@ -90,6 +90,59 @@ def test_events_list_settled_tasks_open_cards_and_owner_messages_since_the_last_
     assert wake.wake_events(tmp_path / "missing", since=since, now=T0) == []
 
 
+
+def test_answered_cards_of_the_window_are_events_with_their_facts(tmp_path):
+    since = T0 - 3600
+    long_comment = "Keep the old parser.\n\nReason: " + "the migration cost is too high; " * 120 + "END-OF-COMMENT"
+    _result(tmp_path, "early", ts=since + 100, cost=0.25, description="earlier settled work")
+    _result(tmp_path, "late", ts=since + 3000, cost=0.75, description="later settled work")
+    _result(tmp_path, "asker", ts=since - 500, status="completed", quizzes={
+        # Answered by a button inside the window: stamps, the chosen label, a question preview.
+        "qbtn": {"state": "answered", "asked_at": _iso(since - 7200), "answered_at": _iso(since + 600),
+                 "options": ["Rewrite it", "Keep it"], "answered_index": 1,
+                 "question": "Should the parser be rewritten before the release?"},
+        # Answered in the owner's own words inside the window: the words arrive whole.
+        "qown": {"state": "answered", "asked_at": _iso(since + 60), "answered_at": _iso(since + 2400),
+                 "options": ["A", "B"], "comment": long_comment, "question": "Which parser?"},
+        # Answered before the window: not news for this wake.
+        "qold": {"state": "answered", "asked_at": _iso(since - 9000), "answered_at": _iso(since - 60),
+                 "options": ["A", "B"], "answered_index": 0, "question": "Old question"},
+        # Still unanswered after its task finished: listed as before, in the card list.
+        "qopen": {"state": "expired_terminal", "asked_at": _iso(since - 300), "question": "Still waiting?"},
+    })
+    lines = wake.wake_events(tmp_path, since=since, now=T0, reason="task_finished:asker:completed")
+    btn = next(line for line in lines if line.startswith("- owner card qbtn "))
+    assert btn == ("- owner card qbtn on task asker: answered 50 min ago; asked 3 h 0 min ago; "
+                   "chose option 2: Keep it; question: Should the parser be rewritten before the release?")
+    own = next(line for line in lines if line.startswith("- owner card qown "))
+    assert own.startswith("- owner card qown on task asker: answered 20 min ago; asked 59 min ago; "
+                          "answered in own words: Keep the old parser.")
+    assert long_comment in own and "END-OF-COMMENT; question: Which parser?" in own  # whole, never clipped
+    assert not any("qold" in line for line in lines)
+    assert any(line.startswith("- owner card qopen on task asker: Unanswered · the task finished") for line in lines)
+    # Answers sort with the settled facts by their own stamp (newest first), after the trigger;
+    # the trigger's de-duplication of its own task never hides an answer on that task.
+    assert lines[0].startswith("- wake cause: task asker finished")
+    events = [line.split()[1:4] for line in lines[1:] if not line.startswith("- owner card qopen ")]
+    assert events == [["task", "late", "completed,"], ["owner", "card", "qown"],
+                      ["owner", "card", "qbtn"], ["task", "early", "completed,"]]
+    # No verdict words about what the owner meant.
+    assert not any(word in btn + own for word in ("understood", "confused", "misunderstood"))
+
+
+def test_answered_card_line_renders_mixed_answers_and_missing_facts_honestly():
+    now = T0
+    both = wake._answered_card_line("t1", "q1", {
+        "answered_at": _iso(now - 120), "asked_at": _iso(now - 240), "options": ["Go", "Stop"],
+        "answered_index": 0, "comment": "but only on weekdays", "question": "Deploy?"}, now=now)
+    assert both == ("- owner card q1 on task t1: answered 2 min ago; asked 4 min ago; "
+                    "chose option 1: Go; with the words: but only on weekdays; question: Deploy?")
+    bare = wake._answered_card_line("t1", "q2", {"answered_at": "not a stamp", "answered_index": 5}, now=now)
+    assert bare == ("- owner card q2 on task t1: answered at an unknown time; asked at an unknown time; "
+                    "chose option 6: label unavailable; question: question text unavailable")
+    empty = wake._answered_card_line("t1", "q3", {"answered_at": _iso(now - 60)}, now=now)
+    assert "answer text unavailable" in empty
+
 @pytest.mark.parametrize("status, origin", [("failed", "host_notice"), ("cancelled", ""),
                                            ("completed", "host_notice"), ("failed", "model_final")])
 def test_failed_inline_presence_is_visible_on_regular_wake_without_reviving_owner_turns(tmp_path, status, origin):

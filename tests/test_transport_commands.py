@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+
 class Bridge:
     def __init__(self, messages):
         self._messages = list(messages)
@@ -114,6 +117,176 @@ def test_external_zero_identity_cannot_bind_owner_or_execute_on_retry(monkeypatc
     assert "owner_id" not in ctx.state
     assert "owner_external_id" not in ctx.state
     assert ctx.sent == [(0, "⚠️ Command ignored: this transport did not provide owner identity."), (0, "⚠️ Command ignored: this transport did not provide owner identity.")]
+
+
+def test_accepted_restart_ends_current_batch_without_processing_later_command(monkeypatch):
+    import server
+    from supervisor import message_bus
+
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
+    bridge = Bridge([
+        {"chat": {"id": 1}, "from": {"id": 1}, "text": "/restart", "source": "web"},
+        {"chat": {"id": 1}, "from": {"id": 1}, "text": "/status", "source": "web"},
+    ])
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_perform_owner_restart", lambda *_a: (True, ""))
+    assert server._process_bridge_updates(bridge, 0, ctx) == 1
+    assert ctx.sent == [(1, "♻️ Restarting.")]
+
+
+def _real_bridge(*texts, chat_id=1, user_id=1, source="web"):
+    """The real queue-backed bridge with a batch already waiting."""
+    from supervisor.message_bus import LocalChatBridge
+
+    bridge = LocalChatBridge()
+    for index, text in enumerate(texts):
+        bridge.enqueue_local_message(text, chat_id=chat_id, user_id=user_id, source=source,
+                                     client_message_id=f"cmid-{index}")
+    return bridge
+
+
+def test_panic_never_calls_replay_before_the_hard_exit(monkeypatch):
+    """Panic takes the direct hard-stop path; volatile replay cannot outlive it.
+    Even a raising or blocking bridge hand-back is never invoked before stop."""
+    import server
+    import supervisor.message_bus as message_bus
+
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
+    bridge = _real_bridge("/panic", "after one", "/status")
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    monkeypatch.setattr(bridge, "requeue_updates", _broken_hand_back)
+    stops = []
+    monkeypatch.setattr(server, "_execute_panic_stop", lambda *_a, **_k: stops.append(True))
+    assert server._process_bridge_updates(bridge, 0, ctx) == 2
+    assert ctx.sent == [(1, "🛑 PANIC: killing everything. App will close.")], "nothing behind Panic ran"
+    assert stops == [True]
+
+
+def _broken_hand_back(*_a, **_k):
+    raise RuntimeError("replay store exploded")
+
+
+def test_accepted_restart_completes_when_the_hand_back_raises(monkeypatch, caplog):
+    """A failed hand-back after an accepted /restart is a logged loss, not a
+    loop crash: the batch still ends and the restart already requested stands."""
+    import logging
+
+    import server
+    from supervisor import message_bus
+
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
+    bridge = _real_bridge("/restart", "/status")
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_perform_owner_restart", lambda *_a: (True, ""))
+    monkeypatch.setattr(bridge, "requeue_updates", _broken_hand_back)
+    with caplog.at_level(logging.ERROR):
+        assert server._process_bridge_updates(bridge, 0, ctx) == 2
+    assert ctx.sent == [(1, "♻️ Restarting.")]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("hand-back raised" in m and "replay store exploded" in m for m in messages)
+    assert any("cannot take back 1 unprocessed update(s)" in m for m in messages)
+
+
+def test_accepted_restart_hands_the_tail_back_and_the_next_read_serves_it(monkeypatch):
+    """TZ-1: an accepted /restart ends the batch at once, but the messages
+    dequeued behind it stay on the real bridge (their accepted rows durable),
+    so a generation that is still reading (a cancelled or revived restart)
+    handles them with their original ids instead of finding them erased."""
+    import server
+    from supervisor import message_bus, state
+
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
+    ctx.WORKERS, ctx.PENDING, ctx.RUNNING = {}, [], {}
+    bridge = _real_bridge("/restart", "/status")
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_perform_owner_restart", lambda *_a: (True, ""))
+    monkeypatch.setattr(state, "status_text", lambda *_a: "Runtime status")
+    assert server._process_bridge_updates(bridge, 0, ctx) == 2
+    assert ctx.sent == [(1, "♻️ Restarting.")], "the stop was not delayed by the tail"
+    assert server._process_bridge_updates(bridge, 2, ctx) == 3
+    assert ctx.sent == [(1, "♻️ Restarting."), (1, "Runtime status")]
+    assert bridge.get_updates(offset=3, timeout=0) == []
+
+
+def test_a_crash_mid_batch_hands_the_later_messages_back_for_the_next_tick(monkeypatch, caplog):
+    """TZ-1: the batch reader drains several queued messages at once. One
+    failing handler is the loop's crash to account for (it still raises); the
+    messages dequeued behind it were never handled and come back on the next
+    read instead of vanishing with the batch."""
+    import logging
+
+    import server
+    from supervisor import message_bus
+
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
+    bridge = _real_bridge("one", "two", "three")
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    routed = []
+
+    def route(_bridge, _ctx, message):
+        if message["text"] == "two":
+            raise RuntimeError("router exploded")
+        routed.append(message["text"])
+
+    monkeypatch.setattr(server, "_route_owner_message", route)
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="router exploded"):
+        server._process_bridge_updates(bridge, 0, ctx)
+    assert routed == ["one"]
+    assert any("Bridge update 2 failed" in r.getMessage() and "1 later update(s) handed back" in r.getMessage()
+               for r in caplog.records)
+    assert server._process_bridge_updates(bridge, 0, ctx) == 4
+    assert routed == ["one", "three"], "the failing message is the crash; the one behind it is not lost"
+    assert bridge.get_updates(offset=4, timeout=0) == []
+
+
+def test_a_crash_mid_batch_stays_the_reported_crash_when_the_hand_back_fails(monkeypatch, caplog):
+    """The hand-back is best effort: when it fails too, the loop still sees the
+    handler's own crash (not the hand-back's), and the loss is logged."""
+    import logging
+
+    import server
+    from supervisor import message_bus
+
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
+    bridge = _real_bridge("one", "two", "three")
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    monkeypatch.setattr(bridge, "requeue_updates", _broken_hand_back)
+    routed = []
+
+    def route(_bridge, _ctx, message):
+        if message["text"] == "two":
+            raise RuntimeError("router exploded")
+        routed.append(message["text"])
+
+    monkeypatch.setattr(server, "_route_owner_message", route)
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="router exploded"):
+        server._process_bridge_updates(bridge, 0, ctx)
+    assert routed == ["one"]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("hand-back raised" in m and "replay store exploded" in m for m in messages)
+    assert any("cannot take back 1 unprocessed update(s)" in m for m in messages)
+    assert any("Bridge update 2 failed" in m and "0 later update(s) handed back" in m for m in messages)
+
+
+def test_a_bridge_without_a_hand_back_is_told_what_it_loses(monkeypatch, caplog):
+    """A transport-shaped fake without ``requeue_updates`` keeps the old
+    behaviour (the batch ends) and the loss is logged, never silent."""
+    import logging
+
+    import server
+    from supervisor import message_bus
+
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
+    bridge = Bridge([
+        {"chat": {"id": 1}, "from": {"id": 1}, "text": "/restart", "source": "web"},
+        {"chat": {"id": 1}, "from": {"id": 1}, "text": "/status", "source": "web"},
+    ])
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_perform_owner_restart", lambda *_a: (True, ""))
+    with caplog.at_level(logging.ERROR):
+        assert server._process_bridge_updates(bridge, 0, ctx) == 1
+    assert ctx.sent == [(1, "♻️ Restarting.")]
+    assert any("cannot take back 1 unprocessed update(s)" in r.getMessage() for r in caplog.records)
 
 
 def test_command_voice_survives_live_delivery_and_history(tmp_path, monkeypatch):

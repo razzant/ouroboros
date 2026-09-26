@@ -458,6 +458,21 @@ const TASK_CAUSE_PHRASES = {
     host_child_status_suffix: "A child task had not settled when the answer was delivered",
     invalid_delivery_control_after_repair: "Ouroboros's final delivery instruction could not be read even after repair, so the answer stands as delivered.",
     budget_exhausted: "The task ran out of budget before it could finish cleanly",
+    // The other forced-finalization rails (outcomes.BEST_EFFORT_REASON_CODES / ACCEPTANCE_BYPASS_REASON_BY_RAIL keys).
+    round_limit: "The task hit its round limit before it could finish cleanly",
+    finalization_grace: "The task hit a time limit and had to wrap up before it could finish cleanly",
+    deadline_local: "The task reached its deadline before it could finish cleanly",
+    context_overflow: "The task outgrew its context before it could finish cleanly",
+    children_unabsorbed: "Some sub-task results were never folded in, so the task had to wrap up",
+    // The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code.
+    absolute_ceiling: "The task reached its maximum running time",
+    deadline: "The task reached its deadline",
+    idle_timeout: "The task made no progress for too long",
+    // The reason codes outcomes.derive_loop_outcome stamps from typed terminal facts.
+    provider_failure: "The model provider failed to answer, so the task could not finish",
+    empty_final_text: "The task ended without a final answer",
+    deep_self_review_unavailable: "The deep self-review could not run",
+    deep_self_review_error: "The deep self-review stopped on an error",
     // #869: the provider-death rail's terminal words (twin of project_dialogue.TASK_CAUSE_PHRASES).
     provider_unavailable: "The model provider stopped answering, so the task could not finish",
     delivery_control_degraded: "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
@@ -518,6 +533,13 @@ function joinCauseClauses(clauses) {
         .join(' · ');
 }
 
+// The explicit author stop (TZ-2 C4): the typed author_stop, or the structured stop recorded under its TRUE
+// cause when the review rounds ran out. The twin of review_records.recorded_author_stop.
+const explicitAuthorStop = (d) => d?.reason === 'author_stop' || (d?.reason === 'review_cycles_exhausted'
+    && d.author_action === 'stop' && d.author_disposition?.action === 'stop');
+// Its AUTHOR's reason beside the typed sentence (never a finish's or reviewer prose). Twin: project_dialogue._author_stop_rationale.
+const authorStopRationale = (d) => (explicitAuthorStop(d) ? String(d.author_disposition?.rationale || '').split(/\s+/).filter(Boolean).join(' ') : '');
+
 // Standing limitations of the delivered answer, from facts already on the
 // record: deferred children, and a plan review still open at delivery (the
 // result's terminal_plan_review_open flag), worded by its class when one is
@@ -556,11 +578,10 @@ export function taskReasonDetail(evt) {
     if (taskStoppedWithSummary(evt)) {
         // An owner-requested stop is a success and carries its own marker instead.
         clause = '';
-    } else if (severity !== 'error' && severity !== 'cancelled' && decision?.status
-        && (decision.status !== 'accepted' || Object.hasOwn(TASK_CAUSE_PHRASES, decisionCause))) {
-        // A warning caused by REVIEW is explained by the host's acceptance decision, in its
-        // own typed reason (an accepted decision only when it has a sentence); the stored
-        // reviewer rationale stays in the card body, the task result and Logs.
+    } else if (((severity !== 'error' && severity !== 'cancelled') || (explicitAuthorStop(decision) && severity === 'error'))
+        && decision?.status && (decision.status !== 'accepted' || Object.hasOwn(TASK_CAUSE_PHRASES, decisionCause))) {
+        // A REVIEW-caused warning, or the explicit author stop that ended a red card, speaks through the
+        // decision's TRUE typed reason (an accepted one only with a sentence); reviewer prose stays in the card.
         clause = taskReasonPhrase(decisionCause);
     } else if (severity === "cancelled" && origin && typeof origin === "object"
         && !Array.isArray(origin) && Object.keys(origin).length) {
@@ -582,7 +603,7 @@ export function taskReasonDetail(evt) {
             ? String(receiptVeto.detail).split(/\s+/).filter(Boolean).join(' ')
             : taskReasonPhrase(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : reason);
     }
-    const line = joinCauseClauses([clause, ...acceptanceIncidentClauses(decision, reason, TASK_CAUSE_PHRASES),
+    const line = joinCauseClauses([clause, authorStopRationale(decision), ...acceptanceIncidentClauses(decision, reason, TASK_CAUSE_PHRASES),
         ...terminalLimitations(record, reason, held), custody ? taskReasonPhrase(custody) : '']);
     // Cancellation's host/browser sentence has identical punctuation. Other
     // cause policy stays with the runtime owner of this shared seam.

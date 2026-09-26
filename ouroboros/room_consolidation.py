@@ -230,6 +230,9 @@ def summarize_source(
             return False
         midpoint = start + len(halves[0])
         pending.extend([(midpoint, end), (start, midpoint)])
+        # The refusal is answered by its halves, each accounted by its own row; the
+        # attempt stays in the usage history, never read as an unresolved failure.
+        failure["resolution"] = "split"
         return True
 
     while pending:
@@ -259,7 +262,13 @@ def summarize_source(
                 corrected, raw = _extract_trailing_json(corrected, "KNOWLEDGE_ENTRIES_JSON:")
                 kept = [e for e in (raw if isinstance(raw, list) else []) if isinstance(e, dict)
                         and (str(e.get("topic") or ""), str(e.get("scope") or "")) in draft_topics]
-                entries.extend(knowledge.bind_entries(kept) if knowledge is not None and kept else [])
+                # Provenance is per nomination: the route that answered THIS part's
+                # correction wrote these entries, whatever route the block's other
+                # rooms or parts ran on (a wait may rebind between parts).
+                from ouroboros.knowledge import observed_route_stamp
+                route = observed_route_stamp(usage)
+                entries.extend({**entry, "_nomination_route": route}
+                               for entry in (knowledge.bind_entries(kept) if knowledge is not None and kept else []))
                 summaries.append(corrected.strip())
                 continue
         failure = usage["_consolidation_errors"][-1]

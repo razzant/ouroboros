@@ -4,6 +4,12 @@ The existing task owns its worker, writer lane, mailbox and durable result.
 This module keeps only the live call's wait and role overrides. It neither
 schedules work nor records physical attempts: every resumed call still goes
 through LLMClient and the ordinary physical-attempt ledger.
+
+Quota recovery order: the transport's Auto account rotation, then every
+configured route of the round, and only then the owner. A round whose later
+route exists returns its refusal instead of waiting (``ResourceDeferral``); the
+owner question is then opened from that retained refusal, never from another
+generation. An inline Presence turn never waits for quota or for the owner.
 """
 
 from __future__ import annotations
@@ -160,6 +166,9 @@ _CALENDAR: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
     "ouroboros_model_wait_calendar", default=())
 _LOGICAL: contextvars.ContextVar[tuple[tuple[float, str], ...]] = contextvars.ContextVar(
     "ouroboros_model_wait_logical", default=())
+# One call's own scope, like its physical capture: never copied into a helper's context.
+_DEFERRED: contextvars.ContextVar[tuple["ResourceDeferral", ...]] = contextvars.ContextVar(
+    "ouroboros_model_wait_deferred", default=())
 
 
 def copy_wait_context() -> contextvars.Context:
@@ -208,6 +217,38 @@ def dispatch_deadline_remaining_sec() -> float | None:
     remaining.extend(max(0.0, deadline - monotonic_now(slot))
                      for deadline, slot in _LOGICAL.get())
     return min(remaining) if remaining else None
+
+
+class ResourceDeferral:
+    """One round's resource refusal, returned to the round instead of waited in its call.
+
+    The round tries its configured routes first. The owner question is then this
+    refusal's own wait, opened from the retained call: catalog checks only, so no
+    generation precedes the owner's answer. A turn that may not wait keeps the fact.
+    """
+
+    def __init__(self, role: str):
+        self.role = role
+        self.fact: dict = {}
+        self._retained: tuple | None = None
+
+    def retain(self, receiver: Any, error: Exception, values: dict) -> None:
+        self._retained = (receiver, error, values)
+        self.fact = {"reason": model_wait_reason(error), "role": self.role, "model": str(values.get("model") or ""),
+                     "reset_at": str(getattr(error, "reset_at", "") or ""),
+                     "account_rotation": copy.deepcopy(getattr(error, "account_rotation", None))}
+
+    def ask_owner(self, context: "TaskModelWait") -> dict:
+        receiver, error, values = self._retained
+        return context.wait(receiver, error, values)
+
+    def terminal(self, *, fallbacks_tried: list, owner_wait: str) -> dict:
+        """The typed temporary non-success when no route recovered it and no owner wait follows."""
+        return {**self.fact, "fallbacks_tried": list(fallbacks_tried), "owner_wait": owner_wait, "temporary": True}
+
+
+def _deferral(role: str) -> ResourceDeferral | None:
+    return next((item for item in reversed(_DEFERRED.get()) if item.role == role), None)
 
 
 def mutate_wait(root: Any, task_id: str, wait_id: str, transform: Callable) -> dict:
@@ -280,6 +321,12 @@ class TaskModelWait:
         self.auto_continue: dict[str, bool] = {}
         self.seen_controls: set[str] = set()
         self.mailbox_stamp = None
+
+    @property
+    def waits_allowed(self) -> bool:
+        """An inline Presence turn holds its conversation slot with no owner at the
+        computer: rotation and fallback still run, then a typed temporary refusal."""
+        return not self.task.get("_presence_turn")
 
     def mutate_row(self, wait_id: str, transform: Callable) -> dict:
         if self.row_mutator is not None:
@@ -376,6 +423,16 @@ class TaskModelWait:
             yield
         finally:
             _REPREPARE.reset(token)
+
+    @contextlib.contextmanager
+    def defer_resource_wait(self, role: str) -> Iterator[ResourceDeferral]:
+        """A later route of this round, or a turn that may not wait, owns this role's refusal."""
+        deferral = ResourceDeferral(role)
+        token = _DEFERRED.set((*_DEFERRED.get(), deferral))
+        try:
+            yield deferral
+        finally:
+            _DEFERRED.reset(token)
 
     def paused_seconds(self, slot_id: str = "", *, now: float | None = None) -> float:
         with self.lock:
@@ -560,6 +617,14 @@ class TaskModelWait:
                "worker_slot_held": self.worker_slot_held, "started_at": utc_now_iso()}
         if self.owner_id:
             row["model_wait_owner_id"] = self.owner_id
+        if getattr(error, "account_rotation", None):
+            row["account_rotation"] = copy.deepcopy(error.account_rotation)
+        # A vendor refusal with no reset evidence gives the engine no cooldown for that
+        # Auto account, so its catalog choosing the same account again proves nothing.
+        unproven = str(route.get("credentialProfileId") or "") if (
+            reason == "quota" and not account_intent and getattr(error, "status_code", 0)
+            and getattr(getattr(error, "physical_attempt_capture", None), "state", None) == "settled"
+            and not (problem_context.get("resetsAt") or problem_context.get("retryAfterMs"))) else ""
         with self.lock:
             self.waits[wait_id] = row
         if quota_wait:
@@ -610,6 +675,7 @@ class TaskModelWait:
                                                                  requested_model=native_model)
                             if (catalog.get("source") == source
                                     and (not account or catalog.get("credentialProfileId") == account)
+                                    and not (unproven and not account and catalog.get("credentialProfileId") == unproven)
                                     and any(item.get("id") == native_model for item in catalog.get("models", []))):
                                 resolution = "resource_available"
                                 return kwargs
@@ -656,7 +722,8 @@ def model_waitable(function: Callable | None = None, *, client_parameter: str = 
     """Catch resource refusals before helper catches; callers may decline waiting.
 
     ``wait_for_resources`` is call-local, leaving the shared task's overrides,
-    controls and custody intact even when a refusal returns immediately.
+    controls and custody intact even when a refusal returns immediately; so is a
+    round's ``defer_resource_wait``, which retains the refusal for that round.
     """
     if function is None:
         return functools.partial(model_waitable, client_parameter=client_parameter)
@@ -698,15 +765,23 @@ def model_waitable(function: Callable | None = None, *, client_parameter: str = 
         poll._model_wait_original = original
         return {**values, "model_poll_control": poll}
 
-    def can_wait(context, error, values):
+    def can_wait(context, receiver, error, values):
+        """Wait here, or raise; a deferring round first retains a quota refusal for its later routes."""
         from ouroboros.llm_claudexor import ClaudexorModelError
 
         capture = getattr(error, "physical_attempt_capture", None)
-        return bool(context and not context.closed and values.get("model_role")
-                    and values.get("wait_for_resources", True)
-                    and isinstance(error, ClaudexorModelError)
-                    and model_wait_reason(error)
-                    and getattr(capture, "state", None) in {"released", "settled"})
+        reason = model_wait_reason(error)
+        if not (context and not context.closed and values.get("model_role") and reason
+                and isinstance(error, ClaudexorModelError)
+                and getattr(capture, "state", None) in {"released", "settled"}):
+            return False
+        deferral = _deferral(values["model_role"])
+        # Quota: account rotation, then every configured route, then the owner. Sign-in
+        # keeps its own owner wait wherever waiting is possible.
+        if deferral is not None and (reason != "auth" or not context.waits_allowed):
+            deferral.retain(receiver, error, values)
+            return False
+        return bool(context.waits_allowed and values.get("wait_for_resources", True))
 
     def merged(result, attempts):
         result[1]["ledger_attempt_ids"] = list(dict.fromkeys([*attempts, *result[1].get("ledger_attempt_ids", [])]))
@@ -751,7 +826,7 @@ def model_waitable(function: Callable | None = None, *, client_parameter: str = 
                 except Exception as error:
                     error.model_role_route = route_projection(values)
                     propagate_model_control(error)
-                    if not can_wait(context, error, values):
+                    if not can_wait(context, receiver, error, values):
                         raise
                     record_attempts(attempts, error)
                     cancelled = threading.Event()
@@ -787,7 +862,7 @@ def model_waitable(function: Callable | None = None, *, client_parameter: str = 
             except Exception as error:
                 error.model_role_route = route_projection(values)
                 propagate_model_control(error)
-                if not can_wait(context, error, values):
+                if not can_wait(context, receiver, error, values):
                     raise
                 record_attempts(attempts, error)
                 values = context.wait(receiver, error, values)

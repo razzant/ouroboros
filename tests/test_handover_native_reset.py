@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import pytest
 
+from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
 from ouroboros import loop, usage_accounting as ua
 from ouroboros.llm_claudexor import ModelTurnState
 from ouroboros.loop_model_call import _reprepare_waiting_main
@@ -57,7 +58,11 @@ def test_main_dual_token_reset_survives_wait_reprepare_and_adopts_new_envelope(
     for message in expected:
         message.pop("nativeContinuation", None)
     assert ctx.messages == expected
-    assert gateway.uploads[-1][0]["messages"] == expected
+    # The canonical system message carries the builder's host-only stable-prefix
+    # declaration; the Codex send copy pops it (llm_claudexor._request).
+    wire_expected = deepcopy(expected)
+    wire_expected[0].pop(STABLE_PREFIX_BLOCKS_KEY, None)
+    assert gateway.uploads[-1][0]["messages"] == wire_expected
     assert ctx.context_fit_plan.core_sha256 == "a" * 64
     assert any(item["model_route"] == route for item in observations)
     rows = ledger(ctx.drive_root)

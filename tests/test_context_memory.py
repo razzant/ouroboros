@@ -388,6 +388,30 @@ def test_retired_dialogue_summary_remains_visible_when_blocks_exist(tmp_path):
     assert "legacy dialogue" in combined
 
 
+def test_era_block_carries_a_host_note_and_other_blocks_stay_unchanged(tmp_path):
+    from ouroboros.context import build_memory_sections
+    from ouroboros.memory import Memory
+
+    note = ("Host note: compression of older dialogue blocks; an interpretation, not a grant "
+            "or a standing rule. Range: {range}; source messages: {count}.")
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "dialogue_blocks.json").write_text(json.dumps([
+        {"type": "era", "range": "2026-07-01 to 2026-08-31", "message_count": 412,
+         "content": "### Era: summer\nThe owner preferred X."},
+        {"type": "era", "content": "### Era: undated\nOlder stuff."},
+        {"type": "summary", "range": "2026-09-01", "message_count": 30, "content": "### Block: 2026-09-01\nRecent."},
+    ]), encoding="utf-8")
+    combined = "\n\n".join(build_memory_sections(Memory(drive_root=tmp_path), partition="volatile"))
+
+    dated = note.format(range="2026-07-01 to 2026-08-31", count=412) + "\n### Era: summer\nThe owner preferred X."
+    undated = note.format(range="unknown", count="unknown") + "\n### Era: undated\nOlder stuff."
+    assert "## Dialogue History\n\n" + dated + "\n\n" + undated + "\n\n### Block: 2026-09-01\nRecent." in combined
+    assert combined.count("Host note:") == 2  # the summary block gets no note
+    # The renderer itself: a summary-only list is byte-identical to its contents.
+    assert Memory.format_blocks_as_markdown([{"type": "summary", "content": "a"}, {"content": "b"}]) == "a\n\nb"
+
+
 def test_retired_dialogue_summary_fallback_preserves_continuity_without_blocks(tmp_path):
     from ouroboros.context import build_memory_sections
     from ouroboros.memory import Memory

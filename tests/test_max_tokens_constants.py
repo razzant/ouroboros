@@ -81,12 +81,15 @@ def test_summary_and_background_token_budgets():
         "ouroboros/tools/review_synthesis.py": "max_tokens=16384",
         "ouroboros/consolidator.py": "max_tokens=16384",
         "ouroboros/reflection.py": "max_tokens=16384",
-        "ouroboros/post_task_synthesis.py": "max_tokens=16384",
         "ouroboros/tools/skill_publish.py": "max_tokens=8192",
     }
     for path, needle in expectations.items():
         src = Path(path).read_text(encoding="utf-8").replace(" ", "")
         assert needle in src, f"{path} must contain {needle}"
+    # Owner decision 2=A (TZ-2 C5): the paid task narrative is gone; the free
+    # facts row buys no model call, so the synthesis leaf holds no summary call.
+    synthesis = Path("ouroboros/post_task_synthesis.py").read_text(encoding="utf-8")
+    assert "chat_observed" not in synthesis and 'call_type="task_summary"' not in synthesis
     assert context_compaction._SUMMARY_OUTPUT_TOKENS == 32_768
     assert context_compaction._summarizer_spec()["output_budget"] == 32_768
 
@@ -453,10 +456,11 @@ def test_repository_index_collapses_junk_dirs():
 
 
 def test_summary_and_reflection_callers_use_bounded_evidence():
-    """Summary and reflection prompt builders must call format_review_evidence_for_prompt with max_chars."""
+    """The reflection prompt builder (the one paid synthesis reader since the paid
+    summary's removal) must call format_review_evidence_for_prompt with max_chars."""
     from pathlib import Path
 
-    for filename in ("ouroboros/post_task_synthesis.py", "ouroboros/reflection.py"):
+    for filename in ("ouroboros/reflection.py",):
         src = Path(filename).read_text(encoding="utf-8")
         assert "format_review_evidence_for_prompt(" in src
         # Must pass max_chars argument (not rely on default 0)
@@ -810,8 +814,7 @@ def test_acceptance_panels_reach_the_synthesis_prompts():
 def test_summary_and_reflection_callers_pass_the_acceptance_panels():
     from pathlib import Path
 
-    # v7 relocated the summary/reflection synthesis callers out of
-    # agent_task_pipeline.py into ouroboros/post_task_synthesis.py.
-    for filename in ("ouroboros/post_task_synthesis.py", "ouroboros/reflection.py"):
+    # The paid summary caller is gone (TZ-2 C5); reflection is the one caller.
+    for filename in ("ouroboros/reflection.py",):
         src = Path(filename).read_text(encoding="utf-8")
         assert "acceptance_panels=" in src, filename

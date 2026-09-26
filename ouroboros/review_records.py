@@ -21,6 +21,7 @@ from ouroboros.review_execution import ReviewRouteKind, delivery_retrieves
 # their existing storage and reviewer evidence; this vocabulary only makes an
 # author's final stance explicit and hash-bound when a review is advisory.
 AUTHOR_DISPOSITION_VALUES = frozenset({"accepted", "rejected", "partial", "deferred"})
+AUTHOR_ACTION_VALUES = frozenset({"finish", "stop"})
 
 
 def build_author_disposition(
@@ -32,6 +33,7 @@ def build_author_disposition(
     enforcement: str = "",
     source: str = "author",
     recorded_at: str = "",
+    action: str = "",
 ) -> Dict[str, Any]:
     """Build one bounded, current-subject author-finality record.
 
@@ -39,11 +41,15 @@ def build_author_disposition(
     returned object in their existing plan/skill/acceptance/commit owners and
     continue to retain raw reviewer rows beside it.  A missing hash or reason
     is rejected so an author finish can never look like an unbound PASS.
+    The author's act (``action``) is a final stance by itself: a record may
+    carry it with an empty disposition, so no caller has to invent a stance.
     """
     value = str(disposition or "").strip().lower()
     reason = " ".join(str(rationale or "").split()).strip()
     subject = str(subject_hash or "").strip()
-    if value not in AUTHOR_DISPOSITION_VALUES:
+    if action and action not in AUTHOR_ACTION_VALUES:
+        raise ValueError("AUTHOR_DISPOSITION_INVALID: unknown action")
+    if value not in AUTHOR_DISPOSITION_VALUES and (value or not action):
         raise ValueError("AUTHOR_DISPOSITION_INVALID: unknown disposition")
     if not subject:
         raise ValueError("AUTHOR_DISPOSITION_INVALID: subject_hash is required")
@@ -63,6 +69,7 @@ def build_author_disposition(
         "enforcement": str(enforcement or "").strip().lower(),
         "recorded_at": str(recorded_at),
         "source": str(source or "author"),
+        **({"action": action} if action else {}),
     }
 
 
@@ -76,6 +83,8 @@ def validate_author_disposition(
     if not isinstance(record, dict):
         return None
     try:
+        if "action" in record and record["action"] not in AUTHOR_ACTION_VALUES:
+            return None
         normalized = build_author_disposition(
             disposition=record.get("disposition", ""),
             rationale=record.get("rationale", ""),
@@ -84,13 +93,10 @@ def validate_author_disposition(
             enforcement=record.get("enforcement", ""),
             source=record.get("source", "author"),
             recorded_at=record.get("recorded_at", ""),
+            action=record.get("action", ""),
         )
     except (TypeError, ValueError):
         return None
-    if "action" in record:
-        if record["action"] not in {"finish", "stop"}:
-            return None
-        normalized["action"] = record["action"]
     if "review_reference" in record:
         import json
         try:
@@ -103,6 +109,24 @@ def validate_author_disposition(
     if expected and normalized["subject_hash"] != expected and not allow_stale:
         return None
     return normalized
+
+
+def recorded_author_stop(decision: Any) -> bool:
+    """Whether a task acceptance decision records the author's explicit stop (TZ-2 C4).
+
+    The typed ``author_stop`` reason, or the structured stop the producer records
+    under its TRUE terminal cause when the review rounds ran out: ``author_action``
+    and the disposition's ``action`` are both ``stop``. A finish is never a stop.
+    The twin of ``log_events.explicitAuthorStop``.
+    """
+    from ouroboros.outcomes import REASON_REVIEW_CYCLES_EXHAUSTED
+
+    if not isinstance(decision, dict):
+        return False
+    author = decision.get("author_disposition")
+    return decision.get("reason") == "author_stop" or (
+        decision.get("reason") == REASON_REVIEW_CYCLES_EXHAUSTED and decision.get("author_action") == "stop"
+        and isinstance(author, dict) and author.get("action") == "stop")
 
 
 def build_author_disposition_from_mapping(

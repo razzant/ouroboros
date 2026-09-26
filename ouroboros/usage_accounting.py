@@ -42,6 +42,7 @@ from ouroboros._usage_rows import (  # noqa: F401  (re-exported substrate vocabu
     _breakdown_bucket,
     _marker_from_final,
     _physical_call_count,
+    _projection_from_final,
     _summary,
     _with_integrity,
     _with_limit,
@@ -63,6 +64,7 @@ __all__ = (
     "record_unmetered_external_dispatch", "refresh_root_accounting",
     "release_attempt", "reserve_attempt", "settle_attempt",
     "skill_review_usage", "usage_breakdown", "usage_from_response", "usage_projection", "usage_scope",
+    "usage_writer_snapshot",
     "review_wave_admission",
 )
 _CURRENT_SCOPE: contextvars.ContextVar[Optional["UsageScope"]] = contextvars.ContextVar(
@@ -457,35 +459,6 @@ from ouroboros._usage_rows_memo import (  # noqa: F401,E402  (re-exported seam)
 )
 
 
-def _projection_from_final(
-    final: list, integrity_degraded: bool, configured_limit: Optional[float] = None,
-    *, root_task_id: str = "", include_roots: bool = True,
-) -> Dict[str, Any]:
-    """Render the money projection from ALREADY-VALIDATED final rows: one
-    snapshot, one projection, so a caller deriving the ordering marker from
-    the SAME rows writes both under one authority instead of pairing a marker
-    with a second, later ledger read."""
-    def limit_of(rows: list) -> Optional[float]:
-        known = [v for v in (_number(row.get("root_limit_usd")) for row in rows) if v is not None]
-        return min(known) if known else None
-    if root_task_id:
-        rows = [row for row in final if str(row.get("root_task_id") or "") == root_task_id]
-        return _with_integrity(_with_limit(_summary(rows), limit_of(rows)), integrity_degraded)
-    result = _with_limit(_summary(final), configured_limit)
-    if include_roots:
-        grouped: Dict[str, list] = {}
-        for row in final:
-            rid = str(row.get("root_task_id") or "")
-            if rid:
-                grouped.setdefault(rid, []).append(row)
-        result["by_root"] = {
-            rid: _with_integrity(_with_limit(_summary(grouped[rid]), limit_of(grouped[rid])),
-                                 integrity_degraded)
-            for rid in sorted(grouped)
-        }
-    return _with_integrity(result, integrity_degraded)
-
-
 def usage_projection(
     drive_root: pathlib.Path | str | None = None,
     *,
@@ -593,6 +566,34 @@ def usage_breakdown(
         return result
 
     return _render_cached(root, cache_key, render, allow_stale=allow_stale)
+
+
+def usage_writer_snapshot(
+    drive_root: pathlib.Path | str | None = None, *, allow_stale: bool = False,
+) -> Dict[str, Any]:
+    """The compatibility writer's slim read: the totals it persists, the ordering marker,
+    the OpenRouter provider bucket its drift check compares and the totals-only money
+    projection, rendered from ONE validated read exactly like ``usage_breakdown`` (same
+    rows, same marker, same render cache) minus the grouped axes and the per-root map
+    the writer never reads. Provider grouping mirrors ``usage_breakdown``: legacy
+    metadata/delta rows stay unattributed and an absent provider has no bucket."""
+    root = _drive_root(drive_root)
+
+    def render(final: list, integrity_degraded: bool) -> Dict[str, Any]:
+        openrouter = [row for row in final if str(row.get("provider") or "") == "openrouter"
+                      and str(row.get("kind") or "") not in {"legacy_metadata", "legacy_delta"}]
+        by_provider = {"openrouter": _breakdown_bucket(openrouter)} if openrouter else {}
+        if integrity_degraded:
+            for bucket in by_provider.values():
+                _with_integrity(bucket, True)
+        return {
+            **_with_integrity(_breakdown_bucket(final), integrity_degraded),
+            "_ledger_high_water_seq": _marker_from_final(final),
+            "by_provider": by_provider,
+            "_usage_projection": _projection_from_final(final, integrity_degraded, include_roots=False),
+        }
+
+    return _render_cached(root, ("usage_writer_snapshot", "", "", None, True), render, allow_stale=allow_stale)
 
 
 def _reservation_cost(request: AttemptRequest) -> Optional[float]:

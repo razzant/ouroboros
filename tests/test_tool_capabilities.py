@@ -610,50 +610,49 @@ def test_policy_hidden_reason_covers_contract_disabled_unregistered_names(tmp_pa
     assert registry.policy_hidden_reason("") is None
 
 
-def test_enable_tools_hidden_label_is_shared_between_surfaces():
-    """Drift pin (adversarial review of 9e59b05d, finding 5): the hidden-vs-missing
-    classification exists on TWO enable_tools surfaces (tool_discovery and the
-    loop's override). Pin both to policy_hidden_reason and the identical label so
-    the surfaces cannot silently diverge in honesty wording."""
+def test_discovery_has_one_implementation_bound_by_the_loop(tmp_path):
+    """#1262 (supersedes the two-surface drift pin): the loop binds tool_discovery's
+    handlers to its resident list instead of carrying its own copies, so the
+    hidden-vs-missing answer has exactly one author."""
     import ouroboros.loop as loop_mod
     import ouroboros.tools.tool_discovery as td
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
 
     label = "🚫 Hidden by policy (the tool exists but this task cannot use it)"
     loop_src = inspect.getsource(loop_mod)
-    td_src = inspect.getsource(td)
-    assert label in loop_src, "loop enable_tools override lost the shared hidden-by-policy label"
-    assert label in td_src, "tool_discovery lost the shared hidden-by-policy label"
-    assert loop_src.count("policy_hidden_reason(") >= 1
-    assert td_src.count("policy_hidden_reason(") >= 1
+    assert label not in loop_src and "policy_hidden_reason(" not in loop_src
+    assert label in inspect.getsource(td)
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_contract = {"disabled_tools": ["write_file"]}
+    registry.set_context(ctx)
+    loop_mod._setup_dynamic_tools(registry, [], [])
+    out = registry.execute("enable_tools", {"tools": "write_file, definitely_not_a_tool"})
+    assert "write_file — disabled by this task's contract (disabled_tools)" in out
+    assert "❌ Not found: definitely_not_a_tool" in out
+    assert "write_file" not in out.split("Not found")[-1]
 
 
-def test_discovery_path_consistent_with_policy():
-    """list_available_tools must return the same non-core set as tool_policy.list_non_core_tools."""
-    from ouroboros.tools.registry import ToolRegistry
-    from ouroboros.tool_policy import list_non_core_tools as policy_non_core
+@pytest.mark.parametrize("mode", ["max", "low", "nano"])
+def test_discovery_lists_the_callable_catalog_in_every_mode(mode):
+    """list_available_tools reads ToolRegistry.schemas() in every context mode and
+    names every callable tool once, whether or not its schema is resident."""
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
     import ouroboros.tools.tool_discovery as td
 
     tmp = pathlib.Path(tempfile.mkdtemp())
     registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
     td.set_registry(registry)
+    ctx = ToolContext(repo_dir=tmp, drive_root=tmp, active_context_mode=mode)
+    registry.set_context(ctx)
+    output = td._list_available_tools(ctx, namespace="builtin")
 
-    # Get what tool_policy says (SSOT)
-    policy_names = {t["name"] for t in policy_non_core(registry)}
-    # Remove meta-tools (discovery excludes them from its listing)
-    policy_names -= {"list_available_tools", "enable_tools"}
-
-    # Get what discovery tool shows
-    from ouroboros.tools.registry import ToolContext
-    ctx = ToolContext(repo_dir=tmp, drive_root=tmp)
-    output = td._list_available_tools(ctx)
-
-    if not policy_names:
-        assert "All tools are already" in output
-    else:
-        for name in policy_names:
-            assert name in output, (
-                f"tool_policy says '{name}' is non-core but discovery doesn't show it"
-            )
+    names = [s["function"]["name"] for s in registry.schemas()]
+    assert names
+    for name in names:
+        assert f"- {name} [" in output, f"schemas() offers {name!r} but discovery does not list it"
+    assert ("[not loaded]" in output) is (mode == "nano")
 
 
 def test_burst_absorb_clause_states_the_prefix_write_cost():

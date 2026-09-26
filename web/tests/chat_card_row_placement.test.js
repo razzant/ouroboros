@@ -41,7 +41,7 @@ function openCardChat(fetchImpl) {
     };
     const instance = createChatInstance({
         ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-        updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+        updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
         chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true,
     });
@@ -151,7 +151,7 @@ test('history replay places stamped rows on their cards and keeps unplaceable on
     let instance;
     try {
         instance = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-            updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+            updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
                 isCurrent: () => true, apply() {} }, chatId: 1, idPrefix: 'chat', mountEl: mount });
         await instance.refreshHistory({ revision: 1 });
         const messages = globalThis.document.byId.get('chat-messages');
@@ -194,7 +194,7 @@ async function replayChat(rows) {
         String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
     const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
     const instance = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-        updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+        updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} }, chatId: 1, idPrefix: 'chat', mountEl: mount });
     return { prior, instance, messages: () => globalThis.document.byId.get('chat-messages') };
 }

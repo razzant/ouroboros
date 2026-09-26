@@ -1,14 +1,16 @@
 """Outage facts reach real delivery projections without rewriting model sources."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import agent_task_pipeline as pipeline, cancel_intents, loop, loop_llm_call, loop_transport
+from ouroboros.gateway import host_service
 from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
-from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
+from ouroboros.presence_runner import PresenceTurnError, PresenceTurnGate, presence_result_from_stored, run_presence_turn
 from ouroboros.task_finalization import send_provider_death_notice
 from ouroboros.task_results import load_task_result
 from ouroboros.tools.registry import ToolRegistry
@@ -79,13 +81,24 @@ def test_pipeline_delivery_and_rebuild_keep_raw_bytes_and_known_wait_custody(tmp
 @pytest.mark.parametrize("outcome", ["message", "deferred", "silent", "tool_delivered"])
 @pytest.mark.parametrize("current", [False, True])
 def test_actual_presence_and_cached_read_keep_authored_speech_and_owner_notice_separate(tmp_path, monkeypatch, outcome, current):
+    """An unresolved dispatched attempt is a typed empty 409 on the first call and on replay.
+
+    The forced rail still words the durable row ``provider_unavailable`` and keeps the authored
+    draft as its result; the pipeline stamps the loop's own no-resend predicate on that row and
+    the Host guard reads the marker back. Neither RAW nor the owner notice becomes speech,
+    whatever outcome the envelope claims, and the admitted child keeps its custody.
+    """
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *_a, **_k: None)
+    notices = []
+    monkeypatch.setattr("ouroboros.presence_runner._write_unresolved_notice",
+                        lambda _root, task_id: notices.append(task_id))
     repo, data = tmp_path / "repo", tmp_path / "data"
     repo.mkdir()
     data.mkdir()
-    created = []
+    created, invoked = [], []
     class Agent:
         def handle_task(self, task):
+            invoked.append(task["id"])
             text, usage, trace = _terminal(data, current=current, task_id=task["id"])
             task["_skip_post_task_synthesis"] = True
             ctx = SimpleNamespace(_presence_completion={"outcome": outcome, "message": "Typed Presence reply"},
@@ -99,16 +112,36 @@ def test_actual_presence_and_cached_read_keep_authored_speech_and_owner_notice_s
         return Agent()
     args = dict(admission=_admission(), event=_event(), repo_dir=repo, drive_root=data,
                 agent_factory=factory, gate=PresenceTurnGate(2))
-    first = run_presence_turn(**args)
-    cached = run_presence_turn(**args)
-    assert cached == first and len(created) == 1
-    assert first.outcome == "deferred"  # failure does not abandon already admitted work
-    stored = load_task_result(data, first.task_id)
-    assert stored["result"] == RAW
-    assert "no terminal provider outcome" in stored["terminal_provider_notice"]
-    assert first.text == (RAW if current else "")
-    assert stored["metadata"]["presence_result_text"] == first.text
-    assert first.work_ref == "next-task"
+    with pytest.raises(PresenceTurnError) as first:
+        run_presence_turn(**args)
+    with pytest.raises(PresenceTurnError) as replay:
+        run_presence_turn(**args)
+    task_id = first.value.turn_ref
+    assert invoked == [task_id] and len(created) == 1  # replay never regenerates
+    stored = load_task_result(data, task_id)
+    notice = stored["terminal_provider_notice"]
+    assert stored["result"] == RAW and "no terminal provider outcome" in notice
+    marker = stored["metadata"]["presence_unknown_outcome"]
+    assert marker["source"] == "provider_outcome_unknown_no_resend"
+    assert marker["error_kind"] == "provider_outcome_unknown"
+    assert "presence_retry_proof" not in stored["metadata"]  # unknown is not not_started
+    assert stored["metadata"]["presence_work_ref"] == "next-task"
+    assert stored["metadata"]["presence_result_text"] == (RAW if current else "")  # the envelope, not speech
+    for err in (first.value, replay.value):
+        assert err.code == "presence_attempt_outcome_unknown"
+        assert (err.turn_ref, err.work_ref) == (task_id, "next-task")  # admitted child custody preserved
+        response = host_service._presence_exception(err, 409)
+        body = json.loads(response.body)
+        assert response.status_code == 409 and body["code"] == "presence_attempt_outcome_unknown"
+        assert body["disposition"] == "retry" and not body.get("text") and "outcome" not in body
+        assert body["error"] == "presence_attempt_outcome_unknown: source_event_id"
+        assert (body["turn_ref"], body["work_ref"]) == (task_id, "next-task")
+        assert all(RAW not in str(value) and notice not in str(value) for value in body.values())
+    # each refusal consults the owner-notice writer (mocked here; production dedups on
+    # presence_recovery_owner_notified, so the owner hears it once)
+    assert notices == [task_id] * 2
+    view = presence_result_from_stored(stored, task_id)
+    assert (view.outcome, view.text, view.work_ref) == ("silent", "", "next-task")
 
 
 @pytest.mark.parametrize("reason", [REASON_OWNER_REQUESTED_FINALIZATION, "deadline", "budget ceiling reached"])

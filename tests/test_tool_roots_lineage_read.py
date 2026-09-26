@@ -240,19 +240,25 @@ def test_child_reads_and_lists_deliverables_by_absolute_path_and_no_root(geometr
 
 
 def test_search_selects_the_root_for_its_own_operation(geometry):
-    """Selection follows the tool's operation: a child may search Deliverables
-    but no profile may search a task_drive, so that path stays refused and the
-    refusal names the roots this profile can search."""
+    """Selection follows the tool's operation, and the matrix is closed under
+    read⇒search (TZ-1 E): a child searches Deliverables and its lineage's
+    task_drive exactly where it may read them — the per-file secret guard still
+    hides the parent's .env and settings.json — while a sibling's drive stays
+    refused and the refusal names the roots this profile can search."""
     registry, _ctx = child_registry(geometry)
 
     found = registry.execute("search_code", {"query": "needle", "path": str(geometry.deliverables)})
-    refused = registry.execute("search_code", {"query": "PARENT", "path": str(geometry.parent_drive)})
+    parent = registry.execute("search_code", {"query": "PARENT|SECRET|sk-", "regex": True,
+                                              "path": str(geometry.parent_drive)})
+    refused = registry.execute("search_code", {"query": "SIBLING", "path": str(geometry.sibling_drive)})
 
     assert "answer.txt:1:" in found and "needle" in found, found
-    assert "PARENT_DRIVE_BYTES" not in refused, refused
+    assert "PARENT_DRIVE_BYTES" in parent, parent
+    assert "SECRET_TOKEN" not in parent and "sk-secret" not in parent, parent
+    assert "SIBLING_BYTES" not in refused, refused
     assert "outside selected root=active_workspace" in refused, refused
     named = refused.split("Roots your profile can search:")[1]
-    assert "deliverables" in named and "task_drive" not in named and "user_files" not in named, refused
+    assert "deliverables" in named and "task_drive" in named and "user_files" not in named, refused
 
 
 def test_a_siblings_or_strangers_file_without_root_is_refused_naming_real_roots(geometry):
@@ -462,7 +468,11 @@ def test_readonly_child_schema_enums_follow_the_matrix(geometry):
     for name in ("read_file", "list_files"):
         assert "deliverables" in enum(name), name
         assert "subagent_projects" not in enum(name) and "user_files" not in enum(name), name
-    assert set(enum("search_code")) == {"active_workspace", "system_repo", "skill_payload", "deliverables"}
+    # Read⇒search closure (TZ-1 E): the child searches every root it may read.
+    assert set(enum("search_code")) == {
+        "active_workspace", "system_repo", "skill_payload", "deliverables",
+        "runtime_data", "task_drive", "artifact_store",
+    }
     assert enum("query_code") == ["active_workspace", "system_repo"]
 
 

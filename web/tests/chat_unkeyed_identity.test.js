@@ -13,7 +13,7 @@ test('unkeyed live progress cannot mutate or finish the current task card', asyn
     };
     let generation = 0, instance;
     const stateSnapshots = {
-        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
         isCurrent: () => true, apply() {},
     };
     try {

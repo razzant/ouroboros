@@ -8,11 +8,15 @@ both outside the loop it watches.
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+from ouroboros.runtime_limits import (
+    BUDGET_PROJECTION_RETRY_SEC, SUPERVISOR_EVENT_BATCH_MAX_EVENTS, SUPERVISOR_EVENT_BATCH_MAX_SEC,
+)
 from ouroboros.server_process import DATA_DIR, log, _restart_requested
 from ouroboros.utils import utc_now_iso
 
@@ -99,6 +103,60 @@ def observe_worker_event_lag(liveness: list, evt: Any) -> None:
     lag = (utc_now() - stamped).total_seconds()
     if liveness[_LAG] is None or lag > liveness[_LAG]:
         liveness[_LAG] = lag
+
+
+def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: Callable[..., Any]) -> bool:
+    """One BOUNDED events pass of the supervisor loop: FIFO, at most
+    ``SUPERVISOR_EVENT_BATCH_MAX_EVENTS`` events; the ``SUPERVISOR_EVENT_BATCH_MAX_SEC``
+    budget is checked between handlers (a handler already running finishes, so one
+    slow handler can overrun it), then the loop runs bridge intake. A ``restart_request`` goes to
+    ``on_restart``; every other event is lag-observed and dispatched. The remainder
+    stays queued for the next turn, so a producer that keeps the queue non-empty
+    can never starve owner-message intake. Returns True when the pass stopped at
+    its bound (a backlog may remain: the caller skips its idle sleep)."""
+    from supervisor.events import dispatch_event
+
+    deadline = time.monotonic() + SUPERVISOR_EVENT_BATCH_MAX_SEC
+    drained = 0
+    while drained < SUPERVISOR_EVENT_BATCH_MAX_EVENTS and time.monotonic() < deadline:
+        try:
+            evt = event_q.get_nowait()
+        except queue.Empty:
+            return False
+        drained += 1
+        if evt.get("type") == "restart_request":
+            on_restart(evt, ctx)
+            continue
+        observe_worker_event_lag(liveness, evt)
+        dispatch_event(evt, ctx)
+    return True
+
+
+def flush_budget_projection(ctx: Any) -> None:
+    """One compatibility budget-projection write per loop turn, AFTER bridge intake.
+
+    ``llm_usage`` events only mark ``ctx.budget_projection_dirty``; this is the one
+    place that pays the ledger render and the STATE_LOCK write. The flag clears only
+    when the writer returns True; a False (unknown or stale ledger marker) or an
+    exception keeps it dirty and the next attempt waits ``BUDGET_PROJECTION_RETRY_SEC``,
+    logged once per attempt, so a frozen-marker install does not render every turn."""
+    if not getattr(ctx, "budget_projection_dirty", False):
+        return
+    now = time.monotonic()
+    if now < float(getattr(ctx, "budget_projection_retry_at", 0.0) or 0.0):
+        return
+    try:
+        written = ctx.update_budget_from_usage({}) is not False
+    except Exception:
+        written = False
+        log.error("Compatibility budget projection update failed; retrying in %.0fs",
+                  BUDGET_PROJECTION_RETRY_SEC, exc_info=True)
+    else:
+        if not written:
+            log.warning("Compatibility budget projection not written (ledger marker unknown or stale); "
+                        "retrying in %.0fs", BUDGET_PROJECTION_RETRY_SEC)
+    ctx.budget_projection_dirty = not written
+    ctx.budget_projection_retry_at = 0.0 if written else now + BUDGET_PROJECTION_RETRY_SEC
 
 
 def _published_loop_facts(liveness: list) -> dict:

@@ -183,6 +183,13 @@ def _promoted_force_plan_metadata(evt: dict) -> dict:
     return {"metadata": {"force_plan": True, "force_plan_source": source}}
 
 
+def _presence_promotion(evt: dict) -> bool:
+    """A promote carrying Presence authority: a speaker's, or a delegated descendant's binding."""
+    from ouroboros.dialogue_provenance import presence_root_carrier
+
+    return bool(presence_root_carrier(evt, task_contract=evt.get("task_contract")))
+
+
 def _promote_project_scope(evt: dict) -> str:
     """The project an admitted promote lands in: the explicit one the event carries,
     else the project the OWNER MESSAGE it came from already has.
@@ -199,7 +206,7 @@ def _promote_project_scope(evt: dict) -> str:
     cannot choose a Project. Fail-open: an unreadable store leaves the scope exactly
     as the event stated it."""
     explicit = str(evt.get("project_id") or "")
-    if explicit or evt.get("presence") or not isinstance(evt.get("source_ref"), dict):
+    if explicit or _presence_promotion(evt) or not isinstance(evt.get("source_ref"), dict):
         return explicit
     try:
         from ouroboros.projects_registry import origin_claim_lock, project_id_for_origin
@@ -427,7 +434,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # assignment below turns that answer into the event's stated scope.
     implicit_scope = (
         not str(evt.get("project_id") or "")
-        and not evt.get("presence")
+        and not _presence_promotion(evt)
         and isinstance(evt.get("source_ref"), dict)
     )
     effective_pid = evt["project_id"] = _promote_project_scope(evt)
@@ -466,6 +473,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "title": title,
         "suggested_name": suggested_name,
         "source": "promote_chat_to_task",
+        "objective_author": dict(evt.get("objective_author") or {}),
+        "owner_corpus": list(evt.get("owner_corpus") or []),
         "_require_unique_task_id": True,
         "_require_worker_pool": True,
         "_admission_token": admission_token,
@@ -520,6 +529,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         # The door's other stamp (an owner message it never logged) rides the root
         # in METADATA, where run_origin reads it, the way a ref rides by value.
         task.setdefault("metadata", {})["origin_suppressed"] = True
+    if task.get("objective_author"):
+        task.setdefault("metadata", {})["objective_author"] = dict(task["objective_author"])
     if isinstance(evt.get("predecessor_authority_source"), dict):
         task["predecessor_authority_source"] = dict(evt["predecessor_authority_source"])
     # Owner Surface Fact: the promoting turn's sending-surface fact lands in
@@ -666,7 +677,7 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
         workspace_repair_hint,
     )
 
-    if task.get("_presence_origin"):
+    if _presence_promotion(evt):
         # Keep the admitted folder from the inherited contract, never a public
         # event's replacement. Presence retains its canonical shared memory.
         workspace = task["task_contract"].get("workspace") or {}

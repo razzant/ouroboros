@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
+import copy
 import logging
 import os
 import pathlib
@@ -94,6 +95,7 @@ from ouroboros.tools.core_artifacts import (  # noqa: F401
     QuizValidationError,
     _MAX_LINK_ACTIONS,
     _MAX_QUIZ_OPTIONS,
+    ESCALATE_TOOL_SCHEMA,
     _escalate,
     _send_links,
     validate_link_actions,
@@ -206,15 +208,16 @@ def _str_match_replace(
     """Shared exact, byte-level, single-occurrence replacement for both str-replace
     editors — the repo editor (``git._str_replace_editor``) and the data-plane editor
     (``_edit_text``) — so they give IDENTICAL match feedback (deferral 4). Returns
-    ``(new_text, None)`` on a unique match, else ``(None, error_message)`` with the
-    count==0 file preview / count>1 positional hints. ``error_tag`` is the caller's
-    error prefix (e.g. ``STR_REPLACE_ERROR`` / ``EDIT_TEXT_ERROR``)."""
+    ``(new_text, None)`` on a unique match, else ``(None, error_message)``: a miss
+    carries the bounded edit-miss locator (plus the whole file when it is small),
+    duplicates name positions. ``error_tag`` is the caller's error prefix (e.g.
+    ``STR_REPLACE_ERROR`` / ``EDIT_TEXT_ERROR``)."""
     count = text.count(old_str)
     if count == 0:
-        preview = text[:2000]
+        from ouroboros.tools.edit_ops import locate_edit_miss, whole_file_preview
         return None, (
             f"⚠️ {error_tag}: old_str not found in {display_path}.\n"
-            f"File preview (first 2000 chars):\n{preview}"
+            f"{locate_edit_miss(text, old_str)}{whole_file_preview(text)}"
         )
     if count > 1:
         positions = []
@@ -1445,36 +1448,8 @@ def get_tools() -> List[ToolEntry]:
                 "include": {"type": "string", "default": "", "description": "Basename glob, including brace alternatives (e.g. '*.py', '*.{js,css}'); applies on every backend"},
             }, "required": ["query"]},
         }, _code_search),
-        ToolEntry("escalate", {
-            "name": "escalate",
-            "description": (
-                "Escalate a decision up the responsibility chain instead of guessing. "
-                "List 2-6 real options, mark your recommendation with recommended=true on that option, "
-                "and let each option's detail name what it gains and what it costs. "
-                "A root task asks the OWNER (a typed quiz card with option buttons); "
-                "a subagent asks its PARENT task (a typed mailbox frame the parent "
-                "answers with forward_to_worker or escalates higher, verbatim). "
-                "By default name your recommended option as the assumption and keep working: "
-                "the card stays answerable, and a late answer still arrives. "
-                "Set wait_for_answer=true (a live root, ordinary conversation included) when the next step "
-                "is irreversible or costly to redo, or the choice is the owner's to make "
-                "(spending, publishing, deleting); your judgment decides. The task then waits after the "
-                "current tool batch without model calls; waiting questions in one batch share one wait, "
-                "which ends on the first incoming message."
-            ),
-            "parameters": {"type": "object", "properties": {
-                "question": {"type": "string", "description": "The decision being escalated (markdown renders in chat)"},
-                "options": {"type": "array", "items": {"type": "object", "properties": {
-                    "label": {"type": "string", "description": "Short option label (button text, max 120)"},
-                    "detail": {"type": "string", "description": "Optional one-line consequence of this option (max 500)"},
-                    "recommended": {"type": "boolean", "description": "True on the ONE option you recommend"},
-                }, "required": ["label"]}, "description": "2-6 mutually exclusive options"},
-                "stake": {"type": "string", "description": "What depends on this decision (optional, max 500)"},
-                "assumption": {"type": "string", "description": "For optional clarification, the assumption you continue under (max 500); may be empty for required waiting."},
-                "wait_for_answer": {"type": "boolean", "default": False, "description": "Live roots: wait for addressed owner input before another model round."},
-                "max_wait_minutes": {"type": "integer", "description": "Optional bound for wait_for_answer: resume with a system notice after N minutes if no answer arrives (the card stays open)."},
-            }, "required": ["question", "options"]},
-        }, _escalate),
+        # A fresh copy per catalog, as the inline literals are.
+        ToolEntry("escalate", copy.deepcopy(ESCALATE_TOOL_SCHEMA), _escalate),
         ToolEntry("forward_to_worker", {
             "name": "forward_to_worker",
             "description": (

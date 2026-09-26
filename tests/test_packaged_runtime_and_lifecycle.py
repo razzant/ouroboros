@@ -489,7 +489,7 @@ def test_supervisor_grace_toast_is_not_the_task_answering_it(monkeypatch, tmp_pa
     assert meta["finalization_requested_at"] == 2000.0
     tick(2000.5)  # the toast is dispatched here, exactly as the loop does it
 
-    assert any("reached idle_timeout" in line for line in tick.delivered), (
+    assert any("Task t-narration: The task made no progress for too long." in line for line in tick.delivered), (
         "the harness never drained the bus — the toast under test was never dispatched"
     )
     assert meta["last_progress_at"] == 1000.0, "host narration counted as the task's work"

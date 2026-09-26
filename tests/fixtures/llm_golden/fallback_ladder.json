@@ -3252,7 +3252,7 @@
                   "effort": "medium",
                   "exclude": false
                 },
-                "session_id": "ouroboros-session-6b68a9325c7ec50094ba2af61bbc0416"
+                "session_id": "ouroboros-session-740c9c09d85e44e8c9bd044a9856d8dc"
               },
               "max_tokens": 65536,
               "messages": [
@@ -3281,7 +3281,7 @@
               ],
               "model": "openai/gpt-5.6"
             },
-            "payload_sha256": "fc523c2e4ceba8d0ed729cf24781994771a694df44285a967bfd9eb318a8d75e"
+            "payload_sha256": "c829346c617722e903158a21e288683c99e50b1fc50b2ff0d31585db835fd5bf"
           },
           {
             "transport": "openai.chat.completions.create",
@@ -3301,7 +3301,7 @@
                   "effort": "medium",
                   "exclude": false
                 },
-                "session_id": "ouroboros-session-a83747a093e9425fe805af8007af41b1"
+                "session_id": "ouroboros-session-8193780e938e020fe0367785d31bc7b3"
               },
               "max_tokens": 65536,
               "messages": [
@@ -3324,7 +3324,7 @@
               ],
               "model": "openai/gpt-5.6"
             },
-            "payload_sha256": "af42956164f7e04dfa70f8b64c49de6753cd942a39627cc5b7ebab519ea4357e"
+            "payload_sha256": "cda7d27981a9c2cdaa8d8334fe57ceb2bbcc0d43519d3b46b19857c3f078049a"
           }
         ],
         "physical_attempts": [
@@ -3332,7 +3332,7 @@
             "source": "llm.chat",
             "model": "openai/gpt-5.6",
             "provider": "openrouter",
-            "candidate_raw_sha256": "fc523c2e4ceba8d0ed729cf24781994771a694df44285a967bfd9eb318a8d75e",
+            "candidate_raw_sha256": "c829346c617722e903158a21e288683c99e50b1fc50b2ff0d31585db835fd5bf",
             "candidate_raw_size_bytes": 442,
             "candidate_measurement_kind": "canonical_json_v1",
             "states": [
@@ -3347,7 +3347,7 @@
             "source": "llm.chat",
             "model": "openai/gpt-5.6",
             "provider": "openrouter",
-            "candidate_raw_sha256": "af42956164f7e04dfa70f8b64c49de6753cd942a39627cc5b7ebab519ea4357e",
+            "candidate_raw_sha256": "cda7d27981a9c2cdaa8d8334fe57ceb2bbcc0d43519d3b46b19857c3f078049a",
             "candidate_raw_size_bytes": 338,
             "candidate_measurement_kind": "canonical_json_v1",
             "states": [

@@ -71,6 +71,18 @@ WORKER_READY_MAX_ATTEMPTS = 3
 # One extension for a child that wrote its own entry progress, measured from birth, never from the last poll.
 WORKER_READY_CEILING_SEC = 300.0
 
+# Supervisor loop events phase (structural constants, not env knobs). One pass drains at most
+# this many worker events, and stops once this many seconds have passed (checked between
+# handlers, so a running handler can overrun it), before bridge intake runs, so a producer that
+# keeps the queue non-empty can never hide an owner message; the remainder waits for the next
+# turn and a turn that hit its bound skips the idle sleep, so a backlog still drains at full speed.
+SUPERVISOR_EVENT_BATCH_MAX_EVENTS = 100
+SUPERVISOR_EVENT_BATCH_MAX_SEC = 2.0
+# After a compatibility budget-projection write returned False or raised (unknown or stale ledger
+# marker, corrupt ledger), the loop keeps the projection dirty and retries no more often than this,
+# so a frozen-marker install cannot render the ledger every turn forever.
+BUDGET_PROJECTION_RETRY_SEC = 30.0
+
 
 def _clamped_number_setting(key: str, *, low, high=float("inf"), cast=float):
     """Env-or-default numeric setting clamped to [low, high]; a typo falls back to the

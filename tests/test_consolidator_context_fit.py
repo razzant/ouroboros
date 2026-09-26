@@ -192,6 +192,7 @@ def test_oversized_logical_block_splits_complete_source_and_advances_once(tmp_pa
     assert not c.should_consolidate(meta, chat)
     refused = usage["_consolidation_errors"][0]
     assert refused["kind"] == "context_overflow" and not refused["preflight_only"]
+    assert refused["resolution"] == "split"  # history kept; the post-task adapter reads it as answered
     # A refusal that was split and then fully summarized is a recovered attempt, not a
     # failed run: the block was written, so no stale error may outlive the advance.
     assert "last_consolidation_error" not in json.loads(meta.read_text())
@@ -258,9 +259,10 @@ def test_unknown_capacity_impossible_overhead_does_not_replay_next_cycle(tmp_pat
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat)
     llm = _LLM(limit=1)
-    c.consolidate(chat, blocks, meta, llm)
+    usage = c.consolidate(chat, blocks, meta, llm)
     first_calls = len(llm.calls)
     assert first_calls > 0
+    assert not usage["_consolidation_errors"][-1].get("resolution")  # the unsplittable refusal stays unresolved
     c.consolidate(chat, blocks, meta, llm)
     assert len(llm.calls) == first_calls
     assert not blocks.exists()

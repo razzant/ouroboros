@@ -87,6 +87,7 @@ import {
     boundActivityPreview,
     buildTimelineItemHtml,
     buildMessageKey,
+    chatStatusCounts,
     chatLogThreadAccepts,
     chatMediaMessageKey,
     chatThreadAccepts,
@@ -105,6 +106,7 @@ import {
     isReplayEvidenceRow,
     isTerminalTaskPhase,
     loadChatInputHistory,
+    markIngressSaved,
     liveLineRowToggleKey,
     bindContentButton,
     bindLiveCardTimeline,
@@ -124,6 +126,7 @@ import {
     saveChatInputHistory,
     senderLabel,
     shouldFirePanic,
+    supervisorReady,
     taskCostMeta,
     taskCostProjection,
     unconfirmedForegroundCardIds,
@@ -478,6 +481,8 @@ export function createChatInstance({
     // Local user submissions awaiting server confirmation (clientMessageId
     // -> { clientMessageId, timestamp }).
     const pendingSubmissions = new Map();
+    // В9: Starting… until a snapshot says supervisor_ready; a disconnect forgets it.
+    let hostReady = false;
     // Bounded conclusions block stale state snapshots; reusable logical task
     // slots are cleared whenever their cycle settles.
     const concludedDirectActivities = new Map();
@@ -600,6 +605,7 @@ export function createChatInstance({
     function hydrateStateSnapshot(data, snapshotRequestedAt = Infinity) {
         syncHeaderControlState(data);
         handoffs?.snapshot(data);
+        hostReady = supervisorReady(data) ?? hostReady;
         const activities = Array.isArray(data?.active_chat_activities)
             ? data.active_chat_activities
             : data?.active_direct_turns;
@@ -610,22 +616,23 @@ export function createChatInstance({
                 if (activity.required_question) chatDecision.appendActivityQuestion(activity.required_question, snapshotRequestedAt);
                 if (Number(activity.chat_id ?? 1) === chatId) modelWaits.observe(activity.activity_id, activity);
             }
+        } else {
+            syncChatStatus();
         }
     }
 
     async function refreshHeaderControlState(force = false) {
         if (!force && state.activePage !== 'chat') return;
-        const request = stateSnapshots.begin();
+        const request = await stateSnapshots.gate(force);
+        if (!request) return;
         try {
             const resp = await apiFetch('/api/state', { cache: 'no-store' });
             if (!resp.ok) throw new Error(`State read failed: HTTP ${resp.status}`);
             const data = await resp.json();
             stateSnapshots.apply(request, data);
         } catch {
-            if (stateSnapshots.isCurrent(request)) {
-                syncHeaderControlState({ accounting: { available: false } });
-                stateSnapshots.fail?.(request);
-            }
+            if (stateSnapshots.isCurrent(request)) syncHeaderControlState({ accounting: { available: false } });
+            stateSnapshots.fail?.(request);
         }
     }
 
@@ -2595,6 +2602,7 @@ export function createChatInstance({
                             ? { skill: msg.skill, jobId: msg.job_id }
                             : null,
                     });
+                    if (msg.role === 'user') markIngressSaved(messagesDiv, msg);
                 }
                 _historyRow = null;
                 // Resolve cards whose task is already terminal on the server
@@ -3318,10 +3326,11 @@ export function createChatInstance({
     let headerControlInterval = null;
     if (asPanel) {
         // A panel has no global controls/budget to poll; seed the status from
-        // the live socket so a late-created panel never gets stuck on
-        // "Connecting…" (the one-shot WS `open` already fired before it existed;
-        // future reconnects still update it via the shared `open` handler).
-        if (ws.isConnected?.()) setStatus('online', 'Online');
+        // the live socket and the page's newest snapshot: the one-shot WS
+        // `open` already fired before a late panel existed.
+        hostReady = supervisorReady(stateSnapshots.latest?.()) ?? hostReady;
+        const seed = computeDerivedChatStatus({ supervisorStarting: !hostReady });
+        if (ws.isConnected?.()) setStatus(seed.kind, seed.text);
         // 1A a panel created AFTER the socket opened missed the `open`-driven
         // refresh — hydrate in-flight turns once from the census (the
         // per-instance closure filters to this panel's chat_id).
@@ -3480,32 +3489,15 @@ export function createChatInstance({
     }
     document.addEventListener('selectionchange', retryHistoricalUpserts);
 
-    // Mounted, unfinished, not waiting: the blocks that host their own running
-    // indicator. Only a managed root among them drives the header's Working…;
-    // a direct turn's block keeps the census verdict (Thinking…).
+    // Mounted, unfinished, not waiting: the blocks that host their own running indicator.
     const foregroundCards = () => Array.from(liveCardRecords.values()).filter((r) => isForegroundLiveCard(r) && !r.modelWaiting);
-    function hasActiveLiveCard() {
-        return foregroundCards().some((r) => !r.direct);
-    }
 
     function deriveChatStatus() {
-        let directCount = 0, managedActive = 0, managedQueued = 0, managedPaused = 0;
-        for (const [id, entry] of activeDirectActivities) {
-            if (modelWaits.waiting(id)) continue;
-            if (String(entry?.kind || '') !== 'managed_task') directCount += 1;
-            else if (String(entry?.phase || '') === 'queued') managedQueued += 1;
-            else if (/^budget_paus(ed|ing)$/.test(entry?.phase ?? '')) managedPaused += 1;
-            else managedActive += 1;
-        }
         return computeDerivedChatStatus({
+            ...chatStatusCounts(activeDirectActivities, liveCardRecords.values(), (id) => modelWaits.waiting(id)),
             isConnected: ws.isConnected ? ws.isConnected() : true,
-            hasActiveLiveCard: hasActiveLiveCard(),
-            activeDirectCount: directCount,
-            activeManagedCount: managedActive,
-            queuedManagedCount: managedQueued,
-            pausedManagedCount: managedPaused,
-            waitingModelCount: [...liveCardRecords.values()].filter((r) => isForegroundLiveCard(r) && r.modelWaiting).length,
             pendingSubmissionsCount: pendingSubmissions.size,
+            supervisorStarting: !hostReady,
         });
     }
 
@@ -3697,12 +3689,9 @@ export function createChatInstance({
             // it settles the bubble but must NOT retire the `Sending...`
             // submission; that takes a linked typing frame / snapshot turn /
             // routing receipt or the turn's conclusion.
-            if (senderSessionId === chatSessionId && clientMessageId) {
-                markPendingDelivered(clientMessageId);
-                syncChatStatus();
-                return;
-            }
-            const added = withRemoteActivity(() => addMessage(
+            const own = senderSessionId === chatSessionId && clientMessageId;
+            if (own) markPendingDelivered(clientMessageId);
+            const added = !own && withRemoteActivity(() => addMessage(
                 msg.content, 'user', false, msg.ts || null, false, {
                 source: msg.source || '',
                 senderLabel: msg.sender_label || '',
@@ -3712,6 +3701,7 @@ export function createChatInstance({
                 },
             ));
             if (added) incrementUnreadIfNeeded(msg);
+            withStableViewport(() => markIngressSaved(messagesDiv, msg));
             syncChatStatus();
             return;
         }
@@ -3918,6 +3908,7 @@ export function createChatInstance({
 
     onWs('close', () => {
         handoffs?.setConnected(false);
+        hostReady = false;
         hideTypingIndicatorOnly();
         syncChatStatus();
         syncHeaderControlState({ accounting: { available: false } });

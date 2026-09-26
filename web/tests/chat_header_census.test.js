@@ -45,7 +45,7 @@ function makeInstance({ details = {}, calls = [], state = { census: null } } = {
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
         updateUnreadBadge() {},
         stateSnapshots: {
-            begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+            begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true,
             // The page-wide sequencer fans a fetched census into the instance.
             apply: (request, data) => { inst?.hydrateStateSnapshot(data, request.requestedAt); },

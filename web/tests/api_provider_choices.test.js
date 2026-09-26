@@ -27,7 +27,8 @@ test('a provider is offered only while its credential is stored, in one owner-fa
         OPENAI_COMPATIBLE_BASE_URL: 'http://localhost:11434/v1',
         GIGACHAT_USER: 'owner', GIGACHAT_PASSWORD: '***set***',
         CLOUDRU_FOUNDATION_MODELS_API_KEY: '***set***', MINIMAX_API_KEY: 'mm',
-        DEEPSEEK_API_KEY: 'ds', ANTHROPIC_API_KEY: 'sk-ant', OPENAI_API_KEY: 'sk',
+        DEEPSEEK_API_KEY: 'ds', ZAI_API_KEY: 'zai',
+        ANTHROPIC_API_KEY: 'sk-ant', OPENAI_API_KEY: 'sk',
         OPENROUTER_API_KEY: 'sk-or',
     });
     assert.deepEqual(every.map((provider) => provider.id), API_PROVIDER_ORDER);

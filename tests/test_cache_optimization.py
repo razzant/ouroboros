@@ -41,6 +41,11 @@ def test_build_llm_messages_returns_three_system_blocks():
     assert system_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert system_msg["content"][1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in system_msg["content"][2]
+    # The real render declares block 0 as the cross-conversation stable prefix
+    # (llm_messages.split_leading_system_prefix reads it on the OpenAI-family/Codex wire).
+    from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
+
+    assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == 1
 
 
 def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():

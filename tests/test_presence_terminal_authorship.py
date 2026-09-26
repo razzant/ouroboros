@@ -1,5 +1,6 @@
 """External speech follows terminal authorship through execution and replay."""
 
+import json
 import queue
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ from starlette.testclient import TestClient
 from ouroboros import agent as agent_module, agent_task_pipeline as pipeline, loop
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_authority import presence_ceiling_payload
-from ouroboros.presence_runner import _cached_result, build_presence_result_event
+from ouroboros.presence_runner import PresenceTurnError, _cached_result, build_presence_result_event
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_finalization import provider_terminal_body
 from ouroboros.tools.registry import ToolRegistry
@@ -19,12 +20,12 @@ from tests.test_presence_failed_handoff import _failed_parent
 from tests.test_presence_runner import _admission
 
 
-def _run_loop(root, monkeypatch, responses, *, held=False):
+def _run_loop(root, monkeypatch, responses, *, held=False, presence=None):
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx.is_direct_chat = True
-    registry._ctx.task_metadata = {"inline_max_rounds": 1}
+    registry._ctx.task_metadata = {"inline_max_rounds": 1, **({"presence": presence} if presence else {})}
     registry._ctx.task_contract = {"capability_ceiling": presence_ceiling_payload(_admission().capability_ceiling)}
     registry.override_handler("chat_history", lambda *_a, **_kw: "Synthetic history")
     calls, held_origins = [], []
@@ -65,7 +66,12 @@ def _read_response():
 @pytest.mark.parametrize("authored", [False, True])
 def test_real_round_limit_delivers_only_the_current_authored_final(tmp_path, monkeypatch, authored):
     reply = "I found the record; the remaining check is incomplete." if authored else ""
-    result, stored, calls, _held = _run_loop(tmp_path, monkeypatch, [_read_response(), {"content": reply}])
+    forced = json.dumps({"delivery_control": "replace", "full_answer": reply,
+                         "presence_finish": {"outcome": "message", "message": reply}}) if authored else ""
+    # A real turn's context carries its Presence metadata; that, with the ceiling, arms the forced call.
+    presence = {"binding_id": "1" * 32, "event": {"conversation_key": "telegram:bot-1:room-1:topic-1"}}
+    result, stored, calls, _held = _run_loop(tmp_path, monkeypatch, [_read_response(), {"content": forced}],
+                                             presence=presence)
     assert len(calls) == 2 and stored["reason_code"] == "round_limit"
     assert stored["terminal_origin"] == ("model_final" if authored else "host_notice")
     assert result["outcome"] == ("message" if authored else "silent")
@@ -78,6 +84,12 @@ def test_real_round_limit_delivers_only_the_current_authored_final(tmp_path, mon
 
 
 def test_exact_host_diagnostic_is_deliverable_when_the_model_authors_it(tmp_path, monkeypatch):
+    """Owner Q4 keeps host bytes internal by default without forbidding model speech.
+
+    Host-authored terminal bytes never speak, and a forced final speaks only its typed
+    declaration; an ordinary final is the model's own text in one channel, so a model
+    that chooses to restate a diagnostic there is heard. The host adds no text filter.
+    """
     _result, host, _calls, _held = _run_loop(tmp_path / "host", monkeypatch, [_read_response(), {"content": ""}])
     result, authored, calls, _held = _run_loop(tmp_path / "author", monkeypatch, [{"content": host["result"]}])
     assert len(calls) == 1  # ordinary implicit final, no presence_finish required
@@ -103,6 +115,24 @@ def test_answerless_failed_parent_keeps_only_admitted_child_custody(tmp_path, or
     assert result.work_ref == ("managed-work" if admission == "scheduled" else "")
     assert result.text == "" and stored["result"] == raw
     assert stored["status"] == "failed"
+
+
+@pytest.mark.parametrize("origin", ["host_notice", "host_salvage", "model_final"])
+@pytest.mark.parametrize("admission", ["scheduled", "rejected"])
+def test_unresolved_attempt_is_refused_whatever_authored_its_terminal(tmp_path, origin, admission):
+    """Under the unknown-outcome fence authorship decides nothing: the rail's notice, its salvage
+    and a round-one draft it stamped ``model_final`` are all unanswered events, refused back to
+    the transport on the first call and on replay with only an admitted child's custody."""
+    refused, stored, raw = _failed_parent(tmp_path, admission=admission, accepted=True, usage={
+        "execution_status": "infra_failed", "reason_code": "provider_unavailable", "terminal_origin": origin,
+        "_best_effort_extracted": origin == "model_final", "_last_llm_error_kind": "provider_outcome_unknown",
+    }, refusal="presence_attempt_outcome_unknown")
+    assert refused.work_ref == ("managed-work" if admission == "scheduled" else "")
+    assert stored["status"] == "failed" and stored["terminal_origin"] == origin and stored["result"] == raw
+    assert stored["metadata"]["presence_unknown_outcome"]["error_kind"] == "provider_outcome_unknown"
+    with pytest.raises(PresenceTurnError) as replay:
+        _cached_result(tmp_path, refused.turn_ref)
+    assert replay.value.code == "presence_attempt_outcome_unknown" and replay.value.work_ref == refused.work_ref
 
 
 @pytest.mark.parametrize("origin,frozen,outcome,expected", [

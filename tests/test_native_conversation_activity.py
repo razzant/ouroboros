@@ -194,7 +194,7 @@ def test_native_post_task_retains_activity_and_delivers_answer_early(monkeypatch
 
     monkeypatch.setattr(pipeline, "_run_chat_consolidation", consolidate)
     for name in (
-        "_run_scratchpad_consolidation", "_run_task_summary", "_run_reflection",
+        "_run_scratchpad_consolidation", "_record_task_facts", "_run_reflection",
         "_update_improvement_backlog", "_apply_reflection_memory_actions",
     ):
         monkeypatch.setattr(pipeline, name, lambda *a, **kw: None)

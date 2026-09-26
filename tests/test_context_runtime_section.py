@@ -107,7 +107,7 @@ def test_runtime_section_includes_filesystem_affordances_with_ctx(tmp_path, monk
 
     assert fs["profile"] == "self_modification"
     assert "runtime_data" in fs["searchable_roots"]
-    assert "task_drive" not in fs["searchable_roots"]
+    assert "task_drive" in fs["searchable_roots"]  # read⇒search closure (TZ-1 E)
     assert "task_drive" in fs["allowed_shell_cwd_roots"]
     assert "status" in fs["git_readonly_subcommands"]
     assert "active_workspace" in fs["light_gated_roots"]

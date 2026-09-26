@@ -144,11 +144,11 @@ def _loop_tools(ctx, owner):
     return tools
 
 
-def test_main_wait_does_not_call_configured_api_fallback_before_owner_switch(main_call, monkeypatch):
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+def test_main_quota_calls_configured_api_fallback_before_any_owner_wait(main_call, monkeypatch):
+    """Owner order: Auto rotation, then the configured fallback, and only then the owner question."""
     from ouroboros.llm_attempt import _attempt_request, _candidate_before_dispatch
 
-    ctx, gateway, owner, events, decide, _observations = main_call
+    ctx, gateway, owner, events, _decide, _observations = main_call
     tools = _loop_tools(ctx, owner)
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::alternate")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
@@ -170,13 +170,7 @@ def test_main_wait_does_not_call_configured_api_fallback_before_owner_switch(mai
                                            before_dispatch=_candidate_before_dispatch(request_body, request))
 
     def catalog(*args, **kwargs):
-        assert api_calls == [] and len(gateway.accepted_operations) == 1
-        row = next(event for event in reversed(list(events.queue)) if event.get("type") == "task_model_wait")
-        response = decide({"request_id": "switch-api", "decision_id": f"model_wait:task-one:{row['wait_id']}",
-                           "revision": row["revision"], "action": "switch", "model": "openai::alternate",
-                           "credential_profile_id": "", "use_local": False, "persist_role": False})
-        assert response.status_code == 202
-        raise ClaudexorUnavailable("subscription_window_exhausted", "still waiting")
+        pytest.fail("the owner is asked only after every configured route of the round failed")
 
     monkeypatch.setattr(ctx.llm, "_chat_remote", send)
     monkeypatch.setattr(ctx.llm, "claudexor_model_catalog", catalog)
@@ -184,6 +178,7 @@ def test_main_wait_does_not_call_configured_api_fallback_before_owner_switch(mai
         ctx.messages, tools, ctx.llm, ctx.drive_logs, lambda *_args, **_kwargs: None, queue.Queue(),
         task_id="task-one", drive_root=ctx.drive_root, event_queue=events)
     assert text == "Finished" and api_calls == ["openai"]
+    assert not [event for event in list(events.queue) if event.get("type") == "task_model_wait"]
     assert usage["_model_route"] == {} and len(gateway.accepted_operations) == 1
     assert any(message.get("content") == "verified read A" for message in ctx.messages)
     assert any(message.get("content") == "completed review B" for message in ctx.messages)

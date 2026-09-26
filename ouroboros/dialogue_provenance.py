@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Mapping
 
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
@@ -23,6 +24,168 @@ def is_presence_task(task: Mapping[str, Any]) -> bool:
         or task.get("_presence_origin")
         or isinstance(metadata.get("presence"), Mapping)
     )
+
+
+# A Presence binding's own work is reached through this scope (owner Q1/Q2).
+PRESENCE_OWN_WORK_SCOPE = "own_binding"
+# The one metadata key a DELEGATED descendant of a Presence-bound task carries:
+# the binding it acts for, never the speaker's ``metadata.presence`` (whose
+# presence arms the forced reply, the parser and the conversation context).
+PRESENCE_BINDING_AUTHORITY_KEY = "presence_binding_authority"
+
+
+def presence_record_binding(record: Any) -> str:
+    """The nonempty host binding id one task/queue record carries, else ``""``.
+
+    The one reader of both carriers: a speaker's ``metadata.presence`` and the
+    ``metadata.presence_binding_authority`` of work a delegated descendant started.
+    """
+
+    metadata = record.get("metadata") if isinstance(record, Mapping) else None
+    return presence_metadata_binding(metadata) or ""
+
+
+def presence_related_work(binding_id: str, record: Any) -> bool:
+    """Independent work started from this same nonempty binding (owner Q1).
+
+    Related work is a promoted or follow-up ROOT carrying the host's Presence
+    provenance for exactly this binding id, whichever of its conversations it
+    came from. An inline Presence turn, a delegated child, an owner root and a
+    record without that provenance are never attributed to the binding.
+    """
+
+    binding = str(binding_id or "").strip()
+    return bool(
+        binding
+        and isinstance(record, Mapping)
+        and presence_record_binding(record) == binding
+        and str(record.get("delegation_role") or "") == "root"
+        and not str(record.get("parent_task_id") or "").strip()
+    )
+
+
+def presence_metadata_binding(metadata: Any) -> str | None:
+    """``None`` for a non-Presence task's metadata; otherwise the binding it acts for (may be empty).
+
+    A Presence turn, promoted or follow-up root speaks from ``metadata.presence``;
+    a delegated descendant holds only the host-inherited binding authority. A
+    malformed authority carrier is still a Presence one: it narrows to nothing.
+    """
+
+    if not isinstance(metadata, Mapping):
+        return None
+    if "presence" in metadata:
+        carrier = metadata["presence"]
+    elif PRESENCE_BINDING_AUTHORITY_KEY in metadata:
+        carrier = metadata[PRESENCE_BINDING_AUTHORITY_KEY]
+    else:
+        return None
+    value = carrier.get("binding_id") if isinstance(carrier, Mapping) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
+def presence_caller_binding(ctx: Any) -> str | None:
+    """``None`` for a non-Presence caller; otherwise its binding id (may be empty)."""
+
+    binding = presence_metadata_binding(getattr(ctx, "task_metadata", None))
+    contract = getattr(ctx, "task_contract", None)
+    return "" if binding is None and isinstance(contract, Mapping) and "capability_ceiling" in contract else binding
+
+
+def presence_binding_authority_metadata(parent_metadata: Any, *, task_contract: Any = None) -> dict[str, Any]:
+    """What a child delegated by this task inherits: its binding authority only, or nothing."""
+
+    binding = presence_metadata_binding(parent_metadata)
+    if binding is None and isinstance(task_contract, Mapping) and "capability_ceiling" in task_contract:
+        binding = ""  # A lost carrier never turns an inherited Presence ceiling into global authority.
+    return {} if binding is None else {PRESENCE_BINDING_AUTHORITY_KEY: {"binding_id": binding}}
+
+
+def presence_root_carrier(source: Any, *, task_contract: Any = None) -> dict[str, Any]:
+    """The Presence carrier an independent root started from ``source`` keeps, or ``{}``.
+
+    ``source`` is the starting task's metadata or its promote event. A Presence
+    turn or root hands on its speaker metadata: the new root answers the same
+    conversation. A delegated descendant hands on only the binding it acts for:
+    its root is that binding's related work, never a speaker. A malformed or lost
+    carrier under a ceiling narrows to an empty binding. Producer and admission
+    both read this; ``presence_record_binding`` reads what it writes.
+    """
+
+    presence = source.get("presence") if isinstance(source, Mapping) else None
+    if isinstance(presence, Mapping) and presence:
+        return {"presence": dict(presence)}
+    return presence_binding_authority_metadata(source, task_contract=task_contract)
+
+
+def presence_sender_origin(ctx: Any) -> dict[str, str]:
+    """Where a Presence caller's run started (its ``run_origin`` room/event facts).
+
+    It names the sending run's origin only: later arrivals in that turn may have
+    been written by other people, so it never claims authorship of quoted words.
+    """
+    metadata = getattr(ctx, "task_metadata", None)
+    return dict(run_origin({"metadata": metadata if isinstance(metadata, Mapping) else {}}).get("presence") or {})
+
+
+def presence_queue_task(drive_root: Any, task_id: str) -> dict[str, Any] | None:
+    """The persisted queue row of one pending/running task, if the snapshot lists it."""
+
+    from ouroboros.utils import read_json_dict
+
+    snapshot = read_json_dict(Path(drive_root) / "state" / "queue_snapshot.json") or {}
+    for key in ("pending", "running"):
+        for item in snapshot.get(key) or []:
+            task = item.get("task") if isinstance(item, Mapping) else None
+            if isinstance(task, Mapping) and str(item.get("id") or task.get("id") or "") == task_id:
+                return {**dict(task), "id": task_id}
+    return None
+
+
+def presence_target_record(drive_root: Any, task_id: str, *,
+                           queue_row: Mapping[str, Any] | None = None) -> Mapping[str, Any] | None:
+    """The record that decides whose work ``task_id`` is.
+
+    The canonical task record decides, a malformed Presence carrier included (it
+    narrows to nothing); a legacy row without Presence provenance may be established
+    only by the queue's own task metadata — ``queue_row`` when the caller holds the
+    live row (the supervisor), else the persisted snapshot.
+    """
+
+    from ouroboros.task_results import load_task_result
+
+    target = str(task_id or "").strip()
+    try:
+        stored = load_task_result(Path(drive_root), target) if target else None
+    except (OSError, ValueError):
+        stored = None  # an unreadable or invalid id is no evidence of relation
+    record = stored if isinstance(stored, Mapping) and stored else None
+    contract = record.get("task_contract") if isinstance(record, Mapping) else None
+    has_ceiling = isinstance(contract, Mapping) and "capability_ceiling" in contract
+    if record is None or (presence_metadata_binding(record.get("metadata")) is None and not has_ceiling):
+        queued = {**dict(queue_row), "id": target} if isinstance(queue_row, Mapping) else (
+            presence_queue_task(drive_root, target))
+        record = queued or record
+    return record
+
+
+def presence_effective_hops(task_id: str, effective: Any) -> list[str]:
+    """The OTHER tasks an effective projection of ``task_id`` carries: retry lineage and successor."""
+
+    if not isinstance(effective, Mapping):
+        return []
+    ids = [value for hop in effective.get("retry_lineage") or [] if isinstance(hop, Mapping)
+           for value in (hop.get("task_id"), hop.get("retry_task_id"))]
+    ids.append(effective.get("task_id") or effective.get("id"))
+    requested = str(task_id or "").strip()
+    return [hop for hop in dict.fromkeys(str(value or "").strip() for value in ids) if hop and hop != requested]
+
+
+def presence_effective_related(binding: str, task_id: str, effective: Any, *, drive_root: Any) -> bool:
+    """Whether every task an effective projection of ``task_id`` reaches is this binding's own work."""
+
+    return all(presence_related_work(binding, presence_target_record(drive_root, hop))
+               for hop in presence_effective_hops(task_id, effective))
 
 
 def presence_provenance_from_task(task: Mapping[str, Any]) -> dict[str, str]:

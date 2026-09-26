@@ -60,7 +60,7 @@ test('the awaited fact never outranks a decision sentence, a rail reason or an o
     });
     assert.equal(taskReasonDetail(decided), 'The one allowed improvement pass was already used.');
     const railed = { ...done({ execution: { ...awaited, status: 'best_effort' } }), reason_code: 'round_limit' };
-    assert.equal(taskReasonDetail(railed), 'round_limit');
+    assert.equal(taskReasonDetail(railed), 'The task hit its round limit before it could finish cleanly');
     assert.equal(taskOutcomeSeverity(railed), 'warn');
     const stopped = { ...done({ execution: awaited }), reason_code: 'owner_requested_finalization' };
     assert.equal(taskReasonDetail(stopped), '');

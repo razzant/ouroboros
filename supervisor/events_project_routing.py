@@ -12,6 +12,7 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
+from ouroboros.dialogue_provenance import presence_root_carrier
 from ouroboros.task_results import STATUS_FAILED, STATUS_SCHEDULED, write_task_result
 from ouroboros.utils import utc_now_iso
 
@@ -497,6 +498,7 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
                 else "unconfirmed"
             )
             transfer = outcome.pop("force_plan_transfer", None)
+            carrier = presence_root_carrier(evt, task_contract=evt.get("task_contract"))
             stored = write_task_result(
                 ctx.DRIVE_ROOT,
                 str(outcome.get("task_id") or task_id),
@@ -527,6 +529,10 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
                     else "Task is scheduled, but its owner-facing routing receipt was not confirmed."
                 ),
                 attachment_manifest=list(outcome.get("attachment_manifest") or []),
+                # A Presence promotion's host-carried provenance is canonical from
+                # admission, so its binding finds, polls and controls the work while
+                # it is still queued (the worker's running write keeps the same value).
+                **({"metadata": carrier, "source": "presence_promote"} if carrier else {}),
             )
             admission = stored.get("promotion_admission") if isinstance(stored, dict) else {}
             if (

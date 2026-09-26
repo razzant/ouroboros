@@ -338,7 +338,7 @@ def test_prepare_onboarding_settings_rejects_openai_compatible_key_without_base_
 def test_onboarding_frontend_uses_base_url_first_compatible_validation():
     source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
 
-    assert "!['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION'].includes(field.settingKey)" in source
+    assert "!['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'].includes(field.settingKey)" in source
     assert "const hasRemote = keyValues.some(([, value]) => value);" not in source
 
 
@@ -617,6 +617,8 @@ def test_setup_contract_groups_rarely_used_providers():
         "MINIMAX_API_KEY": "more",
         "MINIMAX_REGION": "more",
         "DEEPSEEK_API_KEY": "more",
+        "ZAI_API_KEY": "more",
+        "ZAI_PLAN": "more",
         "ANTHROPIC_API_KEY": "primary",
         "OPENAI_COMPATIBLE_BASE_URL": "more",
         "OPENAI_COMPATIBLE_API_KEY": "more",
@@ -691,6 +693,7 @@ _SECRET_CANARIES = {
     "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-SECRETCANARY126",
     "MINIMAX_API_KEY": "minimax-SECRETCANARY127",
     "DEEPSEEK_API_KEY": "sk-ds-SECRETCANARY133",
+    "ZAI_API_KEY": "sk-zai-SECRETCANARY134",
     "ANTHROPIC_API_KEY": "sk-ant-SECRETCANARY128",
     "GIGACHAT_CREDENTIALS": "giga-SECRETCANARY129",
     "GIGACHAT_PASSWORD": "gigapw-SECRETCANARY130",

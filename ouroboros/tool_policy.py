@@ -2,6 +2,7 @@
 
 Low/Max start complete. Nano selects canonical schemas while retaining the
 existing discovery/reclaim transport. Residency never grants execution authority.
+The tool namespaces and the bounded catalog/name-miss renderings live here too.
 """
 
 from __future__ import annotations
@@ -159,6 +160,92 @@ def list_non_core_tools(
             if row["residency"] == "not_loaded"]
 
 
+BUILTIN_NAMESPACE = "builtin"
+# A name-miss answer lists the addressed namespace inline up to this many tools;
+# a larger one gets its count and the discovery call that lists it completely.
+NAME_MISS_INLINE_ROWS = 12
+NAME_MISS_INLINE_CHARS = 4000
+
+
+def tool_namespace(name: str) -> str:
+    """The namespace a name addresses: one MCP server, one extension, or builtin.
+
+    Read from the name's shape (``mcp_<server>__…``, ``ext_<n>_<skill>_…``), so a
+    missed name the strict MCP parser rejects still addresses its server.
+    """
+    from ouroboros.extension_surface_names import parse_extension_surface_name
+
+    text = str(name or "").strip()
+    server, separator, _tool = text[4:].partition("__") if text.startswith("mcp_") else ("", "", "")
+    if server and separator:
+        return f"mcp_{server}"
+    extension = parse_extension_surface_name(text)
+    return f"ext_{len(extension[0])}_{extension[0]}" if extension else BUILTIN_NAMESPACE
+
+
+def catalog_row_lines(rows: Sequence[Mapping[str, Any]], *, include_purpose: bool = False) -> List[str]:
+    """One line per callable tool; an MCP row shows ``'raw MCP name' → callable name``.
+
+    The server-supplied raw name is quoted as data. ``loaded`` (when present) is
+    residency — whether the schema is already in the caller's tool list — never
+    availability; a not-loaded row carries its ``compact_tool_catalog`` purpose.
+    """
+    lines = []
+    for row in rows:
+        name = str(row["name"])
+        line = f"- {row['raw_name']!r} → {name}" if row.get("raw_name") else f"- {name}"
+        if "loaded" in row:
+            line += " [loaded]" if row["loaded"] else " [not loaded]"
+            if (include_purpose or not row["loaded"]) and row.get("description"):
+                purpose = repr(row["description"]) if row.get("raw_name") else row["description"]
+                line += f": {purpose}" + ("…" if row.get("description_truncated") else "")
+        lines.append(line)
+    return lines
+
+
+def name_miss_guidance(
+    requested: str, namespace: str, rows: Sequence[Mapping[str, Any]] | None, *,
+    discovery: bool, identity: Sequence[Mapping[str, Any]] = (),
+) -> List[str]:
+    """What the caller can call instead, from ONE namespace of the current catalog.
+
+    ``rows`` are that namespace's callable tools (``None``: unreadable here);
+    ``identity`` are rows an exact naming rule relates to ``requested``. Nothing
+    outside the namespace or the callable catalog is named, and nothing is called.
+    """
+    select = f'list_available_tools(namespace="{namespace}")'
+    if rows is None:
+        return [f"The current catalog of {namespace} could not be read here"
+                + ("; list_available_tools reports it with any discovery omission." if discovery else ".")]
+    if not rows:
+        return [f"No tool in {namespace} is currently callable in this task"
+                + ("; list_available_tools shows the callable namespaces." if discovery else ".")]
+    rendered = catalog_row_lines(rows) if len(rows) <= NAME_MISS_INLINE_ROWS else []
+    if len(rows) > NAME_MISS_INLINE_ROWS or sum(map(len, rendered)) > NAME_MISS_INLINE_CHARS:
+        lines = [f"{namespace} has {len(rows)} currently callable tools"
+                 + (f"; {select} lists them all." if discovery else ".")]
+    else:
+        pairs = " (raw MCP name → callable name)" if namespace.startswith("mcp_") else ""
+        lines = [f"Currently callable in {namespace}{pairs}:", *rendered]
+    if len(identity) == 1:
+        match = identity[0]
+        hint = (f"Naming-rule identity (exact; not called): {requested!r} corresponds to raw "
+                f"MCP name {match['raw_name']!r}, callable as {match['name']}.")
+        lines.append(hint if sum(map(len, lines)) + len(hint) <= NAME_MISS_INLINE_CHARS
+                     else (f"Naming-rule identity exists but exceeds the inline bound; inspect {select}."
+                           if discovery else "Naming-rule identity exceeds the inline bound; discovery is unavailable."))
+    elif len(identity) > NAME_MISS_INLINE_ROWS:
+        lines.append(f"Naming-rule identity is ambiguous among {len(identity)} callable tools (not called); "
+                     + (f"inspect {select}." if discovery else "a unique identity cannot be given."))
+    elif identity:
+        hint = (f"Naming-rule identity is ambiguous (not called): {requested!r} corresponds to "
+                + "; ".join(f"{row['raw_name']!r} → {row['name']}" for row in identity) + ".")
+        lines.append(hint if sum(map(len, lines)) + len(hint) <= NAME_MISS_INLINE_CHARS
+                     else (f"Naming-rule identity is ambiguous; inspect {select} for the {len(identity)} callable names."
+                           if discovery else "Naming-rule identity is ambiguous; discovery is unavailable."))
+    return lines
+
+
 CAPABILITY_OMISSION_HEADER = "[CAPABILITY_OMISSION_MANIFEST]"
 
 
@@ -181,10 +268,15 @@ def format_capability_omissions(
         if not isinstance(item, dict):
             continue
         names = item.get("tools")
+        servers = item.get("servers")
         detail = (
             item.get("error")
             or item.get("resource")
             or (", ".join(str(name) for name in names) if isinstance(names, list) and names else "")
+            # An enabled MCP server without tools: its own last error, else "no tools listed".
+            or ("; ".join(f"{server.get('id')}: {server.get('last_error') or 'no tools listed'}"
+                          for server in servers if isinstance(server, dict))
+                if isinstance(servers, list) else "")
             or "no detail"
         )
         lines.append(

@@ -40,12 +40,72 @@ def test_native_wait_retains_source_and_leaves_answer_delivery_to_loop(tmp_path,
     wait_after_tools(ctx, messages, {}, {}, 4, [], set())
     assert len(waits) == 1 and waits[0]["state"] == "waiting"
     after = load_task_result(tmp_path, ctx.task_id)["owner_wait"]
-    assert after == {**waits[0], "state": "resumed"}
+    assert after == {**waits[0], "state": "resumed", "resume_reason": "owner_text"}
     assert after["source_ref"] and "restart_transaction_id" not in after
     assert ctx.pending_events == [] and ctx._owner_wait_requested == ""
     assert ctx._loop_mailbox_seen_ids == set()
     assert messages == [{"role": "tool", "tool_call_id": "saved", "content": "Saved form"}]
     assert drain_owner_entries(tmp_path, ctx.task_id, set())[0]["text"] == "Continue with that form"
+
+
+def test_peer_mail_wakes_but_does_not_answer_an_open_question(tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import write_task_message
+    from ouroboros.owner_quiz import quiz_states, record_asked
+    import supervisor.message_bus as mb
+
+    ctx = native_context(tmp_path)
+    ctx.current_chat_id = 1
+    record_asked(tmp_path, ctx.task_id, quiz_id="q1", question="Which path?",
+                 options=[], wait_for_answer=True, chat_id=1)
+    frames = []
+    bridge = mb.LocalChatBridge()
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(mb, "get_bridge", lambda: bridge)
+
+    def wake(_seconds):
+        assert write_task_message(tmp_path, "Here is context", task_id=ctx.task_id,
+                                  source_task_id="peer-1", provenance="independent_task")
+
+    monkeypatch.setattr("ouroboros.owner_wait.time.sleep", wake)
+    messages = []
+    wait_after_tools(ctx, messages, {}, {}, 1, [], set())
+    assert load_task_result(tmp_path, ctx.task_id)["owner_wait"]["resume_reason"] == "mail:peer-1"
+    assert quiz_states(tmp_path, ctx.task_id)["q1"]["state"] == "open"
+    assert "wait_for_answer" not in quiz_states(tmp_path, ctx.task_id)["q1"]
+    assert len([frame for frame in frames if frame.get("type") == "quiz_state"]) == 1
+    assert len(messages) == 1 and "peer-1" in messages[0]["content"]
+    assert "not a confirmed owner answer" in messages[0]["content"]
+
+
+def test_answer_racing_a_wait_end_never_reopens_a_settled_card(tmp_path, monkeypatch):
+    from ouroboros.owner_quiz import quiz_states, record_asked, record_answered
+    from ouroboros.owner_wait import announce_wait_ended
+    import supervisor.message_bus as mb
+
+    record_asked(tmp_path, "root-1", quiz_id="q1", question="Which path?", options=[],
+                 wait_for_answer=True, chat_id=1)
+    assert record_answered(tmp_path, "root-1", quiz_id="q1", option_index=None,
+                           request_id="r1", comment="Proceed")['ok']
+    frames = []
+    bridge = mb.LocalChatBridge()
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(mb, "get_bridge", lambda: bridge)
+    announce_wait_ended(tmp_path, "root-1", "q1", 1)
+    assert quiz_states(tmp_path, "root-1")["q1"]["state"] == "answered"
+    assert not [frame for frame in frames if frame.get("type") == "quiz_state"]
+
+
+def test_answer_before_capacity_grant_replaces_a_stale_timeout(tmp_path):
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER
+    from ouroboros.owner_wait import _fresh_wake, classify_wake
+
+    ctx = native_context(tmp_path)
+    assert classify_wake([{"kind": "hurry", "msg_id": "h"}], "q1") == "hurry"
+    assert classify_wake([{"kind": "task_message", "provenance": "ancestor_task"}], "q1") == "mail:unknown"
+    assert classify_wake([{"kind": KIND_QUIZ_ANSWER, "msg_id": "quiz_answer:other"}], "q1") == "owner_text"
+    assert write_owner_message(tmp_path, "Owner answered", ctx.task_id,
+                               msg_id="quiz_answer:q1", kind=KIND_QUIZ_ANSWER)
+    assert _fresh_wake(ctx, "q1", "timeout") == "answer"
 
 
 def _spent_bound(ctx, minutes=5):
@@ -152,7 +212,7 @@ def test_an_answer_before_the_bound_resumes_without_a_timeout_notice(tmp_path, m
     messages = []
     wait_after_tools(ctx, messages, {}, {}, 1, [], set())
     assert messages == []  # the owner answered; the loop delivers it as usual
-    assert "resume_reason" not in load_task_result(tmp_path, ctx.task_id)["owner_wait"]
+    assert load_task_result(tmp_path, ctx.task_id)["owner_wait"]["resume_reason"] == "owner_text"
 
 
 @pytest.mark.parametrize("reason", ["cancelled", "finalize_requested", "deadline", "absolute_ceiling"])
@@ -166,7 +226,7 @@ def test_a_control_reason_outranks_a_spent_bound(tmp_path, monkeypatch, reason):
     messages = []
     wait_after_tools(ctx, messages, {}, {}, 1, [], set())
     row = load_task_result(tmp_path, ctx.task_id)["owner_wait"]
-    assert row["state"] == "resumed" and "resume_reason" not in row
+    assert row["state"] == "resumed" and row["resume_reason"] == f"control:{reason}"
     assert messages == []
 
 

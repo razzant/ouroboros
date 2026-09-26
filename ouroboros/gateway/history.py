@@ -823,6 +823,8 @@ def _collect_chat_rows(
                 # (the key is simply ignored), and ``transport`` is the
                 # provenance surface.
             }
+            if role == "user" and entry.get("ingress_accepted") is True:
+                rec["ingress_accepted"] = True
             if rec["system_type"] in {"project_started", "project_handoff", "project_completion_summary"}:
                 # Read-side plain normalization for lifecycle rows persisted
                 # before the producer stripped markdown; a no-op on new rows.
@@ -881,6 +883,8 @@ def _collect_chat_rows(
                         for key in ("answered_index", "comment", "wait_ended_at"):  # the answer, the closed bound
                             if key in _live:
                                 quiz[key] = _live[key]
+                        if _live.get("host_facts") and not quiz.get("host_facts"):
+                            quiz["host_facts"] = str(_live["host_facts"])  # the ask-time sentence the block holds
                         if "wait_for_answer" not in _live:
                             quiz.pop("wait_for_answer", None)  # the bound closed: the card no longer waits
                     if quiz.get("wait_for_answer") or quiz.get("wait_ended_at"):

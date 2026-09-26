@@ -1,11 +1,13 @@
 """Transcript shaping for the wire and the reasoning-artifact contract.
 
 Providers disagree about where a system message may appear, whether a tool
-result may carry blocks, what a blind model does with an image, and whose
-reasoning signatures they can validate. This module owns the send-copy
-transforms that answer those disagreements and the predicates that decide when
-replayed reasoning is portable — never the canonical transcript, which every
-transform copies before touching.
+result may carry blocks, what a blind model does with an image, whose
+reasoning signatures they can validate, and how much of a leading system
+message their prompt cache can reuse. This module owns the send-copy
+transforms that answer those disagreements (``split_leading_system_prefix``
+included) and the predicates that decide when replayed reasoning is
+portable — never the canonical transcript, which every transform copies
+before touching.
 """
 
 
@@ -17,6 +19,95 @@ from typing import Any, Dict, List
 from ouroboros.anthropic_native_custody import custody_private_key, scrub_native_custody
 from ouroboros.llm_attempt import _VALID_CACHE_TTLS
 from ouroboros.provider_models import normalize_model_identity
+
+# The Main context builder's declaration on its leading system message: how many leading
+# text blocks are byte-stable across conversations (governance). A provider whose prompt
+# cache treats the whole leading system section as one unit keeps only those blocks
+# there (``split_leading_system_prefix``). Host-only metadata: popped from every send copy.
+STABLE_PREFIX_BLOCKS_KEY = "_stable_prefix_blocks"
+
+# Byte-stable provenance header of the projected host-context notice (no clocks, hashes
+# or ids: round N+1's send copy must remain a prefix extension of round N's).
+HOST_CONTEXT_NOTICE_BEFORE_TASK = (
+    "Host context for this turn: memory, knowledge index, runtime facts and recent "
+    "activity, rendered by the runtime as a continuation of the system prompt. Not "
+    "written by my human and not a message to answer; the message to act on follows next."
+)
+HOST_CONTEXT_NOTICE_AFTER_TASK = (
+    "Host context for this turn: memory, knowledge index, runtime facts and recent "
+    "activity, rendered by the runtime as a continuation of the system prompt. Not "
+    "written by my human and not a message to answer; the message to act on is the one above."
+)
+SYSTEM_PREFIX_SPLIT_PLACEMENTS = ("before_task", "after_task")
+
+
+def split_leading_system_prefix(
+    messages: List[Dict[str, Any]], *, placement: str = "before_task",
+) -> tuple[List[Dict[str, Any]], int]:
+    """Project a declared leading system message for a whole-section prompt cache.
+
+    Returns ``(messages, moved_blocks)``. Applies only when the first message is a
+    system message that carries ``STABLE_PREFIX_BLOCKS_KEY`` (the Main context builder's
+    declaration, ``context_fit.ContextFitProjection.system_message``), its content is a
+    list of text blocks longer than the declared count, and no second system message
+    leads the transcript; every other shape — string systems, undeclared multi-block
+    review prompts, several leading system messages — comes back unchanged with ``0``.
+    The declared blocks stay the system message; the remaining non-empty text blocks
+    become ONE ``[SYSTEM NOTICE]`` message with a byte-stable provenance header: a user
+    message right before the task (``before_task``) or a developer message right after
+    the first user message (``after_task``). A pure function of the canonical messages
+    (never mutated), so round N+1's copy extends round N's and the prospective wrap-up
+    candidate equals the send. Measured 2026-09-25 on ``openai/gpt-6-sol``: the next
+    conversation's first round read 198,797 of 393,676 tokens from cache instead of 0.
+    """
+    if placement not in SYSTEM_PREFIX_SPLIT_PLACEMENTS:
+        raise ValueError(f"unknown system prefix placement: {placement!r}")
+    if not messages or not isinstance(messages[0], dict):
+        return messages, 0
+    leading = messages[0]
+    declared = leading.get(STABLE_PREFIX_BLOCKS_KEY)
+    if str(leading.get("role") or "") != "system" or not isinstance(declared, int) or declared < 1:
+        return messages, 0
+    if len(messages) > 1 and isinstance(messages[1], dict) and str(messages[1].get("role") or "") == "system":
+        return messages, 0
+    content = leading.get("content")
+    if not isinstance(content, list) or len(content) <= declared or not all(
+        isinstance(block, dict) and str(block.get("type") or "text") == "text"
+        and isinstance(block.get("text"), str) for block in content
+    ):
+        return messages, 0
+    moved = [block["text"] for block in content[declared:] if block["text"].strip()]
+    if not moved:
+        return messages, 0
+    system = {key: copy.deepcopy(value) for key, value in leading.items() if key != STABLE_PREFIX_BLOCKS_KEY}
+    system["content"] = copy.deepcopy(content[:declared])
+    rest = [copy.deepcopy(message) for message in messages[1:]]
+    body = "\n\n".join(moved)
+    if placement == "after_task":
+        first_user = next((i for i, message in enumerate(rest)
+                           if isinstance(message, dict) and str(message.get("role") or "") == "user"), None)
+        if first_user is not None:
+            notice = _MessageShapingMixin._content_with_system_notice_marker(HOST_CONTEXT_NOTICE_AFTER_TASK + "\n\n" + body)
+            rest.insert(first_user + 1, {"role": "developer", "content": notice})
+            return [system, *rest], len(moved)
+    notice = _MessageShapingMixin._content_with_system_notice_marker(HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\n" + body)
+    return [system, {"role": "user", "content": notice}, *rest], len(moved)
+
+
+def project_declared_system_prefix(target: Dict[str, Any], messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """``split_leading_system_prefix`` for one send, its shape stamped on the per-call target.
+
+    ``target["wire_layout"]`` rides into ``usage`` at the route's response normalizer (a
+    per-call dict, never a thread-local, so a prospective build can never label another
+    route's answer). Callers gate on the route: OpenAI's public API
+    (``llm_openai_compatible._project_openai_family_system``) and the Codex backend
+    (``llm_claudexor._request``), both of which reuse a donor's cached prefix only up to
+    the end of the leading system unit / input item.
+    """
+    projected, moved_blocks = split_leading_system_prefix(messages)
+    if moved_blocks:
+        target["wire_layout"] = {"system_prefix_split": True, "moved_blocks": moved_blocks}
+    return projected
 
 
 def reset_native_messages(messages: list, route: dict, *, source: str, model: str) -> tuple[list, list]:
@@ -91,7 +182,8 @@ class _MessageShapingMixin:
     ) -> List[Dict[str, Any]]:
         cleaned = scrub_native_custody(messages)
         for msg in cleaned:
-            for key in ("acceptance_observation", "_acceptance_observation", "review_feedback"):
+            for key in ("acceptance_observation", "_acceptance_observation", "review_feedback",
+                        STABLE_PREFIX_BLOCKS_KEY):
                 msg.pop(key, None)
             msg.pop("nativeContinuation", None)
             content = msg.get("content")
@@ -240,6 +332,10 @@ class _MessageShapingMixin:
     @classmethod
     def _normalize_system_message_placement(cls, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Demote runtime system notices after conversation start.
+
+        (The same ``[SYSTEM NOTICE]`` marker has a second producer on the OpenAI
+        family and the Claudexor route: ``split_leading_system_prefix`` projects the LEADING system
+        message's declared mutable blocks to a notice BEFORE the first user turn.)
 
         Providers with strict chat templates require system messages to appear
         only before the first user/assistant/tool turn. Late notices are runtime

@@ -8,6 +8,17 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+from ouroboros.dialogue_provenance import (  # the provenance predicate; authority re-exports it
+    PRESENCE_OWN_WORK_SCOPE,
+    presence_caller_binding,
+    presence_metadata_binding as presence_metadata_binding,
+    presence_effective_hops,
+    presence_effective_related,
+    presence_queue_task,
+    presence_record_binding,
+    presence_related_work,
+    presence_target_record,
+)
 from ouroboros.presence_capabilities import (
     PresenceArgumentBinding,
     PresenceProfileResolution,
@@ -19,6 +30,12 @@ from ouroboros.tool_capabilities import COGNITIVE_MEMORY_TOOL_NAMES
 
 PRESENCE_CEILING_SCHEMA_VERSION = 1
 _SHA256_LEN = 64
+# The own-work baseline (owner Q1/Q2): a Presence mind may find, read and message
+# the independent work it started from ANY conversation of its own binding. The two
+# readers arrive bound to that scope (the host overwrites the argument); steer_task
+# is narrowed by its handler for every Presence caller. A profile that selected one
+# of these names keeps that grant, so a selected global reader stays global.
+_OWN_WORK_BASELINE = (("get_task_result", True), ("recent_tasks", True), ("steer_task", False))
 
 
 class PresenceAuthorityError(ValueError):
@@ -331,6 +348,12 @@ def build_presence_capability_ceiling(
         for name in sorted(COGNITIVE_MEMORY_TOOL_NAMES)
         if name not in selected
     )
+    scope = (PresenceArgumentBinding(("presence_scope",), "static", static_value=PRESENCE_OWN_WORK_SCOPE),)
+    tools.extend(
+        PresenceToolGrant(name, scope if scoped else ())
+        for name, scoped in _OWN_WORK_BASELINE
+        if name not in selected
+    )
     provisional = PresenceCapabilityCeiling(
         skill_name=_text(skill_name, "skill_name"),
         skill_content_hash=_sha(skill_content_hash, "skill_content_hash"),
@@ -518,8 +541,69 @@ def presence_ceiling_allows_binding(ceiling: PresenceCapabilityCeiling, binding:
     return False
 
 
+def presence_effective_refusal(ctx: Any, task_id: str, effective: Any, *, drive_root: Any = None,
+                               same_tree: bool = False) -> str:
+    """Refusal when an admitted ``task_id``'s effective projection reaches work the caller may not address.
+
+    A retry successor replaces the requested record's content, so each hop is judged
+    by the same rule before anything is projected; the foreign id is not named.
+    """
+
+    for hop in presence_effective_hops(task_id, effective):
+        if presence_work_refusal(ctx, hop, drive_root=drive_root, same_tree=same_tree):
+            return (
+                f"⚠️ PRESENCE_CAPABILITY_BLOCKED: task {task_id}'s effective result continues in work "
+                "that was not started from this Presence binding; a Presence turn reads only that work."
+            )
+    return ""
+
+
+def presence_work_refusal(ctx: Any, task_id: str, *, drive_root: Any = None, same_tree: bool = False) -> str:
+    """Refusal text when a Presence caller may not address ``task_id``, else ``""``.
+
+    A non-Presence caller is never narrowed here; a delegated descendant of a
+    Presence-bound task is one through its inherited binding authority.
+    ``presence_target_record`` decides, and a record naming another binding refuses.
+    ``same_tree`` also admits the caller's own task tree, its root included (its
+    lineage reads). ``drive_root`` defaults to the caller's task-status root.
+    """
+
+    binding = presence_caller_binding(ctx)
+    if binding is None:
+        return ""
+    if drive_root is None:
+        metadata = getattr(ctx, "task_metadata", None)
+        drive_root = ((metadata.get("budget_drive_root") if isinstance(metadata, Mapping) else "")
+                      or getattr(ctx, "budget_drive_root", "") or ctx.drive_root)
+    target = str(task_id or "").strip()
+    record = presence_target_record(drive_root, target)
+    if isinstance(record, Mapping) and presence_related_work(binding, record):
+        return ""
+    if same_tree and isinstance(record, Mapping):
+        metadata = getattr(ctx, "task_metadata", None)
+        own_id = str(getattr(ctx, "task_id", "") or "")
+        own_root = str((metadata or {}).get("root_task_id") or own_id) if isinstance(metadata, Mapping) else own_id
+        if own_id and (target in {own_id, own_root} or str(record.get("parent_task_id") or "") == own_id
+                       or str(record.get("root_task_id") or "") == own_root):
+            return ""
+    return (
+        f"⚠️ PRESENCE_CAPABILITY_BLOCKED: task {target or '?'} is not independent work started from "
+        "this Presence binding (same binding_id, any of its conversations); a Presence turn "
+        "addresses only that work."
+    )
+
+
 __all__ = [
     "PRESENCE_CEILING_SCHEMA_VERSION",
+    "PRESENCE_OWN_WORK_SCOPE",
+    "presence_caller_binding",
+    "presence_effective_refusal",
+    "presence_effective_related",
+    "presence_queue_task",
+    "presence_record_binding",
+    "presence_related_work",
+    "presence_target_record",
+    "presence_work_refusal",
     "PresenceAuthorityError",
     "PresenceCapabilityCeiling",
     "PresenceResourceGrant",

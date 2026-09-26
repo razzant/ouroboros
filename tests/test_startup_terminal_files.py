@@ -103,7 +103,7 @@ def test_live_open_synthesis_and_pending_owner_wait_survive_while_dead_child_hea
     waiting_bytes = (waiting_child / "task_results/waiting.json").read_bytes()
     reader = []
     monkeypatch.setattr("ouroboros.task_status.load_effective_task_result",
-                        lambda root, tid: reader.append(tid) or pytest.fail("terminal rows need no orphan materialization"))
+                        lambda root, tid, materialize_artifacts=True: reader.append(tid) or pytest.fail("terminal rows need no orphan materialization"))
     report = _recovery(root, repo)
     assert report["protected"] == ["live", "waiting"]
     assert report["recovered"] == ["dead"]
@@ -121,12 +121,12 @@ def test_orphan_exclusion_filters_before_effective_materialization(roots, monkey
     for tid in ["live", "dead"]:
         write_task_result(root, tid, "running", result="original")
     read = []
-    def effective(root, tid):
-        read.append(tid)
+    def effective(root, tid, materialize_artifacts=True):
+        read.append((tid, materialize_artifacts))
         return {"task_id": tid, "status": "failed", "result": "proven orphan"}
     monkeypatch.setattr("ouroboros.task_status.load_effective_task_result", effective)
     assert reconcile_orphaned_running_tasks(root, exclude_task_ids={"live"}) == 1
-    assert read == ["dead"]
+    assert read == [("dead", False), ("dead", True)]  # decide on a projection, then heal with custody
     assert load_task_result(root, "live")["status"] == "running"
     assert load_task_result(root, "dead")["status"] == "failed"
 
@@ -497,7 +497,8 @@ def test_orphan_reconcile_closes_the_open_quiz_and_its_paired_wait(roots, monkey
         write_task_result(root, tid, "running", owner_wait={"state": "waiting", "quiz_id": f"{tid}-q"})
     monkeypatch.setattr(
         "ouroboros.task_status.load_effective_task_result",
-        lambda _root, tid: {"task_id": tid, "status": "failed", "result": "proven orphan"},
+        # The reconciler decides on a status-only read and re-reads the row it heals.
+        lambda _root, tid, materialize_artifacts=True: {"task_id": tid, "status": "failed", "result": "proven orphan"},
     )
 
     assert reconcile_orphaned_running_tasks(root) == 2

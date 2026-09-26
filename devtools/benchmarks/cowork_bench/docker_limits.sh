@@ -5,6 +5,48 @@
 set -euo pipefail
 : "${COWORK_REAL_DOCKER:?missing resolved Docker executable}"
 
+# The word after an exact option, without printing any argument.
+option_value() {
+    local option=$1 previous=""
+    shift
+    for argument in "$@"; do
+        if [ "$previous" = "$option" ]; then
+            printf '%s' "$argument"
+            return 0
+        fi
+        previous=$argument
+    done
+    return 1
+}
+
+# Host-only eval-attempt evidence (COWORK_ADMISSION_DIR is never mounted into a
+# container). Evidence failures never block the runner's own command.
+if [ "${1:-}" = exec ] && [ -n "${COWORK_ADMISSION_DIR:-}" ]; then
+    case "${2:-}" in
+        agent-*)
+            # The runner names agent-, eval- and pg- containers with one task ID.
+            if task=$(option_value --task_dir "$@"); then
+                { mkdir -p "$COWORK_ADMISSION_DIR" \
+                    && printf '%s\n' "$task" > "$COWORK_ADMISSION_DIR/${2#agent-}.task"; } 2>/dev/null || true
+            fi ;;
+        eval-*)
+            if [ "$(option_value --phase "$@" || true)" = eval ]; then
+                # The runner ran `rm -fv agent-... || true`; only a daemon listing
+                # without that exact name proves the agent container is gone.
+                agent="agent-${2#eval-}"
+                state=unknown
+                if names=$("$COWORK_REAL_DOCKER" ps -a --filter "name=$agent" --format '{{.Names}}' 2>/dev/null); then
+                    state=absent
+                    while IFS= read -r name; do
+                        if [ "$name" = "$agent" ]; then state=present; fi
+                    done <<< "$names"
+                fi
+                shift
+                exec "$COWORK_REAL_DOCKER" exec -e "COWORK_AGENT_CONTAINER_STATE=$state" "$@"
+            fi ;;
+    esac
+fi
+
 create_kind=""
 case "${1:-}" in
     run|create) create_kind=container; prefix=("$1"); shift ;;
@@ -25,10 +67,20 @@ fi
 : "${COWORK_RESOURCE_ROOT:?missing resource filesystem}"
 : "${COWORK_MIN_FREE_BYTES:?missing disk reserve}"
 : "${COWORK_STOP_FILE:?missing admission stop file}"
+container_name=""
+if [ "$create_kind" = container ]; then
+    container_name=$(option_value --name "$@" || true)
+fi
 
 refuse() {
     # The first cause survives later attempts, including a parent budget stop.
     (set -C; printf '%s\n' "$1" > "$COWORK_STOP_FILE") 2>/dev/null || true
+    # A refused eval container proves this task's evaluator never started.
+    if [ -n "${COWORK_ADMISSION_DIR:-}" ] && [[ "$container_name" == eval-* ]]; then
+        { mkdir -p "$COWORK_ADMISSION_DIR" \
+            && (set -C; printf '%s\n' "$1" > "$COWORK_ADMISSION_DIR/${container_name#eval-}.eval_refused"); } \
+            2>/dev/null || true
+    fi
     printf 'Cowork resource admission stopped: %s\n' "$1" >&2
     exit 75
 }

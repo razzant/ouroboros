@@ -602,8 +602,11 @@ def _finish_cyber_acceptance(ctx: _TaskAcceptanceContext, result: Any) -> bool:
     ctx.tools._ctx._task_acceptance_reviewed = False  # final ingress, not review, owns delivery sealing
     clean = not pending and task_acceptance_is_clean(result)
     signal = "" if pending else str(getattr(result, "aggregate_signal", "") or "")
+    # The submitted final is Main's act (finish); Main stated no stance toward
+    # the criticism, so the record carries the act and no invented disposition.
     author = build_author_disposition(
-        disposition="accepted", rationale="Main submitted this complete response for delivery; independent review remains advisory.",
+        disposition="", action="finish",
+        rationale="Main submitted this complete response for delivery; independent review remains advisory.",
         # Evidence assembly can fail before a review binding exists. Bind the
         # author's decision to its real subject without inventing a reviewed pack.
         subject_hash=ctx.review_binding.get("binding_hash") or delivery_subject_hash(ctx.tools._ctx, ctx.llm_trace, ctx.content),
@@ -635,14 +638,21 @@ def _finish_advisory_author(ctx: _TaskAcceptanceContext) -> bool:
     if not feedback and outcome.get("feedback_delivered"):
         feedback = outcome
     disposition = str(stance.get("agent_disposition") or "")
-    from ouroboros.loop_delivery import delivery_evidence_fingerprint
-
-    if (not intent or disposition not in {"accepted", "rejected", "partial", "deferred"}
-            or (action != "stop" and (not feedback or intent.get("review_binding_hash") != feedback.get("binding_hash")))
-            or intent.get("tool_count") != len(ctx.llm_trace.get("tool_calls") or [])
-            or intent.get("owner_directives") != len(getattr(ctx.tools._ctx, "_owner_directives", []) or [])
-            or intent.get("evidence_fingerprint") != delivery_evidence_fingerprint(ctx.tools._ctx, ctx.llm_trace)):
+    if not intent or (disposition and disposition not in {"accepted", "rejected", "partial", "deferred"}):
         return False
+    # Only a FINISH binds to the reviewed feedback and to the three freshness
+    # facts. A stop grants nothing, so nothing about it has to be fresh (TZ-2
+    # C4): the service teardown before the panel changes the evidence
+    # fingerprint, and rejecting the stop for that bought a panel whose
+    # advisory author_finish then read as Done over "not ready".
+    if action != "stop":
+        from ouroboros.loop_delivery import delivery_evidence_fingerprint
+
+        if (not feedback or intent.get("review_binding_hash") != feedback.get("binding_hash")
+                or intent.get("tool_count") != len(ctx.llm_trace.get("tool_calls") or [])
+                or intent.get("owner_directives") != len(getattr(ctx.tools._ctx, "_owner_directives", []) or [])
+                or intent.get("evidence_fingerprint") != delivery_evidence_fingerprint(ctx.tools._ctx, ctx.llm_trace)):
+            return False
     from ouroboros.review_records import build_author_disposition
 
     author = build_author_disposition(
@@ -650,8 +660,8 @@ def _finish_advisory_author(ctx: _TaskAcceptanceContext) -> bool:
         subject_hash=ctx.review_binding["binding_hash"],
         reviewer_signal=str((feedback or {}).get("aggregate_signal") or ""),
         enforcement="blocking" if review_enforcement_blocks(_loop().get_review_enforcement()) else "advisory",
+        action=action,
     )
-    author["action"] = action
     from ouroboros.task_results import project_task_acceptance_review_capacity
 
     capacity = project_task_acceptance_review_capacity(ctx.tools._ctx, task_id=ctx.task_id) if action == "stop" else {}
@@ -662,6 +672,11 @@ def _finish_advisory_author(ctx: _TaskAcceptanceContext) -> bool:
         _loop()._supersede_task_acceptance_for_owner_followup(ctx.tools._ctx, ctx.llm_trace)
         return True
     ctx.tools._ctx._task_acceptance_reviewed = True
+    if action == "stop":
+        # A stop binds no subject, so an earlier panel's cannot reopen review on the next
+        # delivery pass; only the author's next decision (merge_agent_acceptance_stance)
+        # or owner input does.
+        ctx.tools._ctx._task_acceptance_reviewed_subject = ""
     ctx.tools._ctx._task_acceptance_pending = ""
     _loop()._mark_root_acceptance_checkpoint(
         ctx.tools._ctx, ctx.llm_trace, status=author["reviewer_signal"].lower(), pass_index=ctx.passes_done,

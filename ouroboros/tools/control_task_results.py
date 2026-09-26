@@ -188,11 +188,33 @@ def _get_task_result(
     include_work_order_source: bool = False, source_start_char: Any = None,
     source_end_char: Any = None, include_completion_source: bool = False,
     known_result_sha256: str = "", include_focus_source: bool = False, focus_source_sha256: str = "",
+    presence_scope: str = "",
 ) -> str:
     """Read a task result, or a bounded canonical work-order/completion source range."""
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+    scoped = bool(str(presence_scope or "").strip())
+    if scoped:
+        from ouroboros.presence_authority import PRESENCE_OWN_WORK_SCOPE, presence_caller_binding, presence_work_refusal
+
+        # The scoped read admits exactly the work a scoped page can list, plus this
+        # task's own tree; everything else refuses before any record is projected.
+        refusal = (
+            "⚠️ PRESENCE_CAPABILITY_BLOCKED: presence_scope=own_binding needs a Presence task with a binding id."
+            if str(presence_scope).strip() != PRESENCE_OWN_WORK_SCOPE or not presence_caller_binding(ctx)
+            else presence_work_refusal(ctx, str(task_id or ""), drive_root=status_drive_root, same_tree=True)
+        )
+        if refusal:
+            return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     data = load_effective_task_result(status_drive_root, task_id)
+    if scoped:
+        from ouroboros.presence_authority import presence_effective_refusal
+
+        # The effective read may substitute a retry successor's record: it is judged too.
+        refusal = presence_effective_refusal(ctx, str(task_id or ""), data, drive_root=status_drive_root,
+                                             same_tree=True)
+        if refusal:
+            return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     from ouroboros.tools.recent_tasks import _restricted_actor
 
     restricted = _restricted_actor(ctx)

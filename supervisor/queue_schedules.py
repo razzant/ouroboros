@@ -24,6 +24,7 @@ import uuid
 from typing import Any, Dict, List
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import build_task_contract, normalize_allowed_resources
+from ouroboros.dialogue_provenance import presence_metadata_binding
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug
 from ouroboros.skill_loader import skill_identity_collision_names
 from ouroboros.utils import atomic_write_json, in_worker_process, read_json_dict, utc_now_iso
@@ -696,9 +697,10 @@ def _task_from_schedule(record: Dict[str, Any]) -> Dict[str, Any]:
     if existing_contract:
         task["task_contract"] = existing_contract
     task["task_contract"] = build_task_contract(apply_consciousness_authority(task))
-    presence = metadata.get("presence")
     workspace = task["task_contract"]["workspace"]
-    if isinstance(presence, dict) and presence and workspace["root"]:
+    # Presence-bound work (a speaker's follow-up, or one acting for a descendant's binding)
+    # runs in the folder its inherited contract admitted, with canonical shared memory.
+    if presence_metadata_binding(metadata) is not None and workspace["root"]:
         task.update(
             workspace_root=workspace["root"], workspace_mode=workspace["mode"],
             memory_mode="shared",

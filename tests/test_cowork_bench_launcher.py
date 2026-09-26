@@ -18,6 +18,7 @@ import pytest
 from devtools.benchmarks.common.launcher_audit import audit_launcher, launcher_paths
 from devtools.benchmarks.common.model_slots import runtime_actor_snapshot
 from devtools.benchmarks.cowork_bench import campaign as budgets
+from devtools.benchmarks.cowork_bench import eval_attempt as attempts
 from devtools.benchmarks.cowork_bench import run_cowork_bench as launcher
 
 IMAGE_ID = "sha256:" + "1" * 64
@@ -151,7 +152,7 @@ def test_ledger_separates_real_failures_from_recoverable_infrastructure(tmp_path
         write_json(tmp_path / "ouroboros_summary.json", summary)
     if evaluation:
         write_json(tmp_path / "eval_res.json", evaluation)
-    row = launcher.ledger_row("task", tmp_path, runner)
+    row = launcher.ledger_row("task", tmp_path, runner, protocol="legacy", cause="runner_exited")
     assert row["status"] == expected
     assert row["instance_id"] == "task"
 
@@ -225,6 +226,18 @@ def test_manifest_metadata_matches_config_received_by_container(dry_launcher):
     assert not config["settings"].get("OUROBOROS_OR_PROVIDER")
 
 
+def test_meter_blindness_bound_is_validated_and_recorded_in_the_manifest(dry_launcher):
+    out, argv = dry_launcher
+    assert launcher.parse_args([]).meter_blindness_sec == 30.0
+    for invalid in ("20", "-1", "nan", "inf"):  # Must leave room for one 15 s poll plus one read.
+        with pytest.raises(SystemExit):
+            launcher.parse_args(["--meter-blindness-sec", invalid])
+    assert launcher.main([*argv, "--meter-blindness-sec", "45"]) == 0
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["harness"]["meter"] == {"blindness_sec": 45.0, "poll_sec": 15.0,
+                                            "retry_sec": 3.0, "read_slice_sec": 5.0}
+
+
 @pytest.fixture
 def supervised(tmp_path, monkeypatch):
     bench = tmp_path / "bench"
@@ -263,8 +276,11 @@ def supervised(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "stop_process_group", stop)
     monkeypatch.setattr(launcher, "remove_run_containers", cleanup)
     monkeypatch.setattr(launcher, "key_usage", lambda _key, **_kwargs: 100)
+    # Retries wait on this simulated clock, so a meter outage reaches its bound instantly.
+    clock = SimpleNamespace(now=0.0)
     monkeypatch.setattr(launcher, "time", SimpleNamespace(
-        time=time.time, monotonic=time.monotonic, sleep=lambda _delay: None))
+        time=lambda: clock.now, monotonic=lambda: clock.now,
+        sleep=lambda delay: setattr(clock, "now", clock.now + delay)))
     monkeypatch.setattr(launcher.shutil, "disk_usage", lambda _path: SimpleNamespace(free=1024**4))
     return args, bench, env, budget, events, handlers, proc
 
@@ -618,7 +634,9 @@ def test_paid_runner_uses_immutable_image_and_scrubs_ambient_alternate_keys(dry_
     monkeypatch.setattr(launcher, "key_headroom", lambda _key, **_kwargs: {"effective": 1000})
     monkeypatch.setattr(launcher, "key_usage", lambda _key, **_kwargs: 100)
     monkeypatch.setattr(launcher, "prepare_resource_env", lambda env, **_kwargs: dict(env))
-    def supervise(args, command, bench, env, api_key, campaign):
+    def supervise(args, command, bench, env, api_key, campaign, *, confirmed_at):
+        assert isinstance(confirmed_at, float)
+        assert attempts.claim_protocol(bench.parent) == "current"  # read during the real admission path
         assert command[-1] == "one"
         assert env["IMAGE"] == IMAGE_ID
         assert not {"LLM_API_KEY", "MODEL_API_KEY", "OPENROUTER_API_KEY"} & env.keys()
@@ -628,7 +646,20 @@ def test_paid_runner_uses_immutable_image_and_scrubs_ambient_alternate_keys(dry_
         dump = bench / "dumps" / launcher.dump_dir_name(args.model) / "SingleUserTurn-one"
         write_json(dump / "ouroboros_summary.json", {"bench_status": "success"})
         write_json(dump / "eval_res.json", {"pass": True})
-        return {"stop_reason": "", "meter_error": "", "runner_exit_code": 0}
+        # The paid-run fixture must supply the exact terminal evidence a real
+        # current eval entrypoint publishes, not just a bare unclaimed file.
+        attempt_id = "a" * 32
+        attempts.publish_exclusive(dump / attempts.CLAIM_NAME,
+                                   {"kind": "official", "attempt_id": attempt_id})
+        attempts.publish_exclusive(dump / f"{attempts.RECEIPT_PREFIX}{attempt_id}.json", {
+            "kind": "official", "attempt_id": attempt_id, "official_run": True,
+            "returned": {"pass": True}, "raised": None,
+            "result_file": attempts.file_facts(dump / "eval_res.json"),
+        })
+        counts = launcher.write_ledger(bench.parent / "result_index.jsonl", bench, args.model,
+                                       args.selected_tasks, cause="runner_exited")
+        return {"stop_reason": "", "meter_error": "", "runner_exit_code": 0,
+                "interruption_cause": "runner_exited", "ledger_counts": counts}
     monkeypatch.setattr(launcher, "supervise_run", supervise)
     paid_argv = [item for item in argv if item != "--dry-run"]
     assert launcher.main([*paid_argv, "--campaign-file", str(out.parent / "campaign.json")]) == 0
@@ -675,7 +706,7 @@ def test_confirmation_never_accepts_an_invalid_numeric_usage(supervised, monkeyp
     values = iter([invalid, 101.0])
     monkeypatch.setattr(launcher, "key_usage", lambda _key, **_kwargs: next(values))
     diagnostics = []
-    launcher.observe_campaign_usage("not-a-real-key", budget, diagnostics, phase="poll")
+    launcher.observe_campaign_usage("not-a-real-key", budget, diagnostics, phase="poll", deadline=30.0)
     assert budget.record["last_usage"] == 101
     assert diagnostics[0]["accepted"] is False
     assert diagnostics[0]["previous_usage"] == 100
@@ -693,7 +724,8 @@ def test_persistent_bad_counter_stops_and_keeps_rejected_values_in_final_monitor
     result = launcher.supervise_run(args, ["fake-runner"], bench, env, "not-a-real-key", budget)
     assert result["stop_reason"] == "budget_meter_unavailable"
     assert budget.record["last_usage"] == 100
-    assert len(calls) == 6  # One bounded confirmation in the loop and one final settlement read.
+    # Reads 3 s apart until the 30 s bound, then one bounded final settlement of the same shape.
+    assert calls == ([5.0] * 9 + [3.0]) * 2
     assert {row["phase"] for row in result["meter_diagnostics"]} == {"poll", "final"}
     assert all(row["observed_usage"] == 99.0 and not row["accepted"] for row in result["meter_diagnostics"])
     final = json.loads((bench.parent / "monitor.json").read_text(encoding="utf-8"))
@@ -701,7 +733,7 @@ def test_persistent_bad_counter_stops_and_keeps_rejected_values_in_final_monitor
     assert final["meter_error"] == "UsageCounterError"
 
 
-def test_confirmation_shares_one_timeout_window_instead_of_three_full_timeouts(supervised, monkeypatch):
+def test_each_read_gets_a_slice_so_one_slow_read_cannot_consume_the_bound(supervised, monkeypatch):
     _args, _bench, _env, budget, _events, _handlers, _proc = supervised
     clock = SimpleNamespace(now=0.0)
     def advance(delay):
@@ -717,10 +749,10 @@ def test_confirmation_shares_one_timeout_window_instead_of_three_full_timeouts(s
     original = budget.path.read_bytes()
     diagnostics = []
     with pytest.raises(OSError, match="meter unavailable"):
-        launcher.observe_campaign_usage("not-a-real-key", budget, diagnostics, phase="poll")
-    assert timeouts == [15.0, 5.0]
-    assert clock.now == 15.0
-    assert len(diagnostics) == 2
+        launcher.observe_campaign_usage("not-a-real-key", budget, diagnostics, phase="poll", deadline=30.0)
+    assert timeouts == [5.0] * 4  # Reads at 0, 8, 16 and 24 s; the bound ends at exactly 30 s.
+    assert clock.now == 30.0
+    assert len(diagnostics) == 4
     assert budget.path.read_bytes() == original
 
 
@@ -800,8 +832,9 @@ def test_lagging_counter_gets_time_to_catch_up_without_weakening_monotonicity(su
         return 99.0 if clock.now < 3.0 else 101.0
     monkeypatch.setattr(launcher, "key_usage", provider)
     diagnostics = []
-    launcher.observe_campaign_usage("not-a-real-key", budget, diagnostics, phase="poll")
-    assert reads == [(0.0, 15.0), (3.0, 12.0)]
+    anchor = launcher.observe_campaign_usage("not-a-real-key", budget, diagnostics, phase="poll", deadline=30.0)
+    assert reads == [(0.0, 5.0), (3.0, 5.0)]
+    assert anchor == 3.0  # The accepted read's request time, not the start of the confirmation.
     assert budget.record["last_usage"] == 101
     assert [(row["observed_usage"], row["accepted"]) for row in diagnostics] == [(99.0, False), (101.0, True)]
     assert clock.now == 3.0
@@ -857,8 +890,8 @@ def test_late_valid_confirmation_is_not_accepted_even_if_reader_returns_it(super
         return 101.0
     monkeypatch.setattr(launcher, "key_usage", late)
     diagnostics = []
-    with pytest.raises(TimeoutError, match="shared deadline"):
-        launcher.observe_campaign_usage("not-a-real-key", budget, diagnostics, phase="poll")
+    with pytest.raises(TimeoutError, match="after the blindness bound"):
+        launcher.observe_campaign_usage("not-a-real-key", budget, diagnostics, phase="poll", deadline=4.0)
     assert budget.record["last_usage"] == 100
     assert diagnostics[0]["observed_usage"] == 101
     assert diagnostics[0]["accepted"] is False

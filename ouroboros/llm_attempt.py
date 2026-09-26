@@ -179,6 +179,36 @@ def supports_message_cache_control(model: str) -> bool:
     return m.startswith("anthropic/") or m.startswith("google/gemini-")
 
 
+def openai_family_model(model: str) -> bool:
+    """Whether a model id names OpenAI's public-API family (``openai/…`` on OpenRouter,
+    ``openai::…`` direct; the ``~`` processing prefix and a ``:online`` suffix keep it).
+
+    Dated external fact (probes 2026-09-25; inventory row in DEVELOPMENT §2): this family
+    reuses a prompt cache only for the WHOLE leading system section plus tool schemas as
+    one unit, or for an exact earlier prompt as a prefix, and the routing key partitions
+    it. That is why its send copy keeps mutable context out of the leading system message
+    (``llm_messages.split_leading_system_prefix``) and shares one sticky session per model
+    and governance prefix (``_openrouter_session_identity``). OpenRouter ``openai/gpt-oss-*``
+    ids are served by third parties and merely inherit the projection: disclosed, not gated.
+    """
+    from ouroboros.provider_models import normalize_model_identity
+
+    raw = str(model or "").strip().lstrip("~")
+    identity = normalize_model_identity(raw) or raw
+    return identity.strip().lower().startswith("openai/")
+
+
+def openai_family_route(target: Dict[str, Any]) -> bool:
+    """The send-copy predicate: direct ``openai``, or an OpenRouter ``openai/…`` id — never
+    a generic OpenAI-compatible server that happens to serve an ``openai/…`` name."""
+    provider = str(target.get("provider") or "").strip().lower()
+    if provider == "openai":
+        return True
+    if provider != "openrouter":
+        return False
+    return openai_family_model(str(target.get("usage_model") or target.get("resolved_model") or ""))
+
+
 def _route_normalizes_cache_breakpoints(target: Dict[str, Any]) -> bool:
     """Whether the send-time finalizer may normalize cache breakpoints."""
     if str(target.get("provider") or "") == "anthropic":

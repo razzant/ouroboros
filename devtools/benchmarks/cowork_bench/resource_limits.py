@@ -5,6 +5,9 @@ container creation, and exact run labels let the launcher clean up its own
 containers and networks after cancellation, including anonymous helper runs.
 The disk check refuses new creations; the launcher's guard also observes the
 reserve during work. Neither check is a filesystem quota against other users.
+The shim also keeps host-only eval-attempt evidence in ``eval_admission/`` of the
+run root, which no container mounts: the exact task each runner container served
+and every refused eval-container creation.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import shutil
 from collections.abc import Mapping
 
 LABEL_KEY = "org.ouroboros.cowork.run"
+ADMISSION_DIR_NAME = "eval_admission"
 MIN_FREE_BYTES = 200 * 1024**3
 CONTAINER_CPUS = "4"
 CONTAINER_MEMORY = "16g"
@@ -63,6 +67,7 @@ def prepare_resource_env(
         "COWORK_RESOURCE_ROOT": str(resource),
         "COWORK_MIN_FREE_BYTES": str(min_free_bytes),
         "COWORK_STOP_FILE": str(root / "resource_stop"),
+        "COWORK_ADMISSION_DIR": str(root / ADMISSION_DIR_NAME),
         "COWORK_CONTAINER_CPUS": CONTAINER_CPUS,
         "COWORK_CONTAINER_MEMORY": CONTAINER_MEMORY,
         "COWORK_CONTAINER_PIDS": CONTAINER_PIDS,

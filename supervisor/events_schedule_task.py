@@ -525,6 +525,8 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "parent_cognitive_route": parent_cognitive_route,
             "parent_id": parent_id,
             "origin_metadata": evt.get("origin_metadata"),
+            **({"presence_binding_authority": evt["presence_binding_authority"]}
+               if "presence_binding_authority" in evt else {}),
         })
         scheduled_failure_reason = ""
         scheduled_failure_detail = ""

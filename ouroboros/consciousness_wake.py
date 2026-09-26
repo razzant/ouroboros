@@ -2,10 +2,10 @@
 
 A wake-up is an ordinary Main turn nobody typed: ``prompts/CONSCIOUSNESS.md`` is its USER
 message (system prompt, memory and tools are Main's own, owner decision В15).
-``render_wake_message`` fills its placeholders from existing readers (tasks settled since the last
-wake, open owner quiz cards, the count of owner messages) and truncates the event list with an
-explicit source pointer, never silently (BIBLE P1). ``wake_task_metadata`` is
-the wake's origin/authority envelope for ``handle_wake_direct`` (``consciousness_authority``).
+``render_wake_message`` fills its placeholders from existing readers (tasks settled and owner
+cards answered since the last wake, open owner quiz cards, the count of owner messages) and
+truncates the event list with an explicit source pointer, never silently (BIBLE P1).
+``wake_task_metadata`` is the wake's origin/authority envelope for ``handle_wake_direct`` (``consciousness_authority``).
 """
 
 from __future__ import annotations
@@ -165,16 +165,43 @@ def _card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, now: float,
     return f"- owner card {quiz_id} on task {task_id}: {label}{age}; {preview}"
 
 
+def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, now: float) -> str:
+    """One answered card of the window: stamps, the recorded answer, a question preview.
+
+    The owner's own words are the answer itself, so the comment is rendered whole;
+    only the question is a (named) preview. No verdict on what the answer meant.
+    """
+    parts = []
+    for key, word in (("answered_at", "answered"), ("asked_at", "asked")):
+        stamp = _parse_iso(block.get(key))
+        parts.append(f"{word} {_ago(now - stamp)}" if stamp is not None else f"{word} at an unknown time")
+    options = block.get("options") if isinstance(block.get("options"), list) else []
+    index = block.get("answered_index")
+    comment = str(block.get("comment") or "")
+    if isinstance(index, int) and not isinstance(index, bool):
+        label = str(options[index]) if 0 <= index < len(options) else "label unavailable"
+        answer = f"chose option {index + 1}: {label}"
+        if comment.strip():
+            answer += f"; with the words: {comment}"
+    elif comment.strip():
+        answer = f"answered in own words: {comment}"
+    else:
+        answer = "answer text unavailable"
+    preview = _clip_preview(block.get("question") or "question text unavailable")
+    return f"- owner card {quiz_id} on task {task_id}: {'; '.join(parts)}; {answer}; question: {preview}"
+
+
 def wake_events(
     drive_root: Any, *, since: float, now: float, reason: str = "", exclude_task_id: str = "",
 ) -> List[str]:
     """Render a trigger-first, bounded view of fresh facts and outstanding cards.
 
-    Settled task rows are filtered by ``since``. Answerable cards intentionally span the
-    full store because ``expired_terminal`` still accepts a late owner answer (В17a),
-    but they are rendered after the fresh trigger/facts and carry their semantic state.
+    Settled task rows and answered cards are filtered by ``since`` (an answer is an
+    event of the window, sorted with the settled facts by ``answered_at``). Answerable
+    cards intentionally span the full store because ``expired_terminal`` still accepts
+    a late owner answer (В17a), but they are rendered after the fresh trigger/facts and carry their semantic state.
     """
-    from ouroboros.owner_quiz import STATE_EXPIRED_TERMINAL, STATE_OPEN
+    from ouroboros.owner_quiz import STATE_ANSWERED, STATE_EXPIRED_TERMINAL, STATE_OPEN
     from ouroboros.task_results import list_task_results
     from ouroboros.task_status import SETTLED_STATUSES
     from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS
@@ -191,7 +218,16 @@ def wake_events(
             continue
         quizzes = row.get("owner_quiz") if isinstance(row.get("owner_quiz"), dict) else {}
         for quiz_id, block in quizzes.items():
-            if not isinstance(block, dict) or block.get("answered_at"):
+            if not isinstance(block, dict):
+                continue
+            if block.get("answered_at"):
+                # An answer given inside the window is an event of the window: it sorts
+                # with the settled facts by its own stamp (no task id, so the trigger's
+                # de-duplication never hides it). Older answers are not news.
+                answered_at = str(block.get("answered_at") or "")
+                answered_ts = _parse_iso(answered_at)  # an unreadable stamp cannot be placed in the window
+                if block.get("state") == STATE_ANSWERED and answered_ts is not None and answered_ts >= since:
+                    settled.append((_iso(answered_ts), "", _answered_card_line(task_id, str(quiz_id), block, now=now)))
                 continue
             if block.get("state") in (STATE_OPEN, STATE_EXPIRED_TERMINAL):
                 cards.append((

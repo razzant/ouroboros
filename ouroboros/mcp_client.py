@@ -130,6 +130,16 @@ class MCPServerRuntime:
     last_attempted: str = ""
 
 
+def _normalized_stem(value: str) -> str:
+    """The character-class normalization every slug starts from (before any cap or digest)."""
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", str(value or "").strip())
+    return re.sub(r"_+", "_", safe).strip("_").lower()
+
+
+def _name_digest(value: str) -> str:
+    return hashlib.sha1(str(value or "").strip().encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
 def _slugify(value: str, *, max_len: int, injective: bool = False) -> str:
     """Return a provider-safe slug, hashing truncated tails to avoid collisions.
 
@@ -142,14 +152,13 @@ def _slugify(value: str, *, max_len: int, injective: bool = False) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    safe = re.sub(r"[^A-Za-z0-9_]", "_", text)
-    safe = re.sub(r"_+", "_", safe).strip("_").lower()
+    safe = _normalized_stem(text)
     if not safe:
         return ""
     lossy = injective and safe != text
     if len(safe) <= max_len and not lossy:
         return safe
-    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    digest = _name_digest(text)
     keep = max_len - len(digest) - 1
     if keep <= 0:
         return digest
@@ -176,7 +185,11 @@ def make_tool_name(server_id: str, tool_name: str) -> str:
 
 
 def parse_tool_name(name: str) -> Optional[Dict[str, str]]:
-    """Reverse :func:`make_tool_name`, or return ``None`` for non-MCP names."""
+    """Split an ``mcp_<server>__<tool>``-shaped name, or return ``None``.
+
+    Syntactic only: it proves neither catalog membership nor a raw name (a
+    digest is not reversible); :meth:`MCPManager.resolve_tool_name` answers those.
+    """
     text = str(name or "")
     if not text.startswith(TOOL_NAME_PREFIX):
         return None
@@ -190,8 +203,76 @@ def parse_tool_name(name: str) -> Optional[Dict[str, str]]:
 
 
 def is_mcp_tool_name(name: str) -> bool:
-    """Return whether ``name`` is a manager-issued MCP tool name."""
+    """Return whether ``name`` has the MCP wire-name shape (not whether it is listed)."""
     return parse_tool_name(name) is not None
+
+
+_DIGEST_TAIL_RE = re.compile(r"_([0-9a-f]{12})$")
+
+
+def naming_rule_matches(requested_tool: str, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rows of ONE server that the naming rule relates exactly to a missed name.
+
+    ``requested_tool`` is the part after ``mcp_<server>__``; ``tools`` are that
+    server's callable rows (``name`` + ``raw_name``). A row matches when the
+    requested part normalizes like the row's raw name, equals the row's
+    registered stem without its digest, or ends in the row's digest (sha1 of
+    the raw name). These are identities of ``make_tool_name``, not similarity:
+    nothing is ranked, and several matches are an ambiguity the caller resolves.
+    """
+    text = str(requested_tool or "").strip()
+    wanted = _normalized_stem(text)
+    tail = _DIGEST_TAIL_RE.search(text)
+    matches: List[Dict[str, Any]] = []
+    for tool in tools:
+        raw = str(tool.get("raw_name") or "")
+        digest = _name_digest(raw)
+        slug = str(tool.get("name") or "").partition("__")[2]
+        stem = slug[:-len(digest) - 1] if slug.endswith("_" + digest) else ""
+        related = bool(wanted) and wanted in {_normalized_stem(raw), stem}
+        if raw and (related or (tail is not None and tail.group(1) == digest)):
+            matches.append(tool)
+    return matches
+
+
+@dataclass(frozen=True)
+class MCPNameResolution:
+    """What this process's current MCP catalog says about one requested name.
+
+    A pure lookup under the manager lock: no transport, refresh or settings
+    write. Only ``callable`` may proceed to the paid safety check and the call;
+    every other status is its own typed fact, kept distinct from a catalog miss.
+    """
+
+    status: str  # callable | not_found | disallowed | server_disabled | catalog_unavailable | mcp_disabled
+    server_id: str = ""
+    raw_name: str = ""
+    detail: str = ""
+
+    def refusal(self, requested: str) -> ToolResult:
+        """The reason alone; the registry composes the caller's callable view beside it."""
+        name, server = str(requested or ""), self.server_id
+        if self.status == "disallowed":
+            text = (
+                f"⚠️ MCP_TOOL_DISALLOWED: {self.raw_name!r} is not on the "
+                f"allowed_tools list for server {server!r}."
+            )
+            return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=text)
+        if self.status == "not_found":
+            where = (f"the current tool catalog of MCP server {server!r}" if server
+                     else "the tool catalog of any configured MCP server")
+            text = f"⚠️ MCP_TOOL_NOT_FOUND: {name!r} is not in {where}. Nothing was executed."
+            return ToolResult(status="error", code="UNKNOWN_TOOL", text=text)
+        if self.status == "mcp_disabled":
+            text = "⚠️ MCP_DISABLED: enable MCP in Settings → Advanced to use this tool."
+        elif self.status == "server_disabled":
+            text = (f"⚠️ MCP_DISABLED: MCP server {server!r} is disabled in Settings → "
+                    f"Advanced; {name!r} was not executed.")
+        else:
+            text = (f"⚠️ MCP_CATALOG_UNAVAILABLE: MCP server {server!r} has no current tool "
+                    f"catalog in this process ({self.detail}); whether {name!r} exists is "
+                    "unknown. Nothing was executed.")
+        return ToolResult(status="unavailable", code="MCP_UNAVAILABLE", text=text)
 
 
 def _validate_url(url: str) -> str:
@@ -852,6 +933,7 @@ class MCPManager:
                             "schema": tool.schema,
                             "server_id": tool.server_id,
                             "raw_name": tool.raw_name,
+                            "raw_description": _redact_error_text(tool.description, cfg),
                         }
                     )
             return results
@@ -1112,40 +1194,49 @@ class MCPManager:
             ],
         }
 
+    def _resolve_locked(self, prefixed_name: str) -> tuple[MCPNameResolution, Any, Any]:
+        """Exact catalog lookup (caller holds ``self._lock``): (fact, config, tool)."""
+        if not self._enabled:
+            return MCPNameResolution("mcp_disabled"), None, None
+        parsed = parse_tool_name(prefixed_name)
+        server = parsed["server_slug"] if parsed else ""
+        runtime = self._servers.get(server)
+        if runtime is None:
+            broken = next((item for item in self._configuration_errors
+                           if server and item["id"] == server and item["enabled"]), None)
+            if broken is not None:
+                detail = f"its configuration is invalid: {broken['last_error']}"
+                return MCPNameResolution("catalog_unavailable", server, detail=detail), None, None
+            return MCPNameResolution("not_found"), None, None
+        cfg = runtime.config
+        if not cfg.enabled:
+            return MCPNameResolution("server_disabled", cfg.id), cfg, None
+        allowed = set() if mode_has_unrestricted_agency(get_runtime_mode()) else set(cfg.allowed_tools)
+        for tool in runtime.tools:
+            if tool.prefixed_name == prefixed_name:
+                status = "disallowed" if allowed and tool.raw_name not in allowed else "callable"
+                return MCPNameResolution(status, cfg.id, tool.raw_name), cfg, tool
+        if not runtime.tools and (runtime.last_error or not runtime.last_refreshed):
+            # No listing to judge the name against: health is unknown, not a miss.
+            detail = (f"its last listing failed: {_redact_error_text(runtime.last_error, cfg)}"
+                      if runtime.last_error else "it has not been listed yet")
+            return MCPNameResolution("catalog_unavailable", cfg.id, detail=detail), cfg, None
+        return MCPNameResolution("not_found", cfg.id), cfg, None
+
+    def resolve_tool_name(self, prefixed_name: str) -> MCPNameResolution:
+        """The current catalog's fact for one name; performs no transport or refresh."""
+        with self._lock:
+            return self._resolve_locked(prefixed_name)[0]
+
     def _call_tool_result(
         self, prefixed_name: str, arguments: Dict[str, Any]
     ) -> ToolResult:
         """Invoke one MCP tool while retaining host-attested provider facts."""
-        if not self.is_enabled():
-            text = "⚠️ MCP_DISABLED: enable MCP in Settings → Advanced to use this tool."
-            return ToolResult(status="unavailable", code="MCP_UNAVAILABLE", text=text)
         with self._lock:
-            tool_descriptor = None
-            for runtime in self._servers.values():
-                cfg = runtime.config
-                if not cfg.enabled:
-                    continue
-                allowed = set() if mode_has_unrestricted_agency(get_runtime_mode()) else set(cfg.allowed_tools)
-                for tool in runtime.tools:
-                    if tool.prefixed_name == prefixed_name:
-                        if allowed and tool.raw_name not in allowed:
-                            text = (
-                                f"⚠️ MCP_TOOL_DISALLOWED: {tool.raw_name!r} is not on the "
-                                f"allowed_tools list for server {cfg.id!r}."
-                            )
-                            return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=text)
-                        tool_descriptor = (cfg, tool)
-                        break
-                if tool_descriptor:
-                    break
-            if not tool_descriptor:
-                text = (
-                    f"⚠️ MCP_TOOL_NOT_FOUND: {prefixed_name!r}. Refresh the server in "
-                    "Settings → Advanced or check the allowed_tools allowlist."
-                )
-                return ToolResult(status="unavailable", code="MCP_UNAVAILABLE", text=text)
-            cfg, tool = tool_descriptor
+            resolution, cfg, tool = self._resolve_locked(prefixed_name)
             timeout = self._tool_timeout_sec
+        if resolution.status != "callable":
+            return resolution.refusal(prefixed_name)
         try:
             result = _run_async(
                 lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),

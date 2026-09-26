@@ -88,15 +88,14 @@ def test_normalized_presence_task_provenance_uses_event_and_ceiling_facts():
     assert presence_provenance_from_task({"type": "user"}) == {}
 
 
-def test_presence_task_summary_row_persists_normalized_provenance(tmp_path):
-    from ouroboros.agent_task_pipeline import _run_task_summary
+def test_presence_task_facts_row_persists_normalized_provenance(tmp_path):
+    from ouroboros.agent_task_pipeline import _record_task_facts
 
     logs = tmp_path / "logs"
     logs.mkdir()
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
-    _run_task_summary(
+    _record_task_facts(
         env,
-        object(),
         _presence_task(),
         {"rounds": 1, "cost": 0.0},
         {"tool_calls": []},

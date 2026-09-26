@@ -18,10 +18,12 @@ def test_configure_from_settings_without_legacy_field(monkeypatch):
     assert bridge.get_updates(offset=0, timeout=0) == []
 
 
-def test_ui_send_enqueues_structured_message_and_broadcasts(monkeypatch):
+def test_ui_send_enqueues_structured_message_and_broadcasts(monkeypatch, tmp_path):
     bridge = _make_bridge(monkeypatch)
     broadcasts = []
     bridge._broadcast_fn = broadcasts.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {})
 
     bridge.ui_send("hello", sender_session_id="sess-1", client_message_id="c-1")
     updates = bridge.get_updates(offset=0, timeout=1)
@@ -29,10 +31,58 @@ def test_ui_send_enqueues_structured_message_and_broadcasts(monkeypatch):
     assert broadcasts[0]["role"] == "user"
     assert broadcasts[0]["sender_session_id"] == "sess-1"
     assert broadcasts[0]["client_message_id"] == "c-1"
+    assert broadcasts[0]["ingress_accepted"] is True
     assert updates[0]["message"]["text"] == "hello"
     assert updates[0]["message"]["source"] == "web"
     assert updates[0]["message"]["sender_session_id"] == "sess-1"
     assert updates[0]["message"]["client_message_id"] == "c-1"
+    assert updates[0]["message"]["accepted_source_ref"]["client_message_id"] == "c-1"
+    assert updates[0]["message"]["accepted_source_row"]["text"] == "hello"
+    assert updates[0]["message"]["accepted_source_row"]["ingress_accepted"] is True
+    assert (tmp_path / "logs" / "chat.jsonl").exists()
+    from supervisor.message_bus import record_inbound_message
+    ref = record_inbound_message(
+        bridge, updates[0]["message"], chat_id=1, user_id=1,
+        client_message_id="c-1", text="hello", ts="ignored",
+    )
+    assert ref == updates[0]["message"]["accepted_source_ref"]
+    assert len((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_web_ingress_write_failure_never_echoes_or_enqueues(monkeypatch, tmp_path):
+    bridge = _make_bridge(monkeypatch)
+    broadcasts = []
+    bridge._broadcast_fn = broadcasts.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk refused")))
+    with pytest.raises(OSError, match="disk refused"):
+        bridge.ui_send("not accepted", client_message_id="c-2")
+    assert broadcasts == []
+    assert bridge.get_updates(offset=0, timeout=0) == []
+
+
+def test_saved_web_ingress_replays_from_canonical_history(monkeypatch, tmp_path):
+    """The live echo and reload agree about a saved input, not task admission."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    bridge = _make_bridge(monkeypatch)
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {})
+    bridge.ui_send("queued text", sender_session_id="session-1", client_message_id="saved-1")
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "10"})))
+    rows = json.loads(response.body)["messages"]
+    saved = next(row for row in rows if row.get("client_message_id") == "saved-1")
+    assert saved["role"] == "user"
+    assert saved["ingress_accepted"] is True
+    assert saved["sender_session_id"] == "session-1"
+    # A legacy row lacking the typed proof must not acquire it by being readable.
+    message_bus.log_chat("in", 1, 1, "legacy", source="web", client_message_id="legacy-1")
+    rows = json.loads(asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(
+        query_params={"limit": "10"}))).body)["messages"]
+    assert "ingress_accepted" not in next(row for row in rows if row.get("client_message_id") == "legacy-1")
 
 
 def test_ui_send_preserves_suppress_chat_log_flag(monkeypatch):
@@ -43,6 +93,91 @@ def test_ui_send_preserves_suppress_chat_log_flag(monkeypatch):
 
     assert updates[0]["message"]["text"] == "FULL_PROMPT"
     assert updates[0]["message"]["suppress_chat_log"] is True
+
+
+def test_get_updates_drains_only_a_finite_queued_snapshot(monkeypatch):
+    bridge = _make_bridge(monkeypatch)
+    bridge.enqueue_local_message("first", chat_id=77, transport={"conversation_id": "first"})
+    bridge.enqueue_local_message("second", chat_id=77, transport={"conversation_id": "second"})
+    original = bridge.activate_update_transport
+
+    def append_while_draining(msg):
+        if msg.get("text") == "first":
+            bridge.enqueue_local_message("later", chat_id=77)
+        original(msg)
+
+    monkeypatch.setattr(bridge, "activate_update_transport", append_while_draining)
+    updates = bridge.get_updates(offset=20, timeout=0)
+    assert [u["message"]["text"] for u in updates] == ["first", "second"]
+    assert [u["update_id"] for u in updates] == [20, 21]
+    # The supervisor restores each update's route before its own reply rather
+    # than letting the second queued message steal the first's transport.
+    for update, expected in zip(updates, ("first", "second")):
+        original(update["message"])
+        assert bridge._chat_transports[77]["conversation_id"] == expected
+    remaining = bridge.get_updates(offset=22, timeout=0)
+    assert [u["message"]["text"] for u in remaining] == ["later"]
+    assert remaining[0]["update_id"] == 22
+
+
+def test_get_updates_keeps_dequeued_peers_when_one_queued_item_cannot_be_built(monkeypatch, caplog):
+    """TZ-1 batch ingress: the batch reader dequeues several items at once. One
+    item that cannot become an update is dropped on its own (logged): the peers
+    dequeued ahead of it are still returned, the ones behind it too, and the
+    queue behind the snapshot is untouched."""
+    import logging
+
+    bridge = _make_bridge(monkeypatch)
+    for text in ("first", "poison", "third"):
+        bridge.enqueue_local_message(text, chat_id=5, user_id=5, source="skill:bridge",
+                                     client_message_id=f"input-{text}")
+    original = bridge.activate_update_transport
+
+    def refuse_poison(msg):
+        if msg.get("text") == "poison":
+            raise RuntimeError("transport refused")
+        original(msg)
+
+    monkeypatch.setattr(bridge, "activate_update_transport", refuse_poison)
+    with caplog.at_level(logging.ERROR, logger="supervisor.message_bus"):
+        updates = bridge.get_updates(offset=0, timeout=0)
+    assert [u["message"]["text"] for u in updates] == ["first", "third"]
+    assert [u["update_id"] for u in updates] == [1, 2]
+    assert any("Dropping one undecodable queued chat message" in r.getMessage()
+               and "source=skill:bridge chat_id=5 client_message_id=input-poison" in r.getMessage()
+               for r in caplog.records)
+    assert bridge.get_updates(offset=3, timeout=0) == []
+
+    # A foreign object in the queue (not a str, not a mapping) is the same case.
+    bridge._inbox.put(42)
+    bridge.enqueue_local_message("after", chat_id=5, user_id=5, source="skill:bridge")
+    updates = bridge.get_updates(offset=3, timeout=0)
+    assert [(u["update_id"], u["message"]["text"]) for u in updates] == [(3, "after")]
+
+
+def test_requeue_updates_replays_the_tail_before_new_arrivals_with_ids_intact(monkeypatch):
+    """A consumer that stops mid-batch (crash, /panic, /restart) hands the
+    unprocessed tail back; the next read serves it first, in order, with the
+    original update ids, and only then the newer arrivals."""
+    bridge = _make_bridge(monkeypatch)
+    for text in ("a", "b", "c"):
+        bridge.enqueue_local_message(text, chat_id=9, user_id=9, source="skill:bridge",
+                                     transport={"conversation_id": text})
+    batch = bridge.get_updates(offset=10, timeout=0)
+    assert [u["update_id"] for u in batch] == [10, 11, 12]
+    bridge.enqueue_local_message("d", chat_id=9, user_id=9, source="skill:bridge")
+    assert bridge.requeue_updates([]) == 0
+    assert bridge.requeue_updates(batch[1:]) == 2
+    replay = bridge.get_updates(offset=13, timeout=0)
+    assert [(u["update_id"], u["message"]["text"]) for u in replay] == [(11, "b"), (12, "c")]
+    assert replay[0]["message"]["transport"] == {"conversation_id": "b"}, "the route travels with the update"
+    later = bridge.get_updates(offset=13, timeout=0)
+    assert [(u["update_id"], u["message"]["text"]) for u in later] == [(13, "d")]
+    assert bridge.get_updates(offset=14, timeout=0) == []
+    # Two hand-backs without a read in between keep their order: older first.
+    assert bridge.requeue_updates(replay[1:]) == 1
+    assert bridge.requeue_updates(later) == 1
+    assert [u["message"]["text"] for u in bridge.get_updates(offset=14, timeout=0)] == ["c", "d"]
 
 
 def test_project_completion_summary_keeps_event_time_label_live_and_on_reload(
@@ -721,3 +856,94 @@ def test_send_routing_ack_carries_the_cause_only_when_present(monkeypatch):
     assert frames[0]["cause"] == "Not started: the working folder can't be used"
     assert events[0][1]["cause"] == frames[0]["cause"]
     assert "cause" not in frames[1] and "cause" not in events[1][1]
+
+
+def test_named_ingress_hands_its_accepted_row_to_the_queue_as_the_web_witness(monkeypatch, tmp_path):
+    """``accept_local_message`` with a web source (the late quiz answer) queues the
+    SAME in-process witness the socket ingress queues: the dequeuing writer
+    validates a web item against that row, and the queue's empty default is not
+    one. Without the row the supervisor tick raised and the answer was lost."""
+    bridge = _make_bridge(monkeypatch)
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {})
+    row, rejoined = message_bus.accept_local_message(
+        bridge, tmp_path, "late answer", chat_id=1, user_id=1, source="web", client_message_id="late-1",
+    )
+    assert rejoined is False and row["client_message_id"] == "late-1"
+    [update] = bridge.get_updates(offset=0, timeout=0)
+    msg = update["message"]
+    assert msg["accepted_source_row"] == row
+    ref = message_bus.record_inbound_message(
+        bridge, msg, chat_id=1, user_id=1, client_message_id="late-1", text="late answer", ts="ignored",
+    )
+    assert ref == msg["accepted_source_ref"] and ref["ts"] == row["ts"]
+    assert len((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_dequeue_reads_the_retained_row_when_a_web_item_carries_no_witness(monkeypatch, tmp_path):
+    """The queue's default ``accepted_source_row`` is ``{}``: absent, not a witness.
+    A web item with a valid ref and no row is validated against the retained disk
+    row (the skill path) instead of failing the supervisor tick; a ref the disk
+    does not corroborate is still refused."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+
+    bridge = _make_bridge(monkeypatch)
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {})
+    row = message_bus.log_chat(
+        "in", 1, 1, "no witness", ts="2026-01-01T00:00:00+00:00", source="web",
+        client_message_id="bare-1", require_write=True,
+    )
+    ref = build_owner_message_ref(chat_id=1, client_message_id="bare-1", ts=row["ts"], text="no witness")
+    bridge.enqueue_local_message(
+        "no witness", chat_id=1, user_id=1, source="web", client_message_id="bare-1", accepted_source_ref=ref,
+    )
+    [update] = bridge.get_updates(offset=0, timeout=0)
+    assert update["message"].get("accepted_source_row", {}) == {}
+    assert message_bus.record_inbound_message(
+        bridge, update["message"], chat_id=1, user_id=1, client_message_id="bare-1",
+        text="no witness", ts="ignored",
+    ) == ref
+    forged = dict(update["message"], accepted_source_ref={**ref, "text_sha256": "0" * 64})
+    with pytest.raises(ValueError, match="accepted source does not match"):
+        message_bus.record_inbound_message(
+            bridge, forged, chat_id=1, user_id=1, client_message_id="bare-1", text="no witness", ts="ignored",
+        )
+
+
+def test_owner_acceptance_rows_start_a_clean_record_after_a_torn_tail(monkeypatch, tmp_path):
+    """A crashed append can leave ``chat.jsonl`` without its final newline. Both
+    acceptance writers (socket ingress and the named ingress) start a clean record
+    there, so the accepted row stays parseable: history replays its
+    ``ingress_accepted`` fact, the dequeue re-read finds a skill row, and a retry of
+    the same id rejoins instead of enqueueing a second owner turn."""
+    import json
+
+    bridge = _make_bridge(monkeypatch)
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {})
+    chat = tmp_path / "logs" / "chat.jsonl"
+    chat.parent.mkdir(parents=True)
+    chat.write_bytes(b'{"direction": "out", "text": "torn')
+    bridge.ui_send("typed", client_message_id="web-torn")
+    chat.write_bytes(chat.read_bytes() + b'{"direction": "out", "text": "torn again')
+    row, rejoined = message_bus.accept_local_message(
+        bridge, tmp_path, "relayed", chat_id=7, user_id=7, source="skill:telegram", client_message_id="skill-torn",
+    )
+    assert rejoined is False
+    parsed = {}
+    for line in chat.read_text(encoding="utf-8").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue  # the torn fragments stay preserved, unparsed
+        parsed[entry["client_message_id"]] = entry
+    assert parsed["web-torn"]["ingress_accepted"] is True and parsed["skill-torn"] == row
+    assert message_bus.accept_local_message(
+        bridge, tmp_path, "relayed", chat_id=7, user_id=7, source="skill:telegram", client_message_id="skill-torn",
+    ) == (row, True)
+    web, skill = (u["message"] for u in bridge.get_updates(offset=0, timeout=0))
+    assert message_bus.record_inbound_message(
+        bridge, skill, chat_id=7, user_id=7, client_message_id="skill-torn", text="relayed", ts="ignored",
+    ) == skill["accepted_source_ref"]
+    assert web["client_message_id"] == "web-torn"

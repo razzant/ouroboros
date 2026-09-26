@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -65,7 +66,8 @@ def _rows(tmp_path):
 def test_http_records_exact_facts_with_nonterminal_history_type(tmp_path, state, direction):
     client = _client(tmp_path)
     payload = _payload(state=state, message={"provider_message_id": "100.2", "subject": "Café", "to": ["reader@example.test"]})
-    assert _post(client, payload).json() == {"ok": True, "recorded": True, "duplicate": False}
+    assert _post(client, payload).json() == {"ok": True, "recorded": True, "duplicate": False,
+                                            "history_coverage": "indexed"}
     row, = _rows(tmp_path)
     assert row["direction"] == direction
     assert row["text"] == payload["text"] and row["format"] == payload["format"]
@@ -192,12 +194,49 @@ def test_ambiguous_write_failure_invalidates_projection_before_retry(tmp_path, m
     assert len(_rows(tmp_path)) == 1
 
 
-def test_unreadable_retained_chain_is_not_empty_history(tmp_path):
+def test_gapped_retained_chain_accepts_with_explicit_uncertainty(tmp_path):
     client = _client(tmp_path)
     (tmp_path / "logs").mkdir(exist_ok=True)
     (tmp_path / "logs/chat.jsonl").write_text("{broken\n", encoding="utf-8")
-    assert _post(client, _payload()).status_code == 503
-    assert (tmp_path / "logs/chat.jsonl").read_text(encoding="utf-8") == "{broken\n"
+    response = _post(client, _payload())
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "recorded": True, "duplicate": False,
+                               "history_coverage": "gapped"}
+    lines = (tmp_path / "logs/chat.jsonl").read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "{broken"
+    assert json.loads(lines[1])["type"] == "presence_delivery"
+    # A readable later receipt keeps its exact identity even across a gap.
+    restarted = delivery.PresenceDeliveryRecorder(tmp_path)
+    assert restarted.record("transport", _payload())["duplicate"] is True
+    with pytest.raises(delivery.PresenceDeliveryConflict):
+        restarted.record("transport", _payload(text="changed"))
+
+
+def test_readable_history_conflict_still_refuses_even_when_other_rows_are_gapped(tmp_path):
+    client = _client(tmp_path)
+    assert _post(client, _payload()).status_code == 200
+    path = tmp_path / "logs/chat.jsonl"
+    original = path.read_text(encoding="utf-8")
+    row = json.loads(original)
+    row["text"] = "conflicting retained text"
+    path.write_text(original + "{broken\n" + json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(OSError, match="conflicting retained"):
+        delivery.PresenceDeliveryRecorder(tmp_path).record("transport", _payload(delivery_id="later"))
+
+
+def test_receipt_after_torn_tail_starts_a_new_parseable_record(tmp_path):
+    recorder = delivery.PresenceDeliveryRecorder(tmp_path)
+    assert recorder.record("transport", _payload())["recorded"] is True
+    path = tmp_path / "logs/chat.jsonl"
+    with path.open("ab") as handle:
+        handle.write(b'{"interrupted":')
+    assert recorder.record("transport", _payload(delivery_id="next"))["recorded"] is True
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[-2] == '{"interrupted":'
+    assert json.loads(lines[-1])["transport"]["delivery"]["delivery_id"] == "next"
+    # Cold reconstruction cannot prove whether the broken row was a receipt.
+    late = delivery.PresenceDeliveryRecorder(tmp_path).record("transport", _payload(delivery_id="third"))
+    assert late["history_coverage"] == "gapped"
 
 
 def test_required_writer_refusal_does_not_ack_or_fill_index(tmp_path, monkeypatch):
@@ -380,7 +419,12 @@ def test_five_open_turns_leave_receipts_and_inject_admitted(tmp_path):
     with ThreadPoolExecutor(max_workers=5) as pool:
         turns = [pool.submit(_turn, client, binding, index) for index in range(5)]
         try:
-            assert all(entered.acquire(timeout=10) for _ in range(5))
+            # One conversation: the Host gate runs one turn; the other four queue, holding their budget.
+            assert entered.acquire(timeout=10)
+            deadline = time.monotonic() + 10
+            while len(ctx.presence_turns.live()) < 5 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert len(ctx.presence_turns.live()) == 5
             assert _turn(client, binding, 5).status_code == 429  # the turn budget itself still binds
             assert _post(client, _payload()).status_code == 200
             assert _inject(client).status_code == 202

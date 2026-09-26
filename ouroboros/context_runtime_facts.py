@@ -21,6 +21,39 @@ from ouroboros.config import runtime_setting
 log = logging.getLogger(__name__)
 
 
+def task_execution_clock_fact(task: Dict[str, Any], ctx: Any) -> Dict[str, Any]:
+    """Current finite execution-ceiling estimate, not a calendar deadline.
+
+    Quota/budget pauses can move the estimate after this context is assembled;
+    an unknown start or unlimited ceiling yields null instead of a false date.
+    """
+    import datetime
+    import math
+    import time
+    from ouroboros.config import get_task_abs_ceiling_sec
+    from ouroboros.deadline_utils import parse_deadline_ts
+    from ouroboros.model_wait import current_model_wait, execution_elapsed_seconds
+
+    raw = getattr(ctx, "task_started_at", None) or task.get("started_at")
+    try:
+        start = float(raw)
+    except (TypeError, ValueError):
+        parsed = parse_deadline_ts(raw)
+        start = parsed.timestamp() if parsed is not None else 0.0
+    ceiling = get_task_abs_ceiling_sec()
+    started = datetime.datetime.fromtimestamp(start, datetime.timezone.utc).isoformat() if start > 0 and math.isfinite(start) else None
+    projected = None
+    if started and ceiling is not None:
+        now = time.time()
+        owner = current_model_wait()
+        elapsed = (owner.executed_seconds() if owner is not None and owner.task_id == str(task.get("id") or "")
+                   else execution_elapsed_seconds({**task, "started_at": start}, now))
+        projected = datetime.datetime.fromtimestamp(now + max(0.0, ceiling - elapsed),
+                                                    datetime.timezone.utc).isoformat()
+    return {"started_at": started, "absolute_ceiling_at": projected,
+            "absolute_ceiling_at_basis": "current estimate; quota or budget pauses may move it" if projected else "not_set"}
+
+
 def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
     """One dated canonical-queue view, frozen with the task's ContextCore."""
     from ouroboros.config import DATA_DIR, get_max_active_subagents_per_root, get_max_workers

@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
+from ouroboros.dialogue_provenance import presence_root_carrier
 from ouroboros.tools.control_events import (
     _PROMOTE_CONFIRM_TIMEOUT_SEC,
     _emit_and_wait_for_routing,
@@ -59,6 +60,24 @@ def _attach_origin_from_metadata(ctx: ToolContext, evt: Dict[str, Any]) -> None:
             evt["source_text"] = text
     elif metadata.get("origin_suppressed"):
         evt["origin_suppressed"] = True
+
+
+def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any]) -> None:
+    """Keep the routed objective's author separate from the ingress owner corpus."""
+    evt["objective_author"] = {"kind": "task", "task_id": str(getattr(ctx, "task_id", "") or "")}
+    owner_rows = [dict(row) for row in (getattr(ctx, "_owner_directives", None) or [])
+                  if isinstance(row, dict) and row.get("source") in {
+                      "owner_mailbox", "owner_quiz_answer", "origin_message", "owner_corpus", "direct_incoming"}]
+    if evt.get("source_text") and not any(row.get("source") == "origin_message" for row in owner_rows):
+        owner_rows.insert(0, {"source": "origin_message", "content": evt["source_text"]})
+    elif not evt.get("source_text"):
+        # A suppressed (never-logged) origin carries no text; the owner's words
+        # then live only in this run's first row, and ONLY under the host's
+        # owner-ingress stamp (``initial_user``) — an unstamped first turn
+        # (``initial_text``) is never laundered into owner authority.
+        owner_rows[:0] = [dict(row) for row in (getattr(ctx, "_owner_directives", None) or [])
+                          if isinstance(row, dict) and row.get("source") == "initial_user"]
+    evt["owner_corpus"] = owner_rows
 
 
 def _durable_project_of_request(ctx: ToolContext) -> str:
@@ -438,18 +457,17 @@ def _promote_chat_to_task(
         "ts": utc_now_iso(),
     }
     metadata = getattr(ctx, "task_metadata", {})
-    presence = metadata.get("presence") if isinstance(metadata, dict) else None
-    if isinstance(presence, dict) and presence:
-        # A public conversation may promote long work, but it cannot choose a
-        # new Project/workspace/source authority. The immutable positive ceiling
-        # and exact return destination follow the promoted root by value.
+    presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
+    if presence_carrier:
+        # A public conversation cannot choose a new Project/workspace/source authority; the immutable
+        # ceiling and return destination (a descendant's root: its binding only) follow it by value.
         evt.update({
             "project_id": "",
             "project_name": "",
             "workspace_root": "",
             "workspace": "",
             "source": "",
-            "presence": dict(presence),
+            **presence_carrier,
             "task_contract": dict(getattr(ctx, "task_contract", {}) or {}),
         })
         repo_root_note = ""  # Presence runs in its admitted folder, never over the repo
@@ -461,6 +479,7 @@ def _promote_chat_to_task(
 
     evt.update(consciousness_origin_metadata(metadata))
     _attach_origin_from_metadata(ctx, evt)
+    _attach_drafted_objective(ctx, evt)
     predecessor_error = _attach_predecessor_authority_from_metadata(
         ctx, evt, predecessor_task_id,
     )
@@ -750,6 +769,7 @@ def _route_to_project(
 
     evt.update(consciousness_origin_metadata(metadata))
     _attach_origin_from_metadata(ctx, evt)
+    _attach_drafted_objective(ctx, evt)
     evt.update(predecessor_event)
     _attach_client_surface(ctx, evt)
     # Owner 3=A holds on this verb too: a route starts a NEW root exactly like a
@@ -972,6 +992,7 @@ def _send_task_message(
     No origin-bytes substitution, attachments or owner client surface.
     The result says WRITTEN: the target reads it at its next checkpoint.
     """
+    from ouroboros.dialogue_provenance import presence_caller_binding, presence_sender_origin
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
 
     routing_token = uuid.uuid4().hex
@@ -987,6 +1008,8 @@ def _send_task_message(
         "issuer": dict(issuer),
         "ts": utc_now_iso(),
     }
+    if (binding := presence_caller_binding(ctx)) is not None:  # admitted only to this binding's own work (owner Q2)
+        evt.update(presence_binding_id=binding, sender_origin=presence_sender_origin(ctx))
     mode, receipt = _emit_and_wait_for_routing(ctx, evt)
     if str(receipt.get("status") or "") == "delivered":
         return (

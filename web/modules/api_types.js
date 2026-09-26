@@ -297,10 +297,12 @@
  * @property {number=} recommended_index
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {string=} host_facts
  * @property {"chat"} type
  * @property {"user"|"assistant"|"system"} role
  * @property {string} content
  * @property {string} ts
+ * @property {boolean=} ingress_accepted Canonical inbound row saved; not proof of task start or model delivery.
  * @property {boolean=} markdown
  * @property {boolean=} is_progress
  * @property {string=} task_id
@@ -569,6 +571,7 @@
  * @property {string} ts
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {string=} host_facts
  * @property {number=} chat_id
  * @property {string=} task_id
  * @property {boolean=} project_thread
@@ -1516,7 +1519,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // REFUSES a longer comment (it is delivered verbatim, never truncated), so
 // the card must not offer to send one.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.4.11';
+export const GATEWAY_CONTRACT_VERSION = '7.5.0';
 
 /**
  * @typedef {Object} ChatHistoryPosition

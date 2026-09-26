@@ -20,9 +20,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ouroboros.artifacts import attachment_manifest_projection, resolve_attachment_manifest
-from ouroboros.config import get_max_subagent_depth
+from ouroboros.config import get_max_subagent_depth, runtime_settings
 from ouroboros.consciousness_authority import consciousness_origin_metadata
 from ouroboros.depth_evidence import parse_task_depth
+from ouroboros.dialogue_provenance import presence_binding_authority_metadata
 from ouroboros.contracts.task_contract import (
     build_task_contract,
     effective_acceptance_claims,
@@ -60,7 +61,6 @@ from ouroboros.tools.control_subagent_spec import (
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for, system_repo_dir_for
 from ouroboros.utils import append_jsonl, utc_now_iso
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
-from ouroboros.config import runtime_settings
 
 
 def _publish_scheduling_refusal(ctx: Any, status: str, code: str, text: str) -> str:
@@ -846,8 +846,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "required_capabilities": required_caps,
         **intent_fields,
         "subagent_envelope": envelope,
-        # A child of a consciousness turn/tree carries the origin (label, category, level).
-        "origin_metadata": consciousness_origin_metadata(metadata),
+        "origin_metadata": consciousness_origin_metadata(metadata),  # a consciousness child: label, category, level
+        **presence_binding_authority_metadata(metadata, task_contract=getattr(ctx, "task_contract", None)),  # never speaker
     }
     _populate_subagent_event_extras(
         evt, current_chat_id=current_chat_id, child_drive=child_drive,

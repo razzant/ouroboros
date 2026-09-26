@@ -118,6 +118,10 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
         if transcript_growth_signature(limit_ctx.messages) == spoken_before:
             wait_for_acceptance_feedback(tools, limit_ctx, limit_ctx.llm_trace,
                                          limit_ctx.tool_schemas, limit_ctx.owner_msg_seen)
+        elif isinstance(completion, dict):  # that owed round also learns its finish is void
+            from ouroboros.presence_context import presence_finish_not_accepted_note
+
+            _append_or_merge_user_message(limit_ctx.messages, presence_finish_not_accepted_note(ctx, completion), slot=ctx)
     return result
 
 
@@ -152,79 +156,10 @@ from ouroboros.nanny_pacing import (
 
 
 def _setup_dynamic_tools(tools_registry, tool_schemas, messages, context_mode="max"):
-    """Attach list/enable tool handlers and mutate the active schema list."""
-    enabled_extra: set = set()
-    active_tool_names = {
-        name for schema in tool_schemas
-        if (name := str(schema.get("function", {}).get("name") or "").strip())
-    }
+    """Bind the one discovery implementation to this loop's resident schema list."""
+    from ouroboros.tools.tool_discovery import bind_resident_schemas
 
-    def _handle_list_tools(ctx=None, **kwargs):
-        omissions = (
-            tools_registry.capability_omissions()
-            if hasattr(tools_registry, "capability_omissions")
-            else []
-        )
-        non_core = [
-            t for t in list_non_core_tools(tools_registry, context_mode=context_mode)
-            if t["name"] not in active_tool_names
-        ]
-        if not non_core:
-            if not omissions:
-                return "All tools are already in your active set."
-            lines = ["All currently discovered tools are already in your active set.", ""]
-            lines.extend(format_capability_omissions(omissions))
-            return "\n".join(lines)
-        lines = [f"**{len(non_core)} additional tools available** (use `enable_tools` to activate):\n"]
-        for t in non_core:
-            lines.append(f"- **{t['name']}**: {t['description'][:120]}")
-        if omissions:
-            lines.extend(format_capability_omissions(
-                omissions, header="\n" + CAPABILITY_OMISSION_HEADER,
-            ))
-        return "\n".join(lines)
-
-    def _handle_enable_tools(ctx=None, tools: str = "", **kwargs):
-        names = [n.strip() for n in tools.split(",") if n.strip()]
-        enabled, hidden, not_found = [], [], []
-        for name in names:
-            schema = tools_registry.get_schema_by_name(name)
-            if schema and name not in active_tool_names:
-                tool_schemas.append(schema)
-                invalidate_task_cache_splits(getattr(ctx, "task_id", ""))
-                enabled_extra.add(name)
-                active_tool_names.add(name)
-                enabled.append(f"{name} (registered late)")
-            elif name in active_tool_names:
-                enabled.append(f"{name} (already active)")
-            else:
-                # A policy-filtered tool is distinct from an unknown name.
-                reason = (
-                    tools_registry.policy_hidden_reason(name)
-                    if hasattr(tools_registry, "policy_hidden_reason") else None
-                )
-                if reason:
-                    hidden.append(f"{name} — {reason}")
-                else:
-                    not_found.append(name)
-        parts = []
-        if enabled:
-            parts.append(
-                "✅ Tools are registered in the active capability envelope: "
-                + ", ".join(enabled)
-            )
-        if hidden:
-            parts.append(
-                "🚫 Hidden by policy (the tool exists but this task cannot use it): "
-                + "; ".join(hidden)
-            )
-        if not_found:
-            parts.append(f"❌ Not found: {', '.join(not_found)}")
-        return "\n".join(parts) if parts else "No tools specified."
-
-    tools_registry.override_handler("list_available_tools", _handle_list_tools)
-    tools_registry.override_handler("enable_tools", _handle_enable_tools)
-
+    enabled_extra = bind_resident_schemas(tools_registry, tool_schemas)
     non_core_count = len(list_non_core_tools(tools_registry, context_mode=context_mode))
     if non_core_count > 0:
         _append_or_merge_user_message(
@@ -275,7 +210,8 @@ def _provider_unavailable_result(
     unknown_outcome = record or str(
         ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown"
     is_transport_wait = wait_cause == "transport_unavailable"
-    is_context_overflow = kind == "context_overflow" and not (record or is_transport_wait)
+    is_context_overflow = (kind == "context_overflow" and not (record or is_transport_wait)
+                           and not ctx.accumulated_usage.get("resource_refusal"))
     is_deadline_exhausted = kind == "deadline_exhausted" or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "deadline_exhausted"
     llm_trace = getattr(ctx, "llm_trace", None)
     llm_trace = llm_trace if isinstance(llm_trace, dict) else {}
@@ -332,15 +268,17 @@ def _provider_unavailable_result(
         return with_terminal_notice(text, usage, llm_trace)
     no_call, wall = provider_no_call_source(ctx.accumulated_usage, is_deadline_exhausted)
     if no_call:
+        terminal_reason = ("resource_refusal_no_resend" if no_call == "resource_refusal_no_resend"
+                           else "provider_unavailable")
         if wall:
             _finalize_forced_services(ctx, llm_trace)
             _drain_forced_owner_directives(ctx, llm_trace)
         text, usage, llm_trace = _forced_fallback_result(
-            ctx, llm_trace, fallback, reason_code="provider_unavailable",
+            ctx, llm_trace, fallback, reason_code=terminal_reason,
             source=no_call, provider_terminal=wall,
         )
         if usage.get("execution_status") is not None:
-            usage.update(execution_status=RESULT_INFRA_FAILED, reason_code="provider_unavailable")
+            usage.update(execution_status=RESULT_INFRA_FAILED, reason_code=terminal_reason)
         return with_terminal_notice(text, usage, llm_trace)
     prompt = (
         "[DEADLINE] Primary model work reached the owner deadline. Produce the best final answer now from verified work and state what remains undone."
@@ -420,6 +358,7 @@ def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
 def _reset_turn_state(ctx: Any) -> None:
     """Clear the per-turn state this turn owns; nothing durable is touched."""
     ctx._presence_completion, ctx._presence_completion_accepted = None, False
+    ctx._presence_forced_declaration = ctx._presence_forced_pending = None
     ctx._delivery_candidate, ctx._delivery_candidate_revision, ctx._delivery_control_required = None, 0, False
     ctx._delivery_evidence_revision, ctx._delivery_evidence_fingerprint = 0, ""
     ctx.model_turn_state, ctx._authoring_handover, ctx._pending_model_wait_handover = ModelTurnState(), None, None
@@ -482,9 +421,6 @@ def run_llm_loop(
         # A resumed/late-started tree member must see tree spend before its
         # first pacing surface, not a process-local empty stash.
         _loop_tree_accounting(refresh=True, max_age_sec=0.0)
-    from ouroboros.tools import tool_discovery as _td
-    _td.set_registry(tools)
-
     continuation = saved or saved_pause
     tool_schemas = continuation["tool_schemas"] if continuation else initial_tool_schemas(tools, context_mode=active_context_mode)
     tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages, context_mode=active_context_mode)

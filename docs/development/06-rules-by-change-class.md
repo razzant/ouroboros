@@ -51,10 +51,10 @@ Enforcement: `tests/test_protected_artifacts_policy.py` and `tests/test_acceptan
 ### Skill-defined Presence
 
 - Keep behavior portable and authority installation-local: a reviewed `presence:` profile declares instructions, context topics, bounded runtime defaults and conceptual tool/script/resource requests — never provider credentials, room ids or one installed tool spelling; `presence_capabilities.py` stores the owner's exact selections outside the payload, fingerprinted by the request semantics that authorize them. Preserve its optional `workspace_root` (an owner-local external folder, validated through the existing workspace admission and copied into each task contract) when editing runtime/capability selections; unset profiles retain their prior serialized state and fingerprint. Presence keeps canonical shared memory without deriving a Project or creating a forked drive from that folder (ARCHITECTURE §6 "Skills and extensions").
-- Presence authority is a positive immutable ceiling, not a denylist or a prompt promise: admission requires the owner-created binding plus an installed, enabled, freshly executable behavior skill and every required selection, then freezes skill/profile/state/selection fingerprints, exact grants (the profile's selections plus the constant cognitive-memory baseline `tool_capabilities.COGNITIVE_MEMORY_TOOL_NAMES`; a selected grant keeps its bindings), argument bindings, runtime slot and round limit into `task_contract.capability_ceiling`. Schema discovery and execution enforce that same ceiling for built-ins, extensions, MCP tools, scripts and resource roots.
+- Presence authority is a positive immutable ceiling, not a denylist or a prompt promise: admission requires the owner-created binding plus an installed, enabled, freshly executable behavior skill and every required selection, then freezes skill/profile/state/selection fingerprints, exact grants (the profile's selections plus the constant cognitive-memory baseline `tool_capabilities.COGNITIVE_MEMORY_TOOL_NAMES` and the own-work baseline — both readers host-bound to `presence_scope=own_binding`, `steer_task`; a selected grant keeps its bindings), argument bindings, runtime slot and round limit into `task_contract.capability_ceiling`. Schema discovery and execution enforce that same ceiling for built-ins, extensions, MCP tools, scripts and resource roots.
 - `state/presence_bindings.json` is host-owned authority: a transport token resolves only bindings naming that exact transport skill, and the submitted provider/account/conversation/thread must match the binding origin — never recover those identities from message text. Staged files stay inside the calling skill's state root before entering the ordinary attachment store (the turn flow: ARCHITECTURE §12).
 - Run each admitted event with a fresh agent, a deterministic binding-plus-source-event task id, the cross-process installation-wide concurrency gate and per-conversation serialization; the transport's durable provider custody owns arrival FIFO before Host admission. Do not add a transport-specific task scheduler, memory silo, core terminal outbox or resident cross-room agent.
-- Completion is exactly `message`, `silent`, `tool_delivered` or `deferred` (deferred requires a successfully promoted `work_ref`; correlated lookup stays behind the same transport token and binding, and `presence_cancel_work` additionally requires the current binding and conversation to match). Promotion and `schedule_followup` copy the Presence metadata, admitted workspace and capability ceiling by value; any new descendant producer preserves this ceiling or refuses the transition — reconstructing authority from mutable current state is forbidden.
+- Completion is exactly `message`, `silent`, `tool_delivered` or `deferred` (deferred requires a successfully promoted `work_ref`; correlated lookup stays behind the same transport token and binding). A Presence caller reads, steers and cancels only independent roots of its own nonempty binding (`presence_authority.presence_work_refusal`); a delegated descendant is one through the inherited `metadata.presence_binding_authority` alone, never the speaker's `metadata.presence`; and a forced final speaks only its nested `presence_finish` declaration. Promotion and `schedule_followup` copy one Presence carrier (`presence_root_carrier`: speaker metadata or a descendant's binding), admitted workspace and capability ceiling by value; any new descendant producer preserves this ceiling or refuses the transition — reconstructing authority from mutable current state is forbidden.
 - Knowledge-topic and scratchpad mutation each use one stable lock, so concurrent owner and Presence turns cannot overwrite a newer projection with an older render. Test the boundary at both layers — strict profile/state/ceiling parsing, stale/missing review admission, schema and direct-execution filtering, argument binding, binding/token/origin checks, event idempotency and conversation ordering, typed outcomes, late-work correlation, promotion/follow-up inheritance; provider adapter E2E is separate evidence. Enforcement: `tests/test_presence_admission.py` plus the both-layer boundary tests this list requires.
 
 ### Devtools isolation
@@ -105,9 +105,9 @@ Run roots are append-only outside `repo/` and live `data/`; the focused contract
   rejected as soon as it exceeds the source's initial regular-file size rather
   than waiting for a growing file to reach EOF. HTTP admission and
   materialization run their whole blocking operation off the event loop
-  (`gateway._helpers.run_sync_to_completion`); cancellation waits for it before
-  releasing anything, and cancelling an HTTP waiter never cancels the admitted
-  task. Directory exports carry a complete relative member/size/SHA manifest
+  (`gateway._helpers.run_sync_to_completion`); every async ingress-lock
+  caller uses it for locked row → queue → echo. Cancellation settles before release; receive loops
+  stay responsive. Cancelling an HTTP waiter never cancels the admitted task. Directory exports carry a complete relative member/size/SHA manifest
   plus a streamed ZIP (outputs above 50 MiB included); a changed file or
   missing member is an explicit capture failure, while genesis LISTING is
   discovery and only capture/copy is strict.
@@ -702,10 +702,22 @@ and what enforces each.
   root subtree (never `$0` on a read failure); no second ledger, no reconciliation LLM.
 - Runtime notices after the first user/assistant/tool turn are `[SYSTEM NOTICE]` user
   notices, not new `role=system` messages; `LLMClient` demotes non-leading system
-  messages at the provider boundary.
+  messages at the provider boundary. On the OpenAI family and the Claudexor route the LEADING
+  system message's declared mutable blocks also travel as one `[SYSTEM NOTICE]` user notice
+  BEFORE the first user turn (`llm_messages.split_leading_system_prefix`), so the
+  marker has these two meanings.
 - **Cache-friendliness invariant.** Keep stable governance/task contracts before
   mutable evidence; timestamps, hashes, counters and task IDs never belong in a
-  cached prefix. Builders place bare breakpoints (four at most in review,
+  cached prefix. "Stable before mutable" is the Anthropic-breakpoint rule; on the
+  OpenAI family (dated 2026-09-25 observation: the whole leading system section plus
+  tools is one cache unit, reused under one routing key) mutable evidence may not
+  share the leading system section at all — the Main builder DECLARES its stable
+  prefix (`_stable_prefix_blocks`, `context_fit.ContextFitProjection.system_message`)
+  and only the transport projects it (`llm_messages.split_leading_system_prefix` on
+  `llm_attempt.openai_family_route` and in `llm_claudexor._request`, whose backend
+  reuses a donor's prefix only up to an input-item boundary); never project in a builder, never widen the
+  family by name resemblance, and keep the notice header byte-stable (no clocks,
+  hashes, ids). Builders place bare breakpoints (four at most in review,
   `review_substrate.assert_cache_breakpoint_cap`); only
   `LLMClient._normalize_payload_cache_ttl` finalizes them. Preserve existing
   provider hints and recovery; do not add a generic cache/retry framework.
@@ -714,9 +726,11 @@ and what enforces each.
   cached input; a main-loop payload option lives in `main_loop_wire_options`, never
   in one lane after its builder (`tests/test_wrapup_real_send_parity.py`). Preserve `context_fit.seal_task_transcript`'s single message
   marker as it moves between task and tool result; direct Anthropic and
-  OpenRouter keep their supported wire markers. OpenRouter's derived identity
-  excludes cache/host metadata, preserving real task/model differences and
-  explicit affinity. Claudexor's `cache_key_for_model` is shared per install/model
+  OpenRouter keep their supported wire markers. OpenRouter's derived session is
+  per family (`llm_routing._openrouter_session_identity`): OpenAI family = one per
+  model + governance prefix; every other family = conversation-stable from stable
+  policy/model plus the first-user projection, excluding cache/host metadata;
+  explicit affinity and reroute rotation keep precedence. Claudexor's `cache_key_for_model` is shared per install/model
   across tasks, children and wakes: Codex reuses cross-conversation prefixes
   only under the same session. Other API routes retain their prefix identity.
   A wake shares an owner turn's schemas/governance; autonomy and wake reason
@@ -728,6 +742,8 @@ and what enforces each.
   send; image eviction is unchanged. Mechanisms: ARCHITECTURE §6 "Context fitting,
   retry, and compaction" / "Task lifecycle" / "Caller-owned subscription model
   calls". Enforce with `tests/test_review_prompt_caching.py`,
+  `tests/test_openai_system_prefix_split.py` (projection, placement, per-family
+  session), `tests/test_prompt_cache_v664.py` (derived identity, one exact retry),
   `tests/test_transcript_prefix.py` (real Main loop, plain/multipart) and
   `tests/test_transcript_provider_shapes.py` (local/GigaChat); CHECKLISTS item 22.
 - Only sealed reasoning artifacts bind fallback to their endpoint
@@ -966,12 +982,12 @@ and what enforces each.
   generation. File/diff requests impose no commit-or-revert rule; self-modification
   keeps reviewed commits (BIBLE P0/P3).
 - Before cleanup, freeze `review_evidence.task_inputs` and `completion_observations`
-  for summary/reflection (ARCHITECTURE §6 "Post-task reflection"): run origin, whole
+  for reflection (ARCHITECTURE §6 "Post-task reflection"): run origin, whole
   owner Q/A, peer provenance and canonical split-root verification receipts. Zero exit is positive;
   absent is unknown; unrelated passes erase no failure. Send content, not pointers;
   recover the same snapshot. Count delivery via `OWNER_DELIVERY_TOOL_NAMES`, never
-  global skill state. Summary uses `chat_observed` custody and the task-scoped,
-  archive-aware trace reader.
+  global skill state. The free `host_task_facts` row makes no model call; the paid
+  reflection and its Pattern Register write use `chat_observed` custody.
 - Promoted tasks carry their host-minted root id and role on the queue payload.
   RUNNING writes preserve the actual `_task_started_ts` as `started_at` and an existing
   `queued_at`; terminal `ts` stays its own field; missing historical start facts stay
@@ -1054,7 +1070,8 @@ and what enforces each.
   arguments intact. A terminal critic vote cannot deny author reaction or choose its stop. Blocking may save corrections and stop; advancement needs fresh
   reviewer authority. Advisory may explicitly finish revisions after exposed feedback
   or disclosed unavailability without another panel. Keep critic/author hashes separate;
-  bind intent to delivery evidence; consume it on owner/evidence supersession.
+  bind a finish to delivery evidence (a stop needs no freshness); consume it on
+  owner/evidence supersession.
   Queueing is not exposure; predeclared finish cannot authorize unseen feedback;
   `author_action=stop` grants neither completion nor permission. No semantic counters or
   keyword gates (P5). ARCHITECTURE §6 owns material-only continue, invalid-vote abstention

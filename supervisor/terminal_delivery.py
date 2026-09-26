@@ -34,9 +34,8 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.utils import update_json_locked, utc_now_iso
 from ouroboros.task_finalization import (
-    HOST_AUTHORED_TERMINAL_ORIGINS,
-    TERMINAL_ORIGIN_HOST_SALVAGE,
-    TERMINAL_ORIGIN_MODEL_FINAL,
+    HOST_AUTHORED_TERMINAL_ORIGINS, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL,
+    artifact_store_roots, rescued_files_fact, rescued_files_sentence,
 )
 
 log = logging.getLogger(__name__)
@@ -1281,6 +1280,7 @@ def _persist_cancel_receipt(
     preserved_path: str, preview_omitted: int,
     children: Optional[List[Dict[str, Any]]] = None,
     unreconciled_runs: Optional[List[str]] = None,
+    reason_code: str = "", files_rescued: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Q5=A: the technical stop facts live in the task DETAILS panel.
 
@@ -1292,6 +1292,7 @@ def _persist_cancel_receipt(
     digest for a cascade root. Never creates the result file (a later full
     write would clobber a block-only row) and never clobbers previously
     persisted non-empty facts with an emptier rebuild. Fail-soft.
+    ``files_rescued`` (TZ-2 C2) is the typed stat-only store count the receipt text speaks.
     """
     tid = str(task_id or "")
     try:
@@ -1309,7 +1310,10 @@ def _persist_cancel_receipt(
                 else {"path": "", "preserved": False}
             ),
             "ts": utc_now_iso(),
+            **({"files_rescued": dict(files_rescued)} if files_rescued else {}),
         }
+        if str(reason_code or ""):
+            block["reason_code"] = str(reason_code)  # TZ-2 C1: the typed rail beside its sentence
         rows = [
             {"task_id": str(c.get("task_id") or ""),
              "outcome": str(c.get("outcome") or ""),
@@ -1405,6 +1409,7 @@ def build_unreviewed_salvage_event(
     unreconciled_runs: Optional[List[str]] = None,
     settled_status: str = "",
     delivery_id: str = "",
+    reason_code: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Build (without sending) the one salvage/terminal chat message.
 
@@ -1437,12 +1442,19 @@ def build_unreviewed_salvage_event(
     "answer"), and the technical facts (path/sha256/bytes/children digest)
     live in the durable ``cancel_receipt`` block on the task result — the
     details panel — not in chat.
+    ``reason_code`` (TZ-2 C1): the TYPED rail; with an empty ``outcome`` the owner
+    sentence comes from TASK_CAUSE_PHRASES here, and the code rides the receipt, not the prose.
+    TZ-2 C2: text and receipt state the files rescued (positive/zero/unknown, stat-only walk, no hashes).
     """
     from ouroboros.task_results import STATUS_COMPLETED
 
     tid = str(task_id or "").strip()
     if not tid:
         return None
+    code = str(reason_code or "").strip()
+    if code and not str(outcome or "").strip():
+        from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
+        outcome = f"stopped by the supervisor. {TASK_CAUSE_PHRASES.get(code, code)}"
     task_row = task if isinstance(task, dict) else {}
     chat_id = lineage_chat_id(pathlib.Path(drive_root), task_row, tid)
     if not chat_id:
@@ -1457,21 +1469,19 @@ def build_unreviewed_salvage_event(
     if str(settled_status or "").strip().lower() == STATUS_COMPLETED:
         # Completion-wins (owner 4=A): the kept result is the real answer, not a
         # salvage — but it still bypassed the normal delivery path, so say so.
-        lines = [
-            f"✅ Task {tid} {outcome_text}. Its completed result is preserved below."
-            + descendants,
-        ]
+        lines = [f"✅ Task {tid} {outcome_text}. Its completed result is preserved below." + descendants]
     else:
         lines = [
             f"⚠️ Task {tid} was {outcome_text}. Below is the last persisted "
             "intermediate model message, preserved WITHOUT review (salvaged "
             "best-effort; NOT a final answer)." + descendants,
         ]
-    if preview:
-        lines += ["", preview, "", _preview_note_line(preserved_path, omitted)]
-    else:
-        lines += ["", "(no salvageable agent output was found for this task)"]
-    disclosure_lines: List[str] = []
+    lines += ["", preview, "", _preview_note_line(preserved_path, omitted)] if preview else [
+        "", "(no salvageable agent output was found for this task)"]
+    # TZ-2 C2: "no salvageable text" never implies "no files": the stat-only store count
+    # rides the mutable disclosure (never the content-derived identity), hashes not computed.
+    rescued = rescued_files_fact(tid, artifact_store_roots(drive_root, tid, task=task_row))
+    disclosure_lines: List[str] = ["", rescued_files_sentence(rescued)]
     if unreconciled_runs:
         # GR3-7: an audit-failure marker means run state is UNKNOWN — a
         # different honest sentence than "these named runs stayed open".
@@ -1513,9 +1523,9 @@ def build_unreviewed_salvage_event(
         settled_status=str(settled_status or ""), outcome=outcome_text,
         delivery_id=did, preserved_path=str(preserved_path or ""),
         preview_omitted=omitted, children=children,
-        unreconciled_runs=unreconciled_runs,
+        unreconciled_runs=unreconciled_runs, reason_code=code, files_rescued=rescued,
     )
-    return {
+    event = {
         "type": "send_message",
         "chat_id": chat_id,
         "task_id": tid,
@@ -1529,6 +1539,9 @@ def build_unreviewed_salvage_event(
         "delivery_id": did,
         "ts": utc_now_iso(),
     }
+    if code:
+        event["reason_code"] = code
+    return event
 
 
 def deliver_unreviewed_salvage(
@@ -1543,6 +1556,7 @@ def deliver_unreviewed_salvage(
     unreconciled_runs: Optional[List[str]] = None,
     settled_status: str = "",
     delivery_id: str = "",
+    reason_code: str = "",
     event_queue: Any = None,
 ) -> bool:
     """Enqueue ONE unreviewed-salvage chat message for a cancelled/reaped task.
@@ -1560,7 +1574,7 @@ def deliver_unreviewed_salvage(
         pathlib.Path(drive_root), task, task_id,
         outcome=outcome, salvaged_text=salvaged_text, preserved_path=preserved_path,
         children=children, unreconciled_runs=unreconciled_runs,
-        settled_status=settled_status, delivery_id=delivery_id,
+        settled_status=settled_status, delivery_id=delivery_id, reason_code=reason_code,
     )
     if event is None:
         # GR3-1c: a terminal outcome with NO resolvable lineage chat records a

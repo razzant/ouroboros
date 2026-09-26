@@ -241,6 +241,35 @@ def _with_integrity(summary: Dict[str, Any], degraded: bool) -> Dict[str, Any]:
     return summary
 
 
+def _projection_from_final(
+    final: list, integrity_degraded: bool, configured_limit: Optional[float] = None,
+    *, root_task_id: str = "", include_roots: bool = True,
+) -> Dict[str, Any]:
+    """Render the money projection from ALREADY-VALIDATED final rows: one
+    snapshot, one projection, so a caller deriving the ordering marker from
+    the SAME rows writes both under one authority instead of pairing a marker
+    with a second, later ledger read."""
+    def limit_of(rows: list) -> Optional[float]:
+        known = [v for v in (_number(row.get("root_limit_usd")) for row in rows) if v is not None]
+        return min(known) if known else None
+    if root_task_id:
+        rows = [row for row in final if str(row.get("root_task_id") or "") == root_task_id]
+        return _with_integrity(_with_limit(_summary(rows), limit_of(rows)), integrity_degraded)
+    result = _with_limit(_summary(final), configured_limit)
+    if include_roots:
+        grouped: Dict[str, list] = {}
+        for row in final:
+            rid = str(row.get("root_task_id") or "")
+            if rid:
+                grouped.setdefault(rid, []).append(row)
+        result["by_root"] = {
+            rid: _with_integrity(_with_limit(_summary(grouped[rid]), limit_of(grouped[rid])),
+                                 integrity_degraded)
+            for rid in sorted(grouped)
+        }
+    return _with_integrity(result, integrity_degraded)
+
+
 def _marker_from_final(final: Sequence[Dict[str, Any]]) -> Optional[list]:
     """The ordered ``[compaction_epoch, seq]`` fact of these validated rows.
 

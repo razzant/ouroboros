@@ -41,7 +41,7 @@ function fixture(history = []) {
             isConnected: () => true, send() {} },
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
         updateUnreadBadge() {}, chatId: 1, idPrefix: 'chat', mountEl: env.mount,
-        stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
     });
     const messages = document.byId.get('chat-messages');

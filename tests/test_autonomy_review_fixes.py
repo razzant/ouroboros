@@ -192,18 +192,18 @@ def test_pre_loop_checkpoint_failure_reports_unknown_counts_without_reading_corr
     assert stored["owner_wait"]["source_ref"] == case.wait["source_ref"]
 
 
-def test_unknown_exception_summary_does_not_invent_zero_rounds_or_buy_a_model_call(tmp_path, monkeypatch):
-    from ouroboros.post_task_synthesis import _run_task_summary
+def test_unknown_exception_facts_row_does_not_invent_zero_rounds_or_buy_a_model_call(tmp_path, monkeypatch):
+    from ouroboros.post_task_synthesis import _record_task_facts
 
     rows = []
-    monkeypatch.setattr("ouroboros.project_dialogue.append_authored_task_summary",
-                        lambda _root, _result_root, row, **_: rows.append(row))
+    monkeypatch.setattr("ouroboros.project_dialogue.append_canonical_task_summary",
+                        lambda _root, row: rows.append(row))
     monkeypatch.setattr("ouroboros.llm_observability.chat_observed", lambda *_a, **_kw: pytest.fail("no new paid summary"))
-    _run_task_summary(SimpleNamespace(drive_root=tmp_path), None, {"id": "unknown", "text": "Recover work"},
-                      {"loop_evidence_unavailable": True},
-                      {"loop_evidence_unavailable": True, "tool_calls": []}, tmp_path / "logs")
+    _record_task_facts(SimpleNamespace(drive_root=tmp_path), {"id": "unknown", "text": "Recover work"},
+                       {"loop_evidence_unavailable": True},
+                       {"loop_evidence_unavailable": True, "tool_calls": []}, tmp_path / "logs")
     assert rows[0]["tool_calls"] is None and rows[0]["rounds"] is None
-    assert "round count unknown" in rows[0]["text"]
+    assert rows[0]["summary_kind"] == "host_task_facts" and rows[0]["text"] == ""
 
 
 def test_failed_exception_attachment_keeps_the_original_error_and_unknown_projection(tmp_path):

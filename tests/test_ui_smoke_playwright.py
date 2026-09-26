@@ -19,7 +19,9 @@ from tests.candidate_checkout import (
 )
 from ouroboros.test_environment import isolated_environment
 from tests.fixtures_mock_llm import MockLLMServer
-from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
+from tests.ui_chat_viewport_smoke import (
+    _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 
@@ -974,12 +976,9 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                         has_touch=mobile,
                     )
                     page = context.new_page()
-                    page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+                    page.add_init_script(f"({_CAPTURE_TEST_SOCKET})();({_OBSERVE_STATE_READS})()")
                     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                    page.wait_for_function(
-                        "() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)",
-                        timeout=30_000,
-                    )
+                    _wait_socket_open_quiescent(page)  # the frames below live on the test socket only
                     named = page.locator('.chat-live-card[data-task-id="named-act"]')
                     named.wait_for(state="attached", timeout=30_000)
                     unnamed = page.locator('.chat-live-card[data-task-id="unnamed-act"]')
@@ -1218,6 +1217,13 @@ def test_ui_smoke_chat_chronology_reconnect_and_plain_answer_marker(direct_serve
                 )
                 mounted_anchor.wait_for(state="attached", timeout=30_000)
                 assert mounted_anchor.is_visible()
+                # Establish build: unknown SHA deliberately reloads.
+                page.wait_for_function(
+                    "() => typeof window.__ouroWs?._lastSha === 'string'"
+                    " && window.__ouroWs._lastSha.length > 0",
+                    timeout=30_000,
+                )
+                page.evaluate("() => { window.__chronologyDocument = {}; }")
 
                 t1 = {
                     "ts": "2025-07-18T10:00:01+00:00",
@@ -1235,22 +1241,10 @@ def test_ui_smoke_chat_chronology_reconnect_and_plain_answer_marker(direct_serve
                     "format": "markdown",
                 }
                 disconnected_summary = {
+                    **anchor_summary,
                     "ts": "2025-07-18T10:00:02.500000+00:00",
-                    "direction": "system",
-                    "type": "task_summary",
-                    "system_type": "task_summary",
                     "task_id": "chronology-disconnected",
-                    "chat_id": 1,
                     "text": "Disconnected summary-only card.",
-                    "tool_calls": 1,
-                    "rounds": 2,
-                    "outcome_axes": {
-                        "lifecycle": {"status": "completed"},
-                        "execution": {"status": "ok"},
-                        "objective": {"status": "pass"},
-                        "review": {"status": "pass"},
-                        "artifacts": {"status": "ready"},
-                    },
                 }
                 t4 = {
                     "ts": "2025-07-18T10:00:04+00:00",
@@ -1372,6 +1366,7 @@ def test_ui_smoke_chat_chronology_reconnect_and_plain_answer_marker(direct_serve
                         };
                     }"""
                 )
+                assert page.evaluate("() => Boolean(window.__chronologyDocument)")
                 assert abs(scroll_after["anchorTop"] - scroll_before["anchorTop"]) <= 6
                 page.locator("#chat-messages").evaluate("(messages) => { messages.scrollTop = 0; }")
                 page.screenshot(
@@ -1404,6 +1399,7 @@ def test_ui_smoke_chat_chronology_reconnect_and_plain_answer_marker(direct_serve
                 )
 
                 page.goto(f"{url}/?_ouro_reason=sha-change", wait_until="domcontentloaded", timeout=30_000)
+                assert page.evaluate("() => typeof window.__chronologyDocument === 'undefined'")
                 page.get_by_text("Restart complete").wait_for(state="visible", timeout=30_000)
                 first = page.locator(".chat-bubble", has_text="First historical message.").first
                 first.wait_for(state="attached", timeout=30_000)

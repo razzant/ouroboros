@@ -197,10 +197,21 @@ def _drain_incoming_messages(
                 )
                 acknowledge_transcript_entry(drive_root, task_id, entry)
                 continue
+            # A LATE quiz answer: the owner's row and this entry's text are the
+            # owner's own words; the model reads (and the owner corpus keeps) the
+            # FULL card frame rebuilt from the stored block on the canonical root.
+            model_msg = dmsg
+            if entry.get("late_answer") is not None:
+                from ouroboros.owner_quiz import late_answer_model_text
+
+                model_msg = late_answer_model_text(
+                    str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
+                    entry.get("late_answer"), dmsg,
+                )
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
-                content=dmsg,
+                content=model_msg,
                 msg_id=str(entry.get("msg_id") or ""),
             )
             _stamp_owner_delivery(
@@ -213,7 +224,7 @@ def _drain_incoming_messages(
             from ouroboros.client_surface import noted_owner_text
 
             _loop()._append_or_merge_user_message(
-                messages, _loop()._owner_marked_content(noted_owner_text(owner_ctx, entry, dmsg)),
+                messages, _loop()._owner_marked_content(noted_owner_text(owner_ctx, entry, model_msg)),
                 slot=owner_ctx,
             )
             acknowledge_transcript_entry(drive_root, task_id, entry)
@@ -479,7 +490,12 @@ def _handle_forced_finalization(ctx: _RoundLimitContext, reason: str) -> Tuple[s
         return _handle_owner_stop_finalization(ctx, str(reason))
     if reason_lines and reason_lines[0].strip() == REASON_OWNER_STOPPED_DIRECT_TURN:
         return _handle_direct_turn_hard_stop(ctx)
-    fallback = f"⚠️ Task reached {reason or 'deadline'}; finalization grace produced no answer."
+    from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
+
+    # The host fallback speaks the rail's owner sentence; an unknown rail stays raw.
+    rail = (reason_lines[0].strip() if reason_lines else "") or "deadline"
+    cause = TASK_CAUSE_PHRASES.get(rail, f"Task reached {rail}")
+    fallback = f"⚠️ {cause}; finalization grace produced no answer."
     prompt = (
         f"[FINALIZE_NOW] The supervisor opened a finalization grace window (reason: {reason or 'deadline'}). "
         "The task will be stopped shortly. Produce your best final answer NOW from the verified "

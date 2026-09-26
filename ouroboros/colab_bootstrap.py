@@ -24,7 +24,7 @@ DEFAULT_COLAB_APP_ROOT = "/content/drive/MyDrive/Ouroboros"
 DEFAULT_COLAB_REPO_DIR = "/content/ouroboros_repo"
 DEFAULT_OFFICIAL_REPO_URL = "https://github.com/razzant/ouroboros.git"
 
-_SECRET_KEYS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GITHUB_TOKEN", "TELEGRAM_BOT_TOKEN")
+_SECRET_KEYS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GITHUB_TOKEN", "TELEGRAM_BOT_TOKEN")
 
 
 def _run_colab_git_network(args: list[str], *, cwd: pathlib.Path | None = None) -> str:
@@ -87,7 +87,7 @@ def collect_colab_secrets() -> Dict[str, str]:
     """
     # Providers the one-click Colab launch can auto-route models for via
     # apply_runtime_provider_defaults (OpenRouter is the default aggregator;
-    # OpenAI/Anthropic/MiniMax/DeepSeek/Cloud.ru have direct model defaults). OpenAI-compatible
+    # OpenAI/Anthropic/MiniMax/DeepSeek/Z.ai/Cloud.ru have direct model defaults). OpenAI-compatible
     # endpoints have no universal model default and need explicit OUROBOROS_MODEL_*
     # config, so they are an advanced manual path, not part of the quick launch.
     provider_keys = (
@@ -96,6 +96,7 @@ def collect_colab_secrets() -> Dict[str, str]:
         "ANTHROPIC_API_KEY",
         "MINIMAX_API_KEY",
         "DEEPSEEK_API_KEY",
+        "ZAI_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
     )
     out: Dict[str, str] = {}

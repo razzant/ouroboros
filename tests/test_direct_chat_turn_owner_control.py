@@ -541,7 +541,7 @@ def _inflight_synthesis(monkeypatch, tmp_path, task_id=TURN_ID):
     monkeypatch.setattr(llm_mod, "LLMClient", lambda *a, **k: object())
     for name, attr in (("chat_consolidation", "_run_chat_consolidation"),
                        ("scratchpad_consolidation", "_run_scratchpad_consolidation"),
-                       ("summary", "_run_task_summary"), ("reflection", "_run_reflection"),
+                       ("facts", "_record_task_facts"), ("reflection", "_run_reflection"),
                        ("promotion", "_update_improvement_backlog")):
         monkeypatch.setattr(pipeline, attr, _stage(name))
     monkeypatch.setattr(pipeline, "_apply_reflection_memory_actions", lambda *a, **k: None)
@@ -612,13 +612,13 @@ def test_stop_now_during_the_inflight_synthesis_is_accepted_and_stops_the_remain
     finally:
         synthesis.release.set()
     assert second.status_code == 404, second.text
-    assert synthesis.calls == ["chat_consolidation"], synthesis.calls
+    assert synthesis.calls == ["facts", "chat_consolidation"], synthesis.calls
     stored = load_task_result(tmp_path, TURN_ID)
     assert stored["status"] == "completed"
     checkpoint = stored["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded", checkpoint
     assert checkpoint["post_task_stop_reason"] == (
-        "owner_stopped:skipped=scratchpad_consolidation,summary,reflection,promotion"), checkpoint
+        "owner_stopped:skipped=scratchpad_consolidation,reflection,promotion"), checkpoint
     assert not active_intent(tmp_path, TURN_ID)
 
 
@@ -654,11 +654,11 @@ def test_cascade_stop_now_during_the_inflight_synthesis_keeps_the_intent_open_an
             assert intent.get("scope") == SCOPE_CASCADE, intent
             assert "post-task synthesis" in str(intent.get("last_error") or ""), intent
             assert _mailbox_kinds(tmp_path) == []          # no control for a loop that is gone
-            assert synthesis.calls == ["chat_consolidation"], synthesis.calls
+            assert synthesis.calls == ["facts", "chat_consolidation"], synthesis.calls
             synthesis.release.set()
             synthesis.thread.join(30)
             assert not synthesis.thread.is_alive()
-            assert synthesis.calls == ["chat_consolidation"], synthesis.calls
+            assert synthesis.calls == ["facts", "chat_consolidation"], synthesis.calls
             second = client.post(f"/api/tasks/{TURN_ID}/cancel", json=body)
     finally:
         synthesis.release.set()
@@ -668,5 +668,5 @@ def test_cascade_stop_now_during_the_inflight_synthesis_keeps_the_intent_open_an
     checkpoint = stored["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded", checkpoint
     assert checkpoint["post_task_stop_reason"] == (
-        "owner_stopped:skipped=scratchpad_consolidation,summary,reflection,promotion"), checkpoint
+        "owner_stopped:skipped=scratchpad_consolidation,reflection,promotion"), checkpoint
     assert not active_intent(tmp_path, TURN_ID)

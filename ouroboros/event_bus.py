@@ -20,6 +20,7 @@ CHAT_VIDEO = "chat.video"
 CHAT_DOCUMENT = "chat.document"
 CHAT_LINKS = "chat.links"
 CHAT_QUIZ = "chat.quiz"
+CHAT_QUIZ_STATE = "chat.quiz_state"
 SKILL_LIFECYCLE = "skill.lifecycle"
 # One owner-notification fact ("come back, there is something here for you"):
 # a durable `owner_notification` row in logs/events.jsonl — which the server
@@ -28,7 +29,7 @@ SKILL_LIFECYCLE = "skill.lifecycle"
 # Never a chat row, never model context.
 OWNER_NOTIFICATION = "owner.notification"
 VALID_TOPICS = frozenset({
-    CHAT_OUTBOUND, CHAT_TYPING, CHAT_PHOTO, CHAT_VIDEO, CHAT_DOCUMENT, CHAT_LINKS, CHAT_QUIZ,
+    CHAT_OUTBOUND, CHAT_TYPING, CHAT_PHOTO, CHAT_VIDEO, CHAT_DOCUMENT, CHAT_LINKS, CHAT_QUIZ, CHAT_QUIZ_STATE,
     SKILL_LIFECYCLE, OWNER_NOTIFICATION,
 })
 OWNER_NOTIFICATION_TEXT_CHARS = 1000
@@ -237,6 +238,7 @@ __all__ = [
     "CHAT_OUTBOUND",
     "CHAT_PHOTO",
     "CHAT_QUIZ",
+    "CHAT_QUIZ_STATE",
     "CHAT_TYPING",
     "CHAT_VIDEO",
     "EventBus",

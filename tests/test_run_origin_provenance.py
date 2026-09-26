@@ -117,6 +117,26 @@ def test_first_row_label_follows_the_owner_stamp_and_owner_bytes_do_not_change()
         assert ctx._owner_directives[0]["content"] == "Initial requirement verbatim", label
 
 
+def test_promoted_objective_is_not_owner_corpus_even_with_inherited_owner_stamp():
+    from ouroboros.context import build_user_content
+    from ouroboros.loop_messages import owner_source_sha256
+
+    metadata = {"origin_message_ref": OWNER_REF, "objective_author": {"kind": "task", "task_id": "draft-1"},
+                "owner_corpus": [{"source": "origin_message", "content": "Proceed to implementation"},
+                                 {"source": "owner_quiz_answer", "content": "Yes, implement"}]}
+    ctx = _first_row(metadata, "This is NOT permission to implement [SWARM_INITIATIVE]")
+    assert [row["content"] for row in ctx._owner_directives] == ["Proceed to implementation", "Yes, implement"]
+    assert all("source_task_id" not in row for row in ctx._owner_directives)  # owner, not drafter
+    assert owner_source_sha256(ctx) != owner_source_sha256(
+        SimpleNamespace(_owner_directives=[{"source": "initial_user", "content": "This is NOT permission to implement"}]))
+    rendered = build_user_content({"text": "This is NOT permission to implement", "metadata": metadata})
+    assert rendered.startswith("[OBJECTIVE_AUTHOR]") and "task draft-1" in rendered
+    assert "not spoken by the owner" in rendered
+    # Host-initiated tasks still carry the owner's first text without a drafter stamp.
+    assert _first_row({"origin_message_ref": OWNER_REF}, "Owner's exact request")._owner_directives == [
+        {"source": "initial_user", "content": "Owner's exact request"}]
+
+
 # --- the routing issuer -------------------------------------------------------------
 
 @pytest.mark.parametrize("label,direct,metadata,expected", [

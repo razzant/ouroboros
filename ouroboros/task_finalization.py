@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import pathlib
 from typing import Any, Dict, List
 
@@ -597,6 +598,99 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
         "Artifact store manifest (task_results/artifacts/<task_id>/):\n"
         f"{manifest_text}\nTask completion observations:\n{observations}\n\n"
     )
+
+
+# TZ-2 C2: a store's own bookkeeping is not a rescued file. Mirrors
+# ``artifacts._ARTIFACT_MANIFEST`` and ``workspace_patch_capture.SCRATCH_MANIFEST_NAME``
+# (importing the D05 store owner here would invert the terminal-facts direction);
+# tests/test_task_summary.py pins equality with the SSOT so the literals cannot drift.
+RESCUED_FILES_BOOKKEEPING = frozenset({".artifact_manifest.json", ".scratch_manifest.json"})
+
+
+def artifact_store_roots(canonical_root: Any, task_id: str, *, task: Any = None,
+                         child_root: Any = None) -> List[pathlib.Path]:
+    """The task's artifact store directories: the canonical one and, for a split root, the child drive's.
+
+    The child drive is the caller's when it knows it (the pipeline's ``env.drive_root``),
+    else the task row's (``child_drive_root`` / ``drive_root``, the supervisor's own
+    resolution of a running task's drive), else the durable result's; the same store
+    named twice is walked once. Fail-soft: an unreadable result adds no store.
+    """
+    from ouroboros.headless import ARTIFACTS_DIR
+
+    row = task if isinstance(task, dict) else {}
+    child = str(child_root or row.get("child_drive_root") or row.get("drive_root") or "").strip()
+    if not child and canonical_root:
+        try:
+            from ouroboros.task_results import load_task_result
+
+            stored = load_task_result(pathlib.Path(canonical_root), str(task_id)) or {}
+            child = str(stored.get("child_drive_root") or stored.get("headless_child_drive_root")
+                        or stored.get("drive_root") or "").strip()
+        except Exception:
+            log.debug("artifact store roots: durable child drive unreadable for %s", task_id, exc_info=True)
+    stores: List[pathlib.Path] = []
+    for root in (str(canonical_root or ""), child):
+        store = pathlib.Path(root) / ARTIFACTS_DIR / str(task_id)
+        if root and store.resolve(strict=False) not in [known.resolve(strict=False) for known in stores]:
+            stores.append(store)
+    return stores
+
+
+def rescued_files_fact(task_id: str, stores: List[pathlib.Path]) -> Dict[str, Any]:
+    """How many files the task's artifact stores hold, by ``stat`` alone (TZ-2 C2).
+
+    ``state`` is ``positive`` (files were found), ``zero`` (every store was walked and
+    holds none; a store never created is one nothing was written to) or ``unknown`` (a
+    store could not be read — ``count`` is then what the readable part held, a floor,
+    never a total). No file is opened and no hash is computed, and the fact says so
+    (``hash_computed``), so a reader never mistakes this occupancy count for the
+    per-file receipt the artifact manifest (``collect_task_artifact_records``) owns;
+    conversely an empty readable manifest alone never proves zero — only the walk does.
+    Never raises: a failure inside the walk is an unknown store.
+    """
+    rows: List[Dict[str, Any]] = []
+    for store in stores:
+        try:
+            count, readable = _stat_only_file_count(pathlib.Path(store))
+        except Exception:
+            count, readable = 0, False
+        rows.append({"store": str(store), "count": count, "readable": readable})
+    total = sum(int(row["count"]) for row in rows)
+    unreadable = not rows or any(not row["readable"] for row in rows)
+    state = "unknown" if unreadable else ("positive" if total else "zero")
+    return {"count": total, "state": state, "hash_computed": False, "stores": rows}
+
+
+def _stat_only_file_count(store: pathlib.Path) -> tuple[int, bool]:
+    """(regular files below ``store`` minus bookkeeping, whether every directory was readable)."""
+    count, readable, pending = 0, True, [store]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(pathlib.Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False) and entry.name not in RESCUED_FILES_BOOKKEEPING:
+                        count += 1
+        except FileNotFoundError:
+            if directory != store:
+                readable = False  # a subdirectory vanished mid-walk: the count is a floor
+        except OSError:
+            readable = False  # permission denied, a file where the store should be, an I/O error
+    return count, readable
+
+
+def rescued_files_sentence(fact: Dict[str, Any]) -> str:
+    """ONE owner sentence for the stop receipt: the count, its state, and that no hash was computed."""
+    state, count = str(fact.get("state") or "unknown"), int(fact.get("count") or 0)
+    if state == "positive":
+        return f"Files rescued: {count} in the task's artifact store (counted by stat; hashes not computed)."
+    if state == "zero":
+        return "Files rescued: none — the task's artifact store was walked and holds no files (hashes not computed)."
+    seen = f"; {count} seen before the failure" if count else ""
+    return f"Files rescued: unknown — the task's artifact store could not be read{seen} (hashes not computed)."
 
 
 def model_execution_projection(usage: Dict[str, Any]) -> Dict[str, Any] | None:

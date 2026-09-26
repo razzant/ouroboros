@@ -533,7 +533,8 @@ def groom_backlog(drive_root: Any, *, cap: int = _GROOM_CAP) -> int:
     merge near-dupes, mark resolved, re-rank, cap to <=cap. Hand-added items and
     fingerprinted blocks with unmodelled bytes pass through UNCHANGED. Runs on a
     size trigger and re-serializes through the locked parser-safe writer. Returns
-    the number written, or 0 on a bad/empty/oversized reply or concurrent change."""
+    the number written, or 0 on a bad/empty/oversized reply or concurrent change;
+    a failed model call raises to the caller (never the 0 of a pass not needed)."""
     import json as _json
 
     path = backlog_path(drive_root)
@@ -558,46 +559,42 @@ def groom_backlog(drive_root: Any, *, cap: int = _GROOM_CAP) -> int:
     if not fp_items:
         return 0
 
+    from ouroboros.config import get_light_model
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_observability import chat_observed
+
+    # One destructive grooming call sees every complete stored record,
+    # including evidence/context/custom fields and immutable manual items.
+    # If this full prompt cannot be served, the raised failure preserves the
+    # file; there is no smaller second call or prefix-authorized rewrite. The
+    # caller's stage classifies it: an interruption stops later paid post-work.
+    complete = [dict(it) for it in items]
+    prompt = _GROOM_PROMPT.format(cap=cap, items_json=_json.dumps(complete, ensure_ascii=False))
+    resp, usage = chat_observed(
+        LLMClient(),
+        drive_root=pathlib.Path(drive_root),
+        task_id="backlog_groom",
+        call_type="backlog_groom",
+        model_role="light",
+        messages=[{"role": "user", "content": prompt}],
+        model=get_light_model(),
+        reasoning_effort="low",
+        max_tokens=8192,
+    )
+    if usage:
+        try:
+            from supervisor.state import update_budget_from_usage
+
+            update_budget_from_usage(usage)
+        except Exception:
+            pass
+    content = (resp.get("content") or "").strip()
+    start, end = content.find("["), content.rfind("]")
     try:
-        from ouroboros.config import get_light_model
-        from ouroboros.llm import LLMClient
-        from ouroboros.llm_observability import chat_observed
-
-        # One destructive grooming call sees every complete stored record,
-        # including evidence/context/custom fields and immutable manual items.
-        # If this full prompt cannot be served, the exception path preserves the
-        # file; there is no smaller second call or prefix-authorized rewrite.
-        complete = [dict(it) for it in items]
-        prompt = _GROOM_PROMPT.format(cap=cap, items_json=_json.dumps(complete, ensure_ascii=False))
-        client = LLMClient()
-        resp, usage = chat_observed(
-            client,
-            drive_root=pathlib.Path(drive_root),
-            task_id="backlog_groom",
-            call_type="backlog_groom",
-            model_role="light",
-            messages=[{"role": "user", "content": prompt}],
-            model=get_light_model(),
-            reasoning_effort="low",
-            max_tokens=8192,
-        )
-        if usage:
-            try:
-                from supervisor.state import update_budget_from_usage
-
-                update_budget_from_usage(usage)
-            except Exception:
-                pass
-        content = (resp.get("content") or "").strip()
-        start, end = content.find("["), content.rfind("]")
-        if start < 0 or end <= start:
-            return 0
-        kept_raw = _json.loads(content[start:end + 1])
-        if not isinstance(kept_raw, list):
-            return 0
-    except Exception as exc:
-        from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(exc)
+        kept_raw = _json.loads(content[start:end + 1]) if 0 <= start < end else None
+    except ValueError:
+        return 0  # a bad reply, like an empty one: the file is preserved
+    if not isinstance(kept_raw, list):
         return 0
 
     # Anti-wipe: every kept item MUST map to an existing fingerprinted item — the

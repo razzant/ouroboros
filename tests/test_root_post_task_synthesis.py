@@ -5,9 +5,11 @@ by theme; every moved block is verbatim. Covers the durable
 `root_phase_checkpoint` state machine and its exact-subtree cost
 reconciliation, startup recovery of pending/indeterminate synthesis, the
 shared pre-synthesis usage snapshot taken once before worker dispatch, and
-that snapshot reaching (or staying out of) the summary and reflection prompts.
+that snapshot reaching (or staying out of) the free facts row and the
+reflection prompt.
 """
 
+import json
 from types import SimpleNamespace
 
 import ouroboros.agent_task_pipeline as pipeline
@@ -255,9 +257,9 @@ def test_root_synthesis_uses_one_shared_nonfinal_subtree_cost_snapshot(tmp_path,
     )
     monkeypatch.setattr(
         pipeline,
-        "_run_task_summary",
-        lambda _env, _llm, _task, usage, *_args, **_kwargs: (
-            order.append("summary"), snapshots.append(usage)
+        "_record_task_facts",
+        lambda _env, _task, usage, *_args, **_kwargs: (
+            order.append("facts"), snapshots.append(usage)
         ),
     )
     monkeypatch.setattr(
@@ -293,8 +295,8 @@ def test_root_synthesis_uses_one_shared_nonfinal_subtree_cost_snapshot(tmp_path,
 
     assert reads == [(tmp_path, "root-synthesis", "")]
     assert order[:5] == [
-        "snapshot", "chat_consolidation", "scratchpad_consolidation",
-        "summary", "reflection",
+        "snapshot", "facts", "chat_consolidation", "scratchpad_consolidation",
+        "reflection",
     ]
     assert len(snapshots) == 2 and snapshots[0] is snapshots[1]
     snapshot = snapshots[0]
@@ -386,9 +388,10 @@ def test_pre_synthesis_cost_failure_is_unavailable_not_zero(tmp_path, monkeypatc
     assert pipeline._synthesis_cost_text(snapshot) == "cost unavailable (non-final)"
 
 
-def _capture_summary_and_reflection_prompts(
+def _capture_facts_row_and_reflection_prompt(
     tmp_path, monkeypatch, usage, *, task_overrides=None,
 ):
+    """The shared snapshot reaches the free facts row's flat fields and the one paid prompt."""
     import ouroboros.consolidator as consolidator
 
     monkeypatch.setattr(
@@ -425,15 +428,14 @@ def _capture_summary_and_reflection_prompts(
         "reasoning_notes": [],
     }
 
-    summary_llm = CapturingLlm()
-    pipeline._run_task_summary(
+    pipeline._record_task_facts(
         env=None,
-        llm=summary_llm,
         task=task,
         usage=usage,
         llm_trace=trace,
         drive_logs=drive_logs,
     )
+    [row] = [json.loads(line) for line in (drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
 
     reflection_llm = CapturingLlm()
     entry = pipeline._run_reflection(
@@ -446,12 +448,11 @@ def _capture_summary_and_reflection_prompts(
     )
 
     assert entry is not None
-    assert len(summary_llm.prompts) == 1
     assert len(reflection_llm.prompts) == 1
-    return summary_llm.prompts[0], reflection_llm.prompts[0]
+    return row, reflection_llm.prompts[0]
 
 
-def test_shared_cost_snapshot_reaches_summary_and_reflection_prompts(tmp_path, monkeypatch):
+def test_shared_cost_snapshot_reaches_facts_row_and_reflection_prompt(tmp_path, monkeypatch):
     snapshot = {
         "rounds": 8,
         "cost": 1.25,
@@ -472,9 +473,14 @@ def test_shared_cost_snapshot_reaches_summary_and_reflection_prompts(tmp_path, m
         },
     }
 
-    prompts = _capture_summary_and_reflection_prompts(
+    row, prompt = _capture_facts_row_and_reflection_prompt(
         tmp_path, monkeypatch, snapshot,
     )
+    for key in ("accounted_upper_bound_usd_with_children", "reserved_usd", "unresolved_upper_bound_usd",
+                "unknown_unmetered", "cost_final", "cost_with_children_partial", "cost_accounting_status"):
+        assert row[key] == snapshot[key], key
+    assert row["reason_code"] == "child_results_deferred"
+    assert row["outcome_axes"]["execution"]["status"] == "degraded"
     snapshot_text = pipeline._synthesis_usage_snapshot_text(snapshot)
     expected_fragments = (
         '"accounted_upper_bound_usd_with_children": 4.75',
@@ -489,18 +495,17 @@ def test_shared_cost_snapshot_reaches_summary_and_reflection_prompts(tmp_path, m
         '"reason_code": "child_results_deferred"',
         '"status": "best_effort"',
     )
-    for prompt in prompts:
-        assert snapshot_text in prompt
-        assert "accounted subtree cost only" in prompt
-        assert "separate non-final exposure fields" in prompt
-        assert "including the reserved" not in prompt
-        assert "outcome_axes` is canonical task truth" in prompt
-        assert '"review": {' in prompt
-        for fragment in expected_fragments:
-            assert fragment in prompt
+    assert snapshot_text in prompt
+    assert "accounted subtree cost only" in prompt
+    assert "separate non-final exposure fields" in prompt
+    assert "including the reserved" not in prompt
+    assert "outcome_axes` is canonical task truth" in prompt
+    assert '"review": {' in prompt
+    for fragment in expected_fragments:
+        assert fragment in prompt
 
 
-def test_unavailable_cost_snapshot_is_null_not_zero_in_both_prompts(tmp_path, monkeypatch):
+def test_unavailable_cost_snapshot_is_null_not_zero_in_facts_row_and_prompt(tmp_path, monkeypatch):
     snapshot = {
         "rounds": 8,
         "cost": 1.25,
@@ -515,7 +520,7 @@ def test_unavailable_cost_snapshot_is_null_not_zero_in_both_prompts(tmp_path, mo
         "cost_accounting_status": "unavailable",
     }
 
-    prompts = _capture_summary_and_reflection_prompts(
+    row, prompt = _capture_facts_row_and_reflection_prompt(
         tmp_path, monkeypatch, snapshot,
     )
     snapshot_text = pipeline._synthesis_usage_snapshot_text(snapshot)
@@ -525,20 +530,22 @@ def test_unavailable_cost_snapshot_is_null_not_zero_in_both_prompts(tmp_path, mo
         "unresolved_upper_bound_usd",
         "unknown_unmetered",
     )
-    for prompt in prompts:
-        assert snapshot_text in prompt
-        for field in null_fields:
-            assert f'"{field}": null' in prompt
-        assert '"ledger_integrity": "unavailable"' in prompt
-        assert '"cost_snapshot_at": "2026-07-15T12:35:00+00:00"' in prompt
-        assert '"cost_final": false' in prompt
-        assert '"cost_with_children_partial": true' in prompt
-        assert '"cost_accounting_status": "unavailable"' in prompt
-        assert "$0" not in prompt
+    for field in null_fields:
+        assert row[field] is None, field
+    assert row["cost_accounting_status"] == "unavailable"
+    assert snapshot_text in prompt
+    for field in null_fields:
+        assert f'"{field}": null' in prompt
+    assert '"ledger_integrity": "unavailable"' in prompt
+    assert '"cost_snapshot_at": "2026-07-15T12:35:00+00:00"' in prompt
+    assert '"cost_final": false' in prompt
+    assert '"cost_with_children_partial": true' in prompt
+    assert '"cost_accounting_status": "unavailable"' in prompt
+    assert "$0" not in prompt
 
 
 def test_child_legacy_usage_does_not_claim_a_subtree_snapshot(tmp_path, monkeypatch):
-    prompts = _capture_summary_and_reflection_prompts(
+    row, prompt = _capture_facts_row_and_reflection_prompt(
         tmp_path,
         monkeypatch,
         {"rounds": 8, "cost": 1.25},
@@ -550,8 +557,7 @@ def test_child_legacy_usage_does_not_claim_a_subtree_snapshot(tmp_path, monkeypa
         },
     )
 
-    for prompt in prompts:
-        assert "Shared pre-synthesis cost snapshot" not in prompt
-        assert "accounted_upper_bound_usd_with_children" not in prompt
-        assert "cost_snapshot_at" not in prompt
-    assert "Cost: $1.25" in prompts[0]
+    assert "Shared pre-synthesis cost snapshot" not in prompt
+    assert "accounted_upper_bound_usd_with_children" not in prompt
+    assert "cost_snapshot_at" not in prompt
+    assert "accounted_upper_bound_usd_with_children" not in row and "cost_snapshot_at" not in row

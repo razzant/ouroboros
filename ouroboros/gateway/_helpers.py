@@ -35,23 +35,31 @@ async def run_sync_to_completion(function, /, *args, **kwargs):
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
-        # Starlette streams use level cancellation; shield that scope while
-        # also tolerating repeated raw asyncio Task.cancel() calls.
-        with anyio.CancelScope(shield=True):
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    break
-            try:
-                worker.result()
-            except Exception:
-                logging.getLogger(__name__).debug(
-                    "Request worker failed while cancellation settled", exc_info=True,
-                )
+        await settle_to_completion(worker)
         raise
+
+
+async def settle_to_completion(task: asyncio.Task) -> None:
+    """Wait until an owned task is done, through the caller's cancellation.
+
+    Its failure is logged, not raised; a cancelled task still raises.
+    """
+    # Starlette streams use level cancellation; shield that scope while
+    # also tolerating repeated raw asyncio Task.cancel() calls.
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                break
+        try:
+            task.result()
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Request worker failed while cancellation settled", exc_info=True,
+            )
 
 
 def read_rotated_jsonl_entries(
@@ -180,5 +188,5 @@ def stage_initial_task_attachments(
 __all__ = (
     "coerce_bool", "coerce_int", "iter_jsonl_objects", "json_error", "json_exception",
     "read_rotated_jsonl_entries", "request_json_or", "request_drive_root", "request_repo_dir",
-    "stage_initial_task_attachments", "run_sync_to_completion",
+    "stage_initial_task_attachments", "run_sync_to_completion", "settle_to_completion",
 )

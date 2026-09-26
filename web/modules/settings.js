@@ -38,6 +38,7 @@ const INPUT_FIELDS = [
     ['s-openai-base-url', 'OPENAI_BASE_URL'], ['s-openai-compatible-base-url', 'OPENAI_COMPATIBLE_BASE_URL'], ['s-cloudru-base-url', 'CLOUDRU_FOUNDATION_MODELS_BASE_URL'],
     ['s-gigachat-scope', 'GIGACHAT_SCOPE'], ['s-gigachat-user', 'GIGACHAT_USER'], ['s-gigachat-base-url', 'GIGACHAT_BASE_URL'], ['s-gigachat-verify-ssl', 'GIGACHAT_VERIFY_SSL_CERTS'],
     ['s-minimax-region', 'MINIMAX_REGION'],
+    ['s-zai-plan', 'ZAI_PLAN'],
     ['s-server-host', 'OUROBOROS_SERVER_HOST', '127.0.0.1'],
     // 6.1: OUROBOROS_REVIEW_MODELS / OUROBOROS_SCOPE_REVIEW_MODELS are no
     // longer authored here — the Review lanes section composes the ONE
@@ -46,6 +47,7 @@ const INPUT_FIELDS = [
     // deep self-review row lives in Review lanes; the key is the backend's
     // invisible migration source for that row.
     ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
+    ['s-extra-ca-bundle', 'OUROBOROS_EXTRA_CA_BUNDLE'],
     ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
     ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
     ['s-subagent-worktree-root', 'OUROBOROS_SUBAGENT_WORKTREE_ROOT'], ['s-subagent-projects-root', 'OUROBOROS_SUBAGENT_PROJECTS_ROOT'],
@@ -401,12 +403,13 @@ function collectSecretValue(id, body) {
  * Exported for dependency-free node tests.
  */
 export function moreProvidersCredentialConfigured({
-    cloudruKey = '', minimaxKey = '', deepseekKey = '', gigachatCredentials = '', gigachatUser = '', gigachatPassword = '',
+    cloudruKey = '', minimaxKey = '', deepseekKey = '', zaiKey = '', gigachatCredentials = '', gigachatUser = '', gigachatPassword = '',
 } = {}) {
     const has = (v) => Boolean(String(v ?? '').trim());
     return has(cloudruKey)
         || has(minimaxKey)
         || has(deepseekKey)
+        || has(zaiKey)
         || has(gigachatCredentials)
         || (has(gigachatUser) && has(gigachatPassword));
 }
@@ -757,6 +760,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             cloudruKey: value('s-cloudru-key'),
             minimaxKey: value('s-minimax-key'),
             deepseekKey: value('s-deepseek-key'),
+            zaiKey: value('s-zai-key'),
             gigachatCredentials: value('s-gigachat-credentials'),
             gigachatUser: value('s-gigachat-user'),
             gigachatPassword: value('s-gigachat-password'),

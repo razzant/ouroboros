@@ -1,4 +1,4 @@
-"""Native task summaries preserve unknown counters in history."""
+"""Native task facts rows preserve unknown counters in history."""
 import asyncio
 import json
 from types import SimpleNamespace
@@ -9,18 +9,18 @@ from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.cost_projection import carry_cost_meta
 
 
-def test_unknown_task_summary_counts_remain_readable_in_history(tmp_path, monkeypatch):
-    from ouroboros.post_task_synthesis import _run_task_summary
+def test_unknown_task_facts_counts_remain_readable_in_history(tmp_path, monkeypatch):
+    from ouroboros.post_task_synthesis import _record_task_facts
 
     monkeypatch.setattr("ouroboros.llm_observability.chat_observed",
                         lambda *_a, **_k: pytest.fail("unknown evidence must not buy a model call"))
-    _run_task_summary(SimpleNamespace(drive_root=tmp_path), None,
-                      {"id": "uncaptured-summary", "chat_id": 1, "text": "Inspect current work"},
-                      {"loop_evidence_unavailable": True},
-                      {"loop_evidence_unavailable": True, "tool_calls": []}, tmp_path / "logs")
+    _record_task_facts(SimpleNamespace(drive_root=tmp_path),
+                       {"id": "uncaptured-summary", "chat_id": 1, "text": "Inspect current work"},
+                       {"loop_evidence_unavailable": True},
+                       {"loop_evidence_unavailable": True, "tool_calls": []}, tmp_path / "logs")
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
     [row] = json.loads(response.body)["messages"]
-    assert "round count unknown" in row["text"]
+    assert row["text"] == ""  # unknown stays a typed null below, never prose
     assert row["tool_calls"] is None and row["rounds"] is None
 
 

@@ -629,9 +629,12 @@ def reconcile_orphaned_running_tasks(
     window, the worker-boot-after-task evidence, and the refusal to reconcile when
     the queue snapshot is missing. A task that is still pending/running in the
     queue, or whose worker has not booted after the task's last event, is never
-    reconciled. The monotonic guard in ``write_task_result`` additionally protects
-    a genuinely newer terminal/cancel write. Idempotent; safe at boot and on a
-    periodic supervisor tick.
+    reconciled. Two reads per candidate: the decision is a status-only
+    (``materialize_artifacts=False``) projection, and only a row it is about to
+    settle is read again with artifact materialization, so a live child's
+    scratch tree is never copied by this sweep. The monotonic guard in
+    ``write_task_result`` additionally protects a genuinely newer terminal/cancel
+    write. Idempotent; safe at boot and on a periodic supervisor tick.
 
     ``expired_quizzes`` collects ``(task_id, quiz_id)`` for every question this
     sweep expired, so the supervisor-side caller can send the same live frame the
@@ -663,7 +666,14 @@ def reconcile_orphaned_running_tasks(
         except Exception:
             log.debug("Orphan reconcile skipped %s: cancel authority unreadable", task_id, exc_info=True)
             continue
+        # Decide on the status-only projection: a live row costs one projection and
+        # zero artifact transfers. Only a row this sweep is about to settle pays the
+        # materializing read, so the persisted terminal row keeps full custody
+        # (artifact rebase, verification receipts, artifact_bundle) (issue #1230).
         try:
+            projected = load_effective_task_result(root, task_id, materialize_artifacts=False)
+            if str(projected.get("status") or "").strip().lower() not in SETTLED_STATUSES:
+                continue
             effective = load_effective_task_result(root, task_id)
         except Exception:
             continue
@@ -768,8 +778,9 @@ def effective_task_result(
     Read-only display surfaces (chat history annotation, ``api_tasks_list``, the
     SSE follow loop, ``api_logs_tail`` discovery) pass ``False``; every consumer
     that participates in the child-result sha economy or artifact durability
-    (join_ledger, wait_*/get_task_result, api_task_get/artifact, reconcile, prune)
-    keeps the ``True`` default.
+    (join_ledger, wait_*/get_task_result, api_task_get/artifact, prune) keeps the
+    ``True`` default. The orphan reconciler decides on a ``False`` read and
+    materializes only the row it heals.
     ``_events_index`` optionally shares ONE parsed events-tail across a batch of
     rows (the task-list request), so N stale-running rows cost one tail read
     instead of N; ``None`` keeps the per-call read for single-row callers.

@@ -76,6 +76,13 @@ TERMINAL_WRITERS = {
     ('ouroboros/mutation_attribution.py::capture_mutation_baseline', 'status'): 'dynamic',
     ('ouroboros/mutation_attribution.py::record_terminal_mutation_candidates', 'status'): 'dynamic',
     ('ouroboros/post_task_checkpoint.py::set_root_post_task_checkpoint', 'str(existing.get("status") or task.get("status") or STATUS_COMPLETED)'): 'terminal',
+    # Presence recovery asks the owner only after a transport retry has found
+    # an existing, unresolved turn. This field projection preserves the exact
+    # stored status; it cannot terminalize or regenerate the lost attempt.
+    ('ouroboros/presence_runner.py::_write_unresolved_notice', 'str(stored["status"])'): 'dynamic',
+    # Same terminal status under the locked projector; this records only the
+    # deterministic successor link after a positive first-round no-effect proof.
+    ('ouroboros/presence_runner.py::_retry_target', 'STATUS_FAILED'): 'terminal',
     # #1154: the compare-and-clear of a settled terminal-projection obligation.
     # It preserves the record's CURRENT status inside the projector and publishes
     # no lifecycle transition of its own; the status argument is only the

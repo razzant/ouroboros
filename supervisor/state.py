@@ -442,11 +442,14 @@ def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if not api_key:
             return None
+        from ouroboros.net_transport import trust_ssl_context
+
         req = urllib.request.Request(
             "https://openrouter.ai/api/v1/auth/key",
             headers={"Authorization": f"Bearer {api_key}"},
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        # A provider call: it verifies against the owner's trust bundle like every other one.
+        with urllib.request.urlopen(req, timeout=10, context=trust_ssl_context()) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         # OpenRouter usage is dollars, not cents.
         usage_total = data.get("data", {}).get("usage", 0)
@@ -483,6 +486,9 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
     monetary total: every core-mediated provider attempt has already been
     persisted by the transport wrapper.  This prevents logical usage events,
     retries, and review aggregation from charging the same attempt twice.
+    The persisted projection carries totals only; the per-root map is never written.
+    The ledger read is the writer's slim snapshot (``usage_writer_snapshot``): only what this
+    function persists is rendered; the loop's llm_usage path writes once per turn, direct callers on call.
     """
     def _to_float(v: Any, default: float = 0.0) -> float:
         try:
@@ -518,29 +524,28 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
     from ouroboros.usage_accounting import (
         UsageLedgerCorrupt,
         ensure_legacy_imported,
-        usage_breakdown,
         usage_projection,
+        usage_writer_snapshot,
     )
 
     # Ledger I/O is deliberately OUTSIDE STATE_LOCK: the lock stays
     # short-lived, and the validated-snapshot marker below preserves the old
     # serialization invariant without holding STATE_LOCK across a long read.
-    # A DISPLAY read (``allow_stale``: this runs on the supervisor loop per ``llm_usage``
-    # event): a lagging snapshot carries its own lower marker, so it never regresses money.
+    # A DISPLAY read (``allow_stale``: this runs on the supervisor loop once per turn with
+    # ``llm_usage`` events): a lagging snapshot carries its own lower marker, so it never regresses money.
     try:
         ensure_legacy_imported(DRIVE_ROOT)
-        breakdown = usage_breakdown(DRIVE_ROOT, allow_stale=True)
+        breakdown = usage_writer_snapshot(DRIVE_ROOT, allow_stale=True)
         total_limit = float(TOTAL_BUDGET_LIMIT or 0.0)
         projection_snapshot = breakdown.pop("_usage_projection", None)
         if total_limit > 0 and isinstance(projection_snapshot, dict):
             from ouroboros._usage_rows import _with_limit
-            roots = projection_snapshot.pop("by_root", None)
+            # Totals only (issue #1002): per-root money is a ledger render nothing reads back from here.
+            projection_snapshot.pop("by_root", None)
             projection = _with_limit(projection_snapshot, total_limit)
-            if roots is not None:
-                projection["by_root"] = roots
         else:
             projection = (
-                usage_projection(DRIVE_ROOT, global_limit_usd=total_limit, allow_stale=True)
+                usage_projection(DRIVE_ROOT, global_limit_usd=total_limit, include_roots=False, allow_stale=True)
                 if total_limit > 0
                 else {key: breakdown.get(key) for key in (
                 "settled_usd", "confirmed_usd", "estimated_usd", "reserved_usd",
@@ -605,11 +610,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
         # is now the ordered ``[compaction_epoch, seq]`` pair.
         st["usage_ledger_high_water_seq"] = list(ledger_high_water_marker)
         previous_check_call = _to_int(st.get("openrouter_last_check_call"), -1)
-        should_check_ground_truth = bool(
-            st["spent_calls"] > 0
-            and st["spent_calls"] % 50 == 0
-            and st["spent_calls"] != previous_check_call
-        )
+        # Every 50th call by CROSSING (a coalesced write may jump 49 -> 51), deduped by the last check.
+        should_check_ground_truth = st["spent_calls"] > 0 and st["spent_calls"] // 50 > max(previous_check_call, 0) // 50
         if should_check_ground_truth:
             st["openrouter_last_check_call"] = st["spent_calls"]
         _save_state_unlocked(st)

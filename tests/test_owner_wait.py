@@ -90,7 +90,7 @@ def test_deferred_question_flush_and_resume_requires_pool_grant(tmp_path):
         write_owner_message(tmp_path, "Change the requested destination", task_id="root-1")
         resume = events.get(timeout=3)
         # An owner answer is never labelled a bound expiry.
-        assert resume["phase"] == "resume" and "resume_reason" not in resume
+        assert resume["phase"] == "resume" and resume["resume_reason"] == "owner_text"
         assert not ended.is_set()
         commands.put({**identity, "phase": "resume_granted"})
         thread.join(timeout=2)

@@ -38,7 +38,9 @@ from ouroboros.gateway.owner_settings import (
 )
 from ouroboros.onboarding_wizard import build_onboarding_html
 from ouroboros.platform_layer import is_container_env
-from ouroboros.provider_models import MINIMAX_REGION_ENDPOINTS, resolve_minimax_base_url
+from ouroboros.provider_models import (
+    MINIMAX_REGION_ENDPOINTS, ZAI_PLAN_ENDPOINTS, resolve_minimax_base_url, resolve_zai_base_url,
+)
 from ouroboros.secret_masking import (
     MCP_RESPONSE_ONLY_FIELDS,
     is_custom_secret_setting_key,
@@ -558,6 +560,8 @@ def _active_main_route(
                     "cloudru": "CLOUDRU_FOUNDATION_MODELS_BASE_URL", "gigachat": "GIGACHAT_BASE_URL"}.get(provider)
     if provider == "minimax":
         base_url = resolve_minimax_base_url(settings.get("MINIMAX_REGION") or "")
+    elif provider == "zai":
+        base_url = resolve_zai_base_url(settings.get("ZAI_PLAN") or "")
     else:
         base_url = str(settings.get(base_url_key) or "") if base_url_key else ""
     # CW7 (v6.34.0): honour the USE_LOCAL_MAIN routing setting — a local-routed main
@@ -1266,6 +1270,10 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         if minimax_region and minimax_region not in MINIMAX_REGION_ENDPOINTS:
             return unsaved_error("MINIMAX_REGION must be global_en or cn_zh.", 400)
         current["MINIMAX_REGION"] = minimax_region
+        zai_plan = str(current.get("ZAI_PLAN") or "").strip().lower()
+        if zai_plan and zai_plan not in ZAI_PLAN_ENDPOINTS:
+            return unsaved_error("ZAI_PLAN must be payg or coding.", 400)
+        current["ZAI_PLAN"] = zai_plan
         # Generic settings saves operate on the current boot baseline. A pending
         # next-boot mode written by /api/owner/runtime-mode is preserved on disk
         # below, but never hot-applied to this process/env.

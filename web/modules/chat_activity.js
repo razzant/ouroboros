@@ -766,32 +766,76 @@ export function isTerminalTaskPhase(phase = '', terminal = false) {
  * can no longer mutate any projection. requestedAt stays tied to request start
  * and is the barrier for the CARD scan (`lastLiveObservedAt`) only — activity
  * hydration is a plain projection of the census and has no barrier.
+ *
+ * `gate(force)` is the page-wide single-flight admission for the readers: it
+ * resolves to a request when the caller may read now. A periodic tick that
+ * lands while a read is in flight is never queued: it resolves to null once
+ * that read settles, so a caller that only needs some fresh read to have
+ * landed (the boot prefetch before the socket opens) may await it. A forced
+ * caller that lands mid-flight is coalesced with every other forced caller
+ * into ONE follow-up read that starts when the in-flight read settles — the
+ * first forced caller receives that request, the others resolve to null once
+ * the follow-up has applied or failed. `begin()` stays the ungated clock for
+ * synthetic generation bumps. A gated request settles through `apply`/`fail`.
  */
 export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
     let requestedGeneration = 0;
     let appliedGeneration = 0;
+    // Newest applied body until an unavailable read retires it (late-mount seed).
+    let latest = null;
+    let inflight = null;
+    let settled = null;
+    let followUp = null;
+    const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+    const begin = () => ({ generation: ++requestedGeneration, requestedAt: now() });
+    const open = () => { settled = deferred(); inflight = begin(); return inflight; };
+    const settle = (request) => {
+        if (!inflight || request !== inflight) return;
+        const done = settled;
+        const next = followUp;
+        inflight = settled = followUp = null;
+        if (next) next.resolve({ request: open(), done: settled.promise });
+        done.resolve();
+    };
     return {
-        begin() {
-            return { generation: ++requestedGeneration, requestedAt: now() };
+        begin,
+        gate(force = false) {
+            if (!inflight) return Promise.resolve(open());
+            if (!force) return settled.promise.then(() => null);
+            if (!followUp) { followUp = deferred(); return followUp.promise.then((f) => f.request); }
+            return followUp.promise.then((f) => f.done).then(() => null);
         },
         apply(request, data) {
-            const generation = Number(request?.generation) || 0;
-            if (!generation || generation <= appliedGeneration) return false;
-            appliedGeneration = generation;
-            onApply(data, request.requestedAt, generation);
-            return true;
+            try {
+                const generation = Number(request?.generation) || 0;
+                if (!generation || generation <= appliedGeneration) return false;
+                appliedGeneration = generation;
+                latest = data;
+                onApply(data, request.requestedAt, generation);
+                return true;
+            } finally { settle(request); }
         },
         isCurrent(request) {
             return (Number(request?.generation) || 0) > appliedGeneration;
         },
         fail(request) {
-            const generation = Number(request?.generation) || 0;
-            if (!generation || generation <= appliedGeneration) return false;
-            appliedGeneration = generation;
-            onUnavailable();
-            return true;
+            try {
+                const generation = Number(request?.generation) || 0;
+                if (!generation || generation <= appliedGeneration) return false;
+                appliedGeneration = generation;
+                latest = null;
+                onUnavailable();
+                return true;
+            } finally { settle(request); }
         },
+        latest: () => latest,
     };
+}
+
+// В9: one /api/state body's `supervisor_ready`, null when it states nothing. Only
+// true ends Starting…; a `supervisor_error` is not readiness and is not read here.
+export function supervisorReady(data) {
+    return typeof data?.supervisor_ready === 'boolean' ? data.supervisor_ready : null;
 }
 
 /**
@@ -881,7 +925,8 @@ export function positiveTaskTerminalFact(row) {
  * submissions (Sending...) > queue-admitted but unstarted managed work
  * (Queued...) > idle. A queued task ranks below
  * Sending... because an unacknowledged local submission is the more actionable
- * state. Pure over its inputs for dependency-free node tests.
+ * state. Idle is Starting… until the host proves `supervisor_ready` (В9),
+ * then Online. Pure over its inputs for dependency-free node tests.
  */
 export function computeDerivedChatStatus({
     isConnected = true,
@@ -892,6 +937,7 @@ export function computeDerivedChatStatus({
     pausedManagedCount = 0,
     waitingModelCount = 0,
     pendingSubmissionsCount = 0,
+    supervisorStarting = false,
 } = {}) {
     if (!isConnected) {
         return { kind: 'offline', text: 'Reconnecting...', showDots: false };
@@ -918,7 +964,28 @@ export function computeDerivedChatStatus({
         // never dress it up as Working or Queued.
         return { kind: 'online', text: 'Paused (budget)', showDots: false };
     }
+    if (supervisorStarting) return { kind: 'starting', text: 'Starting…', showDots: false };
     return { kind: 'online', text: 'Online', showDots: false };
+}
+
+// The reducer's counted inputs: census activities not waiting on a model, and mounted unfinished
+// cards, where a managed root drives Working… and a direct turn keeps the census verdict (Thinking…).
+export function chatStatusCounts(activities, records, isWaiting = () => false) {
+    const counts = { activeDirectCount: 0, activeManagedCount: 0, queuedManagedCount: 0, pausedManagedCount: 0,
+        hasActiveLiveCard: false, waitingModelCount: 0 };
+    for (const [id, entry] of activities) {
+        if (isWaiting(id)) continue;
+        if (String(entry?.kind || '') !== 'managed_task') counts.activeDirectCount += 1;
+        else if (String(entry?.phase || '') === 'queued') counts.queuedManagedCount += 1;
+        else if (/^budget_paus(ed|ing)$/.test(entry?.phase ?? '')) counts.pausedManagedCount += 1;
+        else counts.activeManagedCount += 1;
+    }
+    for (const record of records) {
+        if (!isForegroundLiveCard(record)) continue;
+        if (record.modelWaiting) counts.waitingModelCount += 1;
+        else if (!record.direct) counts.hasActiveLiveCard = true;
+    }
+    return counts;
 }
 
 /**
@@ -1199,6 +1266,21 @@ export function clearTransientRoutingAnnotations(messagesDiv = globalThis.docume
         changed = true;
     }
     return changed;
+}
+
+// В9: the host stamps a typed `ingress_accepted: true` on an owner echo only after the durable
+// chat write, so that client_message_id's bubble says `Input saved` — never that work began.
+// No flag is unknown and adds nothing. The note wears the delivery note's quiet style.
+export function markIngressSaved(root, row) {
+    const cmid = String(row?.client_message_id || '');
+    if (row?.role !== 'user' || row.ingress_accepted !== true || !cmid) return false;
+    const bubble = [...root.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
+        .find((node) => node.dataset.clientMessageId === cmid);
+    if (!bubble || bubble.querySelector('[data-ingress-saved]')) return false;
+    const note = Object.assign(document.createElement('div'), { className: 'msg-pending', textContent: 'Input saved' });
+    note.dataset.ingressSaved = '';
+    bubble.insertBefore(note, bubble.querySelector('.msg-time'));
+    return true;
 }
 
 export function renderRoutingAnnotation(bubble, annotation, chatId = 1) {

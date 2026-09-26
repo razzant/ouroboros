@@ -55,3 +55,30 @@ def test_live_manifest_lock_is_private_but_user_lock_named_file_is_an_artifact(t
         assert [row["name"] for row in rows] == ["notes.lock"]
     finally:
         release_exclusive_file_lock(lock_path, fd)
+
+
+def test_identical_registration_leaves_the_manifest_untouched_and_a_change_rewrites(tmp_path):
+    """Re-registering an unchanged record is a no-op on disk (issue #1230); a
+    changed record still rewrites the manifest."""
+    import os
+
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    record = {"kind": "child_artifact", "name": "a.txt", "path": str(root / "a.txt"),
+              "size": 3, "sha256": "aa" * 32, "status": "ready", "errors": [], "source_path": "/src/a.txt"}
+    artifacts._register_task_artifact_records(root, [record])
+    manifest = root / artifacts._ARTIFACT_MANIFEST
+    before = manifest.read_bytes()
+    stat_before = os.stat(manifest)
+
+    artifacts._register_task_artifact_records(root, [dict(record)])
+
+    stat_after = os.stat(manifest)
+    assert manifest.read_bytes() == before
+    assert (stat_after.st_mtime_ns, stat_after.st_ino) == (stat_before.st_mtime_ns, stat_before.st_ino)
+
+    artifacts._register_task_artifact_records(root, [{**record, "sha256": "bb" * 32, "size": 4}])
+
+    changed = json.loads(manifest.read_text(encoding="utf-8"))["artifacts"]["a.txt"]
+    assert changed["sha256"] == "bb" * 32 and changed["size"] == 4
+    assert manifest.read_bytes() != before

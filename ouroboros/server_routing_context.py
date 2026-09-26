@@ -64,6 +64,14 @@ def _addressable_root_tasks(ctx: Any, chat_id: Optional[int] = None) -> list:
             return
         if chat_id is not None and not _task_belongs_to_chat(ctx, tid, task_obj, int(chat_id or 0)):
             return
+        # RUNNING can mean only paid post-work remains. A terminal result
+        # cannot drain a new owner/peer message; don't suggest it as steerable.
+        from ouroboros.task_results import load_task_result
+        from ouroboros.task_status import SETTLED_STATUSES
+        from supervisor.queue import _task_drive_for_task
+
+        if (load_task_result(_task_drive_for_task(task_obj, tid), tid) or {}).get("status") in SETTLED_STATUSES:
+            return
         objective = str(
             task_obj.get("objective") or task_obj.get("description") or task_obj.get("text") or ""
         ).strip()

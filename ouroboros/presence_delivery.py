@@ -115,6 +115,7 @@ class PresenceDeliveryRecorder:
         self.data_dir = Path(data_dir)
         self._lock = threading.Lock()
         self._index: dict[tuple[str, ...], str] | None = None
+        self._history_gapped = False
 
     def _rebuild(self) -> dict[tuple[str, ...], str]:
         index: dict[tuple[str, ...], str] = {}
@@ -124,18 +125,20 @@ class PresenceDeliveryRecorder:
                 for row in iter_jsonl_objects(path, _handle=handle, gap_reasons=gaps):
                     try:
                         parsed = _payload_from_row(row)
-                        if parsed is None:
-                            continue
-                        skill, payload = parsed
-                        key = _key(skill, payload)
-                        digest = hashlib.sha256(_canonical(payload)).hexdigest()
-                        if key in index and index[key] != digest:
-                            raise ValueError("conflicting retained presence delivery receipts")
-                        index[key] = digest
-                    except (TypeError, AttributeError, ValueError) as exc:
-                        raise OSError("presence delivery history cannot be reconstructed") from exc
-        if gaps:
-            raise OSError("presence delivery history contains unreadable rows")
+                    except (TypeError, AttributeError, ValueError):
+                        # A malformed retained receipt is also an unobserved
+                        # interval, not proof that its identity never existed.
+                        gaps.add("invalid_presence_delivery_row")
+                        continue
+                    if parsed is None:
+                        continue
+                    skill, payload = parsed
+                    key = _key(skill, payload)
+                    digest = hashlib.sha256(_canonical(payload)).hexdigest()
+                    if key in index and index[key] != digest:
+                        raise OSError("conflicting retained presence delivery receipts")
+                    index[key] = digest
+        self._history_gapped = bool(gaps)
         return index
 
     def record(self, skill: str, value: Any) -> dict[str, Any]:
@@ -149,7 +152,8 @@ class PresenceDeliveryRecorder:
             if previous is not None:
                 if previous != digest:
                     raise PresenceDeliveryConflict("presence delivery identity already has different facts")
-                return {"ok": True, "recorded": True, "duplicate": True}
+                return {"ok": True, "recorded": True, "duplicate": True,
+                        "history_coverage": "gapped" if self._history_gapped else "indexed"}
 
             from ouroboros.presence_bindings import conversation_key as presence_conversation_key
             from ouroboros.presence_runner import _stable_numeric_id
@@ -180,11 +184,13 @@ class PresenceDeliveryRecorder:
                     payload["text"], fmt=payload["format"], source=f"skill:{skill}",
                     client_message_id="presence-delivery:" + hashlib.sha256(_canonical({"key": key})).hexdigest(),
                     transport=transport, task_id=task_id, record_type="presence_delivery",
-                    drive_root=self.data_dir, require_write=True,
+                    drive_root=self.data_dir, require_write=True, ensure_record_boundary=True,
                 )
             except Exception:
                 # The append may have landed before the failure reached us.
                 self._index = None
+                self._history_gapped = False
                 raise
             self._index[key] = digest
-            return {"ok": True, "recorded": True, "duplicate": False}
+            return {"ok": True, "recorded": True, "duplicate": False,
+                    "history_coverage": "gapped" if self._history_gapped else "indexed"}

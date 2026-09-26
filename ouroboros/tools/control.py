@@ -289,7 +289,8 @@ def get_tools() -> List[ToolEntry]:
                 "owner's steering text; from a task it is written as a message from THIS task (never "
                 "owner text, no file attachments), and the result says written, not read. The task picks "
                 "it up at its next step. If no running task clearly fits, use promote_chat_to_task "
-                "(new work) or answer inline — never steer a task you are unsure about."
+                "(new work) or answer inline — never steer a task you are unsure about. "
+                "A Presence-bound turn can steer only work in its own binding; the host checks it."
             ),
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string", "description": "Id of the running task to steer (from current_chat.running_tasks)."},
@@ -415,6 +416,7 @@ def get_tools() -> List[ToolEntry]:
                 "focus_source_sha256": {"type": "string", "default": "", "description": "With include_focus_source: select the retained source by the sha256 the roster row quoted, so a later focus of the same author cannot substitute its evidence."},
                 "source_start_char": {"type": "integer", "description": "Inclusive character offset for the requested canonical source range."},
                 "source_end_char": {"type": "integer", "description": "Exclusive character offset for the requested canonical source range. A range outside the source returns no text: the answer names complete_chars and the range received, and is an argument error."},
+                "presence_scope": {"type": "string", "enum": ["own_binding"], "description": "Presence tasks only: read just independent work started from this Presence binding (any of its conversations) or this task's own tree."},
             }},
         }, _get_task_result),
         ToolEntry("wait_task", {

@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from ouroboros import context
 from ouroboros.context_fit import estimate_context_prompt_tokens
 from ouroboros.tools.registry import ToolContext
@@ -48,6 +50,30 @@ def test_actual_nano_preparation_consolidates_complete_source_before_returning(t
     calls = len(actor.calls)
     context.build_llm_messages(env, memory, task, ctx=ctx, llm=actor, tool_schemas=[], fit_candidate=fits)
     assert len(actor.calls) == calls
+
+
+@pytest.mark.parametrize("broken", [b"{bad", b"[]", b'{"pending_knowledge_nominations":[],"pending_knowledge_nominations":[]}'])
+def test_nano_unreadable_dialogue_meta_withholds_maintenance_not_main(tmp_path, fit, monkeypatch, broken):
+    env, memory, task, ctx, chat_before = _setup(tmp_path)
+    meta = env.drive_root / "memory/dialogue_meta.json"
+    meta.write_bytes(broken)
+    monkeypatch.setattr(context, "get_context_mode", lambda: "nano")
+    actor = SourceReader(env.drive_root, fit.window)
+    messages, info = context.build_llm_messages(
+        env, memory, task, ctx=ctx, llm=actor, tool_schemas=[],
+        fit_candidate=lambda _messages, _tools: {"accepted": False},
+    )
+    receipt = info["context_memory_maintenance"]
+    assert receipt["status"] == "no_progress"
+    assert receipt["usage"]["_consolidation_errors"][0]["kind"] == "dialogue_meta_unreadable"
+    assert messages[-1]["content"] == task["text"]
+    assert meta.read_bytes() == broken
+    assert (env.drive_root / "logs/chat.jsonl").read_text() == chat_before
+    assert not actor.calls
+    events = [json.loads(line) for line in (env.drive_root / "logs/events.jsonl").read_text().splitlines()]
+    assert any(row.get("type") == "context_memory_maintenance" and
+               row["usage"]["_consolidation_errors"][0]["kind"] == "dialogue_meta_unreadable"
+               for row in events)
 
 
 def test_max_and_pure_preview_never_start_a_maintenance_model(tmp_path, fit, monkeypatch):

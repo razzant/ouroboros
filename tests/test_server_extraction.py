@@ -205,6 +205,9 @@ def test_server_extraction_size_bounds_have_meaningful_headroom():
     # bound includes the restart transaction state owned by the composition root.
     # 1700 -> 1730 (issue #1142): the exit latch guards on revival/admission and the
     # latch-checking thread body stay with the loop they protect.
-    assert counts["server"] <= 1730
+    # 1730 -> 1770 (TZ-1 batch ingress): the drained-batch tail hand-back around the
+    # owner-command dispatch and the init-outcome latch beside readiness stay with
+    # the loop and the process state they protect.
+    assert counts["server"] <= 1770
     assert counts["ouroboros.server_routing_context"] <= 1000
     assert counts["ouroboros.server_owner_routing"] <= 1000

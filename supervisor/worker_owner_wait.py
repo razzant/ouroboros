@@ -170,7 +170,8 @@ def _grant_resume(
                 log.warning("Owner-wait rollback remains unpersisted for %s", task_id, exc_info=True)
             raise
         meta.pop("owner_wait_resume_requested", None)
-        if str(resumed.get("resume_reason") or "") == "timeout" and str(resumed.get("quiz_id") or ""):
+        if (str(resumed.get("quiz_id") or "")
+                and not str(resumed.get("resume_reason") or "").startswith("control:")):
             # The bound closed and the pooled task resumed: one seam with the direct lane.
             from ouroboros.owner_wait import announce_wait_ended
 

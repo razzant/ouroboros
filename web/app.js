@@ -684,8 +684,12 @@ document.getElementById('nav-projects-add')?.addEventListener('click', async (ev
     }
 });
 
-async function refreshProjectsNav() {
-    const request = stateSnapshots.begin();
+// Callers that must observe a read taken AFTER their own change (or after a
+// socket open) force one, coalesced behind an in-flight read; the boot prefetch
+// and the periodic poll join whatever page-wide read is in flight.
+async function refreshProjectsNav(force = true) {
+    const request = await stateSnapshots.gate(force);
+    if (!request) return;
     try {
         const resp = await apiFetch('/api/state', { cache: 'no-store' });
         if (!resp.ok) {
@@ -828,7 +832,7 @@ apiFetch('/api/ui/preferences', { cache: 'no-store' })
 ws.on('open', () => {
     activitySocketDisconnected = false;
     stateSnapshots.fail(stateSnapshots.begin());
-    refreshProjectsNav();
+    refreshProjectsNav(true); // the in-flight read predates the socket: one coalesced post-open read
 });
 ws.on('close', () => {
     activitySocketDisconnected = true;
@@ -844,7 +848,7 @@ ws.on('projects_changed', (msg) => {
     if (cid) state.projectChatIds.add(cid);
     refreshProjectsNav();
 });
-setInterval(refreshProjectsNav, 20000);
+setInterval(() => refreshProjectsNav(false), 20000);
 settingsControls = initSettings(ctx);
 dashboardControls = initDashboard(ctx);
 initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
@@ -1049,4 +1053,4 @@ installDesktopShellLinkInterceptor();
 // fan-out never misclassifies an early project frame as main-chat traffic during
 // startup (chat.js::isMyThread relies on state.projectChatIds). Connect even if
 // the prefetch fails, then ws.on('open') keeps it fresh.
-refreshProjectsNav().finally(() => ws.connect());
+refreshProjectsNav(false).finally(() => ws.connect());

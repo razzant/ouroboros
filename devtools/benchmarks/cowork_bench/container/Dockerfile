@@ -4,6 +4,8 @@
 # Build context (assembled by run_cowork_bench.py --build-image, never the repo itself):
 #   seed/                  full `git clone` of the seed checkout at the measured commit
 #   main_ouroboros.py      the engine entrypoint from this directory
+#   eval_attempt.py        its stdlib eval-attempt helper and
+#   official_receipt.py    the evaluator-receipt reader it reuses (from the parent directory)
 ARG BASE_IMAGE=cowork-pack:latest
 FROM ${BASE_IMAGE}
 
@@ -76,6 +78,8 @@ RUN set -eu; \
         || { echo "Chromium is missing from the base image (playwright tasks would be structural zeros)" >&2; exit 1; }; \
     fi
 
-COPY main_ouroboros.py /workspace/main_ouroboros.py
+COPY main_ouroboros.py eval_attempt.py official_receipt.py /workspace/
 RUN mkdir -p /opt/ouroboros-data /opt/ouroboros-app /opt/ouroboros-runtime \
-    && /opt/venv/bin/python3 -m py_compile /workspace/main_ouroboros.py
+    && /opt/venv/bin/python3 -m py_compile /workspace/main_ouroboros.py \
+       /workspace/eval_attempt.py /workspace/official_receipt.py \
+    && cd /workspace && /opt/venv/bin/python3 -c "import eval_attempt"

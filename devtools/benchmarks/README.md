@@ -73,7 +73,9 @@ CALL) — NEVER STAY SILENT.**
   every requested instance, including setup failures, timeouts, and empty
   patches, even when the official benchmark prediction/submission format only
   accepts successful rows. Defaults are adapter-specific (`result_index.jsonl`,
-  `<predictions>.ledger.jsonl`, or `osworld_preflight.ledger.jsonl`).
+  `<predictions>.ledger.jsonl`, or `osworld_preflight.ledger.jsonl`). A row's
+  `official_eval_status` is `unreported` unless its adapter states one;
+  `not_run` is an explicit claim that the official evaluator never ran.
 
 These sidecars are audit artifacts, not replacement scoring. Official benchmark
 harnesses and official result files remain the scoring authority.

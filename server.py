@@ -78,6 +78,7 @@ from ouroboros.server_liveness import (  # noqa: F401
     _chat_turn_wedged,
     _start_supervisor_liveness_watchdog,
     _supervisor_loop_stalled,
+    drain_worker_events, flush_budget_projection,
 )
 from ouroboros.server_maintenance import (  # noqa: F401
     _LAST_CANCEL_INTENT_SWEEP,
@@ -216,7 +217,8 @@ from ouroboros.server_runtime import (
     ws_heartbeat_loop,
 )
 
-_supervisor_ready = threading.Event()
+_supervisor_ready = threading.Event()  # a live generation finished init: the API's `supervisor_ready`
+_supervisor_init_done = threading.Event()  # init reached an outcome (ready OR `_supervisor_error`): boot waiters
 _supervisor_error: Optional[str] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 _supervisor_thread: Optional[threading.Thread] = None
@@ -275,6 +277,8 @@ def _start_supervisor_if_needed(settings: dict) -> bool:
         return False  # the process is exiting: no revival behind the teardown
     _supervisor_error = None
     _supervisor_stop.clear()  # in-process revival after a teardown-stopped generation
+    _supervisor_ready.clear()  # readiness is THIS generation's: Starting, not a stale Online, until init succeeds
+    _supervisor_init_done.clear()
     _supervisor_thread = threading.Thread(
         target=_supervisor_generation,
         args=(settings,),
@@ -300,15 +304,48 @@ def _supervisor_generation(settings: dict) -> None:
     _run_supervisor(settings)
 
 
+def _preserve_unprocessed_updates(bridge, updates, consumed: int) -> int:
+    """Best effort, never raises: hand the tail behind the ``consumed``-th update back to the bridge, ids
+    intact, for this process's next read; what is not kept is logged as lost.
+    Memory only: it dies with process exit; accepted rows outlive it."""
+    tail, requeue, kept = list(updates[consumed:]), getattr(bridge, "requeue_updates", None), 0
+    try:
+        if tail and callable(requeue):
+            kept = int(requeue(tail) or 0)
+    except Exception as exc:
+        log.error("Bridge %s hand-back raised: %s", type(bridge).__name__, exc, exc_info=True)
+    if kept < len(tail):
+        log.error("Bridge %s cannot take back %d unprocessed update(s); they are lost", type(bridge).__name__, len(tail) - kept)
+    return kept
+
+
 def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
+    updates = bridge.get_updates(offset=offset, timeout=1)
+    cursor = [0]  # updates taken up so far, the one in flight included
+    try:
+        return _handle_bridge_update_batch(bridge, updates, offset, ctx, cursor)
+    except Exception as exc:
+        # The failing update is the crash the loop accounts for; the ones behind it were
+        # only dequeued, never handled, and come back next tick (the hand-back never raises).
+        failed = (updates[cursor[0] - 1] if 0 < cursor[0] <= len(updates) else {}).get("update_id")
+        kept = _preserve_unprocessed_updates(bridge, updates, cursor[0])
+        log.error("Bridge update %s failed: %s; %d later update(s) handed back to the bridge", failed, exc, kept)
+        raise
+
+
+def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: list) -> int:
     from supervisor.message_bus import coerce_chat_identity
 
-    updates = bridge.get_updates(offset=offset, timeout=1)
     for upd in updates:
+        cursor[0] += 1
         offset = int(upd["update_id"]) + 1
         msg = upd.get("message") or {}
         if not msg:
             continue
+        # get_updates may return several already-queued messages. Rebind the
+        # transport per message rather than using the last route in the batch.
+        if hasattr(bridge, "activate_update_transport"):
+            bridge.activate_update_transport(msg)
 
         chat_id = coerce_chat_identity((msg.get("chat") or {}).get("id"), 1)
         user_id = coerce_chat_identity((msg.get("from") or {}).get("id"), chat_id or 1)
@@ -412,13 +449,19 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
 
         if lowered.startswith("/panic"):
             reply("🛑 PANIC: killing everything. App will close.", "")
+            # Never hand back a volatile tail before Panic: even a nonblocking
+            # callback could perform I/O or delay the hard stop, and this memory
+            # cannot survive the exit. Accepted ingress rows remain on disk.
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
+            return offset  # Never drain another already-queued message after Panic.
         elif lowered.startswith("/restart"):
             reply("♻️ Restarting.", "")
             ok, restart_msg = _perform_owner_restart(ctx, reply)
             if not ok:
                 reply(f"⚠️ Restart cancelled: {restart_msg}", "failed")
                 continue
+            _preserve_unprocessed_updates(bridge, updates, cursor[0])  # best effort; this generation handles nothing more
+            return offset  # Remaining accepted rows stay durable; no replay is promised.
         elif lowered == "/review" or lowered.startswith("/review "):
             # Target the requesting chat so the ack and results return to the
             # external transport owner, not the default web owner_chat_id.
@@ -658,11 +701,9 @@ def _run_supervisor(settings: dict) -> None:
             branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
         )
 
-        from supervisor.events import dispatch_event
         from supervisor.message_bus import send_with_budget
         from ouroboros.consciousness import BackgroundConsciousness
         import types
-        import queue as _queue_mod
 
         _migrate_startup_cancel_latches(DATA_DIR)
         prior_worker_pids = _startup_worker_pids(DATA_DIR)
@@ -763,11 +804,13 @@ def _run_supervisor(settings: dict) -> None:
             )
         except Exception:
             log.critical("Startup recovery after supervisor initialization failure failed", exc_info=True)
-        _supervisor_ready.set()
+        _supervisor_ready.clear()  # never reached its loop: the API must not paint Online over the error
+        _supervisor_init_done.set()
         _supervisor_thread = None
         return
 
     _supervisor_ready.set()
+    _supervisor_init_done.set()
     log.info("Supervisor ready.")
     _historical_audit.start(DATA_DIR, REPO_DIR)
 
@@ -780,7 +823,7 @@ def _run_supervisor(settings: dict) -> None:
     # of silent hours; the loop publishes a liveness tick at each tick PHASE. The
     # tick is MONOTONIC: it is only ever read as an elapsed gap, so a wall-clock
     # jump must not turn a healthy loop into a phantom stall (nor hide a real one).
-    from ouroboros.server_liveness import loop_phase_facts, observe_worker_event_lag
+    from ouroboros.server_liveness import loop_phase_facts
     _loop_liveness = [time.monotonic(), {}, time.thread_time(), None]  # slots: server_liveness.py
     _watchdog_stop = threading.Event()  # per-generation: stops the watchdog when THIS loop exits
     _start_supervisor_liveness_watchdog(_loop_liveness, _watchdog_stop)
@@ -806,19 +849,14 @@ def _run_supervisor(settings: dict) -> None:
             rotate_jsonl_log_if_needed(DATA_DIR, "task_reflections.jsonl", "task_reflections")
             ensure_workers_healthy()
 
-            event_q = get_event_q()
-            while True:
-                try:
-                    evt = event_q.get_nowait()
-                except _queue_mod.Empty:
-                    break
-                if evt.get("type") == "restart_request":
-                    _handle_restart_in_supervisor(evt, _event_ctx)
-                    continue
-                observe_worker_event_lag(_loop_liveness, evt)
-                dispatch_event(evt, _event_ctx)
+            # One BOUNDED events batch (count + time; the remainder waits for the next
+            # turn), so a producer that keeps the queue non-empty cannot hide intake.
+            backlog = drain_worker_events(
+                get_event_q(), _event_ctx, _loop_liveness, on_restart=_handle_restart_in_supervisor,
+            )
 
             if _restart_requested.is_set():
+                flush_budget_projection(_event_ctx)  # this turn's drained llm_usage still reaches state.json
                 break
 
             # WS3: intake new bridge messages EARLY — before the heavy steps
@@ -826,6 +864,8 @@ def _run_supervisor(settings: dict) -> None:
             # blocking step can never starve new-message intake (the wedge class
             # where no task_received fired for hours until a full restart).
             offset = _process_bridge_updates(bridge, offset, _event_ctx)
+            # The one budget-projection write of this turn (llm_usage events only mark it dirty).
+            flush_budget_projection(_event_ctx)
 
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "maintenance"), time.monotonic()
             enforce_task_timeouts()
@@ -863,7 +903,8 @@ def _run_supervisor(settings: dict) -> None:
                     log.warning("Consciousness alarm tick failed", exc_info=True)
 
             crash_count = 0
-            time.sleep(0.5)
+            if not backlog:
+                time.sleep(0.5)  # a turn that hit its events bound drains the backlog at full speed
 
         except Exception as exc:
             if _supervisor_stop.is_set() or _restart_requested.is_set() or _exit_signalled.is_set():
@@ -1082,7 +1123,7 @@ def _perform_supervisor_restart(
 
 def _wait_for_supervisor_update_finalize() -> bool:
     """Wait for a real init outcome; slow dependency sync is not a failed boot."""
-    _supervisor_ready.wait()
+    _supervisor_init_done.wait()
     return not bool(_supervisor_error)
 
 
@@ -1277,8 +1318,8 @@ async def lifespan(app):
         _start_supervisor_if_needed(settings)
     else:
         _supervisor_ready.set()
+        _supervisor_init_done.set()
         log.info("No supported provider or local routing configured. Supervisor not started.")
-
     # P2: finalize a pending managed merge update (post-boot smoke / boot-loop rollback)
     # and run a one-shot boot-time update check (check-on-restart) so the main-screen
     # Update badge reflects availability. Both run OFF the startup critical path and

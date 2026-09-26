@@ -350,3 +350,24 @@ def test_one_failed_source_preserves_other_account_catalogs(account_engine):
 def test_account_view_requires_the_exact_declared_query(change):
     path = "/v2/model-sources/:id/models"
     assert not model_catalog_api.account_catalog_supported([{**_account_operation(path), **change}], path)
+
+
+def test_model_catalog_reports_a_bad_extra_ca_bundle_instead_of_a_bare_500(monkeypatch):
+    """An unreadable OUROBOROS_EXTRA_CA_BUNDLE is named in the catalog errors; the engine
+    catalog still loads and the endpoint answers 200."""
+    from ouroboros.net_transport import ExtraCaBundleError
+
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENAI_API_KEY": "openai-key"})
+    monkeypatch.setattr(model_catalog_api, "_subscription_model_catalog",
+                        lambda source_id, profile_id: {"items": [{"value": "engine-model"}], "errors": []})
+
+    def _boom():
+        raise ExtraCaBundleError("OUROBOROS_EXTRA_CA_BUNDLE is not readable: /nope.pem")
+
+    monkeypatch.setattr(model_catalog_api, "verify_kwargs", _boom)
+    response = asyncio.run(model_catalog_api.api_model_catalog(None))
+    assert response.status_code == 200
+    payload = json.loads(response.body.decode("utf-8"))
+    assert [item["value"] for item in payload["items"]] == ["engine-model"]
+    trust = [row for row in payload["errors"] if row.get("provider_id") == "extra_ca_bundle"]
+    assert trust and "not readable" in trust[0]["error"] and trust[0]["stage"] == "trust"

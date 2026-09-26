@@ -1,7 +1,8 @@
-"""CPL4-C17 pins: knowledge journals append through the sidecar-lock seam.
+"""CPL4-C17 pins: knowledge history appends through the sidecar-lock seam.
 
-``knowledge_history.jsonl`` / ``knowledge_journal.jsonl`` used raw
-``open("a")`` — the one torn-line hazard left among the memory journals.
+``knowledge_history.jsonl`` (and the since-removed ``knowledge_journal.jsonl``
+size telemetry) used raw ``open("a")`` — the one torn-line hazard left among
+the memory journals.
 """
 
 from __future__ import annotations

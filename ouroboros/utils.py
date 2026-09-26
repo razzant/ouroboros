@@ -580,16 +580,25 @@ def append_jsonl(
             # separator. Preserve those bytes while keeping this append a new
             # record. Ordinary high-volume logs retain their existing fast path.
             try:
-                if path.stat().st_size > 0:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                size = 0  # First append; there is no previous record to separate.
+            except OSError:
+                log.warning("append_jsonl: record boundary unavailable for %s", path, exc_info=True)
+                return False
+            if size:
+                try:
                     with path.open("rb") as existing:
                         existing.seek(-1, os.SEEK_END)
-                        if existing.read(1) != b"\n":
-                            append_data = b"\n" + data
-            except FileNotFoundError:
-                pass
-            except OSError:
-                # Preserve historical behavior for unusual write-only files.
-                append_data = data
+                        last_byte = existing.read(1)
+                except OSError:
+                    log.warning("append_jsonl: record boundary unreadable for %s", path, exc_info=True)
+                    return False
+                if len(last_byte) != 1:
+                    log.warning("append_jsonl: record boundary changed while reading %s", path)
+                    return False
+                if last_byte != b"\n":
+                    append_data = b"\n" + data
 
         for attempt in range(write_retries):
             try:

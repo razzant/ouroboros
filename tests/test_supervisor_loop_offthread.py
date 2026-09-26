@@ -285,3 +285,41 @@ def test_a_stop_in_flight_makes_the_sweep_gateway_attach_only(tmp_path, monkeypa
     finally:
         sm._restart_requested.clear()
     assert used[-1] == ("attach", {}), "a restart in flight never ensures either"
+
+
+def test_reconcile_cadence_is_stamped_when_the_pass_ends(quiet_tick, monkeypatch):
+    """The 300-s zombie reconcile stamps its marker when the pass ENDS, so a pass
+    slower than its cadence never re-arms on the very next tick (issue #1230); a
+    pass that raises still stamps, and the next eligible run still happens."""
+    sm = quiet_tick
+    clock = [1_000_000.0]
+    monkeypatch.setattr(sm.time, "time", lambda: clock[0])
+    calls = []
+
+    def slow_pass(**kwargs):
+        calls.append(kwargs)
+        clock[0] += 400.0
+        if len(calls) == 2:
+            raise RuntimeError("the pass itself failed")
+
+    monkeypatch.setattr(sm, "_periodic_zombie_reconcile", slow_pass)
+    busy = threading.Lock()
+    busy.acquire()
+    monkeypatch.setattr(sm, "_CANCEL_INTENT_SWEEP_LOCK", busy)  # the 20 s sweep is skipped
+    last_custody_reap = [clock[0] + 10_000]  # the 600 s sweep is not due
+    marker = [clock[0] - 301]
+
+    sm._periodic_supervisor_maintenance(last_custody_reap, marker)
+    assert len(calls) == 1 and marker[0] == clock[0]  # stamped at the END of the 400 s pass
+    sm._periodic_supervisor_maintenance(last_custody_reap, marker)
+    assert len(calls) == 1, "a pass slower than its cadence must not re-arm on the next tick"
+
+    clock[0] += 301.0
+    with pytest.raises(RuntimeError):
+        sm._periodic_supervisor_maintenance(last_custody_reap, marker)
+    assert len(calls) == 2 and marker[0] == clock[0], "a failing pass still stamps when it ends"
+    sm._periodic_supervisor_maintenance(last_custody_reap, marker)
+    assert len(calls) == 2
+    clock[0] += 301.0
+    sm._periodic_supervisor_maintenance(last_custody_reap, marker)
+    assert len(calls) == 3, "the next eligible run still happens after the cadence"

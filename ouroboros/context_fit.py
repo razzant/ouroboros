@@ -176,7 +176,13 @@ class ContextFitProjection:
     user_content_json: Optional[str] = None
 
     def system_message(self) -> Dict[str, Any]:
-        return {"role": "system", "content": json.loads(self.system_content_json)}
+        from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
+
+        # Declared for the OpenAI-family and Claudexor send projection (llm_messages.split_leading_system_prefix):
+        # block 0 (SYSTEM.md, BIBLE, reference docs) is byte-stable across conversations, while
+        # the semi-stable memory block changes with every consolidation (8 of 59 Aika events),
+        # so keeping it in the cached unit would lose the whole unit on those events.
+        return {"role": "system", "content": json.loads(self.system_content_json), STABLE_PREFIX_BLOCKS_KEY: 1}
 
 
 @dataclass(frozen=True)
@@ -331,8 +337,10 @@ def _render_context_system_content(
         )
     )
     static_parts.extend(core.reference_book_errors)
-    # Stable governance/policy is first; mutable task evidence is last.  This is
-    # the cache-friendly ordering recommended by both supported cache routes.
+    # Stable governance/policy is first; mutable task evidence is last: the
+    # cache-friendly ordering for Anthropic-style breakpoints. OpenAI's public API
+    # (and the Codex backend) caches the whole leading system section as one unit,
+    # so their send copies keep only block 0 there (declared in ``system_message``).
     return [
         {
             "type": "text",

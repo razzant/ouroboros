@@ -3,9 +3,11 @@
 Every non-native route — OpenRouter, direct OpenAI, cloud.ru, MiniMax, a vLLM
 server — speaks the OpenAI chat-completions shape, and the differences between
 them are request options: which token-limit key, which reasoning carrier, which
-cache affinity, which provider routing block. This module owns building that
-payload and reading the response back into the normalized ``(message, usage)``
-every caller consumes.
+cache affinity, which provider routing block — and, for OpenAI's public API, which
+part of the leading system message its whole-section prompt cache may see
+(``_project_openai_family_system``). This module owns building that payload and
+reading the response back into the normalized ``(message, usage)`` every caller
+consumes.
 """
 
 
@@ -16,8 +18,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 from ouroboros.llm_attempt import (
-    apply_processing_preference, attach_processing_receipt, supports_message_cache_control,
+    apply_processing_preference, attach_processing_receipt, openai_family_route,
+    supports_message_cache_control,
 )
+from ouroboros.llm_messages import project_declared_system_prefix
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 from ouroboros.llm_capability_policy import (
@@ -27,7 +31,7 @@ from ouroboros.llm_capability_policy import (
 )
 from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
 from ouroboros.llm_routing import _resolve_or_provider
-from ouroboros.provider_models import normalize_deepseek_reasoning_effort
+from ouroboros.provider_models import normalize_deepseek_reasoning_effort, normalize_zai_reasoning_effort
 from ouroboros.request_wire_recovery import (
     finalize_wire_response,
     note_provider_metadata_drop_fields,
@@ -46,6 +50,21 @@ _FALSE_LIKE_ENV_VALUES = {"", "0", "false", "no", "off"}
 # Response-only labels are diagnostic facts, not canonical assistant fields. Keep
 # provider-supplied values bounded and printable before they enter usage custody.
 _RESPONSE_METADATA_LABEL_MAX_CHARS = 160
+
+
+def _project_openai_family_system(target: Dict[str, Any], messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The OpenAI-family send copy of a declared leading system message.
+
+    OpenAI's public API caches the whole leading system section plus tools as ONE unit
+    (``llm_attempt.openai_family_model``): keep only the builder-declared stable governance
+    blocks there and carry the mutable context as a host notice before the task, so a new
+    conversation is served the prefix its predecessors already cached. Runs before the
+    direct/OpenRouter branch split and the marker strip, so direct OpenAI, OpenRouter and
+    the prospective wrap-up candidate project the same copy; the canonical transcript keeps
+    its single system message. The shape that was sent rides ``target["wire_layout"]``
+    (per-call, never a thread-local) into ``usage`` in ``_normalize_remote_response``.
+    """
+    return project_declared_system_prefix(target, messages) if openai_family_route(target) else messages
 
 
 def _bounded_response_metadata_label(value: Any) -> Optional[str]:
@@ -131,6 +150,7 @@ class _OpenAICompatibleLaneMixin:
             or supports_vision(resolved_model)
         ):
             messages = self._replace_image_blocks_with_placeholder(messages)
+        messages = _project_openai_family_system(target, messages)
         # Official direct OpenAI Chat uses the current completion-token carrier:
         # provider-wide; model names are not capability authority across routes.
         direct_openai = provider == "openai"
@@ -204,6 +224,26 @@ class _OpenAICompatibleLaneMixin:
                     _EFFORT_CLAMP_CVAR.set({
                         "requested": requested_effort, "applied": applied,
                         "reason": "provider_forced_tool_choice" if forced_tool else "provider_wire_mapping",
+                        "model": resolved_model,
+                    })
+            elif provider == "zai":
+                # Same carriage family, Z.ai's OWN projection table (NOT
+                # DeepSeek's: medium does not exist at Z.ai and xhigh maps to
+                # max, not high). GLM reasoning cannot be disabled — the
+                # DeepSeek ``thinking={"type":"disabled"}`` arm answers
+                # 400 code 1210 ("please use low, high or max") on PAYG — and
+                # forced tool_choice WORKS with thinking enabled (measured
+                # 2026-09-21), so there is no forced-tool exception either.
+                # An absent parameter is served at MAX: dropping the tier
+                # silently billed every call at max. Any tier change is
+                # disclosed on usage as ``reasoning_effort_clamped``.
+                applied = normalize_zai_reasoning_effort(requested_effort)
+                kwargs["reasoning_effort"] = applied
+                _EFFORT_CLAMP_CVAR.set(None)  # never inherit a stale note
+                if applied != requested_effort:
+                    _EFFORT_CLAMP_CVAR.set({
+                        "requested": requested_effort, "applied": applied,
+                        "reason": "provider_wire_mapping",
                         "model": resolved_model,
                     })
             if temperature is not None:
@@ -382,6 +422,12 @@ class _OpenAICompatibleLaneMixin:
             usage.pop("reasoning_pin", None)
             usage.pop("reasoning_effort_clamped", None)
             usage.pop("provider_error", None)
+            usage.pop("wire_layout", None)
+            # The projected wire shape of THIS call's candidate (per-call target, never a
+            # thread-local): the request blob keeps the canonical messages, the sealed
+            # physical candidate keeps the exact wire, this fact says which one was sent.
+            if isinstance(target.get("wire_layout"), dict):
+                usage["wire_layout"] = dict(target["wire_layout"])
         # An HTTP-200 that carried a provider body-error (OpenRouter passes
         # 429/5xx through the body) reaches here only when a same-model reroute
         # was unavailable or also errored. Surface it as a typed marker so the

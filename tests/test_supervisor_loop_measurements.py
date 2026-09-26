@@ -225,7 +225,11 @@ def test_the_loop_publishes_one_monotonic_stamp_per_tick_phase():
     )
     assert [phase for phase, _clock in stamps] == ["events", "maintenance", "assign"], stamps
     assert {clock for _phase, clock in stamps} == {"monotonic"}, stamps
-    assert "observe_worker_event_lag(_loop_liveness, evt)" in source
+    # The bounded drain receives the loop's own liveness list and observes the lag itself.
+    from ouroboros import server_liveness
+
+    assert re.search(r"drain_worker_events\(\s*get_event_q\(\), _event_ctx, _loop_liveness,", source), source
+    assert "observe_worker_event_lag(liveness, evt)" in inspect.getsource(server_liveness.drain_worker_events)
 
 
 def _run_custody_tick(monkeypatch, *, failing_step=None):
@@ -284,3 +288,76 @@ def test_a_healthy_custody_pass_stays_quiet(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG):
         _run_custody_tick(monkeypatch)
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_failed_init_is_not_ready_on_the_state_api_while_boot_waiters_still_settle(monkeypatch, tmp_path):
+    """TZ-1: the failure rail used to SET readiness so the boot finalizer would
+    not hang; ``/api/state`` then answered ``supervisor_ready: true`` beside
+    ``supervisor_error`` and the chat header (readiness is the typed boolean
+    alone) painted Online over a supervisor that never reached its loop.
+    Readiness and the init outcome are separate latches: the real endpoint,
+    wired to the real failure rail, says not-ready with the error, and the
+    finalizer returns at once with a failed verdict."""
+    import asyncio
+    import json
+    import types
+
+    from starlette.requests import Request
+
+    import ouroboros.config as config
+    import server
+    from ouroboros import usage_accounting as ua
+    from ouroboros.gateway.state import api_state
+    from supervisor import queue as queue_mod, state as state_mod, workers
+
+    # Wiring pin: the endpoint reads the SAME latch and error the rail writes.
+    assert server.app.app.state.supervisor_ready_event is server._supervisor_ready
+    assert server.app.app.state.get_supervisor_error() is server._supervisor_error
+
+    ready = threading.Event()
+    init_done = threading.Event()
+    monkeypatch.setattr(server, "_supervisor_ready", ready)
+    monkeypatch.setattr(server, "_supervisor_init_done", init_done)
+    monkeypatch.setattr(server, "_supervisor_thread", threading.current_thread())
+    monkeypatch.setattr(server, "_supervisor_error", None)
+    monkeypatch.setattr(server, "_consciousness", None)
+    monkeypatch.setattr(server, "_apply_settings_to_env", lambda _settings: None)
+    monkeypatch.setattr(server, "_start_supervisor_liveness_watchdog", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_startup_worker_pids", lambda _root: set())
+    monkeypatch.setattr(server, "_run_startup_task_recovery", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "ensure_legacy_imported",
+                        lambda _root: (_ for _ in ()).throw(RuntimeError("boot dependency refused")))
+    server._run_supervisor({})
+    assert init_done.is_set() and not ready.is_set()
+    assert server._supervisor_error == "Supervisor init failed: boot dependency refused"
+    assert server._wait_for_supervisor_update_finalize() is False, "a known failed outcome never blocks the boot"
+
+    root = tmp_path / "data"
+    (root / "state").mkdir(parents=True)
+    (root / "logs").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/ouroboros\n", encoding="utf-8")
+    (repo / ".git" / "refs" / "heads" / "ouroboros").write_text("1234567890abcdef1234567890abcdef12345678\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
+    ua.ensure_legacy_imported(root)
+    monkeypatch.setattr(config, "REPO_DIR", repo)
+    monkeypatch.setattr(state_mod, "TOTAL_BUDGET_LIMIT", 0.0)
+    monkeypatch.setattr(state_mod, "load_state", lambda: {"current_branch": None, "current_sha": None})
+    monkeypatch.setattr(workers, "WORKERS", {})
+    monkeypatch.setattr(workers, "PENDING", [])
+    monkeypatch.setattr(workers, "RUNNING", {})
+    monkeypatch.setattr(queue_mod, "get_evolution_status_snapshot", lambda **_kwargs: {})
+    request = Request({
+        "type": "http", "method": "GET", "path": "/api/state", "headers": [],
+        "query_string": b"", "scheme": "http", "server": ("test", 80), "client": ("test", 1),
+        "app": types.SimpleNamespace(state=types.SimpleNamespace(
+            drive_root=root, app_start=0.0,
+            supervisor_ready_event=server._supervisor_ready,
+            get_supervisor_error=lambda: server._supervisor_error,
+        )),
+    })
+    payload = json.loads(asyncio.run(api_state(request)).body)
+    assert payload["supervisor_ready"] is False
+    assert payload["supervisor_error"] == "Supervisor init failed: boot dependency refused"

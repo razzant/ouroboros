@@ -9,17 +9,31 @@ import pytest
 pytestmark = pytest.mark.portable_detail
 
 
-def test_bundled_playwright_headless_shell_paths_stay_short():
+def _bundled_browsers_root() -> pathlib.Path:
+    """Where the shipped artifact keeps its Playwright browsers.
+
+    Packaged builds install into the Playwright package tree
+    (``PLAYWRIGHT_BROWSERS_PATH=0``); the Docker image hands the runtime a
+    shared directory through the same variable. Either way the test measures
+    the artifact as shipped, never a download it made itself.
+    """
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if configured and configured != "0":
+        return pathlib.Path(configured)
     playwright = pytest.importorskip("playwright", reason="Playwright is not installed")
-    root = pathlib.Path(playwright.__file__).parent / "driver" / "package" / ".local-browsers"
+    return pathlib.Path(playwright.__file__).parent / "driver" / "package" / ".local-browsers"
+
+
+def test_bundled_playwright_headless_shell_paths_stay_short():
+    root = _bundled_browsers_root()
     if not root.is_dir():
         if os.environ.get("OUROBOROS_EXPECT_HEADLESS_SHELL") == "1":
-            pytest.fail("Expected Playwright local browser bundle in this CI lane")
+            pytest.fail(f"Expected Playwright browser bundle at {root} in this CI lane")
         pytest.skip("Playwright local browser bundle not present")
     shells = sorted(root.glob("chromium_headless_shell-*"))
     if not shells:
         if os.environ.get("OUROBOROS_EXPECT_HEADLESS_SHELL") == "1":
-            pytest.fail("Expected Playwright headless-shell bundle in this CI lane")
+            pytest.fail(f"Expected Playwright headless-shell bundle under {root} in this CI lane")
         pytest.skip("Playwright headless-shell bundle not present")
     too_long = []
     for shell in shells:

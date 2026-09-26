@@ -16,6 +16,7 @@ from typing import Any, Iterable, Literal, Optional  # noqa: F401 — historical
 
 from ouroboros.artifacts import (delegated_capture_read_target,
                                  task_artifact_dir_path, task_id_for_artifacts)
+from ouroboros.headless import task_state_dir
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE  # noqa: F401 — historical facade surface
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES, normalize_task_constraint  # noqa: F401 — historical facade surface
 from ouroboros import deliverables_paths as _deliverables_paths
@@ -151,22 +152,22 @@ def _task_root_drives(ctx: Any) -> list[pathlib.Path]:
 
 def lineage_read_base(ctx: Any, root: ResourceRoot, target: pathlib.Path) -> pathlib.Path | None:
     """The lineage ``task_drive``/``artifact_store`` base containing ``target``, or None:
-    ``lineage_task_ids`` on the canonical data root (where a parent's task files live
-    while the child runs on a child or headless drive) and on the task's own drives.
-    Physical containment only; the caller keeps the READ-only gate."""
+    ``lineage_task_ids`` on the canonical data root and the task's own drives (where a parent's
+    files live while the child runs elsewhere), and each id on ITS OWN headless drive (#1260),
+    never through a symlinked headless root. Physical containment only; the caller keeps the READ-only gate."""
     if root not in {"task_drive", "artifact_store"} or not hasattr(ctx, "drive_root"):
         return None
-    candidate = pathlib.Path(target).resolve(strict=False)
-    drives = [canonical_data_root(ctx)]
-    drives += [drive for drive in _task_root_drives(ctx) if drive not in drives]
-    for drive in drives:
-        for task_id in lineage_task_ids(ctx):
-            base = (
-                drive / "task_drives" / task_id if root == "task_drive"
-                else task_artifact_dir_path(drive, task_id, create=False)
-            ).resolve(strict=False)
-            if path_is_relative_to(candidate, base):
-                return base
+    candidate, canonical = pathlib.Path(target).resolve(strict=False), canonical_data_root(ctx)
+    drives = [canonical] + [drive for drive in _task_root_drives(ctx) if drive != canonical]
+    task_ids = lineage_task_ids(ctx)
+    pairs = [(drive, task_id, False) for drive in drives for task_id in task_ids]
+    pairs += [(task_state_dir(canonical, task_id) / "data", task_id, True) for task_id in task_ids]
+    for drive, task_id, headless in pairs:
+        lexical = (drive / "task_drives" / task_id if root == "task_drive"
+                   else task_artifact_dir_path(drive, task_id, create=False))
+        base = lexical.resolve(strict=False)
+        if path_is_relative_to(candidate, base) and (base == lexical or not headless):
+            return base
     return None
 
 

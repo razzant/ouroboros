@@ -77,9 +77,35 @@ def test_openrouter_uses_session_id_without_replacing_existing_extra_body(monkey
 
     assert kwargs["extra_body"]["session_id"].startswith("ouroboros-session-")
     assert kwargs["extra_body"]["session_id"] == continued["extra_body"]["session_id"]
-    assert kwargs["extra_body"]["session_id"] != other["extra_body"]["session_id"]
+    # Measured 2026-09-25 on openai/gpt-6-sol: OpenAI's public API reuses a prompt cache
+    # only under ONE routing key, so the OpenAI family shares a session per model and
+    # governance prefix — a different first user message keeps the SAME session_id
+    # (llm_routing._openrouter_session_identity, the openai-family branch).
+    assert kwargs["extra_body"]["session_id"] == other["extra_body"]["session_id"]
     assert kwargs["extra_body"]["reasoning"]["effort"] == "high"
     assert "prompt_cache_key" not in kwargs
+
+    # Every other family keeps the conversation-stable session: the first user
+    # message is folded in, so a different owner prompt is a different session.
+    grok = {
+        "provider": "openrouter",
+        "resolved_model": "x-ai/grok-4.7",
+        "usage_model": "x-ai/grok-4.7",
+        "supports_openrouter_extensions": True,
+    }
+
+    def build_grok(messages):
+        return client._build_remote_kwargs(
+            grok, messages, "high", 512, "auto", None, None,
+            skip_capability_fetch=True,
+        )
+
+    grok_kwargs = build_grok(_messages())
+    assert grok_kwargs["extra_body"]["session_id"].startswith("ouroboros-session-")
+    assert grok_kwargs["extra_body"]["session_id"] == build_grok(continued_messages)["extra_body"]["session_id"]
+    assert grok_kwargs["extra_body"]["session_id"] != build_grok(different_owner_prompt)["extra_body"]["session_id"]
+    assert grok_kwargs["extra_body"]["session_id"] != kwargs["extra_body"]["session_id"]
+    assert "prompt_cache_key" not in grok_kwargs
 
 
 def _sealed_transcripts():
@@ -175,25 +201,9 @@ def test_openrouter_session_survives_marker_migration_on_sdk_wire(asynchronous, 
         assert captured[3]["messages"] == captured[0]["messages"]
 
 
-def test_derived_session_ignores_transport_metadata_but_preserves_semantic_inputs():
-    from ouroboros.llm import LLMClient
-
-    messages = _messages()
-    messages[1]["content"] = [
-        {"type": "text", "text": "solve exactly"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA==", "detail": "high"}},
-    ]
-    baseline = copy.deepcopy(messages)
-    identity = LLMClient._openrouter_session_identity("openai/gpt-5.5", messages)
-    for ttl in ("5m", "1h"):
-        annotated = copy.deepcopy(messages)
-        annotated[1]["content"][0]["cache_control"] = {"type": "ephemeral", "ttl": ttl}
-        annotated[1]["content"][1].update({
-            "_caption": "host caption", "_source_path": "/fixture/image.png", "_context_capsule": "host",
-        })
-        original = copy.deepcopy(annotated)
-        assert LLMClient._openrouter_session_identity("openai/gpt-5.5", annotated) == identity
-        assert annotated == original
+def _first_user_variants(messages):
+    """First-user rewrites that a conversation-stable session must tell apart:
+    text (also a trailing-space change), the image url, the block order."""
     changed = []
     for text in ("another task", "solve exactly "):
         candidate = copy.deepcopy(messages)
@@ -205,12 +215,72 @@ def test_derived_session_ignores_transport_metadata_but_preserves_semantic_input
     candidate = copy.deepcopy(messages)
     candidate[1]["content"].reverse()
     changed.append(candidate)
+    return changed
+
+
+def _transport_annotated(messages, ttl):
+    annotated = copy.deepcopy(messages)
+    annotated[1]["content"][0]["cache_control"] = {"type": "ephemeral", "ttl": ttl}
+    annotated[1]["content"][1].update({
+        "_caption": "host caption", "_source_path": "/fixture/image.png", "_context_capsule": "host",
+    })
+    return annotated
+
+
+def test_derived_session_ignores_transport_metadata_but_preserves_semantic_inputs():
+    # Pinned on a non-OpenAI family since 2026-09-25: the OpenAI family's session is
+    # prefix-only (see the inverse test below); every other family keeps folding the
+    # first user message in, so the conversation-stable guarantees stay exactly these.
+    from ouroboros.llm import LLMClient
+
+    messages = _messages()
+    messages[1]["content"] = [
+        {"type": "text", "text": "solve exactly"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA==", "detail": "high"}},
+    ]
+    baseline = copy.deepcopy(messages)
+    identity = LLMClient._openrouter_session_identity("anthropic/claude-fable-5", messages)
+    assert identity.startswith("ouroboros-session-")
+    for ttl in ("5m", "1h"):
+        annotated = _transport_annotated(messages, ttl)
+        original = copy.deepcopy(annotated)
+        assert LLMClient._openrouter_session_identity("anthropic/claude-fable-5", annotated) == identity
+        assert annotated == original
+    changed = _first_user_variants(messages)
     candidate = copy.deepcopy(messages)
     candidate[0]["content"][0]["text"] = "another policy"
     changed.append(candidate)
-    assert all(LLMClient._openrouter_session_identity("openai/gpt-5.5", candidate) != identity
+    assert all(LLMClient._openrouter_session_identity("anthropic/claude-fable-5", candidate) != identity
                for candidate in changed)
+    assert LLMClient._openrouter_session_identity("anthropic/claude-opus-5", messages) != identity
+    assert messages == baseline
+
+
+def test_openai_family_session_ignores_the_first_user_message_but_tracks_prefix_and_model():
+    """The inverse of the test above for OpenAI's family (measured 2026-09-25 on
+    openai/gpt-6-sol: one routing key, whole-section cache unit). The first user
+    message — its text, image url, block order, host metadata and cache markers — never
+    enters the session, while block 0 of the system prefix and the model still do.
+    Removing the openai-family branch of ``_openrouter_session_identity`` fails the
+    equality half; hashing only the model would fail the block-0 half."""
+    from ouroboros.llm import LLMClient
+
+    messages = _messages()
+    messages[1]["content"] = [
+        {"type": "text", "text": "solve exactly"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA==", "detail": "high"}},
+    ]
+    baseline = copy.deepcopy(messages)
+    identity = LLMClient._openrouter_session_identity("openai/gpt-5.5", messages)
+    assert identity.startswith("ouroboros-session-")
+    same_session = _first_user_variants(messages) + [_transport_annotated(messages, "5m"), _transport_annotated(messages, "1h")]
+    assert all(LLMClient._openrouter_session_identity("openai/gpt-5.5", candidate) == identity
+               for candidate in same_session)
+    candidate = copy.deepcopy(messages)
+    candidate[0]["content"][0]["text"] = "another policy"
+    assert LLMClient._openrouter_session_identity("openai/gpt-5.5", candidate) != identity
     assert LLMClient._openrouter_session_identity("openai/gpt-5.6-sol", messages) != identity
+    assert LLMClient._openrouter_session_identity("anthropic/claude-fable-5", messages) != identity
     assert messages == baseline
 
 

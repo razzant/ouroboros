@@ -27,6 +27,10 @@ inside the payload rather than a ``path`` arg, the dispatch gates in
 ``registry.py`` read them back out through ``_payload_write_paths`` so the
 acting-subagent and protected-write fences apply identically.
 
+``locate_edit_miss`` is the one bounded diagnosis all three exact editors attach
+when their needle is not in the file (edit_text through ``core._str_match_replace``):
+the closest region, the first differing line and the ``read_file`` window to copy from.
+
 (An ``edit_sketch`` fast-apply tool — strong-model sketch merged by the cheap
 LIGHT model — lived here through the editbench evaluation and was removed: the
 sketch/apply split never beat the direct tools on either cost or robustness;
@@ -49,6 +53,7 @@ import difflib
 import json
 import logging
 import pathlib
+import textwrap
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -264,6 +269,187 @@ def _line_positions(text: str, needle: str, limit: int = 5) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# Edit-miss locator (shared by edit_text / edit_batch / apply_patch)
+# ---------------------------------------------------------------------------
+
+_LOCATE_MAX_FILE_LINES = 20_000     # file lines scanned; the rest is disclosed, not read
+_LOCATE_MAX_OLD_LINES = 200         # needle lines scored per candidate
+_LOCATE_MAX_CANDIDATES = 3          # regions named in one diagnosis
+_LOCATE_MAX_ANCHOR_HITS = 50        # anchor-line hits scored before the best is chosen
+_LOCATE_MAX_DISTINCT_LINES = 8_000  # distinct lines offered to the similarity fallback
+_LOCATE_EXCERPT_LINES = 12          # numbered file lines shown for the chosen region
+_LOCATE_LINE_CHARS = 160            # per rendered line
+_LOCATE_MAX_CHARS = 2_400           # whole rendered block
+_LOCATE_BATCH_MAX = 3               # edit_batch misses located per call
+_WHOLE_FILE_PREVIEW_CHARS = 2_000   # a file this small is shown whole (as the old head preview did)
+
+
+def _norm_ws(line: str) -> str:
+    """One whitespace-insensitive spelling of a line (indent, trailing, tabs, runs)."""
+    return " ".join(line.split())
+
+
+def _cut(line: str, limit: int = _LOCATE_LINE_CHARS) -> str:
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def _positions(n: int) -> List[str]:
+    """Where each needle line sits in its file line: a needle may start or end
+    mid-line, so its first line is a SUFFIX of the file line, its last line a
+    PREFIX, a lone line a SUBSTRING and an inner line the whole line."""
+    return ["single"] if n == 1 else ["first", *["inner"] * (n - 2), "last"]
+
+
+def _at(file_line: str, needle_line: str, position: str) -> bool:
+    if position == "single":
+        return needle_line in file_line
+    if position == "first":
+        return file_line.endswith(needle_line)
+    return file_line.startswith(needle_line) if position == "last" else file_line == needle_line
+
+
+def _excerpt(file_lines: List[str], start: int, count: int) -> str:
+    end = min(len(file_lines), start + count)
+    shown = min(end - start, _LOCATE_EXCERPT_LINES)
+    width = len(str(start + shown)) + 1
+    rows = [f"{start + i + 1:>{width}}| {_cut(file_lines[start + i])}" for i in range(shown)]
+    if end - start > shown:
+        rows.append(f"{'':>{width}}| … {end - start - shown} more line(s) of the region not shown")
+    return "\n".join(rows)
+
+
+def _first_difference(file_lines: List[str], start: int, old_lines: List[str]) -> Optional[Tuple[int, str, str]]:
+    """The first ``(line_no, file_bytes, needle_bytes)`` where the raw lines disagree."""
+    for k, (needle_line, position) in enumerate(zip(old_lines, _positions(len(old_lines)))):
+        if start + k >= len(file_lines):
+            return start + k + 1, "<end of file>", needle_line
+        if not _at(file_lines[start + k], needle_line, position):
+            return start + k + 1, file_lines[start + k], needle_line
+    return None
+
+
+def _whitespace_reason(file_line: str, needle_line: str) -> str:
+    if file_line.rstrip() == needle_line.rstrip():
+        return "trailing whitespace differs"
+    if file_line.strip() == needle_line.strip():
+        lead = lambda s: len(s) - len(s.lstrip())  # noqa: E731 - local one-liner
+        return f"indentation differs: file {lead(file_line)} leading chars, needle {lead(needle_line)}"
+    return "tabs and spaces differ" if file_line.expandtabs() == needle_line.expandtabs() else "whitespace differs inside the line"
+
+
+def whole_file_preview(text: str, limit: int = _WHOLE_FILE_PREVIEW_CHARS) -> str:
+    """The whole file when small enough; a head cut of a large file previews nothing about a miss."""
+    return "" if len(text) > limit else f"\nFile preview (whole file, {len(text)} chars):\n{text}"
+
+
+def _bounded(block: str, notes: List[str]) -> str:
+    out = "\n".join([block, *notes])
+    return out if len(out) <= _LOCATE_MAX_CHARS else out[: _LOCATE_MAX_CHARS - 1] + "…"
+
+
+def locate_edit_miss(
+    text: str, old_str: str, *, cursor_line: int = 1, needle_name: str = "old_str",
+    max_candidates: int = _LOCATE_MAX_CANDIDATES,
+) -> str:
+    """Bounded, actionable diagnosis of why ``old_str`` is not in ``text``: the
+    closest region, the FIRST line where the file's bytes differ from the needle
+    and the ``read_file`` window to copy from. Tiers, cheapest first: line endings
+    (CR/CRLF) → a whitespace-relaxed line match (indentation, trailing, tabs; a
+    needle may start or end mid-line) → the nearest region by the needle's most
+    distinctive line and difflib similarity. Every tier is bounded (lines scanned,
+    candidates scored, excerpt and block size). ``cursor_line`` (1-based) is where
+    the caller's search began — apply_patch hunks apply in file order, so a region
+    before it is reported as such: the fix is reordering, not retyping."""
+    if not old_str:
+        return ""
+    if not text:
+        return f"The file is empty: nothing can match {needle_name}. Use write_file to create its content."
+    all_lines = text.split("\n")
+    file_lines = all_lines[:_LOCATE_MAX_FILE_LINES]
+    notes = ([f"(only the first {_LOCATE_MAX_FILE_LINES} of {len(all_lines)} lines were scanned)"]
+             if len(all_lines) > _LOCATE_MAX_FILE_LINES else [])
+    if "\r" in old_str or "\r" in text:  # tier 0: universal-newline reads leave the file LF-only
+        n_text, n_old = (s.replace("\r\n", "\n").replace("\r", "\n") for s in (text, old_str))
+        if n_old.strip() and n_old in n_text:
+            line = n_text[: n_text.index(n_old)].count("\n") + 1
+            side = (f"{needle_name} carries CR (\\r) characters the file does not" if "\r" not in text
+                    else "the file carries CR (\\r) characters")
+            return _bounded(
+                f"{needle_name} matches at line {line} once line endings are normalized: {side}. Use LF (\\n) only.\n"
+                f"Re-read that region (read_file start_line={line} max_lines={n_old.count(chr(10)) + 1}) "
+                f"and copy the exact bytes into {needle_name}.", notes)
+    old_lines = old_str.split("\n")
+    while old_lines and not old_lines[0].strip():
+        old_lines.pop(0)
+    while old_lines and not old_lines[-1].strip():
+        old_lines.pop()
+    if not old_lines:
+        return _bounded(f"{needle_name} is whitespace only; include at least one non-blank line.", notes)
+    total = len(old_lines)  # the whole needle; only the window below is compared, and that is said
+    old_lines = old_lines[:_LOCATE_MAX_OLD_LINES]
+    n, positions = len(old_lines), _positions(len(old_lines))
+    if total > n:
+        notes.append(f"(only the first {n} of {total} {needle_name} lines were compared; the miss may be after them)")
+    needle = [_norm_ws(line) for line in old_lines]
+    hay = [_norm_ws(line) for line in file_lines]
+
+    def fits(start: int) -> bool:  # every needle line at its position, whitespace aside (short-circuits)
+        return start + n <= len(hay) and all(_at(hay[start + k], needle[k], positions[k]) for k in range(n))
+
+    def matched(start: int) -> int:
+        return sum(1 for k in range(n) if start + k < len(hay) and _at(hay[start + k], needle[k], positions[k]))
+
+    def span(start: int) -> str:
+        end = min(len(file_lines), start + n)
+        return f"line {start + 1}" if end == start + 1 else f"lines {start + 1}–{end}"
+
+    def render(head: str, start: int, extra: List[str]) -> str:
+        diff = _first_difference(file_lines, start, old_lines)
+        body = [head, _excerpt(file_lines, start, n)]
+        if diff:
+            body.append(f"first difference at line {diff[0]}:\n  file   : {_cut(diff[1])!r}\n  {needle_name:<7}: {_cut(diff[2])!r}")
+        if start + 1 < cursor_line:
+            body.append(f"Note: that region is BEFORE line {cursor_line}, where this search started: hunks apply "
+                        "in file order — move this hunk earlier or add an @@ anchor above the region.")
+        body += extra + [f"Re-read that region (read_file start_line={start + 1} max_lines={total}) "
+                         f"and copy the exact bytes into {needle_name}."]
+        return _bounded("\n".join(body), notes)
+
+    relaxed = [i for i in range(len(hay) - n + 1) if fits(i)][:5]  # tier 1: the same lines, whitespace aside
+    if relaxed:
+        start = relaxed[0]
+        diff = _first_difference(file_lines, start, old_lines)
+        reason = (_whitespace_reason(diff[1], diff[2]) if diff
+                  else (f"its first {n} lines match exactly; the difference is in the {total - n} lines after them, "
+                        "which were not compared") if total > n
+                  else "the bytes match" if start + 1 < cursor_line else "only leading/trailing blank lines differ")
+        also = f"; also at lines {', '.join(str(i + 1) for i in relaxed[1:])}" if len(relaxed) > 1 else ""
+        return render(f"{needle_name} matches {span(start)} ignoring whitespace ({reason}){also}. "
+                      "The file's exact bytes are:", start, [])
+    anchor_k = max(range(n), key=lambda k: len(needle[k]))  # tier 2: the needle's most distinctive line
+    anchor = needle[anchor_k]
+    hits = [i for i, line in enumerate(hay) if anchor and anchor in line][:_LOCATE_MAX_ANCHOR_HITS]
+    if not hits and len(anchor) >= 3:
+        distinct: Dict[str, int] = {}
+        for i, line in enumerate(hay):
+            if len(line) >= 3 and line not in distinct:
+                distinct[line] = i
+                if len(distinct) >= _LOCATE_MAX_DISTINCT_LINES:
+                    break
+        hits = [distinct[c] for c in difflib.get_close_matches(anchor, list(distinct), n=max_candidates, cutoff=0.6)]
+    if not hits:
+        return _bounded(
+            f"No line similar to {needle_name} was found ({len(file_lines)} lines scanned). The text may live in "
+            "another file or have changed since you read it: search_code for a distinctive fragment, then re-read.",
+            notes)
+    scored = sorted((-matched(s), abs(s + 1 - cursor_line), s) for s in {max(0, i - anchor_k) for i in hits})
+    score, _distance, start = scored[0]
+    others = [str(s + 1) for _sc, _d, s in scored[1:max_candidates]]
+    return render(
+        f"Nearest region: {span(start)} ({-score} of {n} {needle_name} line(s) match ignoring whitespace):",
+        start, [f"Other candidate region(s) start at line(s): {', '.join(others)}."] if others else [])
+
+# ---------------------------------------------------------------------------
 # apply_patch
 # ---------------------------------------------------------------------------
 
@@ -451,7 +637,11 @@ def _apply_hunks_to_text(
             return None, notes, (
                 f"hunk {hi}: context not found in {path} (searched from line {start + 1}). "
                 f"Hunk expects these consecutive lines:\n{preview}\n"
-                "Copy the exact lines from the file (read_file) into the hunk context."
+                "Copy the exact lines from the file (read_file) into the hunk context.\n"
+                + locate_edit_miss(
+                    "\n".join(file_lines), "\n".join(old),
+                    cursor_line=start + 1, needle_name="the hunk context",
+                )
             )
         if len(matches) > 1:
             where = ", ".join(f"line {m + 1}" for m in matches)
@@ -603,6 +793,7 @@ def _edit_batch(
     )
     binding_iter = iter(supplied_bindings)
     mutation_binding: ResolvedResourceBinding | None = None
+    located = 0  # misses diagnosed so far (bounded per call)
     for idx, edit in enumerate(edits, 1):
         if not isinstance(edit, dict):
             errors.append(f"edit {idx}: must be an object")
@@ -658,6 +849,9 @@ def _edit_batch(
                 f"edit {idx} ({rel}): old_str occurs {occurrences} time(s), expected {count}{where}. "
                 "Re-read the file and set count to the exact number of occurrences you intend to replace."
             )
+            if occurrences == 0 and located < _LOCATE_BATCH_MAX:
+                located += 1
+                errors[-1] += "\n" + textwrap.indent(locate_edit_miss(text, old_str), "      ")
             continue
         contents[rel] = text.replace(old_str, new_str)
         applied.append(f"edit {idx} ({rel}): replaced {count} occurrence(s)")

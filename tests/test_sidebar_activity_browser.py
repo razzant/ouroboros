@@ -251,22 +251,50 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
         observe('p-work', 'unknown')
         mode['fault'] = ''
 
-    # Hold an old response, apply a newer one, then release the old read. The
-    # accepted snapshot sequencer must prevent stale absence-based clearing.
+    # One page-wide state read is in flight at a time: a forced refresh that
+    # lands while an absence response is held starts no second read and
+    # coalesces into one follow-up that begins once the held read settles. The
+    # only thing that outruns a held read is the socket's own generation bump,
+    # so make the held absence stale with a real close and reconnect and prove
+    # it can neither clear the row nor hide the marker once it is released; the
+    # follow-up, sequenced after it, is what carries the current census.
     refresh(active_chat_activities=initial)
     mode['fault'] = 'hold'
     body['active_chat_activities'] = []
     body['_testRevision'] += 1
+    stale_revision = body['_testRevision']
     with page.expect_request(lambda r: urlparse(r.url).path == '/api/state'):
         sockets[-1].send(json.dumps({'type': 'projects_changed'}))
     page.wait_for_function('() => sidebarHeldCount().then(n => n > 0)')
-    mode['fault'] = ''
-    refresh(active_chat_activities=initial)
-    for route, old in held:
+    sockets[-1].send(json.dumps({'type': 'projects_changed'}))
+    page.wait_for_timeout(300)
+    assert page.evaluate('() => sidebarHeldCount()') == 1, 'a forced refresh behind a held read starts no second read'
+    connections = len(sockets)
+    sockets[-1].close()
+    observe('p-work', 'unknown')
+    page.wait_for_function('n => sidebarSockets.length > n && sidebarSockets.at(-1).readyState === WebSocket.OPEN', arg=connections)
+    body['active_chat_activities'] = initial
+    body['_testRevision'] += 1
+    fresh_revision = body['_testRevision']
+    stale_reads, held[:] = list(held), []
+    for route, old in stale_reads:
         route.fulfill(json=old)
-        page.wait_for_function('rev => sidebarReads.includes(rev)', arg=old['_testRevision'])
-    held.clear()
+    # Every released read (the gated one and the socket's own SHA reads) consumes
+    # its body, so this pins the gated read's settle, not merely the first body.
+    page.wait_for_function('([rev, n]) => sidebarReads.filter(r => r === rev).length >= n',
+                           arg=[stale_revision, len(stale_reads)])
+    # The coalesced follow-up starts only now, behind the settled stale read,
+    # and captures the census as it is now: it is held so the stale absence
+    # stands alone when the row is judged.
+    page.wait_for_function('() => sidebarHeldCount().then(n => n > 0)')
     page.evaluate(FRAMES)
+    observe('p-work', 'unknown')
+    assert marker('p-work').is_visible()
+    mode['fault'] = ''
+    for route, snapshot in held:
+        route.fulfill(json=snapshot)
+    held.clear()
+    page.wait_for_function('rev => sidebarReads.includes(rev)', arg=fresh_revision)
     observe('p-work', 'working', True)
 
     # A real socket close and reconnect stop motion immediately and preserve

@@ -54,11 +54,14 @@ def _ceiling(*selections):
     )
 
 
+_OWN_WORK = {"get_task_result", "recent_tasks", "steer_task"}
+
+
 def test_profile_without_tool_selections_still_carries_its_own_memory():
     ceiling = _ceiling()
 
-    assert [grant.name for grant in ceiling.tool_grants] == sorted(COGNITIVE_MEMORY_TOOL_NAMES)
-    assert all(grant.bindings == () for grant in ceiling.tool_grants)
+    assert [grant.name for grant in ceiling.tool_grants] == sorted(COGNITIVE_MEMORY_TOOL_NAMES | _OWN_WORK)
+    assert all(grant.bindings == () for grant in ceiling.tool_grants if grant.name in COGNITIVE_MEMORY_TOOL_NAMES)
     for name in COGNITIVE_MEMORY_TOOL_NAMES:
         assert presence_ceiling_allows_tool(ceiling, name)
 
@@ -84,7 +87,7 @@ def test_a_selected_baseline_tool_keeps_the_profile_authored_bindings():
     assert [(item.argument_path, item.static_value) for item in grant.bindings] == [
         (("scope",), "global"),
     ]
-    assert [item.name for item in ceiling.tool_grants] == sorted(COGNITIVE_MEMORY_TOOL_NAMES)
+    assert [item.name for item in ceiling.tool_grants] == sorted(COGNITIVE_MEMORY_TOOL_NAMES | _OWN_WORK)
 
     ctx = ToolContext(
         repo_dir=None,
@@ -137,7 +140,7 @@ def test_admitted_external_turn_writes_global_knowledge_and_nothing_else(tmp_pat
     _select_history(data, skill_dir)
     admission = _admit(data, _binding(data))
     assert [grant.name for grant in admission.capability_ceiling.tool_grants] == sorted(
-        COGNITIVE_MEMORY_TOOL_NAMES
+        COGNITIVE_MEMORY_TOOL_NAMES | _OWN_WORK
     )
     seen: dict[str, object] = {}
 
@@ -178,6 +181,9 @@ def test_admitted_external_turn_writes_global_knowledge_and_nothing_else(tmp_pat
                     ("run_command", {"cmd": ["true"]}),
                 )
             }
+            from ouroboros.task_results import write_task_result
+
+            write_task_result(data, task["id"], "completed", metadata=task["metadata"], result="Noted.")
             return [{"type": "presence_result", "outcome": "message", "text": "Noted.", "work_ref": ""}]
 
     result = run_presence_turn(

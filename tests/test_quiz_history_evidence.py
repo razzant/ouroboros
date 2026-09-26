@@ -100,7 +100,9 @@ def test_answers_survive_eighteen_quizzes_mailbox_gc_and_rotation(runtime):
         assert quiz["comment"] == f"  Verbatim choice {index}\nsecond line  "
         assert quiz["request_id"] == f"answer-{index}"
         if index % 2:
-            assert "answered_index" not in quiz and "rejected all offered options" in row["text"]
+            assert "answered_index" not in quiz and (
+                "answered in their own words without choosing an offered option" in row["text"])
+            assert "rejected" not in row["text"]
         else:
             assert quiz["answered_index"] == 0 and "chose option 1: First" in row["text"]
     assert len([frame for frame in runtime.frames if frame.get("type") == "quiz"]) == 18
@@ -134,8 +136,27 @@ def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, 
                if row.get("client_message_id") == "quiz_late_answer:task-quiz:late"]
     assert len(inbound) == 1 and inbound[0]["direction"] == "in"
     assert inbound[0]["chat_id"] == 1 and inbound[0]["source"] == "web"
-    assert "[Owner quiz answer]" in inbound[0]["text"] and "Second" in inbound[0]["text"]
-    assert [frame["role"] for frame in runtime.frames if frame.get("type") == "chat"] == ["user"]
+    # The owner's row is the owner's words (the ingress strips edge whitespace
+    # of every owner row), never the host frame; the frame is for the model.
+    assert inbound[0]["text"] == "After the fact"
+    assert "[Owner quiz answer]" not in inbound[0]["text"]
+    chats = [frame for frame in runtime.frames if frame.get("type") == "chat"]
+    assert [frame["role"] for frame in chats] == ["user"]
+    assert chats[0]["content"] == "After the fact"
+
+    # Reload: history replays the late answer as an ordinary user row carrying
+    # the owner's words; no path re-injects the frame into the bubble.
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    response = asyncio.run(make_chat_history_endpoint(runtime.root)(
+        SimpleNamespace(query_params={"n_human": "100", "thread": "1"})))
+    messages = json.loads(response.body)["messages"]
+    replayed = [row for row in messages
+                if row.get("client_message_id") == "quiz_late_answer:task-quiz:late"]
+    assert len(replayed) == 1 and replayed[0]["role"] == "user"
+    assert replayed[0]["text"] == "After the fact"
+    assert not [row for row in messages if row.get("role") == "user"
+                and "[Owner quiz answer]" in str(row.get("text") or "")]
 
 
 @pytest.mark.parametrize("initial_index", [0, None])

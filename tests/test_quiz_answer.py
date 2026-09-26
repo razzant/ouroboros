@@ -431,7 +431,7 @@ def test_escalate_settled_parent_is_a_typed_dead_end(tmp_path, monkeypatch):
 
 def test_escalate_invalid_payload_is_typed(tmp_path):
     ctx = _tool_ctx(tmp_path)
-    out = _escalate(ctx, question="?", options=["only-one"], assumption="a")
+    out = _escalate(ctx, question="?", options=["a"] * 7, assumption="a")
     assert out.startswith("⚠️ QUIZ_OPTIONS_INVALID")
     out = _escalate(ctx, question="?", options=["a", "b"], assumption="")
     assert out.startswith("⚠️ QUIZ_ASSUMPTION_REQUIRED")
@@ -693,8 +693,10 @@ def test_own_answer_needs_no_option_index(tmp_path, monkeypatch):
 
     entries = drain_owner_entries(tmp_path, "task-1", set())
     frame_text = [e for e in entries if e.get("kind") == KIND_QUIZ_ANSWER][0]["text"]
-    assert ("The owner rejected all offered options and answered verbatim: "
-            "neither — use duckdb") in frame_text
+    assert ("The owner answered in their own words without choosing an offered "
+            "option. Verbatim: neither — use duckdb") in frame_text
+    # The host never words the free answer as a rejection the owner did not state.
+    assert "rejected" not in frame_text
     assert "chose option" not in frame_text
 
 
@@ -848,18 +850,30 @@ def test_quiz_state_frame_carries_the_comment_only_when_recorded():
     """#471: `send_quiz_state` puts the owner's free-text answer on the live
     `quiz_state` frame when one was recorded and leaves the key absent
     otherwise (an option-only answer, an expiry, a supersede)."""
+    from ouroboros import event_bus
     from supervisor.message_bus import LocalChatBridge
 
     frames = []
+    bus = event_bus.init_global_event_bus()
+    published = []
+    bus.subscribe("test-transport", event_bus.CHAT_QUIZ_STATE, published.append)
     bridge = LocalChatBridge.__new__(LocalChatBridge)
     bridge._broadcast_fn = frames.append
-    bridge.send_quiz_state("q1", "t1", "answered", answered_index=1)
+    bridge._chat_transports = {7: {"provider": "telegram"}}
+    bridge.send_quiz_state("q1", "t1", "answered", answered_index=1, chat_id=7)
     bridge.send_quiz_state("q1", "t1", "answered", comment="neither — use duckdb")
     bridge.send_quiz_state("q1", "t1", "expired_terminal", comment="")
     assert [("comment" in f, f.get("comment")) for f in frames] == [
         (False, None), (True, "neither — use duckdb"), (False, None),
     ]
     assert frames[0]["answered_index"] == 1 and "answered_index" not in frames[1]
+    # TZ-2 B2: the same lifecycle fact reaches transport skills through the event
+    # bus (the WebSocket reaches only the SPA), carrying the chat's transport so a
+    # skill can edit the card it already delivered instead of waiting for a reload.
+    assert [e["state"] for e in published] == ["answered", "answered", "expired_terminal"]
+    assert published[0]["transport"] == {"provider": "telegram"} and published[1]["transport"] == {}
+    assert published[0]["chat_id"] == 7 and "chat_id" not in published[1]
+    assert published[2]["topic"] == event_bus.CHAT_QUIZ_STATE
 
 
 def test_recommended_option_rides_the_card_the_projection_and_the_parent_frame(tmp_path, monkeypatch):

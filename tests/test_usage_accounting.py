@@ -967,7 +967,7 @@ def test_legacy_state_projection_cannot_regress_under_reordered_writers(
         }
 
     monkeypatch.setattr(ua, "ensure_legacy_imported", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(ua, "usage_breakdown", breakdown)
+    monkeypatch.setattr(ua, "usage_writer_snapshot", breakdown)
     older = threading.Thread(target=state.update_budget_from_usage, args=({},))
     newer = threading.Thread(target=state.update_budget_from_usage, args=({},))
     older.start()

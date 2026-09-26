@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from ouroboros.artifacts import store_chat_media_bytes
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
-from ouroboros.event_bus import CHAT_DOCUMENT, CHAT_LINKS, CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ, CHAT_TYPING, CHAT_VIDEO, publish_event
+from ouroboros.event_bus import CHAT_DOCUMENT, CHAT_LINKS, CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ, CHAT_QUIZ_STATE, CHAT_TYPING, CHAT_VIDEO, publish_event
 from supervisor.state import append_jsonl, load_state
 from ouroboros.projects_registry import stamp_project_thread
 from ouroboros.tools.core import (
@@ -81,6 +81,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, *
                 source=source, client_message_id=message_id,
                 sender_label=str(message.get("sender_label") or ""),
                 transport=message.get("transport"), drive_root=drive_root, require_write=True,
+                ensure_record_boundary=True,  # the acceptance record must stay parseable
             )
         finally:
             # Once this write is attempted, failure can leave canonical bytes.
@@ -89,7 +90,8 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, *
             if retain_inputs is not None:
                 retain_inputs()
         ref = build_owner_message_ref(chat_id=chat_id, client_message_id=message_id, ts=ts, text=logged)
-        bridge.enqueue_local_message(text, **message, accepted_source_ref=ref)
+        # The row rides the item as its in-process witness (``record_inbound_message``).
+        bridge.enqueue_local_message(text, **message, accepted_source_ref=ref, accepted_source_row=row)
         return row, False
 
 
@@ -103,7 +105,13 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
     source = str(message.get("source") or "web")
     ref = message.get("accepted_source_ref")
     if ref:
-        row = accepted_chat_message(DATA_DIR, chat_id, client_message_id) if owner_message_ref_is_valid(ref) else None
+        # A web acceptance (socket or late quiz answer) wrote this row in-process
+        # before enqueue; its returned row is the item's exact witness. A skill
+        # source, or a web item without a witness (the queue's empty default is
+        # absent, not a row to match), re-reads the retained disk row.
+        accepted_row = message.get("accepted_source_row")
+        row = (accepted_row if source == "web" and isinstance(accepted_row, dict) and accepted_row
+               else accepted_chat_message(DATA_DIR, chat_id, client_message_id)) if owner_message_ref_is_valid(ref) else None
         if (not row or row.get("source") != source or row.get("chat_id") != chat_id
                 or row.get("client_message_id") != client_message_id or not entry_matches_source_ref(row, [ref])
                 or ref["text_sha256"] != _text_sha256(text)):
@@ -273,6 +281,9 @@ class LocalChatBridge:
 
     def __init__(self, settings: Optional[Dict[str, Any]] = None):
         self._inbox = queue.Queue()   # user -> agent
+        # Updates the consumer handed back unprocessed (``requeue_updates``); memory only.
+        self._replay: List[Dict[str, Any]] = []
+        self._replay_lock = threading.Lock()
         self._update_counter = 0
         self._broadcast_fn = None  # set by server.py for WebSocket streaming
         # A2A response subscriptions: {subscription_id: (chat_id, callback)}
@@ -291,57 +302,100 @@ class LocalChatBridge:
             self._broadcast_fn(payload)
 
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
-        """Block on inbox and return supervisor-style updates."""
+        """Return the waiting message and a bounded snapshot of its queued peers.
+
+        Only the first read may block; the fixed qsize snapshot keeps a busy
+        producer from holding the supervisor here, and each update keeps its own
+        monotonic id and transport. Updates handed back through ``requeue_updates``
+        come first, in order with their original ids. An item that cannot become
+        an update is logged by source identity (an accepted source as lost) and
+        skipped alone, never discarding its dequeued or still-queued peers.
+        """
+        with self._replay_lock:
+            if self._replay:
+                replay, self._replay = self._replay, []
+                return replay
         try:
-            raw_msg = self._inbox.get(timeout=timeout)
-            if isinstance(raw_msg, str):
-                msg = {
-                    "chat_id": 1,
-                    "user_id": 1,
-                    "text": raw_msg,
-                    "source": "web",
-                    "sender_label": "",
-                }
-            else:
-                msg = dict(raw_msg or {})
-
-            msg_chat_id = coerce_chat_identity(msg.get("chat_id"), 1)
-            msg_user_id = coerce_chat_identity(msg.get("user_id"), 1)
-            message = {
-                "chat": {"id": msg_chat_id},
-                "from": {"id": msg_user_id},
-                "text": str(msg.get("text") or ""),
-                "source": str(msg.get("source") or "web"),
-            }
-            chat_id_value = msg_chat_id
-            if isinstance(msg.get("transport"), dict) and msg.get("transport") and chat_id_value != 1:
-                self._chat_transports[chat_id_value] = dict(msg.get("transport") or {})
-            else:
-                self._chat_transports.pop(chat_id_value, None)
-            for key in (
-                "sender_label",
-                "sender_session_id",
-                "client_message_id",
-                "transport",
-                "image_base64",
-                "image_mime",
-                "image_caption",
-                "suppress_chat_log",
-                "task_constraint",
-                "task_metadata",
-                "accepted_source_ref",
-            ):
-                value = msg.get(key)
-                if value not in (None, "", 0):
-                    message[key] = value
-
-            self._update_counter = max(offset, self._update_counter + 1)
-            return [{
-                "update_id": self._update_counter,
-                "message": message,
-            }]
+            first = self._inbox.get(timeout=timeout)
         except queue.Empty:
             return []
+        updates: List[Dict[str, Any]] = []
+        for index in range(1 + self._inbox.qsize()):
+            try:
+                raw_msg = first if index == 0 else self._inbox.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                updates.append(self._build_update(raw_msg, offset))
+            except Exception:
+                # Do not log private text or attachment bytes. An accepted
+                # delivery can still be located by its ingress coordinates.
+                identity = raw_msg if isinstance(raw_msg, dict) else {}
+                log.exception(
+                    "Dropping one undecodable queued chat message; lost source=%s chat_id=%s client_message_id=%s; "
+                    "%d earlier update(s) in this batch are kept",
+                    str(identity.get("source") or "unknown")[:80],
+                    str(identity.get("chat_id") or "unknown")[:80],
+                    str(identity.get("client_message_id") or "unknown")[:120], len(updates),
+                )
+        return updates
+
+    def _build_update(self, raw_msg: Any, offset: int) -> Dict[str, Any]:
+        """Turn one dequeued item into an update with its own monotonic id."""
+        msg = ({"chat_id": 1, "user_id": 1, "text": raw_msg, "source": "web", "sender_label": ""}
+               if isinstance(raw_msg, str) else dict(raw_msg or {}))
+
+        msg_chat_id = coerce_chat_identity(msg.get("chat_id"), 1)
+        msg_user_id = coerce_chat_identity(msg.get("user_id"), 1)
+        message = {
+            "chat": {"id": msg_chat_id},
+            "from": {"id": msg_user_id},
+            "text": str(msg.get("text") or ""),
+            "source": str(msg.get("source") or "web"),
+        }
+        self.activate_update_transport(msg)
+        for key in (
+            "sender_label", "sender_session_id", "client_message_id", "transport",
+            "image_base64", "image_mime", "image_caption", "suppress_chat_log",
+            "task_constraint", "task_metadata", "accepted_source_ref", "accepted_source_row",
+        ):
+            value = msg.get(key)
+            if value not in (None, "", 0):
+                message[key] = value
+
+        self._update_counter = max(offset, self._update_counter + 1)
+        return {
+            "update_id": self._update_counter,
+            "message": message,
+        }
+
+    def requeue_updates(self, updates: List[Dict[str, Any]]) -> int:
+        """Hand back dequeued updates the consumer did not process; returns how many were kept.
+
+        This process's next ``get_updates`` serves them ahead of newer arrivals,
+        order and ids intact, so a survived handler crash or a cut-short batch
+        does not erase the messages behind it. Memory only: nothing outlives the
+        hard exit of /panic or a completed /restart.
+        """
+        tail = [u for u in list(updates or []) if isinstance(u, dict) and u.get("message")]
+        if not tail:
+            return 0
+        with self._replay_lock:
+            self._replay.extend(tail)  # an earlier hand-back is older: it is served first
+        return len(tail)
+
+    def activate_update_transport(self, msg: Dict[str, Any]) -> None:
+        """Bind this message's reply route (also at build time, for single-update readers).
+
+        The supervisor rebinds per message: a later same-chat message in one
+        drained batch must not steal an earlier one's reply transport.
+        """
+        chat_id = coerce_chat_identity(msg.get("chat_id", (msg.get("chat") or {}).get("id")), 1)
+        transport = msg.get("transport")
+        if isinstance(transport, dict) and transport and chat_id != 1:
+            self._chat_transports[chat_id] = dict(transport)
+        else:
+            self._chat_transports.pop(chat_id, None)
 
     def configure_from_settings(self, settings: Dict[str, Any]) -> None:
         """Compatibility no-op; chat bridges are skills now."""
@@ -389,7 +443,37 @@ class LocalChatBridge:
         clean_text = str(text or "").strip()
         if not clean_text and not image_base64:
             return
+        import uuid
+
+        from ouroboros.project_dialogue import build_owner_message_ref
+
         ts = utc_now_iso()
+        message_id = client_message_id or f"web-{uuid.uuid4().hex}"
+        metadata = dict(task_metadata or {})
+        if str(project_id or "").strip():
+            metadata.setdefault("project_id", str(project_id).strip())
+        log_text = clean_text or str(image_caption or "").strip() or (
+            "(image attached)" if image_base64 else "(file attached)"
+            if metadata.get("chat_attachment_uploads") else ""
+        )
+        # A socket acceptance has its canonical, parseable row BEFORE the echo or
+        # queue handoff (a WS write or in-memory Queue survives no restart); the
+        # returned row is the dequeue witness, so validation needs no chat scan.
+        with _INGRESS_LOCK:
+            row = log_chat(
+                "in", thread_id, 1, log_text, ts=ts, source="web",
+                sender_session_id=sender_session_id, client_message_id=message_id,
+                client_surface=(metadata.get("client_surface") if isinstance(metadata.get("client_surface"), dict) else None),
+                require_write=True, ensure_record_boundary=True,
+            )
+            ref = build_owner_message_ref(chat_id=thread_id, client_message_id=message_id, ts=ts, text=log_text)
+            self.enqueue_local_message(
+                clean_text, chat_id=thread_id, user_id=1, source="web",
+                sender_session_id=sender_session_id, client_message_id=message_id,
+                image_base64=image_base64, image_mime=image_mime,
+                image_caption=image_caption, task_metadata=metadata,
+                accepted_source_ref=ref, accepted_source_row=row,
+            )
         if self._broadcast_fn:
             echo = {
                 "type": "chat",
@@ -399,26 +483,11 @@ class LocalChatBridge:
                 "source": "web",
                 "chat_id": thread_id,
                 "sender_session_id": sender_session_id,
-                "client_message_id": client_message_id,
+                "client_message_id": message_id,
+                "ingress_accepted": True,  # Canonical row was written; execution is not promised.
             }
             stamp_project_thread(DATA_DIR, echo)
             self._broadcast_fn(echo)
-        metadata = dict(task_metadata or {})
-        if str(project_id or "").strip():
-            metadata.setdefault("project_id", str(project_id).strip())
-        self.enqueue_local_message(
-            clean_text,
-            chat_id=thread_id,
-            user_id=1,
-            source="web",
-            sender_label="",
-            sender_session_id=sender_session_id,
-            client_message_id=client_message_id,
-            image_base64=image_base64,
-            image_mime=image_mime,
-            image_caption=image_caption,
-            task_metadata=metadata or None,
-        )
 
     def enqueue_local_message(
         self,
@@ -438,6 +507,7 @@ class LocalChatBridge:
         task_constraint: Optional[Dict[str, Any]] = None,
         task_metadata: Optional[Dict[str, Any]] = None,
         accepted_source_ref: Optional[Dict[str, Any]] = None,
+        accepted_source_row: Optional[Dict[str, Any]] = None,
     ) -> None:
         clean_text = str(text or "").strip()
         caption_text = str(image_caption or "").strip()
@@ -466,6 +536,7 @@ class LocalChatBridge:
             "task_constraint": dict(task_constraint or {}),
             "task_metadata": dict(task_metadata or {}),
             "accepted_source_ref": dict(accepted_source_ref or {}),
+            "accepted_source_row": dict(accepted_source_row or {}),
         })
 
     def send_message(
@@ -957,8 +1028,12 @@ class LocalChatBridge:
         state: str = "open",
         task_id: str = "",
         wait_for_answer: bool = False,
+        host_facts: str = "",
     ) -> Tuple[bool, str]:
-        """Send an owner quiz card to the UI and host event subscribers."""
+        """Send an owner quiz card to the UI and host event subscribers.
+
+        ``host_facts`` (the host's sentence under the question) rides the frame, the
+        event and the chat row when non-empty; ``project_name`` rides the EVENT only."""
         if is_a2a_chat_id(chat_id):
             return True, "ok"
         qid = str(quiz_id or "").strip()
@@ -988,7 +1063,18 @@ class LocalChatBridge:
             "chat_id": int(chat_id or 0),
             "task_id": str(task_id or ""),
         }
+        if host_facts:
+            msg["host_facts"] = str(host_facts)  # the envelope literal keeps constant keys (contract scan)
         stamp_project_thread(DATA_DIR, msg)
+        project = None
+        if msg.get("project_thread"):
+            try:
+                from ouroboros.projects_registry import list_reserved_projects
+
+                project = next((row for row in list_reserved_projects(DATA_DIR)
+                                if row.get("chat_id") == int(chat_id)), None)
+            except Exception:
+                log.debug("Quiz project lookup failed", exc_info=True)
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         quiz_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
@@ -1004,6 +1090,8 @@ class LocalChatBridge:
             "assumption": payload["assumption"],
             "state": str(state or "open"),
             "ts": ts,
+            **({"host_facts": str(host_facts)} if host_facts else {}),
+            **({"project_name": str(project["name"])} if project and project.get("name") else {}),
         })
         try:
             owner_id = int(load_state().get("owner_id") or 0)
@@ -1019,6 +1107,7 @@ class LocalChatBridge:
                 "stake": payload["stake"],
                 "assumption": payload["assumption"],
                 "state": str(state or "open"),
+                **({"host_facts": str(host_facts)} if host_facts else {}),
             },
         )
         _advance_project_visible_revision(chat_id)
@@ -1026,10 +1115,7 @@ class LocalChatBridge:
             try:
                 from ouroboros.owner_quiz import quiz_states
                 from ouroboros.project_dialogue import project_question_pointer
-                from ouroboros.projects_registry import list_reserved_projects
 
-                project = next((row for row in list_reserved_projects(DATA_DIR)
-                                if row.get("chat_id") == int(chat_id)), None)
                 pointer = project_question_pointer(msg, quiz_states(DATA_DIR, task_id).get(qid), project)
                 if pointer:
                     frame = {
@@ -1045,7 +1131,7 @@ class LocalChatBridge:
                     # The complete pointer row (ChatOutbound mirrors): present only when known.
                     for key in ("question", "options", "option_details", "stake", "assumption", "recommended_index",
                                 "answered_index", "comment", "wait_for_answer", "wait_ended_at",
-                                "owner_wait_resume_reason"):
+                                "owner_wait_resume_reason", "host_facts"):
                         if key in pointer:
                             frame[key] = pointer[key]
                     self._broadcast_fn(frame)
@@ -1075,8 +1161,6 @@ class LocalChatBridge:
         ``comment`` is the owner's recorded free-text answer (#471): the live
         card renders it exactly as the replayed one does; absent when empty.
         """
-        if not self._broadcast_fn:
-            return
         msg: Dict[str, Any] = {
             "type": "quiz_state",
             "quiz_id": str(quiz_id or ""),
@@ -1094,10 +1178,15 @@ class LocalChatBridge:
             msg["wait_for_answer"] = bool(wait_for_answer)
         if int(chat_id or 0):
             msg["chat_id"] = int(chat_id or 0)
-        try:
-            self._broadcast_fn(msg)
-        except Exception:
-            log.debug("quiz_state broadcast failed", exc_info=True)
+        if self._broadcast_fn:
+            try:
+                self._broadcast_fn(msg)
+            except Exception:
+                log.debug("quiz_state broadcast failed", exc_info=True)
+        # The WebSocket reaches only the SPA. Transport skills need the same
+        # lifecycle fact to edit an already delivered card without a reload.
+        quiz_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
+        publish_event(CHAT_QUIZ_STATE, {**msg, "transport": quiz_transport})
 
     def push_log(self, event: dict):
         """Stream append_jsonl events to UI."""
@@ -1232,16 +1321,16 @@ def budget_line(force: bool = False) -> str:
                 raise RuntimeError("message bus data root is not initialized")
             from ouroboros.usage_accounting import (
                 ensure_legacy_imported,
-                usage_breakdown,
                 usage_projection,
+                usage_writer_snapshot,
             )
 
             ensure_legacy_imported(DATA_DIR)
             total = float(TOTAL_BUDGET_LIMIT or 0.0)
-            accounting = (  # display: messages are sent from the supervisor loop too
-                usage_projection(DATA_DIR, global_limit_usd=total, allow_stale=True)
+            accounting = (  # display of scalars, sent from the supervisor loop too: no per-root map
+                usage_projection(DATA_DIR, global_limit_usd=total, include_roots=False, allow_stale=True)
                 if total > 0
-                else usage_breakdown(DATA_DIR, allow_stale=True)
+                else usage_writer_snapshot(DATA_DIR, allow_stale=True)
             )
             display_state["spent_usd"] = float(accounting.get("accounted_usd") or 0.0)
             display_state["usage_accounting"] = accounting
@@ -1282,6 +1371,7 @@ def log_chat(
     message_meta: Optional[Dict[str, Any]] = None,
     drive_root=None,
     require_write: bool = False,
+    ensure_record_boundary: bool = False,
 ) -> Optional[dict]:
     root = drive_root if drive_root is not None else DATA_DIR
     if root:
@@ -1305,6 +1395,10 @@ def log_chat(
             "transport": dict(transport or {}),
             "task_id": str(task_id or ""),
         }
+        if direction == "in" and source == "web" and client_message_id and require_write:
+            # The canonical append is the proof used by the live echo. Keep it
+            # on that SAME row so history can replay the fact after a reload.
+            record["ingress_accepted"] = True
         # Media rows (e.g. delivered documents) carry a variable ``type`` plus
         # lightweight metadata so /api/chat/history can rebuild the bubble on
         # reload WITHOUT persisting base64. ``type`` is set from a variable (not a
@@ -1366,7 +1460,10 @@ def log_chat(
             record["quiz"] = dict(quiz)
         if size_bytes is not None:
             record["size_bytes"] = int(size_bytes)
-        written = append_jsonl(root / "logs" / "chat.jsonl", record, require_lock=require_write)
+        written = append_jsonl(
+            root / "logs" / "chat.jsonl", record,
+            require_lock=require_write, ensure_record_boundary=ensure_record_boundary,
+        )
         if require_write:
             if not written:
                 raise RuntimeError("canonical message acceptance could not be persisted")
@@ -1381,7 +1478,9 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      progress_meta: Optional[Dict[str, Any]] = None,
                      ts: Optional[str] = None,
                      role: str = "", system_type: str = "",
-                     narration: Optional[bool] = None) -> None:
+                     narration: Optional[bool] = None,
+                     require_write: bool = False,
+                     ensure_record_boundary: bool = False) -> None:
     """Send one owner-visible message through the shared host seam.
 
     ``narration`` is the note's VOICE, the same typed fact the worker stamps on
@@ -1436,6 +1535,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             task_id=task_id,
             record_type=system_type,
             message_meta=progress_meta,
+            require_write=require_write,
+            ensure_record_boundary=ensure_record_boundary,
         )
 
     if _text.strip() in ("", "\u200b"):

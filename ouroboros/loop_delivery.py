@@ -867,9 +867,9 @@ def _parse_delivery_control_object(
 def _classify_parsed_delivery_control(
     parsed: Optional[Dict[str, Any]],
     duplicate_protocol_key: bool,
-    embedded: bool,
+    embedded: bool, *, envelope_keys: Tuple[str, ...] = (),
 ) -> Tuple[str, str, str]:
-    """Return ``(kind, replacement, error)`` for a parsed control body."""
+    """Return ``(kind, replacement, error)``; ``envelope_keys`` are members an armed caller reads itself."""
 
     exact_error = "control must be one exact JSON object"
     if embedded:
@@ -890,7 +890,7 @@ def _classify_parsed_delivery_control(
     selected = str(parsed.get("delivery_control") or "")
     if "pending_review" in parsed and str(parsed.get("pending_review") or "").strip().lower() not in {"wait", "finish"}:
         return "invalid", "", 'pending_review must be "wait" or "finish"'
-    keys = set(parsed) - {"acceptance_subject", "pending_review"}
+    keys = set(parsed) - {"acceptance_subject", "pending_review", *envelope_keys}
     if selected == "keep" and keys == {"delivery_control"}:
         return "keep", "", ""
     if selected == "replace" and keys == {"delivery_control", "full_answer"}:
@@ -905,7 +905,7 @@ def _resolve_forced_delivery_control_body(
     raw: str,
     candidate: Optional[DeliveryCandidate],
     *,
-    armed: bool,
+    armed: bool, envelope_keys: Tuple[str, ...] = (),  # members the armed caller reads itself
 ) -> Tuple[str, bool, bool, bool, bool]:
     """Return text plus retained/degraded/consumed/replaced facts."""
 
@@ -913,7 +913,7 @@ def _resolve_forced_delivery_control_body(
         candidate = None
     parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(raw)
     control_kind, replacement, _error = _classify_parsed_delivery_control(
-        parsed, duplicate_protocol_key, embedded_protocol,
+        parsed, duplicate_protocol_key, embedded_protocol, envelope_keys=envelope_keys,
     )
     historical = bool(
         not armed
@@ -935,6 +935,7 @@ def _resolve_forced_delivery_control_body(
         control_kind != "none"
         or (parsed is None and strip_protocol_fence(raw).startswith("{"))
         or bool(getattr(parsed, "has_duplicate_keys", False))
+        or bool(envelope_keys and isinstance(parsed, dict) and set(parsed).intersection(envelope_keys))
     )
     if not protocol_intent:
         # Ordinary prose under an armed latch stands (a control object quoted

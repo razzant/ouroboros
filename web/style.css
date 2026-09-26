@@ -7219,6 +7219,14 @@ textarea.chat-input {
     min-inline-size: 0;
 }
 .chat-quiz-stake .inline-code { font-size: inherit; }
+/* The host's own sentence under the question (who asks, how the run started, the owner's last message). */
+.chat-quiz-host-facts {
+    font-size: var(--type-meta);
+    line-height: var(--line-meta, 1.35);
+    color: var(--text-meta);
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+}
 .chat-quiz-options {
     display: flex;
     flex-direction: column;

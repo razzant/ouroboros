@@ -616,6 +616,27 @@
       "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted."
     },
     {
+      "name": "an explicit task-acceptance author stop is Failed and the row carries the agent's own reason beside the typed sentence (TZ-2 C4)",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "task_acceptance_review", "reason": "author_stop", "outcome_tier": "blocked_with_evidence"}, "review": {"status": "skipped", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_stop", "author_action": "stop", "enforcement": "advisory", "rationale": "reviewer prose that never reaches the row", "author_disposition": {"disposition": "", "action": "stop", "rationale": "Not ready: the export endpoint still fails on empty input.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-25T00:00:00+00:00", "source": "author"}}}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted · Not ready: the export endpoint still fails on empty input."
+    },
+    {
+      "name": "an author stop recorded after the review rounds ran out keeps its true terminal cause and still carries the agent's own reason",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "task_acceptance_review", "reason": "review_cycles_exhausted", "outcome_tier": "blocked_with_evidence"}, "review": {"status": "skipped", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "review_cycles_exhausted", "author_action": "stop", "enforcement": "advisory", "review_capacity": {"reason": "review_cycles_exhausted"}, "rationale": "reviewer prose that never reaches the row", "author_disposition": {"disposition": "", "action": "stop", "rationale": "Not ready: the export endpoint still fails on empty input.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-25T00:00:00+00:00", "source": "author"}}}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The task used up its review rounds before the answer was signed off · Not ready: the export endpoint still fails on empty input."
+    },
+    {
+      "name": "a finish beside the exhausted review rounds is no stop: the author's finish rationale never reaches the row",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "review_cycles_exhausted", "author_action": "finish", "enforcement": "advisory", "author_disposition": {"disposition": "partial", "action": "finish", "rationale": "Shipping as is.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-25T00:00:00+00:00", "source": "author"}}}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "The task used up its review rounds before the answer was signed off."
+    },
+    {
       "name": "a blocking plan review whose reviewers were too few holds the work, and the card says so",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "plan_review_quorum_unreachable", "reason": "plan_review_quorum_unreachable", "outcome_tier": "blocked_with_evidence"}, "review": {"status": "skipped"}}},
       "phase": "error",
@@ -719,6 +740,90 @@
       "phase": "warn",
       "headline": "Done with warnings",
       "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+    },
+    {
+      "name": "the round-limit rail says its own sentence on a best-effort finish",
+      "record": {"status": "completed", "reason_code": "round_limit", "outcome_axes": {"execution": {"status": "best_effort", "reason_code": "round_limit"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "The task hit its round limit before it could finish cleanly."
+    },
+    {
+      "name": "the deadline_local rail says its own sentence on a best-effort finish",
+      "record": {"status": "completed", "reason_code": "deadline_local", "outcome_axes": {"execution": {"status": "best_effort", "reason_code": "deadline_local"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "The task reached its deadline before it could finish cleanly."
+    },
+    {
+      "name": "the children_unabsorbed rail says its own sentence on a best-effort finish",
+      "record": {"status": "completed", "reason_code": "children_unabsorbed", "outcome_axes": {"execution": {"status": "best_effort", "reason_code": "children_unabsorbed"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Some sub-task results were never folded in, so the task had to wrap up."
+    },
+    {
+      "name": "a grace window that produced no answer names the time limit, not the code",
+      "record": {"status": "failed", "reason_code": "finalization_grace", "outcome_axes": {"execution": {"status": "failed", "reason_code": "finalization_grace"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The task hit a time limit and had to wrap up before it could finish cleanly."
+    },
+    {
+      "name": "the context-overflow rail says its own sentence",
+      "record": {"status": "failed", "reason_code": "context_overflow", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "context_overflow"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The task outgrew its context before it could finish cleanly."
+    },
+    {
+      "name": "a reaped task names its absolute ceiling in owner words",
+      "record": {"status": "failed", "reason_code": "absolute_ceiling", "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "absolute_ceiling"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The task reached its maximum running time."
+    },
+    {
+      "name": "a reaped task names its deadline in owner words",
+      "record": {"status": "failed", "reason_code": "deadline", "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "deadline"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The task reached its deadline."
+    },
+    {
+      "name": "a reaped task names its idle timeout in owner words",
+      "record": {"status": "failed", "reason_code": "idle_timeout", "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "idle_timeout"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The task made no progress for too long."
+    },
+    {
+      "name": "a provider failure says its own sentence",
+      "record": {"status": "failed", "reason_code": "provider_failure", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "provider_failure"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The model provider failed to answer, so the task could not finish."
+    },
+    {
+      "name": "an empty final text says its own sentence",
+      "record": {"status": "failed", "reason_code": "empty_final_text", "outcome_axes": {"execution": {"status": "failed", "reason_code": "empty_final_text"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The task ended without a final answer."
+    },
+    {
+      "name": "an unavailable deep self-review says its own sentence",
+      "record": {"status": "failed", "reason_code": "deep_self_review_unavailable", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "deep_self_review_unavailable"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The deep self-review could not run."
+    },
+    {
+      "name": "a deep self-review error says its own sentence",
+      "record": {"status": "failed", "reason_code": "deep_self_review_error", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "deep_self_review_error"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The deep self-review stopped on an error."
     }
   ]
 }

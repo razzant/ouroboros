@@ -1070,7 +1070,8 @@ def _openai_compatible_metadata_window(
             from ouroboros.config import runtime_settings
             api_key = str((runtime_settings() or {}).get("OPENAI_COMPATIBLE_API_KEY") or "")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        resp = httpx.get(str(base_url).rstrip("/") + "/models", headers=headers, timeout=5.0)
+        from ouroboros.net_transport import verify_kwargs
+        resp = httpx.get(str(base_url).rstrip("/") + "/models", headers=headers, timeout=5.0, **verify_kwargs())
         resp.raise_for_status()
         payload = resp.json()
         items = payload.get("data") if isinstance(payload, dict) else payload
@@ -1340,7 +1341,7 @@ def probe(
 # excluding it would starve the route of density witnesses entirely.
 _CACHE_INCLUSIVE_PROMPT_TOKEN_PROVIDERS = frozenset({
     "openrouter", "openai", "openai-compatible", "cloudru", "local", "anthropic",
-    "deepseek",
+    "deepseek", "zai",
 })
 
 

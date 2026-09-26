@@ -24,6 +24,10 @@ _LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes,
 # the historical extraction's facade and need not add compatibility re-exports.
 _ADDED_OWNERS = {
     "WORKER_READY_CEILING_SEC": runtime_limits,
+    # The supervisor loop's bounded events pass and the budget-projection retry interval.
+    "SUPERVISOR_EVENT_BATCH_MAX_EVENTS": runtime_limits,
+    "SUPERVISOR_EVENT_BATCH_MAX_SEC": runtime_limits,
+    "BUDGET_PROJECTION_RETRY_SEC": runtime_limits,
     # The two bounds of the usage ledger's display (stale-while-revalidate) read path.
     "USAGE_DISPLAY_LOCK_TIMEOUT_SEC": runtime_limits,
     "USAGE_DISPLAY_REVALIDATE_AFTER_SEC": runtime_limits,
@@ -314,5 +318,6 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     }
     assert counts["ouroboros.config"] <= 1000
     assert all(count <= 1000 for count in counts.values())
-    assert counts["ouroboros.settings_defaults"] <= 500
+    # 500 -> 520: the Z.ai direct provider adds its key and plan rows to the leaf (PR #1207).
+    assert counts["ouroboros.settings_defaults"] <= 520
     assert (PACKAGE / "config.py").is_file()

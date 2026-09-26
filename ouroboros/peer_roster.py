@@ -24,7 +24,7 @@ import pathlib
 import time
 from typing import Any, Dict, List, Optional
 
-from ouroboros.dialogue_provenance import is_presence_task
+from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
 from ouroboros.focus import compact_focus, focus_fingerprint
 from ouroboros.task_status import _load_queue_snapshot, queue_snapshot_observation
 from ouroboros.utils import read_json_dict
@@ -269,7 +269,7 @@ def maybe_append_roster_note(ctx: Any, messages: List[Dict[str, Any]], drive_roo
                   "_presence_origin": getattr(ctx, "_presence_origin", None)}
     if (str(metadata.get("parent_task_id") or "").strip()
             or str(metadata.get("delegation_role") or "") == "subagent"
-            or is_presence_task(actor_task)):
+            or is_presence_task(actor_task) or presence_caller_binding(ctx) is not None):
         return False
     task_id = str(getattr(ctx, "task_id", "") or "")
     canonical = pathlib.Path(str(

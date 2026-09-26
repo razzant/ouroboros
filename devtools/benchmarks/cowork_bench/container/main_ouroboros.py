@@ -8,7 +8,9 @@ external-workspace task and translates the terminal result into the benchmark's 
 (``traj_log.json`` + ``workspace/`` + a ``Status:`` line the runner greps).
 
 Engine contract (README "Подключение своего раннера"): ``--task_dir``, ``--max_steps``,
-``--phase agent|eval|all``. ``--phase eval`` runs only the benchmark's evaluator.
+``--phase agent|eval|all``. ``--phase eval`` runs only the benchmark's evaluator, at most once
+per task dump (``eval_attempt.py``, copied beside this file), plus the run's opt-in
+audit-only residual-state diagnostic.
 ``--phase inventory`` checks MCP startup and tool discovery without model calls.
 ``--phase stateful`` proves PPTX and browser state survives separate HTTP client sessions.
 Both preserve complete probe logs under ``--probe-output`` before any paid run.
@@ -830,16 +832,50 @@ def run_stateful_phase(output_dir: pathlib.Path) -> int:
 # --------------------------------------------------------------------------- eval phase
 
 
+def _eval_attempt():
+    """The stdlib helper the image copies beside this entrypoint; the repository package otherwise."""
+    try:
+        import eval_attempt
+    except ImportError:
+        from devtools.benchmarks.cowork_bench import eval_attempt
+    return eval_attempt
+
+
 def run_eval_phase(task_dir: str, max_steps: int) -> int:
+    """One claimed official evaluation; the opt-in residual diagnostic follows its final lines."""
+    attempts = _eval_attempt()
+    # Host evidence for the diagnostic only; the official evaluator keeps its original environment.
+    agent_state = os.environ.pop(attempts.AGENT_STATE_ENV, "") or "unknown"
     from utils.evaluation.evaluator import TaskEvaluator
 
     bench_config = load_bench_config()
-    task_config = build_task_config(task_dir, str(bench_config["model"]), max_steps)
+    model = str(bench_config["model"])
+    task_root = attempts.task_dump_root(f"{ENGINE}/{model}".replace("/", "_"), task_dir)
     print("\n====== Evaluating ======", flush=True)
-    eval_res = asyncio.run(TaskEvaluator.evaluate_from_log_file(task_config.log_file))
+
+    def prepare() -> str:
+        # Built only inside a fresh claim: `TaskConfig.build` deletes an existing eval_res.json.
+        log_file = build_task_config(task_dir, model, max_steps).log_file
+        if os.path.abspath(log_file) != str(task_root / "traj_log.json"):
+            raise attempts.NotRun("log_path_mismatch")
+        return log_file
+
+    bindings = attempts.official_bindings(task_root, task_dir, entry_path=__file__,
+                                          config_path=os.environ.get(CONFIG_ENV) or DEFAULT_CONFIG_PATH)
+    record, ran_here = attempts.official_attempt(
+        task_root, bindings, {"agent_container_state": agent_state}, prepare,
+        lambda log_file: asyncio.run(TaskEvaluator.evaluate_from_log_file(log_file)),
+    )
+    eval_res = attempts.official_verdict(record)
+    if eval_res is None:
+        print(attempts.refusal_line(record), flush=True)
+        return 1
     print(f"Pass:    {eval_res.get('pass', False)}", flush=True)
     print(f"Details: {eval_res.get('details', eval_res.get('failure', 'N/A'))}", flush=True)
-    return 0 if eval_res.get("pass", False) else 1
+    code = 0 if eval_res.get("pass", False) else 1
+    if ran_here and bench_config.get(attempts.FLAG) is True and eval_res.get("pass", False) is None:
+        attempts.run_residual_diagnostic(task_root, record["attempt_id"])
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -52,8 +52,8 @@ WHAT S26 ASSERTS, in order:
    and the keepalive script was never run down; the DURABLE artifacts show no
    post-stop paid work either — the tool-bearing gate cannot see a tool-less
    summary/reflection call, so the pin reads the task result (no open
-   ``root_phase_checkpoint``), chat.jsonl (no ``authored_root_summary`` row) and
-   ``task_reflections.jsonl`` (no row) for the turn;
+   ``root_phase_checkpoint``), chat.jsonl (no paid ``authored_root_summary`` row;
+   the free host facts row is not paid work) and ``task_reflections.jsonl`` (no row);
 5. the chat CONCLUDED (no "Working…" forever) — over the SAME /ws the SPA opens
    the turn announced itself (typing frame: activity_id = task id, kind
    ``direct_chat``, the client_message_id link), the toast frame carried
@@ -282,9 +282,9 @@ def _post_task_synthesis_is_open(stored: dict) -> bool:
 
 
 def _post_stop_synthesis_rows(oracle: ArtifactOracle, task_id: str) -> list:
-    """Durable traces of the post-task worker for the turn: the authored summary
-    row (written even for a trivial turn, so its absence means the phase never
-    ran) and any reflection row."""
+    """Durable traces of PAID post-task work for the turn: any reflection row and
+    any paid narrative row (the paid summary no longer exists, so this stays a
+    regression guard). The free host facts row is not paid work and may exist."""
     summaries = [r for r in oracle._jsonl("logs/chat.jsonl", type_filter="task_summary")
                  if str(r.get("task_id") or "") == task_id
                  and r.get("summary_kind") == "authored_root_summary"]

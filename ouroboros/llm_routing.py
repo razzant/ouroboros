@@ -22,6 +22,7 @@ from ouroboros.model_wait import dispatch_deadline_remaining_sec
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 from ouroboros.provider_models import (
     DEEPSEEK_BASE_URL,
+    resolve_zai_base_url,
     PROVIDER_PREFIXES,
     normalize_anthropic_model_id,
     normalize_model_identity,
@@ -208,7 +209,10 @@ class _ProviderRoutingMixin:
         system text block and dynamic evidence last.  Hash only that stable
         prefix plus the normalized model identity, so changing task evidence
         does not fragment the provider cache while different policies cannot
-        collide.  Routes without a leading system prefix simply opt out.
+        collide.  Routes without a leading system prefix simply opt out. For
+        the OpenAI family this prefix is also the whole OpenRouter session
+        identity (``_openrouter_session_identity``) and the block its send copy
+        keeps in the leading system message.
         """
         if not messages or str(messages[0].get("role") or "") != "system":
             return ""
@@ -255,10 +259,21 @@ class _ProviderRoutingMixin:
         model_id: str,
         messages: List[Dict[str, Any]],
     ) -> str:
-        """Conversation-stable OpenRouter affinity, bounded well below 256 chars."""
+        """Sticky OpenRouter affinity, bounded well below 256 chars.
+
+        Conversation-stable for every family but OpenAI's, whose public API reuses a
+        prompt cache only under one routing key and only for the whole leading system
+        section (measured 2026-09-25): there the session is one per model and governance
+        prefix, so a new task, child or wake is served the prefix its predecessors cached.
+        """
+        from ouroboros.llm_attempt import openai_family_model
+
         prefix_identity = cls._prompt_cache_identity(model_id, messages)
         if not prefix_identity:
             return ""
+        if openai_family_model(model_id):
+            digest = hashlib.sha256(f"{prefix_identity}\0openai-family".encode("utf-8")).hexdigest()[:32]
+            return f"ouroboros-session-{digest}"
         first_user: Any = ""
         for message in messages:
             if str(message.get("role") or "") == "user":
@@ -304,6 +319,8 @@ class _ProviderRoutingMixin:
             return f"minimax/{resolved_model}"
         if provider == "deepseek":
             return f"deepseek/{resolved_model}"
+        if provider == "zai":
+            return f"zai/{resolved_model}"
         if provider == "claudexor":
             return f"claudexor::{resolved_model}"
         return f"openai-compatible/{resolved_model}"
@@ -387,6 +404,20 @@ class _ProviderRoutingMixin:
                 # previous assistant turn's reasoning_content (v4-pro enforces
                 # with a 400; "" is accepted for foreign turns — probed 2026-09-01).
                 "requires_reasoning_echo": True,
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "zai":
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": configured("ZAI_API_KEY", ""),
+                # Plan-selected official endpoint (PAYG default; the Coding
+                # Plan endpoint is intended for supported tools only).
+                "base_url": resolve_zai_base_url(configured("ZAI_PLAN", "")),
+                "default_headers": {},
                 "supports_openrouter_extensions": False,
                 "supports_generation_cost": False,
             }
@@ -503,7 +534,9 @@ class _ProviderRoutingMixin:
         headers = tuple(sorted(
             (str(k), str(v)) for k, v in dict(target.get("default_headers") or {}).items()
         ))
-        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers)
+        from ouroboros.net_transport import extra_ca_bundle
+
+        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers, extra_ca_bundle())
         if cache_key not in self._remote_clients:
             self._remote_clients[cache_key] = self._new_remote_client(target)
         return self._remote_clients[cache_key]
@@ -548,7 +581,9 @@ class _ProviderRoutingMixin:
         api_key = str(target.get("api_key") or "")
         headers_dict = dict(target.get("default_headers") or {})
         headers = tuple(sorted((str(k), str(v)) for k, v in headers_dict.items()))
-        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers)
+        from ouroboros.net_transport import extra_ca_bundle
+
+        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers, extra_ca_bundle())
 
         client = self._async_remote_clients.get(cache_key)
         if client is None:

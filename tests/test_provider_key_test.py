@@ -699,7 +699,7 @@ def test_response_log_and_accounting_expose_only_controlled_error(
 def test_provider_test_registry_is_derived_from_provider_defaults():
     assert provider_api._PROVIDER_TEST_KNOWN_IDS == {
         "openrouter", "openai", "anthropic", "cloudru", "gigachat", "minimax",
-        "deepseek", "openai-compatible",
+        "deepseek", "zai", "openai-compatible",
     }
     assert provider_api._PROVIDER_TEST_OVERRIDE_KEYS == provider_api.ALL_PROVIDER_CREDENTIAL_KEYS
 

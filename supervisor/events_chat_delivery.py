@@ -441,7 +441,7 @@ def _handle_send_quiz(evt: Dict[str, Any], ctx: Any) -> None:
     try:
         chat_id = _delivery_chat_id(evt, ctx)
         options = evt.get("options")
-        if chat_id is None or not isinstance(options, list) or not options:
+        if chat_id is None or not isinstance(options, list):
             return
         if chat_id == 0:
             # Deliberate exception to the "0 is a real hidden session" policy:
@@ -457,6 +457,7 @@ def _handle_send_quiz(evt: Dict[str, Any], ctx: Any) -> None:
             assumption=str(evt.get("assumption") or ""),
             state=str(evt.get("state") or "open"),
             task_id=str(evt.get("task_id") or ""),
+            host_facts=str(evt.get("host_facts") or ""),
             **({"wait_for_answer": True} if evt.get("wait_for_answer") is True else {}),
         )
         if not ok:

@@ -23,6 +23,12 @@ from ouroboros.presence_runner import (
     PresenceTurnGate,
     run_presence_turn,
 )
+from ouroboros.task_results import write_task_result
+
+
+def _terminal(drive_root, task, reply):
+    """The real pipeline's durable terminal: the Host reads it back, the envelope alone never answers."""
+    write_task_result(pathlib.Path(drive_root), task["id"], "completed", metadata=task["metadata"], result=reply)
 
 
 def _admission() -> PresenceAdmission:
@@ -84,6 +90,7 @@ def test_runner_builds_bounded_fresh_task_and_logs_shared_dialogue(tmp_path):
     class Agent:
         def handle_task(self, task):
             captured.update(task)
+            _terminal(data, task, "Hi")
             return [{"type": "presence_result", "outcome": "message", "text": "Hi", "work_ref": ""}]
 
     result = run_presence_turn(
@@ -136,6 +143,7 @@ def test_presence_initial_attachment_rejection_defaults_to_partial_staging(tmp_p
     class Agent:
         def handle_task(self, task):
             seen_tasks.append(task)
+            _terminal(data, task, "ok")
             return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
     result = run_presence_turn(
@@ -299,6 +307,7 @@ def test_presence_turn_is_live_for_liveness_readers_but_never_an_owner_target(mo
                 seen["with_main"] = observe(task["id"])
             finally:
                 registry.unregister("main-turn")
+            _terminal(tmp_path, task, "")
             return [{"type": "presence_result", "outcome": "silent", "text": "", "work_ref": ""}]
 
     try:
@@ -429,6 +438,46 @@ def test_previous_turn_shows_what_a_transport_tool_delivered(tmp_path):
         ["Schedule: Mon 10:00"], "Final: 10:00", "partly confirmed")
     assert 'delivery partly confirmed): "Schedule: Mon 10:00" / "Final: 10:00".' in build_presence_context_section(
         tmp_path, captured[-1]["metadata"]["presence"])
+
+
+def test_deferred_handoff_keeps_internal_finish_note_out_of_prior_speech(tmp_path):
+    """A tool-send note stays context even when owed work makes the turn deferred."""
+    note = "helper failed; the table was already sent"
+    captured = []
+    first = _pointer_turn(tmp_path, "note-e1", {"outcome": "deferred", "text": "", "message": "",
+                                                 "finish_note": note, "work_ref": "owed-task"})
+    assert (first.outcome, first.text, first.work_ref) == ("deferred", "", "owed-task")
+    _pointer_turn(tmp_path, "note-e2", {"outcome": "silent", "text": ""}, captured=captured)
+    pointer = captured[-1]["metadata"]["presence"]["previous_turn"]
+    assert pointer["message"] == "" and pointer["finish_note"] == note
+    section = build_presence_context_section(tmp_path, captured[-1]["metadata"]["presence"])
+    assert 'finish note "helper failed; the table was already sent"' in section
+    assert '): "helper failed; the table was already sent"' not in section
+
+
+def test_legacy_deferred_pointer_is_checked_against_canonical_reply_before_quoting(tmp_path):
+    """Old deferred tool-send notes shared `message` with speech; source separates them."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import _previous_turn_path
+
+    captured = []
+    note = "helper failed, result already sent"
+    _pointer_turn(tmp_path, "old-note", {"outcome": "deferred", "text": "", "message": note,
+                                         "work_ref": "owed"})
+    path = _previous_turn_path(tmp_path, conversation_key("telegram", "bot-1", "room-1", "topic-1"))
+    historical = path.read_bytes()
+    _pointer_turn(tmp_path, "after-note", {"outcome": "silent", "text": ""}, captured=captured)
+    previous = captured[-1]["metadata"]["presence"]["previous_turn"]
+    assert (previous["message"], previous["finish_note"]) == ("", note)
+    assert b'"finish_note"' not in historical  # source remains unchanged; this is a read projection
+    assert 'finish note "helper failed, result already sent"' in build_presence_context_section(
+        tmp_path, captured[-1]["metadata"]["presence"])
+
+    _pointer_turn(tmp_path, "old-speech", {"outcome": "deferred", "text": "Still working", "message": "Still working",
+                                           "work_ref": "owed"})
+    _pointer_turn(tmp_path, "after-speech", {"outcome": "silent", "text": ""}, captured=captured)
+    spoken = captured[-1]["metadata"]["presence"]["previous_turn"]
+    assert spoken["message"] == "Still working" and "finish_note" not in spoken
 
 
 def test_previous_turn_reports_the_fate_of_its_deferred_work(tmp_path):

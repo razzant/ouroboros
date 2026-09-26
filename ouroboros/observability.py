@@ -189,7 +189,7 @@ _GENERIC_KV_SECRET_KEY_HINTS = (
     "key", "token", "secret", "auth", "bearer", "cred", "password", "passwd",
     "passphrase", "apikey", "access_token", "openrouter", "openai", "anthropic",
     "cloudru", "cloud_ru", "gigachat", "groq", "deepseek", "together", "fireworks",
-    "mistral", "cohere", "perplexity", "replicate", "huggingface", "azure", "xai",
+    "mistral", "cohere", "perplexity", "replicate", "huggingface", "azure", "xai", "zai",
 )
 
 

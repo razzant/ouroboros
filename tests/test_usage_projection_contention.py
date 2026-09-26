@@ -501,10 +501,12 @@ def test_cold_memo_fails_closed_once_under_contention(data_root):
     assert ua.usage_projection(data_root, allow_stale=True)["accounted_usd"] == 0.0
 
 
-def test_loop_handlers_survive_a_cold_memo_without_publishing_a_zero(data_root, supervisor_state):
+def test_loop_handlers_survive_a_cold_memo_without_publishing_a_zero(data_root, supervisor_state, monkeypatch):
+    from ouroboros import server_liveness
     from ouroboros.cost_projection import live_root_cost_projection
     from supervisor import events_budget
 
+    monkeypatch.setattr(server_liveness, "BUDGET_PROJECTION_RETRY_SEC", 0.0)  # retry on the very next turn
     _spend(data_root, 0.40)
     rows_memo._ROWS_MEMO.clear()  # a fresh supervisor generation: nothing validated yet
     supervisor_state.save_state(dict(supervisor_state.load_state(), spent_usd=7.5))
@@ -513,20 +515,25 @@ def test_loop_handlers_survive_a_cold_memo_without_publishing_a_zero(data_root, 
         DRIVE_ROOT = data_root
         update_budget_from_usage = staticmethod(supervisor_state.update_budget_from_usage)
 
+    ctx = Ctx()
     task = {"id": "root", "root_task_id": "root", "budget_drive_root": str(data_root)}
     event = {"type": "llm_usage", "task_id": "task", "usage": {"prompt_tokens": 5, "cost": 0.4}}
     with _held_ledger_lock(data_root):
         heartbeat, heartbeat_sec = _timed(lambda: live_root_cost_projection("root", task, {}, data_root))
-        _, usage_sec = _timed(lambda: events_budget._handle_llm_usage(dict(event), Ctx()))
+        events_budget._handle_llm_usage(dict(event), ctx)
+        _, usage_sec = _timed(lambda: server_liveness.flush_budget_projection(ctx))  # the turn's one write
     assert heartbeat_sec < _MAX_READ_SEC and usage_sec < _MAX_READ_SEC
     assert heartbeat["cost_accounting_status"] == "unavailable"
     assert heartbeat["accounted_upper_bound_usd_with_children"] is None  # unknown, never zero
-    assert [row["projection_update_status"] for row in _llm_usage_rows(data_root)] == ["unavailable"]
+    assert [row["projection_update_status"] for row in _llm_usage_rows(data_root)] == ["deferred"]
+    assert ctx.budget_projection_dirty is True  # the refused write is owed to the next turn
     assert supervisor_state.load_state()["spent_usd"] == pytest.approx(7.5)  # the last value stays
 
     # The working case stays quiet: with the lock free the same handlers publish real money.
-    events_budget._handle_llm_usage(dict(event), Ctx())
-    assert _llm_usage_rows(data_root)[-1]["projection_update_status"] == "available"
+    events_budget._handle_llm_usage(dict(event), ctx)
+    server_liveness.flush_budget_projection(ctx)
+    assert _llm_usage_rows(data_root)[-1]["projection_update_status"] == "deferred"
+    assert ctx.budget_projection_dirty is False
     assert supervisor_state.load_state()["spent_usd"] == pytest.approx(0.40)
     heartbeat = live_root_cost_projection("root", task, {}, data_root)
     assert heartbeat["cost_accounting_status"] == "available"

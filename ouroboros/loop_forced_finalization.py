@@ -388,8 +388,8 @@ def _maybe_enforce_child_absorption_gate(
         prompt=(
             "[FINALIZE_WITH_UNABSORBED_CHILDREN]\n"
             "You still have child results without exact dispositions and already received one "
-            "child-absorption reminder. Produce an honest best-effort final answer now; name the "
-            "unabsorbed or unfinished children explicitly. Current child state: "
+            "child-absorption reminder. Produce an honest best-effort final answer now that says "
+            "what remains unabsorbed or unfinished; the exact child state is: "
             f"{_undecided_children_listing(undecided)}."
         ),
         fallback_text="⚠️ Finalized best-effort with undispositioned child results.",
@@ -637,8 +637,100 @@ def _prepare_forced_prompt(
         prompt
         + _loop()._forced_delegation_note(tools_ctx, llm_trace)
         + _forced_state_facts(ctx, llm_trace)
+        + _presence_forced_contract(ctx, tools_ctx)
         + _forced_subject_prompt(ctx, llm_trace)
     )
+
+
+def _presence_forced_contract(ctx: _RoundLimitContext, tools_ctx: Any) -> str:
+    """Arm a Presence task's ONE forced call to declare its outward delivery apart from its record.
+
+    The forced answer is the internal record (owner, review, task result); what the
+    conversation receives is only the nested ``presence_finish`` declaration. Until a
+    valid declaration arrives with a model-final answer the arm stays ``missing``, so
+    no untyped internal prose becomes Presence speech (owner Q4). Not a delivery receipt.
+    Only a context whose final becomes a Presence result is armed: the host ceiling AND
+    the Presence metadata the pipeline keys that result on. A delegated child inherits
+    the ceiling with its contract, but it answers its parent, not a conversation.
+    """
+    contract = getattr(tools_ctx, "task_contract", None)
+    metadata = getattr(tools_ctx, "task_metadata", None)
+    presence = metadata.get("presence") if isinstance(metadata, dict) else None
+    if not (isinstance(contract, dict) and isinstance(contract.get("capability_ceiling"), dict)
+            and isinstance(presence, dict)):
+        return ""
+    tools_ctx._presence_forced_declaration = {"status": "missing", "reason": "no presence_finish declaration"}
+    tools_ctx._presence_forced_pending = None
+    try:
+        from ouroboros.presence_context import presence_send_facts
+        from ouroboros.tool_access import canonical_data_root
+
+        # Receipts live on the canonical root; a forked execution drive holds none.
+        sent = presence_send_facts(canonical_data_root(tools_ctx), ctx.task_id, presence)
+    except Exception:
+        sent = "unknown (receipts unreadable)"
+    handoff = getattr(tools_ctx, "_swarm_handoff_attempt", None)
+    scheduled = isinstance(handoff, dict) and str(handoff.get("status") or "") == "scheduled"
+    return (
+        "\n\n[PRESENCE_DELIVERY]\n"
+        "This task answers a Presence conversation. Your answer is its internal record for the "
+        "owner and review; the people in the conversation receive only what you declare. Return "
+        "exactly one JSON object and no other text: "
+        '{"delivery_control":"replace","full_answer":"<complete internal record>",'
+        '"presence_finish":{"outcome":"message","message":"<new text for the conversation>"}}'
+        + (' ("delivery_control":"keep" without full_answer keeps the current answer as the record)'
+           if _loop()._live_delivery_candidate(ctx) is not None else "")
+        + ". Outcomes: message = new useful speech on their subject, an honest partial included; "
+        "silent = nothing new needs saying; tool_delivered = the substantive result already reached "
+        "them through a transport tool; deferred = acknowledge work that was actually scheduled"
+        + (" (it was)" if scheduled else " (none was)") + ". Keep internal facts in full_answer; "
+        "the host never forwards that record automatically. You decide what, if anything, to say "
+        "in presence_finish.message, including relevant limitations. "
+        "An early acknowledgement is not the promised result and an uncertain send may not have "
+        "landed. Without a valid presence_finish nothing new is sent. Sends confirmed for this task "
+        f"so far: {sent}."
+    )
+
+
+def _read_presence_declaration(tools_ctx: Any, extracted: str) -> None:
+    """Record the nested ``presence_finish`` of an armed forced body without rewriting that body.
+
+    The resolver keeps reading the original bytes (``envelope_keys`` admits this one
+    key), so the parser's duplicate-key evidence still reaches every rail, the
+    acceptance subject included. A declaration is valid only in an envelope that
+    repeats no key anywhere. Each read records its non-speaking verdict at once; a
+    valid declaration speaks only once its answer becomes the model final.
+    """
+    from ouroboros.loop_delivery import _parse_delivery_control_object
+    from ouroboros.observability import strip_protocol_fence
+    from ouroboros.tools.presence import PRESENCE_OUTCOMES
+
+    tools_ctx._presence_forced_pending = None
+    tools_ctx._presence_forced_declaration = {"status": "missing", "reason": "no presence_finish declaration"}
+    parsed, duplicate = _parse_delivery_control_object(strip_protocol_fence(extracted))
+    if not duplicate and (not isinstance(parsed, dict) or "presence_finish" not in parsed):
+        return
+    value = parsed.get("presence_finish") if isinstance(parsed, dict) else None
+    reason = ""
+    if duplicate or getattr(parsed, "has_duplicate_keys", False):
+        reason = "the forced envelope repeats a key"
+    elif not isinstance(value, dict) or not set(value) <= {"outcome", "message"} \
+            or value.get("outcome") not in PRESENCE_OUTCOMES or not isinstance(value.get("message", ""), str):
+        reason = "presence_finish must be one {outcome, message} object with a known outcome"
+    else:
+        outcome, message = value["outcome"], value.get("message", "").strip()
+        handoff = getattr(tools_ctx, "_swarm_handoff_attempt", None)
+        if outcome == "message" and not message:
+            reason = "message needs nonblank conversational text"
+        elif outcome == "silent" and message:
+            reason = "silent carries no text"
+        elif outcome == "deferred" and not (isinstance(handoff, dict) and handoff.get("status") == "scheduled"):
+            reason = "deferred needs work that was actually scheduled"
+    if reason:
+        tools_ctx._presence_forced_declaration = {"status": "invalid", "reason": reason}
+    else:
+        tools_ctx._presence_forced_pending = {
+            "status": "declared", "outcome": value["outcome"], "message": value.get("message", "").strip()}
 
 
 def _forced_subject_prompt(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> str:
@@ -1012,16 +1104,29 @@ def _resolve_forced_delivery_control(
     """Resolve forced control; returns text, degradation, retained, replaced."""
     if tools_ctx is None or not extracted:
         return extracted, "", False, False
+    presence_armed = isinstance(getattr(tools_ctx, "_presence_forced_declaration", None), dict)
+    if presence_armed:
+        _read_presence_declaration(tools_ctx, extracted)
     candidate = getattr(tools_ctx, "_delivery_candidate", None)
-    armed = bool(getattr(tools_ctx, "_delivery_control_required", False)) or (
+    armed = presence_armed or bool(getattr(tools_ctx, "_delivery_control_required", False)) or (
         isinstance(candidate, _loop().DeliveryCandidate)
         and _loop()._delivery_replace_required(candidate)
     )
     resolved, retained, degraded, consumed, replaced = (
         _loop()._resolve_forced_delivery_control_body(
             extracted, candidate, armed=armed,
+            envelope_keys=("presence_finish",) if presence_armed else (),
         )
     )
+    if presence_armed and isinstance(tools_ctx._presence_forced_pending, dict):
+        from ouroboros.loop_delivery import _parse_delivery_control_body
+
+        parsed, _, _ = _parse_delivery_control_body(extracted)
+        if degraded or not (isinstance(parsed, dict) and parsed.get("delivery_control") in {"keep", "replace"}):
+            # A declaration cannot speak unless its outer control positively chose the final record.
+            tools_ctx._presence_forced_pending = None
+            tools_ctx._presence_forced_declaration = {
+                "status": "invalid", "reason": "the delivery-control envelope was rejected"}
     if consumed:
         tools_ctx._delivery_control_required = False
         from ouroboros.loop_delivery import _parse_delivery_control_body, apply_delivery_subject_decision
@@ -1194,6 +1299,8 @@ def _forced_final_answer(
         set_terminal_host_notice(ctx.accumulated_usage, plan_suffix, _loop()._forced_orphan_note(ctx))
         full_text = extracted
         ctx.accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
+        if isinstance(getattr(tools_ctx, "_presence_forced_pending", None), dict):
+            tools_ctx._presence_forced_declaration = tools_ctx._presence_forced_pending
         candidate = _publish_model_forced_candidate(
             ctx, llm_trace, full_text, reason_code,
             degraded_reason=control_degraded,

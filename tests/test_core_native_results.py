@@ -372,7 +372,13 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
             {"path": "notes.txt", "root": "runtime_data", "old_str": "zeta", "new_str": "q"},
             "EDIT_TEXT_BLOCKED",
             "⚠️ EDIT_TEXT_ERROR: old_str not found in runtime_data:notes.txt.\n"
-            "File preview (first 2000 chars):\nalpha\nbeta\n",
+            "Nearest region: line 2 (0 of 1 old_str line(s) match ignoring whitespace):\n"
+            " 2| beta\n"
+            "first difference at line 2:\n"
+            "  file   : 'beta'\n"
+            "  old_str: 'zeta'\n"
+            "Re-read that region (read_file start_line=2 max_lines=1) and copy the exact bytes into old_str.\n"
+            "File preview (whole file, 11 chars):\nalpha\nbeta\n",
         ),
         (
             "edit_text",

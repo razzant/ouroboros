@@ -36,7 +36,7 @@ LC2_LEAF_OWNERS: dict[str, tuple[str, str]] = {
         "ouroboros.agent_task_pipeline",
         "build_trace_summary _update_improvement_backlog _apply_reflection_memory_actions "
         "_child_task_evidence _pre_synthesis_usage_snapshot _compact_review_projection "
-        "_TASK_SUMMARY_PROMPT _run_task_summary _run_chat_consolidation "
+        "_record_task_facts _run_chat_consolidation "
         "_run_scratchpad_consolidation _run_reflection"
     ),
     "ouroboros.usage_legacy_import": (

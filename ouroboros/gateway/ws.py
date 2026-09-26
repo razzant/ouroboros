@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
 import logging
@@ -13,6 +14,7 @@ from typing import Any
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros.config import DATA_DIR
+from ouroboros.gateway._helpers import run_sync_to_completion, settle_to_completion
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -314,12 +316,45 @@ async def _dispatch_extension_message(
     return True
 
 
+def _initialization_notice() -> str:
+    return json.dumps({
+        "type": "chat",
+        "role": "system", "system_type": "initialization_notice",
+        "content": "⚠️ System is still initializing. Please wait a moment and try again.",
+        "ts": utc_now_iso(),
+    })
+
+
+async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None, accept) -> None:
+    """Run one chat frame's acceptance once this socket's previous one settled.
+
+    The web acceptance takes the single host's ingress lock and a locked durable
+    append (log_chat(require_write=True)); either may wait behind a skill delivery
+    scanning retained chat or a slow disk, so it runs off the ASGI loop, and the
+    receive loop never awaits it: a command frame on the same socket (Panic,
+    Restart) is admitted meanwhile. ``run_sync_to_completion`` keeps custody of
+    row → queue → echo; a failure answers the sender with the initialization notice.
+    """
+    if previous is not None:
+        await asyncio.wait((previous,))  # its failure was its own notice
+    try:
+        await run_sync_to_completion(accept)
+    except Exception:
+        try:
+            await websocket.send_text(_initialization_notice())
+        except Exception:
+            log.debug("WebSocket closed before its chat failure notice", exc_info=True)
+
+
 async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     with _ws_lock:
         _ws_clients.append(websocket)
         total = len(_ws_clients)
     log.info("WebSocket client connected (total: %d)", total)
+    # Tail of this socket's chat acceptances: each waits for the one before it,
+    # so its chat frames settle in receive order while the loop keeps receiving.
+    accepting: asyncio.Task | None = None
     try:
         while True:
             data = await websocket.receive_text()
@@ -390,7 +425,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                             # land in chat.jsonl at the canonical-row writer.
                             client_surface["received_at"] = utc_now_iso()
                             task_metadata["client_surface"] = client_surface
-                        bridge.ui_send(
+                        accept = functools.partial(
+                            bridge.ui_send,
                             payload,
                             sender_session_id=str(msg.get("sender_session_id", "") or ""),
                             client_message_id=str(msg.get("client_message_id", "") or ""),
@@ -401,15 +437,14 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                             chat_id=thread_id,
                             project_id=str(msg.get("project_id", "") or ""),
                         )
+                        accepting = asyncio.create_task(_accept_chat_after(websocket, accepting, accept))
                     else:
+                        # A command is a queue put only (no lock, no durable write). It is
+                        # admitted on receipt, never behind this socket's pending chat
+                        # acceptances: Panic and Restart ride it on the SPA's one socket.
                         bridge.ui_send(payload, broadcast=False)
                 except Exception:
-                    await websocket.send_text(json.dumps({
-                        "type": "chat",
-                        "role": "system", "system_type": "initialization_notice",
-                        "content": "⚠️ System is still initializing. Please wait a moment and try again.",
-                        "ts": utc_now_iso(),
-                    }))
+                    await websocket.send_text(_initialization_notice())
     except WebSocketDisconnect:
         pass
     except Exception as exc:
@@ -422,6 +457,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 pass
             total = len(_ws_clients)
         log.info("WebSocket client disconnected (total: %d)", total)
+        if accepting is not None:
+            # Received chat frames keep custody through disconnect or cancellation:
+            # the socket task returns only after each settled row → queue → echo.
+            await settle_to_completion(accepting)
 
 
 __all__ = [

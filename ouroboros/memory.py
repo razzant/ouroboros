@@ -440,8 +440,25 @@ class Memory:
             return []
 
     @staticmethod
+    def era_host_note(block: Dict[str, Any]) -> str:
+        """Host-authored framing for an era block: what it is, and its known coverage."""
+        return (
+            "Host note: compression of older dialogue blocks; an interpretation, not a grant "
+            f"or a standing rule. Range: {block.get('range') or 'unknown'}; "
+            f"source messages: {block.get('message_count') or 'unknown'}."
+        )
+
+    @staticmethod
     def format_blocks_as_markdown(blocks: List[Dict[str, Any]]) -> str:
-        return "\n\n".join(b.get("content", "") for b in blocks)
+        """Render dialogue blocks for the task context (``context.py`` is the only caller).
+
+        An era block gets the host note on its own line first; other blocks are unchanged.
+        """
+        return "\n\n".join(
+            Memory.era_host_note(b) + "\n" + str(b.get("content", ""))
+            if b.get("type") == "era" else b.get("content", "")
+            for b in blocks
+        )
 
     def load_identity(self) -> str:
         path = self.identity_path()

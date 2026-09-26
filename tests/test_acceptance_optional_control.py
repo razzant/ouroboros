@@ -211,11 +211,20 @@ def test_cyber_explicit_nomination_keeps_its_existing_no_wait_power(full_loop, m
         return {"content": revised}, 0.0
 
     monkeypatch.setattr(loop, "call_llm_with_retry", main)
-    result, _usage, trace = f.run()
+    result, usage, trace = f.run()
     assert result == revised and len(f.review_sends) == 1 and not f.waits
     assert trace["acceptance_decision"]["reason"] == "author_finish"
-    assert trace["acceptance_decision"]["author_disposition"]["source"] == "author_final_response"
+    author = trace["acceptance_decision"]["author_disposition"]
+    assert author["source"] == "author_final_response"
+    # The submitted final is Main's act: the host records "finish" and invents
+    # neither an "accepted" stance nor a "solved" tier (TZ-2 C4).
+    assert author["action"] == "finish" and author["disposition"] == ""
     assert trace["review_decision"]["review_pending"] is True
+    from ouroboros.outcomes import derive_loop_outcome
+
+    objective = derive_loop_outcome(result, usage, trace)["outcome_axes"]["objective"]
+    assert (objective["status"], objective["source"], objective["reason"]) == ("pass", "author_acceptance", "author_finish")
+    assert "outcome_tier" not in objective
 
 
 @pytest.mark.parametrize("early", ["settled", "queued_wake"])

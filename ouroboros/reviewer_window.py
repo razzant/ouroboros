@@ -151,6 +151,11 @@ def reviewer_route(model_id: str, *, session: bool = False) -> tuple:
 
         return provider, str(
             resolve_minimax_base_url(runtime_settings().get("MINIMAX_REGION") or "") or "")
+    if provider == "zai":
+        # Z.ai's base url is selected by the plan, the same way MiniMax's is by region.
+        from ouroboros.provider_models import resolve_zai_base_url
+
+        return provider, resolve_zai_base_url(runtime_settings().get("ZAI_PLAN") or "")
     settings_key = {
         "openai": "OPENAI_BASE_URL",
         "openai-compatible": "OPENAI_COMPATIBLE_BASE_URL",

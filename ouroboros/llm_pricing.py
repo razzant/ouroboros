@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.provider_models import normalize_model_identity
 from ouroboros.config import runtime_setting
+from ouroboros.net_transport import requests_verify_kwargs
 
 
 # The moved warnings keep the logger identity they were emitted under.
@@ -55,7 +56,7 @@ def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Opt
 
     try:
         url = "https://openrouter.ai/api/v1/models"
-        resp = requests.get(url, timeout=max(0.1, min(5.0, float(timeout_sec))))
+        resp = requests.get(url, timeout=max(0.1, min(5.0, float(timeout_sec))), **requests_verify_kwargs())
         resp.raise_for_status()
 
         data = resp.json()
@@ -194,7 +195,7 @@ def fetch_openrouter_endpoint_pricing(model: str, *, timeout_sec: float = 5.0) -
         return {}
     url = f"https://openrouter.ai/api/v1/models/{quote(author, safe='')}/{quote(slug, safe='')}/endpoints"
     try:
-        response = requests.get(url, timeout=max(0.1, min(5.0, float(timeout_sec))))
+        response = requests.get(url, timeout=max(0.1, min(5.0, float(timeout_sec))), **requests_verify_kwargs())
         response.raise_for_status()
         payload = response.json().get("data") or {}
         endpoints = payload.get("endpoints")
@@ -253,6 +254,7 @@ def fetch_cloudru_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Option
             f"{base_url.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=max(0.1, min(5.0, float(timeout_sec))),
+            **requests_verify_kwargs(),
         )
         resp.raise_for_status()
         models = resp.json().get("data", []) or []
@@ -313,7 +315,7 @@ class _GenerationCostMixin:
             base_url = str(active_target.get("base_url") or "").rstrip("/")
             api_key = str(active_target.get("api_key") or "")
             url = f"{base_url}/generation?id={generation_id}"
-            resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
+            resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5, **requests_verify_kwargs())
             if resp.status_code == 200:
                 data = resp.json().get("data") or {}
                 cost = data.get("total_cost") or data.get("usage", {}).get("cost")
@@ -321,7 +323,7 @@ class _GenerationCostMixin:
                     return float(cost)
             # Generation cost can lag the chat response; retry once.
             time.sleep(0.5)
-            resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5)
+            resp = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=5, **requests_verify_kwargs())
             if resp.status_code == 200:
                 data = resp.json().get("data") or {}
                 cost = data.get("total_cost") or data.get("usage", {}).get("cost")

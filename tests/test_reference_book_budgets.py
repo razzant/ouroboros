@@ -33,11 +33,12 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # (measured 165470 on the merged chapter).
     # 165500 -> 165550: the long-work continuity merge landed the chapter at 165507 (over by
     # 7 bytes on the official line); re-based here, no text of this chapter was touched.
-    # 165550 -> 165650: the scheduled_tasks.json tree line names the table's second row kind
-    # (`kind:"notify"`, a model-free owner notification); the base sat 20 bytes under.
-    # 165650 -> 165800: the event_bus.py tree row names the owner-notification fact and
-    # the owner-chat rule the module now owns (the §1 row is the grep target for its events).
-    "docs/architecture/01-high-level-architecture.md": 165800,
+    # 165550 -> 165900 (PR #1300): the net_transport row and the data-layout row for the merged
+    # extra-CA bundle; the base sat 174 bytes under the previous budget.
+    # 165900 -> 166100 (owner notifications merged onto #1300's tree, measured 165977): the
+    # scheduled_tasks.json tree line names the table's second row kind (`kind:"notify"`) and
+    # the event_bus.py row names the owner-notification fact and the owner-chat rule it owns.
+    "docs/architecture/01-high-level-architecture.md": 166100,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -92,19 +93,35 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # bounded authored focus (cross-focus awareness).
     # 30900 -> 31150 (issue #1142): the crash counter's shutdown exemption names WHERE the stop
     # event is set (the uvicorn signal handler, then the lifespan teardown) and why both are needed.
-    # 31150 -> 32300: the schedule table's second dispatch verb (`kind: "notify"`:
-    # a model-free owner notification, its receipt, lock discipline, silence of a
-    # disabled skill, per-occurrence frame key) is a mechanism the chapter had no
-    # text for; the base sat 20 bytes under the previous budget.
-    # 32300 -> 32450: the owner's durable disable/delete of a notify row (suppression
-    # marker a skill's repeat cannot lift) joins the same paragraph — one sentence.
-    # 32450 -> 32600: the same sentence now says who the owner's hand is (Activity
-    # or Ouroboros at the owner's word), what the skill's cancel gets, and that the
-    # owner's second delete removes the record — the review found the shorter
-    # sentence untrue.
-    # 32600 -> 32700: the receipt sentence carries its one exception (a fired reminder the
-    # owner switched off keeps the owner's marker against the skill's cancel).
-    "docs/architecture/05-supervisor-loop.md": 32700,
+    # 31150 -> 31300 (issue #1002): the budget-projection paragraph states what the persisted
+    # projection carries (totals only) and where per-root money lives; the chapter had no
+    # sentence about the shape of the persisted projection to replace.
+    # 31300 -> 31500 (issue #1230): the reconciliation sentence states the two-read rule of
+    # task reconciliation (decide on a status-only read, materialize only the healed row)
+    # and the cadence stamp at pass end; the older clause it extends is kept, not duplicated.
+    # 31500 -> 32400: the tick description names the bounded events batch and the one
+    # projection write per turn (the unbounded drain and per-event write they replace had
+    # no sentence of their own), and the projection paragraph states the writer's slim read,
+    # its retry interval and the crossing rule of the OpenRouter check.
+    # 32400 -> 33600 (TZ-1 batch ingress, measured 33531): the bridge-intake paragraph is a
+    # mechanism the chapter had no text for — the bounded batch drain with per-message
+    # transport rebinding, the record-bounded canonical-row-before-echo web acceptance and
+    # its queue witness, the memory-only hand-back of the unprocessed tail on a crash or
+    # /restart, and /panic's refusal to hand anything back; the base sat 1 byte under the
+    # previous budget.
+    # 33600 -> 33700 (TZ-2 B+C merged onto TZ-1 PR-1 #1330, measured 33688 on the merged tree):
+    # TZ-2's D15 settled-result sentence (fast mail and typed steer refuse a settled Project
+    # result; a quiz answer takes the late-answer path), its post-work ceiling clause and its
+    # typed timeout-cause sentence join TZ-1's bridge-intake paragraph; TZ-2 had compressed the
+    # owner-wait and heartbeat paragraphs it touched in place (+103 bytes alone), TZ-1's
+    # paragraph is new, so the union displaces nothing.
+    # 33700 -> 35400 (owner notifications merged onto the TZ-1/TZ-2 tree, measured 35243): the
+    # schedule table's second dispatch verb (`kind: "notify"`: a model-free owner notification,
+    # its receipt, lock discipline, silence of a disabled skill, per-occurrence frame key) and
+    # the owner's durable disable/delete of such a row (both of the owner's hands, what the
+    # skill's repeat and cancel get, the second delete, the fired-receipt exception) are one
+    # paragraph the chapter had no text for; the TZ paragraphs it joins displace nothing.
+    "docs/architecture/05-supervisor-loop.md": 35400,
     # 286850 -> 287600: "an answer that has not arrived is a gap" is a new invariant of
     # plan review and task acceptance (the slot census vocabulary, the `awaiting`
     # projection, the only-awaited task outcome); the in-flight sentence it grew from is
@@ -161,8 +178,41 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # after the long-work continuity merge, 308678 after the Claudexor 3.14.0 pin, #1264);
     # the run-origin sentences replace the "request decides what the run was for" and the
     # owner-turn descriptions (+144 on the merged base) rather than appending to them.
-    "docs/architecture/06-agent-core.md": 308900,
-    "docs/architecture/07-configuration.md": 36991,
+    # 308900 -> 309800 (#1262): the one name-miss answer, every-mode discovery and the MCP
+    # lookup-before-safety facts are mechanisms no older text held; the "Not found"
+    # sentence they sit in was compressed rather than appended to (measured 309712).
+    # 309800 -> 310100 (TZ2 + #1262 merge, measured 309985): the Presence task-message
+    # own-binding boundary and forced declaration remain beside #1262's name-miss
+    # contract; both are independent rules in the same chapter, not duplicate prose.
+    # 310100 -> 313400 (OpenAI-family cache layout incl. the Claudexor route and the review-round wording, measured 313212): the prompt-caching
+    # paragraph gains the dated cache-unit fact, the declared-prefix projection, the
+    # per-family session rule, the wire_layout/sealed-candidate disclosure and the
+    # residuals; a mechanism the chapter lacked, so only its two stale clauses were replaced.
+    # 313400 -> 314000 (PR #1300; measured 313858 on the merged tree): the transport paragraph gains
+    # the trust-bundle seam every first-party client shares; no older text to displace.
+    # 314000 -> 314900 (TZ-3 PR-1, measured 314850 on the merged tree): the era run boundary with
+    # its `era_retry` record keyed to the executed Light binding, the four typed memory-maintenance
+    # events and the host stamp on `source_capture` history rows are mechanisms no older text
+    # described; the sentences they extend were rewritten in place, not appended to.
+    # 314900 -> 315600 (TZ-1 cluster E, measured 315566 on the merged tree): the Tool API paragraph
+    # gains the bounded edit-miss locator the three exact editors share, and the roots paragraph
+    # states the read⇒list,search / write⇒edit closure of the operation matrix; neither mechanism
+    # had older text to displace, and neither duplicates the TZ-3 memory prose above.
+    # 315600 -> 316600 (TZ-3 #1291 reconcile, measured 316489 after TZ-1 merge): automatic
+    # body-only anchors, the explicit summary sibling and typed nomination refusals extend
+    # the existing note-writer paragraph; neither replaces TZ-1's independent contract.
+    # 316600 -> 316800 (TZ-2 union with #1331, measured 316731): the author-stop,
+    # free host_task_facts, stat-only files_rescued and post-work settlement clauses
+    # replace their prior paragraphs (+242 bytes) independently of the memory writer;
+    # both contracts survive the merge, with no duplicated prose to displace.
+    "docs/architecture/06-agent-core.md": 316800,
+    # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
+    # gained (events batch bound, budget-projection retry interval); no older text to displace.
+    # 37300 -> 38400 (PR #1207): the Z.ai (`zai::`) direct provider gets its own route
+    # paragraph (plan-selected endpoint, low/high/max projection, 1113 billing) plus two
+    # settings rows; the base sat 95 bytes under the previous budget, no older text to displace.
+    # 38400 -> 38700 (PR #1300): one settings row for the extra-CA trust bundle; the base sat 33 bytes under.
+    "docs/architecture/07-configuration.md": 38700,
     # 18947 -> 19287: CI failure collection now documents diagnostic desktop builds while release remains gated.
     # 19287 -> 20560 (#1215): three contracts the chapter had no older text for — the
     # ONE reusable browser lane and the two triggers that share it (the unfiltered
@@ -172,7 +222,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 20560 -> 20800 (PR #1255; measured 20768): the Docker subsection maps the new root
     # .dockerignore (what it keeps out of image layers and why .git/tests/ must stay in),
     # a config BIBLE P6 requires on the map.
-    "docs/architecture/08-git-branching-ci-and-build.md": 20800,
+    # 20800 -> 22000 (PR #1300; measured 21921): the Docker subsection maps the single-Dockerfile layout
+    # (browsers above the lock copy, the shared browser path, cache mounts, the CI lanes that exercise
+    # them) and points at the extra-CA setting; the base sat 16 bytes under the previous budget.
+    "docs/architecture/08-git-branching-ci-and-build.md": 22000,
     # 12405 -> 14400 (issue #1142): the ordinary-close paragraph gains the mechanism the chapter had
     # no text for — graceful stop signals the server PID only, the server half (stop event at the
     # signal, bounded uvicorn drain) is self-sufficient against an old group-SIGTERM launcher.
@@ -201,10 +254,28 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # conversation key, placeholder re-run and its lost-attempt facts, presence-local liveness,
     # previous-turn pointer and its replay repair, split in-flight budgets, silent orphaned work,
     # presence room label); the base sat 2 bytes under.
-    # 12500 -> 13200: `POST /notify` joins the frozen route family with its contract
-    # (grant, the events-row fact, deferred `kind: "notify"` rows keyed by the
-    # skill); the base sat 10 bytes under the previous budget.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 13200,
+    # 12500 -> 14300 (TZ3): the source-bound pre-effect Presence start and event
+    # identity, auth saturation, and retry/receipt boundary add contracts the old
+    # chapter could not describe. Existing transport and companion rules remain.
+    # 14300 -> 14800 (TZ3): source-bound first-round no-effect proof and successor
+    # identity must be explained beside existing Host retry/receipt custody; no new store.
+    # 12500 -> 13400 (TZ2 own work): the Presence paragraph gains two contracts it had
+    # no text for — what a binding's own work is and which readers/controls reach it
+    # (replacing the conversation-exact cancel sentence), and the forced-final split
+    # between the internal record and the declared reply; the base sat 10 bytes under.
+    # 13400 -> 13700 (TZ2 descendant authority): one sentence the chapter lacked — a
+    # delegated descendant's inherited binding authority, apart from the speaker metadata.
+    # 13700 -> 13950 (TZ2 repair, measured 13918): that sentence now names what the
+    # descendant's promote/follow-up roots carry and the canonical-first steer precedence
+    # (replacing the live-row clause), and "host diagnostics" states its ordinary-final limit.
+    # 13950 -> 14100 (TZ2 review): a deferred tool-delivery finish note is
+    # carried separately from prior speech in the same previous-turn pointer.
+    # 14100/14800 -> 17500: TZ2 binding authority and TZ3 Host retry custody
+    # coexist in one current Host/Presence map; neither overwrites the other.
+    # 17500 -> 18300 (owner notifications merged onto the TZ2/TZ3 tree, measured 18147): `POST
+    # /notify` joins the frozen route family with its contract (grant, the events-row fact,
+    # deferred `kind: "notify"` rows keyed by the skill, the suppressed-cancel exception).
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 18300,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.
@@ -230,7 +301,23 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # chapter had 5 bytes left. Sized to the text: 5 bytes of margin.
     # 94520 -> 94900: the delegated-lane bullet names the worktree ops lock rule
     # (issue #1241: no tree walk or per-file git process under the lock).
-    "docs/development/06-rules-by-change-class.md": 94900,
+    # 94900 -> 95000 (TZ2 own work): the Presence bullets replace the conversation-exact
+    # cancel clause with the own-binding rule and name the forced declaration.
+    # 95000 -> 95150 (TZ2 descendant authority): the own-binding bullet names how a delegated
+    # descendant is a Presence caller (inherited binding authority, never speaker metadata).
+    # 95150 -> 95200 (TZ2 repair, measured 95191): the promotion/follow-up clause names the
+    # one carrier it copies instead of "the Presence metadata".
+    # 95200 -> 95400 (tz2 7a387f717): the C4 explicit-stop rule took the chapter to 95223
+    # before this diff; nothing displaced.
+    # 95400 -> 96700 (OpenAI-family cache layout incl. the Claudexor route, measured 96596): the cache-friendliness
+    # bullet states the declare-in-builder / project-in-transport rule, the per-family
+    # OpenRouter session and the two enforcing tests; the notice bullet gains the second
+    # meaning of the `[SYSTEM NOTICE]` marker. The derived-identity sentence is replaced.
+    # 96700 -> 96800 (TZ-2 B+C merged onto TZ-1 PR-1 #1330, measured 96752 on the merged tree):
+    # each side fit alone (TZ-2 96666, TZ-1 96682); TZ-2's reflection-custody and stop-freshness
+    # clauses and TZ-1's off-loop ingress-lock clause rewrite different bullets in place, so
+    # the union displaces nothing.
+    "docs/development/06-rules-by-change-class.md": 96800,
     "docs/development/07-managed-update-rule.md": 4166,
     "docs/development/08-mutation-attribution-rule.md": 2899,
     "docs/development/09-process-custody-rule.md": 10028,
@@ -241,7 +328,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # system-message-actions bullet and adds what no older text held: the door, the
     # regenerate-and-read-the-neighbours duty and what enforces each half.
     "docs/development/11-design-system.md": 28300,
-    "docs/development/12-mcp-client-integration.md": 3313,
+    # 3313 -> 3520 (#1262): the missed-name rule (catalog-only answer, no guess, alias,
+    # cross-server hint or automatic call, before safety); no older text held it (measured 3506).
+    "docs/development/12-mcp-client-integration.md": 3520,
     "docs/development/13-gateway-boundary-pattern.md": 2228,
     # 14958 -> 16100: release proof now records diagnostic signing/attestation side effects, authority asymmetry, and fail-closed prerequisites.
     # 16100 -> 19350 (#1215): the safe-launch recipe an operator must copy exactly,

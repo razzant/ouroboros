@@ -21,7 +21,7 @@ function makeInstance(rows, details = {}) {
     const instance = createChatInstance({
         ws: {on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {}},
         state: {activePage: 'chat', projectChatIds: new Set(), unreadCount: 0}, updateUnreadBadge() {},
-        stateSnapshots: {begin: () => ({generation: 1, requestedAt: Date.now()}), isCurrent: () => true, apply() {}},
+        stateSnapshots: {begin: () => ({generation: 1, requestedAt: Date.now()}), gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {}},
         chatId: 1, idPrefix: 'chat', mountEl: env.mount,
     });
     return {...env, handlers, instance, card: id => walkCard(globalThis.document.byId.get('chat-messages'), id)};
