@@ -690,3 +690,30 @@ test('Activity offers no Enable on a skill row held back by readiness alone', as
     // Delete stays (it suppresses) and is marked as a skill row for the dialog.
     assert.equal(row.querySelector('[data-act="schedule-delete"]').dataset.managed, '1');
 });
+
+test('Activity shows a notify row by its sentence with the notification tag and the owner controls', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    routes.set(schedulesUrl, response({ tasks: [
+        { id: 'notify-cal-evt-1-abc', name: 'Reminder from cal', kind: 'notify', source: 'skill:cal', enabled: true, status: 'active',
+          trigger: { type: 'once', run_at: '2999-01-01T09:00:00+00:00' }, notification: { text: 'Dentist at 9', key: 'evt-1' } },
+        { id: 'notify-cal-evt-2-def', name: 'Reminder from cal', kind: 'notify', source: 'skill:cal', enabled: false,
+          manual_override: 'disabled', status: 'suppressed', retained: true, restorable: true, trigger: { type: 'once', run_at: '2999-01-02T09:00:00+00:00' },
+          notification: { text: 'Standup', key: 'evt-2' } },
+    ] }));
+    await initActivity({ mount, ws }).refresh();
+    const schedules = section(mount, 'schedules');
+    const history = schedules.querySelector('[data-activity-history]');
+    const standing = [...schedules.querySelectorAll('.activity-row')].filter((row) => !history.contains(row));
+    assert.equal(standing.length, 1);
+    // The sentence is the title; the row says it is a notification and names its skill,
+    // never a skill-managed marker (no readiness caveat), and offers Disable.
+    assert.match(standing[0].textContent, /Dentist at 9[\s\S]*notification · one-shot[\s\S]*· cal/);
+    assert.doesNotMatch(standing[0].textContent, /Reminder from cal|readiness/);
+    assert.equal(standing[0].querySelector('button').textContent, 'Disable');
+    // The owner's disabled reminder is a suppressed record with Restore, like a skill row.
+    const retained = history.querySelectorAll('.activity-row');
+    assert.equal(retained.length, 1);
+    assert.match(retained[0].textContent, /Standup[\s\S]*suppressed/);
+    assert.equal(retained[0].querySelector('button').textContent, 'Restore');
+});

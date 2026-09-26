@@ -153,28 +153,6 @@ def test_notify_scheduling_validation(tmp_path: pathlib.Path) -> None:
     assert len(queue.list_scheduled_tasks(tmp_path)["tasks"]) == 2
 
 
-def test_events_websocket_allows_manifest_declared_owner_notification_without_grant(tmp_path: pathlib.Path) -> None:
-    """The host's own owner notifications are not conversation content: a
-    companion that declares the topic may subscribe without an owner grant,
-    exactly like skill.lifecycle."""
-    from ouroboros import event_bus
-
-    _seed_token(tmp_path, skill="mirror", token="mtok", permissions=[], subscribe_events=["owner.notification"])
-    app = create_host_service_app(tmp_path)
-    client = TestClient(app)
-    event_bus.init_global_event_bus()
-    try:
-        with client.websocket_connect("/events", headers={"X-Skill-Token": "mtok"}) as ws:
-            ws.send_json({"type": "subscribe", "topic": "owner.notification"})
-            assert ws.receive_json()["type"] == "subscribed"
-            event_bus.publish_event("owner.notification", {"text": "hello", "source": "skill:cal"})
-            message = ws.receive_json()
-        assert message["type"] == "event" and message["topic"] == "owner.notification"
-        assert message["data"]["text"] == "hello"
-    finally:
-        event_bus.init_global_event_bus()
-
-
 def test_owner_disable_or_delete_of_a_notify_row_survives_the_skill_reposting_its_key(tmp_path: pathlib.Path) -> None:
     from supervisor import queue
 
@@ -236,3 +214,73 @@ def test_scheduled_notify_upsert_refuses_a_row_owned_by_another_source(tmp_path:
                        json={"text": "mine", "key": "shared", "at": "2999-01-01T00:00:00+00:00"})
     assert resp.status_code == 409
     assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["notification"]["text"] == "theirs"
+
+
+def test_notify_reports_an_unwritable_log_as_503_not_500(tmp_path: pathlib.Path) -> None:
+    """An operational failure before the append's own retry loop (here: the
+    logs directory is a regular file) is the same honest 503, never a bare 500."""
+    import shutil
+
+    client, _app = _notify_client(tmp_path)
+    shutil.rmtree(tmp_path / "logs", ignore_errors=True)
+    (tmp_path / "logs").write_text("not a directory", encoding="utf-8")
+    client = TestClient(_app, raise_server_exceptions=False)
+    resp = client.post("/notify", headers={"X-Skill-Token": "tok"}, json={"text": "hi"})
+    assert resp.status_code == 503 and resp.headers["content-type"].startswith("application/json")
+
+
+def test_long_keys_yield_ids_the_owner_lifecycle_endpoints_accept(tmp_path: pathlib.Path) -> None:
+    from ouroboros.gateway.host_service import _notify_fresh_schedule_id, _notify_schedule_id
+    from ouroboros.schedule_contract import schedule_id_error
+    from supervisor import queue
+
+    queue.init(tmp_path)
+    for key in ("k" * 128, "встреча 1", "встреча-1", "a"):
+        assert schedule_id_error(_notify_schedule_id("cal", key)) == ""
+    assert _notify_schedule_id("cal", "встреча 1") != _notify_schedule_id("cal", "встреча-1")
+    assert schedule_id_error(_notify_schedule_id("s" * 200, "k" * 128)) == ""
+    assert schedule_id_error(_notify_fresh_schedule_id("s" * 200)) == ""
+    client, _app = _notify_client(tmp_path)
+    resp = client.post("/notify", headers={"X-Skill-Token": "tok"},
+                       json={"text": "x", "key": "k" * 128, "at": "2999-01-01T00:00:00+00:00"})
+    assert resp.status_code == 200
+    schedule_id = resp.json()["id"]
+    assert len(schedule_id) <= 81
+    off = queue.mutate_scheduled_task("disable", schedule_id, reason="owner: off", actor="owner:gateway", drive_root=tmp_path)
+    assert off["ok"] is True and off["status"] == "updated"
+
+
+def test_notify_addresses_the_owner_of_its_own_data_root(tmp_path: pathlib.Path) -> None:
+    from ouroboros.utils import atomic_write_json
+
+    client, _app = _notify_client(tmp_path)
+    atomic_write_json(tmp_path / "state" / "state.json", {"owner_chat_id": 777})
+    resp = client.post("/notify", headers={"X-Skill-Token": "tok"}, json={"text": "hi"})
+    assert resp.status_code == 200 and resp.json()["chat_id"] == 777
+    rows = [r for r in _events_rows(tmp_path) if r.get("type") == "owner_notification"]
+    assert rows[-1]["chat_id"] == 777
+
+
+def test_skill_cancel_cannot_lift_the_owner_suppression(tmp_path: pathlib.Path) -> None:
+    """The bypass a reviewer found: cancel plus a repeat of the same key must
+    not resurrect a reminder the owner switched off."""
+    from supervisor import queue
+
+    queue.init(tmp_path)
+    client, _app = _notify_client(tmp_path)
+    headers = {"X-Skill-Token": "tok"}
+    body = {"text": "Meeting", "key": "cal:evt-7", "at": "2999-01-01T14:45:00+00:00"}
+    schedule_id = client.post("/notify", headers=headers, json=body).json()["id"]
+    queue.mutate_scheduled_task("disable", schedule_id, reason="owner: off", actor="owner:gateway", drive_root=tmp_path)
+    cancelled = client.post("/notify", headers=headers, json={"text": "x", "key": "cal:evt-7", "cancel": True})
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"ok": True, "cancelled": False, "id": schedule_id, "status": "suppressed"}
+    rows = queue.list_scheduled_tasks(tmp_path)["tasks"]
+    assert len(rows) == 1 and rows[0]["manual_override"] == "disabled" and rows[0]["enabled"] is False
+    again = client.post("/notify", headers=headers, json=body)
+    assert again.json()["status"] == "suppressed"
+    assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["enabled"] is False
+    # Its own unsuppressed row the skill may still remove.
+    other = client.post("/notify", headers=headers, json={**body, "key": "cal:evt-8"}).json()["id"]
+    assert client.post("/notify", headers=headers, json={"text": "x", "key": "cal:evt-8", "cancel": True}).json()["cancelled"] is True
+    assert [r["id"] for r in queue.list_scheduled_tasks(tmp_path)["tasks"]] == [schedule_id]

@@ -749,8 +749,9 @@ def _notify_source_silenced(source: str) -> bool:
 
 
 def _fire_owner_notification(record: Dict[str, Any], now: datetime.datetime,
-                             scheduled_for: datetime.datetime) -> Dict[str, Any] | None:
-    """Persist one due ``kind: "notify"`` row's notification; ``None`` = not fired.
+                             scheduled_for: datetime.datetime) -> tuple[Dict[str, Any] | None, str]:
+    """Persist one due ``kind: "notify"`` row's notification: ``(row, "")`` when
+    fired, ``(None, why)`` when not.
 
     The durable append happens here, under the table lock the tick already
     holds (a local file write, like a task row's result); the topic publish is
@@ -758,22 +759,28 @@ def _fire_owner_notification(record: Dict[str, Any], now: datetime.datetime,
     recurring or re-armed reminder rings on every occurrence while a crash
     replay of the same occurrence still collapses on the client.
     """
+    import hashlib
+
     from ouroboros.event_bus import emit_owner_notification
 
     notification = record.get("notification") if isinstance(record.get("notification"), dict) else {}
     source = str(record.get("source") or "")
     # UTC, so the occurrence key does not depend on the host's zone setting.
     due_iso = scheduled_for.astimezone(datetime.timezone.utc).isoformat()
+    producer_key = str(notification.get("key") or "") or str(record.get("id") or "")
+    if len(producer_key) + 1 + len(due_iso) > 128:
+        # The producer may use the whole 128-character key; the occurrence key
+        # must still fit the same cap, so a long key rides as its digest.
+        producer_key = hashlib.sha256(producer_key.encode("utf-8")).hexdigest()[:32]
     try:
-        return emit_owner_notification(
+        row = emit_owner_notification(
             _queue().DRIVE_ROOT, chat_id=_notification_chat_id(record), category="notice",
             text=str(notification.get("text") or ""), source=source or "scheduler",
-            key=f"{str(notification.get('key') or '') or str(record.get('id') or '')}@{due_iso}",
-            scheduled_for=due_iso, publish=False,
+            key=f"{producer_key}@{due_iso}", scheduled_for=due_iso, publish=False,
         )
     except ValueError as exc:
-        _record_last_error(record, f"invalid notification: {exc}")
-        return None
+        return None, f"invalid notification: {exc}"
+    return row, ("" if row is not None else "notification log write failed; retrying")
 
 
 def check_scheduled_tasks() -> None:
@@ -809,7 +816,13 @@ def check_scheduled_tasks() -> None:
                 changed = True
             trigger = record.get("trigger") if isinstance(record.get("trigger"), dict) else {}
             trigger_type = str(trigger.get("type") or "cron").strip().lower()
-            notify_row = str(record.get("kind") or "") == SCHEDULE_KIND_NOTIFY
+            kind = str(record.get("kind") or "task").strip().lower()
+            notify_row = kind == SCHEDULE_KIND_NOTIFY
+            if kind not in ("task", SCHEDULE_KIND_NOTIFY):
+                # A verb this tick does not know is not a task in disguise: the
+                # row is left untouched with a typed error, never dispatched.
+                changed = _record_last_error(record, f"unsupported schedule kind: {kind}") or changed
+                continue
             # A notify row admits no task, so nothing of it can be in flight.
             if not notify_row and _schedule_running_or_queued(schedule_id, _queue().DRIVE_ROOT) is not False:
                 # Unknown reads as "still in flight": re-dispatching a schedule
@@ -858,12 +871,11 @@ def check_scheduled_tasks() -> None:
                 if _notify_source_silenced(str(record.get("source") or "")):
                     continue
                 due_at = _parse_schedule_time(trigger.get("run_at"), tz) if trigger_type == "once" else next_run
-                row = _fire_owner_notification(record, now, due_at or now)
+                row, why = _fire_owner_notification(record, now, due_at or now)
                 if row is None:
-                    # Not fired: the row stays armed and its last_error says why
-                    # (set by the helper for a rejected notification; an append
-                    # that failed is retried on the next pass).
-                    changed = _record_last_error(record, str(record.get("last_error") or "notification log write failed; retrying")) or changed
+                    # Not fired: the row stays armed and its last_error says why;
+                    # the next pass retries it.
+                    changed = _record_last_error(record, why) or changed
                     continue
                 fired.append(row)
                 record["last_run_at"] = now.isoformat()

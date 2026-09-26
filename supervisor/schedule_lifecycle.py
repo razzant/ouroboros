@@ -258,7 +258,7 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             # removes it — nothing of the owner's is being overridden there.
             notify_row = str(current.get("kind") or "") == _store.SCHEDULE_KIND_NOTIFY
             owner_over_notify = notify_row and str(actor or "") != str(current.get("source") or "")
-            detail, removed = "", False
+            detail, removed, kept = "", False, False
             if operation == "disable":
                 current["enabled"] = False
                 if skill_row or owner_over_notify:
@@ -271,6 +271,12 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                     # (a later post of the same key starts a fresh row).
                     tasks = [item for item in tasks if str(item.get("id") or "") != wanted]
                     status, removed = "deleted", True
+                elif notify_row and not owner_over_notify and _is_suppressed(current):
+                    # The skill cancelling a row the OWNER switched off: the marker
+                    # is the owner's, so the record stays untouched — otherwise
+                    # cancel plus a repeat of the same key would lift the owner's
+                    # decision. Reported as the suppression it is, and unchanged.
+                    status, kept = "suppressed", True
                 elif skill_row or owner_over_notify:
                     # Retained as a suppressed record: dropping the row would only
                     # have it recreated by the next lifecycle resync (or the skill's
@@ -325,7 +331,7 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             else:
                 current["enabled"] = True
                 status = "updated"
-            changed = status not in UNCHANGED_STATUSES
+            changed = status not in UNCHANGED_STATUSES and not kept
             if changed:
                 if not removed:
                     current["updated_at"] = utc_now_iso()

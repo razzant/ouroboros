@@ -111,3 +111,25 @@ def test_owner_notification_is_a_valid_topic_for_plugins_and_companions():
     from ouroboros.contracts.skill_manifest import _EVENT_TOPIC_RE
 
     assert _EVENT_TOPIC_RE.match(event_bus.OWNER_NOTIFICATION)
+
+
+def test_emit_repairs_a_torn_predecessor_so_the_receipt_always_parses(tmp_path, fresh_bus):
+    """A crash mid-append leaves a partial line; the next notification must not
+    be glued onto it (the scheduler consumes its row on the append's success)."""
+    log_path = tmp_path / "logs" / "events.jsonl"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text('{"ts": "2026-09-26T00:1', encoding="utf-8")
+    row = event_bus.emit_owner_notification(
+        tmp_path, chat_id=1, category="notice", text="after the tear", source="skill:x",
+    )
+    assert row is not None
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert lines[-1] == json.dumps(row, ensure_ascii=False)
+    assert json.loads(lines[-1])["text"] == "after the tear"
+
+
+def test_emit_answers_none_when_the_log_cannot_be_opened(tmp_path, fresh_bus):
+    (tmp_path / "logs").write_text("a file where the directory should be", encoding="utf-8")
+    assert event_bus.emit_owner_notification(
+        tmp_path, chat_id=1, category="notice", text="hi", source="skill:x",
+    ) is None

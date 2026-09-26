@@ -888,3 +888,37 @@ def test_suppressed_notify_row_never_fires_until_the_owner_restores_it(tmp_path)
     assert queue.mutate_scheduled_task("restore", "n-off", reason="owner: back", actor="owner:gateway", drive_root=tmp_path)["ok"] is True
     queue.check_scheduled_tasks()
     assert len([row for row in _events(tmp_path) if row.get("type") == "owner_notification"]) == 1
+
+
+def test_unknown_schedule_kind_is_left_untouched_with_a_typed_error(tmp_path):
+    queue, pending = _queue(tmp_path)
+    queue.upsert_scheduled_task({**_notify_row("n-weird"), "kind": "future_action"})
+    queue.check_scheduled_tasks()
+    assert pending == [], "an unknown verb never dispatches a model task"
+    record = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert record["enabled"] is True and not record.get("completed_at") and not record.get("last_run_at")
+    assert "unsupported schedule kind: future_action" in record["last_error"]
+    assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []
+
+
+def test_notify_row_with_the_longest_producer_key_still_fires(tmp_path):
+    """The route accepts 128-character keys; the occurrence key must fit the
+    same cap, so a long key rides as its digest instead of never firing."""
+    queue, pending = _queue(tmp_path)
+    long_key = "k" * 128
+    queue.upsert_scheduled_task(_notify_row("n-long", key=long_key))
+    queue.check_scheduled_tasks()
+    notices = [row for row in _events(tmp_path) if row.get("type") == "owner_notification"]
+    assert len(notices) == 1 and len(notices[0]["key"]) <= 128 and notices[0]["key"].endswith("@2000-01-01T00:00:00+00:00")
+    record = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert record["enabled"] is False and record["completed_at"] and record.get("last_error") == ""
+
+
+def test_notify_row_that_the_emitter_rejects_records_why(tmp_path):
+    queue, pending = _queue(tmp_path)
+    queue.upsert_scheduled_task({**_notify_row("n-empty"), "notification": {"text": "   ", "key": "e"}})
+    queue.check_scheduled_tasks()
+    record = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert record["enabled"] is True and not record.get("completed_at")
+    assert "invalid notification" in str(record.get("last_error") or ""), "the durable row says why it never rings"
+    assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []

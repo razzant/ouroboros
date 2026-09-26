@@ -188,7 +188,16 @@ def emit_owner_notification(
         row["scheduled_for"] = str(scheduled_for).strip()
     import pathlib
 
-    if not append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", dict(row)):
+    try:
+        # This row is a receipt (the scheduler consumes its schedule on it), so
+        # it repairs a torn predecessor's boundary before appending and reports
+        # an unwritable log as "not written" instead of raising into the seam.
+        written = append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", dict(row),
+                               ensure_record_boundary=True)
+    except OSError:
+        log.warning("owner notification could not be appended", exc_info=True)
+        return None
+    if not written:
         return None
     if publish:
         publish_owner_notification(row)

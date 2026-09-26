@@ -309,9 +309,7 @@ class HostServiceContext:
             topic = permission.split(":", 1)[1]
             declared = set(str(item or "").strip() for item in (loaded.manifest.subscribe_events or []))
             permissions = set(str(item or "").strip() for item in (loaded.manifest.permissions or []))
-            # Not conversation content, so no owner grant: lifecycle facts and the
-            # host's own owner notifications (a transport mirrors them).
-            if topic in ("skill.lifecycle", "owner.notification") and "subscribe_event" in permissions and topic in declared:
+            if topic == "skill.lifecycle" and "subscribe_event" in permissions and topic in declared:
                 return
         if permission not in granted:
             raise HostServiceAuthError(f"skill {skill_name!r} lacks grant {permission!r}")
@@ -648,18 +646,14 @@ def _presence_staged_files(
     return tuple(files)
 
 
-def _owner_notification_chat_id() -> int:
-    """The owner's canonical chat, or Main while no owner is bound.
-
-    Deliberately not ``notification_chat_route``: that helper keeps chat 0 as a
-    real destination (the Skill Review panel), and a notification addressed
-    there would be refused by the browser notifier's room gate and read by
-    nobody.
-    """
-    from supervisor.state import load_state
-
+def _owner_notification_chat_id(data_dir: pathlib.Path) -> int:
+    """The owner's chat of THIS data root (its own state file, never the
+    process-global one), or Main while no owner is bound. Not
+    ``notification_chat_route``: it keeps chat 0 (the Skill Review panel), which
+    the browser notifier refuses and nobody reads."""
+    state = read_json_dict(pathlib.Path(data_dir) / "state" / "state.json") or {}
     try:
-        owner = int(load_state().get("owner_chat_id") or 0)
+        owner = int(state.get("owner_chat_id") or 0)
     except (TypeError, ValueError):
         owner = 0
     return owner if owner > 0 else WEB_UI_CHAT_ID
@@ -668,13 +662,10 @@ def _owner_notification_chat_id() -> int:
 async def _api_notify(request: Request) -> JSONResponse:
     """One owner notification from a skill: never a chat row, never a model turn.
 
-    The host, not the skill, stamps the source; the fact is one durable
-    ``owner_notification`` events row (its live browser frame is that append's
-    log-sink copy) plus the ``owner.notification`` topic for transport skills.
-    ``key`` is the producer's own identity for the notice, so a redelivery
-    after a lost acknowledgement collapses on the client instead of ringing
-    twice. A failed durable write is 503 — the skill retries the same notice.
-    """
+    The host stamps the source; the fact is one durable ``owner_notification``
+    events row (its live browser frame is the append's log-sink copy) plus the
+    ``owner.notification`` topic. ``key`` is the producer's identity for the
+    notice (a redelivery collapses on the client); a failed write is 503."""
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
         skill_name, token_payload = ctx.authenticate_token_payload(
@@ -705,20 +696,23 @@ async def _api_notify(request: Request) -> JSONResponse:
     at_raw = payload.get("at")
     cron_raw = payload.get("cron")
     cancel = payload.get("cancel", False)
-    if cancel not in (True, False):
+    if not isinstance(cancel, bool):
         return _json_error("cancel must be a boolean", 400)
     if at_raw is not None or cron_raw is not None or cancel:
         return await run_sync_to_completion(
             _schedule_owner_notification, ctx, skill_name, text.strip(), key,
             at_raw, cron_raw, payload.get("timezone"), bool(cancel),
         )
-    try:
-        # The append takes the log's file lock: off the event loop, like every
-        # other durable write this service performs.
-        row = await run_sync_to_completion(
-            emit_owner_notification, ctx.data_dir, chat_id=_owner_notification_chat_id(),
+    def _emit_now() -> Optional[Dict[str, Any]]:
+        # The state read and the append both touch files under a lock: off the
+        # event loop, like every other durable write this service performs.
+        return emit_owner_notification(
+            ctx.data_dir, chat_id=_owner_notification_chat_id(ctx.data_dir),
             category="notice", text=text, source=f"skill:{skill_name}", key=key,
         )
+
+    try:
+        row = await run_sync_to_completion(_emit_now)
     except ValueError as exc:
         return _json_error(str(exc), 400)
     if row is None:
@@ -727,28 +721,35 @@ async def _api_notify(request: Request) -> JSONResponse:
 
 
 def _notify_schedule_id(skill_name: str, key: str) -> str:
-    """One row per (skill, key): the slug for humans, a hash so two keys that
-    slug alike (`встреча 1` / `встреча-1`) never replace each other."""
+    """One row per (skill, key) inside the schedule-id contract (≤81 URL-safe
+    characters): the slug for humans, truncated to leave room for a hash of
+    the raw key, so keys that slug alike never collide and a long key never
+    yields an id the owner's lifecycle endpoints refuse."""
     from hashlib import sha256
 
     from ouroboros.schedule_contract import schedule_slug
 
-    return f"{schedule_slug('notify', skill_name, key)}-{sha256(key.encode('utf-8')).hexdigest()[:8]}"
+    digest = sha256(key.encode("utf-8")).hexdigest()[:8]
+    return f"{schedule_slug('notify', skill_name, key)[:72].rstrip('-._')}-{digest}"
+
+
+def _notify_fresh_schedule_id(skill_name: str) -> str:
+    """A keyless post is fire-and-forget: a fresh, contract-sized id each time."""
+    from ouroboros.schedule_contract import schedule_slug
+
+    return schedule_slug("notify", skill_name, utc_now_iso()[:19].replace(":", ""), os.urandom(3).hex())
 
 
 def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, text: str, key: str,
                                  at_raw: Any, cron_raw: Any, timezone_raw: Any, cancel: bool) -> JSONResponse:
-    """A deferred notice is a ``kind: "notify"`` row of the ONE schedule table.
-
-    The scheduler tick fires it without a model turn; ``key`` is the row's
-    identity, so the same key re-posted moves the reminder and ``cancel`` with
-    that key removes it through the audited delete. Without a key a row is
-    fire-and-forget (a fresh id each time).
-    """
+    """A deferred notice is a ``kind: "notify"`` row of the ONE schedule table:
+    the tick fires it without a model turn; ``key`` is the row's identity (a
+    repeat moves it, ``cancel`` removes it through the audited delete); without
+    a key a row is fire-and-forget."""
     from ouroboros.deadline_utils import parse_deadline_ts
     from ouroboros.schedule_contract import cron_error, timezone_error
     from supervisor.queue import (
-        ScheduleRefused, ScheduleStoreUnreadable, load_schedule_store, remove_scheduled_task,
+        ScheduleRefused, ScheduleStoreUnreadable, load_schedule_store, mutate_scheduled_task,
         schedule_transaction, upsert_scheduled_task,
     )
 
@@ -765,12 +766,15 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
                 current = next((row for row in rows if str(row.get("id") or "") == schedule_id), None)
                 if current is None or str(current.get("source") or "") != source:
                     return _json_error("no scheduled notification with that key", 404)
-                changed = remove_scheduled_task(
-                    schedule_id, drive_root=ctx.data_dir, actor=source,
+                outcome = mutate_scheduled_task(
+                    "delete", schedule_id, drive_root=ctx.data_dir, actor=source,
                     reason="notification cancelled by its skill")
         except ScheduleStoreUnreadable as exc:
             return _json_error(str(exc), 503)
-        return JSONResponse({"ok": True, "cancelled": bool(changed), "id": schedule_id})
+        if outcome.get("status") == "suppressed" and not outcome.get("changed"):
+            # The owner's off switch outlives the skill's cancel (see lifecycle).
+            return JSONResponse({"ok": True, "cancelled": False, "id": schedule_id, "status": "suppressed"})
+        return JSONResponse({"ok": True, "cancelled": bool(outcome.get("changed")), "id": schedule_id})
     if (at_raw is None) == (cron_raw is None):
         return _json_error("supply exactly one of at (ISO 8601 instant) or cron (5-field expression)", 400)
     timezone = str(timezone_raw or "").strip()
@@ -786,10 +790,9 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
         trigger = {"type": "cron", "expr": cron_raw.strip()}
     if err := timezone_error(timezone):
         return _json_error(err, 400)
-    schedule_id = _notify_schedule_id(skill_name, key) if key else f"notify-{skill_name}-{utc_now_iso()[:19].replace(':', '')}-{os.urandom(3).hex()}"
-    # ``name`` is audit material (schedule_mutation rows carry it); the sentence
-    # is not, so the row is named by its owner and the UI reads the sentence
-    # from ``notification`` itself.
+    schedule_id = _notify_schedule_id(skill_name, key) if key else _notify_fresh_schedule_id(skill_name)
+    # ``name`` is audit material; the sentence is not — the UI reads it from
+    # ``notification`` itself.
     record = {
         "id": schedule_id, "name": f"Reminder from {skill_name}", "kind": "notify", "source": source,
         "enabled": True, "timezone": timezone, "trigger": trigger,
@@ -803,8 +806,7 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
                 if str(current.get("source") or "") != source:
                     return _json_error("that schedule id belongs to another source", 409)
                 if str(current.get("manual_override") or "") in ("disabled", "deleted"):
-                    # The owner switched this reminder off; a skill's repeat of the
-                    # same key does not lift that — only the owner's restore does.
+                    # The owner switched this reminder off; only their restore lifts it.
                     return JSONResponse({"ok": True, "scheduled": False, "id": schedule_id,
                                          "status": "suppressed"})
             stored = upsert_scheduled_task(
