@@ -65,7 +65,7 @@ def test_closed_notes_allow_voluntary_disposition_without_new_authority(harness,
     notes = json.dumps([_finding("n1", "note"), _finding("n2", "note")])
     sub = harness.install({"s1": notes, "s2": CLEAN, "s3": CLEAN})
     ctx = harness.make_ctx()
-    assert _control(_call(ctx)) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(_call(ctx)) == {"outcome": "GREEN", "closed": True}
     before = _state(harness)
     wave = before["waves"][-1]
     fingerprint = wave["request_fingerprint"]
@@ -75,7 +75,7 @@ def test_closed_notes_allow_voluntary_disposition_without_new_authority(harness,
 
     out = pr._handle_plan_task(ctx, review_disposition={"review_fingerprint": fingerprint, "items": items})
 
-    assert _control(out) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(out) == {"outcome": "GREEN", "closed": True}
     assert "Notes are optional" in out and "neither reopens" in out
     after = _state(harness)
     annotated = after["waves"][-1]
@@ -88,7 +88,7 @@ def test_closed_notes_allow_voluntary_disposition_without_new_authority(harness,
     assert exact["supersedes_wave_artifact"] == prior_ref
     assert exact["dispositions"] == items
     assert pr._read_plan_review_wave_artifact(harness.drive, "task-1", prior_ref) == exact_before
-    assert _control(_call(ctx)) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(_call(ctx)) == {"outcome": "GREEN", "closed": True}
     assert len(sub.calls) == 1
 
 
@@ -548,7 +548,7 @@ def test_disposition_inputs_are_bounded_at_entry(harness):
     huge = "r" * (plan_spec.MAX_FINDING_TEXT_CHARS * 20)
     out = pr._handle_plan_task(ctx, review_disposition={"review_fingerprint": fp, "items": [
         {"finding_id": "s1:n1", "decision": "accept", "rationale": huge}]})
-    assert _control(out) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(out) == {"outcome": "GREEN", "closed": True}
     stored = _state(harness)["waves"][-1]["dispositions"][0]
     assert len(stored["rationale"]) < plan_spec.MAX_FINDING_TEXT_CHARS + 200 and "truncat" in stored["rationale"].lower()
     # R10-1: `decision` is enum-like and bounded at entry — identity keys are never wide carriers
@@ -676,7 +676,7 @@ def test_missing_requested_evidence_reask_keeps_free_disposition_without_new_att
         "items": [{"finding_id": repeat[0]["finding_id"], "decision": "defer",
                    "rationale": "The source is unavailable; it is not needed to begin this work."}],
     })
-    assert _control(disposed) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(disposed) == {"outcome": "GREEN", "closed": True}
     assert len(sub.calls) == 1 and _state(harness)["cycles_paid"] == 2
 
 
@@ -713,20 +713,15 @@ def _actor(slot_id, *, ok=False, failure_code="", error=""):
     return {"slot_id": slot_id, "model": "m", "ok": ok, "failure_code": failure_code, "error": error}
 
 
-def test_slot_reasons_dedup_typed_reasons_and_the_owner_line_names_the_late_result():
-    from ouroboros.tools.plan_review_runtime import plan_slot_reasons, plan_wave_progress_line
+def test_the_owner_line_names_the_late_result_and_carries_no_slot_reason():
+    from ouroboros.tools.plan_review_runtime import plan_wave_progress_line
 
     counts = {"parseable": 0, "configured": 6, "blocking": 0, "note": 0, "need_evidence": 0}
     same = [_actor(f"s{i}", failure_code="subscription_window_exhausted") for i in range(3)]
     distinct = [_actor("d1", failure_code="credential_pool_exhausted"), _actor("d2", error="transport died"),
                 _actor("d3", error="x" * 400), _actor("d4", failure_code="deadline_exhausted")]
     wave = {"actors": same + distinct, "custody_pending": True}
-    reasons = plan_slot_reasons(wave)  # the MODEL-facing helper keeps the typed reasons, deduplicated and bounded
-    assert reasons.count("subscription_window_exhausted") == 1  # three identical reasons -> one
-    assert "credential_pool_exhausted; transport died" in reasons
-    assert "(+1 more in the task result)" in reasons and "deadline_exhausted" not in reasons  # first four shown
-    assert "OMISSION NOTE" in reasons and "\n" not in reasons  # bounded, one line
-    # The OWNER line carries none of them: who answered, and that a result is still owed.
+    # The OWNER line carries no typed reason: who answered, and that a result is still owed.
     line = plan_wave_progress_line("DEGRADED", counts, cycles_paid=1, cap=2, wave=wave)
     assert line == "📐 Plan review: none of the 7 reviewers answered; a reviewer's answer is still on its way."
     # A clean wave reads the same with or without its roster.
@@ -862,7 +857,7 @@ def test_reviewer_question_holds_the_wave_until_a_free_disposition_and_its_answe
     answered = pr._handle_plan_task(ctx, review_disposition={
         "review_fingerprint": wave["request_fingerprint"],
         "items": [{"finding_id": "s1:q1", "decision": "accept", "rationale": "The board asked for five."}]})
-    assert _control(answered) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(answered) == {"outcome": "GREEN", "closed": True}
     assert len(sub.calls) == 1 and _state(harness)["cycles_paid"] == 1  # $0: no reviewer call, no cycle
     _call(ctx, spec={**DECK_SPEC, "in_scope": ["a 6-slide deck"]})  # the next PAID cycle carries the answer
     assert len(sub.calls) == 2

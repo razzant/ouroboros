@@ -547,3 +547,45 @@ def test_the_native_episode_keeps_its_own_host_observed_attestation():
     source = inspect.getsource(review_native_episode.NativeToolRoundReviewExecutor)
     assert '"host_file_read_attestation": "host_observed"' in source
     assert "harness_observed" not in source
+
+
+# ---------------------------------------------------------------------------
+# observed sources: a host-declared absolute file the session may read (plan review's room)
+# ---------------------------------------------------------------------------
+
+
+def _observed_row(path):
+    from ouroboros.tools.scope_required_sources import source_text_identity
+
+    return {"root": "artifact_store", "path": path.name, "file": str(path),
+            **source_text_identity(path.read_bytes())}
+
+
+def test_an_observed_source_records_coverage_without_a_capability_delta(tmp_path, repo):
+    """A `Read` of the snapshot's absolute path folds into measured coverage under the
+    `harness_observed` provenance; an observed source never sets `native_incomplete`
+    (quiet side: the same unread row under `native_required_sources` does), and a read of
+    an unrelated absolute file contributes nothing. Reverted, the facts are `{}`."""
+    snapshot = tmp_path / "artifacts" / "plan-dialogue-1.jsonl"
+    snapshot.parent.mkdir()
+    snapshot.write_text("".join(f'{{"n": {index}}}\n' for index in range(1, 41)), encoding="utf-8")
+    row = _observed_row(snapshot)
+    _journal(tmp_path, _claude_event(str(snapshot), offset=1, limit=40), run="run-whole")
+    facts = session_read_facts(str(tmp_path / "run-whole"), {"observed_sources": [row]}, session_root=str(repo))
+    assert facts["read_provenance"] == READ_PROVENANCE and "native_incomplete" not in facts
+    [source] = facts["native_read_coverage"]["sources"]
+    assert source["status"] == "complete" and source["covered_chars"] == source["complete_chars"] == row["complete_chars"]
+    assert facts["native_read_coverage"]["status"] == "complete"
+    _journal(tmp_path, _claude_event(str(snapshot), offset=1, limit=10), run="run-part")
+    partial = session_read_facts(str(tmp_path / "run-part"), {"observed_sources": [row]}, session_root=str(repo))
+    [source] = partial["native_read_coverage"]["sources"]
+    assert source["status"] == "incomplete" and 0 < source["covered_chars"] < row["complete_chars"]
+    assert "native_incomplete" not in partial  # observed, never a capability delta
+    required = session_read_facts(str(tmp_path / "run-part"), {"native_required_sources": [row]}, session_root=str(repo))
+    assert required["native_incomplete"] == "required_source_coverage_incomplete"
+    other = tmp_path / "artifacts" / "other.txt"
+    other.write_text("unrelated\n", encoding="utf-8")
+    _journal(tmp_path, _claude_event(str(other), offset=1, limit=1), run="run-other")
+    unrelated = session_read_facts(str(tmp_path / "run-other"), {"observed_sources": [row]}, session_root=str(repo))
+    [source] = unrelated["native_read_coverage"]["sources"]
+    assert source["status"] == "incomplete" and source["covered_chars"] == 0

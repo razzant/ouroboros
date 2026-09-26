@@ -120,7 +120,7 @@ def test_a_declared_new_source_file_is_constitutional_before_it_exists(harness):
     assert wave["constitutional"] is True
     assert "affected_paths" in wave["constitutional_note"] and str(target) in wave["constitutional_note"]
     system_prompt = _system_prompt(substrate)
-    assert "## BIBLE.md (constitution" in system_prompt and "6. Governance" in system_prompt
+    assert "## BIBLE.md (constitution" in system_prompt and "7. Governance" in system_prompt
     assert "## ARCHITECTURE.md (architecture and data flow" in system_prompt
     assert "on-demand pointer" not in system_prompt
     assert "REMINDER" not in out
@@ -270,11 +270,11 @@ def test_a_wave_stored_before_affected_paths_still_closes_at_zero_cost(harness):
         {"finding_id": "s1:f1", "decision": "accept", "rationale": "the owner signs it off"},
     ]})
 
-    assert _control(out) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(out) == {"outcome": "GREEN", "closed": True}
     assert substrate.calls == []
     state = _state(harness)
     assert int(state.get("cycles_paid") or 0) == paid_before
     closed = state["waves"][-1]
     assert closed["request_fingerprint"] == fingerprint and closed["closed"] is True
-    assert closed["spec_hash"] == stored_hash and closed["aggregate"] == "REVIEW_REQUIRED"
+    assert closed["spec_hash"] == stored_hash and closed["aggregate"] == "GREEN"
     assert "affected_paths" not in closed["spec"]

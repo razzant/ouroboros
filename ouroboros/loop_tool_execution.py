@@ -517,6 +517,7 @@ def _typed_result_metadata(
         ):
             meta["plan_review_outcome"] = plan_outcome
             meta["plan_review_closed"] = plan_closed
+            meta["plan_review_historical_critic"] = bool(tool_result.meta.get("plan_review_historical_critic"))
     if isinstance(tool_result, ToolResult) and tool_result.meta.get("post_commit_tests") == "failed":
         # A preserved commit whose post-commit tests failed is a SUCCESS that
         # still holds a failure the reflection triggers must see. The producer

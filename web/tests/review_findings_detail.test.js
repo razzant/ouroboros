@@ -106,6 +106,69 @@ test('a compact Plan wave names its recorded counts and the immutable artifact r
     assert.doesNotMatch(detail, /w\.json/);
 });
 
+test('a revised plan selected after a critic wave is labelled as the earlier plan\'s review', () => {
+    const critic = 'c'.repeat(64);
+    const revised = 'r'.repeat(64);
+    const authorSubject = {
+        review_fingerprint: critic,
+        source_ref: { root: 'artifact_store', path: 'plan-author.json', sha256: 'f'.repeat(64) },
+        author_disposition: { action: 'finish', disposition: 'partial', rationale: 'Considered.', subject_hash: revised },
+    };
+    const detail = (fingerprint) => ({
+        task_id: 'root',
+        plan_review_state: {
+            schema_version: 2,
+            current_attempt: { fingerprint, status: 'open', reason: 'author_current_plan', author_subject: { ...authorSubject, author_disposition: { ...authorSubject.author_disposition, subject_hash: fingerprint } } },
+            waves: [{ request_fingerprint: critic, cycle_index: 1, aggregate: 'GREEN', closed: true, paid: true, findings: [], counts: { blocking: 0, note: 0, need_evidence: 0 } }],
+            waves_omitted: 0,
+        },
+    });
+    const historical = planReviewGroupFromTaskDetail(detail(revised));
+    assert.equal(historical.label, 'Plan review · earlier plan');
+    assert.equal(historical.historicalCritic, true);
+    assert.equal(historical.verdict, 'GREEN');  // the critic's real verdict, never a synthesized one
+    assert.match(historical.authorDecisionText, /The verdict shown is the earlier plan's review; the selected plan r{64} has no verdict of its own/);
+    const html = renderReviewsSection([historical], { sectionExpanded: true, expandedGroups: new Set(['plan:root']) });
+    assert.match(html, /Plan review · earlier plan/);
+    assert.match(html, /has no verdict of its own/);
+    // Quiet side: the author selecting the reviewed plan itself keeps the plain group.
+    const own = planReviewGroupFromTaskDetail(detail(critic));
+    assert.equal(own.label, 'Plan review');
+    assert.equal(own.historicalCritic, false);
+    assert.doesNotMatch(own.authorDecisionText, /no verdict of its own/);
+});
+
+test('a plan wave ordered weaker than the owner setting names each seat, and a silent seat keeps its earlier finding listed', () => {
+    const fingerprint = 'w'.repeat(64);
+    const detail = (extra) => planReviewGroupFromTaskDetail({
+        task_id: 'root',
+        plan_review_state: {
+            schema_version: 2,
+            current_attempt: { fingerprint, status: 'open' },
+            waves: [{
+                request_fingerprint: fingerprint, cycle_index: 2, aggregate: 'REVIEW_REQUIRED', closed: false, paid: true,
+                counts: { blocking: 1, note: 0, need_evidence: 0 },
+                findings: [{ finding_id: 'slot_1:f1', id: 'f1', class: 'blocking', summary: 'Friday is impossible', breaks: 'invariant_1', slot: 'slot_1', model: 'm/a', carried_absent_answer: true }],
+                actors: [
+                    { slot_id: 'slot_1', model: 'm/a', ok: false, error: 'transport died', effort: 'low', declared_effort: 'low', carried_findings: 1 },
+                    { slot_id: 'slot_2', model: 'm/b', ok: true, effort: 'low', declared_effort: 'low' },
+                    { slot_id: 'slot_3', model: 'cursor-grok-4.6-xhigh', ok: true, effort: 'xhigh', declared_effort: '' },
+                ],
+                ...extra,
+            }],
+            waves_omitted: 0,
+        },
+    }).attempts[0].detailText;
+    const weaker = detail({ ordered_weaker: { slot_1: { effort: 'low', owner_effort: 'xhigh' }, slot_2: { effort: 'low', owner_effort: 'high' } } });
+    assert.match(weaker, /^Reviewers ordered weaker than your setting: slot_1 low \(setting xhigh\), slot_2 low \(setting high\)$/m);
+    assert.match(weaker, /^m\/a · unavailable · did not answer; its earlier finding is still listed$/m);
+    assert.match(weaker, /\[blocking\] Friday is impossible — breaks invariant_1 — slot_1 · m\/a/);
+    assert.doesNotMatch(weaker, /Verdict: GREEN/);
+    // Quiet side: a wave with no weaker order (or an empty fact) draws no such line.
+    assert.doesNotMatch(detail({}), /ordered weaker/);
+    assert.doesNotMatch(detail({ ordered_weaker: {} }), /ordered weaker/);
+});
+
 test('the hydrator announces first load, failure and retry without narrating background refreshes', async () => {
     const events = [];
     let mode = 'ok';
@@ -288,3 +351,48 @@ test('the hydrate status node swaps its message text across the loading→error 
     assert.match(current.children[0].innerHTML, /Loading review details/);
     assert.equal(current.children.length, 1);
 });
+
+test('a compact Plan wave still names reviewers ordered weaker than the setting', () => {
+    const fingerprint = 'c'.repeat(64);
+    const group = planReviewGroupFromTaskDetail({
+        task_id: 'root',
+        plan_review_state: {
+            schema_version: 2,
+            current_attempt: {},
+            waves: [{
+                compact: true, request_fingerprint: fingerprint, cycle_index: 1, aggregate: 'GREEN', closed: true,
+                counts: { findings: 0, blocking: 0, dispositions: 0 },
+                wave_artifact: { root: 'artifact_store', path: 'w.json', sha256: 'abc123def4567890', bytes: 321 },
+                ordered_weaker: { slot_1: { effort: 'low', owner_effort: 'xhigh' } },
+            }],
+            waves_omitted: 0,
+        },
+    });
+    const detail = group.attempts[0].detailText;
+    assert.match(detail, /Reviewers ordered weaker than your setting: slot_1 low \(setting xhigh\)/);
+    assert.match(detail, /Finding bodies compacted/);
+});
+
+test('a carried finding is explained on a not-sent seat and on a failed seat alike', () => {
+    const fingerprint = 'e'.repeat(64);
+    const detail = (actor) => planReviewGroupFromTaskDetail({
+        task_id: 'root',
+        plan_review_state: {
+            schema_version: 2,
+            current_attempt: { fingerprint, status: 'open' },
+            waves: [{
+                request_fingerprint: fingerprint, cycle_index: 2, aggregate: 'REVIEW_REQUIRED', closed: false, paid: true,
+                counts: { blocking: 1, note: 0, need_evidence: 0, parseable: 2, quorum: 2 }, findings: [],
+                actors: [{ slot_id: 'slot_1', model: 'm/a', ...actor }],
+            }],
+            waves_omitted: 0,
+        },
+    }).attempts[0].detailText;
+    assert.match(detail({ ok: false, operation_state: 'not_dispatched', error: 'health_skip', carried_findings: 1 }),
+        /m\/a · not sent; its earlier finding is still listed/);
+    assert.match(detail({ ok: false, error: 'transport died', reported_cause: 'transport died', carried_findings: 1 }),
+        /m\/a · unavailable — "transport died" · did not answer; its earlier finding is still listed/);
+    assert.doesNotMatch(detail({ ok: false, operation_state: 'not_dispatched', error: 'health_skip' }), /earlier finding/);
+    assert.doesNotMatch(detail({ ok: false, error: 'transport died' }), /earlier finding/);
+});
+

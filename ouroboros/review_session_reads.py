@@ -81,8 +81,13 @@ def session_read_facts(run_dir: str, policy: Any, *, session_root: str,
 
     The same usage keys a native episode attaches
     (``review_native_episode._episode_source_facts``), with ``read_provenance``
-    naming the weaker provenance: the host executed none of these reads. A
-    session whose surface declared no manifest claims nothing at all.
+    naming the weaker provenance: the host executed none of these reads. The
+    manifest is the surface's ``native_required_sources`` or, when it declared
+    none, its ``observed_sources`` — sources the host only OBSERVES (plan
+    review's own-room snapshot): the fold and the coverage facts are identical,
+    but ``native_incomplete`` is set for required sources only, so an observed
+    source never reads as a capability delta. A session whose surface declared
+    neither claims nothing at all.
 
     The session's verdict is PAID evidence, so every failure here is a
     disclosure instead of a refusal: a journal this host cannot find, read or
@@ -93,8 +98,9 @@ def session_read_facts(run_dir: str, policy: Any, *, session_root: str,
     "run_id"}``; without it, or when the write fails, the coverage stands alone.
     """
     policy = policy if isinstance(policy, dict) else {}
-    if "native_required_sources" not in policy:
+    if "native_required_sources" not in policy and "observed_sources" not in policy:
         return {}
+    required = "native_required_sources" in policy
     unobserved = {"native_read_coverage": {"status": "unobserved",
                                            "reason": "session_events_unavailable", "sources": []},
                   "read_provenance": "unobserved"}
@@ -103,15 +109,16 @@ def session_read_facts(run_dir: str, policy: Any, *, session_root: str,
         if not events:
             return unobserved
         receipts = parse_session_read_receipts(events, scope_root=session_root)
-        coverage = fold_session_coverage(receipts, policy.get("native_required_sources"),
-                                         resolve_file=session_source_reader(session_root))
+        coverage = fold_session_coverage(
+            receipts, policy.get("native_required_sources") if required else policy.get("observed_sources"),
+            resolve_file=session_source_reader(session_root))
     except Exception:
         log.debug("session read-coverage fold failed", exc_info=True)
         return unobserved
     facts = {"native_read_coverage": coverage,
              "native_history_source": _stored_read_history(store, policy, receipts, coverage),
              "read_provenance": READ_PROVENANCE}
-    if coverage["status"] == "incomplete":
+    if required and coverage["status"] == "incomplete":
         facts["native_incomplete"] = "required_source_coverage_incomplete"
     return facts
 
@@ -124,6 +131,7 @@ def _stored_read_history(store: Any, policy: Dict[str, Any], receipts: List[Dict
         return {}
     payload = {"required_sources": policy.get("native_required_sources"),
                "required_sources_ref": policy.get("native_required_sources_ref"),
+               "observed_sources": policy.get("observed_sources"),
                "read_receipts": receipts, "coverage": coverage,
                "read_provenance": READ_PROVENANCE,
                "delegated_run_id": str(store.get("run_id") or "")}
@@ -239,7 +247,7 @@ def fold_session_coverage(receipts: List[Dict[str, Any]], required_sources: Any,
                 row.update(status="incomplete", reason="source_gap",
                            missing_ranges=[[0, total]], covered_chars=0)
             else:
-                row.update(_folded_row(receipts, row, text, total))
+                row.update(_folded_row(receipts, row, text, total, scope_root=str(getattr(resolve_file, "scope_root", ""))))
         except (KeyError, TypeError, ValueError, OSError):
             row.update(status="unobserved", reason="required_source_identity_unavailable")
         rows.append(row)
@@ -254,27 +262,36 @@ def session_source_reader(session_root: str) -> Callable[[Dict[str, Any]], Optio
 
     The session's scope root IS the candidate repository, so only rows addressed
     at a repository root are reachable from its reads; any other root (runtime
-    data, a skill payload) stays unreadable and therefore unobserved. Text is
-    normalized to the universal-newline ABI the manifest is written on.
+    data, a skill payload) stays unreadable and therefore unobserved — unless the
+    row carries a host-declared absolute ``file`` (an observed artifact-store
+    source outside the workspace), which is read as written. Text is normalized
+    to the universal-newline ABI the manifest is written on.
     """
     base = pathlib.Path(str(session_root or ".")).resolve(strict=False)
 
     def read(row: Dict[str, Any]) -> Optional[str]:
-        if str(row.get("root", "")) not in REPOSITORY_ROOT_NAMES:
-            return None
-        relative = posixpath.normpath(str(row.get("path") or "")).removeprefix("./")
-        if not relative or relative == "." or relative.startswith(("..", "/")):
-            return None
+        declared = str(row.get("file") or "")
+        if declared and pathlib.Path(declared).is_absolute():
+            target = pathlib.Path(declared)
+        else:
+            if str(row.get("root", "")) not in REPOSITORY_ROOT_NAMES:
+                return None
+            relative = posixpath.normpath(str(row.get("path") or "")).removeprefix("./")
+            if not relative or relative == "." or relative.startswith(("..", "/")):
+                return None
+            target = base.joinpath(*relative.split("/"))
         try:
-            raw = base.joinpath(*relative.split("/")).read_bytes()
+            raw = target.read_bytes()
             return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         except (OSError, ValueError, UnicodeDecodeError):
             return None
 
+    read.scope_root = str(session_root or "")  # the receipts' root, for host-declared absolute files
     return read
 
 
-def _folded_row(receipts: List[Dict[str, Any]], row: Dict[str, Any], text: str, total: int) -> Dict[str, Any]:
+def _folded_row(receipts: List[Dict[str, Any]], row: Dict[str, Any], text: str, total: int,
+                *, scope_root: str = "") -> Dict[str, Any]:
     # Start offset of every line plus the text end, on the SAME line definition
     # the host reader renders by (``str.splitlines``), so a harness's line window
     # and the manifest's character ranges meet on one basis.
@@ -282,11 +299,15 @@ def _folded_row(receipts: List[Dict[str, Any]], row: Dict[str, Any], text: str, 
     for line in text.splitlines(keepends=True):
         cursor += len(line)
         offsets.append(cursor)
+    # A receipt matches the row it opened: a repository row by its path under the session
+    # root; a host-declared absolute `file` by the same normalization the receipts use.
+    opened = (_normalized_path(str(row["file"]), scope_root) if row.get("file")
+              else (str(row.get("path") or ""), SESSION_ROOT))
     delivered = [receipt for receipt in receipts
                  if isinstance(receipt, dict) and receipt.get("tool") == "read_file"
                  and receipt.get("outcome") == "executed" and receipt.get("delivered") is True
-                 and not receipt.get("source_gap") and receipt.get("opened_root") == SESSION_ROOT
-                 and receipt.get("opened_path") == row.get("path")]
+                 and not receipt.get("source_gap")
+                 and (receipt.get("opened_path"), receipt.get("opened_root")) == opened]
     spans = [span for receipt in delivered
              for span in (_receipt_span(receipt, total, offsets),) if span is not None]
     cursor, missing = 0, []

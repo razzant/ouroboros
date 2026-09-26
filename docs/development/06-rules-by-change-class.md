@@ -943,6 +943,25 @@ and what enforces each.
   unconditional `FINAL ANSWER:` or the task-level answer protocol. Host notices stay
   outside answer bytes/identity via terminal record/outbox/System on replay and
   single-body/headless transports; unchanged answers never revive superseded verdicts.
+- Plan review verdict: GREEN means a quorum answered and no blocking finding or
+  `need_evidence` without a disposition remains; notes never change it.
+  `plan_spec.closure_after_disposition` is the ONE closure table: under advisory a
+  reasoned reject closes a below-quorum blocking finding (per finding); blocking-mode
+  closure is unchanged; a closed REVIEW_REQUIRED is written as GREEN with a closure
+  note on every write path, and the four control validators keep accepting older
+  closed REVIEW_REQUIRED rows. An author-selected revised plan publishes the critic
+  wave's real pair labelled `historical_critic`, never an invented verdict. An envelope
+  `reviewer_effort` outranks a row's pinned effort for plan review only (an argument of
+  `plan_review_slots`, never a contextvar; a compound route slug keeps its encoded
+  effort); every wave records its effective per-seat efforts, the owner baseline captured
+  at dispatch and one typed `ordered_weaker`. On a same-spec cycle a seat that does not
+  answer keeps its still-open findings listed (`carried_absent_answer`), never counted as
+  parseable. The own-room conversation reaches every reviewer as numbered readable lines;
+  progress and host rows stay behind the exact snapshot; session reads of it are an
+  observed fact (`observed_sources`), never a gate. Tests: `tests/test_plan_spec.py`, `tests/test_plan_review_engine_quorum.py`,
+  `tests/test_awaited_review_not_degraded.py`, `tests/test_plan_author_disclosure.py`,
+  `tests/test_plan_review_epoch.py`, `tests/test_reviewer_slot_route_contract.py`,
+  `tests/test_plan_dialogue_snapshot.py`, `tests/test_review_session_reads.py`.
 - Keep delivered result, unresolved tool-call evidence and host acceptance separate.
   Error count alone does not degrade execution or establish objective acceptance;
   retain `execution.unresolved_tool_errors` and the cosmetic bucket, and expose the

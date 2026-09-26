@@ -33,16 +33,50 @@ def test_note_only_wave_releases_real_finalization_without_paperwork(harness, en
     ])})
     ctx = harness.make_ctx(force_plan=True)
     out = _call(ctx)
-    assert _control(out) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(out) == {"outcome": "GREEN", "closed": True}  # notes never change the verdict
     state = _state(harness)
     wave = state["waves"][-1]
-    assert wave["dispositions"] == [] and state["cycles_paid"] == 1
+    assert wave["aggregate"] == "GREEN" and wave["dispositions"] == [] and state["cycles_paid"] == 1
     exact = read_wave(harness.drive, "task-1", wave["wave_artifact"])
     assert exact["findings"][0]["summary"] == "A simpler alternative may fit the goal."
     assert plan_review_gate_projection(state, enforcement)["allow"]
     assert force_plan_decision(ctx, {}, enforcement=enforcement)["allow"]
-    assert _control(_call(ctx)) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(_call(ctx)) == {"outcome": "GREEN", "closed": True}
     assert len(sub.calls) == 1
+
+
+@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
+def test_a_reasoned_reject_closes_a_below_quorum_blocking_finding_only_under_advisory(harness, enforcement):
+    """The open set, through the engine: one blocking slot below quorum holds the wave
+    REVIEW_REQUIRED; a reject with its rationale closes it under advisory (recorded GREEN
+    in the hot index and the exact artifact, no reviewer call, no cycle) and the gate
+    allows; under blocking the same $0 call leaves it open and the gate still holds."""
+    from ouroboros.task_results import plan_review_gate_projection
+    from ouroboros.tools import plan_review as pr
+    from ouroboros.tools.plan_review_artifacts import read_wave
+
+    harness.state["enforcement"] = enforcement
+    sub = harness.install({"s1": json.dumps([_engine._finding("b1", "blocking", breaks="claim_1")]),
+                           "s2": CLEAN, "s3": CLEAN})
+    ctx = harness.make_ctx()
+    assert _control(_call(ctx)) == {"outcome": "REVIEW_REQUIRED", "closed": False}
+    fp = _state(harness)["waves"][-1]["request_fingerprint"]
+    out = pr._handle_plan_task(ctx, review_disposition={"review_fingerprint": fp, "items": [
+        {"finding_id": "s1:b1", "decision": "reject", "rationale": "the claim is checked by the demo"}]})
+    advisory = enforcement == "advisory"
+    assert _control(out) == ({"outcome": "GREEN", "closed": True} if advisory
+                             else {"outcome": "REVIEW_REQUIRED", "closed": False})
+    state = _state(harness)
+    wave = state["waves"][-1]
+    exact = read_wave(harness.drive, "task-1", wave["wave_artifact"])
+    assert (wave["aggregate"], wave["closed"]) == (exact["aggregate"], exact["closed"])
+    assert wave["aggregate"] == ("GREEN" if advisory else "REVIEW_REQUIRED")
+    assert ("closed_by_disposition" in " ".join(wave["closure_notes"])) is advisory
+    assert ("blocking_finding_below_quorum_stays_open" in out) is not advisory
+    assert wave["findings"][0]["class"] == "blocking" and wave["dispositions"][0]["decision"] == "reject"
+    assert state["cycles_paid"] == 1 and len(sub.calls) == 1
+    assert plan_review_gate_projection(state, enforcement)["allow"] is advisory
+    assert plan_review_gate_projection(state, enforcement)["closed"] is advisory
 
 
 def test_quorum_unreachable_releases_finalization_for_a_blocked_terminal(harness, monkeypatch):

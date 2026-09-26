@@ -118,52 +118,144 @@ def plan_chat_reader(root: pathlib.Path, task_id: str):
     return read
 
 
+# Structural producer fields only (BIBLE P5): the streams that carry the two speakers, quiz
+# cards and answers, and addressed mailbox rows. Progress rows and host system rows stay in
+# the exact snapshot behind the pointer, addressed by the inline line numbers.
+_CONVERSATION_STREAMS = frozenset({"chat", "mailbox", "retained_quiz_projection", "retained_origin"})
+_ATTACHMENT_NAME_KEYS = ("label", "name", "filename", "original_filename")
+
+
+def _snapshot_rows(own: dict) -> list[tuple[int, dict]]:
+    """``[(line_no, row)]`` over the recorded snapshot bytes. Line 1 is the JSONL header, so
+    the numbers equal the physical lines a ``chat:<id>@<sha256>::lines=A-B`` locator selects."""
+    rows: list[tuple[int, dict]] = []
+    for number, line in enumerate(str(own.get("text") or "").split("\n"), start=1):
+        if number == 1 or not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append((number, row))
+    return rows
+
+
+def _is_conversation(row: dict) -> bool:
+    return str(row.get("stream") or "") in _CONVERSATION_STREAMS and (
+        row.get("direction") != "system" or row.get("type") == "quiz_answer")
+
+
+def _quiz_text(row: dict) -> str:
+    quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else {}
+    options = [str(o) for o in quiz.get("options") or []] if isinstance(quiz.get("options"), list) else []
+    qid = str(quiz.get("quiz_id") or "")
+    if row.get("type") == "quiz_answer":
+        index = quiz.get("answered_index")
+        chosen = (f"chose ({index + 1}) {options[index]}" if isinstance(index, int) and 0 <= index < len(options)
+                  else f'own answer: "{quiz.get("comment") or row.get("text") or ""}"')
+        comment = str(quiz.get("comment") or "")
+        return f"[answer {qid}] {chosen}" + (f' — "{comment}"' if comment and isinstance(index, int) else "")
+    recommended = quiz.get("recommended_index")
+    listed = " ".join(f"({i}) {label}" for i, label in enumerate(options, start=1))
+    return (f"[question {qid}] {quiz.get('question') or row.get('text') or ''} — options: {listed}"
+            + (f"; recommended ({recommended + 1})" if isinstance(recommended, int) else ""))
+
+
+def _line(number: int, row: dict) -> str:
+    body = _quiz_text(row) if row.get("type") in {"quiz", "quiz_answer"} and isinstance(row.get("quiz"), dict) \
+        else str(row.get("text") or "")
+    names = [next((str(a[k]) for k in _ATTACHMENT_NAME_KEYS if a.get(k)), "")
+             for a in (row.get("attachments") or []) if isinstance(a, dict)]
+    body = body.replace("\n", "\n  ") + (f" [attachments: {', '.join(n for n in names if n)}]" if any(names) else "")
+    return f"{number} · {row.get('ts') or '-'} · {row.get('author') or '?'} · {body}"
+
+
+def _gap_summary(own: dict) -> str:
+    counts: dict[str, int] = {}
+    for section in (own.get("coverage") or {}).values() if isinstance(own.get("coverage"), dict) else ():
+        if isinstance(section, dict):
+            for gap in section.get("gaps") or []:
+                kind = str(gap.get("kind") if isinstance(gap, dict) else gap)
+                counts[kind] = counts.get(kind, 0) + 1
+            if section.get("complete") is False:
+                counts["mailbox_incomplete"] = counts.get("mailbox_incomplete", 0) + 1
+    for key in ("room_gap", "ordering_gap"):
+        if (own.get("coverage") or {}).get(key):
+            counts[str(own["coverage"][key])] = counts.get(str(own["coverage"][key]), 0) + 1
+    return ", ".join(f"{kind}×{n}" for kind, n in counts.items()) or "none"
+
+
+def dialogue_view(own: dict, keep: int | None = None) -> tuple[str, dict]:
+    """The inline OWN ROOM DIALOGUE section as numbered readable lines, plus its facts.
+
+    ``keep`` limits the inline conversation to its NEWEST rows (all when None); every
+    omitted row stays addressable by its snapshot line number through the pointer.
+    """
+    rows = _snapshot_rows(own)
+    conversation = [(n, row) for n, row in rows if _is_conversation(row)]
+    others = [(n, row) for n, row in rows if not _is_conversation(row)]
+    progress = sum(1 for _n, row in others if row.get("stream") == "progress")
+    inline = conversation if keep is None else conversation[len(conversation) - min(keep, len(conversation)):]
+    omitted = len(conversation) - len(inline)
+    locator = str(own.get("locator") or f"chat:{own.get('chat_id')}")
+    facts = {"source_sha256": own.get("sha256"), "snapshot_lines": int(own.get("lines") or 0),
+             "conversation_rows": len(conversation), "conversation_inline_rows": len(inline),
+             "conversation_first_inline_line": inline[0][0] if inline else None, "other_rows": len(others)}
+    if own.get("gap") or not rows:
+        body = f"Explicit gap: own room source unavailable ({own.get('gap') or 'no snapshot rows'})."
+        return ("## OWN ROOM DIALOGUE (exact recorded snapshot)\n\n" + body + "\n"), facts
+    header = (f"Room {own.get('label') or own.get('chat_id')} · locator `{locator}` · {facts['snapshot_lines']} snapshot "
+              f"lines, {own.get('bytes', '?')} bytes · captured {own.get('captured_at') or 'time unavailable'} · "
+              f"{len(conversation)} conversation rows, {len(others)} other rows · gaps: {_gap_summary(own)}")
+    cut = (f"; {omitted} earlier conversation rows before line {inline[0][0]} (exact omitted prefix: "
+           f"`{locator}::lines=2-{inline[0][0] - 1}`)" if omitted and inline else
+           f"; all {omitted} conversation rows (nothing fit inline; exact omitted prefix: "
+           f"`{locator}::lines=2-{facts['snapshot_lines']}`)" if omitted else "")
+    footer = (
+        f"Not inline: {progress} progress rows and {len(others) - progress} host rows{cut}. Every inline line "
+        "carries its snapshot line number, so a gap in the numbering is a row not shown. The complete redacted "
+        f"snapshot `{locator}` ({facts['snapshot_lines']} lines) is in task custody: a session reads "
+        f"`{own.get('file') or '(not persisted for this dry run)'}`; a native episode reads "
+        f"read_file(root='artifact_store', path='{(own.get('source_ref') or {}).get('path') or ''}'); any reviewer "
+        f"may request lines with `need_evidence` locator `{locator}::lines=A-B`. Both speakers keep their source "
+        "and author; a peer suggestion is not an owner instruction. Later messages are not claimed reviewed by "
+        "this snapshot."
+    )
+    return ("## OWN ROOM DIALOGUE (exact recorded snapshot)\n\n" + header + "\n\n"
+            + "\n".join(_line(n, row) for n, row in inline) + ("\n\n" if inline else "") + footer + "\n"), facts
+
+
 def render_dialogue(manifest: Any) -> str:
     own = manifest.get("own_dialogue") or {}
-    metadata = {key: value for key, value in own.items() if key != "text"}
     return (
-        "## OWN ROOM DIALOGUE (exact recorded snapshot)\n\n"
-        "Both speakers, questions, options and answers retain their source and author. "
-        "A peer suggestion is not an owner instruction. Later messages are not claimed reviewed by this snapshot.\n"
-        + json.dumps(metadata, ensure_ascii=False, default=str) + "\n"
-        + str(own.get("text") or "Explicit gap: own room source unavailable.") + "\n"
+        dialogue_view(own)[0]
         + "## RELATED ROOMS (pointers only; request chat:<id> with need_evidence)\n\n"
         + json.dumps(manifest.get("related_rooms") or [], ensure_ascii=False, default=str) + "\n"
     )
 
 
-def fit_dialogue_text(packet: str, own: dict, capacity_chars: int, *, measure=len) -> tuple[str, dict]:
-    """Keep the largest newest suffix fitting this delivery's actual measure.
+def fit_dialogue_view(packet: str, own: dict, capacity_chars: int, *, measure=len) -> tuple[str, dict]:
+    """Keep the whole conversation when it fits this delivery's actual measure, else the
+    largest NEWEST run of conversation rows, the cut named in the footer with its exact
+    line range. Only the inline conversation yields room; governance, the operative inputs
+    and the pointer stay intact. Progress and host rows are never inline."""
+    full, facts = dialogue_view(own)
+    if measure(packet) <= capacity_chars or full not in packet:
+        return packet, facts
 
-    Only automatic dialogue yields room; required governance and operative
-    inputs stay intact. Ranges describe the immutable UTF-8 source exactly.
-    """
-    source = str(own.get("text") or "")
-    raw = source.encode("utf-8")
-    coverage = {"source_sha256": own.get("sha256"), "source_bytes": len(raw),
-                "inline_bytes": [0, len(raw) - 1] if raw else None, "omitted_prefix": None}
-    if not source or measure(packet) <= capacity_chars or source not in packet:
-        return packet, coverage
+    def selected(keep: int) -> tuple[str, dict]:
+        view, kept = dialogue_view(own, keep)
+        return packet.replace(full, view, 1), kept
 
-    def selected(take):
-        tail = source[-take:] if take else ""
-        start = len(raw) - len(tail.encode("utf-8"))
-        notice = (f"Dialogue coverage: newest bytes {start}-{len(raw) - 1} attached; "
-                  if tail else "Dialogue coverage: no inline source bytes fit; ")
-        omitted = f"{own['locator']}::bytes=0-{start - 1}"
-        notice += f"exact omitted prefix: {omitted}. The complete redacted snapshot remains at the recorded source handle.\n"
-        return packet.replace(source, notice + tail, 1), start, omitted
-
-    low, high = 0, len(source) - 1
+    low, high = 0, facts["conversation_rows"]
     while low < high:
         count = (low + high + 1) // 2
         if measure(selected(count)[0]) <= capacity_chars:
             low = count
         else:
             high = count - 1
-    fitted, start, omitted = selected(low)
-    coverage.update(inline_bytes=[start, len(raw) - 1] if low else None, omitted_prefix=omitted)
-    return fitted, coverage
+    return selected(low)
 
 
 def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
@@ -174,10 +266,12 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
     if frozen is not None:
         from ouroboros.tools.plan_review_artifacts import frozen_delivery_inputs
         return frozen_delivery_inputs(frozen, slots)
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY, model_role_option
     from ouroboros.tools.plan_review_runtime import PLAN_REVIEW_MAX_TOKENS, slot_retrieves, slot_is_session
     from ouroboros.tools.review_synthesis import build_plan_review_messages, per_slot_input_token_limits
     from ouroboros.tools.plan_packet import plan_user_stable_len
     from ouroboros.tools.plan_spec import PLAN_FINDINGS_ARRAY_CONTRACT
+    from ouroboros.tools.scope_required_sources import source_text_identity
     from ouroboros.review_native_episode import review_native_transcript_bound, native_landing_at, native_first_send_chars
     from ouroboros.reviewer_window import reviewer_window_binding
     from ouroboros.review_execution import _messages_char_count
@@ -187,8 +281,17 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
     api = [slot for slot in slots if not slot_retrieves(slot)]
     limits = per_slot_input_token_limits([s.model for s in api], output_reserve=PLAN_REVIEW_MAX_TOKENS,
                                        tokenizer_margin=155_000, slots=api)
+    # What each session reviewer may read of the room: the snapshot declared as an OBSERVED
+    # source (never a required manifest, which would order multi-MB reads), so the harness
+    # journal fold records per-reviewer coverage as a fact (`review_session_reads`).
+    observed = ([{"root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"],
+                  **source_text_identity(str(own.get("text") or "").encode("utf-8"))}]
+                if own.get("source_ref") and own.get("file") else [])
     for slot in slots:
         sid = str(slot.slot_id)
+        # A shared packet cannot say "your": each slot's send ends with its own seat, after the
+        # cache-stable prefix, so a cycle-2 reviewer knows which earlier findings are its own.
+        seat = f"\n## YOUR PANEL SEAT\n\n`{sid}`\n"
         if not slot_retrieves(slot):
             capacity = int(limits[sid]) * 4
             existing = messages.get(sid)
@@ -196,12 +299,12 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
                 # Continuation history is already exact; only this turn's new
                 # automatic source can shrink, never its prior paid inputs.
                 total = _messages_char_count(existing)
-                view, coverage[sid] = fit_dialogue_text(user_content, own, capacity - total + len(user_content))
-                messages[sid] = [{**m, "content": view} if i == len(existing) - 1 and m.get("role") == "user" else dict(m)
+                view, coverage[sid] = fit_dialogue_view(user_content, own, capacity - total + len(user_content) - len(seat))
+                messages[sid] = [{**m, "content": view + seat} if i == len(existing) - 1 and m.get("role") == "user" else dict(m)
                                  for i, m in enumerate(existing)]
             else:
-                view, coverage[sid] = fit_dialogue_text(user_content, own, capacity - len(system_prompt))
-                messages[sid] = build_plan_review_messages(system_prompt, view, plan_user_stable_len(view))
+                view, coverage[sid] = fit_dialogue_view(user_content, own, capacity - len(system_prompt) - len(seat))
+                messages[sid] = build_plan_review_messages(system_prompt, view + seat, plan_user_stable_len(view))
             lengths[sid] = _messages_char_count(messages[sid])
         elif not slot_is_session(slot):
             bound = review_native_transcript_bound(slot.model, output_reserve=PLAN_REVIEW_MAX_TOKENS,
@@ -211,30 +314,31 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
             def first_send(task):
                 return native_first_send_chars(session_root, surface="plan_review", role_hint=slot.role_hint,
                     slot_id=sid, session_task=task, output_contract=PLAN_FINDINGS_ARRAY_CONTRACT, task_id=task_id)
-            tasks[sid], coverage[sid] = fit_dialogue_text(session_task, own,
+            tasks[sid], coverage[sid] = fit_dialogue_view(session_task + seat, own,
                 native_landing_at(bound) - governance_read - 1, measure=first_send)
-        elif own.get("file") and own.get("text"):
-            instruction = (
-                f"MANDATORY FULL READ: {own['file']} (redacted immutable room dialogue; "
-                f"sha256={own['sha256']}; bytes={own['bytes']}; lines=1-{own['lines']}). "
-                "Read the whole source using your file tools. Your harness owns its context window; "
-                "the host has no numerical window evidence for this route. If it actually cannot fit, "
-                "read the newest part and report exact included and omitted ranges of this snapshot "
-                f"using {own['locator']}::lines or ::bytes. Do not claim unread messages reviewed. "
-                "File access is available; full-read coverage remains reviewer-declared, not host-attested.\n"
-            )
-            tasks[sid] = session_task.replace(str(own["text"]), instruction, 1)
-            coverage[sid] = {"source_sha256": own["sha256"], "source_bytes": own["bytes"],
-                             "inline_bytes": None, "full_file": own["file"], "read_coverage": "unobserved"}
+        else:
+            # A delegated session receives the conversation inline like every other slot. The
+            # host owns no session window: an owner-asserted `reviewer:<slot>` window fits the
+            # conversation to it; without one nothing is invented — the whole conversation goes,
+            # the pointer names the exact snapshot, and the harness owns its own context.
+            asserted = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, reviewer_window_binding(slot)["model_role"]))
+            if asserted > 0:
+                limit = per_slot_input_token_limits([slot.model], context_window=asserted, slots=[slot],
+                                                    output_reserve=PLAN_REVIEW_MAX_TOKENS, tokenizer_margin=155_000)
+                tasks[sid], coverage[sid] = fit_dialogue_view(session_task + seat, own, int(limit[sid]) * 4)
+            else:
+                tasks[sid], coverage[sid] = session_task + seat, dialogue_view(own)[1]
+            coverage[sid].update(window="asserted" if asserted > 0 else "unasserted", file=own.get("file") or "")
         if slot_retrieves(slot):
             lengths[sid] = (first_send(tasks.get(sid, session_task)) if not slot_is_session(slot)
                             else len(tasks.get(sid, session_task)))
         if sid in coverage:
-            coverage[sid]["delivery"] = ("delegated_file" if slot_is_session(slot) else
+            coverage[sid]["delivery"] = ("delegated_session" if slot_is_session(slot) else
                                          "native_retrieving" if slot_retrieves(slot) else "packet")
     return {"slot_messages": messages, "slot_session_tasks": tasks, "slot_prompt_chars": lengths,
             "dialogue_delivery": coverage,
             "native_mandatory_read_chars": native_mandatory_chars,
             "request_policy": {"output_contract": PLAN_FINDINGS_ARRAY_CONTRACT,
                                "native_data_root": str(data_root),
-                               "native_mandatory_read_chars": native_mandatory_chars}}
+                               "native_mandatory_read_chars": native_mandatory_chars,
+                               **({"observed_sources": observed} if observed else {})}}

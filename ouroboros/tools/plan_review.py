@@ -15,11 +15,15 @@ Cycles: ``review_cycles.review_max_cycles()`` bounds PAID panels per task
 DISPATCHED (B2 — a dispatched DEGRADED panel pays like any other; a wave of only
 typed $0 skip rows stays unpaid); an identical fingerprint — DEGRADED included —
 replays the recorded wave free (no panel, no cycle). Closure
-(``plan_spec.closure_after_disposition``): GREEN closes;
-Note-only REVIEW_REQUIRED closes immediately; need_evidence closes by disposition
-at $0; a below-quorum blocking finding stays open. REVISE_PLAN never closes by
-disposition. A subsequent paid delta review may evaluate a changed spec or a
-justified rejection when another paid cycle is available. Under blocking enforcement an open wave HOLDS
+(``plan_spec.closure_after_disposition``, the ONE table): GREEN = no blocking
+finding and no need_evidence without a disposition (notes never change the
+verdict); need_evidence closes by disposition at $0; under advisory enforcement a
+reject with its rationale also closes a below-quorum blocking finding (per
+finding), under blocking it stays open until a changed spec is reviewed or the
+reviewer retires it; a REVIEW_REQUIRED whose open set empties is recorded GREEN.
+REVISE_PLAN never closes by disposition. A subsequent paid delta review may
+evaluate a changed spec or a justified rejection when another paid cycle is
+available. Under blocking enforcement an open wave HOLDS
 finalization (``owner_hurry.force_plan_decision``); at the cap the typed
 ``plan_review_cycles_exhausted`` result + event leave the honest exits: owner
 unstick or a ``blocked_with_evidence`` terminal. Advisory proceeds open under the
@@ -80,6 +84,7 @@ from ouroboros.tools.plan_spec import plan_fingerprint as _plan_fingerprint
 from ouroboros.tools.plan_evidence import task_evidence_reader as _task_evidence_reader
 from ouroboros.tools.plan_dialogue import attach_own_dialogue, plan_chat_reader, dialogue_slot_inputs
 from ouroboros.tools.plan_review_artifacts import (
+    standing_findings_lineage as _standing_findings_lineage,
     PlanReviewSourceUnavailable,
     attach_continuation_restart_delta as _attach_continuation_restart_delta,
     authority_wave as _authority_wave,
@@ -225,8 +230,9 @@ _DISPOSITION_SCHEMA = {
         "explicit author_action=finish|stop with author_disposition may also select a full current goal/plan/spec without a new reviewer. The wave is "
         "named by review_fingerprint. While that wave is still open with reviewer slots in "
         "flight, this call first COLLECTS what has settled at $0 without waiting (items may be "
-        "[]); to wait longer, re-submit the same envelope. note/need_evidence findings close at $0; a blocking "
-        "finding stays open. A subsequent paid delta review may consider a changed spec or "
+        "[]); to wait longer, re-submit the same envelope. Notes never hold the wave; need_evidence "
+        "closes at $0; under advisory a reject with rationale also closes a below-quorum blocking "
+        "finding; otherwise a blocking finding stays open. A subsequent paid delta review may consider a changed spec or "
         "justified rejection when another paid cycle is available. Recording a disposition "
         "consumes no cycle and never closes REVISE_PLAN."
     ),
@@ -262,13 +268,15 @@ def get_tools():
                     "research, a deliverable, a computer-use flow, or an action in the world. "
                     "Submit goal + spec (what/how-checked/deferred) + plan prose; independent "
                     "reviewers return typed findings against the spec (blocking findings must name "
-                    "the spec element they break); the host aggregates: GREEN closes; "
-                    "Notes are optional; need_evidence closes by review_disposition at no cost; REVISE_PLAN needs "
+                    "the spec element they break); the host aggregates: GREEN = no blocking finding and "
+                    "no open need_evidence (notes never change the verdict); need_evidence closes by "
+                    "review_disposition at no cost; under advisory enforcement a reject with its rationale "
+                    "also closes a blocking finding below quorum; REVISE_PLAN needs "
                     "a changed spec or justified rejection judged by a subsequent paid delta review "
                     "when another paid cycle is available. Cycles are bounded by the owner's Max review cycles; an unchanged "
                     "envelope replays the recorded result for free (a locator a reviewer asked for "
                     "with need_evidence is attached by the host next time and makes the envelope "
-                    "new; a new review-mode call with a different reviewer_effort re-dispatches a paid panel). Under blocking enforcement an "
+                    "new; on an OPEN review a different reviewer_effort re-dispatches the panel, a CLOSED review stands for its envelope). Under blocking enforcement an "
                     "open review holds implementation. An explicit review_disposition.author_action=stop "
                     "permits unfinished finalization only. Advisory author_action=finish may select a corrected "
                     "goal+plan+spec in the same call without another panel, citing the earlier review_fingerprint "
@@ -583,6 +591,26 @@ def _prepare_plan_inputs(ctx: ToolContext, request: "_PlanRequest", state_root: 
 
 # --------------------------------------------------------------------------- review
 
+def _standing_or_refusal(ctx: ToolContext, state_root, task_id: str, state: dict, previous: Optional[dict],
+                         spec: dict, enforcement: str):
+    """The seats' standing obligations across the same-spec lineage, resolved BEFORE anything
+    is paid; unreadable history is a typed refusal, never an empty obligation."""
+    try:
+        return _standing_findings_lineage(state_root, task_id, state, previous, spec, enforcement)
+    except PlanReviewSourceUnavailable as exc:
+        return _plan_unavailable(ctx, str(exc), "plan_review_exact_artifact_unavailable")
+
+
+def _predecessor_ref(existing: Optional[dict], previous: Optional[dict], state: dict, resume_in_flight: bool) -> dict:
+    """The exact artifact of the predecessor this dispatch judged against: kept on resume, else
+    the selected predecessor's own reference (its hot entry when the materialized copy lacks one),
+    so a same-fingerprint re-dispatch that replaces it in the hot index still reaches it."""
+    if resume_in_flight:
+        return dict((existing or {}).get("previous_wave_artifact") or {})
+    hot = plan_review_wave(state, str((previous or {}).get("request_fingerprint") or "")) or {}
+    return dict((previous or {}).get("wave_artifact") or hot.get("wave_artifact") or {})
+
+
 async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, collect: Optional[dict] = None) -> str:
     """``collect`` = the recorded inputs of an open wave being collected at $0 (window 0)."""
     try:
@@ -728,6 +756,10 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
                 "ERROR: Prior exact plan-review authority is unreadable; a delta review is refused.",
                 "plan_review_exact_artifact_unavailable",
             )
+    standing = _standing_or_refusal(ctx, state_root, task_id, state, previous, spec, enforcement)
+    if isinstance(standing, str):
+        return standing
+
     cycle_index = int(resume.get("cycle_index") or cycles_paid + 1)
     retry_key = str(resume.get("retry_key") or f"plan_review:{fingerprint}:{cycle_index}")
     slots = _effective_plan_slots(slots)
@@ -809,6 +841,11 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
     # excluded slots stay configured rows: they count in the quorum denominator
     rows = list(rows) + oversize_rows + health_skip_rows
     _attach_continuation_restart_delta(rows, continuation_restarted)
+    # The owner baseline for `ordered_weaker`: the same builder with no order, recorded at
+    # dispatch and reused on resume (never recomputed from the live setting at collection).
+    owner_efforts = None if not request.reviewer_effort else (
+        (existing or {}).get("owner_efforts") if resume_in_flight else
+        {str(s.slot_id): str(s.effort or "") for s in _plan_review_slots()})
     wave, seen_after, agg = _synthesize_plan_review_wave(
         rows, state=state, spec=spec, request_plan=request.plan, fingerprint=fingerprint,
         previous=previous, manifest=manifest, manifest_hash=manifest_hash,
@@ -817,7 +854,10 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
         quorum=quorum, configured_slots=configured_slots,
         health_evidence=health_evidence, reviewer_effort=request.reviewer_effort,
         dispositions=list((existing or {}).get("dispositions") or []) if resume_in_flight else None,
+        owner_efforts=owner_efforts,
+        standing=standing,
     )
+    wave["previous_wave_artifact"] = _predecessor_ref(existing, previous, state, resume_in_flight)
     aggregate = str(wave["aggregate"])
     exact_wave = _exact_wave(
         wave, plan_prose=request.plan, manifest=manifest, slots=configured_slots, rows=rows,
@@ -872,8 +912,10 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
     return _publish_rendered_wave(ctx, stored, cap=cap, cycles_paid=paid_now, enforcement=enforcement, reminder=reminder)
 
 def _last_paid_wave(state: dict) -> Optional[dict]:
+    """The latest PAID wave, compact or not: a compact entry is materialized (or refused as
+    unreadable) by the authority read that follows, never skipped as if no panel had run."""
     for wave in reversed(state.get("waves") or []):
-        if wave.get("paid") and not wave.get("compact"):
+        if wave.get("paid"):
             return wave
     return None
 
@@ -1054,14 +1096,22 @@ def _apply_author_subject(ctx: ToolContext, disposition: dict, envelope: Optiona
             + _argument_values(disposition, ("author_action", "review_fingerprint", "items", "author_disposition")))
     _narrate_author_rationale(ctx, author)  # the durable write landed: the mind's own words reach the owner
     allowed = action == "finish" and not review_enforcement_blocks(enforcement)
+    # The published pair is the critic wave's REAL (aggregate, closed): a revised plan has no
+    # verdict of its own and gets none invented here; the gate projection labels whose verdict
+    # it is (historical_critic), so a closed GREEN on the earlier plan never approves these bytes.
+    signal = str((wave or {}).get("aggregate") or "DEGRADED")
+    historical = bool(wave) and fingerprint != critic_fp
     text = (f"Current author plan saved: {fingerprint}. Critic subject: {critic_fp}. "
-            "No reviewer called and no cycle consumed; original findings and custody remain unchanged. "
+            + (f"Earlier plan {critic_fp} was {signal}; this revised plan has no verdict of its own. "
+               if historical else "")
+            + "No reviewer called and no cycle consumed; original findings and custody remain unchanged. "
             "Your rationale was shown to the owner in your own voice. "  # an empty rationale is refused before this line
             + ("Advisory author finish permits proceeding with this plan." if allowed else
                "No implementation approval granted. You may preserve the plan and finish with work blocked/unfinished.")
             + "\n" + json.dumps({"author_disposition": author, "source_ref": ref}, ensure_ascii=False))
-    return _publish_plan_review_projection(ctx, {"aggregate_signal": str((wave or {}).get("aggregate") or "DEGRADED"),
-        "closed": False, "author_action": action, "author_disposition": author}, text)
+    return _publish_plan_review_projection(ctx, {"aggregate_signal": signal,
+        "closed": bool((wave or {}).get("closed")), "historical_critic": historical,
+        "author_action": action, "author_disposition": author}, text)
 
 
 def _apply_disposition(ctx: ToolContext, disposition: dict) -> str:
@@ -1163,7 +1213,7 @@ def _apply_disposition(ctx: ToolContext, disposition: dict) -> str:
         exact = _read_plan_review_wave_artifact(root, task_id, prior_ref) if prior_ref else dict(wave)
         exact.update({
             "dispositions": list(items), "closed": bool(closure["closed"]),
-            "closure_notes": closure_notes,
+            "aggregate": closure["aggregate"], "closure_notes": closure_notes,
             "disposition_recorded_at": disposition_recorded_at,
             "supersedes_wave_artifact": prior_ref,
         })
@@ -1172,7 +1222,7 @@ def _apply_disposition(ctx: ToolContext, disposition: dict) -> str:
         disposition_ref = _persist_plan_review_wave_artifact(root, task_id, exact)
         stored = record_plan_review_dispositions(
             root, task_id, fingerprint=fingerprint, dispositions=items,
-            closed=bool(closure["closed"]), closure_notes=closure_notes,
+            closed=bool(closure["closed"]), aggregate=closure["aggregate"], closure_notes=closure_notes,
             wave_artifact=disposition_ref, recorded_at=disposition_recorded_at,
             author_disposition=author_record,
         )

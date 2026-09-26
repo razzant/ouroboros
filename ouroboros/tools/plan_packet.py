@@ -46,23 +46,34 @@ _RUBRIC = (
     "missing is the AUTHOR's judgment rather than a document, ask the author: a `need_evidence` "
     "finding whose `breaks` names the spec id the question is about, no locator needed; Ouroboros "
     "answers it in its disposition or escalates it. Do not invent a gap.",
+    "6. Subtraction — what could the spec drop (a claim, decision, invariant, deferral, path or "
+    "guard) without losing the goal? Say it as a `note` naming the element id; removing is advice "
+    "as legitimate as adding.",
 )
 
 _BLOCKING_RULE = (
     "A finding is `blocking` iff being wrong about it AFTER the work starts would invalidate work "
     "already done, violate a declared commitment, or make an acceptance claim unverifiable — and it "
     "MUST name `breaks`: the id of the spec element it breaks (goal for the intention as a whole, claim_N, invariant_N, decision_N, "
-    "deferred_N). Everything else is a `note`. If missing evidence makes a claim STRUCTURALLY "
-    "unverifiable, that is `blocking` with `breaks=<claim id>`, not `need_evidence`."
+    "deferred_N). Everything else is a `note`. A claim you cannot check as written is a question to "
+    "the author (`need_evidence` with the claim id in `breaks`) or a `note`, not a blocker."
 )
 
 _CONVERGENCE_RULE = (
-    "CONVERGENCE RULE (cycle ≥2): a reformulation of a prior finding is not a new finding; a new "
-    "`blocking` finding must state why it was invisible in the previous cycle; a prior `blocking` "
-    "finding that is still open must be re-emitted (same id, summary starting `still-open:`); a "
-    "resolved one is simply not repeated. Spec ids may have SHIFTED between cycles (positional ids "
-    "renumber when an element is dropped or reordered): re-target `breaks` against the CURRENT spec "
-    "ids using the Spec delta (`renumbered: [{from, to, text}]`), never against the old ids."
+    "CONVERGENCE RULE (cycle ≥2) — adjudicate your OWN earlier findings first. They are the rows "
+    "below whose finding_id starts with your panel seat (named at the end of this packet). Read the "
+    "author's dispositions and the Spec delta as the author's argument, and for each `blocking` "
+    "finding and `need_evidence` you raised decide: RESOLVED — the delta or the rationale answers "
+    "it: do not repeat it; SUPERSEDED — the element it targeted was removed or replaced: do not "
+    "repeat it; STILL OPEN — re-emit it (same id and class, summary starting `still-open:`) naming "
+    "the residual the answer does not cover. `still-open` holds only while the goal is unchanged: "
+    "when the host says the goal changed, judge the new intention afresh — an earlier finding "
+    "survives only where it still breaks a CURRENT element. Then review what changed: a "
+    "reformulation of an earlier finding is not a new finding, and a NEW `blocking` finding must "
+    "state why it was invisible in the previous cycle. Spec ids may have SHIFTED between cycles "
+    "(positional ids renumber when an element is dropped or reordered): re-target `breaks` against "
+    "the CURRENT spec ids using the Spec delta (`renumbered: [{from, to, text}]`), never against "
+    "the old ids."
 )
 
 
@@ -118,7 +129,7 @@ def build_plan_review_system_prompt(
     ]
     if constitutional:
         parts.append(
-            "6. Governance (this plan touches Ouroboros's own body): does the spec contradict "
+            "7. Governance (this plan touches Ouroboros's own body): does the spec contradict "
             "BIBLE.md or a frozen contract? Cite the principle.\n"
         )
     parts.append(f"\n## Blocking rule\n\n{_BLOCKING_RULE}\n")
@@ -226,6 +237,12 @@ def _render_prior_cycles(prior_cycles: list[dict], dispositions: list[dict], spe
         )
     lines.append("### Agent dispositions\n\n" + _json_block(dispositions or [], PACKET_PRIOR_CYCLES_CHARS) + "\n")
     lines.append("### Spec delta\n\n" + _json_block(spec_delta or {}, PACKET_PRIOR_CYCLES_CHARS) + "\n")
+    # ONE host fact from the delta the host already computed: `still-open` holds only while the
+    # goal is unchanged. `unknown` when the previous frozen spec body was truncated (no delta).
+    goal_changed = (spec_delta or {}).get("goal_changed")
+    previous = (prior_cycles[-1] if isinstance(prior_cycles[-1], Mapping) else {}).get("cycle_index", "?") if prior_cycles else "?"
+    lines.append(f"Goal changed since cycle {previous}: "
+                 f"{'unknown' if not isinstance(goal_changed, bool) else 'yes' if goal_changed else 'no'}\n")
     return "\n".join(lines)
 
 

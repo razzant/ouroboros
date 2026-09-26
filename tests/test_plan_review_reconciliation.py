@@ -468,7 +468,8 @@ def test_missing_substrate_actor_stays_paid_and_custody_lost(harness, monkeypatc
 # ------------------------------------------------------------- collection (P1-3)
 
 
-def _install_barrier_substrate(monkeypatch, calls, *, texts=None, still_pending=(), refused=(), pending_waves=()):
+def _install_barrier_substrate(monkeypatch, calls, *, texts=None, still_pending=(), refused=(), pending_waves=(),
+                               pending_by_wave=None):
     """A substrate that honours the event route: a fresh dispatch released at its
     drain deadline returns ``pending_dispatch`` rows; a reconcile returns the settled
     rows (except ``still_pending`` slots, which are still running, and ``refused``
@@ -486,7 +487,8 @@ def _install_barrier_substrate(monkeypatch, calls, *, texts=None, still_pending=
         wave_fp = str((request.reconciliation_identity or {}).get("subject_hash") or "")
         actors = []
         for slot in slots:
-            pending = fresh or slot.slot_id in still_pending or wave_fp in pending_waves
+            pending = (fresh or slot.slot_id in still_pending or wave_fp in pending_waves
+                       or slot.slot_id in (pending_by_wave or {}).get(wave_fp, ()))
             refuse = not pending and slot.slot_id in refused
             actors.append({
                 "slot_id": slot.slot_id, "model": slot.model,
@@ -678,9 +680,9 @@ def test_disposition_items_are_recorded_on_a_wave_that_stays_custody_pending(har
     _install_barrier_substrate(monkeypatch, calls, texts={"s1": question})
     final = _collect(ctx, fingerprint)
     wave = _state(harness)["waves"][-1]
-    assert wave["custody_pending"] is False and wave["aggregate"] == "REVIEW_REQUIRED"
+    assert wave["custody_pending"] is False and wave["aggregate"] == "GREEN"  # the answered question emptied the open set
     assert [(d["finding_id"], d["decision"]) for d in wave["dispositions"]] == [("s1:q1", "accept")]
-    assert _control(final) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(final) == {"outcome": "GREEN", "closed": True}
     assert _state(harness)["cycles_paid"] == 1
 
 

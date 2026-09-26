@@ -70,10 +70,10 @@ ONLY_AWAITED = {
         [_row("s1", ok=True), _awaiting("s2"), _awaiting("s3")], answered=1, findings=[_NOTE]),
     "a clean quorum held open by the last slot": _wave(
         [_row("s1", ok=True), _row("s2", ok=True), _awaiting("s3")], answered=2),
+    "a quorum whose only findings are notes: notes never move the verdict": _wave(
+        [_row("s1", ok=True), _row("s2", ok=True), _awaiting("s3")], answered=2, findings=[_NOTE]),
 }
 NOT_ONLY_AWAITED = {
-    "a quorum of answers raised findings: a critic verdict sits beneath the placeholder": _wave(
-        [_row("s1", ok=True), _row("s2", ok=True), _awaiting("s3")], answered=2, findings=[_NOTE]),
     "a wait beside a real failure": _wave(
         [_row("s1", failure_code="run_failed"), _awaiting("s2"), _awaiting("s3")]),
     "a wait beside a typed $0 refusal": _wave(
@@ -616,3 +616,40 @@ def test_nobody_answered_beside_a_failed_reviewer_is_none_answered_even_with_an_
     assert "plan_review_class" not in only_awaited
     partial = owner_hurry.plan_review_class_facts({"answered": 1, "failed": 1, "awaiting": 1, "configured": 3}, awaited=False)
     assert partial["plan_review_class"] == "unanswered"
+
+
+# ------------------------------------------------------------------ plan: the open set at the consumer boundary
+
+def test_an_advisory_wave_closed_by_a_reasoned_reject_is_not_stamped_degraded(tmp_path, monkeypatch, harness):
+    """The real gate over a real recorded wave: one below-quorum blocking finding, rejected
+    with a rationale under advisory, closes the wave (recorded GREEN), so the finished task
+    is not stamped ``degraded`` and carries no ``terminal_plan_review_open``. Quiet side:
+    the same wave with an unanswered question to the author stays open and keeps today's
+    ``plan_review_advisory`` stamp."""
+    from ouroboros.tools import plan_review as pr
+
+    harness.state["enforcement"] = "advisory"
+    blocking = json.dumps([_finding("b1", "blocking", breaks="claim_1")])
+    harness.install({"s1": blocking, "s2": CLEAN, "s3": CLEAN})
+    ctx = harness.make_ctx()
+    _call(ctx)
+    fp = _state(harness)["waves"][-1]["request_fingerprint"]
+    open_decision = force_plan_decision(ctx, {}, enforcement="advisory")
+    assert open_decision["status"] == "advisory_open" and open_decision["closed"] is False
+    pr._handle_plan_task(ctx, review_disposition={"review_fingerprint": fp, "items": [
+        {"finding_id": "s1:b1", "decision": "reject", "rationale": "the claim is checked by the demo"}]})
+    closed_decision = force_plan_decision(ctx, {}, enforcement="advisory")
+    assert closed_decision["status"] == "closed" and closed_decision["outcome"] == "GREEN"
+    usage, trace, outcome, _record = _finalize(tmp_path / "closed", monkeypatch, closed_decision)
+    assert trace["delivery_candidate"]["degraded"] is False and outcome["degraded"] is False
+    assert "terminal_plan_review_open" not in usage and "terminal_host_notice" not in usage
+    # Quiet side: an undispositioned question keeps the wave open and the stamp.
+    question = json.dumps([_finding("q1", "need_evidence", breaks="claim_1", summary="Why five?")])
+    harness.install({"s1": question, "s2": CLEAN, "s3": CLEAN})
+    asked = harness.make_ctx(task_id="task-asked")
+    _call(asked)
+    asked_decision = force_plan_decision(asked, {}, enforcement="advisory")
+    assert asked_decision["status"] == "advisory_open" and asked_decision["outcome"] == "REVIEW_REQUIRED"
+    usage, trace, outcome, _record = _finalize(tmp_path / "open", monkeypatch, asked_decision)
+    assert trace["delivery_candidate"]["degraded_reason"] == "plan_review_advisory"
+    assert outcome["reason_code"] == "plan_review_advisory" and usage["terminal_plan_review_open"] is True

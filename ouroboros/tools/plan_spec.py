@@ -25,6 +25,7 @@ import re
 from typing import Any, Iterable, Mapping, Optional
 
 from ouroboros.config import adaptive_quorum
+from ouroboros.settings_scales import effort_rank
 from ouroboros.contracts.task_contract import normalize_acceptance_claims
 from ouroboros.tool_access import path_is_relative_to
 from ouroboros.triad_review import empty_array_is_verified_clean, extract_json_array
@@ -727,11 +728,19 @@ def aggregate(slot_results: Iterable[Mapping[str, Any]], *, quorum: Optional[int
     """Host-computed wave aggregate — no reviewer-authored verdict.
 
     ``slot_results`` = EVERY configured slot as ``{slot, model, ok, findings,
-    error?}`` (``ok`` = parseable; ``findings`` = ``validate_findings`` output).
+    error?, carried?}`` (``ok`` = parseable; ``findings`` = ``validate_findings``
+    output; ``carried`` = a seat's still-open findings from the same-spec
+    predecessor when the seat did not answer THIS wave — they join the open set
+    stamped ``carried_absent_answer`` but the row stays unparseable and casts no
+    quorum or blocking-slot vote: silence never manufactures GREEN).
     ``quorum`` defaults to ``config.adaptive_quorum(len(slot_results))``.
     parseable slots < quorum → ``DEGRADED``; slots with ≥1 ``blocking`` ≥ quorum
-    → ``REVISE_PLAN``; any other finding → ``REVIEW_REQUIRED`` (a
-    need_evidence-only wave never revises); nothing → ``GREEN``. One configured
+    → ``REVISE_PLAN``; a non-empty OPEN SET — any ``blocking`` finding below
+    quorum or any ``need_evidence`` (a document request or a question to the
+    author) — → ``REVIEW_REQUIRED`` (a need_evidence-only wave never revises);
+    otherwise ``GREEN``: a quorum parsed and the open set is empty. ``note``
+    findings never change the verdict (they are optional advice, so a note-only
+    wave is GREEN). One configured
     slot follows ``adaptive_quorum(1) == 1`` (its blocking finding revises) with
     the loud reason ``single_reviewer_no_diversity``. Returns
     ``{aggregate, reasons, counts, findings}`` — findings flattened with
@@ -752,6 +761,13 @@ def aggregate(slot_results: Iterable[Mapping[str, Any]], *, quorum: Optional[int
         labels.add(slot)
         if not row.get("ok"):
             reasons.append(f"slot_unparseable:{slot}:{str(row.get('error') or 'no parseable findings')}")
+            carried = [dict(f) for f in (row.get("carried") or []) if isinstance(f, Mapping)]
+            for finding in carried:
+                finding.update({"slot": slot, "carried_absent_answer": True})
+                finding.setdefault("finding_id", f"{slot}:{finding.get('id', '')}")
+                flat.append(finding)
+            if carried:
+                reasons.append(f"findings_carried_absent_answer:{slot}:{len(carried)}")
             continue
         parseable += 1
         slot_findings = [dict(f) for f in (row.get("findings") or []) if isinstance(f, Mapping)]
@@ -776,12 +792,12 @@ def aggregate(slot_results: Iterable[Mapping[str, Any]], *, quorum: Optional[int
     elif blocking_slots >= q:
         verdict = "REVISE_PLAN"
         reasons.append(f"blocking_slots_at_quorum:{blocking_slots}/{q}")
-    elif flat:
+    elif counts["blocking"] or counts["need_evidence"]:
         verdict = "REVIEW_REQUIRED"
         if counts["blocking"]:
             reasons.append(f"blocking_below_quorum:{blocking_slots}/{q}")
-        if counts["need_evidence"] == len(flat):
-            reasons.append("need_evidence_only")
+        else:
+            reasons.append("need_evidence_only")  # only questions/requests hold the wave
     else:
         verdict = "GREEN"
     return {"aggregate": verdict, "reasons": reasons, "counts": counts, "findings": flat}
@@ -825,15 +841,23 @@ def closure_after_disposition(
     dispositions: Iterable[Mapping[str, Any]],
     enforcement: str,
 ) -> dict:
-    """The ONE closure table (F7) → ``{closed, open_ids, notes}``.
+    """The ONE closure table (F7) → ``{closed, aggregate, open_ids, notes}``.
 
-    GREEN → closed. Notes are optional advice, so a note-only REVIEW_REQUIRED
-    wave closes without dispositions. Need_evidence still requires a disposition
-    (accept|reject|defer + rationale). REVISE_PLAN → NEVER closed by
-    disposition. A subsequent paid delta review may consider a changed spec or
-    justified rejection when another paid cycle is available. DEGRADED is not
-    closable by disposition. Advisory enforcement never flips ``closed``: the caller
-    may proceed with the wave open under loud disclosure — this function only
+    The open set of a wave is every ``blocking`` finding that is not closed plus
+    every ``need_evidence`` (a document request or a question to the author)
+    without a valid disposition (accept|reject|defer + rationale). Notes never
+    hold a wave. GREEN → closed. REVIEW_REQUIRED → closed iff the open set is
+    empty; a below-quorum ``blocking`` finding closes, per finding, ONLY under
+    advisory enforcement and ONLY by a reasoned ``reject`` (accept or defer keep
+    it open: an accepted blocking finding says the reviewed plan is broken, and
+    closing it would certify that plan GREEN); under blocking enforcement it
+    stays open until a changed spec is reviewed or the reviewer retires it in a
+    later paid cycle. REVISE_PLAN and DEGRADED are never closed by disposition.
+    ``aggregate`` is the verdict to RECORD: a REVIEW_REQUIRED wave whose open set
+    emptied is written as GREEN with the note ``closed_by_disposition``; every
+    other verdict is returned as itself. Enforcement here is the CONFIGURED
+    value (Cyber Pro is action authority, not closure); an open wave under
+    advisory may still proceed under loud disclosure — this function only
     reports. Control-line invariants (``tools.plan_render
     ._parse_plan_review_control``): GREEN ⇒ closed, REVISE_PLAN ⇒ not closed.
     """
@@ -864,15 +888,22 @@ def closure_after_disposition(
         valid[fid] = dict(item)
     known = {str(f.get("finding_id") or f.get("id") or "") for f in items}
     notes.extend(f"unknown_finding_id:{fid}" for fid in sorted(set(valid) - known))
+    advisory = mode == "advisory"  # the configured value, as the notes below already read it
     open_ids: list[str] = []
     for finding in items:
         fid = str(finding.get("finding_id") or finding.get("id") or "")
-        blocking = finding.get("class") == "blocking"
-        # C-08: a validated BLOCKING finding stays open whatever the aggregate label
-        # says — a single blocking finding below quorum surfaces as REVIEW_REQUIRED,
-        # and closing it with a $0 disposition would be exactly the laundering the
-        # height rule exists to prevent. It needs a changed spec or a paid delta cycle.
-        if blocking or (finding.get("class") != "note" and fid not in valid):
+        klass = finding.get("class")
+        if klass == "note":
+            continue  # notes never hold a wave
+        decision = (valid.get(fid) or {}).get("decision")
+        if klass == "blocking":
+            # Under ADVISORY a reasoned reject closes a blocking finding BELOW quorum,
+            # per finding; accept/defer keep it open. Under BLOCKING closure is
+            # unchanged: a changed spec, or the reviewer retiring it in a later paid cycle.
+            closes = advisory and verdict == "REVIEW_REQUIRED" and decision == "reject"
+        else:
+            closes = fid in valid  # need_evidence: accept | reject | defer + rationale
+        if not closes:
             open_ids.append(fid)
     if verdict == "GREEN":
         closed = True
@@ -880,7 +911,7 @@ def closure_after_disposition(
         closed = not open_ids
         if not items:
             notes.append("no_findings_recorded: REVIEW_REQUIRED without findings closes vacuously")
-        if any(f.get("class") == "blocking" for f in items):
+        if not advisory and any(f.get("class") == "blocking" for f in items):
             notes.append(
                 "blocking_finding_below_quorum_stays_open: blocking findings remain open after disposition"
             )
@@ -898,10 +929,51 @@ def closure_after_disposition(
     if not closed:
         notes.append(
             "advisory_enforcement: the caller may proceed with the wave open under loud disclosure"
-            if mode == "advisory" else
+            if advisory else
             "blocking_enforcement: the wave must close before the work starts"
         )
-    return {"closed": closed, "open_ids": open_ids, "notes": notes}
+    recorded = "GREEN" if verdict == "REVIEW_REQUIRED" and closed else verdict
+    if recorded != verdict:
+        notes.append("closed_by_disposition: REVIEW_REQUIRED → GREEN (open set emptied)")
+    return {"closed": closed, "aggregate": recorded, "open_ids": open_ids, "notes": notes}
+
+
+def plan_ordered_weaker(configured_slots: list, owner_efforts: Optional[dict]) -> dict[str, dict[str, str]]:
+    """``{slot_id: {effort, owner_effort}}`` for every seat whose EFFECTIVE effort ranks
+    below the effort the owner's settings would have run (both ranks known on
+    ``EFFORT_SCALE``); ``{}`` when nothing was ordered weaker. Computed from the
+    request at dispatch and carried through collection, never recomputed from the
+    live owner setting."""
+    weaker: dict[str, dict[str, str]] = {}
+    for slot in configured_slots or []:
+        sid = str(getattr(slot, "slot_id", "") or "")
+        effort = str(getattr(slot, "effort", "") or "")
+        owner = str((owner_efforts or {}).get(sid) or "")
+        if 0 <= effort_rank(effort) < effort_rank(owner):
+            weaker[sid] = {"effort": effort, "owner_effort": owner}
+    return weaker
+
+
+def plan_standing_findings(previous: Optional[dict], spec: dict, enforcement: str) -> dict[str, list[dict]]:
+    """``{slot_id: [findings]}`` still open on ``previous`` when it reviewed the SAME spec
+    (equal ``spec_hash``): keyed by seat, independent of the roster fingerprint, effort or
+    order, so a seat that fails to answer a same-spec cycle keeps its objection listed
+    (``plan_review_runtime.synthesize_plan_review_wave``). A changed spec, a closed predecessor or no
+    predecessor carries nothing."""
+    if not isinstance(previous, dict) or not isinstance(previous.get("spec"), dict) or previous.get("closed"):
+        return {}
+    if str(previous.get("spec_hash") or spec_hash(previous["spec"])) != spec_hash(spec):
+        return {}
+    findings = [f for f in previous.get("findings") or [] if isinstance(f, Mapping)]
+    open_ids = set(closure_after_disposition(
+        str(previous.get("aggregate") or ""), findings, list(previous.get("dispositions") or []), enforcement,
+    )["open_ids"])
+    standing: dict[str, list[dict]] = {}
+    for finding in findings:
+        if str(finding.get("finding_id") or "") in open_ids and finding.get("class") in ("blocking", "need_evidence"):
+            standing.setdefault(str(finding.get("slot") or ""), []).append(dict(finding))
+    return standing
+
 
 
 def plan_fingerprint(goal: str, plan: str, spec: dict, manifest_hash: str, constitutional: bool) -> str:

@@ -134,3 +134,66 @@ def test_a_spent_cap_does_not_release_while_a_paid_slot_can_still_settle():
     gate = plan_review_gate_projection(state, "blocking")
     assert gate["status"] == "open" and gate["allow"] is False
     assert gate["custody_pending"] is True
+
+
+def test_author_selection_after_a_green_critic_publishes_the_critics_real_pair(harness, monkeypatch):
+    """A revised plan selected after a GREEN critic wave gets NO invented verdict: the tool
+    result carries the critic wave's real (GREEN, closed) pair labelled historical, the text
+    says the earlier plan was GREEN and this plan has none of its own, the durable gate
+    projection stays open with `historical_critic`, and the call succeeds (the validator
+    used to raise on GREEN + closed=False AFTER the plan was persisted and narrated).
+    Re-selecting the reviewed GREEN plan itself keeps its own pair, unlabelled; a
+    REVISE_PLAN critic keeps today's open pair."""
+    from ouroboros.tools import plan_review as pr
+    from ouroboros.tools.plan_review_runtime import publish_plan_review_projection
+
+    published = []
+
+    def capture(ctx, review, text):
+        published.append(dict(review))
+        return publish_plan_review_projection(ctx, review, text)
+
+    monkeypatch.setattr(pr, "_publish_plan_review_projection", capture)
+    h = harness
+    h.state["enforcement"] = "advisory"
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    clean = "[]\nNO_FINDINGS"
+    h.install({s: clean for s in ("s1", "s2", "s3")})
+    ctx = h.make_ctx()
+    _call(ctx)
+    critic_fp = load_plan_review_state(h.drive, ctx.task_id)["current_attempt"]["fingerprint"]
+    ctx._active_builtin_tool_result = None  # the registry sidecar seam: the typed meta lands here
+    result = _call(ctx, {**DECK_SPEC, "acceptance_claims": ["Corrected claim"]}, plan="Corrected plan.",
+        review_disposition={"review_fingerprint": critic_fp, "items": [], "author_action": "finish",
+                            "author_disposition": {"disposition": "partial", "rationale": "Considered."}})
+    assert "Current author plan saved" in result and "ERROR" not in result
+    assert f"Earlier plan {critic_fp} was GREEN; this revised plan has no verdict of its own." in result
+    assert published[-1]["aggregate_signal"] == "GREEN" and published[-1]["closed"] is True
+    assert published[-1]["historical_critic"] is True and published[-1]["author_action"] == "finish"
+    meta = ctx._active_builtin_tool_result.meta
+    assert meta == {"plan_review_outcome": "GREEN", "plan_review_closed": True,
+                    "plan_review_historical_critic": True}
+    gate = plan_review_gate_projection(load_plan_review_state(h.drive, ctx.task_id), "advisory")
+    assert gate["historical_critic"] is True and gate["outcome"] == "GREEN"
+    assert gate["closed"] is False and gate["status"] == "advisory_open" and gate["allow"] is True
+    assert closed_plan_review_wave(load_plan_review_state(h.drive, ctx.task_id)) is None
+    # Quiet side 1: selecting the reviewed GREEN plan itself is its own verdict, unlabelled.
+    own = h.make_ctx(task_id="task-own")
+    own._active_builtin_tool_result = None
+    _call(own)
+    own_fp = load_plan_review_state(h.drive, "task-own")["current_attempt"]["fingerprint"]
+    same = _call(own, review_disposition={"review_fingerprint": own_fp, "items": [], "author_action": "finish",
+                                          "author_disposition": {"disposition": "accepted", "rationale": "As reviewed."}})
+    assert "Current author plan saved" in same and "no verdict of its own" not in same
+    assert own._active_builtin_tool_result.meta == {"plan_review_outcome": "GREEN", "plan_review_closed": True}
+    assert published[-1]["historical_critic"] is False
+    # Quiet side 2: a REVISE_PLAN critic keeps its open pair for the revised plan.
+    h.install({s: json.dumps([_finding("first", "blocking", breaks="claim_1")]) for s in ("s1", "s2", "s3")})
+    revised = h.make_ctx(task_id="task-revise")
+    _call(revised)
+    revise_fp = load_plan_review_state(h.drive, "task-revise")["current_attempt"]["fingerprint"]
+    _call(revised, {**DECK_SPEC, "acceptance_claims": ["Corrected claim"]}, plan="Corrected plan.",
+          review_disposition={"review_fingerprint": revise_fp, "items": [], "author_action": "finish",
+                              "author_disposition": {"disposition": "partial", "rationale": "Considered."}})
+    assert (published[-1]["aggregate_signal"], published[-1]["closed"]) == ("REVISE_PLAN", False)
+    assert published[-1]["historical_critic"] is True

@@ -1405,7 +1405,7 @@ _PLAN_REVIEW_IDENTITY_KEYS = frozenset({
     "previous_fingerprint", "spec_hash", "evidence_manifest_hash", "plan_prose_hash", "sha256",
     "model", "request_model", "route", "host_file_read_attestation", "reason", "decision", "kind",
     "goal", "acceptance_claims", "cycle_index", "series_id", "schema_version", "retry_key",
-    "wave_artifact", "spec_source_ref", "dialogue_source_ref", "dialogue_chat_id", "author_request_fingerprint",
+    "wave_artifact", "previous_wave_artifact", "spec_source_ref", "dialogue_source_ref", "dialogue_chat_id", "author_request_fingerprint",
     "historical_supplements",
 })
 
@@ -1502,9 +1502,11 @@ def record_plan_review_wave(
             for idx, w in enumerate(waves)
         ]
         overflow = max(0, len(waves) - _PLAN_REVIEW_MAX_WAVES)
-        if overflow:
-            state["waves_omitted"] = int(state.get("waves_omitted") or 0) + overflow
-            waves = waves[overflow:]
+        if overflow:  # the newest PAID wave stays reachable: the next dispatch judges against it
+            keep = next((i for i in range(len(waves) - 1, -1, -1) if waves[i].get("paid")), None)
+            dropped = set([i for i in range(len(waves)) if i != keep][:overflow])
+            state["waves_omitted"] = int(state.get("waves_omitted") or 0) + len(dropped)
+            waves = [w for i, w in enumerate(waves) if i not in dropped]
         # I-02: size-fitting (older-wave compaction, then the last-resort text cut) runs for
         # EVERY writer in `_update_plan_review_state` → `_fit_plan_review_state`.
         state["waves"] = waves
@@ -1516,9 +1518,12 @@ def record_plan_review_wave(
 
 
 def plan_review_notes_are_annotatable(wave: Dict[str, Any]) -> bool:
-    """Optional notes remain discussable after automatic closure, not new authority."""
+    """Optional notes remain discussable after automatic closure, not new authority.
+
+    A note-only wave is recorded GREEN (notes never change the verdict); older
+    records carry it as a closed REVIEW_REQUIRED, and both stay annotatable."""
     findings = wave.get("findings") or []
-    return bool(findings) and wave.get("aggregate") == "REVIEW_REQUIRED" and all(
+    return bool(findings) and wave.get("aggregate") in {"GREEN", "REVIEW_REQUIRED"} and all(
         finding.get("class") == "note" for finding in findings
     )
 
@@ -1530,6 +1535,7 @@ def record_plan_review_dispositions(
     fingerprint: str,
     dispositions: List[Dict[str, Any]],
     closed: bool,
+    aggregate: str = "",
     closure_notes: Optional[List[str]] = None,
     wave_artifact: Optional[Dict[str, Any]] = None,
     recorded_at: str = "",
@@ -1537,7 +1543,9 @@ def record_plan_review_dispositions(
 ) -> Dict[str, Any]:
     """Store the agent's dispositions on one FULL wave and its resulting closure.
     Only note-only closed waves accept annotations. Closure authority remains
-    ``plan_spec.closure_after_disposition``; other closed waves are immutable."""
+    ``plan_spec.closure_after_disposition`` (``aggregate`` is the verdict that
+    table says to record — GREEN when a REVIEW_REQUIRED open set emptied); this
+    writer is rule-free. Other closed waves are immutable."""
 
     def _record(state: Dict[str, Any]) -> Dict[str, Any]:
         wave = next((w for w in state["waves"] if str(w.get("request_fingerprint") or "") == fingerprint), None)
@@ -1563,7 +1571,7 @@ def record_plan_review_dispositions(
                 raise ValueError("PLAN_REVIEW_AUTHOR_DISPOSITION_INVALID: stale or malformed record")
             wave["author_disposition"] = author
         if closed and str(wave.get("aggregate") or "") == "REVIEW_REQUIRED":
-            wave["closed"] = True
+            wave.update(closed=True, aggregate=aggregate or wave["aggregate"])
         state["current_attempt"] = {"fingerprint": fingerprint, "status": "open", "reason": ""}
         return state
 

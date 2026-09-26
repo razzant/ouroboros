@@ -143,11 +143,11 @@ def test_compound_session_effort_precedes_surface_defaults(monkeypatch):
     assert [slot.declared_effort for slot in plan_review_runtime.plan_review_slots()] == ["", ""]
 
 
-def test_declared_plan_effort_is_the_default_rung_and_touches_no_other_surface(monkeypatch):
-    """The envelope's reviewer_effort fills only the rows that leave effort to the
-    caller: a compound slug and an explicit per-row effort still win. It travels as
-    an argument of the plan builder alone, so the commit gate, scope, acceptance and
-    skill-review identities are byte-identical before and after a declaration."""
+def test_declared_plan_effort_outranks_row_pins_but_not_compound_slugs(monkeypatch):
+    """The envelope's reviewer_effort is an ORDER for this plan: it outranks the
+    owner's per-row pin; only a compound Cursor/Agy slug keeps its encoded effort. It
+    travels as an argument of the plan builder alone, so the commit gate, scope,
+    acceptance and skill-review identities are byte-identical before and after."""
     from ouroboros.skill_review_cycles import skill_review_contract_fingerprint
     from ouroboros.tools import plan_review_runtime
     from ouroboros.tools.commit_gate import commit_review_contract_fingerprint
@@ -164,9 +164,10 @@ def test_declared_plan_effort_is_the_default_rung_and_touches_no_other_surface(m
               commit_review_contract_fingerprint(),
               skill_review_contract_fingerprint(["m"], delivery=commit_triad_delivery()))
     declared = plan_review_runtime.plan_review_slots(default_effort="max")
-    assert [s.effort for s in declared] == ["xhigh", "max", "low"]
-    assert [s.declared_effort for s in declared] == ["", "max", ""]
+    assert [s.effort for s in declared] == ["xhigh", "max", "max"]  # the pinned `low` row runs the order
+    assert [s.declared_effort for s in declared] == ["", "max", "max"]
     assert [s.effort for s in plan_review_runtime.plan_review_slots()] == ["xhigh", "medium", "low"]
+    assert [s.declared_effort for s in plan_review_runtime.plan_review_slots()] == ["", "", ""]
     after = (commit_triad_delivery(), [s.effort for s in structured_scope_review_slots()],
              commit_review_contract_fingerprint(),
              skill_review_contract_fingerprint(["m"], delivery=commit_triad_delivery()))

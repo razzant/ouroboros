@@ -80,7 +80,8 @@ self-modification, never attachable evidence (`denied_path`).
 Specs, findings and closure: ARCHITECTURE §6 "Plan construction and review".
 Accept, reject or defer findings. Disposition-only
 `plan_task(review_disposition={review_fingerprint, items:[{finding_id, decision, rationale}]})`
-closes `need_evidence` at $0, one item per required finding.
+closes `need_evidence` at $0, one item per required finding; under advisory a
+reasoned reject also closes a below-quorum blocking finding.
 Duplicate, conflicting, unknown, stale, incomplete, mixed or vacuous calls
 return typed argument errors before recording; `plan_review._handle_plan_task` ignores
 default-empty optional fields. Do not replay plans for dispositions.
@@ -121,7 +122,9 @@ acceptance keeps (`review_evidence._accept_owner_directives`). JSONL records
 and chat line selectors split on physical LF only, never on valid Unicode
 inside a message. Each consumer redacts at its boundary and discloses missing
 source or ranges; a replay or earned paid retry of the same author request
-keeps its recorded snapshot, disclosing later messages as unreviewed. Follow
+keeps its recorded snapshot (complete and uncapped; the inline view is the
+conversation only, with a pointer naming exact omitted line ranges),
+disclosing later messages as unreviewed. Follow
 ARCHITECTURE's per-delivery context/source contract for delivery, coverage and sizing. Enforcement:
 `test_packet_uses_full_dialogue_and_keeps_acceptance_directives`,
 `tests/test_plan_dialogue_review_regressions.py`, the acceptance ledger tests

@@ -464,9 +464,9 @@ def plan_wave_only_awaited(wave: Any) -> bool:
     (the census names no unresolved, uncollected, refused or failed slot), and the
     recorded answers hold no verdict of their own beneath the stored placeholder. A
     collected blocking or ``need_evidence`` finding keeps the wave open whatever the
-    awaited slots answer, and a quorum of answers that raised findings IS a critic
-    verdict the wait merely postpones — neither reads as a mere wait. A roster or a
-    quorum the typed facts cannot vouch for is never a mere wait either."""
+    awaited slots answer, so it never reads as a mere wait; notes are neutral (they
+    never move the verdict), so a quorum whose only findings are notes is still a mere
+    wait. A roster or a quorum the typed facts cannot vouch for is never a mere wait."""
     from ouroboros.tools.plan_review_runtime import plan_wave_slot_census
 
     if not isinstance(wave, dict) or not wave.get("custody_pending"):
@@ -480,10 +480,8 @@ def plan_wave_only_awaited(wave: Any) -> bool:
         return False
     counts = wave.get("counts") if isinstance(wave.get("counts"), dict) else {}
     quorum = counts.get("quorum")
-    if (type(quorum) is not int or quorum <= 0 or not isinstance(findings, list)
-            or any(not isinstance(item, dict) or item.get("class") != "note" for item in findings)):
-        return False
-    return len(census["answered"]) < quorum or not findings
+    return not (type(quorum) is not int or quorum <= 0 or not isinstance(findings, list)
+                or any(not isinstance(item, dict) or item.get("class") != "note" for item in findings))
 
 
 def plan_review_class_facts(wave: Any, *, awaited: bool) -> Dict[str, Any]:

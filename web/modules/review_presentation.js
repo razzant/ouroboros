@@ -533,18 +533,18 @@ function planFindingLines(wave) {
 
 function planActorAvailabilityLines(wave) {
     // The bug report's own bar: a result that was never received must say so
-    // explicitly instead of contributing silently-zero findings. A row names the
-    // model and quotes the engine's reported sentence; the failure code and the
-    // slot id stay in the task detail and Logs (an unresolved slot keeps its raw state).
+    // explicitly instead of contributing silently-zero findings. A row names the model and
+    // quotes the engine's sentence; failure code and slot id stay in the task detail and Logs.
     const lines = [];
     for (const actor of (Array.isArray(wave.actors) ? wave.actors : [])) {
         if (!actor || typeof actor !== 'object' || actor.ok !== false) continue;
         const model = text(actor.model) || 'reviewer';
         const cause = text(actor.reported_cause).split(/\s+/).join(' ');
+        const carried = finiteCount(actor.carried_findings) ? '; its earlier finding is still listed' : '';
         if (actorAwaiting(actor)) lines.push(`${model} · awaiting${sinceLocalTime(actor.awaiting_since)}`);
         else if (actorUnresolved(actor)) lines.push(`${model} · no answer${cause ? ` — "${cause}"` : ''}${sinceLocalTime(actor.awaiting_since)}`);
-        else if (text(actor.operation_state) === 'not_dispatched') lines.push(`${model} · not sent`);
-        else lines.push(`${model} · unavailable${cause ? ` — "${cause}"` : ''}`);
+        else if (text(actor.operation_state) === 'not_dispatched') lines.push(`${model} · not sent${carried}`);
+        else lines.push(`${model} · unavailable${cause ? ` — "${cause}"` : ''}${carried ? ` · did not answer${carried}` : ''}`);
     }
     return lines;
 }
@@ -561,6 +561,14 @@ function planWaveDetail(wave) {
         wave.reason ? `Reason: ${text(wave.reason)}` : '',
     ];
     const counts = wave.counts && typeof wave.counts === 'object' ? wave.counts : {};
+    // A panel ordered weaker than the owner's setting says so seat by seat (typed fact; the
+    // verdict token is never recoloured), on compact waves too since compaction keeps the fact.
+    const weaker = wave.ordered_weaker && typeof wave.ordered_weaker === 'object'
+        ? Object.entries(wave.ordered_weaker).filter(([, row]) => row && typeof row === 'object') : [];
+    if (weaker.length) {
+        lines.push(`Reviewers ordered weaker than your setting: ${weaker
+            .map(([sid, row]) => `${sid} ${text(row.effort) || '?'} (setting ${text(row.owner_effort) || '?'})`).join(', ')}`);
+    }
     if (wave.compact) {
         // A compacted wave keeps counts while its finding bodies moved to the
         // immutable wave artifact; name that remainder instead of rendering a
@@ -669,8 +677,13 @@ export function planReviewGroupFromTaskDetail(detail, ownerTaskId = '') {
     const authorSubject = current.author_subject;
     const author = authorDispositionText(authorSubject?.author_disposition);
     const reviewFingerprint = author ? text(authorSubject.review_fingerprint) : currentFingerprint;
+    // The critic reviewed the EARLIER plan when the author selected a revised one: the group
+    // is labelled as that plan's review and the selected plan is named unreviewed — the same
+    // `historical_critic` fact the gate projection carries, never a synthesized verdict.
+    const historicalCritic = Boolean(author) && Boolean(reviewFingerprint) && reviewFingerprint !== currentFingerprint;
     const authorDecisionText = author ? [author,
         `Critic plan: ${reviewFingerprint}`,
+        historicalCritic ? `The verdict shown is the earlier plan's review; the selected plan ${currentFingerprint} has no verdict of its own` : '',
         authorSubject.source_ref?.path ? `Current plan source: ${text(authorSubject.source_ref.root)}:${text(authorSubject.source_ref.path)}` : '',
         authorSubject.source_ref?.sha256 ? `Source sha256=${text(authorSubject.source_ref.sha256)}` : '',
     ].filter(Boolean).join('\n') : '';
@@ -738,7 +751,8 @@ export function planReviewGroupFromTaskDetail(detail, ownerTaskId = '') {
     return {
         id: `plan:${owner}`,
         surface: 'plan',
-        label: 'Plan review',
+        label: historicalCritic ? 'Plan review · earlier plan' : 'Plan review',
+        historicalCritic,
         subject: '',
         presentationOwnerTaskId: owner,
         subjectTaskId: owner,

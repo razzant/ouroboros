@@ -28,7 +28,7 @@ from ouroboros.tools.plan_render import (
     _actor_outcome, _degraded_replay_note, _next_step, _parse_plan_review_control, _render_wave,
 )
 from ouroboros.tools.plan_review_runtime import (
-    plan_no_dispatch_line, plan_pending_actors, plan_slot_reasons, plan_wave_has_in_flight,
+    plan_no_dispatch_line, plan_pending_actors, plan_wave_has_in_flight,
     plan_wave_line_has_news, plan_wave_progress_line, plan_wave_slot_census,
 )
 from tests.test_plan_finalization_collection import panel as _panel
@@ -191,19 +191,12 @@ def test_an_unresolved_slot_is_never_worded_as_waiting_and_a_waiting_slot_never_
     assert "unresolved" not in waiting and "no verdict" not in waiting and waiting.startswith("📐 Plan review so far: ")
 
 
-def test_a_real_failure_is_still_named_while_others_are_awaited_and_awaiting_is_never_a_reason():
+def test_a_real_failure_is_still_counted_while_others_are_awaited_and_its_reason_stays_off_the_line():
     wave = _wave([_pending("s1"), _failed("s2", "run_failed"), _failed("s3", "", "transport died"),
                   _skipped("s4"), _pending("s5", "in_flight"), _pending("s6")],
                  historical_supplements=[_supplement("s6")])
-    assert plan_slot_reasons(wave) == "run_failed; transport died; subscription_window_exhausted"
-    assert plan_slot_reasons(wave, failed_only=True) == "run_failed; transport died"
-    assert "Pending dispatch" not in plan_slot_reasons(wave)
     line = _line(wave)
     assert "2 didn't answer, 1 not sent" in line and "run_failed" not in line and "transport died" not in line
-    # The guard's other direction: with the same rows settled as failures, every reason is named.
-    for row in wave["actors"]:
-        row.update(operation_state="settled", late_result_pending=False)
-    assert plan_slot_reasons(wave) == f"{PENDING_ERROR}; run_failed; transport died; subscription_window_exhausted"
 
 
 def _settled_family_lines():

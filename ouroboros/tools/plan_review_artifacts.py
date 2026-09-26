@@ -277,7 +277,13 @@ def in_flight_resume_inputs(
         )}
     previous = None
     previous_fingerprint = str(existing.get("previous_fingerprint") or "")
-    if previous_fingerprint:
+    replaced = existing.get("previous_wave_artifact") if isinstance(existing.get("previous_wave_artifact"), dict) else {}
+    if replaced:  # a same-fingerprint re-dispatch replaced its predecessor in the hot index: read the exact copy
+        try:
+            previous = read_wave(state_root, task_id, replaced)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"error": "Prior exact plan-review authority is unreadable; in-flight reconciliation is refused."}
+    elif previous_fingerprint:
         from ouroboros.task_results import plan_review_wave
 
         previous = plan_review_wave(state, previous_fingerprint)
@@ -289,6 +295,12 @@ def in_flight_resume_inputs(
                     "Prior exact plan-review authority is unreadable; "
                     "in-flight reconciliation is refused."
                 )}
+    if (replaced or previous_fingerprint) and (previous is None or (
+            previous.get("cycle_index") == existing.get("cycle_index")
+            and str(previous.get("request_fingerprint") or "") == str(existing.get("request_fingerprint") or ""))):
+        return {"error": (  # a recorded predecessor that resolves to nothing, or to this very wave, is not a first wave
+            "Prior plan-review predecessor cannot be resolved to a distinct wave; in-flight reconciliation is refused."
+        )}
     raw_actor_rows = existing.get("actors")
     if not isinstance(raw_actor_rows, list) or any(
         not isinstance(row, dict) for row in raw_actor_rows
@@ -663,7 +675,7 @@ def compact_wave(wave: Dict[str, Any]) -> Dict[str, Any]:
         "closed": bool(wave.get("closed")),
         "paid": bool(wave.get("paid")),
         "wave_artifact": copy.deepcopy(wave.get("wave_artifact") or {}),
-        **{key: copy.deepcopy(wave[key]) for key in ("historical_supplements", "retry_key", "custody_pending") if key in wave},
+        **{key: copy.deepcopy(wave[key]) for key in ("historical_supplements", "retry_key", "custody_pending", "ordered_weaker", "previous_wave_artifact") if key in wave},
         **({"author_disposition": copy.deepcopy(wave["author_disposition"])}
            if isinstance(wave.get("author_disposition"), dict) else {}),
         **({"spec_source_ref": copy.deepcopy(wave["spec_source_ref"])} if wave.get("spec_source_ref") else {}),
@@ -742,3 +754,83 @@ def current_author_plan(drive_root: Any, task_id: str, state: dict) -> Optional[
         return {**value, "author_disposition": author, "review_fingerprint": subject["review_fingerprint"]}
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise PlanReviewSourceUnavailable(f"PLAN_AUTHOR_SOURCE_UNAVAILABLE: {exc}") from exc
+
+
+def row_pending(row: Dict[str, Any]) -> bool:
+    """A reviewer row whose answer has not arrived (awaiting, in flight, late-pending): never a terminal absence."""
+    return not row.get("ok") and (bool(row.get("late_result_pending")) or str(row.get("operation_state") or "settled") in (
+        "pending_dispatch", "in_flight", "custody_lost"))
+
+
+def _pending_seats(wave: Dict[str, Any]) -> set[str]:
+    return {str(r.get("slot_id") or "") for r in wave.get("actors") or [] if isinstance(r, dict) and row_pending(r)}
+
+
+def _earlier_wave(state_root: Any, task_id: str, state: Dict[str, Any], wave: Dict[str, Any]) -> Optional[dict]:
+    """The exact predecessor of ``wave``: by its recorded artifact pointer, else the hot index
+    materialized as authority. ``None`` only when the wave names no predecessor; an unreadable,
+    evicted or self-naming predecessor is a source failure, never an empty history."""
+    ref = wave.get("previous_wave_artifact") if isinstance(wave.get("previous_wave_artifact"), dict) else {}
+    fingerprint = str(wave.get("previous_fingerprint") or "")
+    if ref:
+        try:
+            earlier = read_wave(state_root, task_id, ref)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise PlanReviewSourceUnavailable(
+                f"PLAN_REVIEW_SOURCE_UNAVAILABLE: predecessor artifact {ref.get('path')}: {exc}") from exc
+    elif fingerprint:
+        from ouroboros.task_results import plan_review_wave
+
+        hot = plan_review_wave(state, fingerprint)
+        if hot is None:
+            raise PlanReviewSourceUnavailable(
+                f"PLAN_REVIEW_SOURCE_UNAVAILABLE: predecessor wave {fingerprint[:8]} is not in the index")
+        earlier = authority_wave(state_root, task_id, hot)
+    else:
+        return None
+    if isinstance(earlier, dict) and earlier.get("cycle_index") == wave.get("cycle_index") and str(
+            earlier.get("request_fingerprint") or "") == str(wave.get("request_fingerprint") or ""):
+        raise PlanReviewSourceUnavailable("PLAN_REVIEW_SOURCE_UNAVAILABLE: a plan-review wave names itself as its predecessor")
+    return earlier if isinstance(earlier, dict) else None
+
+
+def standing_findings_lineage(state_root: Any, task_id: str, state: Dict[str, Any], previous: Optional[dict],
+                              spec: dict, enforcement: str) -> Dict[str, list]:
+    """Per-seat standing findings across the same-spec lineage. A seat still pending when its
+    wave was superseded gave no terminal answer there, so its obligation comes from the wave
+    before, walked back until a real answer, a closed predecessor or a changed spec ends it.
+    The set of seats under walk only shrinks: a seat answered in a newer wave is never
+    re-added from an older one. History that cannot be read raises (fail closed): an unknown
+    obligation is never an empty one."""
+    from ouroboros.tools import plan_spec
+
+    target = plan_spec.spec_hash(spec)
+
+    def same_spec(wave: Any) -> bool:
+        if not isinstance(wave.get("spec"), dict):  # unresolved spec authority is not a verified mismatch
+            raise PlanReviewSourceUnavailable("PLAN_REVIEW_SOURCE_UNAVAILABLE: a plan-review wave carries no operative spec")
+        return str(wave.get("spec_hash") or plan_spec.spec_hash(wave["spec"])) == target
+
+    if not isinstance(previous, dict) or not same_spec(previous) or previous.get("closed"):
+        return {}
+    standing = plan_spec.plan_standing_findings(previous, spec, enforcement)
+    pending = _pending_seats(previous) - set(standing)
+    wave, seen = previous, set()
+    while pending:
+        key = (str(wave.get("request_fingerprint") or ""), wave.get("cycle_index"))
+        if key in seen:
+            raise PlanReviewSourceUnavailable(f"PLAN_REVIEW_SOURCE_UNAVAILABLE: plan-review lineage loops at {key[0][:8]}")
+        seen.add(key)
+        earlier = _earlier_wave(state_root, task_id, state, wave)
+        if earlier is None or earlier.get("closed") or not same_spec(earlier):
+            break  # the chain starts here, or a closed / changed-spec predecessor ended every obligation
+        step = plan_spec.plan_standing_findings(earlier, spec, enforcement)
+        rows = {str(r.get("slot_id") or ""): r for r in earlier.get("actors") or [] if isinstance(r, dict)}
+        for sid in sorted(pending):
+            if sid in step:
+                standing[sid] = step[sid]
+                pending.discard(sid)
+            elif not (sid in rows and row_pending(rows[sid])):
+                pending.discard(sid)  # a real answer (or no seat) in this wave ended the obligation
+        wave = earlier
+    return standing

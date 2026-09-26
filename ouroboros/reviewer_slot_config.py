@@ -749,12 +749,12 @@ def _delivery_slot(
 
     # ABI-4: the local-route fact is read off the typed target constructed at
     # the review seam, not re-derived per model string here.
-    own_effort = _row_own_effort(row)
     return ReviewSlot(
         slot_id=row.slot_id,
         model=row.target_id,
         effort=row_effort(row, effort_surface, default=default_effort),
-        declared_effort=default_effort if default_effort and not own_effort else "",
+        # "this row runs at the caller's order": every row but a compound route slug.
+        declared_effort=default_effort if default_effort and not _compound_effort(row) else "",
         role_hint=role_hint,
         use_local=(row.use_local if row.use_local is not None else resolved_review_model_target(row.target_id).provider_route == "local"),
         route=(ReviewRouteKind.AGENT_SESSION if row.is_session
@@ -784,8 +784,10 @@ def triad_delivery_slots(
     assembled packet, an ``agent_session`` row is a delegated retrieving
     reviewer, a ``subagent_id`` api row is a native retrieving episode — the
     substrate's route seam decides from the slot fields carried here. Effort is
-    the row's explicit value, else a compound Cursor/Agy route's encoded value,
-    else ``default_effort``, else the configured Review effort. Slot ids are the
+    a caller's ``default_effort`` (a plan envelope's order) on every row but a
+    compound Cursor/Agy route slug, whose encoded effort is the route's identity;
+    with no order it is the row's explicit value, else that compound value, else
+    the configured Review effort. Slot ids are the
     rows' own, owner-assigned on the structured config (ABI-10 retired the
     legacy comma-list read). ``slot_fields`` are the caller's per-surface ReviewSlot
     properties (timeout, output budget, temperature). A malformed structured
@@ -877,11 +879,11 @@ def commit_triad_delivery() -> Dict[str, Any]:
     }
 
 
-def _row_own_effort(row: ConfiguredReviewerSlot) -> str:
-    """The effort the ROW itself carries: its explicit field, else a Cursor/Agy
-    compound slug's encoded effort; '' when the row leaves it to its caller."""
-    if row.effort:
-        return row.effort
+def _compound_effort(row: ConfiguredReviewerSlot) -> str:
+    """A Cursor/Agy compound route slug's encoded effort, '' for every other row.
+    That effort is the route's model identity: sending ``model=…-xhigh`` with
+    ``effort=low`` is the contradiction ``validate_compound_session_effort``
+    already refuses at save time, so no caller's order may override it."""
     if row.is_session:
         return compound_session_effort(RouteSpec(
             kind=SHARED_ROUTE_KIND_SESSION,
@@ -889,6 +891,12 @@ def _row_own_effort(row: ConfiguredReviewerSlot) -> str:
             credential_profile_id=row.profile_id,
         )) or ""
     return ""
+
+
+def _row_own_effort(row: ConfiguredReviewerSlot) -> str:
+    """The effort the ROW itself carries: its explicit field, else a Cursor/Agy
+    compound slug's encoded effort; '' when the row leaves it to its caller."""
+    return row.effort or _compound_effort(row)
 
 
 def row_effort(
@@ -899,16 +907,18 @@ def row_effort(
 ) -> str:
     """Resolve one effort authority without contradicting a compound route.
 
-    An explicit row field wins.  When it is absent, a Cursor/Agy compound model
-    slug already carries the requested effort and therefore wins over the
-    surface default.  Ordinary rows retain the existing surface default (or a
-    caller's declared default, as a plan review order may carry).
+    A caller's ``default`` is an ORDER for this run (a plan envelope's
+    ``reviewer_effort``): it outranks the owner's per-row pin on every row except
+    a Cursor/Agy compound slug, whose encoded effort is the route's identity and
+    stays. Only plan review passes an order; commit, scope, skill, acceptance and
+    deep review call without one, and for them an explicit row field wins, then
+    a compound slug's encoded effort, then the surface setting.
     """
+    if default and not _compound_effort(row):
+        return default
     own = _row_own_effort(row)
     if own:
         return own
-    if default:
-        return default
     from ouroboros.config import resolve_effort
 
     return resolve_effort(surface)

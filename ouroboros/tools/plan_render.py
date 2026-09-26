@@ -274,12 +274,19 @@ def _next_step(wave: dict, *, enforcement: str, cap: Optional[int], cycles_paid:
         )
         if blocking:
             ids = ", ".join(str(f.get("finding_id") or f.get("id")) for f in blocking[:4])
-            text += (
-                f"NOTE: {len(blocking)} BLOCKING finding(s) below quorum ({ids}) stay OPEN whatever "
-                "you disposition. "
-                + ("A changed spec or a justified rejection may be judged in another paid cycle. "
-                   if not at_cap else "The cycle cap is reached; no further paid panel is available. ")
-            )
+            if enforcement == "advisory":  # the closure table's per-finding rule, stated as a fact
+                text += (
+                    f"NOTE: {len(blocking)} BLOCKING finding(s) below quorum ({ids}): a reject with its "
+                    "rationale closes each one; accept or defer keeps it open until a changed spec is reviewed. "
+                    + ("" if not at_cap else "The cycle cap is reached; no further paid panel is available. ")
+                )
+            else:
+                text += (
+                    f"NOTE: {len(blocking)} BLOCKING finding(s) below quorum ({ids}) stay OPEN whatever "
+                    "you disposition: a changed spec, or a justified rejection judged in another paid "
+                    "cycle, closes them. "
+                    + ("" if not at_cap else "The cycle cap is reached; no further paid panel is available. ")
+                )
     else:
         text = author_note + (
             "Blocking findings: accept ⇒ change the spec and re-call plan_task (new fingerprint, "
@@ -317,6 +324,7 @@ def _closure_note_view(note: str) -> str:
     """Legacy host notes describe state; the current renderer owns available steps."""
     prefix = str(note).partition(":")[0]
     meaning = {
+        "closed_by_disposition": "the open set emptied; the wave is recorded GREEN",
         "blocking_finding_below_quorum_stays_open": "blocking findings remain open after disposition",
         "revise_plan_not_closable_by_disposition": "disposition does not close blocking findings",
         "degraded_not_closable_by_disposition": "no parseable reviewer quorum; disposition does not close the wave",
@@ -402,8 +410,14 @@ def _render_wave(
         lines += ["", "⚠️ DEGRADED: no parseable reviewer quorum — recorded as an OPEN wave; "
                   + _degraded_replay_note(wave, paid_available=cap is None or cycles_paid < cap) + "."]
     actor_lines = [
-        f"- {a.get('slot_id')} · {a.get('model')} · {a.get('route')} · host_file_read: "
-        f"{a.get('host_file_read_attestation')} · {_actor_outcome(a, slot_class.get(id(a), ''))}"
+        f"- {a.get('slot_id')} · {a.get('model')} · {a.get('route')}"
+        + (f" · effort {a['effort']}{' (ordered)' if a.get('declared_effort') else ''}" if a.get("effort") else "")
+        + f" · host_file_read: {a.get('host_file_read_attestation')}"
+        + (f" · room snapshot read {a['room_read_coverage'].get('covered_chars')}/{a['room_read_coverage'].get('complete_chars')} "
+           f"chars ({a['room_read_coverage'].get('provenance')})" if isinstance(a.get("room_read_coverage"), dict) else "")
+        + f" · {_actor_outcome(a, slot_class.get(id(a), ''))}"
+        + ((" · not sent" if a.get("operation_state") == "not_dispatched" else " · did not answer")
+           + "; its earlier finding is still listed" if a.get("carried_findings") else "")
         + (f" · disclosures: {', '.join(a['disclosures'])}" if a.get("disclosures") else "")
         for a in wave.get("actors") or []
     ] or ["(no actor records)"]
@@ -411,9 +425,11 @@ def _render_wave(
     findings_total = int(wave.get("findings_total") or len(findings))
     finding_page = findings[:MAX_FINDINGS_PER_SLOT]
     if wave.get("reviewer_effort"):
-        actor_lines.append(
-            f"- declared reviewer effort: {wave['reviewer_effort']} (this envelope's order; an explicit "
-            "per-row effort or a compound route slug outranks it)")
+        actor_lines.append(f"- reviewer effort ordered for this envelope: {wave['reviewer_effort']}")
+    if isinstance(wave.get("ordered_weaker"), dict) and wave["ordered_weaker"]:
+        actor_lines.append("- ORDERED WEAKER THAN THE OWNER SETTING on " + ", ".join(
+            f"{sid} ({row.get('effort')} < {row.get('owner_effort')})"
+            for sid, row in wave["ordered_weaker"].items() if isinstance(row, dict)))
     lines += [
         "", "### Reviewer slots" + (" (original recorded state)" if historical_feedback is not None else ""), "", *actor_lines,
         "", "### Findings (per slot; finding_id = slot:id)", "", "```json",

@@ -85,7 +85,7 @@ def test_full_plan_review_disposition_repeat_and_tail_delta(_harness):
     spec = {"in_scope": ["full requirement\n" * 22_000 + "SCOPE_TAIL_A"],
             "acceptance_claims": ["full criterion\n" * 22_000 + "CLAIM_TAIL"],
             "affected_paths": []}  # required on every submitted spec (owner 9=A)
-    assert _control(_call(ctx, spec, goal=goal)) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert _control(_call(ctx, spec, goal=goal)) == {"outcome": "GREEN", "closed": True}
     state = _state(_harness)
     fingerprint = state["waves"][-1]["request_fingerprint"]
     finding = state["waves"][-1]["findings"][0]["finding_id"]
@@ -99,7 +99,7 @@ def test_full_plan_review_disposition_repeat_and_tail_delta(_harness):
     assert _raw_state(_harness.drive, "task-1")["waves"][-1]["spec"] == {}
     changed = deepcopy(spec)
     changed["in_scope"][0] = changed["in_scope"][0].replace("TAIL_A", "TAIL_B")
-    assert _control(_call(ctx, changed, goal=goal))["outcome"] == "REVIEW_REQUIRED"
+    assert _control(_call(ctx, changed, goal=goal))["outcome"] == "GREEN"
     assert len(substrate.calls) == 2 and _state(_harness)["cycles_paid"] == 2
     sent = _user_text(substrate.calls[-1]["request"].messages[-1]["content"])
     assert "SCOPE_TAIL_B" in sent and "previous frozen spec body truncated" not in sent

@@ -143,3 +143,24 @@ def test_uncertain_or_running_panels_keep_committed_capacity(paid, cycles, actor
     state = {'cycles_paid': cycles, 'current_attempt': {'fingerprint': 'original'},
              'waves': [{'request_fingerprint': 'original', 'custody_pending': True, 'paid': paid, 'actors': actors}]}
     assert in_flight_hold(state, fingerprint='revised', cap=1)
+
+
+def test_native_first_send_carries_no_required_source_manifest_for_the_room(harness):
+    """The room snapshot is an OBSERVED source for sessions only: a native episode's first
+    send names no required-source manifest, so it is never told to read the multi-MB
+    snapshot and no capability delta is filed for not doing so."""
+    from ouroboros.review_execution import ReviewAssignment
+    from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
+
+    ctx = harness.make_ctx()
+    ctx.current_chat_id = 1
+    harness.state['slots'] = [replace(harness.state['slots'][0], subagent_id='native-reader')]
+    append_jsonl(harness.drive / 'logs/chat.jsonl', {'direction': 'out', 'chat_id': 1, 'text': 'Discussion and tradeoffs.'})
+    substrate = harness.install({'s1': CLEAN})
+    _call(ctx)
+    request, slot = substrate.calls[0]['request'], substrate.calls[0]['slots'][0]
+    assert request.policy['observed_sources'][0]['root'] == 'artifact_store' and 'native_required_sources' not in request.policy
+    executor = NativeToolRoundReviewExecutor(ReviewAssignment(request=request, slot=slot, call_id='native-observed'))
+    _registry, _schemas, messages, _size = executor._open_episode(str(harness.workspace), harness.drive)
+    assert 'Required source manifest' not in messages[-1]['content']
+    assert 'Discussion and tradeoffs.' in messages[-1]['content']
