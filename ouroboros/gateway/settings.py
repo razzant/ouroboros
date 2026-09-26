@@ -450,6 +450,33 @@ async def _run_settings_writer(fn: Any, context: Any, body: Any) -> JSONResponse
         )
 
 
+async def api_owner_autostart(request: Request) -> JSONResponse:
+    """Windows logon autostart: GET reads the HKCU Run-key truth, POST sets it.
+
+    The registry IS the state — no settings.json mirror, so a key edited in
+    Windows' own tooling is reported as it is. Availability is the packaged
+    Windows desktop run (winreg + OUROBOROS_LAUNCHER_EXE exported by the
+    launcher); everything else answers ``available: false`` and never touches
+    the registry.
+    """
+    from ouroboros import windows_autostart
+
+    if request.method == "GET":
+        return JSONResponse({"ok": True, **windows_autostart.read_autostart_state()})
+    body = await _json_body_or_empty(request)
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        return unsaved_error("'enabled' must be a boolean", 400)
+    enabled = bool(body["enabled"])
+    result = windows_autostart.set_autostart(enabled)
+    if not result.get("ok"):
+        # A registry failure is a server-side condition, not a bad request.
+        return json_error(str(result.get("error") or "autostart update failed"), 500)
+    _owner_audit(request, "autostart", {"enabled": enabled})
+    # Report the post-write registry truth, not the request: a disable over an
+    # already-absent key is idempotent success with enabled=false.
+    return JSONResponse({k: v for k, v in result.items() if k != "ok"} | {"ok": True})
+
+
 @owner_write_guard
 async def api_owner_runtime_mode(request: Request) -> JSONResponse:
     """Persist the owner-selected runtime mode for the next boot."""

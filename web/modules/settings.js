@@ -1045,6 +1045,77 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         return result;
     }
 
+    async function syncAutostartControl() {
+        const section = byId('autostart-section');
+        const checkbox = byId('s-autostart');
+        const note = byId('autostart-status');
+        if (!section || !checkbox) return;
+        let state = null;
+        try {
+            state = await apiClient.ownerAutostartGet();
+        } catch (err) {
+            // Endpoint unreachable: keep the section hidden rather than a dead control.
+            section.hidden = true;
+            return;
+        }
+        if (!state || state.ok !== true || !state.available) {
+            section.hidden = true;
+            return;
+        }
+        section.hidden = false;
+        checkbox.disabled = false;
+        checkbox.checked = Boolean(state.enabled);
+        checkbox.dataset.registryTruth = '1';
+        if (note) {
+            note.textContent = state.enabled
+                ? `Enabled — ${state.key_path || ''}\\${state.value_name || ''} → ${state.launcher_exe || 'launcher.exe'}`
+                : '';
+        }
+    }
+
+    function bindAutostartControl() {
+        const section = byId('autostart-section');
+        const checkbox = byId('s-autostart');
+        const note = byId('autostart-status');
+        if (!section || !checkbox) return;
+        checkbox.addEventListener('change', async () => {
+            if (checkbox.dataset.registryTruth !== '1') return;
+            const nextEnabled = checkbox.checked;
+            checkbox.disabled = true;
+            try {
+                const ok = await openConfirmDialog({
+                    title: 'Run at logon',
+                    body: nextEnabled
+                        ? 'Add this installation to the Windows Run key so Ouroboros starts when you log in?'
+                        : 'Remove Ouroboros from the Windows Run key?',
+                    confirmLabel: nextEnabled ? 'Enable' : 'Disable',
+                });
+                let result;
+                if (!ok) {
+                    result = { ok: false, error: 'Autostart change cancelled.' };
+                } else {
+                    result = await apiClient.ownerAutostartSet(nextEnabled);
+                }
+                if (!result || result.ok !== true) {
+                    throw Object.assign(new Error(result?.error || 'Autostart change failed.'), { body: result });
+                }
+                checkbox.checked = Boolean(result.enabled);
+                if (note) {
+                    note.textContent = result.enabled
+                        ? `Enabled — ${result.key_path || ''}\\${result.value_name || ''} → ${result.launcher_exe || 'launcher.exe'}`
+                        : '';
+                }
+                if (typeof setStatus === 'function') setStatus('Autostart ' + (result.enabled ? 'enabled' : 'disabled') + '.', 'ok');
+            } catch (err) {
+                // Re-read the registry truth so the checkbox never lies.
+                await syncAutostartControl();
+                if (typeof setStatus === 'function') setStatus(err?.body?.error || err?.message || 'Autostart change failed.', 'error');
+            } finally {
+                checkbox.disabled = false;
+            }
+        });
+    }
+
     async function saveSafetyModeViaOwnerEndpointIfNeeded(next) {
         // Owner-only, dropped from the generic /api/settings POST — saved through the
         // dedicated audited endpoint. Confirm on LOWERING coverage (full > light > off).
@@ -1106,6 +1177,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     syncSettingsLoadState();
     syncRuntimeModeBridgeState();
     syncAutoGrantBridgeState();
+    bindAutostartControl();
+    syncAutostartControl();
     reloadSettingsWithFeedback();
 
     if (typeof setBeforePageLeave === 'function') {
@@ -1129,6 +1202,9 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     // to discard "unsaved settings" that do not exist.
     const onServerSettingEdited = (event) => {
         if (event?.target?.closest?.('[data-notify-settings]')) return;
+        // The autostart checkbox is registry-backed (owner endpoint), not a
+        // settings.json field: its change must not dirty the server draft.
+        if (event?.target?.closest?.('#autostart-section')) return;
         onSettingsEdited();
     };
     page.addEventListener('input', onServerSettingEdited);

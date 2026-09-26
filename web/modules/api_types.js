@@ -842,6 +842,17 @@
  */
 
 /**
+ * @typedef {Object} OwnerAutostartResponse
+ * @property {boolean} ok
+ * @property {boolean} available
+ * @property {boolean} enabled  // registry truth; false when unavailable
+ * @property {string=} launcher_exe
+ * @property {string=} reason
+ * @property {string=} key_path
+ * @property {string=} value_name
+ */
+
+/**
  * @typedef {Object} OwnerContextModeResponse
  * @property {boolean} ok
  * @property {string} context_mode

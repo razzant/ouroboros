@@ -70,7 +70,10 @@ Every `/api/files/*` operation resolves its requested path and refuses the opera
 | DELETE | `/api/claudexor/credential-profiles/{harness}/{profile_id}` | `gateway.claudexor_accounts.api_claudexor_credential_profile` |
 | PATCH | `/api/claudexor/credential-profiles/{harness}/{profile_id}` | `gateway.claudexor_accounts.api_claudexor_credential_profile` |
 | POST | `/api/owner/runtime-mode` | `gateway.settings.api_owner_runtime_mode` |
+| GET/POST | `/api/owner/autostart` | `gateway.settings.api_owner_autostart` (Windows logon autostart: the HKCU Run key is the state, availability is the packaged Windows desktop run — `windows_autostart.py`) |
 | POST | `/api/owner/auto-grant` | `gateway.settings.api_owner_auto_grant` |
+| GET | `/api/owner/autostart` | `gateway.settings.api_owner_autostart_get` |
+| POST | `/api/owner/autostart` | `gateway.settings.api_owner_autostart_post` |
 | POST | `/api/owner/context-mode` | `gateway.settings.api_owner_context_mode` |
 | POST | `/api/owner/safety-mode` | `gateway.settings.api_owner_safety_mode` |
 | POST | `/api/owner/skills/{skill}/presence-runtime` | `gateway.presence_settings.api_owner_skill_presence_runtime` |

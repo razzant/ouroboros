@@ -263,6 +263,10 @@ export const apiClient = {
     previewOnboardingSubagents: (payload) => jsonPost('/api/onboarding/subagents/preview', payload),
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
+    /** @returns {Promise<import('./api_types.js').OwnerAutostartResponse>} */
+    ownerAutostartGet: () => fetchJson('/api/owner/autostart', { cache: 'no-store' }),
+    /** @returns {Promise<import('./api_types.js').OwnerAutostartResponse>} */
+    ownerAutostartSet: (enabled) => jsonPost('/api/owner/autostart', { enabled: Boolean(enabled) }),
     ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
     /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),

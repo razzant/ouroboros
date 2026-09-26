@@ -940,6 +940,18 @@ export function renderSettingsPage() {
                         </div>
                     </div>
 
+                    <div class="form-section" id="autostart-section" hidden>
+                        <h3>Startup</h3>
+                        <div class="settings-section-copy">
+                            <strong>Run at logon</strong> adds this installation to the Windows <code>HKCU ...\\CurrentVersion\\Run</code> registry key — no background service. Windows desktop installations only; the state shown is the registry itself.
+                        </div>
+                        <label class="local-toggle ui-field ui-field-inline" id="autostart-toggle-label" title="Creates or removes the HKCU Run-key entry pointing at this installation's launcher.">
+                            <input type="checkbox" id="s-autostart" class="ui-checkbox" name="s-autostart">
+                            Run at logon (Windows)
+                        </label>
+                        <div id="autostart-status" class="settings-inline-note" role="status" aria-live="polite"></div>
+                    </div>
+
                     <div class="form-section">
                         <h3>Cleanup</h3>
                         <!-- The two subagent path roots moved to Agents →

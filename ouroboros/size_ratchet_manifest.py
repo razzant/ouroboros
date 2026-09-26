@@ -236,7 +236,6 @@ BAND_PATHS = {
     "web/app.js": "Sidebar activity adds in-place marker and accessible-name updates to the existing navigation owner and connects the shared snapshot sequencer to transport failures. Pure census/status interpretation stays in project_activity.js; moving these DOM bindings would split navigation ownership.",
     "web/modules/chat_activity.js": "Existing task activity renderer consumes the shared quota/auth wait state; no parallel task card or lifecycle.",
     "web/modules/harness_accounts.js": None,
-    "web/modules/settings.js": "Settings retains draft, validation and save ownership; account discovery subscription and refresh state live together in the existing settings_catalog.js owner.",
     "web/modules/settings_ui.js": "The existing Settings markup owner includes the client-local Appearance panel alongside the other tab declarations; theme behavior remains in theme.js, without a new one-panel wrapper.",
     "web/modules/skills.js": "One installed-skill page controller owns independently settling primary/optional reads and current-generation menu, identity and badge updates; domain lifecycle, cards, hub truth and shared interactions remain separate owners.",
     "web/tests/chat_instance_dom.test.js": "Entered the band from 1000 lines with the alias-free subagent cost pin (stage-2 fix wave): that regression reproduces only through the real createChatInstance card path, and this file owns the DOM harness that drives it; split when the next createChatInstance face lands.",
