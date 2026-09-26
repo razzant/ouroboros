@@ -110,7 +110,8 @@ def _notify_fresh_schedule_id(skill_name: str) -> str:
     """A keyless post is fire-and-forget: a fresh, contract-sized id each time."""
     from ouroboros.schedule_contract import schedule_slug
 
-    return schedule_slug("notify", skill_name, utc_now_iso()[:19].replace(":", ""), os.urandom(3).hex())
+    slug = schedule_slug("notify", skill_name, utc_now_iso()[:19].replace(":", ""), os.urandom(3).hex())
+    return re.sub(r"\.{2,}", ".", slug)
 
 
 def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, text: str, key: str,
@@ -197,7 +198,9 @@ def _schedule_owner_notification(ctx: "HostServiceContext", skill_name: str, tex
                 reason="notification scheduled by its skill")
     except ScheduleRefused as refusal:
         # An audit that could not be written is the host failing, not the skill: retry.
-        return _json_error(refusal.message, 503 if refusal.status == "audit_unavailable" else 400)
+        if refusal.status == "audit_unavailable":
+            return _json_error(refusal.message, 503)
+        return JSONResponse({"ok": False, "error": refusal.message, "status": refusal.status}, status_code=400)
     except ScheduleStoreUnreadable as exc:
         return _json_error(str(exc), 503)
     return JSONResponse({

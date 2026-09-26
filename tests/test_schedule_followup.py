@@ -934,7 +934,7 @@ def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path, monkey
     ring for a skill the owner switched off or removed; and it asks about each
     skill once per pass, not once per due row."""
     import ouroboros.skill_loader as skill_loader
-    from ouroboros.skill_loader import save_enabled, save_skill_grants
+    from ouroboros.skill_loader import compute_content_hash, save_enabled, save_skill_grants
 
     queue, pending = _queue(tmp_path)
     skill_dir = tmp_path / "skills" / "external" / "cal"
@@ -946,7 +946,7 @@ def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path, monkey
     queue.upsert_scheduled_task(_notify_row("n-ghost", source="skill:ghost", key="g"))
     queue.upsert_scheduled_task(_notify_row("n-cal", source="skill:cal", key="c"))
     queue.upsert_scheduled_task(_notify_row("n-cal-2", source="skill:cal", key="c2"))
-    save_skill_grants(tmp_path, "cal", [], content_hash="h", requested_keys=[],
+    save_skill_grants(tmp_path, "cal", [], content_hash=compute_content_hash(skill_dir, manifest_entry="plugin.py"), requested_keys=[],
                       granted_permissions=["notify_owner"], requested_permissions=["notify_owner"])
     save_enabled(tmp_path, "cal", False)
     looked_up: list[str] = []
@@ -969,7 +969,7 @@ def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path, monkey
 def test_notify_row_of_a_skill_whose_grant_was_revoked_stays_silent(tmp_path):
     """The owner's grant is the consent that armed the row: revoking it keeps
     the row silent (and visible in Activity) exactly as disabling the skill."""
-    from ouroboros.skill_loader import save_enabled, save_skill_grants
+    from ouroboros.skill_loader import compute_content_hash, save_enabled, save_skill_grants
 
     queue, _pending = _queue(tmp_path)
     skill_dir = tmp_path / "skills" / "external" / "cal"
@@ -983,7 +983,7 @@ def test_notify_row_of_a_skill_whose_grant_was_revoked_stays_silent(tmp_path):
     queue.check_scheduled_tasks()  # no grant yet: silent, still armed
     assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []
     assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["enabled"] is True
-    save_skill_grants(tmp_path, "cal", [], content_hash="h", requested_keys=[],
+    save_skill_grants(tmp_path, "cal", [], content_hash=compute_content_hash(skill_dir, manifest_entry="plugin.py"), requested_keys=[],
                       granted_permissions=["notify_owner"], requested_permissions=["notify_owner"])
     queue.check_scheduled_tasks()
     assert len([row for row in _events(tmp_path) if row.get("type") == "owner_notification"]) == 1

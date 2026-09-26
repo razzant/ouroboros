@@ -889,7 +889,8 @@ the row is yours to move: the same key posted again replaces its time and
 text (a one-shot that already fired needs a new `at` — the same instant answers
 `400 consumed_not_rearmed`); `{"key": ..., "cancel": true}` removes it (`404` when there is no such
 row of yours). Without a key each post is a new fire-and-forget row. A
-disabled or removed skill's rows stay silent until it is enabled again, and an
+disabled or removed skill's rows — or a skill whose `notify_owner` grant was
+revoked — stay silent until it is enabled and granted again, and an
 owner who disabled or deleted one of your rows — on the Activity page, or by
 asking Ouroboros — keeps it off: the same key posted again answers `{"scheduled": false, "status":
 "suppressed"}` and your cancel `{"cancelled": false, "status": "suppressed"}`

@@ -242,6 +242,7 @@ def test_long_keys_yield_ids_the_owner_lifecycle_endpoints_accept(tmp_path: path
     assert _notify_schedule_id("cal", "a..b") != _notify_schedule_id("cal", "a.b"), "the digest keeps dotted keys apart"
     assert schedule_id_error(_notify_schedule_id("s" * 200, "k" * 128)) == ""
     assert schedule_id_error(_notify_fresh_schedule_id("s" * 200)) == ""
+    assert schedule_id_error(_notify_fresh_schedule_id("my..skill")) == ""
     client, _app = _notify_client(tmp_path)
     resp = client.post("/notify", headers={"X-Skill-Token": "tok"},
                        json={"text": "x", "key": "k" * 128, "at": "2999-01-01T00:00:00+00:00"})
@@ -329,6 +330,21 @@ def test_companions_on_the_events_socket_are_not_served_owner_notifications(tmp_
         ws.send_json({"type": "subscribe", "topic": OWNER_NOTIFICATION})
         message = ws.receive_json()
     assert message["type"] == "error" and "lacks grant" in message["error"]
+
+
+def test_reposting_a_fired_one_shot_at_the_same_instant_names_its_refusal(tmp_path: pathlib.Path) -> None:
+    from supervisor import queue
+
+    queue.init(tmp_path)
+    client, _app = _notify_client(tmp_path)
+    headers = {"X-Skill-Token": "tok"}
+    body = {"text": "Standup", "key": "cal:evt-20", "at": "2000-01-01T09:00:00+00:00"}
+    assert client.post("/notify", headers=headers, json=body).status_code == 200
+    queue.check_scheduled_tasks()  # fires the past instant once
+    again = client.post("/notify", headers=headers, json=body)
+    assert again.status_code == 400 and again.json()["status"] == "consumed_not_rearmed"
+    moved = client.post("/notify", headers=headers, json={**body, "at": "2999-01-01T09:00:00+00:00"})
+    assert moved.status_code == 200 and moved.json()["scheduled"] is True
 
 
 def test_two_skills_with_look_alike_long_names_never_share_a_schedule_id() -> None:

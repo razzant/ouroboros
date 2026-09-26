@@ -743,8 +743,11 @@ def _notify_source_silenced(source: str, seen: Dict[str, bool]) -> bool:
         from ouroboros.skill_loader import find_skill, load_enabled, load_skill_grants
 
         name, root = source[len("skill:"):], _queue().DRIVE_ROOT
-        # The owner's grant is the consent that armed the row; revoking it
-        # silences the row exactly as disabling the skill does.
+        # The owner's grant is the consent that armed the row; a grant the owner
+        # withdrew silences the row exactly as disabling the skill does. This
+        # reads the recorded grant itself, not the Host route's content-hash
+        # binding: a payload edit stops NEW posts until the owner re-grants,
+        # but does not withdraw the consent behind reminders already armed.
         seen[source] = (find_skill(root, name) is None or not load_enabled(root, name)
                         or "notify_owner" not in load_skill_grants(root, name).get("granted_permissions", []))
     return seen[source]
