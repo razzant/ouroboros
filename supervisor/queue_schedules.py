@@ -716,36 +716,32 @@ def _task_from_schedule(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _notification_chat_id(record: Dict[str, Any]) -> int:
-    """The row's own positive chat, else the owner's chat, else Main.
-
-    Never ``notification_chat_route``: chat 0 is a real destination there (the
-    Skill Review panel) and a notification addressed to it reaches nobody.
-    """
+    """The row's own positive chat, else where any owner notification goes
+    (``event_bus.owner_notification_chat_id``: the bound owner, else Main)."""
     try:
         pinned = int(record.get("chat_id") or 0)
     except (TypeError, ValueError):
         pinned = 0
     if pinned > 0:
         return pinned
-    try:
-        owner = int(_queue().load_state().get("owner_chat_id") or 0)
-    except (TypeError, ValueError):
-        owner = 0
-    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.event_bus import owner_notification_chat_id
 
-    return owner if owner > 0 else WEB_UI_CHAT_ID
+    return owner_notification_chat_id(_queue().DRIVE_ROOT)
 
 
-def _notify_source_silenced(source: str) -> bool:
+def _notify_source_silenced(source: str, seen: Dict[str, bool]) -> bool:
     """A skill's standing reminders fall silent with the skill: the resync never
     touches ``skill:`` rows, so a disabled or removed skill would otherwise keep
-    ringing while its card says off."""
+    ringing while its card says off. ``seen`` memoises one tick's answers so a
+    burst of due rows costs one discovery per skill, not one per row."""
     if not source.startswith("skill:"):
         return False
-    from ouroboros.skill_loader import find_skill, load_enabled
+    if source not in seen:
+        from ouroboros.skill_loader import find_skill, load_enabled
 
-    name = source[len("skill:"):]
-    return find_skill(_queue().DRIVE_ROOT, name) is None or not load_enabled(_queue().DRIVE_ROOT, name)
+        name = source[len("skill:"):]
+        seen[source] = find_skill(_queue().DRIVE_ROOT, name) is None or not load_enabled(_queue().DRIVE_ROOT, name)
+    return seen[source]
 
 
 def _fire_owner_notification(record: Dict[str, Any], now: datetime.datetime,
@@ -805,6 +801,7 @@ def check_scheduled_tasks() -> None:
             return
         changed = False
         collision_names = None
+        silenced_sources: Dict[str, bool] = {}
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         for record in list(data.get("tasks") or []):
             if not isinstance(record, dict) or not record.get("enabled", True):
@@ -868,7 +865,7 @@ def check_scheduled_tasks() -> None:
                 if str(record.get("skill") or "") in collision_names:
                     continue
             if notify_row:
-                if _notify_source_silenced(str(record.get("source") or "")):
+                if _notify_source_silenced(str(record.get("source") or ""), silenced_sources):
                     continue
                 due_at = _parse_schedule_time(trigger.get("run_at"), tz) if trigger_type == "once" else next_run
                 row, why = _fire_owner_notification(record, now, due_at or now)

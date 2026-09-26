@@ -855,14 +855,17 @@ instant>"` (once) or `"cron": "<5-field>"` plus optional `"timezone"`. The host
 stores a `kind: "notify"` row in the one schedule table (visible under Activity
 → Scheduled, where the owner can disable or delete it) and the supervisor tick
 fires it at its instant without a model — a reminder whose instant passed while
-Ouroboros was off fires once on the next tick, like any one-shot. With a `key`
+Ouroboros was off fires once on the next tick, like any one-shot, and a crash
+between the durable receipt and the table write can replay one occurrence. With a `key`
 the row is yours to move: the same key posted again replaces its time and
 text; `{"key": ..., "cancel": true}` removes it (`404` when there is no such
 row of yours). Without a key each post is a new fire-and-forget row. A
 disabled or removed skill's rows stay silent until it is enabled again, and an
 owner who disabled or deleted one of your rows on the Activity page keeps it
 off: the same key posted again answers `{"scheduled": false, "status":
-"suppressed"}` until the owner restores it. Every scheduled post rewrites the
+"suppressed"}` and your cancel `{"cancelled": false, "status": "suppressed"}`
+until the owner restores the row — or deletes the retained record a second
+time, which removes it and frees the key. Every scheduled post rewrites the
 one schedule table under its lock, so keep the armed set small — the next
 occurrences, keyed, not a year of one-shots.
 

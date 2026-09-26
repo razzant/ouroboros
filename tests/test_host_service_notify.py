@@ -122,11 +122,12 @@ def test_notify_with_at_schedules_a_notify_row_that_a_key_moves_and_cancels(tmp_
     rows = queue.list_scheduled_tasks(tmp_path)["tasks"]
     assert len(rows) == 1 and rows[0]["trigger"]["run_at"].startswith("2999-01-02T10:00")
     assert rows[0]["notification"]["text"] == "Meeting with Ivan (moved)"
-    # Cancel by key removes it through the audited delete; an unknown key is 404.
-    gone = client.post("/notify", headers=headers, json={"text": "x", "key": "cal:evt-1", "cancel": True})
+    # Cancel by key removes it through the audited delete (a cancel names a key,
+    # no text needed); an unknown key is 404.
+    gone = client.post("/notify", headers=headers, json={"key": "cal:evt-1", "cancel": True})
     assert gone.status_code == 200 and gone.json()["cancelled"] is True
     assert queue.list_scheduled_tasks(tmp_path)["tasks"] == []
-    assert client.post("/notify", headers=headers, json={"text": "x", "key": "cal:evt-1", "cancel": True}).status_code == 404
+    assert client.post("/notify", headers=headers, json={"key": "cal:evt-1", "cancel": True}).status_code == 404
     # A cron reminder from a skill rides the same row kind.
     cron = client.post("/notify", headers=headers, json={"text": "Standup", "key": "standup", "cron": "0 9 * * 1-5", "timezone": "Europe/Moscow"})
     assert cron.status_code == 200 and cron.json()["scheduled"] is True
@@ -144,7 +145,7 @@ def test_notify_scheduling_validation(tmp_path: pathlib.Path) -> None:
     assert client.post("/notify", headers=headers, json={"text": "x", "at": "2999-01-01T00:00:00Z", "cron": "* * * * *"}).status_code == 400
     assert client.post("/notify", headers=headers, json={"text": "x", "cron": "bad"}).status_code == 400
     assert client.post("/notify", headers=headers, json={"text": "x", "cron": "* * * * *", "timezone": "Mars/Olympus"}).status_code == 400
-    assert client.post("/notify", headers=headers, json={"text": "x", "cancel": True}).status_code == 400, "cancel needs a key"
+    assert client.post("/notify", headers=headers, json={"cancel": True}).status_code == 400, "cancel needs a key"
     assert client.post("/notify", headers=headers, json={"text": "x", "key": "k", "cancel": True, "at": "2999-01-01T00:00:00Z"}).status_code == 400
     assert queue.list_scheduled_tasks(tmp_path)["tasks"] == []
     # Without a key a row is fire-and-forget: two posts, two rows.
@@ -250,6 +251,32 @@ def test_long_keys_yield_ids_the_owner_lifecycle_endpoints_accept(tmp_path: path
     assert off["ok"] is True and off["status"] == "updated"
 
 
+def test_companions_on_the_events_socket_are_not_served_owner_notifications(tmp_path: pathlib.Path) -> None:
+    """The documented boundary: an in-process plugin subscribes to the topic,
+    a companion on WS /events is refused (no grant exists for it yet)."""
+    from ouroboros.event_bus import OWNER_NOTIFICATION
+    from tests.test_host_service_api import FakeBridge
+
+    _seed_token(tmp_path, skill="listener", token="token", permissions=["notify_owner"],
+                subscribe_events=[OWNER_NOTIFICATION])
+    client = TestClient(create_host_service_app(tmp_path, bridge_getter=FakeBridge))
+    with client.websocket_connect("/events", headers={"X-Skill-Token": "token"}) as ws:
+        ws.send_json({"type": "subscribe", "topic": OWNER_NOTIFICATION})
+        message = ws.receive_json()
+    assert message["type"] == "error" and "lacks grant" in message["error"]
+
+
+def test_two_skills_with_look_alike_long_names_never_share_a_schedule_id() -> None:
+    """The slug is truncated to fit the id contract, so two 64-character names
+    that differ only past the cut must still get their own row per key."""
+    from ouroboros.gateway.host_service import _notify_schedule_id
+
+    first, second = "a" * 60 + "0007", "a" * 60 + "0008"
+    ids = {_notify_schedule_id(first, "2"), _notify_schedule_id(second, "2")}
+    assert len(ids) == 2 and all(len(i) <= 81 for i in ids)
+    assert _notify_schedule_id(first, "2") == _notify_schedule_id(first, "2")
+
+
 def test_notify_addresses_the_owner_of_its_own_data_root(tmp_path: pathlib.Path) -> None:
     from ouroboros.utils import atomic_write_json
 
@@ -282,5 +309,6 @@ def test_skill_cancel_cannot_lift_the_owner_suppression(tmp_path: pathlib.Path) 
     assert queue.list_scheduled_tasks(tmp_path)["tasks"][0]["enabled"] is False
     # Its own unsuppressed row the skill may still remove.
     other = client.post("/notify", headers=headers, json={**body, "key": "cal:evt-8"}).json()["id"]
+    assert other != schedule_id
     assert client.post("/notify", headers=headers, json={"text": "x", "key": "cal:evt-8", "cancel": True}).json()["cancelled"] is True
     assert [r["id"] for r in queue.list_scheduled_tasks(tmp_path)["tasks"]] == [schedule_id]

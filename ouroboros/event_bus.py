@@ -142,6 +142,26 @@ def publish_event(topic: str, data: Dict[str, Any]) -> None:
     get_global_event_bus().publish(topic, data)
 
 
+def owner_notification_chat_id(drive_root) -> int:
+    """Where an owner notification goes: the owner's chat of THIS data root
+    (its own state file, never the process-global one), else Main while no
+    owner is bound. Deliberately not ``notification_chat_route``: chat 0 is a
+    real destination there (the Skill Review panel), but a banner addressed to
+    it reaches nobody — the browser notifier refuses it. One rule for every
+    producer (the Host route, the scheduler, a future agent tool)."""
+    import pathlib
+
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.utils import read_json_dict
+
+    state = read_json_dict(pathlib.Path(drive_root) / "state" / "state.json") or {}
+    try:
+        owner = int(state.get("owner_chat_id") or 0)
+    except (TypeError, ValueError):
+        owner = 0
+    return owner if owner > 0 else WEB_UI_CHAT_ID
+
+
 def emit_owner_notification(
     drive_root: Any, *, chat_id: int, category: str, text: str, source: str,
     key: str = "", scheduled_for: str = "", publish: bool = True,

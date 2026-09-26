@@ -716,4 +716,10 @@ test('Activity shows a notify row by its sentence with the notification tag and 
     assert.equal(retained.length, 1);
     assert.match(retained[0].textContent, /Standup[\s\S]*suppressed/);
     assert.equal(retained[0].querySelector('button').textContent, 'Restore');
+    // Delete carries what the dialog needs to tell the truth: the first Delete of
+    // a reminder suppresses it, deleting the retained record removes it.
+    const armedDelete = standing[0].querySelector('[data-act="schedule-delete"]');
+    assert.equal(armedDelete.dataset.notify, '1');
+    assert.equal(armedDelete.dataset.suppressed, '');
+    assert.equal(retained[0].querySelector('[data-act="schedule-delete"]').dataset.suppressed, '1');
 });

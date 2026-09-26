@@ -1078,7 +1078,7 @@ reason the subscription belongs to the client rather than to a room. That is
 deliberate for the first version: we measure how it feels before adding clever
 exceptions.
 
-**Two authorities, one surface.** Every category is one of two kinds:
+**Three authorities, one surface.** Every category is one of three kinds:
 
 | Category | Kind | What decides |
 |---|---|---|

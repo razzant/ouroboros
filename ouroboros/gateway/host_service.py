@@ -21,8 +21,9 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, WEB_UI_CHAT_ID, is_a2a_chat_id
-from ouroboros.event_bus import OWNER_NOTIFICATION_TEXT_CHARS, emit_owner_notification, get_global_event_bus
+from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, is_a2a_chat_id
+from ouroboros.event_bus import (OWNER_NOTIFICATION_TEXT_CHARS, emit_owner_notification, get_global_event_bus,
+                                 owner_notification_chat_id)
 from ouroboros.config import WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC
 from ouroboros.gateway._helpers import run_sync_to_completion
 from ouroboros.gateway.files import store_chat_upload
@@ -646,18 +647,6 @@ def _presence_staged_files(
     return tuple(files)
 
 
-def _owner_notification_chat_id(data_dir: pathlib.Path) -> int:
-    """The owner's chat of THIS data root (its own state file, never the
-    process-global one), or Main while no owner is bound. Not
-    ``notification_chat_route``: it keeps chat 0 (the Skill Review panel), which
-    the browser notifier refuses and nobody reads."""
-    state = read_json_dict(pathlib.Path(data_dir) / "state" / "state.json") or {}
-    try:
-        owner = int(state.get("owner_chat_id") or 0)
-    except (TypeError, ValueError):
-        owner = 0
-    return owner if owner > 0 else WEB_UI_CHAT_ID
-
 
 async def _api_notify(request: Request) -> JSONResponse:
     """One owner notification from a skill: never a chat row, never a model turn.
@@ -682,10 +671,16 @@ async def _api_notify(request: Request) -> JSONResponse:
         return _json_error("invalid json", 400)
     if not isinstance(payload, dict):
         return _json_error("request body must be a JSON object", 400)
-    text = payload.get("text")
-    if not isinstance(text, str) or not text.strip():
+    cancel = payload.get("cancel", False)
+    if not isinstance(cancel, bool):
+        return _json_error("cancel must be a boolean", 400)
+    text = payload.get("text", "")
+    if not isinstance(text, str):
+        return _json_error("text must be a string", 400)
+    text = text.strip()
+    if not text and not cancel:  # a cancel names a key, not a text
         return _json_error("text is required", 400)
-    if len(text.strip()) > OWNER_NOTIFICATION_TEXT_CHARS:
+    if len(text) > OWNER_NOTIFICATION_TEXT_CHARS:
         return _json_error(f"text must be at most {OWNER_NOTIFICATION_TEXT_CHARS} characters", 400)
     key = payload.get("key", "")
     if key is not None and not isinstance(key, str):
@@ -695,19 +690,16 @@ async def _api_notify(request: Request) -> JSONResponse:
         return _json_error("key must be at most 128 characters", 400)
     at_raw = payload.get("at")
     cron_raw = payload.get("cron")
-    cancel = payload.get("cancel", False)
-    if not isinstance(cancel, bool):
-        return _json_error("cancel must be a boolean", 400)
     if at_raw is not None or cron_raw is not None or cancel:
         return await run_sync_to_completion(
-            _schedule_owner_notification, ctx, skill_name, text.strip(), key,
-            at_raw, cron_raw, payload.get("timezone"), bool(cancel),
+            _schedule_owner_notification, ctx, skill_name, text, key,
+            at_raw, cron_raw, payload.get("timezone"), cancel,
         )
     def _emit_now() -> Optional[Dict[str, Any]]:
         # The state read and the append both touch files under a lock: off the
         # event loop, like every other durable write this service performs.
         return emit_owner_notification(
-            ctx.data_dir, chat_id=_owner_notification_chat_id(ctx.data_dir),
+            ctx.data_dir, chat_id=owner_notification_chat_id(ctx.data_dir),
             category="notice", text=text, source=f"skill:{skill_name}", key=key,
         )
 
@@ -723,13 +715,14 @@ async def _api_notify(request: Request) -> JSONResponse:
 def _notify_schedule_id(skill_name: str, key: str) -> str:
     """One row per (skill, key) inside the schedule-id contract (≤81 URL-safe
     characters): the slug for humans, truncated to leave room for a hash of
-    the raw key, so keys that slug alike never collide and a long key never
-    yields an id the owner's lifecycle endpoints refuse."""
+    the raw (skill, key) pair, so names or keys that slug alike — or long
+    names the truncation would fold together — never collide, and a long key
+    never yields an id the owner's lifecycle endpoints refuse."""
     from hashlib import sha256
 
     from ouroboros.schedule_contract import schedule_slug
 
-    digest = sha256(key.encode("utf-8")).hexdigest()[:8]
+    digest = sha256(f"{skill_name}\n{key}".encode("utf-8")).hexdigest()[:8]
     return f"{schedule_slug('notify', skill_name, key)[:72].rstrip('-._')}-{digest}"
 
 

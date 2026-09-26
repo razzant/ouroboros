@@ -810,9 +810,11 @@ def test_notify_cron_row_fires_and_advances_like_a_task_row(tmp_path):
     assert record["next_run_at"] > "2000-01-02"
 
 
-def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path):
+def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path, monkeypatch):
     """The resync never touches ``skill:`` rows, so the tick itself must not
-    ring for a skill the owner switched off or removed."""
+    ring for a skill the owner switched off or removed; and it asks about each
+    skill once per pass, not once per due row."""
+    import ouroboros.skill_loader as skill_loader
     from ouroboros.skill_loader import save_enabled
 
     queue, pending = _queue(tmp_path)
@@ -824,16 +826,23 @@ def test_notify_row_of_a_disabled_or_missing_skill_stays_silent(tmp_path):
     (skill_dir / "plugin.py").write_text("def register(api): pass\n", encoding="utf-8")
     queue.upsert_scheduled_task(_notify_row("n-ghost", source="skill:ghost", key="g"))
     queue.upsert_scheduled_task(_notify_row("n-cal", source="skill:cal", key="c"))
+    queue.upsert_scheduled_task(_notify_row("n-cal-2", source="skill:cal", key="c2"))
     save_enabled(tmp_path, "cal", False)
+    looked_up: list[str] = []
+    real_find_skill = skill_loader.find_skill
+    monkeypatch.setattr(skill_loader, "find_skill",
+                        lambda root, name: looked_up.append(name) or real_find_skill(root, name))
     queue.check_scheduled_tasks()
     assert [row for row in _events(tmp_path) if row.get("type") == "owner_notification"] == []
+    assert sorted(looked_up) == ["cal", "ghost"], "one discovery per skill per tick, not per due row"
     save_enabled(tmp_path, "cal", True)
     queue.check_scheduled_tasks()
     notices = [row for row in _events(tmp_path) if row.get("type") == "owner_notification"]
-    assert [n["source"] for n in notices] == ["skill:cal"]
+    assert [n["source"] for n in notices] == ["skill:cal", "skill:cal"]
     records = {r["id"]: r for r in queue.list_scheduled_tasks(tmp_path)["tasks"]}
     assert records["n-ghost"]["enabled"] is True and not records["n-ghost"].get("completed_at")
     assert records["n-cal"]["enabled"] is False and records["n-cal"]["completed_at"]
+    assert records["n-cal-2"]["enabled"] is False and records["n-cal-2"]["completed_at"]
 
 
 def test_notify_row_survives_a_failed_append_and_retries(tmp_path, monkeypatch):

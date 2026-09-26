@@ -197,7 +197,7 @@ export function initActivity({ mount, ws } = {}) {
                 <span class="activity-sub">${sub}</span>
             </div>
             <div class="activity-row-actions">${lifecycle}
-               <button type="button" class="btn btn-xs btn-danger" data-act="schedule-delete" data-id="${id}" data-managed="${managed ? '1' : ''}">Delete</button></div>
+               <button type="button" class="btn btn-xs btn-danger" data-act="schedule-delete" data-id="${id}" data-managed="${managed ? '1' : ''}" data-notify="${notify ? '1' : ''}" data-suppressed="${suppressed ? '1' : ''}">Delete</button></div>
         </div>`;
     }
 
@@ -406,14 +406,19 @@ export function initActivity({ mount, ws } = {}) {
             if (act === 'schedule-delete') {
                 // A skill-declared schedule cannot be removed: the skill's manifest
                 // would recreate it. Delete SUPPRESSES it durably, and the dialog
-                // says so before anything is sent.
+                // says so before anything is sent. A skill's reminder is re-posted
+                // under its key the same way, so its first Delete suppresses too;
+                // deleting the retained record again really removes it.
                 const managedRow = btn.dataset.managed === '1';
+                const reminderRow = btn.dataset.notify === '1' && btn.dataset.suppressed !== '1';
                 const confirmedDelete = await openConfirmDialog({
-                    title: managedRow ? 'Suppress skill schedule' : 'Delete schedule',
+                    title: managedRow ? 'Suppress skill schedule' : reminderRow ? 'Suppress reminder' : 'Delete schedule',
                     body: managedRow
                         ? 'This schedule is declared by an installed skill and cannot be removed; Delete keeps it suppressed until you Restore it. Suppress it?'
-                        : 'Delete this schedule?',
-                    confirmLabel: managedRow ? 'Suppress' : 'Delete',
+                        : reminderRow
+                            ? 'This reminder is re-posted by its skill under the same key; Delete keeps it suppressed until you Restore it, and deleting the retained record again removes it. Suppress it?'
+                            : 'Delete this schedule?',
+                    confirmLabel: managedRow || reminderRow ? 'Suppress' : 'Delete',
                     danger: true,
                 });
                 if (!confirmedDelete) return;

@@ -106,6 +106,18 @@ def test_failed_append_answers_none_and_publishes_nothing(tmp_path, fresh_bus, m
     assert seen == []
 
 
+def test_owner_notification_chat_id_is_the_bound_owner_else_main(tmp_path):
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+
+    assert event_bus.owner_notification_chat_id(tmp_path) == WEB_UI_CHAT_ID, "no state yet: Main"
+    state = tmp_path / "state" / "state.json"
+    state.parent.mkdir()
+    state.write_text(json.dumps({"owner_chat_id": 0}), encoding="utf-8")
+    assert event_bus.owner_notification_chat_id(tmp_path) == WEB_UI_CHAT_ID, "chat 0 reaches nobody"
+    state.write_text(json.dumps({"owner_chat_id": 777}), encoding="utf-8")
+    assert event_bus.owner_notification_chat_id(tmp_path) == 777
+
+
 def test_owner_notification_is_a_valid_topic_for_plugins_and_companions():
     assert event_bus.OWNER_NOTIFICATION in event_bus.VALID_TOPICS
     from ouroboros.contracts.skill_manifest import _EVENT_TOPIC_RE

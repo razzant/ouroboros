@@ -6,6 +6,7 @@ def test_privileged_extension_permissions_have_skill_review_items() -> None:
 
     required_mentions = {
         "inject_chat": "inject_chat_minimization",
+        "notify_owner": "inject_chat_minimization",
         "presence": "`presence` permission",
         "subscribe_event": "event_subscription_minimization",
         "companion_process": "companion_process_safety",
