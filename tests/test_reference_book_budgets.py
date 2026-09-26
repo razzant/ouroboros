@@ -96,7 +96,11 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # text for; the base sat 20 bytes under the previous budget.
     # 32300 -> 32450: the owner's durable disable/delete of a notify row (suppression
     # marker a skill's repeat cannot lift) joins the same paragraph — one sentence.
-    "docs/architecture/05-supervisor-loop.md": 32450,
+    # 32450 -> 32600: the same sentence now says who the owner's hand is (Activity
+    # or Ouroboros at the owner's word), what the skill's cancel gets, and that the
+    # owner's second delete removes the record — the review found the shorter
+    # sentence untrue.
+    "docs/architecture/05-supervisor-loop.md": 32600,
     # 286850 -> 287600: "an answer that has not arrived is a gap" is a new invariant of
     # plan review and task acceptance (the slot census vocabulary, the `awaiting`
     # projection, the only-awaited task outcome); the in-flight sentence it grew from is

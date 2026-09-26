@@ -251,6 +251,24 @@ def test_long_keys_yield_ids_the_owner_lifecycle_endpoints_accept(tmp_path: path
     assert off["ok"] is True and off["status"] == "updated"
 
 
+def test_the_agents_manage_schedules_is_the_owners_hand_on_a_skill_reminder(tmp_path: pathlib.Path) -> None:
+    """Ouroboros switching a skill's reminder off at the owner's word (actor
+    ``agent``, as manage_schedules calls it) leaves the same durable marker as
+    the Activity page: the skill's repeat of the key answers suppressed."""
+    from supervisor import queue
+
+    queue.init(tmp_path)
+    client, _app = _notify_client(tmp_path)
+    headers = {"X-Skill-Token": "tok"}
+    body = {"text": "Meeting", "key": "cal:evt-9", "at": "2999-01-01T14:45:00+00:00"}
+    schedule_id = client.post("/notify", headers=headers, json=body).json()["id"]
+    outcome = queue.mutate_scheduled_task("disable", schedule_id, reason="owner asked", actor="agent", drive_root=tmp_path)
+    assert outcome["ok"] and outcome["status"] == "updated"
+    assert client.post("/notify", headers=headers, json=body).json()["status"] == "suppressed"
+    row = queue.list_scheduled_tasks(tmp_path)["tasks"][0]
+    assert row["manual_override"] == "disabled" and row["enabled"] is False
+
+
 def test_companions_on_the_events_socket_are_not_served_owner_notifications(tmp_path: pathlib.Path) -> None:
     """The documented boundary: an in-process plugin subscribes to the topic,
     a companion on WS /events is refused (no grant exists for it yet)."""

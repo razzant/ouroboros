@@ -215,7 +215,7 @@ def get_tools() -> List[ToolEntry]:
                 "history: schedule a new run_at instead of trying to re-arm it. Deleting a skill "
                 "row keeps it as a suppressed record so the skill lifecycle cannot resurrect it. "
 "A kind='notify' row is a skill's model-free reminder (its sentence is the preview): "
-"the owner's disable or delete keeps it suppressed so the skill cannot re-arm that key, "
+"disable or delete (yours at the owner's word, or the owner's from Activity) keeps it suppressed so the skill cannot re-arm that key, "
 "and a second delete of the suppressed record removes it. "
                 "Only your own root turn may change a schedule; a delegated task may only list. "
                 "list accepts offset and limit (bounded pages) and returns total/next_offset; "

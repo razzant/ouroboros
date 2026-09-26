@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import pathlib
 import threading
 import uuid
 from dataclasses import dataclass
@@ -149,8 +150,6 @@ def owner_notification_chat_id(drive_root) -> int:
     real destination there (the Skill Review panel), but a banner addressed to
     it reaches nobody — the browser notifier refuses it. One rule for every
     producer (the Host route, the scheduler, a future agent tool)."""
-    import pathlib
-
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from ouroboros.utils import read_json_dict
 
@@ -206,8 +205,6 @@ def emit_owner_notification(
     }
     if str(scheduled_for or "").strip():
         row["scheduled_for"] = str(scheduled_for).strip()
-    import pathlib
-
     try:
         # This row is a receipt (the scheduler consumes its schedule on it), so
         # it repairs a torn predecessor's boundary before appending and reports

@@ -252,9 +252,12 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                         "detail": "the schedule audit log could not be written; nothing was changed"}
             running = _store._schedule_running_or_queued(wanted, root)
             skill_row = str(current.get("source") or "") == "skill_manifest"
-            # A skill's notify row is re-posted by its key, so the OWNER's off
-            # switch needs the same durable marker a skill-manifest row keeps;
-            # the skill cancelling its own row (actor = the row's source) really
+            # A skill's notify row is re-posted by its key, so the owner's off
+            # switch needs the same durable marker a skill-manifest row keeps.
+            # The owner acts from Activity (`owner:gateway`) or through
+            # Ouroboros's manage_schedules at their word (`agent`) — both are
+            # the owner's hand here, as for a skill-manifest row; only the row's
+            # own source is the skill, and its cancel of its own row really
             # removes it — nothing of the owner's is being overridden there.
             notify_row = str(current.get("kind") or "") == _store.SCHEDULE_KIND_NOTIFY
             owner_over_notify = notify_row and str(actor or "") != str(current.get("source") or "")

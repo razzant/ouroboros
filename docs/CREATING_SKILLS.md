@@ -861,8 +861,8 @@ the row is yours to move: the same key posted again replaces its time and
 text; `{"key": ..., "cancel": true}` removes it (`404` when there is no such
 row of yours). Without a key each post is a new fire-and-forget row. A
 disabled or removed skill's rows stay silent until it is enabled again, and an
-owner who disabled or deleted one of your rows on the Activity page keeps it
-off: the same key posted again answers `{"scheduled": false, "status":
+owner who disabled or deleted one of your rows — on the Activity page, or by
+asking Ouroboros — keeps it off: the same key posted again answers `{"scheduled": false, "status":
 "suppressed"}` and your cancel `{"cancelled": false, "status": "suppressed"}`
 until the owner restores the row — or deletes the retained record a second
 time, which removes it and frees the key. Every scheduled post rewrites the
