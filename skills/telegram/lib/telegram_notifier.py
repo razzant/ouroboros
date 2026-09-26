@@ -301,11 +301,8 @@ NOTICES_SETTING = {
 
 
 def _make_notifier(api, *, trust_env: bool = False):
-    """Periodic, file-based proactive notifications (task done / budget threshold),
-    plus the owner-notice mirror subscription (`owner.notification`, behind
-    NOTICES_SETTING). Read-only over durable files; sends only when a pinned chat
-    + toggle are set."""
-    api.subscribe_event("owner.notification", _make_notice(api, trust_env=trust_env))
+    """Periodic, file-based proactive notifications (task done / budget threshold).
+    Read-only over durable files; sends only when a pinned chat + toggle are set."""
     async def notifier() -> None:
         retry_delay = TELEGRAM_RETRY_INITIAL_SEC
         degraded_cause = ""
