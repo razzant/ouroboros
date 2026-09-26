@@ -852,7 +852,9 @@ plain; `key` (at most 128) is your own identity for the notice, so a repeat
 after a lost acknowledgement rings once. `403` is a missing grant, `429` the
 60-per-minute lane, `503` a failed durable write or a schedule audit the host
 could not record (retry the same request), `409` a keyed row that belongs to
-another skill.
+another skill. A cancel whose delete landed but whose audit outcome was lost
+answers `200 {ok: false, cancelled: true, status: "changed_audit_incomplete"}` —
+the row is gone, do not retry.
 
 A deferred reminder is the same request with a time: `"at": "<ISO 8601
 instant>"` (once) or `"cron": "<5-field>"` plus optional `"timezone"`, answered
@@ -872,7 +874,9 @@ asking Ouroboros — keeps it off: the same key posted again answers `{"schedule
 "suppressed"}` and your cancel `{"cancelled": false, "status": "suppressed"}`
 until the owner restores the row — or deletes the retained record a second
 time, which removes it and frees the key. A reminder that already fired is a
-receipt: your cancel or the owner's Delete removes it at once. Every scheduled post rewrites the
+receipt: your cancel or the owner's Delete removes it at once (unless the owner
+switched it off — then your cancel answers `suppressed` and only the owner's Delete
+removes it). Every scheduled post rewrites the
 one schedule table under its lock, so keep the armed set small — the next
 occurrences, keyed, not a year of one-shots.
 
