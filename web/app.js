@@ -23,6 +23,7 @@ import { initSettings } from './modules/settings.js';
 import { initCosts } from './modules/costs.js';
 import { initSkills } from './modules/skills.js';
 import { initWidgets } from './modules/widgets.js';
+import { initLearn } from './modules/learn.js';
 import { initUpdates } from './modules/updates.js';
 import { initActivity } from './modules/activity.js';
 import { initUpdateStatus } from './modules/update_status.js';
@@ -858,6 +859,7 @@ initActivity({ ...ctx, mount: document.getElementById('dashboard-panel-activity'
 initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
 initSkills(ctx);
 initWidgets(ctx);
+initLearn(ctx);
 initUpdateStatus(ctx);
 
 initOnboardingOverlay();
