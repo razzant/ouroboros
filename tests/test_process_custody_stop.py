@@ -146,10 +146,56 @@ def test_failed_stop_retains_live_identity_and_does_not_publish_stopped(tmp_path
     try:
         before = custody.ledger_path(tmp_path).read_bytes()
         monkeypatch.setattr(custody, "kill_process_group_id", lambda _: None)
-        monkeypatch.setattr("ouroboros.platform_layer.kill_pid_tree", lambda _: None)
+        monkeypatch.setattr("ouroboros.platform_layer.force_kill_pid", lambda _: None)
         assert custody.stop_ledgered_processes(tmp_path, {daemon.CUSTODY_PURPOSE}, timeout_sec=0) == []
         assert proc.poll() is None
         assert custody.ledger_path(tmp_path).read_bytes() == before
+        assert not (tmp_path / "logs" / "supervisor.jsonl").exists()
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX group fixture")
+@pytest.mark.parametrize("purpose", ["mcp_task_session:held", "service:held"])
+def test_reused_group_number_cannot_signal_a_real_foreign_process(tmp_path, monkeypatch, purpose):
+    foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                               start_new_session=True)
+    try:
+        row = {"pid": foreign.pid, "pgid": foreign.pid, "scope": "task",
+               "purpose": purpose, "owner_task": "gone", "session_id": "old-boot",
+               "fingerprint": {"start_time": "old boot", "cmd_sha256": "old command"}}
+        assert custody.append_jsonl(custody.ledger_path(tmp_path), row)
+        signals = []
+        monkeypatch.setattr(custody, "kill_process_group_id", lambda pgid, **kw: signals.append(pgid))
+        unconfirmed = []
+        assert custody.stop_group_custody(tmp_path, lambda _: True, timeout_sec=0,
+                                          unconfirmed=unconfirmed) == []
+        assert unconfirmed and "identity unconfirmed" in unconfirmed[0]
+        if purpose.startswith("service:"):
+            quiet, blockers = custody.quiesce_custodied_services(tmp_path, timeout_sec=0)
+            assert quiet is False and blockers == [f"custody_service:{foreign.pid}:identity_unconfirmed"]
+        assert custody.reap_orphaned_processes(tmp_path, running_task_ids=set()) == []
+        assert signals == [] and foreign.poll() is None
+        assert custody._read_ledger(tmp_path) == [row]
+    finally:
+        foreign.kill()
+        foreign.wait(timeout=5)
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX group fixture")
+def test_reaper_retains_group_when_signal_helper_swallows_failure(tmp_path, monkeypatch):
+    proc = custody.spawn_supervised(
+        [sys.executable, "-c", "import time; time.sleep(60)"], drive_root=tmp_path,
+        purpose="mcp_task_session:held", scope="task", owner_task_id="gone")
+    try:
+        before = custody._read_ledger(tmp_path)
+        monkeypatch.setattr(custody, "kill_process_group_id", lambda *a, **kw: None)
+        assert custody.reap_orphaned_processes(tmp_path, running_task_ids=set()) == []
+        assert proc.poll() is None
+        assert custody._read_ledger(tmp_path) == before
         assert not (tmp_path / "logs" / "supervisor.jsonl").exists()
     finally:
         proc.kill()

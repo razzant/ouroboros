@@ -9,7 +9,27 @@ const TRANSPORTS = [
     { value: 'stdio', label: 'Local process (stdio)' },
 ];
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
-    'command', 'args', 'auth_header', 'auth_token', 'allowed_tools', 'cwd', 'env', 'env_from_settings']);
+    'command', 'args', 'auth_header', 'auth_token', 'allowed_tools', 'cwd', 'env', 'env_from_settings',
+    'session_scope']);
+const SESSION_SCOPES = [
+    { value: 'call', label: 'Fresh session per call' },
+    { value: 'task', label: 'One session per task (stateful servers)' },
+];
+// Microsoft's Playwright Extension bridge to the owner's own Chrome
+// (docs/CHROME_EXTENSION.md). Added disabled: the owner installs the extension
+// and enables the server; Ouroboros never installs a browser add-on.
+const CHROME_EXTENSION_PRESET = Object.freeze({
+    id: 'chrome',
+    name: 'My Chrome (Playwright Extension)',
+    enabled: false,
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@playwright/mcp@0.0.82', '--extension'],
+    session_scope: 'task',
+    auth_header: 'Authorization',
+    auth_token: '',
+    allowed_tools: [],
+});
 
 let mcpServers = [];
 let mcpStatusByServer = {};
@@ -76,6 +96,11 @@ function renderServerCard(server, index) {
     const authToken = String(server.auth_token ?? '');
     const enabled = server.enabled === true || server.enabled === 'True' || server.enabled === 'true';
     const allowedTools = Array.isArray(server.allowed_tools) ? server.allowed_tools.join(', ') : '';
+    const sessionScope = String(server.session_scope ?? 'call');
+    const sessionOptions = SESSION_SCOPES.map((opt) => {
+        const selected = opt.value === sessionScope ? ' selected' : '';
+        return `<option value="${escapeHtml(opt.value)}"${selected}>${escapeHtml(opt.label)}</option>`;
+    }).join('');
     const transportOptions = TRANSPORTS.map((opt) => {
         const selected = opt.value === transport ? ' selected' : '';
         return `<option value="${escapeHtml(opt.value)}"${selected}>${escapeHtml(opt.label)}</option>`;
@@ -197,6 +222,11 @@ function renderServerCard(server, index) {
                     <label for="mcp-${index}-allowed_tools">Allowed tools (optional, comma-separated)</label>
                     <input type="text" class="ui-control" id="mcp-${index}-allowed_tools" aria-label="MCP server ${index + 1}: Allowed tools (optional, comma-separated)" data-mcp-field="allowed_tools" value="${escapeHtml(allowedTools)}" placeholder="search, read_repo" autocomplete="off" spellcheck="false">
                 </div>
+                <div class="form-field ui-field">
+                    <label for="mcp-${index}-session_scope">Session</label>
+                    <select class="ui-control" id="mcp-${index}-session_scope" aria-label="MCP server ${index + 1}: Session" data-mcp-field="session_scope">${sessionOptions}</select>
+                    <span class="muted" data-mcp-task-session-warning ${sessionScope === 'task' ? '' : 'hidden'}>Experimental: each task gets a separate session; closure is requested on exit, but hard Stop/Panic does not yet prove the external process died. Do not connect a personal browser. Delegated child tasks cannot use it.</span>
+                </div>
             </div>
             <div class="settings-inline-status mcp-server-message" data-mcp-message hidden></div>
             ${unsupported.length ? `<div class="form-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
@@ -256,6 +286,10 @@ function bindCardEvents(card) {
                 server[field] = input.value;
             }
             if (field === 'transport') renderAll();
+            if (field === 'session_scope') {
+                const warning = card.querySelector('[data-mcp-task-session-warning]');
+                if (warning) warning.hidden = server.session_scope !== 'task';
+            }
             notifyChanged();
         });
         input.addEventListener('change', () => {
@@ -438,6 +472,22 @@ function bindAddButton() {
     });
 }
 
+function bindAddChromeButton() {
+    const btn = document.getElementById('btn-mcp-add-chrome');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+        const existing = mcpServers.findIndex((s) => String(s.id || '') === CHROME_EXTENSION_PRESET.id);
+        if (existing < 0) {
+            mcpServers.push({ ...CHROME_EXTENSION_PRESET, args: [...CHROME_EXTENSION_PRESET.args], allowed_tools: [] });
+            renderAll();
+            notifyChanged();
+        }
+        const list = document.getElementById('mcp-servers-list');
+        const card = existing < 0 ? list?.lastElementChild : list?.children?.[existing];
+        revealNewRow(card, card?.querySelector?.('[data-mcp-field="enabled"]'));
+    });
+}
+
 function bindRefreshAllButton() {
     const btn = document.getElementById('btn-mcp-refresh-all');
     if (!btn) return;
@@ -458,6 +508,7 @@ function bindRefreshAllButton() {
 export function initMcpSettings({ onChange } = {}) {
     onChangeCallback = typeof onChange === 'function' ? onChange : null;
     bindAddButton();
+    bindAddChromeButton();
     bindRefreshAllButton();
     const enabled = document.getElementById('s-mcp-enabled');
     if (enabled) enabled.addEventListener('change', notifyChanged);

@@ -420,6 +420,7 @@ def kill_worker_tree(pid: int, *, keep_services: bool = False, panic_process=Non
     still needs when ONE task is cancelled or timed out; a generation change
     ends those services with the generation, so the pool paths leave it off.
     The platform helper applies the same retained-subtree contract on every OS.
+    The worker's MCP task-session groups are then stopped through custody.
     """
     from ouroboros.platform_layer import kill_pid_tree, request_process_tree_kill
     if panic_process is not None:
@@ -434,7 +435,37 @@ def kill_worker_tree(pid: int, *, keep_services: bool = False, panic_process=Non
     spared = _q._retained_daemon_pids()
     if keep_services:
         spared |= _q._kept_service_pids()
+    # Signal a worker's MCP groups while their leaders can still authenticate
+    # the recorded pgids. Killing the worker first can close their stdin and
+    # reap those leaders, leaving only unsafe numeric group ids behind.
+    _stop_worker_task_sessions(pid, getattr(_q, "DRIVE_ROOT", None))
     kill_pid_tree(pid, exclude_pids=spared)
+
+
+def _stop_worker_task_sessions(pid: int, drive_root: Any) -> None:
+    """End the MCP task-session groups this worker spawned before its tree kill.
+
+    Each server leads its own group, so a descendant its leader left behind is
+    outside the worker's tree; the custody row names the worker. Unconfirmed
+    rows stay for the reaper, which stops them once their task is gone.
+    """
+    if not drive_root:
+        return
+    try:
+        from ouroboros.process_custody import TASK_SESSION_PURPOSE_PREFIX, stop_group_custody
+
+        unconfirmed: List[str] = []
+        stopped = stop_group_custody(
+            pathlib.Path(drive_root),
+            lambda row: (str(row.get("purpose") or "").startswith(TASK_SESSION_PURPOSE_PREFIX)
+                         and int(row.get("spawner_pid") or 0) == int(pid)),
+            timeout_sec=2.0, reason="worker_stop", unconfirmed=unconfirmed,
+        )
+        if stopped or unconfirmed:
+            _supervisor_row({"type": "worker_task_sessions_stopped", "worker_pid": pid,
+                             "stopped": stopped, "unconfirmed": unconfirmed})
+    except Exception:
+        log.warning("Task-session custody stop for worker %s failed", pid, exc_info=True)
 
 
 @_serialized_worker_lifecycle

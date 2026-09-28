@@ -199,6 +199,9 @@ def execute_panic_stop(
     so that Job is not a Panic backstop.
     Unconfirmed shutdown remains disclosed with custody retained; names or
     recycled descriptor ports never authorize signalling an unrelated process.
+    MCP task-session groups are signalled in-process first, then recorded groups
+    (workers' included) are attempted through custody. An unidentified group
+    stays recorded and unconfirmed.
     """
     import threading
     import time
@@ -223,16 +226,17 @@ def execute_panic_stop(
                         settlements[name]["disclosure_error"] = type(disclosure_error).__name__
         if native:
             run()  # retained multiprocessing owner; no application callbacks
-            return
+            return None
         (settlements if settle else requests)[name] = "unfinished"
         thread = threading.Thread(target=run, name=f"panic-{name}", daemon=True)
         try:
             thread.start()
         except RuntimeError as exc:
             (settlements if settle else requests)[name] = {"requested": False, "error": str(exc)}
-            return  # failure of one owner cannot skip the remaining native children
+            return None  # failure of one owner cannot skip the remaining native children
         if not settle:
             request_threads.append(thread)
+        return thread
 
     import multiprocessing
 
@@ -241,6 +245,7 @@ def execute_panic_stop(
     from ouroboros.gateway.host_service import host_service_port
     from ouroboros.local_model import get_manager
     from ouroboros.platform_layer import kill_process_on_port
+    from ouroboros.process_custody import TASK_SESSION_PURPOSE_PREFIX, stop_group_custody
     from ouroboros.tools.services import kill_all_services
     from ouroboros.tools.shell import kill_all_tracked_subprocesses
     from ouroboros.workspace_executor import kill_all_foreground
@@ -259,6 +264,9 @@ def execute_panic_stop(
     attempt("executors", lambda: kill_all_foreground(data_dir, request_only=True))
     attempt("services", lambda: kill_all_services(data_dir, request_only=True))
     attempt("companions", lambda: panic_kill_all(request_only=True))
+    # Only a loaded owner holds task sessions here (direct chat); never import one now.
+    if (task_sessions := sys.modules.get("ouroboros.mcp_task_sessions")) is not None:
+        attempt("mcp-task-sessions", task_sessions.request_emergency_stop)
     children = multiprocessing.active_children()
     for child in children:
         attempt(f"child-{child.pid}", lambda child=child: kill_worker_tree(
@@ -288,6 +296,23 @@ def execute_panic_stop(
     attempt("executors", lambda: kill_all_foreground(data_dir, wait=False), settle=True)
     attempt("services", lambda: kill_all_services(data_dir, wait=False), settle=True)
     attempt("companions", panic_kill_all, settle=True)
+    # Every recorded MCP task-session group, this process's and every worker's.
+    def settle_mcp_groups():
+        unconfirmed = []
+        stopped = stop_group_custody(
+            data_dir, lambda row: str(row.get("purpose") or "").startswith(TASK_SESSION_PURPOSE_PREFIX),
+            timeout_sec=2.0, reason="owner_panic", unconfirmed=unconfirmed)
+        return {"stopped": stopped, "unconfirmed": unconfirmed}
+
+    mcp_settlement = attempt("mcp-task-sessions", settle_mcp_groups, settle=True)
+    # This is the root's only request to worker-held MCP groups. Complete its
+    # bounded signal/verification before port shutdown or the hard exit; an
+    # unfinished thread is explicitly unconfirmed, never a successful Panic.
+    if mcp_settlement is not None:
+        mcp_settlement.join(timeout=2.5)
+        if mcp_settlement.is_alive():
+            settlements["mcp-task-sessions"] = {"stopped": [], "unconfirmed": [
+                "MCP group settlement unfinished; custody retained"]}
     # Workers received private lifeline requests above. Root-first tree cleanup
     # here would destroy their local child ownership before those requests run.
     # Queue/custody reconciliation belongs to the following supervisor boot.

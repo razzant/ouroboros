@@ -230,7 +230,7 @@ def test_spawn_supervised_kills_child_when_custody_record_fails(tmp_path, monkey
     assert killed == [proc]
 
 
-def test_update_quiesce_kills_service_group_that_outlives_leader(tmp_path, monkeypatch):
+def test_update_quiesce_retains_unidentified_group_that_outlives_leader(tmp_path, monkeypatch):
     entry = {
         "pid": 123,
         "pgid": 456,
@@ -256,10 +256,10 @@ def test_update_quiesce_kills_service_group_that_outlives_leader(tmp_path, monke
 
     ok, blockers = process_custody.quiesce_custodied_services(tmp_path)
 
-    assert ok is True
-    assert blockers == []
-    assert killed == [456]
-    assert rewritten == []
+    assert ok is False
+    assert blockers == ["custody_service:123:identity_unconfirmed"]
+    assert killed == []
+    assert rewritten == [entry]
 
 
 @_POSIX_ONLY

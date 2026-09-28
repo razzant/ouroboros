@@ -225,6 +225,7 @@ def request_worker_owned_stops(drive_root):
             results[module_name] = {"requested": False, "error": type(exc).__name__}
 
     for module_name, method, manager in (
+        ("ouroboros.mcp_task_sessions", "request_emergency_stop", False),
         ("ouroboros.tools.shell_process", "kill_all_tracked_subprocesses", False),
         ("ouroboros.workspace_executor", "kill_all_foreground", False),
         ("ouroboros.tools.services", "kill_all_services", False),

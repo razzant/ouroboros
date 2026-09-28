@@ -344,6 +344,34 @@ def disabled_tools_dispatch_only(ctx: Any) -> bool:
     return is_consciousness_origin(getattr(ctx, "task_metadata", None))
 
 
+def task_session_block_reason(ctx: Any, *, dispatch: bool = True) -> str:
+    """Why ``ctx`` may not use a ``session_scope=task`` MCP server ('' when it may).
+
+    Such a server's session is owned by one task id and never shared
+    (``mcp_task_sessions``). A delegated child would otherwise open its own
+    connection to what the owner connected for a task — the owner's Chrome, for
+    the Playwright Extension — so children never see these tools. A
+    consciousness wake is refused at dispatch only, keeping its schema prefix
+    identical to an owner turn's (``disabled_tools_dispatch_only``).
+    """
+    from ouroboros.contracts.task_constraint import normalize_task_constraint
+    from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
+
+    if not str(getattr(ctx, "task_id", "") or "").strip():
+        return "this caller has no task id to own a session"
+    constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    roles = {str(getattr(constraint, "mode", "") or "")}
+    for data in (getattr(ctx, "task_metadata", None), getattr(ctx, "task_contract", None)):
+        if isinstance(data, dict):
+            lineage = data.get("lineage") if isinstance(data.get("lineage"), dict) else {}
+            roles |= {str(data.get("delegation_role") or "").strip(), str(lineage.get("delegation_role") or "").strip()}
+    if roles & {"subagent", ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE}:
+        return "a delegated child task may not open a session to it"
+    if dispatch and disabled_tools_dispatch_only(ctx):
+        return "a background consciousness wake may not open a session to it"
+    return ""
+
+
 _GITHUB_TOKEN_TOOLS = frozenset({
     "list_github_prs",
     "get_github_pr",

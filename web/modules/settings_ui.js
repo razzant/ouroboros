@@ -816,6 +816,7 @@ export function renderSettingsPage() {
                             </div>
                             <div class="settings-toolbar">
                                 <button type="button" class="btn btn-default btn-sm" id="btn-mcp-add-server">Add server</button>
+                                <button type="button" class="btn btn-default btn-sm" id="btn-mcp-add-chrome" title="Experimental disabled preset; Stop/Panic custody unproven. Do not connect a personal profile.">Chrome experiment</button>
                                 <button type="button" class="btn btn-default btn-sm" id="btn-mcp-refresh-all">Refresh all</button>
                             </div>
                         </div>
