@@ -47,7 +47,8 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 166450 -> 167000 (merge of the moved target into the plan-review branch, measured 166885): both
     # sides' replaced paragraphs land together; no text was appended by the merge itself.
     # 167000 -> 167300 (merge of the moved target into the plan-review branch, measured 167032): both sides' paragraphs land together.
-    "docs/architecture/01-high-level-architecture.md": 167300,
+    # 167300 -> 167550: Windows tray module gains its own lifecycle and same-install activation row.
+    "docs/architecture/01-high-level-architecture.md": 167550,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -278,7 +279,8 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 12405 -> 14400 (issue #1142): the ordinary-close paragraph gains the mechanism the chapter had
     # no text for — graceful stop signals the server PID only, the server half (stop event at the
     # signal, bounded uvicorn drain) is self-sufficient against an old group-SIGTERM launcher.
-    "docs/architecture/09-shutdown-and-process-cleanup.md": 14400,
+    # 14400 -> 15400: tray hide/restore and bounded icon disposal add a Windows desktop shutdown contract.
+    "docs/architecture/09-shutdown-and-process-cleanup.md": 15400,
     # 17655 -> 20400: the supervisor-reliability sprint adds eight invariants the chapter lacked
     # (typed permanent engine refusal, interrupted parent, stalled-loop facts, source-ack
     # pre-check, host-owed round, reviewer tool bound, off-thread custody, fence transport) —
