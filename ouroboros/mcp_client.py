@@ -2,8 +2,10 @@
 
 Configured servers are hot-reloaded from settings, listed tools are exposed
 through ToolRegistry as provider-safe ``mcp_<server>__<tool>`` names, and each
-call opens a fresh session. Secrets, server descriptions/results, and obvious
-metadata SSRF targets are handled defensively because MCP servers are external.
+call opens a fresh session unless the server sets ``session_scope: task``
+(``mcp_task_sessions``: one held session per task). Secrets, server
+descriptions/results, and obvious metadata SSRF targets are handled defensively
+because MCP servers are external.
 
 For ``stdio``, ``command`` is an executable and ``args`` is passed as an exact
 list without a shell. Optional cwd, literal and settings-backed environment selections
@@ -63,6 +65,8 @@ except Exception as _import_exc:  # pragma: no cover - defensive
 
 
 SUPPORTED_TRANSPORTS = ("streamable_http", "sse", "stdio")
+_HELD_CLOSE_NOTE = ("If this task held a session, closure was requested; no replacement connection starts "
+                    "until its server's process group is confirmed stopped.")
 TOOL_NAME_PREFIX = "mcp_"
 _TOOL_NAME_PATTERN = re.compile(r"^mcp_[A-Za-z0-9_]+__[A-Za-z0-9_]+$")
 _MAX_TOOL_NAME_LEN = 64
@@ -102,6 +106,7 @@ class MCPServerConfig:
     env: Dict[str, str] = field(default_factory=dict, repr=False)
     secret_values: tuple[str, ...] = field(default=(), repr=False)
     configuration_warnings: tuple[str, ...] = ()
+    session_scope: str = "call"
 
     def has_auth(self) -> bool:
         return bool(self.auth_token.strip())
@@ -411,12 +416,16 @@ def normalize_server_config(
 
     try:
         known = {"id", "slug", "name", "label", "enabled", "transport", "url", "command",
-                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings"}
+                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings",
+                 "session_scope"}
         unknown = set(raw) - known
         warnings = ("Fields retained but not applied: " + ", ".join(sorted(map(str, unknown))),) if unknown else ()
         cwd = raw.get("cwd", "")
         if not isinstance(cwd, str) or "\x00" in cwd:
             raise ValueError("cwd must be a string without NUL")
+        session_scope = raw.get("session_scope") or "call"
+        if session_scope not in ("call", "task"):
+            raise ValueError("session_scope must be 'call' or 'task'")
         refs = validate_process_env(raw.get("env_from_settings"))
         env, secret_values = resolve_process_env(raw.get("env"), refs, settings=settings)
         unused = ("url", "auth_token") if transport == "stdio" else ("command", "args", "cwd", "env", "env_from_settings")
@@ -467,6 +476,7 @@ def normalize_server_config(
         env=env,
         secret_values=secret_values,
         configuration_warnings=warnings,
+        session_scope=session_scope,
     )
 
 
@@ -894,7 +904,11 @@ class MCPManager:
                 else:
                     new_servers[cfg.id] = MCPServerRuntime(config=cfg)
             self._servers = new_servers
-            return True
+            live = {cfg.id: cfg for cfg in new_configs if self._enabled and cfg.enabled}
+        from ouroboros.mcp_task_sessions import retain_sessions
+
+        retain_sessions(live)
+        return True
 
     # -- introspection ------------------------------------------------------
 
@@ -964,6 +978,7 @@ class MCPManager:
                             "server_id": tool.server_id,
                             "raw_name": tool.raw_name,
                             "raw_description": _redact_error_text(tool.description, cfg),
+                            "session_scope": cfg.session_scope,
                         }
                     )
             return results
@@ -1012,6 +1027,7 @@ class MCPManager:
                         "cwd": cfg.cwd,
                         "env_from_settings": dict(cfg.env_from_settings),
                         "configuration_warnings": list(cfg.configuration_warnings),
+                        "session_scope": cfg.session_scope,
                         "tool_count": len(runtime.tools),
                         "tools": [
                             {
@@ -1259,7 +1275,7 @@ class MCPManager:
             return self._resolve_locked(prefixed_name)[0]
 
     def _call_tool_result(
-        self, prefixed_name: str, arguments: Dict[str, Any]
+        self, prefixed_name: str, arguments: Dict[str, Any], *, task_id: str = ""
     ) -> ToolResult:
         """Invoke one MCP tool while retaining host-attested provider facts."""
         with self._lock:
@@ -1267,11 +1283,17 @@ class MCPManager:
             timeout = self._tool_timeout_sec
         if resolution.status != "callable":
             return resolution.refusal(prefixed_name)
+        held = cfg.session_scope == "task"
         try:
-            result = _run_async(
-                lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
-                join_timeout=timeout + 3,
-            )
+            if held:
+                from ouroboros.mcp_task_sessions import call_task_session
+
+                result = call_task_session(cfg, task_id, tool.raw_name, arguments or {}, timeout)
+            else:
+                result = _run_async(
+                    lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
+                    join_timeout=timeout + 3,
+                )
             if not isinstance(result, ToolResult):
                 raise TypeError("MCP transport returned a non-ToolResult outcome")
         except asyncio.TimeoutError:
@@ -1280,10 +1302,13 @@ class MCPManager:
                 "The remote outcome is unknown: side effects may already have happened, "
                 "and remote cancellation is not confirmed. Use the server-specific status/read "
                 "tool, if available, to reconcile the operation before retrying."
+                + (f" {_HELD_CLOSE_NOTE}" if held else "")
             )
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text)
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
             body = f"⚠️ MCP_TOOL_ERROR: {type(exc).__name__}: {_redact_error_text(exc, cfg)}"
+            if held:
+                body += f"\n{_HELD_CLOSE_NOTE}"
             text = _model_facing_result(cfg, tool.raw_name, body)
             return ToolResult(
                 status="error",
@@ -1371,6 +1396,6 @@ def call_mcp_tool(name: str, arguments: Dict[str, Any]) -> str:
     return get_manager().call_tool(name, arguments or {})
 
 
-def _call_mcp_tool_result(name: str, arguments: Dict[str, Any]) -> ToolResult:
-    """Internal typed ToolRegistry call helper."""
-    return get_manager()._call_tool_result(name, arguments or {})
+def _call_mcp_tool_result(name: str, arguments: Dict[str, Any], *, task_id: str = "") -> ToolResult:
+    """Internal typed ToolRegistry call helper; ``task_id`` owns a task-held session."""
+    return get_manager()._call_tool_result(name, arguments or {}, task_id=task_id)

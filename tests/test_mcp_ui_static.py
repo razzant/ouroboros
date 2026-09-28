@@ -208,3 +208,76 @@ for (const server of [
     result = subprocess.run([node, "--input-type=module", "-e", script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+def test_chrome_preset_is_an_opt_in_task_scoped_entry():
+    """Execute the registered preset handler: it adds a DISABLED task-scoped entry once."""
+    node = _node_bin()
+    if not node:
+        pytest.skip("Node is unavailable")
+    script = r'''
+import assert from 'node:assert/strict';
+import { initMcpSettings, applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
+const handlers = {};
+const button = (id) => ({ addEventListener: (_kind, handler) => { handlers[id] = handler; } });
+const host = { innerHTML: '', children: [], lastElementChild: null, querySelectorAll: () => [] };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host
+    : ['btn-mcp-add-server', 'btn-mcp-add-chrome', 'btn-mcp-refresh-all'].includes(id) ? button(id) : null };
+globalThis.fetch = async () => ({ ok: false });
+initMcpSettings();
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: [] });
+handlers['btn-mcp-add-chrome']();
+handlers['btn-mcp-add-chrome']();
+const servers = collectMcpSettings().MCP_SERVERS;
+assert.equal(servers.length, 1);
+const [chrome] = servers;
+assert.equal(chrome.enabled, false);
+assert.equal(chrome.transport, 'stdio');
+assert.equal(chrome.session_scope, 'task');
+assert.deepEqual(chrome.args, ['-y', '@playwright/mcp@0.0.82', '--extension']);
+assert.match(host.innerHTML, /data-mcp-field="session_scope"/);
+assert.match(host.innerHTML, /<option value="task" selected>/);
+assert.ok(!host.innerHTML.includes('Fields retained but not applied'));
+applyMcpSettings({ MCP_SERVERS: [{ id: 'plain', transport: 'stdio', command: 'x' }] });
+assert.match(host.innerHTML, /<option value="call" selected>/);
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_task_session_warning_tracks_the_unsaved_session_selection():
+    """Changing a select must update its warning without discarding the card/draft."""
+    node = _node_bin()
+    if not node:
+        pytest.skip("Node is unavailable")
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
+let onInput;
+const warning = { hidden: true };
+const select = { dataset: { mcpField: 'session_scope' }, value: 'call',
+    addEventListener: (event, handler) => { if (event === 'input') onInput = handler; } };
+const card = { dataset: { mcpIndex: '0' }, querySelectorAll: () => [select],
+    querySelector: (selector) => selector === '[data-mcp-task-session-warning]' ? warning : null };
+const host = { innerHTML: '', querySelectorAll: () => [card] };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null };
+globalThis.fetch = async () => ({ ok: false });
+applyMcpSettings({ MCP_SERVERS: [{ id: 'local', transport: 'stdio', command: 'node', session_scope: 'call' }] });
+assert.match(host.innerHTML, /data-mcp-task-session-warning hidden/);
+select.value = 'task'; onInput();
+assert.equal(warning.hidden, false);
+assert.equal(collectMcpSettings().MCP_SERVERS[0].session_scope, 'task');
+select.value = 'call'; onInput();
+assert.equal(warning.hidden, true);
+assert.equal(collectMcpSettings().MCP_SERVERS[0].session_scope, 'call');
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_settings_ui_offers_the_chrome_preset_without_installing_anything(settings_ui_source: str) -> None:
+    assert 'id="btn-mcp-add-chrome"' in settings_ui_source
+    assert "Experimental disabled preset; Stop/Panic custody unproven" in settings_ui_source
+    assert "Do not connect a personal profile" in settings_ui_source

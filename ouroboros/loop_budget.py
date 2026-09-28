@@ -610,6 +610,17 @@ def _cleanup_loop_resources(
             stateful_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             log.warning("Failed to shutdown stateful executor", exc_info=True)
+    try:
+        # A task-held MCP session (e.g. the Playwright Extension's connection to
+        # the owner's Chrome) ends with the loop that owned it.
+        from ouroboros.mcp_task_sessions import close_task_sessions
+
+        receipts = close_task_sessions(str(getattr(ctx.tools._ctx, "task_id", "") or ""))
+        for receipt in receipts:
+            if not receipt["closed"]:
+                log.error("MCP task session disconnection unconfirmed: %s", receipt)
+    except Exception:
+        log.debug("Task-held MCP session cleanup failed", exc_info=True)
     _loop()._finalize_task_services(ctx)
     # The full DeliveryCandidate is loop-local: only its compact
     # hash/revision projection remains in llm_trace after this cleanup. Clear

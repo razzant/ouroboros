@@ -654,11 +654,18 @@ class ToolRegistry:
             _mcp_ensure_configured(refresh=True)
         manager = _mcp_get_manager()
         grants = self._acting_tool_grants() if self._is_acting_subagent() else None
+        held_blocked = registry_guards.task_session_block_reason(self._ctx, dispatch=False)
         rows = [tool for tool in manager.list_tools_for_registry()
                 if _presence_tool_allowed(self._ctx, tool["name"])
                 if grants is None or tool["name"] in grants]
+        held = [tool for tool in rows if held_blocked and tool.get("session_scope") == "task"]
+        rows = [tool for tool in rows if tool not in held]
+        hidden = sorted({str(tool.get("server_id") or "") for tool in held})
         if not record:
             return _partition_shadowed_tools(rows, self._entries)[0]
+        if hidden:
+            self._capability_omissions.append({"surface": "mcp", "reason": "task_session_scope",
+                                               "servers": hidden, "detail": held_blocked})
         rows = self._visible_dynamic_tools("mcp", rows)
         self._record_mcp_slug_collisions([
             item for item in getattr(manager, "tool_name_collisions", lambda: [])()
@@ -793,6 +800,13 @@ class ToolRegistry:
             return "disabled by this task's contract (disabled_tools)"
         if not _presence_tool_allowed(self._ctx, requested):
             return "outside this presence task's positive capability ceiling"
+        held_blocked = requested.startswith("mcp_") and registry_guards.task_session_block_reason(self._ctx, dispatch=False)
+        if held_blocked:
+            from ouroboros.mcp_client import get_manager as _mcp_get_manager
+
+            if any(row["name"] == requested and row.get("session_scope") == "task"
+                   for row in _mcp_get_manager().list_tools_for_registry()):
+                return f"its MCP server keeps one session per task; {held_blocked}"
         if requested not in self._entries:
             return None
         if self._entries[requested].alias_for:
@@ -881,7 +895,8 @@ class ToolRegistry:
                 self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
                 return None
             mcp_tool = _mcp_get_manager().get_tool(requested)
-            if mcp_tool:
+            if mcp_tool and not (mcp_tool.get("session_scope") == "task"
+                                 and registry_guards.task_session_block_reason(self._ctx, dispatch=False)):
                 return _dynamic_tool_schema(mcp_tool)
         return None
 

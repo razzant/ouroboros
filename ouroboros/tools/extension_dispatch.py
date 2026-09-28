@@ -79,9 +79,22 @@ def _dispatch_mcp_tool_result(
     name: str,
     args: Dict[str, Any],
 ) -> ToolResult:
-    """Run one MCP tool while preserving provider-owned result facts."""
-    from ouroboros.safety import check_safety as _mcp_check_safety
+    """Run one MCP tool while preserving provider-owned result facts.
 
+    A ``session_scope=task`` server's call carries the caller's task id, which
+    owns the held session; a caller that may not own one is refused here,
+    before Safety or transport.
+    """
+    from ouroboros.mcp_client import get_manager as _mcp_get_manager
+    from ouroboros.safety import check_safety as _mcp_check_safety
+    from ouroboros.tools.registry_guards import task_session_block_reason
+
+    listed = next((row for row in _mcp_get_manager().list_tools_for_registry() if row["name"] == name), {})
+    reason = task_session_block_reason(ctx) if listed.get("session_scope") == "task" else ""
+    if reason:
+        text = (f"⚠️ MCP_TOOL_DISALLOWED: {name!r} belongs to MCP server {listed.get('server_id')!r}, "
+                f"which keeps one session per task; {reason}. Nothing was executed.")
+        return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=text)
     is_safe, safety_msg = _mcp_check_safety(
         name,
         args,
@@ -93,7 +106,10 @@ def _dispatch_mcp_tool_result(
     try:
         from ouroboros.mcp_client import _call_mcp_tool_result as _mcp_call
 
-        result = _mcp_call(name, args or {})
+        # Only an admitted task-scope call carries an owner; a server switched to
+        # task scope after the check above then fails closed without one.
+        owner = str(getattr(ctx, "task_id", "") or "") if listed.get("session_scope") == "task" else ""
+        result = _mcp_call(name, args or {}, task_id=owner)
     except Exception as exc:
         text = f"⚠️ TOOL_ERROR ({name}): {exc}"
         return ToolResult(status="error", code="TOOL_ERROR", text=text)

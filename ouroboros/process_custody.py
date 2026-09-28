@@ -55,6 +55,9 @@ LEDGER_FILENAME = "process_ledger.jsonl"
 # reaper can tell "mine" from "previous generation" without guessing.
 _SESSION_ID = uuid.uuid4().hex
 _VALID_SCOPES = ("task", "session", "daemon")
+TASK_SESSION_PURPOSE_PREFIX = "mcp_task_session:"  # + server id (``mcp_task_sessions``)
+# Purposes whose whole recorded group, not only its leader, is custody.
+GROUP_CUSTODY_PURPOSE_PREFIXES = ("service:", "workspace_service:", TASK_SESSION_PURPOSE_PREFIX)
 
 
 def current_custody_session_id() -> str:
@@ -116,8 +119,9 @@ def record_process(
     scope: str,
     owner_task_id: str = "",
     reap_process_group: bool = True,
+    spawner_pid: int = 0,
 ) -> Dict[str, Any]:
-    """Append a custody record for an already-spawned process."""
+    """Append a custody record; ``spawner_pid`` lets another owner select it by spawner."""
     if scope not in _VALID_SCOPES:
         raise ValueError(f"process custody scope must be one of {_VALID_SCOPES}, got {scope!r}")
     try:
@@ -150,6 +154,7 @@ def record_process(
         "scope": scope,
         "owner_task": str(owner_task_id or ""),
         "session_id": _SESSION_ID,
+        **({"spawner_pid": int(spawner_pid)} if spawner_pid else {}),
     }
     if not append_jsonl(ledger_path(drive_root), entry):
         raise OSError("process custody record could not be written")
@@ -165,6 +170,7 @@ def spawn_supervised(
     owner_task_id: str = "",
     new_process_group: bool = True,
     on_spawn: Any = None,
+    spawner_pid: int = 0,
     **popen_kwargs: Any,
 ) -> subprocess.Popen:
     """Popen + durable custody record (the single supervised chokepoint).
@@ -191,6 +197,7 @@ def spawn_supervised(
             purpose=purpose,
             scope=scope,
             owner_task_id=owner_task_id,
+            spawner_pid=spawner_pid,
         )
     except Exception as exc:
         log.warning("process custody record failed for pid %s (%s)", proc.pid, purpose, exc_info=True)
@@ -298,16 +305,25 @@ def _fingerprint_matches(entry: Dict[str, Any], *, require_measured: bool = Fals
 
 
 def _service_group_survives_leader(entry: Dict[str, Any]) -> bool:
-    """Keep dead-leader evidence while a group member can still execute."""
+    """Retain a group row while its numeric group id is occupied.
+
+    This is evidence of possible liveness, never authority to signal: after a
+    leader is reaped (or a reboot) the same pgid can name a foreign group.
+    """
     purpose = str(entry.get("purpose") or "")
     scope = str(entry.get("scope") or "")
+    pid = int(entry.get("pid") or 0)
     pgid = int(entry.get("pgid") or 0)
-    return bool(
-        purpose.startswith(("service:", "workspace_service:"))
-        and scope in {"task", "session"}
-        and pgid > 0
-        and process_group_has_live_members(pgid)
-    )
+    if not (purpose.startswith(GROUP_CUSTODY_PURPOSE_PREFIXES) and scope in {"task", "session"} and pgid > 0):
+        return False
+    return process_group_has_live_members(pgid)
+
+
+def _identified_group_leader(entry: Dict[str, Any]) -> bool:
+    """A measured live leader in its recorded group is the signal authority."""
+    pid, pgid = int(entry.get("pid") or 0), int(entry.get("pgid") or 0)
+    return (pid > 0 and pid == pgid and _fingerprint_matches(entry, require_measured=True)
+            and process_group_id(pid) == pgid)
 
 
 def _read_ledger_records(
@@ -647,16 +663,17 @@ def stop_ledgered_processes(
             continue
         pid = int(entry.get("pid") or 0)
         pgid = int(entry.get("pgid") or 0)
-        from ouroboros.platform_layer import collect_descendant_pids, kill_pid_tree
+        from ouroboros.platform_layer import collect_descendant_pids, force_kill_pid
 
         children = collect_descendant_pids(pid)
         deadline = time.monotonic() + max(0.0, timeout_sec)
         try:
-            # Harness children lead their own groups. Capture and stop the PID
-            # tree before its parent dies, then sweep the original group too.
-            kill_pid_tree(pid)
-            if pgid > 0:
+            # Signal the group while its measured leader still authenticates
+            # the pgid, then stop any descendants that left that group.
+            if pgid > 0 and _identified_group_leader(entry):
                 kill_process_group_id(pgid)
+            for victim in [*children, pid]:
+                force_kill_pid(victim)
         except Exception:
             log.warning("Failed to stop ledgered process %s", pid, exc_info=True)
             failures.append(f"process {pid} signal failed")
@@ -691,6 +708,73 @@ def stop_ledgered_processes(
     return stopped
 
 
+def stop_group_custody(
+    drive_root: pathlib.Path, select: Any, *, timeout_sec: float = 5.0,
+    reason: str = "owner_stop", unconfirmed: Optional[List[str]] = None,
+) -> List[int]:
+    """Stop selected ``GROUP_CUSTODY_PURPOSE_PREFIXES`` rows; return pids whose custody ended.
+
+    The recorded group is the unit, but a dead leader cannot authenticate a
+    surviving numeric pgid. Such a row remains unresolved without a signal.
+    A row leaves the ledger only once its leader, group and the descendants
+    captured before signalling are gone within ``timeout_sec``; otherwise it stays
+    for the next stop or the reaper, named in ``unconfirmed``. Windows: no group.
+    """
+    from ouroboros.platform_layer import collect_descendant_pids, force_kill_pid
+
+    drive_root, failures = pathlib.Path(drive_root), unconfirmed if unconfirmed is not None else []
+    _, entries, previous = _read_ledger_records(drive_root, strict=False)
+    survivors: List[Dict[str, Any]] = []
+    targets: List[tuple] = []
+    for entry in entries:
+        if not (str(entry.get("purpose") or "").startswith(GROUP_CUSTODY_PURPOSE_PREFIXES) and select(entry)):
+            survivors.append(entry)
+            continue
+        pid, pgid = int(entry.get("pid") or 0), int(entry.get("pgid") or 0)
+        leader = (_identified_group_leader(entry) if pgid > 0
+                  else _fingerprint_matches(entry, require_measured=True))
+        children = collect_descendant_pids(pid) if leader else []
+        if not leader and _service_group_survives_leader(entry):
+            failures.append(f"process {pid} group {pgid} identity unconfirmed; custody retained")
+            survivors.append(entry)
+            continue
+        try:
+            if leader:
+                kill_process_group_id(pgid)
+            for victim in [*children, pid] if leader else []:
+                force_kill_pid(victim)
+        except Exception:
+            log.warning("Failed to stop custody group of %s", pid, exc_info=True)
+            failures.append(f"process {pid} group {pgid} signal failed")
+            survivors.append(entry)
+            continue
+        targets.append((entry, children))
+
+    def alive(entry: Dict[str, Any], children: List[int]) -> bool:
+        return (_fingerprint_matches(entry) or _service_group_survives_leader(entry)
+                or any(pid_is_alive(child) and not pid_is_zombie(child) for child in children))
+
+    deadline, pending = time.monotonic() + max(0.0, timeout_sec), list(targets)
+    while (pending := [item for item in pending if alive(*item)]) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    released: List[int] = []
+    for entry, children in targets:
+        pid, pgid = int(entry.get("pid") or 0), int(entry.get("pgid") or 0)
+        if any(item[0] is entry for item in pending):
+            failures.append(f"process {pid} group {pgid} exit unconfirmed; custody retained")
+            survivors.append(entry)
+            continue
+        released.append(pid)
+        append_jsonl(drive_root / "logs" / "supervisor.jsonl", {
+            "ts": utc_now_iso(), "type": "process_stopped", "pid": pid, "pgid": pgid,
+            "purpose": entry.get("purpose"), "scope": entry.get("scope"), "owner_task": entry.get("owner_task"),
+            "recorded_session": entry.get("session_id"), "captured_descendants": len(children), "reason": reason,
+        })
+    if released:
+        _rewrite_ledger(drive_root, survivors, previous=previous)
+    return released
+
+
 def quiesce_custodied_services(
     drive_root: pathlib.Path, *, timeout_sec: float = 5.0
 ) -> tuple[bool, List[str]]:
@@ -711,8 +795,14 @@ def quiesce_custodied_services(
             and str(entry.get("scope") or "") in {"task", "session"}
             and (leader_matches or _service_group_survives_leader(entry))
         ):
-            targets.append(entry)
-        elif leader_matches:
+            pid, pgid = int(entry.get("pid") or 0), int(entry.get("pgid") or 0)
+            if (not _identified_group_leader(entry) if pgid > 0
+                    else not _fingerprint_matches(entry, require_measured=True)):
+                survivors.append(entry)
+                blockers.append(f"custody_service:{pid}:identity_unconfirmed")
+            else:
+                targets.append(entry)
+        elif leader_matches or _service_group_survives_leader(entry):
             survivors.append(entry)
 
     from ouroboros.platform_layer import kill_pid_tree
@@ -900,6 +990,14 @@ def reap_orphaned_processes(
         elif scope == "daemon" or (same_session and not task_owner_gone):
             survivors.append(entry)
             continue
+        group_custody = purpose.startswith(GROUP_CUSTODY_PURPOSE_PREFIXES) and scope in {"task", "session"}
+        if group_custody and int(entry.get("pgid") or 0) > 0 and not _identified_group_leader(entry):
+            # A dead leader's pgid may have been reused, even across a reboot.
+            # The row remains an unresolved custody claim; a number is not an
+            # identity and must not authorize a group signal.
+            if leader_matches or group_survives:
+                survivors.append(entry)
+            continue
         try:
             pgid = int(entry.get("pgid") or 0)
             if pgid > 0:
@@ -908,6 +1006,12 @@ def reap_orphaned_processes(
                 from ouroboros.platform_layer import kill_pid_tree
 
                 kill_pid_tree(pid, exclude_pids=retained_roots)
+            # platform_layer's signal helpers deliberately swallow OS errors.
+            # Only observed exit, including all live group members, confirms a
+            # reap. A failed or skipped signal must leave the row for retry.
+            if _fingerprint_matches(entry) or (group_custody and _service_group_survives_leader(entry)):
+                survivors.append(entry)
+                continue
             reaped.append(pid)
             append_jsonl(drive_root / "logs" / "supervisor.jsonl", {
                 "ts": utc_now_iso(),
