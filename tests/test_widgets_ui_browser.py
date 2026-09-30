@@ -329,10 +329,10 @@ _WIDGET_TEMPORAL_TRACE_SCRIPT = r"""
     const start = () => {
         const observer = new MutationObserver((records) => {
             records.forEach((row) => {
-                // Masonry writes its plan as custom properties (widgets lifecycle
-                // phase 3): `--masonry-h` on the list is the one write per layout.
-                if (row.type === 'attributes' && row.target.matches?.('.widgets-list')) {
-                    record('masonry', row.target, {height: row.target.style.getPropertyValue('--masonry-h')});
+                // The grid writes a card's cell as custom properties on the card
+                // (web/modules/widget_grid.js), and only when the plan changes.
+                if (row.type === 'attributes' && row.target.matches?.('.widgets-card')) {
+                    record('layout', row.target, {row: row.target.style.getPropertyValue('--widget-row')});
                 }
             });
             scan();
@@ -734,7 +734,7 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
         if frame is not None:
             frame.locator("body").evaluate("() => window.__resetFixtureGeometry?.()")
 
-    def assert_converged(page, phase: str, *, masonry_limit: int | None = None):
+    def assert_converged(page, phase: str, *, layout_writes: int | None = None):
         quiet = _wait_for_widget_quiet(page)
         trace = page.evaluate("window.__widgetTemporalTrace")
         heights = [round(row["heightValue"]) for row in trace["events"] if row["kind"] == "message"]
@@ -755,9 +755,10 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
         assert quiet, diagnostic
         assert not _has_sustained_alternation(heights), diagnostic
         assert not _has_sustained_alternation(sibling_pairs), diagnostic
-        masonry_count = sum(row["kind"] == "masonry" for row in trace["events"])
-        if masonry_limit is not None:
-            assert masonry_count <= masonry_limit, diagnostic
+        # Content-height independence: a frame growing or shrinking writes no cell.
+        layout_count = sum(row["kind"] == "layout" for row in trace["events"])
+        if layout_writes is not None:
+            assert layout_count == layout_writes, diagnostic
         sibling = page.locator(card_selector("sibling")).evaluate(
             "node => { const box = node.getBoundingClientRect(); return {x: box.x, width: box.width}; }"
         )
@@ -840,7 +841,7 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                 wide_after = child_metrics(frames["wide"])
                 assert wide_after["scrollLeft"] > 0, wide_after
                 assert wide_after["scrollTop"] == 0, wide_after
-                assert_converged(page, "wide-horizontal-wheel", masonry_limit=8)
+                assert_converged(page, "wide-horizontal-wheel", layout_writes=0)
 
                 reset_trace(page, frames["auto"])
                 frames["auto"].locator('[data-action="grow"]').click()
@@ -856,7 +857,7 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                 auto_grown = child_metrics(frames["auto"])
                 assert auto_grown["htmlOverflowY"] == "hidden", auto_grown
                 assert auto_grown["bodyOverflowY"] == "hidden", auto_grown
-                assert_converged(page, "auto-grow", masonry_limit=8)
+                assert_converged(page, "auto-grow", layout_writes=0)
 
                 reset_trace(page, frames["auto"])
                 frames["auto"].locator('[data-action="shrink"]').click()
@@ -865,7 +866,7 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                     arg=[frame_selector("auto"), grown_auto_height],
                     timeout=10_000,
                 )
-                assert_converged(page, "auto-shrink", masonry_limit=8)
+                assert_converged(page, "auto-shrink", layout_writes=0)
                 auto_shrunk = child_metrics(frames["auto"])
                 assert auto_shrunk["htmlOverflowY"] == "hidden", auto_shrunk
                 assert auto_shrunk["bodyOverflowY"] == "hidden", auto_shrunk
@@ -901,7 +902,7 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                 )
                 capped_bottom = child_metrics(frames["capped"])
                 assert 0 < capped_bottom["markerBottom"] <= capped_bottom["height"] + 1, capped_bottom
-                assert_converged(page, "capped-grow-and-keyboard", masonry_limit=8)
+                assert_converged(page, "capped-grow-and-keyboard", layout_writes=0)
                 page.screenshot(path=str(evidence_dir / f"{browser_name}-capped.png"), full_page=True)
 
                 reset_trace(page, frames["capped"])
@@ -911,7 +912,7 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                     arg=frame_selector("capped"),
                     timeout=10_000,
                 )
-                assert_converged(page, "capped-shrink", masonry_limit=8)
+                assert_converged(page, "capped-shrink", layout_writes=0)
                 capped_shrunk = child_metrics(frames["capped"])
                 assert capped_shrunk["htmlOverflowY"] == "hidden", capped_shrunk
                 assert capped_shrunk["bodyOverflowY"] == "hidden", capped_shrunk
@@ -921,10 +922,10 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
 
                 reset_trace(page, frames["fixed"])
                 frames["fixed"].locator('[data-action="grow"]').click()
-                assert_converged(page, "fixed-grow", masonry_limit=8)
+                assert_converged(page, "fixed-grow", layout_writes=0)
                 reset_trace(page, frames["fixed"])
                 frames["fixed"].locator('[data-action="shrink"]').click()
-                assert_converged(page, "fixed-shrink", masonry_limit=8)
+                assert_converged(page, "fixed-shrink", layout_writes=0)
                 assert page.locator(frame_selector("fixed")).evaluate(
                     "frame => frame.getBoundingClientRect().height"
                 ) == 480

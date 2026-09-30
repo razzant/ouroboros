@@ -5252,49 +5252,120 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: 0;
 }
 
-/* Widgets page. Masonry (web/modules/masonry.js) measures and packs the cards
-   and writes the result ONLY as custom properties — `--masonry-h` on the list,
-   `--masonry-w/-x/-y` on each card; these static rules apply them. Cards are
-   positioned by transform in the owner's key order, so a reorder never moves a
-   DOM node (a moved <iframe> would reload). */
+/* Widgets page. The grid (web/modules/widget_grid.js) plans each card's cell
+   without measuring anything and writes it ONLY as custom properties —
+   `--widget-col/-row/-w/-h` and `--widget-order` on each card, the
+   `data-widget-layout` mode on the list; these static rules apply them. A card
+   keeps its cell and its size whatever its content does (taller content
+   scrolls inside the body), and a move, resize or mode switch never moves a
+   DOM node (a moved <iframe> would reload). Row height and gap mirror
+   WIDGET_GRID_ROW_PX / WIDGET_GRID_GAP_PX. */
 
 .widgets-list {
-    position: relative;
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-auto-rows: 40px;
+    gap: 14px;
     margin-top: 16px;
-    height: var(--masonry-h, auto);
+}
+
+.widgets-list > .muted {
+    grid-column: 1 / -1;
 }
 
 .widgets-card {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: var(--masonry-w, auto);
-    transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    grid-column: var(--widget-col, auto) / span var(--widget-w, 4);
+    grid-row: var(--widget-row, auto) / span var(--widget-h, 8);
     padding: 14px;
     backdrop-filter: blur(12px);
 }
 
-.widgets-card.dragging {
-    opacity: 0.68;
+/* Narrow fallback: one full-width column in the key order, each card at its
+   own height. */
+.widgets-list[data-widget-layout="stack"] {
+    grid-template-columns: minmax(0, 1fr);
 }
 
-.widgets-card.drag-over {
+.widgets-list[data-widget-layout="stack"] .widgets-card {
+    grid-column: 1 / -1;
+    grid-row: auto / span var(--widget-h, 8);
+    order: var(--widget-order, 0);
+}
+
+/* While a card is moved or resized: no text selection, faint cell guides on
+   the desktop grid, and frames ignore the pointer so the drag keeps its
+   events over them. */
+.widgets-list.arranging {
+    user-select: none;
+}
+
+.widgets-list.arranging:not([data-widget-layout="stack"]) {
+    background-image:
+        linear-gradient(to right, var(--accent-10) 0 calc(100% - 14px), transparent 0),
+        linear-gradient(to bottom, var(--accent-10) 0 40px, transparent 0);
+    background-size: calc((100% + 14px) / 12) 100%, 100% 54px;
+}
+
+.widgets-list.arranging iframe {
+    pointer-events: none;
+}
+
+.widgets-card.arranging {
+    z-index: 2;
     border-color: var(--accent-45);
     box-shadow: 0 0 0 3px var(--accent-10);
 }
 
-/* Each card is its own stacking context (transform + backdrop-filter), so an
-   open launch-policy menu would otherwise paint under a later sibling card. */
+/* Each card is its own stacking context (backdrop-filter), so an open
+   launch-policy menu would otherwise paint under a later sibling card. */
 .widgets-card:has(.skills-card-menu-dialog[open]) {
     z-index: 1;
 }
 
 .widgets-card-head {
     display: flex;
+    flex: 0 0 auto;
     justify-content: space-between;
     gap: 12px;
     align-items: center;
     margin-bottom: 12px;
+}
+
+.widgets-card-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+}
+
+.widgets-arrange-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+.widgets-arrange-status[data-tone="error"] {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 10px 0;
+    padding: 8px 12px;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+    color: var(--text-primary);
+    border: 1px solid var(--accent-45);
+    border-radius: var(--radius-xs);
 }
 
 .widgets-card-title {
@@ -5316,6 +5387,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     cursor: grab;
+    touch-action: none;
     font: inherit;
     font-size: 14px;
     line-height: 1;
@@ -5326,8 +5398,41 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     color: var(--text-primary);
 }
 
-.widgets-card-drag:active {
+.widgets-card-drag:active,
+.widgets-card.arranging .widgets-card-drag {
     cursor: grabbing;
+}
+
+/* Corner resize grip in the card's bottom-right padding, clear of the body's
+   scrollbar; the stacked column resizes the height only. */
+.widgets-card-resize {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    width: 12px;
+    height: 12px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: linear-gradient(135deg, transparent 0 55%, currentColor 55% 63%, transparent 63% 75%, currentColor 75% 83%, transparent 83%);
+    color: var(--text-meta);
+    cursor: nwse-resize;
+    touch-action: none;
+}
+
+.widgets-card-resize:hover {
+    color: var(--accent);
+}
+
+/* The grip sits 2px inside the card, which clips anything further out. */
+.widgets-card-resize:focus-visible {
+    color: var(--accent);
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 0;
+}
+
+.widgets-list[data-widget-layout="stack"] .widgets-card-resize {
+    cursor: ns-resize;
 }
 
 /* Framed-card head controls (widgets lifecycle phase 2): status as dot + text

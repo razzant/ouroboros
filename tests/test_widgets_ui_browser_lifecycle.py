@@ -636,8 +636,8 @@ def test_ui_smoke_widget_retain_keeps_running_across_pages(direct_server_with_da
     hidden (the `requestAnimationFrame` counter is asserted advanced on webkit
     only: Chromium pauses animation frames of a hidden frame, no rate is
     promised) and its bridged ticks still reaching the host while the
-    declarative poll issues nothing. A keyboard reorder changes the visible
-    position without moving the node or reloading the frame. The page carries
+    declarative poll issues nothing. A keyboard move changes the card's grid
+    cell without moving the node or reloading the frame. The page carries
     no Refresh control: the window reload is the only hard reset, it ends the
     kept frame with its window, and it forgets an owner Stop (which lives in
     the page session only). Owner Stop frees the frame and its timers.
@@ -692,8 +692,9 @@ def test_ui_smoke_widget_retain_keeps_running_across_pages(direct_server_with_da
             card("kept"),
         )
 
-    def masonry_x(page, tab_id: str) -> str:
-        return page.locator(card(tab_id)).evaluate("node => node.style.getPropertyValue('--masonry-x')")
+    cell_js = "node => `${node?.style.getPropertyValue('--widget-col')}/${node?.style.getPropertyValue('--widget-row')}`"
+    def grid_cell(page, tab_id: str) -> str:
+        return page.locator(card(tab_id)).evaluate(cell_js)
 
     def dom_index(page, tab_id: str) -> int:
         return page.evaluate(
@@ -775,19 +776,18 @@ def test_ui_smoke_widget_retain_keeps_running_across_pages(direct_server_with_da
                 assert kept_frame(page).evaluate("() => window.__keptMark") == "same-window"
                 assert page.locator(f"{card('kept')} [data-widget-status]").inner_text() == "Keeps running"
 
-                # Keyboard reorder moves the kept card to the other end of the visible
-                # order (the list arrives sorted by tab id, so it normally sits last and
-                # Home brings it first) while its node stays where it is and its frame
-                # never reloads.
+                # A keyboard move takes the kept card to the other end of the grid's reading
+                # order (it arrives last, sorted by tab id; Home: the top-left cell) while its
+                # node stays where it is and its frame never reloads.
                 page.wait_for_function(
-                    "(selector) => document.querySelector(selector)?.style.getPropertyValue('--masonry-x') !== ''",
+                    "(selector) => document.querySelector(selector)?.style.getPropertyValue('--widget-col') !== ''",
                     arg=card("kept"),
                     timeout=5_000,
                 )
-                x_before = masonry_x(page, "kept")
-                key_press = "Home" if x_before != "0px" else "End"
+                cell_before = grid_cell(page, "kept")
+                key_press = "Home" if cell_before != "1/1" else "End"
                 index_before = dom_index(page, "kept")
-                page.locator(f"{card('kept')} [data-widget-reorder-handle]").focus()
+                page.locator(f"{card('kept')} [data-widget-move-handle]").focus()
                 page.keyboard.press(key_press)
                 page.wait_for_function(
                     """async ([key, first]) => {
@@ -799,17 +799,17 @@ def test_ui_smoke_widget_retain_keeps_running_across_pages(direct_server_with_da
                     timeout=5_000,
                 )
                 page.wait_for_function(
-                    "([selector, before]) => document.querySelector(selector)?.style.getPropertyValue('--masonry-x') !== before",
-                    arg=[card("kept"), x_before],
+                    f"([selector, before]) => ({cell_js})(document.querySelector(selector)) !== before",
+                    arg=[card("kept"), cell_before],
                     timeout=5_000,
                 )
                 if key_press == "Home":
-                    assert masonry_x(page, "kept") == "0px", masonry_x(page, "kept")
+                    assert grid_cell(page, "kept") == "1/1", grid_cell(page, "kept")
                 assert dom_index(page, "kept") == index_before, "a reorder must not move the card node"
                 assert frame_count(page, "kept") == 1
                 assert same_frame(page)
                 assert kept_frame(page).evaluate("() => window.__keptMark") == "same-window"
-                assert page.evaluate("document.activeElement?.hasAttribute('data-widget-reorder-handle')")
+                assert page.evaluate("document.activeElement?.hasAttribute('data-widget-move-handle')")
 
                 # Owner decision Q20: the page carries no Refresh control, so nothing in it
                 # stops a kept-running program behind the owner's back.

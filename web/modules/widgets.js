@@ -1,6 +1,5 @@
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
-import { applyMasonry } from './masonry.js';
 import {
     classifyWidgetJobStatus,
     isRetryableWidgetError,
@@ -26,7 +25,8 @@ import {
     WIDGET_START_MODES,
     withWidgetStartMode,
 } from './widget_card.js';
-import { bindWidgetCardReorder, normalizeWidgetOrder, sortTabsByWidgetOrder } from './widget_reorder.js';
+import { createWidgetArrangement, normalizeWidgetOrder, sortTabsByWidgetOrder } from './widget_reorder.js';
+import { normalizeWidgetLayout } from './widget_grid.js';
 import {
     apiClient,
     apiFetch,
@@ -62,6 +62,7 @@ function pageTemplate() {
             <div class="widgets-scroll scroll-fade-y">
                 <div id="widgets-list-error" class="skills-load-error" hidden><span data-widget-list-error></span> <button type="button" class="btn btn-default btn-sm" data-widget-list-retry>Retry</button></div>
                 <div id="widgets-list" class="widgets-list"></div>
+                <div class="widgets-arrange-status" data-widget-arrange-status role="status" aria-live="polite"></div>
             </div>
         </section>
     `;
@@ -84,10 +85,11 @@ function renderCardHtml(tab) {
                 </div>
                 <div class="widgets-card-controls">
                     ${renderWidgetCardControls(tab)}
-                    <button class="widgets-card-drag" type="button" data-widget-reorder-handle title="Move widget: drag or use arrow keys" aria-label="Move widget: drag or use arrow keys">↕</button>
+                    <button class="widgets-card-drag" type="button" data-widget-move-handle title="Move widget: drag or use arrow keys" aria-label="Move widget: drag or use arrow keys">✥</button>
                 </div>
             </div>
             <div class="widgets-card-body" data-widget-mount></div>
+            <button class="widgets-card-resize" type="button" data-widget-resize-handle title="Resize widget: drag or use arrow keys" aria-label="Resize widget: drag or use arrow keys"></button>
         </article>
         `;
 }
@@ -1186,8 +1188,8 @@ function retireCard(card, settling) {
 // changed are replaced — a running one retires first while its fresh card is
 // inserted beside it and mounts once the stop settled (`mountTrackedTab` waits
 // on the same settle promise) — new cards are appended, every other card keeps
-// its DOM node. No node ever moves: the visible order is the masonry key order,
-// and a moved <iframe> would reload. The list's masonry relayouts on the mutation.
+// its DOM node. No node ever moves: a card's place is its grid cell (or its rank
+// in the stacked column), and a moved <iframe> would reload. The caller relayouts.
 function patchWidgetCards(list, previousTabs, nextTabs) {
     const plan = planWidgetListPatch(previousTabs, nextTabs);
     for (const key of plan.removed) {
@@ -1278,7 +1280,8 @@ export function initWidgets(ctx = {}) {
     // mid-sync marks the list dirty and the running sync loops once more.
     let activeSync = 0;
     let listDirty = false;
-    let uiPreferences = { widget_order: [], widget_start_mode: {}, nested_subagents_expanded: false };
+    let uiPreferences = { widget_order: [], widget_layout: {}, widget_start_mode: {}, nested_subagents_expanded: false };
+    let preferencesAvailable = false;
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
         ctx.ws.on('message', (msg) => {
@@ -1298,14 +1301,24 @@ export function initWidgets(ctx = {}) {
     // its frame while Widgets is hidden; every other mounted card is stopped.
     const retainsWhileHidden = (key) => isRetainedWidget(tabByKey(key), uiPreferences);
     const keptRunning = () => Array.from(widgetDisposers.keys()).filter(retainsWhileHidden);
-    // The complete visible key order (`lastTabs` already carries `widget_order`):
-    // masonry packs the cards in it; no DOM node is ever moved for it.
-    const currentWidgetOrder = () => (lastTabs || []).map(widgetKey);
-    const relayout = () => applyMasonry(list, { order: currentWidgetOrder() });
+    // Card order and grid cells (`lastTabs` already carries `widget_order`):
+    // a move, resize or reorder relayouts by custom properties, never a node move.
+    const arrangement = createWidgetArrangement(list, {
+        tabs: () => lastTabs || [],
+        prefs: () => uiPreferences,
+        commit(next) {
+            uiPreferences = { ...uiPreferences, ...next };
+            if (lastTabs && next.widget_order) lastTabs = sortTabsByWidgetOrder(lastTabs, next.widget_order);
+        },
+        canEdit: () => preferencesAvailable,
+        save: (next) => apiClient.saveUiPreferences(next),
+        status: list.parentElement.querySelector('[data-widget-arrange-status]'),
+    });
+    const relayout = arrangement.relayout;
 
     function paintShell(tabs) {
         renderShell(list, tabs);
-        bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder);
+        arrangement.bind();
         relayout();
     }
 
@@ -1368,13 +1381,23 @@ export function initWidgets(ctx = {}) {
         try {
             do {
                 listDirty = false;
+                const since = arrangement.revision();
+                const settledAtStart = arrangement.settled(since);
                 const [data, prefs] = await listRequests.run(
                     (controller) => requestWidgetListPayload(apiClient, controller));
                 if (!isCurrent()) return;
-                listError.hidden = true;
+                listError.hidden = Boolean(prefs);
+                if (!prefs) listError.querySelector('[data-widget-list-error]').textContent = 'Layout preferences unavailable; cards remain visible but cannot be moved. Retry to restore editing.';
+                preferencesAvailable = Boolean(prefs);
+                const arrangeStatus = list.parentElement.querySelector('[data-widget-arrange-status]');
+                if (!prefs) arrangeStatus.textContent = 'Layout unavailable; retry loading Widgets before moving cards.';
+                else if (arrangeStatus.textContent.startsWith('Layout unavailable')) arrangeStatus.textContent = '';
                 if (prefs) {
+                    // An arrangement made (or still saving) after this read began is newer.
+                    const arranged = settledAtStart && arrangement.settled(since) ? prefs : uiPreferences;
                     uiPreferences = {
-                        widget_order: normalizeWidgetOrder(prefs.widget_order),
+                        widget_order: normalizeWidgetOrder(arranged.widget_order),
+                        widget_layout: normalizeWidgetLayout(arranged.widget_layout),
                         widget_start_mode: prefs.widget_start_mode && typeof prefs.widget_start_mode === 'object'
                             ? prefs.widget_start_mode
                             : {},
@@ -1417,7 +1440,10 @@ export function initWidgets(ctx = {}) {
                 }
                 lastTabs = tabs;
                 lastSignature = signature;
-                bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder);
+                if (prefs) arrangement.pinDefaults();
+                arrangement.bind();
+                list.querySelectorAll('[data-widget-move-handle], [data-widget-resize-handle]')
+                    .forEach((handle) => { handle.disabled = !preferencesAvailable; });
                 relayout();
                 widgetsMounted = true;
                 for (const tab of tabs) {
@@ -1431,9 +1457,7 @@ export function initWidgets(ctx = {}) {
                     }
                     if (isFramedWidget(tab) && !startsOnShow(tab)) await settleStopped(card, tab);
                     else await startWidget(card, tab, isCurrent);
-                    relayout();
                 }
-                relayout();
             } while (listDirty && isCurrent());
         } catch (err) {
             if (!isCurrent()) return;
@@ -1453,20 +1477,6 @@ export function initWidgets(ctx = {}) {
                 retryButton.textContent = 'Retry';
             }
         }
-    }
-
-    // A reorder (handle drag / keys) hands over the next key order: remember it,
-    // re-sort the last good list, relayout in place, persist. No node moves.
-    function persistWidgetOrder(order) {
-        const normalized = normalizeWidgetOrder(order);
-        uiPreferences = { ...uiPreferences, widget_order: normalized };
-        if (lastTabs) {
-            lastTabs = sortTabsByWidgetOrder(lastTabs, normalized);
-        }
-        relayout();
-        apiClient.saveUiPreferences({ widget_order: normalized }).catch((err) => {
-            console.warn('Failed to save widget order', err);
-        });
     }
 
     // Framed card, effective policy `auto` or `retain` (both start on show; only
@@ -1514,13 +1524,11 @@ export function initWidgets(ctx = {}) {
         syncWidgetCardControls(card, 'stopping', effectiveStartMode(tab, uiPreferences));
         await disposeWidgetByKey(widgetKey(tab));
         await settleStopped(card, tab);
-        relayout();
     }
 
     async function startWidgetByOwner(card, tab) {
         stoppedByOwner.delete(widgetKey(tab));
         await startWidget(card, tab, isCurrentFor(renderGeneration));
-        relayout();
     }
 
     // Launch-policy writes are a whole-map replace through the preferences API:

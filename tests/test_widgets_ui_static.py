@@ -462,43 +462,57 @@ def test_widgets_use_design_radius_tokens():
     assert "border-radius: 9px;" not in block
 
 
-def test_widgets_cards_do_not_stretch_to_row_height():
-    """Masonry packs unequal cards by absolute position. Phase 3: `layout()`
-    packs the cards in the page's explicit key order (`widget_order`), never the
-    DOM order, and writes the plan back only as narrow custom properties
-    (`--masonry-w/-x/-y` per card, `--masonry-h` on the list) that one static
-    rule set in web/style.css applies; the generated per-container `<style>`
-    with `:nth-child` rules is gone, and `applyMasonry` returns an idempotent
-    disposer for its three observers and the pending frame."""
+def test_widgets_cards_keep_a_saved_grid_cell_and_size():
+    """Widgets grid: each card sits at a stable cell of a 12-column grid with a
+    fixed width and height in grid units (`ui_preferences.widget_layout`), in
+    the owner's order when it has no saved cell. `planWidgetGrid` never
+    measures a card, so content that grows or shrinks moves and resizes
+    nothing: a taller body scrolls inside its fixed card. The plan reaches the
+    DOM only as custom properties (`--widget-col/-row/-w/-h`, `--widget-order`)
+    and the list's `data-widget-layout` mode, which one static rule set in
+    web/style.css applies; a narrow list falls back to one stacked column in
+    the key order. The masonry that measured heights is gone."""
     source = _widgets_js()
     css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
-    masonry = (REPO_ROOT / "web" / "modules" / "masonry.js").read_text(encoding="utf-8")
+    grid = _read("web/modules/widget_grid.js")
+    assert not (REPO_ROOT / "web" / "modules" / "masonry.js").exists()
+    assert "masonry" not in source
     assert "const span = Number(tab.span || tab.grid_span || 1);" in source
     assert "widgets-card-span-2" in source
-    assert "const relayout = () => applyMasonry(list, { order: currentWidgetOrder() });" in source
-    assert "function layout(container, config)" in masonry
-    assert "item.classList.contains(spanClass) ? 2 : 1" in masonry
-    assert "Math.min(desiredColumns, availableColumns)" in masonry
-    assert "itemResizeObserver" in masonry
-    assert "observeItems()" in masonry
-    # Custom properties in, static CSS out; no generated stylesheet, no DOM id.
-    for name in ("--masonry-w", "--masonry-x", "--masonry-y", "--masonry-h"):
-        assert f"setProperty('{name}'" in masonry, name
-    for gone in ("createElement('style')", "document.head", "getElementById", "data-masonry-id", "masonryId", "nth-child", "textContent"):
-        assert gone not in masonry, gone
-    assert "resizeObserver.disconnect();" in masonry
-    assert "itemResizeObserver.disconnect();" in masonry
-    assert "mutationObserver.disconnect();" in masonry
-    assert "cancelAnimationFrame(frame)" in masonry
+    assert "const relayout = arrangement.relayout;" in source
+    assert "export function planWidgetGrid(cards, layout = {})" in grid
+    assert "export function applyWidgetGrid(container, { placements = new Map(), order = [] } = {})" in grid
+    for name in ("--widget-col", "--widget-row", "--widget-w", "--widget-h", "--widget-order"):
+        assert f"style.setProperty('{name}'" in grid, name
+    # Nothing is measured, generated or moved for a layout.
+    for gone in ("offsetHeight", "getBoundingClientRect", "createElement", "document.head", "MutationObserver", "nth-child", ".append(", ".before(", ".after("):
+        assert gone not in grid, gone
+    assert "observer.disconnect();" in grid
+    assert "if (frame) cancelAnimationFrame(frame);" in grid
     widgets_block = css.split(".widgets-list {", 1)[1].split("}", 1)[0]
-    assert "display: grid" not in widgets_block
-    assert "position: relative;" in widgets_block
-    assert "height: var(--masonry-h, auto);" in widgets_block
-    card_block = css.split("height: var(--masonry-h, auto);", 1)[1].split(".widgets-card {", 1)[1].split("}", 1)[0]
-    assert "width: var(--masonry-w, auto);" in card_block
-    assert "transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));" in card_block
-    # `widgets-card-span-2` is the JS span signal only (masonry reads the class);
-    # the inert `grid-column: span 2` rules from the grid era are gone (CA-9).
+    assert "display: grid;" in widgets_block
+    assert "grid-template-columns: repeat(12, minmax(0, 1fr));" in widgets_block
+    assert "grid-auto-rows: 40px;" in widgets_block
+    assert "gap: 14px;" in widgets_block
+    assert "export const WIDGET_GRID_ROW_PX = 40;" in grid
+    assert "export const WIDGET_GRID_GAP_PX = 14;" in grid
+    card_block = css.split("grid-auto-rows: 40px;", 1)[1].split(".widgets-card {", 1)[1].split("}", 1)[0]
+    assert "grid-column: var(--widget-col, auto) / span var(--widget-w, 4);" in card_block
+    assert "grid-row: var(--widget-row, auto) / span var(--widget-h, 8);" in card_block
+    assert "overflow: hidden;" in card_block
+    assert "min-height: 0;" in card_block
+    body_block = css.split(".widgets-card-body {", 1)[1].split("}", 1)[0]
+    assert "overflow: auto;" in body_block
+    assert "min-height: 0;" in body_block
+    stack_block = css.split('.widgets-list[data-widget-layout="stack"] .widgets-card {', 1)[1].split("}", 1)[0]
+    assert "grid-column: 1 / -1;" in stack_block
+    assert "grid-row: auto / span var(--widget-h, 8);" in stack_block
+    assert "order: var(--widget-order, 0);" in stack_block
+    # A drag keeps its pointer events over frames without touching them.
+    assert ".widgets-list.arranging iframe {" in css
+    assert "--masonry" not in css
+    # `widgets-card-span-2` is the default-width signal only (read from the tab);
+    # the inert `grid-column: span 2` rules from the first grid era stay gone (CA-9).
     assert ".widgets-card-span-2" not in css
 
 
@@ -534,39 +548,51 @@ def test_widget_fault_status_wraps_inside_narrow_card():
 
 
 def test_widgets_card_order_is_owner_ui_preference():
-    """The reorder handles live in ``widget_reorder.js``; the card markup and
-    the preference write stay in the page host. Phase 3: a reorder (drag or
-    keys) is a pure move in the KEY order (``moveWidgetKey``) handed back to the
-    page, which re-sorts, relayouts through masonry and persists — no
-    ``<article>`` is ever moved, so a running frame never reloads on reorder.
-    Disclosed residual: the Tab/focus order follows the DOM and may differ from
-    the visible order until a window reload rebuilds the cards."""
+    """The move and resize handles and the arrangement controller live in
+    ``widget_reorder.js``; the card markup and the preference state stay in the
+    page host. A grid move or resize is a pure change of cells
+    (``arrangeWidgetSlot``) and a stacked reorder a pure move in the KEY order
+    (``moveWidgetKey``); the page re-sorts, relayouts by custom properties and
+    persists ``widget_layout`` / ``widget_order`` — no ``<article>`` is ever
+    moved, so a running frame never reloads on a move or resize. Disclosed
+    residual: the Tab/focus order follows the DOM and may differ from the
+    visible order until a window reload rebuilds the cards."""
     source = _widgets_js()
     reorder = _read("web/modules/widget_reorder.js")
     css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
     api_client = (REPO_ROOT / "web" / "modules" / "api_client.js").read_text(encoding="utf-8")
 
-    assert 'data-widget-reorder-handle' in source
+    assert 'data-widget-move-handle' in source
+    assert 'data-widget-resize-handle' in source
+    assert 'data-widget-reorder-handle' not in source
     assert "from './widget_reorder.js'" in source
     assert "export function sortTabsByWidgetOrder" in reorder
     assert "originalIndex" in reorder
     assert "return a.originalIndex - b.originalIndex;" in reorder
     assert "Move widget: drag or use arrow keys" in source
+    assert "Resize widget: drag or use arrow keys" in source
     assert "handle.addEventListener('keydown'" in reorder
-    assert "event.key === 'ArrowUp'" in reorder
+    assert "handle.addEventListener('pointerdown'" in reorder
+    assert "ArrowUp:" in reorder
     assert "apiClient.uiPreferences()" in source
-    assert "apiClient.saveUiPreferences({ widget_order: normalized })" in source
+    assert "save: (next) => apiClient.saveUiPreferences(next)," in source
+    assert "widget_layout: normalizeWidgetLayout(arranged.widget_layout)," in source
+    assert "const settledAtStart = arrangement.settled(since);" in source
+    assert "const arranged = settledAtStart && arrangement.settled(since) ? prefs : uiPreferences;" in source
     assert "export function moveWidgetKey(order, key, toIndex)" in reorder
-    assert "export function bindWidgetCardReorder(list, currentOrder, onOrderChange)" in reorder
-    assert "bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder);" in source
-    for moved in (".before(", ".after(", ".prepend(", ".append(", "insertBefore", "appendChild", "replaceWith"):
+    assert "export function createWidgetArrangement(list, options)" in reorder
+    assert "arrangement.bind();" in source
+    for moved in (".before(", ".after(", ".prepend(", ".append(", "insertBefore", "appendChild", "replaceWith", "draggable"):
         assert moved not in reorder, moved
     # The keyed patch inserts and replaces nodes but never moves one.
     assert "anchor.after(" not in source
     assert "list.prepend(" not in source
     assert "previousLiveCard" not in source
     assert ".widgets-card-drag" in css
-    assert ".widgets-card.drag-over" in css
+    assert ".widgets-card-resize {" in css
+    assert ".widgets-card.arranging {" in css
+    assert ".widgets-card.drag-over" not in css
+    assert "touch-action: none;" in css.split(".widgets-card-resize {", 1)[1].split("}", 1)[0]
     assert "uiPreferences: (init = {}) => fetchJson('/api/ui/preferences'" in api_client
     assert "saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload)" in api_client
 
