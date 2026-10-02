@@ -686,16 +686,17 @@ def test_finalizer_reduces_over_cap_breakpoints_and_discloses_the_reduction(monk
     )
 
     payload = captured["payload"]
-    # tools(1) + system(2) + first message block(1) survive; the tail markers are dropped.
+    # No extra tool marker is added when the caller already used the cap.
+    # System(2) and the first two message markers survive; content is unchanged.
     assert len(_markers(payload)) == 4
-    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert "cache_control" not in payload["tools"][-1]
     assert [("cache_control" in block) for block in payload["messages"][0]["content"]] == [
-        True, False, False, False,
+        True, True, False, False,
     ]
     assert [block["text"] for block in payload["messages"][0]["content"]] == [
         "evidence 0", "evidence 1", "evidence 2", "evidence 3",
     ]
-    assert usage["prompt_cache_breakpoints_reduced"] == {"declared": 7, "kept": 4, "dropped": 3}
+    assert usage["prompt_cache_breakpoints_reduced"] == {"declared": 6, "kept": 4, "dropped": 2}
     assert usage["prompt_cache_ttl"] == "1h"
 
 

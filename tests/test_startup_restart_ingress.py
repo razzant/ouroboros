@@ -191,7 +191,9 @@ def test_correlated_restart_is_accepted_once_without_holding_ingress_or_claiming
         _join_restarts()
     with TestClient(app) as client:
         operation = client.get('/chat/operations/23:restart-once', headers=headers).json()
-        assert operation['status'] == ('pending' if checkout_ok else 'failed')
+        assert operation['status'] == ('completed' if checkout_ok else 'failed')
+        if checkout_ok:
+            assert 'Restart confirmed.' in operation['text'] and 'restarted' not in operation['text'].lower()
         rejoined = client.post('/chat/inject', headers=headers, json=body)
         assert rejoined.json()['rejoined'] is True and calls == ['checkout']
     rows = [json.loads(line) for line in (obj.data / 'logs/chat.jsonl').read_text(encoding='utf-8').splitlines()]
@@ -199,7 +201,8 @@ def test_correlated_restart_is_accepted_once_without_holding_ingress_or_claiming
     replies = [row for row in rows if row.get('origin_message_ref')]
     assert replies
     assert all(row['origin_message_ref']['client_message_id'] == 'restart-once' for row in replies)
-    assert not any(row.get('task_terminal_status') == 'completed' for row in replies)
+    assert not replies[0].get('task_terminal_status'), 'initial acknowledgement never claims completion'
+    assert any(row.get('task_terminal_status') == 'completed' for row in replies) is checkout_ok
     assert obj.server._restart_requested.is_set() is checkout_ok
 
 

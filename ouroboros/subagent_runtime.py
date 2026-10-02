@@ -807,7 +807,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             _canonical_work_order_fingerprint=canonical_work_order_fingerprint,
             _work_order_source_request=work_order_source_request,
             _coordination_context=coordination_context,
-            **{key: options.pop(key) for key in ("directory_strategy", "scope_paths", "continue_from")
+            **{key: options.pop(key) for key in ("directory_strategy", "scope_paths", "continue_from", "input_sources")
                if key in options},
         )
         # Every configured-session start lands here — the host's pre-start

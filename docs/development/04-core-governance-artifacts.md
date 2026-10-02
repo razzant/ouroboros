@@ -44,7 +44,7 @@ The context-delivery registry:
 | Plan review (`tools/plan_review.py`) | full for a SELF-MODIFICATION plan; otherwise a runtime heading-derived navigation map, never a copy | full for a self-modification plan (`api_chat` inline, `agent_session` mandatory full read); otherwise book navigation + a resolvable pointer | not resident: a named on-demand pointer; a reviewer needing it returns `need_evidence` with an exact `::lines=A-B` range |
 | Deep self-review (`deep_self_review.py`) | full inline through shared tier 1 on native and session deliveries, without a duplicate-read demand; the seven-file memory whitelist stays byte-exact inline with per-entry dispositions | Tier 3: book navigation and chapters on demand | Tier 2 within this row’s transcript-bound share; deep keeps its own report criteria and CHECKLISTS navigation (ARCHITECTURE §6 "Deep self-review") |
 
-Scheduled API-child `input_sources="declared"` selects assignment/common sources; governance delivery and ordinary shared children stay unchanged. Qualify actual physical sends and source receipts, not disk `memory_mode=empty`. Tools/mail may broaden inputs; first position and exchange remain author decisions. Mechanism/limits: ARCHITECTURE §6 "Selected first-input sources".
+`input_sources="declared"` selects authored inputs; `memory_mode=empty` only seeds a drive. Shared views and native work orders retain distinct transport evidence. Qualify actual sends; tools/mail may broaden inputs, exchange remains the mind's choice (ARCHITECTURE §6 "Selected first-input sources").
 
 Scope's change-relative source manifest (`tools/scope_required_sources.py`)
 names touched protected runtime, frozen contracts and prompts, their declared
@@ -96,14 +96,13 @@ GREEN. Every submitted envelope reaching `plan_task` supersedes prior authority,
 so no newer attempt falls back to an older GREEN. Paid cycles are bounded by the
 shared `OUROBOROS_REVIEW_MAX_CYCLES` (`ouroboros/review_cycles.py`).
 
-**Context mode (Nano / Low / Max).** The Main task context row above is each
-mode's projection of the two books (ARCHITECTURE §6 "Context fitting, retry, and
-compaction"); Max binds `DEVELOPMENT.md` to the active repository — a path fact,
-never a guess from message text. Tier-0 identity and constitutional context
+**Context mode (Nano / Low / Max).** The Main row above defines book projections
+(ARCHITECTURE §6 "Context fitting, retry, and compaction"); Max binds
+`DEVELOPMENT.md` to the active repository by path, not message wording. Tier-0 identity and constitutional context
 stays full in every mode. Predicted Max pressure never swaps in Low documents:
-only actual provider overflow may use a task-local Low projection, then at most
-one same-route strictly-smaller call, and none of it changes owner mode or P3
-commit/scope review. Disclosed residual: an explicit per-task handbook override
+only actual provider overflow, after useful working-history and narrative-memory
+reduction, may use task-local Low book navigation. Recovery sends must be strictly
+smaller; none changes owner mode or P3 commit/scope review. Disclosed residual: an explicit per-task handbook override
 (`context_requires_self_body_docs`) wins in Max only: Low and Nano ignore it
 (issue #1019), as does a delegated subagent child in every mode (issue #1026); the
 sibling `context_requires_development` flag is ignored on the same paths.
@@ -128,25 +127,9 @@ in `tests/test_loop_misc.py`.
 
 ### Invariant: Compaction must earn its rewrite
 
-Helper compaction is deficit-triggered and low-water-sized: a positive deficit
-against the binding boundary (the smaller known of owner target and route
-capacity) requests at most one pass per route+round, sized deficit plus
-ceil(boundary / `context_budget.RECLAIM_LOW_WATER_DIVISOR`) — a structural
-constant pinned by `tests/test_context_budget_ssot.py`, not a setting — so the pass lands
-below the boundary rather than at it; requested margin and achieved headroom are
-separate checkpoint facts, never conflated. The materializer then checkpoints the
-exact actor-visible source before summarizing and publishes only completely
-covered, bound units with provenance and a strictly smaller ContextFit size (same
-image proxy/density). Only typed summarizer overflow may split sources; capsules
-retain the original provenance union. Trigger, sizing and route+round rules
-belong to ARCHITECTURE §6 "Context fitting, retry, and compaction"; the
-materializer adds no threshold, timer, route or retry policy.
+Helper compaction is deficit-triggered and low-water-sized: one pass per route/round requests the deficit plus an eighth of the binding target/capacity boundary (`RECLAIM_LOW_WATER_DIVISOR`, `tests/test_context_budget_ssot.py`). Requested margin and achieved headroom are distinct facts, never a judgment of thinking. Main may replace only exact units whose call arguments, complete results and text were present in a usable physical attempt. Syntax changes across provider formats do not imply missing exposure, but an unsent or omitted unit stays raw. Checkpoint the complete source before map/fold, publish only bound, smaller units, and split only on typed summarizer overflow. Helper text is an attributed host record; actor-authored notes remain the actor's. Preserve older capsule/source readers.
 
-Authored views reuse that custody but follow the actor's note/source selection,
-so need not shrink. Preserve complete units, owner/new tail and schema residency;
-measure without new Main admission gates. Test actual loop wiring, not manually
-seeded observations: `tests/test_main_authored_context.py`, alongside the helper
-coverage in `tests/test_compaction.py`.
+Authored views reuse source custody and need not shrink. Preserve complete owner/new tails and schema residency, measure through existing fit arithmetic, and expose directly usable inspect/restore handles on canonical and live child roots. Same-ID continuation retains the frozen memory view and exposure, never recaptures it as today's history. Sources being stored is not proof they were delivered. Test real loop wiring and both preservation/replacement paths (`tests/test_main_authored_context.py`, `test_context_physical_exposure.py`); ARCHITECTURE §6 owns mode/route, custody and sizing mechanisms. No second trigger or retry policy belongs here.
 
 ### Invariant: No silent truncation
 

@@ -18,10 +18,15 @@ def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
 
     if task_input_sources(task) != "declared":
         return {}
+    actor = task.get("configured_subagent") or (task.get("metadata") or {}).get("configured_subagent") or {}
+    external = isinstance(actor, Mapping) and (actor.get("route") or {}).get("kind") == "agent_session"
+    governance = ("Complete normalized task authority and existing host instructions; SYSTEM/BIBLE govern the "
+                  "supervising Ouroboros and are not claimed as native-session input bytes" if external else
+                  "SYSTEM.md and BIBLE.md; existing reference-book projections")
     return {
         "input_sources": "declared",
         "included": [
-            "SYSTEM.md and BIBLE.md; existing reference-book projections",
+            governance,
             "explicit assignment, question, evidence and normalized task authority",
             "runtime access, tools, workspace, clock, resource and budget facts",
             "this child's own retained progress, tool and event history",
@@ -33,7 +38,7 @@ def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
             "parent context, notes, review_notes, predecessor narrative and inherited attachments",
             "task-tree blackboard, routing manifests and other-task summaries",
         ],
-        "lifetime": "Entire task, including tools, retries, fallback, compaction and selected API descendants.",
+        "lifetime": "Entire task, including tools, retries, fallback, compaction and selected descendants.",
         "collaboration": (
             "Ordinary task messages remain available; input selection imposes no collaboration order. "
             "The host does not gate mailbox delivery or detect the first position."
@@ -46,7 +51,7 @@ def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
         "limitations": (
             "No sandbox, no semantic filtering of declared facts or governance/authority, and no "
             "promise about learned priors. Vendor-side context is unobserved. This receipt records "
-            "host composition, not blanket blindness. Native agent sessions are unsupported."
+            "host composition, not blanket blindness or control over vendor-side native context."
         ),
     }
 
@@ -57,7 +62,34 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def assignment_instructions(ctx: Any) -> str:
+def selected_input_sources(ctx: Any, requested: Any = None) -> str:
+    from ouroboros.contracts.task_contract import normalize_input_sources, task_input_sources
+    inherited = task_input_sources({"task_contract": getattr(ctx, "task_contract", {}),
+                                    "metadata": getattr(ctx, "task_metadata", {})})
+    selected = normalize_input_sources(requested) if requested is not None else inherited
+    if inherited == "declared" and selected != "declared":
+        raise ValueError("input_sources=shared cannot widen an inherited declared selection")
+    return selected
+
+
+def declared_parent_contract(contract: Mapping[str, Any], context: str = "") -> dict:
+    """Keep full task authority while omitting inherited narrative carriers."""
+    projected = {key: value for key, value in contract.items()
+                 if key not in {"notes", "review_notes", "predecessor_authority", "attachment_manifest_ref"}}
+    projected.update(context=context, attachment_manifest=[])
+    predecessor = contract.get("predecessor_authority")
+    if isinstance(predecessor, Mapping) and predecessor:
+        keys = {"source", "task_id", "authority_sha256", "authority_chars", "digest_semantics"}
+        reference = {key: value for key, value in predecessor.items() if key in keys}
+        omitted = predecessor.get("omitted_fields")
+        reference["omitted_fields"] = sorted(set(
+            [str(key) for key in predecessor if key not in keys | {"omitted_fields"}]
+            + (list(omitted) if isinstance(omitted, list) else [])))
+        projected["predecessor_authority"] = reference
+    return projected
+
+
+def assignment_instructions(ctx: Any, input_sources: str | None = None) -> str:
     """Host-authored complete normalized contract for every direct delegate start."""
 
     contract = getattr(ctx, "task_contract", None)
@@ -71,10 +103,56 @@ def assignment_instructions(ctx: Any) -> str:
         contract = build_task_contract({"task_contract": contract})
     if not contract:
         return ""
+    if input_sources == "declared":
+        contract = {**declared_parent_contract(contract), "input_sources": "declared"}
     return (
         "HOST TASK CONTRACT AUTHORITY (complete normalized JSON; exact strings are authority):\n"
         + json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
+
+
+def memory_reference_text(reference: Any) -> str:
+    """One plain reference projection, kept separate from task authority."""
+    if not isinstance(reference, Mapping) or not reference.get("text"):
+        return ""
+    facts = {key: value for key, value in reference.items() if key != "text"}
+    return ("MEMORY REFERENCE (selected context, not task authority)\n"
+            "The following is attributed prior understanding, not a new instruction or permission.\n"
+            + json.dumps(facts, ensure_ascii=False, sort_keys=True) + "\n" + str(reference["text"]))
+
+
+def direct_start_selection(ctx, requested, retry_of):
+    from ouroboros.delegate_shared import _fail
+    try:
+        selection = selected_input_sources(ctx, requested)
+    except ValueError as exc:
+        return "", _fail("delegate_start", "INPUT_SOURCE_SELECTION_INVALID", str(exc), definitely_unrun=True)
+    if retry_of and requested is not None:
+        return "", _fail("delegate_start", "retry_selector_conflict", "A retry replays its recorded input selection.")
+    return selection, None
+
+
+def direct_start_instructions(ctx, actor, selection, requested, source_bound=False):
+    from ouroboros.tools.delegate import _assignment_instructions
+    if actor.get("compiled_work_order") and requested is not None:
+        raise ValueError("The scheduled work order already binds its input selection.")
+    assignment = "" if actor.get("compiled_work_order") else _assignment_instructions(ctx, selection)
+    reference = ""
+    if not actor.get("compiled_work_order") and not source_bound and selection == "shared":
+        from ouroboros.chronicle_view import helper_memory_reference
+        reference = memory_reference_text(helper_memory_reference(ctx))
+    if selection == "declared" and not actor.get("compiled_work_order"):
+        receipt = input_source_selection_receipt({"input_sources": "declared",
+            "configured_subagent": {"route": {"kind": "agent_session"}}})
+        receipt["lifetime"] = "This external run and its immutable retries; later direct starts choose separately, subject to inherited selection."
+        assignment += "\n\nINPUT SOURCE SELECTION\n" + json.dumps(receipt, ensure_ascii=False, sort_keys=True)
+    return assignment, reference
+
+
+def chosen_request_fingerprint(request):
+    """Direct requests retain authority/inert memory in instructions, prompt unchanged."""
+    return sha256(json.dumps({key: request[key] for key in ("prompt", "instructions")},
+                            ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _render_external_work_order(task: Mapping[str, Any]) -> str:
@@ -122,6 +200,12 @@ def _render_external_work_order(task: Mapping[str, Any]) -> str:
         )
         if body:
             rendered.append(f"{title}\n{body}")
+    from ouroboros.contracts.task_contract import task_input_sources
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    if task_input_sources(task) != "declared":
+        memory = memory_reference_text(task.get("memory_reference") or metadata.get("memory_reference"))
+        if memory:
+            rendered.append(memory)
     rendered.append(
         "HOST AUTHORITY BINDING (facts, not instructions to widen)\n"
         + _text(json.dumps(authority, ensure_ascii=False, sort_keys=True))

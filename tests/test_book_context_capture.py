@@ -77,7 +77,7 @@ def test_child_keeps_biography_and_book_orientation_in_max(tmp_path):
     assert "How I keep work alive." in text and "How changes remain coherent." in text
     assert "Full mechanism and WHY." not in text
     assert "Parent's unselected current working note." not in text
-    assert "Unselected raw parent conversation." not in text
+    assert "Unselected raw parent conversation." in text  # Shared default includes a fitting parent's raw room.
     assert "chat_history" in text and "get_task_result" in text
 
 

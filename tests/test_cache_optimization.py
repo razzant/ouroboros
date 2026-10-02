@@ -66,8 +66,11 @@ def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
     (tmpdir / "drive" / "memory" / "knowledge" / "patterns.md").write_text("patterns", encoding="utf-8")
 
     messages, _ = build_llm_messages(env=env, memory=memory, task={"id": "t2", "type": "task", "text": "hi"})
-    stable_text = messages[0]["content"][1]["text"]
-    dynamic_text = messages[0]["content"][2]["text"]
+    stable_text = messages[0]["content"][-2]["text"]
+    dynamic_text = messages[0]["content"][-1]["text"]
+    from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
+    assert messages[0][STABLE_PREFIX_BLOCKS_KEY] == 2
+    assert "dialogue" in messages[0]["content"][1]["text"]
 
     assert "## Identity" in stable_text
     assert "## Knowledge base" in stable_text

@@ -22,7 +22,7 @@ def _install_queue(tmp_path, monkeypatch):
     queue.DRIVE_ROOT = tmp_path
     workers.PENDING[:] = []
     workers.RUNNING.clear()
-    workers.WORKERS.clear()
+    monkeypatch.setattr(workers, "WORKERS", {})
     queue.BUDGET_ROOT_FENCES.clear()
     queue.init_queue_refs(workers.PENDING, workers.RUNNING, workers.QUEUE_SEQ_COUNTER_REF)
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 0})

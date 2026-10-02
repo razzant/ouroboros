@@ -16,7 +16,7 @@ from ouroboros.post_task_checkpoint import POST_TASK_SYNTHESIS_INFLIGHT, POST_TA
 from supervisor import active_activity
 from tests.test_claudexor_startup_lifetime import startup  # noqa: F401 - fixture reuse (real fake engine)
 
-STOP_NOTICE = "Stopping active task. New settings apply to the next message."
+STOP_NOTICE = "Stopping active task. Restart confirmed. New settings apply to the next message."
 
 
 def _rows(root):
@@ -207,7 +207,7 @@ def test_the_restart_notice_claims_a_stopped_task_only_when_one_was_owned(
 
     assert _restart(ctx, monkeypatch) == [True]
 
-    assert messages == ["♻️ Restarting.", "New settings apply to the next message."]
+    assert messages == ["♻️ Restarting.", "Restart confirmed. New settings apply to the next message."]
     assert [c[0] for c in owners.calls] == ["checkout", "kill", "reconcile", "daemon_stop"]
 
 

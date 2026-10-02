@@ -155,7 +155,11 @@ def test_remote_candidate_manifest_matches_exact_post_transform_send(data_root):
     assert all(row["candidate_context_sha256"] == hashlib.sha256(context_bytes).hexdigest() for row in rows)
     assert all(row["candidate_context_size_bytes"] == len(context_bytes) for row in rows)
     assert all(row["candidate_measurement_kind"] == "canonical_json_v1" for row in rows)
-    assert final["physical_context"] == context.__dict__
+    from ouroboros.llm_attempt import memory_view_measurement
+    expected_context = {**context.__dict__, "memory_view": memory_view_measurement(sent)}
+    assert final["physical_context"] == expected_context
+    assert expected_context["memory_view"]["status"] == "unobserved"
+    assert expected_context["memory_view"]["utf8_bytes"] is None
 
     manifest = _manifest(final["candidate_manifest_ref"])
     assert manifest["call_id"] == final["attempt_id"]
@@ -174,7 +178,7 @@ def test_remote_candidate_manifest_matches_exact_post_transform_send(data_root):
     assert capture is not None and capture.state == "settled"
     assert capture.attempt_id == final["attempt_id"]
     assert capture.candidate_manifest_ref == final["candidate_manifest_ref"]
-    assert capture.physical_context == context
+    assert capture.physical_context.__dict__ == expected_context
 
 
 @pytest.mark.parametrize(

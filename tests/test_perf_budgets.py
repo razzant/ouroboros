@@ -31,6 +31,23 @@ from ouroboros import usage_ledger
 from ouroboros import _usage_rows_memo as memo
 
 
+def test_chronicle_growth_warning_preserves_the_journal_and_stays_quiet_below_threshold(tmp_path, monkeypatch):
+    from ouroboros import context_budget
+    from ouroboros.agent_startup_checks import hot_store_growth_notes
+
+    monkeypatch.setattr(context_budget, "CHRONICLE_JOURNAL_WARN_BYTES", 64)
+    env = types.SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+    journal = tmp_path / "memory/chronicle/records.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"x" * 64)
+    assert hot_store_growth_notes(env) == []
+    journal.write_bytes(b"x" * 65)
+    notes = hot_store_growth_notes(env)
+    assert len(notes) == 1 and "memory/chronicle/records.jsonl" in notes[0]
+    assert "Preserve original records" in notes[0]
+    assert journal.read_bytes() == b"x" * 65
+
+
 def test_retained_execution_drive_tripwire_counts_both_roots(tmp_path, monkeypatch):
     from ouroboros import context_budget
     from ouroboros.agent_startup_checks import hot_store_growth_notes

@@ -10,6 +10,7 @@ from typing import List
 from ouroboros import knowledge as knowledge_store
 from ouroboros.knowledge import INDEX_FILE, OVERVIEW_TOPIC
 from ouroboros.knowledge import sanitize_topic as _sanitize_topic
+from ouroboros.memory_guidance import REMEMBERING_TOPIC
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolEntry, ToolContext
 from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_tool_result
@@ -25,7 +26,7 @@ PATTERNS_TOPIC = "patterns"
 # readers (context, deep self-review, the headless copy) all use the canonical
 # drive. A project copy of any of them would be a second source of truth nobody
 # reads.
-GLOBAL_ONLY_TOPICS = frozenset({BACKLOG_TOPIC, OVERVIEW_TOPIC, PATTERNS_TOPIC})
+GLOBAL_ONLY_TOPICS = frozenset({BACKLOG_TOPIC, OVERVIEW_TOPIC, PATTERNS_TOPIC, REMEMBERING_TOPIC})
 # Existing consolidator and Pattern Register imports share this exact lock.
 _knowledge_write_lock = knowledge_store.knowledge_write_lock
 
@@ -238,8 +239,9 @@ def _knowledge_list(ctx: ToolContext, scope: str = "") -> str:
 
 
 def get_tools() -> List[ToolEntry]:
+    from ouroboros.tools.chronicle import chronicle_tools
     topic = {"type": "string", "description": "Shelf-relative topic path without .md; nested paths and Unicode names are supported; no scope prefixes (global/, project/)."}
-    scope = {"type": "string", "description": "global or project:<exact project id>. Omitted uses this task's project shelf, otherwise global. Global knowledge remains explicitly reachable from a project. Understanding of people and relationships, and anything that should outlive the project, belongs in global. Reserved topics (improvement-backlog, overview, patterns) always resolve to global."}
+    scope = {"type": "string", "description": "global or project:<exact project id>. Omitted uses this task's project shelf, otherwise global. Global knowledge remains explicitly reachable from a project. Understanding of people and relationships, and anything that should outlive the project, belongs in global. Reserved topics (improvement-backlog, overview, patterns, remembering) always resolve to global."}
     return [
         ToolEntry("knowledge_read", {
             "name": "knowledge_read",
@@ -265,4 +267,4 @@ def get_tools() -> List[ToolEntry]:
             "description": "List the selected knowledge shelf with authored summaries and source links. This generated inventory is separate from the shared authored overview.",
             "parameters": {"type": "object", "properties": {"scope": scope}, "required": []},
         }, _knowledge_list),
-    ]
+    ] + chronicle_tools()

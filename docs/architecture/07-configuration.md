@@ -32,7 +32,7 @@ Providers name the same output budget differently: OpenRouter/Anthropic-compatib
 | Main task loop (`loop_llm_call.MAIN_LOOP_MAX_TOKENS`) | 65,536 |
 | `LLMClient.vision_query()` and VLM tools (`analyze_screenshot`, `vlm_query`) | 32,768 |
 | Review synthesis dedup | 16,384 |
-| Chat block consolidation, era compression, scratchpad consolidation | 16,384 |
+| Chronicle episodes/digests and scratchpad consolidation | 16,384 |
 | Execution reflection and pattern-register update | 16,384 |
 | Post-task summary (`agent_task_pipeline`) | 16,384 |
 | Improvement-backlog grooming (`improvement_backlog.groom_backlog`) | 8,192 |
@@ -162,7 +162,7 @@ A registry of `config.SETTINGS_DEFAULTS` (exact defaults canonical in `settings_
 | OUROBOROS_PREFLIGHT_TEST_WORKERS | (unset) | Env-only: xdist workers for the hermetic parallel pass (floor 2, else `os.cpu_count()`); read from the OPERATOR environment, scrubbed from the candidate |
 | OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | true | Auto-grant manifest-declared permissions to cleanly reviewed skills (hash-bound; blocking findings never grant) |
 | OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS | true | Launcher seed/resync writes hash-pinned `native_seed` verdicts; acts only at seed/resync, no runtime grant endpoint |
-| OUROBOROS_CONTEXT_MODE | max | Context mode `nano`/`low`/`max`, owner-selected outside Cyber Pro; `nano` records `owner_nano`/`rendered_mode=nano`; sizes Ouroboros's own working window, while scope review runs in every mode (BIBLE P1/P3); Cyber may configure it through the same audited writer (§6 Context fitting, retry, and compaction) |
+| OUROBOROS_CONTEXT_MODE | max | Owner-selected outside Cyber Pro: Nano 85K, Low 250K total targets (reply included), Max route window. Targets are distinct from capacity; model, effort and review scope stay unchanged. `context_budget.py` is numeric SSOT; Cyber uses the same audited writer (§6 Context fitting, retry, and compaction). |
 | OUROBOROS_CONTEXT_MODE_AUTO_LOW | false | Provenance tombstone of the RETIRED persistent auto-Low, not a toggle: normalization writes `false` and `get_owner_context_mode()` honours a persisted `low` only beside it (`context_mode_compat.py`); task-local overflow retry is separate (§6 Context fitting, retry, and compaction) |
 | OUROBOROS_RUNTIME_MODE | advanced | Effective Access light/advanced/pro/cyber_pro, persisted as the next-boot value; boundaries and Cyber agency: §6 Safety and runtime mode; review enforcement stays independent |
 | OUROBOROS_SKILLS_REPO_PATH | "" | Extra skills checkout path (expanded at read time, never cloned/pulled) |

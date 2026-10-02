@@ -292,6 +292,7 @@ def _run_round_compaction(
             task_id=ctx.task_id,
             negative_memo=reclaim_negative_memo(ctx.tools._ctx),
             trace_refs_by_tool_call_id=reclaim_trace_refs(ctx.tools._ctx),
+            exposed_units=(getattr(ctx.tools._ctx, "_last_context_observation", {}) or {}).get("exposed_units", []),
         )
         _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
             "checkpoint_kind": "context_reclaim_manual",
@@ -368,6 +369,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             observed_tool_schemas=observed["tool_schemas"], tool_schemas=schemas,
             fit_candidate=fit_candidate, drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent,
             task_id=ctx.task_id, trace_refs_by_tool_call_id=reclaim_trace_refs(tool_ctx),
+            exposed_units=observed.get("exposed_units"),
         )
         receipt = asdict(result)
     if receipt["status"] != "no_op":

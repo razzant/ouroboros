@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from ouroboros.consolidator import _format_entries_for_block
+from ouroboros.chronicle_sources import format_source_row
 from ouroboros.memory import Memory
 
 
@@ -43,14 +43,16 @@ def test_chat_history_marks_system_entries(tmp_path):
     assert "[User]" not in history
 
 
-def test_consolidator_preserves_system_direction():
-    formatted = _format_entries_for_block([
+def test_chronicle_source_preserves_system_direction():
+    formatted = format_source_row(
         {
             "ts": "2026-03-19T16:53:30.629879+00:00",
             "direction": "system",
             "type": "task_summary",
             "text": "Detailed task summary.",
         }
-    ])
+    )
 
-    assert "[2026-03-19 16:53] [system] Ouroboros: Detailed task summary." in formatted
+    assert formatted.startswith("[2026-03-19T16:53:30.629879+00:00; Ouroboros;")
+    assert json.loads(formatted.splitlines()[1]) == {"direction": "system", "type": "task_summary"}
+    assert formatted.endswith("\nDetailed task summary.")

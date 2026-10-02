@@ -373,6 +373,12 @@ def promote_source_payload(raw: bytes, *, source_id: str, extension: str, catego
             payload = [json.loads(line) for line in raw.splitlines() if line.strip()] if json_lines else json.loads(raw)
         except (ValueError, UnicodeError):
             payload = None
+        if source_id == 'focused_room' and isinstance(payload, dict) and payload.get('kind') == 'chronicle_room_source':
+            # The host's room manifest owns these exact chunk edges. Chat rows
+            # inside each chunk remain opaque data; quoted refs confer no custody.
+            for ref in payload.get('source_chunks', []):
+                _rewrite_child_ref_tree(ref, parent_root, child_root, task_id, state, carrier='response_ref')
+            return raw  # Placement changes never rewrite the captured manifest.
         meta = payload.get("artifact_meta") if isinstance(payload, dict) else None
         plan_wave = plan_wave_source and isinstance(meta, dict) and meta.get("kind") == "plan_review_wave"
         plan_history = source_id.startswith('plan-review-late-') and isinstance(payload, dict) and payload.get('kind') == 'plan_review_historical_supplement' and payload.get('task_id') == task_id

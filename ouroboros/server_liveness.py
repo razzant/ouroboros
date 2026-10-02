@@ -8,6 +8,7 @@ both outside the loop it watches.
 
 from __future__ import annotations
 
+import posixpath
 import queue
 import re
 import sys
@@ -228,7 +229,10 @@ def _innermost_repo_frame(stack: list[str]) -> str:
     """``path:function`` of the innermost frame inside the repository - a relative path, else
     the innermost frame outside the Python runtime ('' when none) - without the line number,
     so the samples of one stalled function fold into one row."""
-    runtime = tuple(prefix.replace("\\", "/") for prefix in {sys.prefix, sys.base_prefix} if prefix)
+    # Bundled Python can retain ../ components in sys.prefix while code
+    # filenames are normalized. Compare lexically, without watchdog filesystem IO.
+    runtime = tuple(posixpath.normpath(prefix.replace("\\", "/")).rstrip("/") + "/"
+                    for prefix in {sys.prefix, sys.base_prefix} if prefix)
     outside = ""
     for row in reversed(stack):
         parsed = _STACK_ROW.match(row)
@@ -236,7 +240,7 @@ def _innermost_repo_frame(stack: list[str]) -> str:
         key = f"{path}:{func}"
         if path and not _ABSOLUTE_PATH.match(path):
             return key
-        if path and not outside and not path.startswith(runtime):
+        if path and not outside and not posixpath.normpath(path.replace("\\", "/")).startswith(runtime):
             outside = key
     return outside
 

@@ -17,7 +17,8 @@ def _src(rel: str) -> str:
 
 def test_agent_context_budget_values_pinned():
     """Values are the SSOT; changing them is a deliberate, visible edit."""
-    assert cb.OWNER_LOW_TARGET_TOKENS == 200_000
+    assert cb.OWNER_LOW_TARGET_TOKENS == 250_000
+    assert cb.OWNER_NANO_TARGET_TOKENS == 85_000
     for retired in ("BG_CONTEXT_WARN_CHARS", "BG_CONTEXT_MAX_CHARS", "BG_STATE_JSON_WARN_CHARS", "BG_OBSERVATIONS_WARN_BYTES"):
         assert not hasattr(cb, retired), retired  # a wake-up is a Main turn under Main's budgets
     assert cb.LARGE_CONTEXT_SECTION_CHARS == 200_000
@@ -27,6 +28,18 @@ def test_agent_context_budget_values_pinned():
     # Structural low-water divisor of the automatic reclaim pass (12.5 % of the
     # binding boundary): a disclosed design choice, not a setting.
     assert cb.RECLAIM_LOW_WATER_DIVISOR == 8
+
+
+def test_context_payload_helpers_keep_existing_bytes_and_exported_names():
+    from ouroboros import context_compaction, context_fit, chronicle_sources, chronicle_view, loop_messages
+
+    encoders = (context_compaction._canonical_json, chronicle_sources._encoded, chronicle_view._encoded)
+    assert all(encoder is cb.canonical_context_json for encoder in encoders)
+    assert encoders[0]({"z": b"x", "a": ["Ж🙂", None, "line\n"]}) == '{"a":["Ж🙂",null,"line\\n"],"z":"b\'x\'"}'
+    assert context_fit.extract_plain_text_from_content is loop_messages._extract_plain_text_from_content
+    assert context_fit.extract_plain_text_from_content is cb.extract_plain_text_from_content
+    assert cb.extract_plain_text_from_content([{"text": "first"}, None, {"text": "Ж🙂"}, {}]) == "firstЖ🙂"
+    assert cb.extract_plain_text_from_content(None) == "" and cb.extract_plain_text_from_content(42) == "42"
 
 
 def test_reclaim_low_water_divisor_is_one_constant_read_at_call_time(monkeypatch):

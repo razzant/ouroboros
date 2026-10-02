@@ -406,8 +406,9 @@ def test_continuity_projection_contract_is_mirrored_across_governance_docs():
     assert "state/skill_review_root_tasks.jsonl" in development
     assert "state/skill_review_root_tasks.jsonl" in architecture
     assert "SKILL_REVIEW_ROOT_TASKS_WARN_BYTES" in architecture
-    assert "eight hot stores" in architecture
-    assert "eight os.stat calls" in _read("ouroboros/agent_startup_checks.py")
+    assert "_hot_store_thresholds" in architecture
+    assert "memory/chronicle/records.jsonl" in architecture
+    assert "CHRONICLE_JOURNAL_WARN_BYTES" in architecture
     for item in (
         "source_completeness",
         "actor_readable_projection",

@@ -62,6 +62,12 @@ D19 = "Frozen contracts (ABI)"
 D20 = "Presence"
 
 [modules]
+"ouroboros/chronicle_store.py" = "D15"
+"ouroboros/chronicle_import.py" = "D15"
+"ouroboros/chronicle_view.py" = "D03"
+"ouroboros/chronicle_sources.py" = "D15"
+"ouroboros/memory_guidance.py" = "D15"
+"ouroboros/tools/chronicle.py" = "D15"
 "launcher.py" = "D18"
 "ouroboros/budget_pause.py" = "D01"
 "ouroboros/launcher_windows_runtime.py" = "D18"
@@ -264,6 +270,7 @@ D20 = "Presence"
 "ouroboros/loop_budget.py" = "D01"
 "ouroboros/loop_delivery.py" = "D01"
 "ouroboros/loop_forced_finalization.py" = "D01"
+"ouroboros/loop_memory.py" = "D01"
 "ouroboros/loop_messages.py" = "D01"
 "ouroboros/loop_model_call.py" = "D01"
 "ouroboros/loop_nudges.py" = "D01"
@@ -896,6 +903,7 @@ lazy_only = [
   "D06->D05",
   "D06->D08",
   "D06->D15",
+  "D07->D03",
   "D07->D09",
   "D07->D10",
   "D07->D11",

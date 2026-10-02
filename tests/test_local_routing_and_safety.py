@@ -65,6 +65,19 @@ def test_prepare_messages_for_local_context_preserves_core_and_compacts_non_core
     assert "## Drive state" in system_blocks[2]["text"]
     assert "## Runtime context" in system_blocks[2]["text"]
     assert "[Compacted for local-model context" in system_blocks[2]["text"]
+    from ouroboros.context_budget import MEMORY_BEGIN, MEMORY_END
+    memory = "## Recent chat\nExact words\n## Arbitrary owner heading\nOwner cancelled publication.\n"
+    for index in (1, 2):
+        blocks = [{"type": "text", "text": "## BIBLE.md\nConstitution"},
+                  {"type": "text", "text": "## Identity\nThe same mind"}]
+        blocks.insert(index, {"type": "text", "text": "## Diagnostic noise\n" + "x" * 8000
+            + MEMORY_BEGIN + memory + MEMORY_END + "\n## More diagnostics\n" + "z" * 8000})
+        before = [{"role": "system", "content": blocks}, {"role": "user", "content": "Proceed internally."}]
+        after = client._prepare_messages_for_local_context(before, ctx_len=1200, max_tokens=200)
+        rendered = after[0]["content"][index]["text"]
+        assert rendered.split(MEMORY_BEGIN)[1].split(MEMORY_END)[0] == memory
+        assert "x" * 8000 not in rendered and "z" * 8000 not in rendered
+        assert "x" * 8000 in before[0]["content"][index]["text"]
 
 
 

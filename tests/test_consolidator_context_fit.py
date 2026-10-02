@@ -71,10 +71,10 @@ def _paths(tmp_path):
             tmp_path / "memory" / "dialogue_meta.json")
 
 
-def _write_chat(path, count=100, text_size=80, *, start=0):
+def _write_chat(path, count=100, text_size=80, *, start=0, task_id="fixture"):
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [{"ts": f"2026-01-01T{index // 60:02d}:{index % 60:02d}:00Z", "direction": "in",
-             "text": f"entry-{index} " + ("Ж🙂x" * text_size), "chat_id": 1}
+             "text": f"entry-{index} " + ("Ж🙂x" * text_size), "chat_id": 1, "task_id": task_id}
             for index in range(start, start + count)]
     path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
     return rows
@@ -88,214 +88,13 @@ def _corrections(prompts):
     return [prompt for prompt in prompts if CORRECTION_HEADING in prompt]
 
 
-def _source(prompts):
-    """Exact source bytes the DRAFT calls received, in order."""
-    return "".join(prompt.split(DRAFT_HEADING, 1)[1][:-1] for prompt in _drafts(prompts))
-
-
-def _corrected_source(prompts):
-    """Exact complete source bytes the CORRECTION calls compared against, in order."""
-    return "".join(prompt.split(CORRECTION_HEADING, 1)[1][:-1] for prompt in _corrections(prompts))
-
-
 def _summary(llm, text="source" * 100, **kwargs):
-    """Draft and correct one exact source as one Main room of one message (identity resident)."""
-    return rc.summarize_source(
-        c._light_call(llm, None, {}), text, [],
-        lambda part, note: rc.room_draft_prompt(
-            part, room_label="Main", block_range_text=_RANGE, message_count=1,
-            identity_text="identity", continuation_note=note),
-        lambda draft, part, note: rc.correction_prompt(
-            draft, part, room_label="Main", scope="dialogue block " + _RANGE,
-            identity_text="identity", continuation_note=note),
-        **kwargs)
-
-
-def _prompt_tokens(source, *, identity_text="", message_count=1,
-                   first_ts="2026-01-01T01:00", last_ts="2026-01-01T02:00",
-                   continuation_note=""):
-    prompt = rc.room_draft_prompt(
-        source, room_label="Main", block_range_text=rc.block_range(first_ts, last_ts),
-        message_count=message_count, identity_text=identity_text, continuation_note=continuation_note,
-    )
-    return context_fit.estimate_context_prompt_tokens(
-        [{"role": "user", "content": prompt}], None,
-    )
-
-
-def _window_for_split(source, *, identity_text="", message_count=1,
-                      first_ts="2026-01-01T01:00", last_ts="2026-01-01T02:00",
-                      density=1.0, continuation_note="", fraction=0.66):
-    """Build a synthetic route window from the real fixed prompt and source.
-
-    Consolidation's output reserve remains the production 16,384 tokens. The
-    fixture capacity is derived from the current prompt prefix and a fraction
-    of the variable source, so adding attribution guidance cannot make the
-    test accidentally exercise an impossible route.
-    """
-    fixed = _prompt_tokens(
-        "", identity_text=identity_text, message_count=message_count,
-        first_ts=first_ts, last_ts=last_ts, continuation_note=continuation_note,
-    )
-    full = _prompt_tokens(
-        source, identity_text=identity_text, message_count=message_count,
-        first_ts=first_ts, last_ts=last_ts, continuation_note=continuation_note,
-    )
-    assert full > fixed
-    split_capacity = fixed + (full - fixed) * fraction
-    return LIGHT_OUTPUT_RESERVE + ceil(split_capacity * density)
-
-
-def _source_for_split(*, identity_text="", message_count=1,
-                      first_ts="2026-01-01T01:00", last_ts="2026-01-01T02:00",
-                      multiplier=12):
-    """Create variable source whose size follows the current fixed prefix."""
-    unit = "complete entry Ж🙂 "
-    fixed = _prompt_tokens(
-        "", identity_text=identity_text, message_count=message_count,
-        first_ts=first_ts, last_ts=last_ts,
-    )
-    source = unit
-    while _prompt_tokens(
-        source, identity_text=identity_text, message_count=message_count,
-        first_ts=first_ts, last_ts=last_ts,
-    ) < fixed * multiplier:
-        source += source
-    return source
-
-
-@pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
-def test_oversized_logical_block_splits_complete_source_and_advances_once(tmp_path, fit, monkeypatch, code):
-    from ouroboros.llm_claudexor import ClaudexorModelError
-    fit.window = None
-    chat, blocks, meta = _paths(tmp_path)
-    rows = _write_chat(chat, text_size=120)
-    source_bytes = chat.read_bytes()
-    def reject(llm, prompt):
-        if len(prompt.encode("utf-8")) > llm.limit:
-            raise ClaudexorModelError({"code": code, "message": "Controlled provider refusal",
-                "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})
-    llm = _LLM(limit=3500, effect=reject)
-    advances = []
-    advance = c._advance_cursor
-    monkeypatch.setattr(c, "_advance_cursor", lambda *args: (advances.append(args[-1]), advance(*args))[-1])
-
-    usage = c.consolidate(chat, blocks, meta, llm)
-
-    assert usage["cost"] is None  # refusal did not report cash
-    assert _source(llm.accepted) == c._format_entries_for_block(rows, include_room_labels=True)
-    assert chat.read_bytes() == source_bytes
-    assert advances == [100]
-    saved = json.loads(blocks.read_text())
-    assert len(saved) == 1 and saved[0]["message_count"] == 100
-    assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
-    assert not c.should_consolidate(meta, chat)
-    refused = usage["_consolidation_errors"][0]
-    assert refused["kind"] == "context_overflow" and not refused["preflight_only"]
-    assert refused["resolution"] == "split"  # history kept; the post-task adapter reads it as answered
-    # A refusal that was split and then fully summarized is a recovered attempt, not a
-    # failed run: the block was written, so no stale error may outlive the advance.
-    assert "last_consolidation_error" not in json.loads(meta.read_text())
-    assert refused["capacity_tokens"] is None and refused["input_limit"] is None
-    sizes = [len(call["messages"][0]["content"].encode("utf-8")) for call in llm.calls]
-    for index, size in enumerate(sizes[:-1]):
-        if size > llm.limit:
-            assert sizes[index + 1] < size
-
-
-def test_known_capacity_includes_whole_prompt_density_and_output_reserve(tmp_path, fit):
-    chat, blocks, meta = _paths(tmp_path)
-    rows = _write_chat(chat, text_size=140)
-    identity = "identity at full length " * 20
-    spans = []
-    formatted = c._format_entries_for_block(rows, include_room_labels=True, source_spans=spans)
-    # Account for the continuation attribution that can appear after a split,
-    # as well as the ordinary fixed prefix. This keeps the synthetic route
-    # large enough for both while retaining a variable source budget.
-    from ouroboros.dialogue_provenance import source_continuation_note
-    continuation = source_continuation_note(
-        spans, spans[len(spans) // 2][0] + 1, spans[len(spans) // 2][0] + 2,
-    )
-    fit.density = 2.5
-    fit.window = _window_for_split(
-        formatted, identity_text=identity, message_count=len(rows),
-        first_ts=rows[0]["ts"], last_ts=rows[-1]["ts"], density=fit.density,
-        continuation_note=continuation,
-    )
-    llm = _LLM()
-
-    result = c.consolidate(chat, blocks, meta, llm, identity)
-
-    assert len(llm.calls) > 1
-    for call in llm.calls:
-        assert identity in call["messages"][0]["content"]
-        size = ceil(context_fit.estimate_context_prompt_tokens(call["messages"], call["tools"]) * fit.density)
-        assert size + call["max_tokens"] <= fit.window
-        assert call["model_role"] == "light" and call["max_tokens"] == 16384
-    assert _source(llm.accepted) == c._format_entries_for_block(rows, include_room_labels=True)
-    assert result["cost"] == pytest.approx(0.01 * len(llm.calls))
-
-
-def test_known_capacity_overhead_refusal_is_typed_without_model_call(tmp_path, fit):
-    fit.window = 16384
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat)
-    original = chat.read_bytes()
-    c.atomic_write_json(meta, {"last_consolidated_offset": 0, "chat_log_signature": c._chat_log_signature(chat)})
-    cursor = json.loads(meta.read_text())["chat_log_signature"]
-    llm = _LLM()
-    for _ in range(2):
-        usage = c.consolidate(chat, blocks, meta, llm, "large identity" * 300)
-        assert usage["_consolidation_errors"][-1]["kind"] == "context_overflow"
-        assert usage["cost"] == 0  # proven local preflight, no request
-    saved = json.loads(meta.read_text())
-    assert saved["chat_log_signature"] == cursor and saved["last_consolidated_offset"] == 0
-    assert saved["last_consolidation_error"]["preflight_only"]
-    assert not llm.calls and not blocks.exists() and chat.read_bytes() == original
-
-
-def test_unknown_capacity_impossible_overhead_does_not_replay_next_cycle(tmp_path, fit):
-    fit.window = None
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat)
-    llm = _LLM(limit=1)
-    usage = c.consolidate(chat, blocks, meta, llm)
-    first_calls = len(llm.calls)
-    assert first_calls > 0
-    assert not usage["_consolidation_errors"][-1].get("resolution")  # the unsplittable refusal stays unresolved
-    c.consolidate(chat, blocks, meta, llm)
-    assert len(llm.calls) == first_calls
-    assert not blocks.exists()
-    assert json.loads(meta.read_text()).get("last_consolidated_offset", 0) == 0
-    # A new route capacity is new evidence; the old refusal must not trap it.
-    fit.window, llm.limit = 100_000, None
-    c.consolidate(chat, blocks, meta, llm)
-    assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
-
-
-def test_route_capacity_changes_split_shape_without_provider_branch(tmp_path, fit):
-    counts = []
-    for window in (100_000, 17_000):
-        fit.window = window
-        chat, blocks, meta = _paths(tmp_path / str(window))
-        _write_chat(chat)
-        llm = _LLM()
-        c.consolidate(chat, blocks, meta, llm)
-        assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
-        counts.append(len(llm.calls))
-    assert counts[0] == 2 < counts[1]  # one draft and one correction, then split parts
-
-
-def test_single_large_entry_is_lossless_even_without_line_boundaries(fit):
-    fit.window = 17000
-    source = "no-newline-🙂Ж-end" * 2000
-    llm = _LLM()
-    content, _ = _summary(llm, source)
-    assert content and len(llm.calls) > 2
-    # A correction whose fixed prefix overflowed re-drafts its halves, so the
-    # DRAFT sources may cover a part twice; the CORRECTED sources — what the
-    # published text was checked against — cover the source exactly once.
-    assert _corrected_source(llm.accepted) == source
+    """One real Light source operation; publication/correction belongs to the store writer."""
+    prompt = rc.room_draft_prompt(text, room_label="Main", block_range_text=_RANGE,
+        message_count=1, identity_text="identity", helper=True)
+    fixed = rc.room_draft_prompt("", room_label="Main", block_range_text=_RANGE,
+        message_count=1, identity_text="identity", helper=True)
+    return c._call_consolidation_llm(llm, prompt, "Room episode", fixed_prompt=fixed, **kwargs)
 
 
 @pytest.mark.parametrize("stale", [False, True])
@@ -303,93 +102,8 @@ def test_unknown_or_stale_capacity_gets_one_ordinary_call(fit, stale):
     fit.window, fit.stale = (1 if stale else None), stale
     llm = _LLM()
     assert _summary(llm)[0]
-    assert len(llm.calls) == 2  # one unchecked draft, one unchecked correction; no split
-    assert _drafts(llm.accepted) == llm.accepted[:1] and _corrections(llm.accepted) == llm.accepted[1:]
-
-
-@pytest.mark.parametrize("first_success", [False, True])
-def test_partial_split_failure_stops_before_siblings_and_preserves_cursor(tmp_path, fit, first_success):
-    fit.window = 17000
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat)
-    before = chat.read_bytes()
-    failure_at = 2 if first_success else 1
-
-    def fail(llm, prompt):
-        if len(llm.calls) == failure_at:
-            raise _Refusal("provider refused", code="invalid_api_key")
-    llm = _LLM(effect=fail)
-    usage = c.consolidate(chat, blocks, meta, llm)
-    assert len(llm.calls) == failure_at and len(llm.accepted) == failure_at - 1
-    assert usage["cost"] is None
-    assert usage["_consolidation_errors"][-1]["kind"] == "auth_error"
-    assert not blocks.exists() and chat.read_bytes() == before
-    assert json.loads(meta.read_text()).get("last_consolidated_offset", 0) == 0
-
-
-@pytest.mark.parametrize("raw", [None, "", " \n"])
-def test_empty_output_is_non_success_with_real_usage(tmp_path, fit, raw):
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat)
-    llm = _LLM(effect=lambda *_: ({"content": raw}, {"cost": 0.02}))
-    result = c.consolidate(chat, blocks, meta, llm)
-    assert result["cost"] == 0.02
-    assert result["_consolidation_errors"][-1]["kind"] == "empty_summary"
-    assert not blocks.exists() and len(llm.calls) == 1
-    assert json.loads(meta.read_text()).get("last_consolidated_offset", 0) == 0
-
-
-@pytest.mark.parametrize("code", ["auth_required", "subscription_window_exhausted", "model_operation_interrupted", "model_outcome_unknown"])
-def test_control_resource_and_unknown_model_errors_still_propagate(tmp_path, fit, code):
-    from ouroboros.llm_claudexor import ClaudexorModelError
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat)
-    error = ClaudexorModelError({"code": code, "message": "context length exceeded"})
-    def fail(*_):
-        raise error
-    llm = _LLM(effect=fail)
-    with pytest.raises(ClaudexorModelError) as caught:
-        c.consolidate(chat, blocks, meta, llm)
-    assert caught.value is error and len(llm.calls) == 1
-    assert not blocks.exists() and not meta.exists()
-
-
-def test_wait_interruption_propagates_after_a_successful_part(tmp_path, fit):
-    from ouroboros.model_wait import ModelWaitInterrupted
-    fit.window = 17000
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat)
-    def fail(llm, _):
-        if len(llm.calls) == 2:
-            raise ModelWaitInterrupted("cancelled", role="light")
-    llm = _LLM(effect=fail)
-    with pytest.raises(ModelWaitInterrupted):
-        c.consolidate(chat, blocks, meta, llm)
-    assert len(llm.calls) == 2 and len(llm.accepted) == 1
-    assert not blocks.exists() and not meta.exists()
-
-
-@pytest.mark.parametrize("unresolved", [False, True])
-@pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
-def test_confirmed_model_context_refusal_splits_but_unknown_custody_propagates(fit, unresolved, code):
-    from ouroboros.llm_claudexor import ClaudexorModelError
-    fit.window = None
-    error = ClaudexorModelError({"code": code, "message": "Controlled provider refusal",
-        "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})
-    error.physical_attempt_capture = SimpleNamespace(state="unresolved" if unresolved else "settled")
-    def refuse_once(llm, _):
-        if len(llm.calls) == 1:
-            raise error
-    llm = _LLM(effect=refuse_once)
-    if unresolved:
-        with pytest.raises(ClaudexorModelError):
-            _summary(llm)
-        assert len(llm.calls) == 1
-    else:
-        content, usage = _summary(llm)
-        # The refusal, then each half drafted and corrected against its own bytes.
-        assert content and len(llm.calls) == 5 and usage["cost"] is None
-        assert _source(llm.accepted) == _corrected_source(llm.accepted) == "source" * 100
+    assert len(llm.calls) == 1  # one operation with unknown capacity
+    assert _drafts(llm.accepted) == llm.accepted and not _corrections(llm.accepted)
 
 
 def test_generic_unknown_custody_is_not_a_context_retry_even_through_cause(fit):
@@ -418,111 +132,6 @@ def test_non_context_refusals_never_split(fit, message, code, kind):
     content, usage = _summary(llm)
     assert not content and len(llm.calls) == 1
     assert usage["_consolidation_errors"][-1]["kind"] == kind
-
-
-def test_refused_attempt_usage_is_merged_with_successful_parts(fit):
-    fit.window = None
-    def refuse_once(llm, _):
-        if len(llm.calls) == 1:
-            error = _Refusal(usage={"prompt_tokens": 7, "completion_tokens": 0, "total_tokens": 7, "cost": 0.03})
-            error.ledger_attempt_ids = ["refused-attempt"]
-            raise error
-    llm = _LLM(effect=refuse_once)
-    content, usage = _summary(llm)
-    assert content and len(llm.calls) == 5  # refusal + (draft, correction) per half
-    assert usage["cost"] == pytest.approx(0.07)
-    assert usage["prompt_tokens"] == 47 and usage["total_tokens"] == 67
-    assert usage["ledger_attempt_ids"] == ["refused-attempt"]
-
-
-def test_rotation_append_and_partial_failure_only_advance_completed_chunks(tmp_path, fit):
-    chat, blocks, meta = _paths(tmp_path)
-    rows = _write_chat(chat, count=200, text_size=0)
-    rows[100]["text"] = "large source🙂" * 3000
-    chat.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-    captured = c._chat_log_signature(chat)
-    archive = tmp_path / "archive" / "chat_20260101.jsonl"
-
-    def rotate_and_fail(llm, _):
-        if len(llm.calls) == 1:
-            archive.parent.mkdir()
-            chat.rename(archive)
-            _write_chat(chat, 100, 0, start=200)
-        if len(llm.calls) == 3:
-            with chat.open("a") as output:
-                output.write(json.dumps({"ts": "2026-01-02T00:00:00Z", "text": "appended tail"}) + "\n")
-            raise _Refusal("failed part", code="invalid_request")
-    # Chunk 0 (100 short rows) fits one draft + one correction; chunk 1 carries
-    # the oversized row, so its first draft is call 3 and fails.
-    fit.window = LIGHT_OUTPUT_RESERVE + 6000
-    llm = _LLM(effect=rotate_and_fail)
-    usage = c.consolidate(chat, blocks, meta, llm)
-    assert len(llm.calls) == 3 and usage["cost"] is None
-    saved = json.loads(meta.read_text())
-    # Chunk 0 (draft + correction) is a complete unit and stays published; the
-    # failed chunk 1 is withheld and recorded as this run's own error.
-    assert saved["last_consolidated_offset"] == 100 and saved["chat_log_signature"] == captured
-    assert saved["last_consolidation_error"]["cursor_offset"] == 100
-    assert sum(block["message_count"] for block in json.loads(blocks.read_text())) == 100
-    assert c.should_consolidate(meta, chat)
-
-    succeeding = _LLM()
-    c.consolidate(chat, blocks, meta, succeeding)
-    # Corrected coverage is the invariant: a correction whose prefix overflowed
-    # re-drafts its halves, so draft sources may repeat a part.
-    assert _corrected_source(succeeding.accepted) == c._format_entries_for_block(rows[100:], include_room_labels=True) + c._format_entries_for_block(c._read_chat_entries(chat)[:100], include_room_labels=True)
-    saved = json.loads(meta.read_text())
-    assert saved["last_consolidated_offset"] == 100
-    assert saved["chat_log_signature"]["first_line_sha256"] == c._chat_log_signature(chat)["first_line_sha256"]
-    assert c._read_chat_entries(chat)[saved["last_consolidated_offset"]:][0]["text"] == "appended tail"
-    assert "last_consolidation_error" not in saved  # the successful retry retired the stale error
-
-
-@pytest.mark.parametrize("failing_call", [3, 4])  # era compression, era correction
-def test_failed_era_usage_is_accounted_and_original_blocks_survive(tmp_path, fit, failing_call):
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat, text_size=0)
-    originals = [{"range": "2025-01-01", "type": "summary", "message_count": 100, "content": f"old-{i}"} for i in range(10)]
-    c.atomic_write_json(blocks, originals)
-    def fail_era(llm, _):
-        if len(llm.calls) == failing_call:
-            return {"content": ""}, {"cost": 0.04}
-    llm = _LLM(effect=fail_era)
-    usage = c.consolidate(chat, blocks, meta, llm)
-    assert len(llm.calls) == failing_call  # the block's draft and correction, then the failed era stage
-    assert usage["cost"] == pytest.approx(0.01 * (failing_call - 1) + 0.04)
-    assert json.loads(blocks.read_text())[:10] == originals
-    assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
-
-
-def test_light_account_and_manual_window_share_real_context_resolver(monkeypatch):
-    from ouroboros import capability_evidence, config
-    model = "claudexor::codex=gpt-test"
-    accounts = json.dumps({"main": "main-account", "light": "light-account"})
-    windows = json.dumps({"main": 100000, "light": 17000})
-    settings = {"OUROBOROS_MODEL": model, "OUROBOROS_MODEL_LIGHT": model,
-                "OUROBOROS_MODEL_ACCOUNTS": accounts, "OUROBOROS_MODEL_CONTEXT_WINDOWS": windows}
-    monkeypatch.setenv("OUROBOROS_MODEL_ACCOUNTS", accounts)
-    monkeypatch.setattr(config, "load_settings", lambda: settings)
-    monkeypatch.setattr(c, "_consolidation_route", lambda: (model, False))
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
-    probes = []
-
-    def probe(_root, **kwargs):
-        probes.append(kwargs)
-        return CapabilityEvidence(100000, "confirmed", "test", "light-fingerprint", model=model)
-    monkeypatch.setattr(capability_evidence, "probe", probe)
-    llm = _LLM()
-    text = "full source " * 1000
-    content, _ = _summary(llm, text)
-
-    assert content and len(llm.calls) > 1
-    assert all(call["model_account_override"] == "light-account" for call in llm.calls)
-    assert all(call["model"] == model and call["model_role"] == "light" for call in llm.calls)
-    assert all(p["options"]["credential_profile_id"] == "light-account" for p in probes)
-    assert all(p["provider"] == "claudexor" and p["allow_fetch"] is True for p in probes)
-    assert all(context_fit.estimate_context_prompt_tokens(call["messages"]) + 16384 <= 17000 for call in llm.calls)
-    assert _corrected_source(llm.accepted) == text
 
 
 def test_local_and_auto_account_are_passed_explicitly(fit, monkeypatch):
@@ -561,63 +170,9 @@ def test_wait_route_override_and_reprepare_remeasure_whole_request(fit, monkeypa
     assert _summary(llm)[0]
     assert llm.calls[0]["model"] == "changed/model"
     assert llm.calls[0]["model_account_override"] == "changed-pin"
-    # The wait's reprepare re-measured the draft under the observed account;
-    # the correction call that follows starts from the ordinary route again.
+    # The wait reprepare remeasures the same operation under the observed account.
     assert fit.tasks[1]["model_route"] == {"credentialProfileId": "changed-pin"}
-    assert len(llm.calls) == 2 and len(fit.tasks) == 3
-
-
-def test_retry_limit_survives_density_changes_and_source_changes_release_it(tmp_path, fit):
-    fit.window = None
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat, text_size=0)
-    llm = _LLM(limit=1)
-    c.consolidate(chat, blocks, meta, llm)
-    calls = len(llm.calls)
-    fit.density = 4.5
-    c.consolidate(chat, blocks, meta, llm)
-    assert len(llm.calls) == calls
-    c.consolidate(chat, blocks, meta, llm, identity_text="new identity context")
-    assert len(llm.calls) > calls
-
-
-def test_complete_blocks_are_preserved_if_a_summary_write_fails(tmp_path, fit, monkeypatch):
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat)
-    def fail_write(*_):
-        raise OSError("disk unavailable")
-    monkeypatch.setattr(c, "_write_locked_json", fail_write)
-    with pytest.raises(OSError):
-        c.consolidate(chat, blocks, meta, _LLM())
-    assert not meta.exists()  # successful inference is not durable cursor progress
-
-
-@pytest.mark.parametrize("failing_call", [3, 4])  # second block's draft, second block's correction
-@pytest.mark.parametrize("unknown", [False, True])
-def test_partial_block_failure_does_not_start_era_work(tmp_path, fit, unknown, failing_call):
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat, count=200, text_size=0)
-    originals = [{"range": "2025-01-01", "type": "summary", "message_count": 100, "content": f"old-{i}"} for i in range(10)]
-    c.atomic_write_json(blocks, originals)
-    def fail_second(llm, _):
-        if len(llm.calls) == failing_call:
-            error = _Refusal("unknown" if unknown else "auth failed", code="invalid_api_key")
-            if unknown:
-                error.physical_attempt_capture = SimpleNamespace(state="unresolved")
-            raise error
-    llm = _LLM(effect=fail_second)
-    usage = c.consolidate(chat, blocks, meta, llm)
-    assert len(llm.calls) == failing_call
-    assert json.loads(blocks.read_text())[:10] == originals
-    # The transaction boundary is the logical chunk: the complete first chunk
-    # stays published, the failed second chunk (draft or correction) is withheld.
-    assert len(json.loads(blocks.read_text())) == 11
-    saved = json.loads(meta.read_text())
-    assert saved["last_consolidated_offset"] == 100
-    # The successful PREFIX advanced the cursor, but the failed suffix is this run's
-    # OWN fresh error: advancing must not clear the very failure just recorded.
-    assert saved["last_consolidation_error"]["cursor_offset"] == 100
-    assert usage["_blocks_written"] == 1
+    assert len(llm.calls) == 1 and len(fit.tasks) == 2
 
 
 def test_unavailable_capacity_reader_retains_ordinary_call(monkeypatch):
@@ -629,52 +184,7 @@ def test_unavailable_capacity_reader_retains_ordinary_call(monkeypatch):
     monkeypatch.setattr(capability_evidence, "probe", unavailable)
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
     llm = _LLM()
-    assert _summary(llm)[0] and len(llm.calls) == 2
-
-
-@pytest.mark.parametrize("preceding_blocks", [0, 1])
-@pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
-def test_refusal_bound_survives_preceding_logical_blocks(tmp_path, fit, preceding_blocks, code):
-    """Earlier success cannot consume a later unpublished block's refusal."""
-    from ouroboros.llm_claudexor import ClaudexorModelError
-    from ouroboros.model_wait import ModelWaitInterrupted
-
-    fit.window = None
-    chat, blocks, meta = _paths(tmp_path)
-    count = 100 * (preceding_blocks + 1)
-    _write_chat(chat, count=count, text_size=5)
-    raw = chat.read_bytes()
-    interruption = ModelWaitInterrupted("deadline", role="light")
-
-    target_draft = 2 * preceding_blocks + 1  # every published block costs a draft and a correction
-
-    def first_cycle(llm, prompt):
-        if len(llm.calls) == target_draft:
-            error = ClaudexorModelError({"code": code, "message": "Controlled provider refusal",
-                "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})
-            error.physical_attempt_capture = SimpleNamespace(state="settled")
-            raise error
-        if len(llm.calls) > target_draft:
-            raise interruption
-
-    first = _LLM(effect=first_cycle)
-    with pytest.raises(ModelWaitInterrupted) as caught:
-        c.consolidate(chat, blocks, meta, first)
-    assert caught.value is interruption
-    rejected = first.calls[target_draft - 1]["messages"][0]["content"]
-    saved = json.loads(meta.read_text())
-    assert saved["consolidation_retry"]["input_limit"]["input_bytes"] == len(rejected.encode()) - 1
-    assert saved.get("last_consolidated_offset", 0) == 0
-    assert not blocks.exists() and chat.read_bytes() == raw
-
-    second = _LLM()
-    c.consolidate(chat, blocks, meta, second)
-    next_prompt = second.calls[target_draft - 1]["messages"][0]["content"]
-    assert len(next_prompt.encode()) < len(rejected.encode())
-    assert chat.read_bytes() == raw
-    final = json.loads(meta.read_text())
-    assert final["last_consolidated_offset"] == count
-    assert "consolidation_retry" not in final
+    assert _summary(llm)[0] and len(llm.calls) == 1
 
 
 @pytest.mark.parametrize("shape", ["usage_finish_reason", "anthropic_stop_reason"])
@@ -691,3 +201,377 @@ def test_output_truncation_is_refused_on_every_lane_shape(fit, shape):
     assert content == ""
     assert [error["kind"] for error in usage["_consolidation_errors"]] == ["output_truncated"]
 
+
+def _consolidate(root, llm, identity="", **kwargs):
+    from ouroboros.tools.registry import ToolContext
+    chat, blocks, meta = _paths(root)
+    return c.consolidate(chat, blocks, meta, llm, identity,
+        knowledge_context=ToolContext(repo_dir=root, drive_root=root, task_id="fixture"),
+        completed_task={"id": "fixture"}, **kwargs)
+
+
+def _store(root):
+    from ouroboros.chronicle_store import ChronicleStore
+    return ChronicleStore(root)
+
+
+def _read_sources(root, store):
+    from ouroboros.artifacts import read_actor_source_bytes
+    return [json.loads(read_actor_source_bytes(root, ref["task_id"], ref))
+        for episode in store.records(kinds=["episode"]) for ref in episode["source_refs"]]
+
+
+def _reader_summary(root, source, window):
+    from ouroboros.tools.registry import ToolContext
+    from tests.test_memory_pressure_maintenance import SourceReader
+    actor = SourceReader(root, window)
+    knowledge = c.KnowledgeReadContext(ToolContext(repo_dir=root, drive_root=root, task_id="fixture"))
+    content, usage = _summary(actor, source, knowledge=knowledge)
+    return actor, content, usage, knowledge
+
+
+@pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
+def test_oversized_source_refusal_retains_bound_then_reads_complete_source(tmp_path, fit, code):
+    from ouroboros.llm_claudexor import ClaudexorModelError
+    from tests.test_memory_pressure_maintenance import SourceReader
+    fit.window = None
+    chat, _blocks, _meta = _paths(tmp_path)
+    rows = _write_chat(chat, count=3, text_size=25000)
+    original = chat.read_bytes()
+    def refuse(*_):
+        error = ClaudexorModelError({"code": code, "message": "Controlled refusal",
+            "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})
+        error.physical_attempt_capture = SimpleNamespace(state="settled")
+        raise error
+    first = _LLM(effect=refuse)
+    refused = _consolidate(tmp_path, first)
+    assert len(first.calls) == 1 and refused["cost"] is None
+    store = _store(tmp_path)
+    assert not store.records(kinds=["episode"])
+    bound = store.records(kinds=["input_refusal"])[0]["input_limit"]
+    assert bound["input_bytes"] == len(first.calls[0]["messages"][0]["content"].encode()) - 1
+    actor = SourceReader(tmp_path, 1000000)
+    result = _consolidate(tmp_path, actor)
+    assert result["_blocks_written"] == 1
+    assert actor.sources and json.dumps(rows, ensure_ascii=False, sort_keys=True) in actor.received[0]
+    assert _read_sources(tmp_path, store) == [rows]
+    assert store.scan_state()["last_consolidated_offset"] == len(rows)
+    assert "last_consolidation_error" not in store.scan_state()
+    assert chat.read_bytes() == original
+
+
+def test_known_capacity_includes_whole_prompt_density_and_output_reserve(tmp_path, fit):
+    from tests.test_memory_pressure_maintenance import SourceReader
+    fit.window, fit.density = 50000, 2.5
+    chat, _blocks, _meta = _paths(tmp_path)
+    rows = _write_chat(chat, count=2, text_size=30000)
+    identity = "Identity must remain complete. " * 20
+    actor = SourceReader(tmp_path, fit.window)
+    usage = _consolidate(tmp_path, actor, identity)
+    assert usage["_blocks_written"] == 1, usage
+    for call in actor.calls:
+        tokens = ceil(context_fit.estimate_context_prompt_tokens(call["messages"], call["tools"]) * fit.density)
+        assert tokens + call["max_tokens"] <= fit.window
+        assert call["model_role"] == "light" and call["max_tokens"] == LIGHT_OUTPUT_RESERVE
+    assert all(identity in source for source in actor.received)
+    assert _read_sources(tmp_path, _store(tmp_path)) == [rows]
+    assert usage["cost"] == pytest.approx(.01 * len(actor.calls))
+
+
+def test_known_capacity_overhead_refusal_is_typed_without_model_call(tmp_path, fit):
+    fit.window = LIGHT_OUTPUT_RESERVE
+    chat, blocks, meta = _paths(tmp_path)
+    _write_chat(chat, count=2)
+    before = chat.read_bytes()
+    llm = _LLM()
+    for _ in range(2):
+        usage = _consolidate(tmp_path, llm, "large identity" * 300)
+        assert usage["_consolidation_errors"][-1]["kind"] == "context_overflow"
+        assert usage["cost"] == 0
+    store = _store(tmp_path)
+    assert not store.scan_state().get("last_consolidated_offset")
+    assert store.scan_state()["last_consolidation_error"]["preflight_only"]
+    assert not llm.calls and not blocks.exists() and not meta.exists()
+    assert chat.read_bytes() == before
+
+
+def test_unread_pointer_never_publishes_or_advances_and_source_is_retained(tmp_path, fit):
+    from ouroboros.artifacts import read_actor_source_bytes
+    fit.window = 24000
+    chat, _blocks, _meta = _paths(tmp_path)
+    _write_chat(chat, count=1, text_size=30000)
+    original = chat.read_bytes()
+    usage = _consolidate(tmp_path, _LLM())
+    error = usage["_consolidation_errors"][-1]
+    assert error["kind"] == "source_incomplete"
+    ref = error["source_ref"]
+    assert "entry-0" in read_actor_source_bytes(tmp_path, ref["task_id"], ref).decode()
+    assert error["response_ref"]
+    assert not _store(tmp_path).records(kinds=["episode"])
+    assert not _store(tmp_path).scan_state().get("last_consolidated_offset")
+    assert chat.read_bytes() == original
+
+
+@pytest.mark.parametrize("window", [30000, 50000])
+def test_route_capacity_changes_complete_source_delivery_without_provider_branch(tmp_path, fit, window):
+    fit.window = window
+    source = "BEGINNING Ж🙂 " + "no-newline-long-source " * 18000 + " DECISIVE END"
+    actor, content, usage, reads = _reader_summary(tmp_path, source, window)
+    assert content and not usage.get("_consolidation_errors"), usage
+    assert reads.source_complete()
+    assert len(actor.calls) > 2 and len(actor.received) == 1
+    assert source in actor.received[0]
+    assert "DECISIVE END" in actor.received[0]
+
+
+@pytest.mark.parametrize("raw", [None, "", " \n"])
+def test_empty_output_is_non_success_with_real_usage(tmp_path, fit, raw):
+    chat, _blocks, _meta = _paths(tmp_path)
+    _write_chat(chat, count=2)
+    llm = _LLM(effect=lambda *_: ({"content": raw}, {"cost": .02}))
+    usage = _consolidate(tmp_path, llm)
+    assert usage["cost"] == .02 and len(llm.calls) == 1
+    assert usage["_consolidation_errors"][-1]["kind"] == "empty_summary"
+    assert not _store(tmp_path).records(kinds=["episode"])
+    assert not _store(tmp_path).scan_state().get("last_consolidated_offset")
+
+
+@pytest.mark.parametrize("code", ["auth_required", "subscription_window_exhausted", "model_operation_interrupted", "model_outcome_unknown"])
+def test_control_resource_and_unknown_model_errors_still_propagate(tmp_path, fit, code):
+    from ouroboros.llm_claudexor import ClaudexorModelError
+    chat, _blocks, _meta = _paths(tmp_path)
+    _write_chat(chat, count=2)
+    error = ClaudexorModelError({"code": code, "message": "context length exceeded"})
+    def fail(*_):
+        raise error
+    llm = _LLM(effect=fail)
+    with pytest.raises(ClaudexorModelError) as caught:
+        _consolidate(tmp_path, llm)
+    assert caught.value is error and len(llm.calls) == 1
+    assert not _store(tmp_path).records(kinds=["episode"])
+    assert not _store(tmp_path).scan_state().get("last_consolidated_offset")
+
+
+def test_wait_interruption_after_original_preserves_original_for_correction(tmp_path, fit):
+    from ouroboros.model_wait import ModelWaitInterrupted
+    chat, _blocks, _meta = _paths(tmp_path)
+    rows = _write_chat(chat, count=2)
+    def fail(llm, _prompt):
+        if len(llm.calls) == 2:
+            raise ModelWaitInterrupted("cancelled", role="light")
+    llm = _LLM(effect=fail)
+    with pytest.raises(ModelWaitInterrupted):
+        _consolidate(tmp_path, llm)
+    assert len(llm.calls) == 2
+    store = _store(tmp_path)
+    assert _read_sources(tmp_path, store) == [rows] and not store.records(kinds=["revision"])
+    retry = _LLM()
+    _consolidate(tmp_path, retry)
+    assert len(retry.calls) == 1 and len(store.records(kinds=["episode"])) == 1
+    assert len(store.records(kinds=["revision"])) == 1
+    assert store.scan_state()["last_consolidated_offset"] == 2
+
+
+@pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
+def test_unknown_paid_refusal_never_repeats_on_next_cycle(tmp_path, fit, code):
+    from ouroboros.llm_claudexor import ClaudexorModelError
+    chat, _blocks, _meta = _paths(tmp_path)
+    _write_chat(chat, count=2)
+    error = ClaudexorModelError({"code": code, "message": "context length exceeded"})
+    error.physical_attempt_capture = SimpleNamespace(state="unresolved")
+    error.ledger_attempt_ids = ["paid-unknown"]
+    def fail(*_):
+        raise error
+    llm = _LLM(effect=fail)
+    with pytest.raises(ClaudexorModelError):
+        _consolidate(tmp_path, llm)
+    _consolidate(tmp_path, llm)
+    assert len(llm.calls) == 1
+    assert not _store(tmp_path).records(kinds=["input_refusal", "episode"])
+    assert _store(tmp_path).scan_state()["pending_consolidation_outcomes"]
+
+
+def test_refused_attempt_usage_is_retained_separately_from_later_success(tmp_path, fit):
+    fit.window = None
+    chat, _blocks, _meta = _paths(tmp_path)
+    _write_chat(chat, count=1, text_size=10000)
+    error = _Refusal(usage={"prompt_tokens": 7, "completion_tokens": 0, "total_tokens": 7, "cost": .03})
+    error.ledger_attempt_ids = ["refused-attempt"]
+    def fail(*_):
+        raise error
+    usage = _consolidate(tmp_path, _LLM(effect=fail))
+    assert usage["cost"] == .03 and usage["prompt_tokens"] == usage["total_tokens"] == 7
+    assert usage["ledger_attempt_ids"] == ["refused-attempt"]
+    from tests.test_memory_pressure_maintenance import SourceReader
+    actor = SourceReader(tmp_path, 1000000)
+    later = _consolidate(tmp_path, actor)
+    assert later["_blocks_written"] == 1
+    assert later["cost"] == pytest.approx(.01 * len(actor.calls))
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_auth_failure_preserves_only_already_published_original(tmp_path, fit, failure_at):
+    chat, _blocks, _meta = _paths(tmp_path)
+    rows = _write_chat(chat, count=2)
+    def fail(llm, _prompt):
+        if len(llm.calls) == failure_at:
+            raise _Refusal("provider refused", code="invalid_api_key")
+    llm = _LLM(effect=fail)
+    usage = _consolidate(tmp_path, llm)
+    assert len(llm.calls) == failure_at and usage["cost"] is None
+    assert usage["_consolidation_errors"][-1]["kind"] == "auth_error"
+    store = _store(tmp_path)
+    assert _read_sources(tmp_path, store) == ([rows] if failure_at == 2 else [])
+    assert store.scan_state().get("last_consolidated_offset", 0) == (2 if failure_at == 2 else 0)
+
+
+def test_publication_failure_never_advances_and_retains_exact_source(tmp_path, fit, monkeypatch):
+    from ouroboros.chronicle_store import ChronicleStore
+    chat, _blocks, _meta = _paths(tmp_path)
+    _write_chat(chat, count=2)
+    original = chat.read_bytes()
+    store = _store(tmp_path)
+    store.import_legacy()
+    def reject(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+    monkeypatch.setattr(ChronicleStore, "append_episode", reject)
+    with pytest.raises(OSError, match="disk unavailable"):
+        _consolidate(tmp_path, _LLM())
+    assert not store.scan_state().get("last_consolidated_offset")
+    assert not store.records(kinds=["episode"])
+    assert chat.read_bytes() == original
+    assert list((tmp_path / "task_results/artifacts/fixture/source_handles/context_checkpoints").glob("*"))
+
+
+@pytest.mark.parametrize("failing_call", [3, 4])
+@pytest.mark.parametrize("unknown", [False, True])
+def test_partial_room_failure_never_starts_digest_work(tmp_path, fit, unknown, failing_call):
+    chat, blocks, _meta = _paths(tmp_path)
+    rows = _write_chat(chat, count=4, text_size=0)
+    for row in rows[2:]:
+        row["chat_id"] = 2
+    chat.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    blocks.parent.mkdir(parents=True)
+    original = json.dumps([{"content": "Earlier history " * 100}]).encode()
+    blocks.write_bytes(original)
+    def fail(llm, _prompt):
+        if len(llm.calls) == failing_call:
+            error = _Refusal("unknown" if unknown else "auth failed", code="invalid_api_key")
+            if unknown:
+                error.physical_attempt_capture = SimpleNamespace(state="unresolved")
+                error.ledger_attempt_ids = ["unknown-room"]
+            raise error
+    llm = _LLM(effect=fail)
+    usage = _consolidate(tmp_path, llm, compact_chronicle=True, pressure_fits=lambda: False)
+    assert len(llm.calls) == failing_call
+    assert not _store(tmp_path).records(kinds=["digest"])
+    assert blocks.read_bytes() == original
+    assert usage["_blocks_written"] == (1 if failing_call == 3 else 2)
+    assert _store(tmp_path).scan_state()["last_consolidated_offset"] == (2 if failing_call == 3 else 4)
+    assert _store(tmp_path).scan_state()["last_consolidation_error"]
+
+
+def test_failed_digest_usage_is_accounted_and_original_sources_survive(tmp_path, fit):
+    chat, blocks, _meta = _paths(tmp_path)
+    _write_chat(chat, count=2, text_size=0)
+    blocks.parent.mkdir(parents=True)
+    original = json.dumps([{"content": "Earlier history " * 100}]).encode()
+    blocks.write_bytes(original)
+    def fail(llm, _prompt):
+        if len(llm.calls) == 3:
+            return {"content": ""}, {"cost": .04}
+    usage = _consolidate(tmp_path, _LLM(effect=fail), compact_chronicle=True, pressure_fits=lambda: False)
+    assert usage["cost"] == pytest.approx(.06)
+    assert blocks.read_bytes() == original
+    assert _store(tmp_path).scan_state()["last_consolidated_offset"] == 2
+    assert not _store(tmp_path).records(kinds=["digest"])
+
+
+def test_unknown_capacity_impossible_pointer_is_not_replayed_after_definitive_refusal(tmp_path, fit):
+    fit.window = None
+    chat, _blocks, _meta = _paths(tmp_path)
+    _write_chat(chat, count=1, text_size=4000)
+    llm = _LLM(limit=1)
+    _consolidate(tmp_path, llm)  # complete source is definitively too large
+    _consolidate(tmp_path, llm)  # the smaller retained-source pointer also fails
+    sent = len(llm.calls)
+    assert sent == 2
+    fit.density = 4.5  # density drift cannot invalidate an exact byte refusal
+    usage = _consolidate(tmp_path, llm)
+    assert len(llm.calls) == sent
+    assert not _store(tmp_path).scan_state().get("last_consolidated_offset")
+    assert usage["_consolidation_errors"]
+    fit.window, llm.limit = 100000, None  # fresh capacity is new route evidence
+    _consolidate(tmp_path, llm)
+    assert _store(tmp_path).scan_state()["last_consolidated_offset"] == 1
+
+
+def test_budget_failure_stops_before_other_rooms_and_digest(tmp_path, fit):
+    from ouroboros.usage_accounting import BudgetExceeded
+    chat, _blocks, _meta = _paths(tmp_path)
+    rows = _write_chat(chat, count=2)
+    rows[1]["chat_id"] = 2
+    chat.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    def exhausted(*_):
+        raise BudgetExceeded("budget exhausted")
+    llm = _LLM(effect=exhausted)
+    result = _consolidate(tmp_path, llm, compact_chronicle=True, pressure_fits=lambda: False)
+    assert len(llm.calls) == 1
+    assert result["_consolidation_errors"][-1]["kind"] == "budget_exhausted"
+    assert not _store(tmp_path).records(kinds=["episode", "digest"])
+    assert not _store(tmp_path).scan_state().get("last_consolidated_offset")
+
+
+def test_light_manual_window_and_account_share_real_context_resolver(monkeypatch):
+    from ouroboros import capability_evidence, config
+    model = "claudexor::codex=gpt-test"
+    settings = {"OUROBOROS_MODEL": model, "OUROBOROS_MODEL_LIGHT": model,
+        "OUROBOROS_MODEL_ACCOUNTS": {"main": "main-account", "light": "light-account"},
+        "OUROBOROS_MODEL_CONTEXT_WINDOWS": {"main": 100000, "light": 17000}}
+    monkeypatch.setenv("OUROBOROS_MODEL_ACCOUNTS", json.dumps(settings["OUROBOROS_MODEL_ACCOUNTS"]))
+    monkeypatch.setattr(config, "load_settings", lambda: settings)
+    monkeypatch.setattr(c, "_consolidation_route", lambda: (model, False))
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    probes = []
+    def probe(_root, **kwargs):
+        probes.append(kwargs)
+        return CapabilityEvidence(100000, "confirmed", "test", "light-fingerprint", model=model)
+    monkeypatch.setattr(capability_evidence, "probe", probe)
+    llm = _LLM()
+    assert _summary(llm, "short source")[0]
+    content, usage = _summary(llm, "full source " * 4000)
+    assert not content and len(llm.calls) == 1
+    assert usage["_consolidation_errors"][-1]["capacity_tokens"] == 17000
+    assert all(call["model_account_override"] == "light-account" for call in llm.calls)
+    assert all(p["options"]["credential_profile_id"] == "light-account" for p in probes)
+    assert all(p["provider"] == "claudexor" and p["allow_fetch"] for p in probes)
+
+
+@pytest.mark.parametrize("preceding_rooms", [0, 1])
+def test_refusal_bound_survives_preceding_published_room(tmp_path, fit, preceding_rooms):
+    from tests.test_memory_pressure_maintenance import SourceReader
+    fit.window = None
+    chat, _blocks, _meta = _paths(tmp_path)
+    rows = _write_chat(chat, count=2 * (preceding_rooms + 1), text_size=4000)
+    for row in rows[2 * preceding_rooms:]:
+        row["chat_id"] = 2
+    chat.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    target_call = 2 * preceding_rooms + 1
+    def reject_target(llm, _prompt):
+        if len(llm.calls) == target_call:
+            raise _Refusal()
+    first = _LLM(effect=reject_target)
+    _consolidate(tmp_path, first)
+    store = _store(tmp_path)
+    assert len(first.calls) == target_call
+    assert store.scan_state().get("last_consolidated_offset", 0) == 2 * preceding_rooms
+    assert len(store.records(kinds=["episode"])) == preceding_rooms
+    bound = store.records(kinds=["input_refusal"])[0]["input_limit"]
+    rejected_size = len(first.calls[-1]["messages"][0]["content"].encode())
+    assert bound["input_bytes"] == rejected_size - 1
+    actor = SourceReader(tmp_path, 1000000)
+    _consolidate(tmp_path, actor)
+    assert len(actor.calls[0]["messages"][0]["content"].encode()) < rejected_size
+    assert len(store.records(kinds=["episode"])) == preceding_rooms + 1
+    assert [row for part in _read_sources(tmp_path, store) for row in part] == rows
+    assert store.scan_state()["last_consolidated_offset"] == len(rows)

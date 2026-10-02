@@ -7,6 +7,9 @@ import pytest
 from ouroboros import consolidator as c, reflection, knowledge as k
 from ouroboros.context_fit import estimate_context_prompt_tokens
 from ouroboros.memory import Memory
+from ouroboros.chronicle_store import ChronicleStore
+from ouroboros.chronicle_view import capture_chronicle, render_memory
+from ouroboros.utils import atomic_write_json
 from ouroboros.tools.registry import ToolContext
 from tests import test_consolidator_context_fit as fit_helpers
 
@@ -31,7 +34,7 @@ class SourceReader:
             return "I retain the beginning, middle and last event, checked against the complete source."
         if "scratchpad working memory has" in prompt:
             return json.dumps({"knowledge_entries": [], "compressed_block": "I retain the beginning, middle and last event, including unresolved questions."})
-        if prompt.startswith("Compress these older memory blocks"):
+        if prompt.startswith("Write a compact shared-life account"):
             return "### Era\nI retain the beginning, middle and last event across the complete dated span."
         return "### Block\nI remember the complete episode including its final unresolved decision."
 
@@ -112,6 +115,27 @@ def test_unread_initial_source_cannot_authorize_a_reflection_action(tmp_path, fi
     assert (tmp_path / entry["source_ref"]["read"]["arguments"]["path"]).exists()
 
 
+def test_fitting_digest_does_not_require_reading_deferred_mechanical_metadata(tmp_path, fit):
+    from tests.test_chronicle_consolidation import setup
+    store, ctx, chat, blocks, meta = setup(tmp_path)
+    fit.window = 50000
+    original = store.append_episode("1", "The owner's publication decision remains cancelled. " * 100, [],
+        {"kind": "mind"}, metadata={"children": [f"index-only-child-{n:08d}" for n in range(12000)],
+                                  "source_gap": "Earlier source remains missing."})
+    actor = SourceReader(tmp_path, fit.window)
+    result = c.consolidate(chat, blocks, meta, actor, knowledge_context=ctx,
+        represented_only=True, compact_chronicle=True, pressure_fits=lambda: bool(store.records(kinds=["digest"])))
+    assert not result.get("_consolidation_errors") and result["_blocks_written"] == 1
+    assert len(actor.calls) == 1 and actor.sources == []  # No compulsory metadata read or false read credit.
+    prompt = actor.calls[0]["messages"][0]["content"]
+    assert original["text"] in prompt and "Earlier source remains missing." in prompt
+    assert "index-only-child-00000000" not in prompt and "not a read receipt" in prompt
+    ref = store.records(kinds=["digest"])[0]["source_refs"][0]
+    retained = (tmp_path / ref["read"]["arguments"]["path"]).read_text(encoding="utf-8")
+    assert estimate_context_prompt_tokens([{"role": "user", "content": retained}]) > fit.window
+    assert json.loads(retained)["metadata"]["children"] == original["metadata"]["children"]
+
+
 @pytest.mark.parametrize("legacy_gap", [False, True])
 def test_pressure_reduces_whole_chronicle_and_one_huge_block_before_normal_send(tmp_path, fit, legacy_gap):
     fit.window = 50000
@@ -125,11 +149,12 @@ def test_pressure_reduces_whole_chronicle_and_one_huge_block_before_normal_send(
     if legacy_gap:
         blocks[1].pop("gap_id")
     path = tmp_path / "memory/dialogue_blocks.json"
-    c.atomic_write_json(path, blocks)
+    atomic_write_json(path, blocks)
+    original_blocks = path.read_bytes()
     scratch = {"ts": "2026-09-01", "source": "task", "content": "Active complete source. " * 15000 + "FINAL QUESTION."}
     memory.mutate_scratchpad_blocks(lambda _current: [scratch])
     def fits():
-        messages = [{"role": "system", "content": memory.identity_path().read_text(encoding="utf-8") + path.read_text(encoding="utf-8") + memory.scratchpad_path().read_text(encoding="utf-8")}]
+        messages = [{"role": "system", "content": memory.identity_path().read_text(encoding="utf-8") + render_memory(json.loads(capture_chronicle(memory, {"id": "pressure-view", "chat_id": 1})), token_budget=1500)[0] + memory.scratchpad_path().read_text(encoding="utf-8")}]
         return estimate_context_prompt_tokens(messages) < 2000
     assert not fits() and not c.should_consolidate_scratchpad(memory)
     actor = SourceReader(tmp_path, fit.window)
@@ -138,40 +163,42 @@ def test_pressure_reduces_whole_chronicle_and_one_huge_block_before_normal_send(
     assert fits() and memory.identity_path().read_bytes() == identity_before
     assert result["changed_sources"]
     assert result["usage"]["cost"] == pytest.approx(len(actor.calls) * 0.01)
-    saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved[1] == blocks[1] and len(saved) == 3
-    for original, compressed in ((blocks[0], saved[0]), (blocks[2], saved[2])):
-        ref = compressed["source_ref"]
-        assert json.loads((tmp_path / ref["read"]["arguments"]["path"]).read_text(encoding="utf-8")) == [original]
+    assert path.read_bytes() == original_blocks
+    store = ChronicleStore(tmp_path)
+    assert store.records(kinds=["digest"])
+    rendered, _ = render_memory(json.loads(capture_chronicle(memory, {"id": "after-pressure", "chat_id": 1})))
+    assert "Source gap" in rendered
     journal = [json.loads(line) for line in memory.journal_path().read_text(encoding="utf-8").splitlines()]
     assert next(row for row in journal if row["type"] == "blocks_consolidated")["source_blocks"] == [scratch]
-    # Two contiguous runs: each is compressed and then corrected against its complete
-    # sections through the retained-source route, plus the scratchpad source.
-    assert len(actor.sources) == 5 and all(actor.received)
+    # One whole-room digest and scratchpad source, both read in full through their retained handles.
+    assert len(actor.sources) == 2 and all(actor.received)
+    for ref, delivered in zip(actor.sources, actor.received):
+        assert (tmp_path / ref["read"]["arguments"]["path"]).read_text(encoding="utf-8") == delivered
     assert all("CURRENT GOAL: resolve the outstanding research question." in source for source in actor.received)
-    # The caller can now construct its normal first request; maintenance has
-    # not changed the identity or truncated any original source to achieve fit.
-    assert estimate_context_prompt_tokens([{"role": "system", "content": path.read_text(encoding="utf-8") + memory.load_scratchpad()}]) < 2000
 
 
-def test_force_tail_is_explicit_and_advances_a_huge_short_dialogue_once(tmp_path, fit):
+def test_completed_huge_short_dialogue_is_retrieved_and_published_once(tmp_path, fit):
+    fit.window = 50000
     memory, ctx = setup_memory(tmp_path)
     chat = tmp_path / "logs/chat.jsonl"
     chat.parent.mkdir()
-    rows = [{"text": "Huge single message. " * 10000, "chat_id": 1, "ts": "2026-09-13T01:00:00Z"}]
-    chat.write_text(json.dumps(rows[0]) + "\n")
+    rows = [{"text": "Huge single message. " * 10000, "chat_id": 1, "task_id": "pressure-task",
+             "ts": "2026-09-13T01:00:00Z"}]
+    chat.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
     blocks, meta = tmp_path / "memory/dialogue_blocks.json", tmp_path / "memory/dialogue_meta.json"
-    assert not c.should_consolidate(meta, chat)
+    assert c.should_consolidate(meta, chat)
     actor = SourceReader(tmp_path, fit.window)
-    assert c.consolidate(chat, blocks, meta, actor, knowledge_context=ctx) is None
-    assert not actor.calls
+    assert c.consolidate(chat, blocks, meta, actor, knowledge_context=ctx)["_blocks_written"] == 0
+    assert not actor.calls  # a pressure request does not make an open room complete
     before = chat.read_bytes()
-    result = c.maintain_memory_pressure(memory, actor, ctx,
-        fits=lambda: meta.exists() and json.loads(meta.read_text(encoding="utf-8")).get("last_consolidated_offset") == 1)
-    assert result["status"] == "fitting"
-    assert chat.read_bytes() == before
-    assert len(actor.calls) == 2  # one draft and its correction; the tail now fits, so no era call
-    assert sum(row["message_count"] for row in json.loads(blocks.read_text(encoding="utf-8"))) == 1
+    usage = c.consolidate(chat, blocks, meta, actor, knowledge_context=ctx, completed_task={"id": "pressure-task"})
+    store = ChronicleStore(tmp_path)
+    assert usage["_blocks_written"] == 1 and store.scan_state()["last_consolidated_offset"] == 1
+    assert chat.read_bytes() == before and not blocks.exists() and not meta.exists()
+    episode = store.records(kinds=["episode"])[0]
+    from ouroboros.artifacts import read_actor_source_bytes
+    assert json.loads(read_actor_source_bytes(tmp_path, "pressure-task", episode["source_refs"][0])) == rows
+    assert len(actor.sources) == 2 and all(actor.received)  # draft and independent correction read their own source
     assert not c.should_consolidate(meta, chat)
 
 
@@ -248,3 +275,45 @@ def test_scratchpad_pressure_cas_preserves_concurrent_sources(tmp_path, fit, cha
     c.consolidate_scratchpad(memory, tmp_path / "memory/knowledge", Concurrent(), pressure=True, knowledge_context=ctx)
     saved = memory.load_scratchpad_blocks()
     assert saved == [newer] if change_same_source else saved[1:] == [appended]
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("mode,owner_mode,legacy,maintain", [
+    ("max", "max", True, True), ("max", "max", False, True),
+    ("low", "low", True, True), ("nano", "nano", True, True),
+    ("low", "max", True, True),
+])
+def test_post_task_keeps_new_work_and_owner_targets_without_legacy_margin_chase(
+        tmp_path, monkeypatch, pending, mode, owner_mode, legacy, maintain):
+    from types import SimpleNamespace
+    from ouroboros import chronicle_view, post_task_synthesis
+
+    memory, _ctx = setup_memory(tmp_path)
+    ChronicleStore(tmp_path).import_legacy()
+    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path,
+                          drive_path=lambda name: tmp_path / name)
+    calls, projections = [], []
+    monkeypatch.setattr(c, "should_consolidate", lambda *_a: pending)
+    monkeypatch.setattr(c, "consolidate", lambda **kwargs: calls.append(kwargs) or {})
+
+    def projection(*_args):
+        projections.append("measured")
+        return lambda: False, {"target_miss": True, "mode": mode, "owner_context_mode": owner_mode,
+                               "route_fp": "route", "legacy_transition": legacy, "window_tokens": 500000}
+
+    monkeypatch.setattr(chronicle_view, "maintenance_projection", projection)
+    assert post_task_synthesis._run_chat_consolidation(
+        env, memory, object(), {"id": "finished"}, tmp_path / "logs") is None
+    assert len(calls) == int(pending or maintain)
+    assert len(projections) == 1
+    if calls:
+        assert calls[0]["completed_task"] == {"id": "finished"}
+        assert bool(calls[0].get("compact_chronicle")) is maintain
+        if maintain:
+            from ouroboros.context_budget import OWNER_LOW_TARGET_TOKENS, OWNER_NANO_TARGET_TOKENS
+            demand = calls[0]["fitting_demand"]
+            assert demand["purpose"] == ("owner_mode" if owner_mode != "max" else "working_headroom")
+            assert demand["requirement_tokens"] == {"max": 500000, "low": OWNER_LOW_TARGET_TOKENS,
+                                                    "nano": OWNER_NANO_TARGET_TOKENS}[owner_mode]
+        else:
+            assert not any(key in calls[0] for key in ("compact_chronicle", "pressure_fits", "fitting_demand"))

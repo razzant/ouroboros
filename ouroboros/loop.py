@@ -360,7 +360,7 @@ def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
     """
     from ouroboros.tools.compact_context import record_context_view
 
-    record_context_view(ctx, messages, tool_schemas)
+    record_context_view(ctx, messages, tool_schemas, physical_capture=getattr(ctx, "_usable_main_capture", None))
     fact = _observe_transcript_send(ctx, messages, round_idx=round_idx)
     if not fact:
         return

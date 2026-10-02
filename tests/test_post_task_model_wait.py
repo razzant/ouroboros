@@ -254,6 +254,62 @@ def test_real_consolidation_error_controls_remaining_post_task_stages(
         assert "scratchpad_consolidation,reflection,promotion" in checkpoint["post_task_stop_reason"]
 
 
+@pytest.mark.parametrize("fresh_unknown", [False, True])
+def test_held_memory_operation_does_not_interrupt_later_root_stages(phase, monkeypatch, fresh_unknown):
+    """Actual memory stage and post-task runner distinguish held from new unknowns."""
+    from ouroboros import chronicle_view, consolidator, post_task_synthesis
+    from ouroboros.memory import Memory
+    from tests.test_chronicle_consolidation import setup
+
+    f = phase
+    store, ctx, chat, blocks, meta = setup(f.root)
+    held_source = store.append_episode("1", "Held original decision. " * 200, [], {"kind": "mind"})
+    calls = []
+    def light(prompt, label, **options):
+        calls.append((prompt, label))
+        if len(calls) == 1 or fresh_unknown:
+            return "", {"cost": None, "ledger_attempt_ids": [f"unresolved-{len(calls)}"],
+                        "_consolidation_errors": [{"kind": "provider_outcome_unknown"}]}, None
+        return "Independent room retains its decision and source.", {"cost": 0, "prompt_tokens": 0}, None
+
+    monkeypatch.setattr(consolidator, "_light_call", lambda *_args: light)
+    consolidator.consolidate(chat, blocks, meta, None, knowledge_context=ctx, represented_only=True,
+        compact_chronicle=True, pressure_fits=lambda: False, fitting_demand={"memory_budget_tokens": 100})
+    pending = store.scan_state()["pending_consolidation_outcomes"]
+    store.append_episode("22", "Independent decision. " * 100, [], {"kind": "mind"})
+    monkeypatch.setattr(chronicle_view, "maintenance_projection", lambda *_args: (lambda: False, {
+        "basis": "post_task_evaluation", "memory_budget_tokens": 200, "rendered_memory_tokens": 2000,
+        "route_fp": "post-route", "mode": "max"}))
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", post_task_synthesis._run_chat_consolidation)
+    monkeypatch.setattr(pipeline, "_run_reflection", lambda *_args, **_kwargs:
+                        f.stages.append("reflection") or None)
+    launch(f)
+    assert f.done.wait(5)
+    checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
+    assert len(calls) == 2 and held_source["text"] not in calls[-1][0]
+    assert store.scan_state()["pending_consolidation_outcomes"][0] == pending[0]
+    if fresh_unknown:
+        assert checkpoint["post_task_stop_reason"].startswith("provider_outcome_unknown:")
+        assert f.stages == ["facts"]
+        assert len(store.scan_state()["pending_consolidation_outcomes"]) == 2
+    else:
+        assert checkpoint["post_task_synthesis"] == "completed" and not checkpoint.get("post_task_stop_reason")
+        assert f.stages == ["facts", "scratch", "reflection", "backlog"]
+        assert len(store.records(kinds=["digest"])) == 1
+        # A following quiet maintenance pass still names the original custody,
+        # but causes neither repayment nor another paid-stage interruption.
+        reason = post_task_synthesis._run_chat_consolidation(
+            f.env, Memory(f.root, f.env.repo_dir), None, f.task, f.root / "logs")
+        assert not reason
+        # The completed root added new host facts, which may receive their own
+        # episode/correction. Neither earlier digest is dispatched again.
+        assert sum(label == "Room digest" for _prompt, label in calls) == 2
+        assert all(held_source["text"] not in prompt for prompt, _label in calls[1:])
+        snapshot = chronicle_view.capture_chronicle(Memory(f.root, f.env.repo_dir), f.task)
+        import json
+        assert json.loads(snapshot)["maintenance"]["pending_operations"] == pending
+
+
 def test_budget_refusal_inside_promotion_is_never_swallowed_into_completed(phase, monkeypatch):
     """TZ-2 C3: `propagate_model_error` re-raises only control/unknown facts, so a
     `BudgetExceeded` raised inside a stage adapter's own catch (promotion, backlog,
@@ -857,19 +913,25 @@ def test_split_root_facts_row_counts_the_actor_store_when_synthesis_runs_canonic
         str(task_artifacts_dir(child, f.task["id"], create=False))]
 
 
-@pytest.mark.parametrize("second_chunk", ["recovered", "lost", "budget"])
-def test_split_recovery_history_is_not_an_unresolved_consolidation_failure(phase, monkeypatch, second_chunk):
-    """F-R3: the stage adapter read ``_consolidation_errors`` attempt HISTORY as an
-    unresolved failure, so a context refusal that the real consolidator answered by
-    splitting (and then wrote the block and advanced the cursor) turned post-work
-    ``degraded``. Through the REAL chat-consolidation adapter and consolidator (only
-    the provider dispatch is substituted): the refusal row stays in the history with
-    its explicit ``resolution``; a later chunk that is lost still reads degraded
-    without a skip (partial success is not success), and the wallet still stops."""
+@pytest.mark.parametrize("second_room", ["recovered", "lost", "budget"])
+def test_retained_source_recovery_is_not_an_unresolved_consolidation_failure(phase, monkeypatch, second_room):
+    """A definitive old overflow is retained, then complete-source reads recover it.
+
+    The retired fixed-block writer split the same source inside one call. The
+    active writer retains the refusal bound and reads the complete source on its
+    next maintenance pass. Through the real post-task adapter, that recovered
+    history is not an unresolved error. Ordinary upkeep yields after that room;
+    a following completed task processes the next room, whose real failure still
+    degrades its phase or stops every later paid stage on budget exhaustion.
+    """
     import json
-    from ouroboros import consolidator, context_fit, llm_observability, post_task_synthesis
+    from ouroboros import consolidator, context_fit, llm_observability, post_task_synthesis, chronicle_view
     from ouroboros.capability_evidence import CapabilityEvidence
+    from ouroboros.chronicle_store import ChronicleStore, source_row_id
+    from ouroboros.memory import Memory
+    from ouroboros.tools.registry import ToolContext
     from ouroboros.usage_accounting import BudgetExceeded
+    from tests.test_memory_pressure_maintenance import SourceReader
 
     f = phase
     monkeypatch.setattr(consolidator, "_consolidation_route", lambda: ("test/model", False))
@@ -879,49 +941,113 @@ def test_split_recovery_history_is_not_an_unresolved_consolidation_failure(phase
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
     monkeypatch.setattr(pipeline, "_run_chat_consolidation", post_task_synthesis._run_chat_consolidation)
     monkeypatch.setattr(pipeline, "_run_reflection", lambda *a, **k: f.stages.append("reflection") or None)
-    chat = f.root / "logs" / "chat.jsonl"
+    monkeypatch.setattr(chronicle_view, "maintenance_projection", lambda *_args: (lambda: True, {"basis": "fixture_no_pressure"}))
+    chat = f.root / "logs/chat.jsonl"
     chat.parent.mkdir(parents=True, exist_ok=True)
-    chat.write_text("".join(json.dumps({"ts": f"2026-01-01T{i // 60:02d}:{i % 60:02d}:00Z", "direction": "in",
-                                        "text": f"entry-{i} " + "x" * 120, "chat_id": 1}) + "\n"
-                            for i in range(200)), encoding="utf-8")
+    first_rows = [{"ts": f"2026-01-01T00:0{i}:00Z", "direction": "in", "task_id": f.task["id"],
+                   "text": f"FIRST_ROOM_EVENT_{i} " + "x" * 30000, "chat_id": 1} for i in range(2)]
+    chat.write_text("".join(json.dumps(row) + "\n" for row in first_rows), encoding="utf-8")
+    memory = Memory(f.root, f.env.repo_dir)
+    identity = memory.load_identity()
+    ctx = ToolContext(repo_dir=f.env.repo_dir, drive_root=f.root, task_id=f.task["id"])
     refused = []
+    recovering = False
+    actor = SourceReader(f.root, 1000000)
 
-    def dispatch(_client, *, call_type="", messages=(), **_kwargs):
-        prompt = messages[0]["content"]
-        if call_type == "memory_consolidation" and "entry-0 " in prompt and "entry-99 " in prompt and not refused:
-            refused.append(call_type)
-            raise transport.ClaudexorModelError({"code": "invalid_request", "message": "Controlled provider refusal",
+    def dispatch(_client, *, call_type="", messages=(), **kwargs):
+        if not recovering:
+            refused.append(messages[0]["content"])
+            error = transport.ClaudexorModelError({"code": "invalid_request", "message": "Controlled provider refusal",
                 "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})
-        if "entry-150 " in prompt and second_chunk != "recovered":
-            f.stages.append("second-chunk")
-            raise BudgetExceeded("root wallet spent") if second_chunk == "budget" else RuntimeError("provider failed")
-        return {"content": f"summary of {call_type}"}, {"prompt_tokens": 1, "completion_tokens": 1,
-                                                       "total_tokens": 2, "cost": 0.0}
+            error.physical_attempt_capture = SimpleNamespace(state="settled")
+            error.usage = {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1, "cost": 0.0}
+            raise error
+        if "SECOND_ROOM_EVENT" in messages[0]["content"] and second_room != "recovered":
+            f.stages.append("second-room")
+            raise BudgetExceeded("root wallet spent") if second_room == "budget" else RuntimeError("provider failed")
+        message, usage = actor.chat(messages=messages, **kwargs)
+        return message, {**usage, "cost": 0.0}
 
     monkeypatch.setattr(llm_observability, "chat_observed", dispatch)
+    prior = consolidator.consolidate(chat, f.root / "memory/dialogue_blocks.json", f.root / "memory/dialogue_meta.json",
+        None, identity, knowledge_context=ctx, completed_task=f.task)
+    assert len(refused) == 1 and prior["_consolidation_errors"][-1]["kind"] == "context_overflow"
+    chronicle = ChronicleStore(f.root)
+    assert not chronicle.records(kinds=["episode"])
+    assert chronicle.records(kinds=["input_refusal"])
+    second_row = {"ts": "2026-01-01T00:03:00Z", "direction": "in", "task_id": f.task["id"],
+                  "text": "SECOND_ROOM_EVENT", "chat_id": 22}
+    with chat.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(second_row) + "\n")
+        # Both rooms belong to a truly completed task, so the second was
+        # eligible in the first pass and remains closed for the next task's pass.
+        stream.write(json.dumps({"ts": "2026-01-01T00:04:00Z", "direction": "system", "chat_id": 22,
+            "task_id": f.task["id"], "type": "task_summary", "summary_kind": "terminal_root_projection",
+            "outcome_authority": "canonical_task_result_after_finalization", "outcome_final": True,
+            "outcome_phase": "done", "status": "completed", "text": "Already answered"}) + "\n")
+    recovering = True
     launch(f)
     assert f.done.wait(10)
-    assert refused, "the first chunk's complete draft was refused for context"
+    assert actor.received and json.dumps(first_rows, ensure_ascii=False, sort_keys=True) in actor.received[0]
+    until(lambda: not post_task_model_waits(f.root))
+    first_task_id = f.task["id"]
+    first_checkpoint = load_task_result(f.root, first_task_id)["root_phase_checkpoint"]
+    assert first_checkpoint["post_task_synthesis"] == "completed"
+    assert not first_checkpoint.get("post_task_stop_reason")
+    assert f.stages == ["facts", "scratch", "reflection", "backlog"]
+    [first_episode] = chronicle.records(kinds=["episode"])
+    assert first_episode["room_id"] == "1"
+    assert chronicle.scan_state()["last_consolidated_offset"] == 2
+    assert "last_consolidation_error" not in chronicle.scan_state()
+    first_events = [json.loads(line) for line in (f.root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
+    [first_row] = [event for event in first_events if event.get("type") == "chat_block_consolidation"]
+    assert first_row["last_error_kind"] is None and first_row["blocks_written"] == 1
+
+    # A new completed owner supplies the next ordinary maintenance opportunity;
+    # do not replay a completed checkpoint or turn ordinary upkeep into a sweep.
+    f.task = {**f.task, "id": "post-owner-next", "root_task_id": "post-owner-next", "text": "Next answer"}
+    write_task_result(f.root, f.task["id"], "completed", result="Next answer",
+                      root_phase_checkpoint={"post_task_synthesis": "pending_once"})
+    f.done.clear()
+    f.stages.clear()
+    first_reads = len(actor.received)
+    launch(f)
+    assert f.done.wait(10)
+    until(lambda: not post_task_model_waits(f.root))
+    assert chronicle.records(kinds=["episode"])[0]["id"] == first_episode["id"]
+    assert all("FIRST_ROOM_EVENT" not in source for source in actor.received[first_reads:])
+    assert load_task_result(f.root, first_task_id)["root_phase_checkpoint"] == first_checkpoint
     checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
-    meta = json.loads((f.root / "memory" / "dialogue_meta.json").read_text(encoding="utf-8"))
-    blocks = json.loads((f.root / "memory" / "dialogue_blocks.json").read_text(encoding="utf-8"))
-    events = [json.loads(line) for line in (f.root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    [row] = [event for event in events if event.get("type") == "chat_block_consolidation"]
-    assert len(blocks) == (2 if second_chunk == "recovered" else 1), "the recovered chunk is a published block"
-    assert meta["last_consolidated_offset"] == (200 if second_chunk == "recovered" else 100)
-    if second_chunk == "recovered":
+    meta = chronicle.scan_state()
+    episodes = chronicle.records(kinds=["episode"])
+    events = [json.loads(line) for line in (f.root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
+    [row] = [event for event in events if event.get("type") == "chat_block_consolidation"
+             and event.get("task_id") == f.task["id"]]
+    # The earlier completed post phase also wrote a separate host fact, which
+    # may be represented after an ordinary error. It cannot stand in for the
+    # failed room's source coverage or turn this checkpoint green.
+    assert len([episode for episode in episodes if episode["room_id"] == "22"]) == (1 if second_room == "recovered" else 0)
+    represented = {key for episode in episodes for key in episode["metadata"]["source_row_ids"]}
+    assert (source_row_id(second_row) in represented) == (second_room == "recovered")
+    assert meta["last_consolidated_offset"] == (4 if second_room == "recovered" else 2)
+    assert chronicle.records(kinds=["input_refusal"]), "the old attempt receipt is not erased by recovery"
+    # The stage classifier still understands explicitly resolved old attempts,
+    # even though the new retained-source pass keeps them in its durable ledger.
+    resolved = {**prior["_consolidation_errors"][-1], "resolution": "complete_source_read"}
+    assert post_task_synthesis._post_task_paid_interruption([resolved]) == ""
+    if second_room == "recovered":
         assert checkpoint["post_task_synthesis"] == "completed"
         assert not checkpoint.get("post_task_stop_reason")
-        assert row["last_error_kind"] == "context_overflow", "the attempt history is preserved"
+        assert row["last_error_kind"] is None
         assert "last_consolidation_error" not in meta
         assert f.stages[-3:] == ["scratch", "reflection", "backlog"]
-    elif second_chunk == "lost":
+    elif second_room == "lost":
         assert checkpoint["post_task_synthesis"] == "degraded"
         assert not checkpoint.get("post_task_stop_reason")
-        assert meta["last_consolidation_error"]["cursor_offset"] == 100
-        assert f.stages[-4:] == ["second-chunk", "scratch", "reflection", "backlog"]
+        assert post_task_synthesis._post_task_paid_interruption([resolved, meta["last_consolidation_error"]])
+        assert f.stages[-4:] == ["second-room", "scratch", "reflection", "backlog"]
     else:
         assert checkpoint["post_task_synthesis"] == "degraded"
         assert checkpoint["post_task_stop_reason"] == (
             "budget_exhausted:skipped=scratchpad_consolidation,reflection,promotion")
-        assert f.stages[-1] == "second-chunk"
+        assert f.stages[-1] == "second-room"

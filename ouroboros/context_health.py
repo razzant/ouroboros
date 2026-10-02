@@ -198,7 +198,8 @@ def _memory_health_lines(env: Any) -> List[str]:
     Health is where stale memory becomes visible, so a dialogue-consolidation run that
     failed, or a nomination batch that was accepted and then not published, is named
     here rather than left to a log nobody reads. Both lines are STATE read from
-    ``memory/dialogue_meta.json``; neither carries a timestamp, because this block is
+    the active chronicle scan state (legacy ``memory/dialogue_meta.json`` before activation);
+    neither carries a timestamp, because this block is
     rendered dynamically and the facts are latest-run facts, not events.
     """
     import time as _time
@@ -234,11 +235,19 @@ def _memory_health_lines(env: Any) -> List[str]:
 
     from ouroboros.memory_nomination_receipts import DialogueMetaUnreadable, load_meta
 
+    state_source = "memory/dialogue_meta.json"
     try:
-        meta = load_meta(env.drive_path("memory/dialogue_meta.json"))
-    except DialogueMetaUnreadable:
+        from ouroboros.chronicle_store import ChronicleStore
+        store = ChronicleStore(env.drive_path("memory").parent)
+        active = store.log_path.exists() and store.activation()
+        if active:
+            state_source = "memory/chronicle/records.jsonl"
+            meta = store.scan_state()
+        else:
+            meta = load_meta(env.drive_path(state_source))
+    except (DialogueMetaUnreadable, ValueError, OSError, TimeoutError):
         # A broken existing meta file is not an empty nomination/cursor state.
-        lines.append("WARNING: DIALOGUE META UNREADABLE — memory/dialogue_meta.json; "
+        lines.append(f"WARNING: DIALOGUE META UNREADABLE — {state_source}; "
                      "consolidation withheld to preserve existing bytes")
     else:
         pending = meta.get("pending_knowledge_nominations")
@@ -250,7 +259,7 @@ def _memory_health_lines(env: Any) -> List[str]:
             lines.append(
                 f"WARNING: DIALOGUE KNOWLEDGE PUBLICATION OPEN — {len(pending)} source-addressed "
                 f"nominations (first {min(3, len(pending))}: {sample}; omitted {max(0, len(pending)-3)}). "
-                "Read memory/dialogue_meta.json and memory/knowledge_history.jsonl for full source. "
+                f"Read {state_source} and memory/knowledge_history.jsonl for full source. "
                 "No automatic or tool-level discharge exists yet; later successes cannot retire older entries."
             )
         receipt = meta.get("last_unpublished_nominations")
@@ -266,16 +275,20 @@ def _memory_health_lines(env: Any) -> List[str]:
                 )
             elif failed is not None and failed != 0:
                 lines.append("WARNING: DIALOGUE LEGACY NOMINATION RECEIPT INVALID — "
-                             "memory/dialogue_meta.json; inspect the original receipt")
+                             f"{state_source}; inspect the original receipt")
         error = meta.get("last_consolidation_error")
         if isinstance(error, dict):
+            location = (f"at cursor {error['cursor_offset']}" if error.get("cursor_offset") is not None
+                        else f"source/operation retained in {state_source}")
             lines.append(
-                f"WARNING: LAST DIALOGUE CONSOLIDATION FAILED — kind={error.get('kind') or 'unknown'} "
-                f"at cursor {error.get('cursor_offset')}"
+                f"WARNING: LAST DIALOGUE CONSOLIDATION FAILED — kind={error.get('kind') or 'unknown'} {location}"
             )
         from ouroboros.consolidator import _era_retry_runs
         runs = _era_retry_runs(meta)
-        for shown, (source_sha256, record) in enumerate(runs.items()):
+        if active and runs:
+            lines.append(f"DIALOGUE LEGACY HISTORY — {len(runs)} old era compression attempt(s) were not shorter; "
+                         "their sources and receipts remain retained. Chronicle maintenance now owns representation.")
+        for shown, (source_sha256, record) in enumerate([] if active else runs.items()):
             if shown == 3:
                 lines.append(f"WARNING: DIALOGUE ERA COMPRESSION WITHHELD — {len(runs) - 3} more run(s) recorded in era_retry")
                 break

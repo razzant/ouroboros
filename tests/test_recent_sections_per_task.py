@@ -299,7 +299,7 @@ def test_child_reads_its_own_drive_beside_working_sources(tmp_path):
               "parent_task_id": "parent", "root_task_id": "parent", "budget_drive_root": str(canonical)},
     )
     dynamic = messages[0]["content"][2]["text"]
-    assert "## Working sources" in dynamic and "your own recent process" in dynamic
+    assert "## Working sources" in dynamic and "Your own recent process" in dynamic
     tools = dynamic[dynamic.index("## Recent tools"):].split("\n## ", 1)[0]
     assert "own_tool" in tools and "parent_tool" not in tools and "mirrored" not in tools
     assert "of task drive logs/tools.jsonl" in tools.splitlines()[0]

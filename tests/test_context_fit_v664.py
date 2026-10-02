@@ -101,7 +101,7 @@ def test_known_owner_max_miss_reclaims_without_predicted_low(monkeypatch, tmp_pa
 
 def test_owner_low_uses_elastic_target_then_target_miss(monkeypatch, tmp_path):
     plan = _plan(preferred="low", window=500_000, known=True)
-    messages = plan.messages_for("low") + [{"role": "user", "content": "x" * 600_000}]
+    messages = plan.messages_for("low") + [{"role": "user", "content": "x" * 800_000}]
     first = _measure(
         monkeypatch, tmp_path, plan=plan, profile="owner_low", mode="low", messages=messages,
     )
@@ -130,7 +130,7 @@ def test_confirmed_window_below_target_wins_even_when_target_fits(monkeypatch, t
     assert measurement.target_deficit_tokens == 0
     assert measurement.capacity_deficit_tokens > 0
     # Deficit-triggered, low-water-sized: the goal carries an eighth of the BINDING
-    # boundary (the 65,550 window, not the 200K target) above the deficit.
+    # boundary (the 65,550 window, not the 250K target) above the deficit.
     assert measurement.low_water_margin_tokens == math.ceil(65_550 / RECLAIM_LOW_WATER_DIVISOR)
     assert measurement.reclaim_goal_tokens == (
         measurement.capacity_deficit_tokens + measurement.low_water_margin_tokens
@@ -140,14 +140,14 @@ def test_confirmed_window_below_target_wins_even_when_target_fits(monkeypatch, t
 
 @pytest.mark.parametrize("profile,preferred,window,known,boundary", [
     ("owner_max", "max", 70_000, True, 70_000),  # capacity binds a Max route
-    ("owner_low", "low", 500_000, True, 200_000),  # the economy target binds Low
-    ("owner_low", "low", 0, False, 200_000),  # unknown capacity: the target alone binds
+    ("owner_low", "low", 500_000, True, 250_000),  # the economy target binds Low
+    ("owner_low", "low", 0, False, 250_000),  # unknown capacity: the target alone binds
 ])
 def test_low_water_margin_follows_the_binding_boundary(
     monkeypatch, tmp_path, profile, preferred, window, known, boundary,
 ):
     plan = _plan(preferred=preferred, window=window, known=known)
-    messages = plan.messages_for(preferred) + [{"role": "user", "content": "x" * 600_000}]
+    messages = plan.messages_for(preferred) + [{"role": "user", "content": "x" * 800_000}]
     disposition = _measure(
         monkeypatch, tmp_path, plan=plan, profile=profile, mode=preferred, messages=messages,
     )
@@ -220,7 +220,7 @@ def test_task_local_low_does_not_inherit_owner_economy_target(monkeypatch, tmp_p
         plan=plan,
         profile="task_local_low",
         mode="low",
-        messages=plan.messages_for("low") + [{"role": "user", "content": "x" * 600_000}],
+        messages=plan.messages_for("low") + [{"role": "user", "content": "x" * 800_000}],
     )
     assert disposition.measurement.target_total_tokens is None
     assert disposition.measurement.target_deficit_tokens is None

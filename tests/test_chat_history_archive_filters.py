@@ -204,6 +204,7 @@ def test_explicit_chat_history_surfaces_missing_consolidation_generation(tmp_pat
 
 def test_chat_history_keeps_durable_gap_after_consolidator_rebases_cursor(tmp_path):
     from ouroboros.consolidator import consolidate, should_consolidate
+    from ouroboros.chronicle_store import ChronicleStore
 
     _write(tmp_path / "logs" / "chat.jsonl", [_row("2026-08-21T09:00:00Z", "survivor")])
     memory_dir = tmp_path / "memory"
@@ -224,17 +225,27 @@ def test_chat_history_keeps_durable_gap_after_consolidator_rebases_cursor(tmp_pa
 
     class NoLlmExpected:
         def chat(self, **_kwargs):
-            raise AssertionError("gap rebasing below BLOCK_SIZE must not call the LLM")
+            raise AssertionError("open raw rows must not be summarized during gap rebasing")
 
     assert consolidate(
         chat_path=tmp_path / "logs" / "chat.jsonl",
         blocks_path=blocks_path,
         meta_path=meta_path,
         llm_client=NoLlmExpected(),
-    ) is None
-    blocks = json.loads(blocks_path.read_text(encoding="utf-8"))
-    assert blocks[0]["gap_id"].startswith("gap:")
-    assert "[MEMORY GAP]" in blocks[0]["content"]
+    )["_blocks_written"] == 0
+    store = ChronicleStore(tmp_path)
+    gaps = store.records(kinds=["gap"])
+    assert len(gaps) == 1 and gaps[0]["id"].startswith("gap:")
+    assert "[MEMORY GAP]" in gaps[0]["text"]
+    assert store.scan_state()["last_consolidated_offset"] == 0
+    assert store.scan_state()["chat_log_signature"]["first_line_sha256"] != "f" * 64
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["last_consolidated_offset"] == 50
+    assert not blocks_path.exists()
+    consolidate(
+        chat_path=tmp_path / "logs" / "chat.jsonl", blocks_path=blocks_path,
+        meta_path=meta_path, llm_client=NoLlmExpected(),
+    )
+    assert len(store.records(kinds=["gap"])) == 1
 
     second = memory.chat_history(count=20)
     stale_page = memory.chat_history(count=20, snapshot=old_snapshot.group(1))

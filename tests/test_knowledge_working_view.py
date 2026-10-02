@@ -116,19 +116,17 @@ def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(
 
     llm = Reader()
     if room_correction:
-        from ouroboros import room_consolidation as rc
-        room = rc.RoomSource("1", "Main", [{"text": episode}], episode)
-        content, usage = rc.summarize_block(c._light_call(llm, ctx, {}), [room],
-            first_ts="2026-09-01T10:00:00Z", last_ts="2026-09-01T10:01:00Z",
-            knowledge_instruction=c.KNOWLEDGE_MAINTENANCE_PROMPT)
-        bound = usage["_knowledge_entries"]
+        from tests.test_room_knowledge_correction import _consolidate
+        bound, outcomes = _consolidate(ctx, llm, episode)
+        content, usage = answer, {"active_correction": True}
     else:
         content, usage = c._call_consolidation_llm(llm, episode, "multiwindow", knowledge=reads)
         bound = reads.bind_entries(nomination)
+        outcomes = c._write_knowledge_entries(original.address.shelf, bound, context=ctx)
     assert content, usage
     assert len(llm.revisions) > 2
     assert bound[0]["expected_revision"] == original.revision
-    assert c._write_knowledge_entries(original.address.shelf, bound, context=ctx)[0]["ok"]
+    assert outcomes[0]["ok"]
     assert k.read_knowledge_note(original.address).text.endswith("decisive last event.")
     assert list((tmp_path / "task_results" / "artifacts" / "memory-view" / "source_handles").rglob("*.json"))
 

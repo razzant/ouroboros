@@ -155,7 +155,7 @@ def persist_queue_snapshot(reason: str = "") -> bool:
                 "task_group_id": t.get("task_group_id"),
                 "task_group": t.get("task_group"),
                 "subagent_envelope": t.get("subagent_envelope"), "configured_subagent": t.get("configured_subagent"),
-                "memory_mode": t.get("memory_mode"), "drive_root": t.get("drive_root"), "parent_cognitive_route": t.get("parent_cognitive_route"), "subagent_availability": t.get("subagent_availability"),
+                "memory_mode": t.get("memory_mode"), "drive_root": t.get("drive_root"), "parent_cognitive_route": t.get("parent_cognitive_route"), "memory_reference": t.get("memory_reference"), "subagent_availability": t.get("subagent_availability"),
                 "child_drive_root": t.get("child_drive_root"),
                 "budget_drive_root": t.get("budget_drive_root"),
                 "task_constraint": t.get("task_constraint"), "predecessor_authority_source": t.get("predecessor_authority_source"),

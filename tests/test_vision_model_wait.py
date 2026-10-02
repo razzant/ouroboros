@@ -288,6 +288,15 @@ def test_strict_child_schema_rejects_false_capture_and_wrong_receipt():
     capture = asdict(ua.PhysicalAttemptCapture("a", MODEL, "claudexor", "released", "opaque"))
     receipt = {"receipt_id": "ours", "custody": None, "capture": capture}
     vision_process._read_receipt(receipt, "ours")
+    from ouroboros.llm_attempt import memory_view_measurement
+    capture["physical_context"] = asdict(ua.PhysicalAttemptContext(
+        "owner_max", "max", "cold_estimate", "route", "round", None, None, False, False,
+        memory_view=memory_view_measurement({})))
+    vision_process._read_receipt(receipt, "ours")
+    capture["physical_context"]["memory_view"]["utf8_bytes"] = "unknown"
+    with pytest.raises(Exception):
+        vision_process._read_receipt(receipt, "ours")
+    capture["physical_context"]["memory_view"]["utf8_bytes"] = None
     with pytest.raises(ValueError, match="another invocation"):
         vision_process._read_receipt(receipt, "theirs")
     capture["effort"] = ["not", "an", "evidence", "object"]

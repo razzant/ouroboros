@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import context_compaction, loop
+from ouroboros import context_compaction, loop, usage_accounting as ua
 from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.tools.registry import ToolRegistry
 from tests.test_context_fit_integration import _plan
@@ -46,11 +46,26 @@ def main_loop(tmp_path, monkeypatch):
                 return f.ctx.context_fit_plan.model
 
             def chat(self, **kwargs):
+                from ouroboros.llm_attempt import _physical_candidate, _attempt_request
+                from ouroboros.model_send_seal import persist_physical_candidate
+
+                ua.adopt_physical_attempt_capture(None)
                 f.inputs.append(deepcopy(kwargs))
                 reply = next(replies)
                 if isinstance(reply, Exception):
                     raise reply
                 message = reply(kwargs) if callable(reply) else deepcopy(reply)
+                candidate = _physical_candidate({key: kwargs[key] for key in ("messages", "tools", "model")})
+                request = _attempt_request({"provider": "openai", "usage_model": kwargs["model"]}, candidate)
+                attempt_id = f"authored-send-{len(f.inputs)}"
+                persisted = persist_physical_candidate(f.ctx.drive_root, task_id="authored-main",
+                    attempt_id=attempt_id, candidate=candidate, candidate_facts={})
+                ua.adopt_physical_attempt_capture(ua.PhysicalAttemptCapture(
+                    attempt_id, kwargs["model"], "openai", "settled", "canonical_json_v1",
+                    candidate_manifest_ref=persisted["manifest_ref"], physical_context=request.physical_context,
+                    candidate_raw_sha256=request.candidate_raw_sha256, candidate_raw_size_bytes=request.candidate_raw_size_bytes,
+                    candidate_context_sha256=request.candidate_context_sha256,
+                    candidate_context_size_bytes=request.candidate_context_size_bytes))
                 return message, {"prompt_tokens": 100, "completion_tokens": 10,
                                  "cost": 0.0, "provider": "openai"}
 
@@ -167,9 +182,9 @@ def test_failed_or_empty_response_cannot_supply_a_false_authored_receipt(main_lo
     f, observed, prior = main_loop, [], {}
     record = compact_context.record_context_view
 
-    def observe(ctx, messages, schemas):
+    def observe(ctx, messages, schemas, **kwargs):
         observed.append(deepcopy(messages))
-        record(ctx, messages, schemas)
+        record(ctx, messages, schemas, **kwargs)
 
     monkeypatch.setattr(compact_context, "record_context_view", observe)
     monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", lambda *a, **kw: True)

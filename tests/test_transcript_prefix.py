@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 from types import SimpleNamespace
+import pytest
 
 from ouroboros import loop, transcript_prefix
 from ouroboros.transcript_prefix import CHECKPOINT_KIND, message_digest, observe_send, sanction_rewrite
@@ -123,6 +124,20 @@ def test_a_compaction_stamp_never_explains_a_system_rewrite():
     fact = observe_send(slot, [{"role": "system", "content": "reprojected"}, TASK, ASSISTANT], round_idx=2)
     assert fact["kind"] == "system_rewritten" and fact["sanctioned_by"] is None
     assert getattr(slot, transcript_prefix.SANCTION_ATTR) is None, "the stamp is still consumed"
+
+
+@pytest.mark.parametrize("system,compaction,expected", [(True, False, "memory_marks"),
+    (False, False, None), (True, True, "memory_marks"), (False, True, "compaction")])
+def test_mark_refresh_sanctions_only_its_system_view(system, compaction, expected):
+    slot = SimpleNamespace()
+    observe_send(slot, [SYSTEM, TASK, ASSISTANT], round_idx=1)
+    sanction_rewrite(slot, "memory_marks")
+    if compaction:
+        sanction_rewrite(slot, "compaction")
+    messages = [{"role": "system", "content": "new mark"} if system else SYSTEM, TASK,
+                ASSISTANT if system else {"role": "assistant", "content": "rewritten"}]
+    assert observe_send(slot, messages, round_idx=2)["sanctioned_by"] == expected
+    assert getattr(slot, transcript_prefix.SANCTION_ATTR) is None
 
 
 def test_sanctioned_by_rides_through_unchanged():
@@ -264,7 +279,7 @@ def _fake_compaction(messages, *_args, **_kwargs):
         if message.get("role") == "tool":
             rebuilt[index] = {**message, "content": "[compacted tool result]"}
             break
-    receipt = SimpleNamespace(status="applied", checkpoint_ref="ckpt-1", reclaimed_tokens=10, goal_reached=True)
+    receipt = SimpleNamespace(status="applied", checkpoint_ref="ckpt-1", reclaimed_tokens=10, goal_reached=True, fit=None)
     return rebuilt, receipt, {"prompt_tokens": 1, "completion_tokens": 1}
 
 

@@ -356,13 +356,21 @@ def test_latched_wait_cause_outranks_the_overflow_a_failed_local_pass_left(tmp_p
     assert derive_loop_outcome(result, usage, trace)["failure"] == {"kind": "provider", "reason_code": "provider_unavailable"}
 
 
-def test_context_overflow_with_no_episode_keeps_the_overflow_salvage(tmp_path, monkeypatch):
-    """Control for the precedence: a primary dispatch rejected as a context
-    overflow with NO wait episode never walks the chain (a local fallback being
-    configured changes nothing) and keeps the overflow terminal unchanged —
-    source ``context_overflow_local_salvage``, ``llm_api_error``, the window
-    wording."""
-    monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", _no_chain)
+@pytest.mark.parametrize("recovered", [False, True])
+def test_definite_overflow_tries_configured_fallback_before_terminal_salvage(tmp_path, monkeypatch, recovered):
+    """A definite overflow permits configured fallback; an exhausted chain keeps
+    the overflow terminal. The unresolved-attempt tests above still forbid it."""
+    chains = []
+    def fallback(**kwargs):
+        chains.append(kwargs)
+        assert kwargs["accumulated_usage"]["_last_llm_error_kind"] == "context_overflow"
+        assert TRANSPORT_DEATHS_KEY not in kwargs["accumulated_usage"]
+        if recovered:
+            for key in ("_last_llm_error_kind", "execution_status", "reason_code"):
+                kwargs["accumulated_usage"].pop(key, None)
+        return ({"role": "assistant", "content": "Recovered on configured fallback"} if recovered else None,
+                kwargs["active_model"], kwargs["active_use_local"], kwargs["context_fit_plan"], kwargs["active_context_mode"])
+    monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", fallback)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "local/candidate")
     monkeypatch.setenv("USE_LOCAL_FALLBACK", "1")
@@ -370,8 +378,12 @@ def test_context_overflow_with_no_episode_keeps_the_overflow_salvage(tmp_path, m
     notes = []
     result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, notes))
 
-    assert llm.calls == 1
+    assert llm.calls == 1 and len(chains) == 1
     assert _events(tmp_path, "network_wait") == []
+    if recovered:
+        assert result == "Recovered on configured fallback"
+        assert usage.get("reason_code") is None and "forced_finalization" not in trace
+        return
     assert usage["_last_llm_error_kind"] == "context_overflow"
     assert usage["execution_status"] == "infra_failed"
     assert usage["reason_code"] == "llm_api_error"

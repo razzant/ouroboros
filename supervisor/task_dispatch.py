@@ -49,6 +49,7 @@ def build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     subagent_envelope = fields.get("subagent_envelope") if isinstance(fields.get("subagent_envelope"), dict) else {}
     configured_subagent = fields.get("configured_subagent") if isinstance(fields.get("configured_subagent"), dict) else {}
     parent_cognitive_route = fields.get("parent_cognitive_route") if isinstance(fields.get("parent_cognitive_route"), dict) else {}
+    memory_reference = copy.deepcopy(fields.get("memory_reference")) if isinstance(fields.get("memory_reference"), dict) else {}
     directory_options = {key: fields[key] for key in ("directory_strategy", "scope_paths") if key in fields}
     source_bindings = {key: copy.deepcopy(fields[key]) for key in ("parent_workspace", "workspace_copy")
                        if isinstance(fields.get(key), dict)}
@@ -97,7 +98,7 @@ def build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
         "task_group": task_group,
         "subagent_envelope": subagent_envelope,
         "configured_subagent": configured_subagent,
-        "parent_cognitive_route": parent_cognitive_route,
+        "parent_cognitive_route": parent_cognitive_route, "memory_reference": memory_reference,
         **directory_options,
         **source_bindings,
         "metadata": {
@@ -125,7 +126,7 @@ def build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
             "task_group": task_group,
             "subagent_envelope": subagent_envelope,
             "configured_subagent": configured_subagent,
-            "parent_cognitive_route": parent_cognitive_route,
+            "parent_cognitive_route": parent_cognitive_route, "memory_reference": memory_reference,
             **directory_options,
             **source_bindings,
             "root_cost_ceiling_usd": root_cost_ceiling_usd,

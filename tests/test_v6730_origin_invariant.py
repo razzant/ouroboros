@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -610,163 +609,6 @@ def test_context_reader_follows_mid_archive_consolidation_cursor(tmp_path):
 
 # ---------------------------------------------------------------- consolidator
 
-def _mock_llm():
-    llm = MagicMock()
-    llm.chat.return_value = (
-        {"content": "Block summary."},
-        {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0},
-    )
-    return llm
-
-
-def _chat_layout(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "archive").mkdir(parents=True, exist_ok=True)
-    return logs / "chat.jsonl", tmp_path / "dialogue_blocks.json", tmp_path / "dialogue_meta.json"
-
-
-def _entries(start, count, tag):
-    return "".join(
-        json.dumps({"ts": f"2026-07-19T10:{i:02d}:00Z", "direction": "in", "text": f"{tag} {start + i}"}) + "\n"
-        for i in range(count)
-    )
-
-
-def test_consolidator_survives_single_rotation(tmp_path):
-    from ouroboros.consolidator import BLOCK_SIZE, _run_block_consolidation, should_consolidate
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    # First generation: consolidate one full block, leaving a 50-entry tail.
-    chat.write_text(_entries(0, BLOCK_SIZE + 50, "gen1"), encoding="utf-8")
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    stored = json.loads(meta.read_text(encoding="utf-8"))
-    assert stored["last_consolidated_offset"] == BLOCK_SIZE
-    # Rotation: the whole generation moves to the archive; live restarts.
-    (tmp_path / "archive" / "chat_20260719T210000.jsonl").write_text(
-        chat.read_text(encoding="utf-8"), encoding="utf-8",
-    )
-    chat.write_text(_entries(1000, 60, "gen2"), encoding="utf-8")
-    # The 50 archived tail entries + 60 live ones are pending → consolidate.
-    assert should_consolidate(meta, chat) is True
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    block_texts = json.dumps(json.loads(blocks.read_text(encoding="utf-8")))
-    # The archived tail was consolidated (its entries fed the second block).
-    meta_after = json.loads(meta.read_text(encoding="utf-8"))
-    # Run 1 consumed 100; run 2 consumes one more block (100) → position 200 in
-    # the 150-archive + 60-live concatenation → cursor 50 into the live file
-    # (10 entries remain pending — the archived tail was NOT lost).
-    assert meta_after["last_consolidated_offset"] == 50
-    from ouroboros.consolidator import _chat_log_signature
-
-    assert meta_after["chat_log_signature"] == _chat_log_signature(chat)
-    assert block_texts  # blocks exist
-
-
-def test_consolidator_partial_archive_consumption_keeps_archive_signature(tmp_path):
-    from ouroboros.consolidator import BLOCK_SIZE, _chat_log_signature, _run_block_consolidation
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    chat.write_text(_entries(0, 10, "gen1"), encoding="utf-8")
-    # Cursor at 0 with gen1 signature recorded (as a prior run would leave it).
-    meta.write_text(json.dumps({
-        "last_consolidated_offset": 0,
-        "chat_log_signature": _chat_log_signature(chat),
-    }), encoding="utf-8")
-    # Rotate a LARGE generation (2.5 blocks) and start a tiny live file.
-    archive = tmp_path / "archive" / "chat_20260719T210000.jsonl"
-    big = _entries(0, BLOCK_SIZE * 2 + 50, "gen1")
-    archive.write_text(big, encoding="utf-8")
-    chat.write_text(_entries(5000, 3, "gen2"), encoding="utf-8")
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text(encoding="utf-8"))
-    # 253 pending → 2 whole blocks consolidated (200); cursor still INSIDE the
-    # archive segment, so the ARCHIVE's signature must be kept (not the live one).
-    assert meta_after["last_consolidated_offset"] == BLOCK_SIZE * 2
-    assert meta_after["chat_log_signature"] == _chat_log_signature(archive)
-    # Next run continues from there and crosses into the live file.
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None  # tail < BLOCK_SIZE
-
-
-def test_consolidator_multi_rotation_chain_walk(tmp_path):
-    from ouroboros.consolidator import _chat_log_signature, _run_block_consolidation
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    gen1 = tmp_path / "archive" / "chat_20260719T200000.jsonl"
-    gen2 = tmp_path / "archive" / "chat_20260719T210000.jsonl"
-    gen1.write_text(_entries(0, 40, "gen1"), encoding="utf-8")
-    gen2.write_text(_entries(100, 40, "gen2"), encoding="utf-8")
-    chat.write_text(_entries(200, 40, "gen3"), encoding="utf-8")
-    # Cursor points at gen1 (two rotations ago), 10 entries consumed.
-    meta.write_text(json.dumps({
-        "last_consolidated_offset": 10,
-        "chat_log_signature": _chat_log_signature(gen1),
-    }), encoding="utf-8")
-    # Pending = 30 (gen1 tail) + 40 + 40 = 110 ≥ BLOCK_SIZE → one block.
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text(encoding="utf-8"))
-    # 10 + 100 consolidated = position 110 → 30 into the LIVE file (40+40 before it).
-    assert meta_after["last_consolidated_offset"] == 30
-    assert meta_after["chat_log_signature"] == _chat_log_signature(chat)
-    assert len(json.loads(blocks.read_text(encoding="utf-8"))) == 1
-
-
-def test_consolidator_unfindable_generation_appends_explicit_gap_block(tmp_path):
-    from ouroboros.consolidator import BLOCK_SIZE, _run_block_consolidation
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    chat.write_text(_entries(0, BLOCK_SIZE, "gen9"), encoding="utf-8")
-    meta.write_text(json.dumps({
-        "last_consolidated_offset": 500,
-        "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 1},
-    }), encoding="utf-8")
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    stored_blocks = json.loads(blocks.read_text(encoding="utf-8"))
-    assert any("MEMORY GAP" in block.get("content", "") for block in stored_blocks)
-
-
-def test_consolidator_rotation_during_summarization_keeps_captured_generation(tmp_path):
-    """Triad r2 critical: chat.jsonl rotating DURING the slow LLM summarization
-    must not stamp the archived-generation offset onto the new live generation —
-    the cursor commits against the signature captured at read time."""
-    from ouroboros.consolidator import (
-        BLOCK_SIZE,
-        _chat_log_signature,
-        _run_block_consolidation,
-    )
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    gen1_body = _entries(0, BLOCK_SIZE + 30, "gen1")
-    chat.write_text(gen1_body, encoding="utf-8")
-    gen1_sig = _chat_log_signature(chat)
-
-    llm = MagicMock()
-
-    def _rotate_mid_summarization(**_kwargs):
-        # Rotation lands while the LLM call is in flight.
-        (tmp_path / "archive" / "chat_20260720T120000.jsonl").write_text(
-            gen1_body, encoding="utf-8",
-        )
-        chat.write_text(_entries(5000, 3, "gen2"), encoding="utf-8")
-        return (
-            {"content": "Block summary."},
-            {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0},
-        )
-
-    llm.chat.side_effect = _rotate_mid_summarization
-    assert _run_block_consolidation(chat, blocks, meta, llm, "") is not None
-    meta_after = json.loads(meta.read_text(encoding="utf-8"))
-    # The cursor names the CAPTURED gen1 identity (now archived), offset 100 —
-    # NOT the new live gen2 file.
-    assert meta_after["chat_log_signature"]["first_line_sha256"] == gen1_sig["first_line_sha256"]
-    assert meta_after["last_consolidated_offset"] == BLOCK_SIZE
-    # The next run walks the chain from the archived gen1 tail — nothing lost:
-    # 30 gen1 tail + 3 gen2 live = 33 pending (< BLOCK_SIZE → no new block, no reset).
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    meta_next = json.loads(meta.read_text(encoding="utf-8"))
-    assert meta_next["last_consolidated_offset"] == BLOCK_SIZE
-    assert meta_next["chat_log_signature"]["first_line_sha256"] == gen1_sig["first_line_sha256"]
-
 
 def test_lens_over_cap_origins_emit_disclosed_omission_note(tmp_path):
     """Triad r3: past the synthesis cap the omission is DISCLOSED (count + durable
@@ -791,41 +633,6 @@ def test_lens_over_cap_origins_emit_disclosed_omission_note(tmp_path):
     assert len(notes) == 1
     assert "2 more" in notes[0]["text"]
     assert "project_task_bindings.json" in notes[0]["text"]
-
-
-def test_consolidator_rotation_between_capture_and_read_restarts(tmp_path, monkeypatch):
-    """Triad r3: a rotation landing BETWEEN signature capture and entry read must
-    restart the capture — the committed cursor always pairs a signature with the
-    entries of the SAME generation."""
-    import ouroboros.consolidator as cons
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    gen1_body = _entries(0, cons.BLOCK_SIZE + 10, "gen1")
-    chat.write_text(gen1_body, encoding="utf-8")
-    gen1_sig = cons._chat_log_signature(chat)
-    meta.write_text(json.dumps({
-        "last_consolidated_offset": 0, "chat_log_signature": gen1_sig,
-    }), encoding="utf-8")
-
-    real_read = cons._read_chat_entries
-    state = {"rotated": False}
-
-    def racing_read(path):
-        if path == chat and not state["rotated"]:
-            state["rotated"] = True
-            (tmp_path / "archive" / "chat_20260720T130000.jsonl").write_text(
-                gen1_body, encoding="utf-8",
-            )
-            chat.write_text(_entries(7000, 5, "gen2"), encoding="utf-8")
-        return real_read(path)
-
-    monkeypatch.setattr(cons, "_read_chat_entries", racing_read)
-    assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text(encoding="utf-8"))
-    # The retry re-resolved the chain: one block consumed from the ARCHIVED gen1,
-    # cursor = offset 100 stamped with gen1's captured signature — never gen2's.
-    assert meta_after["last_consolidated_offset"] == cons.BLOCK_SIZE
-    assert meta_after["chat_log_signature"]["first_line_sha256"] == gen1_sig["first_line_sha256"]
 
 
 def test_pooled_task_metadata_carries_origin_for_nested_promotes(tmp_path):
@@ -868,243 +675,246 @@ def test_lens_zero_human_quota_synthesizes_nothing(tmp_path):
     assert [m for m in view if m.get("origin_projected")] == []
 
 
-def test_era_compression_preserves_gap_markers(tmp_path):
-    """Triad r5+r8: era compression never erases a durable [MEMORY GAP] block,
-    never lets one era BRIDGE a discontinuity, and keeps exact chronology —
-    only the contiguous summary run before the gap is compressed."""
-    import ouroboros.consolidator as cons
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    old_blocks = [
-        {"ts": "2026-07-01T00:00:00Z", "type": "summary", "range": "r",
-         "message_count": 100, "content": "old block A1 " + "detail " * 40},
-        {"ts": "2026-07-01T06:00:00Z", "type": "summary", "range": "r",
-         "message_count": 100, "content": "old block A2 " + "detail " * 40},
-        {"ts": "2026-07-01T12:00:00Z", "type": "summary", "range": "unknown",
-         "message_count": 0, "gap_id": "gap:test", "content": "[MEMORY GAP] test"},
-        {"ts": "2026-07-02T00:00:00Z", "type": "summary", "range": "r",
-         "message_count": 100, "content": "old block B"},
-        {"ts": "2026-07-03T00:00:00Z", "type": "summary", "range": "r",
-         "message_count": 100, "content": "old block C"},
-    ] + [
-        {"ts": f"2026-07-1{i}T00:00:00Z", "type": "summary", "range": "r",
-         "message_count": 100, "content": f"recent block {i}"}
-        for i in range(7)
-    ]
-    (tmp_path / "dialogue_blocks.json").write_text(json.dumps(old_blocks), encoding="utf-8")
-    chat.write_text(_entries(0, cons.BLOCK_SIZE, "gen1"), encoding="utf-8")
-    llm = MagicMock()
-    llm.chat.return_value = (
-        {"content": "Era or block summary."},
-        {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0},
-    )
-    assert cons._run_block_consolidation(chat, blocks, meta, llm, "") is not None
-    blocks_after = json.loads(blocks.read_text(encoding="utf-8"))
-    gap_positions = [i for i, b in enumerate(blocks_after) if b.get("gap_id") == "gap:test"]
-    assert len(gap_positions) == 1
-    # The era compressed ONLY the pre-gap run (A1+A2); the gap keeps its
-    # chronological slot right after it, and post-gap blocks B/C stay intact.
-    assert gap_positions[0] == 1
-    texts = [b.get("content", "") for b in blocks_after]
-    assert "old block B" in texts and "old block C" in texts
-    assert not any(t.startswith("old block A") for t in texts)  # compressed into the era
-    assert "Era or block summary." in texts[0]  # the era is shorter than the run it replaced
+def _entries(start, count, tag, *, chat_id=1):
+    return "".join(json.dumps({"ts": f"2026-07-19T10:{i:02d}:00Z", "direction": "in",
+        "task_id": "rotation-task", "chat_id": chat_id, "text": f"{tag} {start + i}"}) + "\n"
+        for i in range(count))
 
 
-def test_consolidator_rotation_between_resolve_and_first_capture(tmp_path, monkeypatch):
-    """Triad r6: a rotation in the resolve→first-capture window must not let the
-    stored offset be applied to the NEW live generation (which would skip its
-    prefix and drop the archived tail) — the capture anchors to the cursor
-    generation recorded in meta and re-resolves on mismatch."""
-    import ouroboros.consolidator as cons
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    gen1_body = _entries(0, 60, "gen1")  # 60 un-consolidated gen1 entries
-    chat.write_text(gen1_body, encoding="utf-8")
-    gen1_sig = cons._chat_log_signature(chat)
-    meta.write_text(json.dumps({
-        "last_consolidated_offset": 10, "chat_log_signature": gen1_sig,
-    }), encoding="utf-8")
-
-    real_sig = cons._chat_log_signature
-    state = {"rotated": False}
-
-    def racing_sig(path):
-        # Rotation lands AFTER the initial resolve, right at the first capture:
-        # the new live generation is LONGER than the stored offset, so without
-        # the meta-anchor check the old offset would silently apply to it.
-        if not state["rotated"]:
-            state["rotated"] = True
-            (tmp_path / "archive" / "chat_20260720T150000.jsonl").write_text(
-                gen1_body, encoding="utf-8",
-            )
-            chat.write_text(_entries(9000, cons.BLOCK_SIZE + 40, "gen2"), encoding="utf-8")
-        return real_sig(path)
-
-    monkeypatch.setattr(cons, "_chat_log_signature", racing_sig)
-    assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text(encoding="utf-8"))
-    # Chain re-resolved from the archived gen1 (60 entries) + live gen2 (140):
-    # one block (100) consumed from position 10 → absolute position 110 →
-    # cursor 110-60=50 into the LIVE gen2 file; gen1's tail was consolidated,
-    # and the gen2 prefix was NOT silently skipped.
-    assert meta_after["last_consolidated_offset"] == 50
-    assert meta_after["chat_log_signature"]["first_line_sha256"] != gen1_sig["first_line_sha256"]
+def _rotation_setup(root, monkeypatch):
+    from ouroboros import consolidator as c
+    from ouroboros.chronicle_store import ChronicleStore
+    from tests.test_chronicle_consolidation import Helper
+    for name in ("logs", "memory", "archive"):
+        (root / name).mkdir(exist_ok=True)
+    chat = root / "logs/chat.jsonl"
+    blocks, meta = root / "memory/dialogue_blocks.json", root / "memory/dialogue_meta.json"
+    blocks.write_text("[]", encoding="utf-8")
+    meta.write_text("{}", encoding="utf-8")
+    helper = Helper()
+    monkeypatch.setattr(c, "_light_call", lambda *_args: helper)
+    return ChronicleStore(root), helper, chat, blocks, meta
 
 
-def test_consolidator_rotation_during_both_captures_defers_cleanly(tmp_path, monkeypatch):
-    """Triad r4: if rotation races BOTH capture attempts, consolidation defers —
-    nothing summarized, cursor untouched, retry next cycle."""
-    import ouroboros.consolidator as cons
+def _run_rotation(root, chat, blocks, meta, **kwargs):
+    from ouroboros import consolidator as c
+    from ouroboros.tools.registry import ToolContext
+    return c.consolidate(chat, blocks, meta, None,
+        knowledge_context=ToolContext(repo_dir=root, drive_root=root, task_id="rotation-task"),
+        completed_task={"id": "rotation-task"}, **kwargs)
 
-    chat, blocks, meta = _chat_layout(tmp_path)
-    gen = 0
 
-    def churn_read(path):
-        nonlocal gen
+def _represented_rows(root, store):
+    from ouroboros.artifacts import read_actor_source_bytes
+    rows = []
+    for episode in store.records(kinds=["episode"]):
+        ref = episode["source_refs"][0]
+        rows.extend(json.loads(read_actor_source_bytes(root, ref["task_id"], ref)))
+    return rows
+
+
+def test_consolidator_survives_single_rotation(tmp_path, monkeypatch):
+    from ouroboros import consolidator as c
+    store, helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    chat.write_text(_entries(0, 3, "gen1"), encoding="utf-8")
+    _run_rotation(tmp_path, chat, blocks, meta)
+    with chat.open("a", encoding="utf-8") as stream:
+        stream.write(_entries(3, 2, "gen1-tail"))
+    chat.replace(tmp_path / "archive/chat_20260719T210000.jsonl")
+    chat.write_text(_entries(1000, 4, "gen2"), encoding="utf-8")
+    assert c.should_consolidate(meta, chat)
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert len(_represented_rows(tmp_path, store)) == 9
+    assert store.scan_state()["last_consolidated_offset"] == 4
+    assert store.scan_state()["chat_log_signature"] == c._chat_log_signature(chat)
+    assert blocks.read_text(encoding="utf-8") == "[]"
+    assert meta.read_text(encoding="utf-8") == "{}"
+    calls = len(helper.calls)
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert len(helper.calls) == calls
+
+
+def test_consolidator_partial_archive_consumption_keeps_archive_signature(tmp_path, monkeypatch):
+    from ouroboros import consolidator as c
+    store, helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    archive = tmp_path / "archive/chat_20260719T210000.jsonl"
+    archive.write_text(_entries(0, 3, "finished", chat_id=1) + _entries(3, 2, "retry", chat_id=2), encoding="utf-8")
+    chat.write_text(_entries(5000, 2, "live", chat_id=2), encoding="utf-8")
+    def interrupted(prompt, label, **kwargs):
+        if label == "Room episode" and '"chat_id": 2' in prompt:
+            return "", {"_consolidation_errors": [{"kind": "transport_error"}]}, None
+        return helper(prompt, label, **kwargs)
+    monkeypatch.setattr(c, "_light_call", lambda *_args: interrupted)
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert store.scan_state()["last_consolidated_offset"] == 3
+    assert store.scan_state()["chat_log_signature"] == c._chat_log_signature(archive)
+    assert [r["text"] for r in _represented_rows(tmp_path, store)] == [f"finished {i}" for i in range(3)]
+    monkeypatch.setattr(c, "_light_call", lambda *_args: helper)
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert len(_represented_rows(tmp_path, store)) == 7
+    assert store.scan_state()["last_consolidated_offset"] == 2
+    assert store.scan_state()["chat_log_signature"] == c._chat_log_signature(chat)
+
+
+def test_consolidator_multi_rotation_chain_walk(tmp_path, monkeypatch):
+    from ouroboros import consolidator as c
+    store, _helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    first = tmp_path / "archive/chat_20260719T200000.jsonl"
+    second = tmp_path / "archive/chat_20260719T210000.jsonl"
+    first.write_text(_entries(0, 4, "gen1"), encoding="utf-8")
+    second.write_text(_entries(100, 4, "gen2"), encoding="utf-8")
+    chat.write_text(_entries(200, 4, "gen3"), encoding="utf-8")
+    cursor = {"last_consolidated_offset": 1, "chat_log_signature": c._chat_log_signature(first)}
+    meta.write_text(json.dumps(cursor), encoding="utf-8")
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert [r["text"] for r in _represented_rows(tmp_path, store)] == (
+        [f"gen1 {i}" for i in range(1, 4)] + [f"gen2 {i}" for i in range(100, 104)] + [f"gen3 {i}" for i in range(200, 204)])
+    assert store.scan_state()["last_consolidated_offset"] == 4
+    assert store.scan_state()["chat_log_signature"] == c._chat_log_signature(chat)
+    assert json.loads(meta.read_text(encoding="utf-8")) == cursor
+
+
+def test_consolidator_rotation_during_summarization_keeps_captured_generation(tmp_path, monkeypatch):
+    from ouroboros import consolidator as c
+    store, helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    chat.write_text(_entries(0, 3, "gen1"), encoding="utf-8")
+    signature = c._chat_log_signature(chat)
+    rotated = False
+    def rotate(prompt, label, **kwargs):
+        nonlocal rotated
+        if not rotated:
+            rotated = True
+            chat.replace(tmp_path / "archive/chat_20260720T120000.jsonl")
+            chat.write_text(_entries(5000, 2, "gen2"), encoding="utf-8")
+        return helper(prompt, label, **kwargs)
+    monkeypatch.setattr(c, "_light_call", lambda *_args: rotate)
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert store.scan_state()["chat_log_signature"] == signature
+    assert store.scan_state()["last_consolidated_offset"] == 3
+    assert [r["text"] for r in _represented_rows(tmp_path, store)] == [f"gen1 {i}" for i in range(3)]
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert len(_represented_rows(tmp_path, store)) == 5
+    assert store.scan_state()["chat_log_signature"] == c._chat_log_signature(chat)
+
+
+@pytest.mark.parametrize("phase", ["read", "capture"])
+def test_consolidator_rotation_during_capture_restarts(tmp_path, monkeypatch, phase):
+    from ouroboros import consolidator as c
+    store, _helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    chat.write_text(_entries(0, 6, "gen1"), encoding="utf-8")
+    meta.write_text(json.dumps({"last_consolidated_offset": 1, "chat_log_signature": c._chat_log_signature(chat)}), encoding="utf-8")
+    store.import_legacy()
+    hook = "_read_chat_entries" if phase == "read" else "_capture_generation_window"
+    original = getattr(c, hook)
+    rotated = False
+    def race(*args, **kwargs):
+        nonlocal rotated
+        if not rotated:
+            rotated = True
+            chat.replace(tmp_path / "archive/chat_20260720T150000.jsonl")
+            chat.write_text(_entries(9000, 8, "gen2"), encoding="utf-8")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(c, hook, race)
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert [r["text"] for r in _represented_rows(tmp_path, store)] == (
+        [f"gen1 {i}" for i in range(1, 6)] + [f"gen2 {i}" for i in range(9000, 9008)])
+    assert store.scan_state()["last_consolidated_offset"] == 8
+    assert store.scan_state()["chat_log_signature"] == c._chat_log_signature(chat)
+
+
+def test_consolidator_rotation_during_every_capture_defers_cleanly(tmp_path, monkeypatch):
+    from ouroboros import consolidator as c
+    store, helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    chat.write_text(_entries(0, 3, "gen0"), encoding="utf-8")
+    store.import_legacy()
+    stored = store.scan_state()
+    original = c._read_chat_entries
+    generations = []
+    def churn(path):
         if path == chat:
-            gen += 1
-            body = _entries(gen * 1000, cons.BLOCK_SIZE + 5, f"gen{gen}")
-            (tmp_path / "archive" / f"chat_2026072{gen}T000000.jsonl").write_text(
-                chat.read_text(encoding="utf-8"), encoding="utf-8",
-            )
-            chat.write_text(body, encoding="utf-8")
-            return []
-        return real_read(path)
-
-    chat.write_text(_entries(0, cons.BLOCK_SIZE + 5, "gen0"), encoding="utf-8")
-    stored = {"last_consolidated_offset": 0, "chat_log_signature": cons._chat_log_signature(chat)}
-    meta.write_text(json.dumps(stored), encoding="utf-8")
-    real_read = cons._read_chat_entries
-    llm = _mock_llm()
-    monkeypatch.setattr(cons, "_read_chat_entries", churn_read)
-    assert cons._run_block_consolidation(chat, blocks, meta, llm, "") is None
-    assert json.loads(meta.read_text(encoding="utf-8")) == stored  # cursor untouched
-    llm.chat.assert_not_called()  # nothing was summarized
+            generation = len(generations) + 1
+            generations.append(generation)
+            chat.replace(tmp_path / f"archive/chat_2026072{generation}T000000.jsonl")
+            chat.write_text(_entries(generation * 1000, 3, f"gen{generation}"), encoding="utf-8")
+        return original(path)
+    monkeypatch.setattr(c, "_read_chat_entries", churn)
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert len(generations) > 1
+    assert store.scan_state() == stored
+    assert not store.records(kinds=["episode"])
+    assert helper.calls == []
 
 
-def test_consolidator_gap_block_failure_keeps_old_cursor(tmp_path, monkeypatch):
-    """Triad r3: if the durable gap marker cannot be written, the old cursor is
-    PRESERVED for retry (never erased without its promised record)."""
-    import ouroboros.consolidator as cons
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    chat.write_text(_entries(0, cons.BLOCK_SIZE, "gen9"), encoding="utf-8")
-    stored = {
-        "last_consolidated_offset": 500,
-        "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 1},
-    }
-    meta.write_text(json.dumps(stored), encoding="utf-8")
-    monkeypatch.setattr(
-        cons, "_mutate_locked_json_list",
-        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")),
-    )
-    assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    assert json.loads(meta.read_text(encoding="utf-8")) == stored  # cursor untouched
-    # And an interrupted attempt (block written, meta write crashed) never
-    # duplicates the marker on retry: the gap id is deterministic.
-    monkeypatch.undo()
-    assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    blocks_now = json.loads(blocks.read_text(encoding="utf-8"))
-    assert sum("MEMORY GAP" in b.get("content", "") for b in blocks_now) == 1
-    assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    blocks_now = json.loads(blocks.read_text(encoding="utf-8"))
-    assert sum("MEMORY GAP" in b.get("content", "") for b in blocks_now) == 1
+@pytest.mark.parametrize("failure", ["gap", "rebase"])
+def test_consolidator_gap_publication_failure_keeps_old_cursor(tmp_path, monkeypatch, failure):
+    from ouroboros.chronicle_store import ChronicleStore
+    store, helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    chat.write_text(_entries(0, 3, "survivor"), encoding="utf-8")
+    store.import_legacy()
+    lost = {"last_consolidated_offset": 500, "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 1}}
+    store.publish([], scan_state=lost)
+    original = ChronicleStore.publish
+    def fail(self, records, **kwargs):
+        if (failure == "gap" and any(r.get("kind") == "gap" for r in records)) or (failure == "rebase" and kwargs.get("scan_state")):
+            raise OSError("disk full")
+        return original(self, records, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(ChronicleStore, "publish", fail)
+        with pytest.raises(OSError, match="disk full"):
+            _run_rotation(tmp_path, chat, blocks, meta)
+    assert store.scan_state() == lost
+    assert helper.calls == []
+    _run_rotation(tmp_path, chat, blocks, meta)
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert len(store.records(kinds=["gap"])) == 1
+    assert "[MEMORY GAP]" in store.records(kinds=["gap"])[0]["text"]
+    assert len(_represented_rows(tmp_path, store)) == 3
 
 
-def test_uninitialized_cursor_consolidates_preexisting_archives(tmp_path):
-    """Triad r9: a rotation BEFORE the first-ever consolidation (no cursor yet)
-    must not orphan the archived generation — the whole chain is the window."""
-    from ouroboros.consolidator import (
-        BLOCK_SIZE,
-        _chat_log_signature,
-        _run_block_consolidation,
-        should_consolidate,
-    )
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    (tmp_path / "archive" / "chat_20260720T160000.jsonl").write_text(
-        _entries(0, BLOCK_SIZE - 20, "gen1"), encoding="utf-8",
-    )
-    chat.write_text(_entries(5000, 40, "gen2"), encoding="utf-8")
-    # 80 archived + 40 live = 120 pending with NO meta at all.
-    assert should_consolidate(meta, chat) is True
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text(encoding="utf-8"))
-    # One block (100) consumed across the chain → cursor 20 into the live file.
-    assert meta_after["last_consolidated_offset"] == 20
-    assert (
-        meta_after["chat_log_signature"]["first_line_sha256"]
-        == _chat_log_signature(chat)["first_line_sha256"]
-    )
+def test_uninitialized_cursor_consolidates_preexisting_archives(tmp_path, monkeypatch):
+    store, _helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    meta.unlink()
+    (tmp_path / "archive/chat_20260720T160000.jsonl").write_text(_entries(0, 3, "archived"), encoding="utf-8")
+    chat.write_text(_entries(5000, 2, "live"), encoding="utf-8")
+    _run_rotation(tmp_path, chat, blocks, meta)
+    assert [r["text"] for r in _represented_rows(tmp_path, store)] == ["archived 0", "archived 1", "archived 2", "live 5000", "live 5001"]
+    assert store.scan_state()["last_consolidated_offset"] == 2
+    assert not meta.exists()
 
 
-def test_gap_path_quarantines_non_list_blocks_store(tmp_path):
-    """Triad r9 advisory: a valid-JSON-but-non-list store is quarantined too."""
-    import ouroboros.consolidator as cons
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    blocks.write_text('{"valid": "json", "but": "not a list"}', encoding="utf-8")
-    chat.write_text(_entries(0, 5, "gen1"), encoding="utf-8")
-    meta.write_text(json.dumps({
-        "last_consolidated_offset": 500,
-        "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 1},
-    }), encoding="utf-8")
-    assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    quarantined = list(tmp_path.glob("dialogue_blocks.json.corrupt-*.bak"))
-    assert len(quarantined) == 1
-    assert "not a list" in quarantined[0].read_text(encoding="utf-8")
-    blocks_now = json.loads(blocks.read_text(encoding="utf-8"))
-    assert isinstance(blocks_now, list)
-    assert sum("MEMORY GAP" in b.get("content", "") for b in blocks_now) == 1
+@pytest.mark.parametrize("bad", [b'{"valid":"json","but":"not a list"}', b"{corrupt-not-json"])
+def test_gap_path_preserves_corrupt_blocks_source(tmp_path, monkeypatch, bad):
+    from ouroboros.artifacts import read_actor_source_bytes
+    store, _helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    blocks.write_bytes(bad)
+    chat.write_text(_entries(0, 2, "survivor"), encoding="utf-8")
+    meta.write_text(json.dumps({"last_consolidated_offset": 500,
+        "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 1}}), encoding="utf-8")
+    _run_rotation(tmp_path, chat, blocks, meta)
+    ref = store.activation()["metadata"]["source_refs"]["blocks"]
+    assert read_actor_source_bytes(tmp_path, ref["task_id"], ref) == bad
+    assert blocks.read_bytes() == bad
+    assert len(store.records(kinds=["gap"])) == 1
+    assert any(r["metadata"].get("legacy_type") == "gap" for r in store.room_records("legacy"))
 
 
-def test_gap_path_quarantines_corrupt_blocks_store(tmp_path):
-    """Codex final review: the gap write path must QUARANTINE a corrupt
-    dialogue_blocks.json (forensic copy preserved), never reset it to []."""
-    import ouroboros.consolidator as cons
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    blocks.write_text("{corrupt-not-json", encoding="utf-8")
-    chat.write_text(_entries(0, 5, "gen1"), encoding="utf-8")
-    meta.write_text(json.dumps({
-        "last_consolidated_offset": 500,
-        "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 1},
-    }), encoding="utf-8")
-    assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    quarantined = list(tmp_path.glob("dialogue_blocks.json.corrupt-*.bak"))
-    assert len(quarantined) == 1
-    assert quarantined[0].read_text(encoding="utf-8") == "{corrupt-not-json"
-    blocks_now = json.loads(blocks.read_text(encoding="utf-8"))
-    assert sum("MEMORY GAP" in b.get("content", "") for b in blocks_now) == 1
-
-
-def test_consolidator_gap_marker_is_idempotent_even_below_block_size(tmp_path):
-    """Triad r1 critical: the gap must be RECORDED once and the cursor rebased in
-    the same step, even when the live file holds fewer than BLOCK_SIZE rows —
-    and repeat invocations must never duplicate the marker."""
-    from ouroboros.consolidator import (
-        _chat_log_signature,
-        _run_block_consolidation,
-        should_consolidate,
-    )
-
-    chat, blocks, meta = _chat_layout(tmp_path)
-    chat.write_text(_entries(0, 7, "gen9"), encoding="utf-8")  # far below BLOCK_SIZE
-    meta.write_text(json.dumps({
-        "last_consolidated_offset": 500,
-        "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 1},
-    }), encoding="utf-8")
-    # Gap detection itself schedules the run (regardless of pending volume).
-    assert should_consolidate(meta, chat) is True
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    stored_blocks = json.loads(blocks.read_text(encoding="utf-8"))
-    assert sum("MEMORY GAP" in b.get("content", "") for b in stored_blocks) == 1
-    meta_after = json.loads(meta.read_text(encoding="utf-8"))
-    assert meta_after["last_consolidated_offset"] == 0
-    assert meta_after["chat_log_signature"] == _chat_log_signature(chat)
-    # Cursor now matches the live generation: no re-schedule, no duplicate marker.
-    assert should_consolidate(meta, chat) is False
-    assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    stored_blocks = json.loads(blocks.read_text(encoding="utf-8"))
-    assert sum("MEMORY GAP" in b.get("content", "") for b in stored_blocks) == 1
+def test_digest_preserves_imported_gap_markers_and_exact_sources(tmp_path, monkeypatch):
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.chronicle_view import capture_chronicle, render_memory
+    from ouroboros.memory import Memory
+    store, _helper, chat, blocks, meta = _rotation_setup(tmp_path, monkeypatch)
+    source = json.dumps([{"content": "Before the gap. " + "detail " * 100},
+        {"content": "[MEMORY GAP] Missing generation.", "gap_id": "gap:test"},
+        {"content": "After the gap. " + "detail " * 100}]).encode()
+    blocks.write_bytes(source)
+    chat.write_text("", encoding="utf-8")
+    _run_rotation(tmp_path, chat, blocks, meta, compact_chronicle=True, pressure_fits=lambda: False)
+    assert store.records(kinds=["digest"])
+    ref = store.activation()["metadata"]["source_refs"]["blocks"]
+    assert read_actor_source_bytes(tmp_path, ref["task_id"], ref) == source
+    assert blocks.read_bytes() == source
+    snapshot = json.loads(capture_chronicle(Memory(tmp_path), {"id": "reader", "chat_id": 1}))
+    rendered, _facts = render_memory(snapshot)
+    assert "[Source gap:" in rendered
+    imported_gap = next(row for row in store.records(kinds=["gap"]) if "[MEMORY GAP]" in row["text"])
+    assert imported_gap["id"] in rendered

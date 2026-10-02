@@ -82,8 +82,8 @@ def _validate_declared_input_task(task: Dict[str, Any]) -> None:
     role = task.get("delegation_role") or meta.get("delegation_role") or lineage.get("delegation_role")
     actor = task.get("configured_subagent") or meta.get("configured_subagent") or {}
     route = actor.get("route") if isinstance(actor, dict) else {}
-    if not task.get("id") or role != "subagent" or not isinstance(route, dict) or route.get("kind") != "api_model":
-        raise ValueError("INPUT_SOURCE_SELECTION_UNSUPPORTED: declared inputs require a scheduled API-model child")
+    if not task.get("id") or role != "subagent" or not isinstance(route, dict) or route.get("kind") not in {"api_model", "agent_session"}:
+        raise ValueError("INPUT_SOURCE_SELECTION_UNSUPPORTED: declared inputs require a scheduled API-model or configured-session child")
 
 
 def _capture_declared_context_core(

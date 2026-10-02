@@ -430,7 +430,15 @@ def test_wake_context_discloses_a_malformed_recent_chat_gap(tmp_path):
         json.dumps({"chat_id": 1, "direction": "in", "text": "complete recent chat"}),
         '{"direction":"in","text":"broken"',
     ])
-    assert "jsonl_malformed" in context
+    assert "invalid_chat_row:JSONDecodeError" in context
+    assert "Recorded history gaps; complete coverage is not established" in context
+    from ouroboros.chronicle_sources import capture_room
+    from ouroboros.memory import Memory
+    rows, coverage = capture_room(Memory(drive_root=tmp_path), "1")
+    assert [row["text"] for row in rows] == ["complete recent chat"]
+    assert coverage["complete"] is False
+    gap = next(row for row in coverage["gaps"] if row["kind"] == "invalid_chat_row:JSONDecodeError")
+    assert gap["generation"] and gap["start_byte"] < gap["end_byte"]
 
 
 def test_wake_context_carries_a_complete_dialogue_block_without_a_gap(tmp_path):

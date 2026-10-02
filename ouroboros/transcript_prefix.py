@@ -31,7 +31,9 @@ SANCTION_ATTR = "_transcript_rewrite_sanctioned"
 
 def sanction_rewrite(slot: Any, by: str = "compaction") -> None:
     """Name the rewrite the next ``observe_send`` should attribute (one-shot)."""
-    setattr(slot, SANCTION_ATTR, by)
+    previous = getattr(slot, SANCTION_ATTR, None)
+    reasons = set(previous) if isinstance(previous, (list, tuple, set)) else {previous} if previous else set()
+    setattr(slot, SANCTION_ATTR, sorted(reasons | {by}))
 
 
 def _plain_text(content: Any) -> str:
@@ -113,13 +115,15 @@ def observe_send(
     expected -- the explicit argument or the one-shot ``sanction_rewrite``
     stamp a rewriting seam left on the slot -- or ``None`` for an
     unexplained break.  The stamp is consumed by every observation and
-    explains a break below the system row only: compaction never touches the
-    system row, while a context-fit reprojection touches nothing else.
+    explains only the seam's own rewrite: compaction acts below the system
+    row, while an explicit memory mark refresh changes the system view.
     """
     current = [message_digest(message) for message in messages]
     previous = getattr(slot, DIGEST_ATTR, None)
     setattr(slot, DIGEST_ATTR, current)
     sanction = sanctioned_by or getattr(slot, SANCTION_ATTR, None)
+    reasons = set(sanction) if isinstance(sanction, (list, tuple, set)) else {sanction} if sanction else set()
+    sanction = next((reason for reason in sorted(reasons) if reason != "memory_marks"), None)
     setattr(slot, SANCTION_ATTR, None)
     if not isinstance(previous, list):
         return None
@@ -132,7 +136,8 @@ def observe_send(
             return None
         kind, index = "shrunk", len(previous)
     elif index == 0:
-        kind, sanction = "system_rewritten", None  # compaction never touches the system row
+        kind = "system_rewritten"
+        sanction = "memory_marks" if "memory_marks" in reasons else None  # compaction never touches the system row
     elif index == len(previous) - 1:
         kind = "tail_replaced"
     else:

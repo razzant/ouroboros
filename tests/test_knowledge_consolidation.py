@@ -10,6 +10,7 @@ import pytest
 
 from ouroboros import consolidator as c, knowledge as k, reflection
 from ouroboros.memory import Memory
+from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.tools.registry import ToolContext
 from tests import test_consolidator_context_fit as fit_helpers
 from tests.test_consolidator_context_fit import _paths, _write_chat
@@ -266,20 +267,24 @@ def test_dialogue_consolidation_retains_nominations_and_commits_shared_note(tmp_
             "basis": "The episode established a more precise preference."}]}])
     llm = MemoryLLM(answer)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="dialogue-memory")
-    usage = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx)
-    assert usage["cost"] == pytest.approx(0.06)  # draft read/answer, correction read/answer
-    block = json.loads(blocks.read_text())[0]
-    assert "KNOWLEDGE_ENTRIES_JSON" not in block["content"]
-    assert block["rooms"][0]["content"] == "Checked interpretation."
-    source_id = block["knowledge_source_ref"]["entry_id"]
-    rows = [json.loads(line) for line in (tmp_path / "memory" / "knowledge_history.jsonl").read_text().splitlines()]
-    source = next(row for row in rows if row.get("entry_id") == source_id)
-    assert source["nominations"][0]["entries"][0]["expected_revision"] == original.revision
-    assert block["knowledge_writes"][0]["ok"]
+    usage = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx, completed_task={"id": "fixture"})
+    assert usage["cost"] == pytest.approx(0.06)  # each operation reads its own current source
+    store = ChronicleStore(tmp_path)
+    episode = store.records(kinds=["episode"])[0]
+    revision = store.records(kinds=["revision"])[0]
+    assert "KNOWLEDGE_ENTRIES_JSON" not in revision["text"]
+    assert revision["text"] == "Checked interpretation."
+    assert revision["metadata"]["knowledge_entries"][0]["expected_revision"] == original.revision
+    rows = [json.loads(line) for line in (tmp_path / "memory/knowledge_history.jsonl").read_text(encoding="utf-8").splitlines()]
+    source = next(row for row in rows if row.get("type") == "dialogue_knowledge_nominations")
+    assert source["source_ref"]["record_id"] == revision["id"]
+    assert source["nominations"][0]["expected_revision"] == original.revision
     assert "Current understanding" in k.read_knowledge_note(original.address).text
     assert "DECISIVE ORIGINAL TAIL." in k.read_knowledge_note(original.address).text
-    assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
-    assert "pending_knowledge_nominations" not in json.loads(meta.read_text())
+    assert store.scan_state()["last_consolidated_offset"] == 100
+    assert not store.scan_state().get("pending_knowledge_nominations")
+    assert not blocks.exists() and not meta.exists()
+    assert store.get(episode["id"])["text"] == episode["text"]
 
 
 def test_reflection_reads_current_note_preserves_full_update_and_counts_only_actual_write(tmp_path, fit):
@@ -370,7 +375,7 @@ def test_oversized_requested_note_is_retained_and_only_delivered_prefix_is_credi
     assert usage["cost"] == pytest.approx(0.03)
 
 
-def test_era_compression_cannot_erase_unpublished_knowledge_proposals(tmp_path, fit):
+def test_room_digest_cannot_erase_unpublished_knowledge_proposals(tmp_path, fit):
     original = _initial(tmp_path)
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat, count=1100, text_size=0)
@@ -390,19 +395,19 @@ def test_era_compression_cannot_erase_unpublished_knowledge_proposals(tmp_path, 
                 {"topic": "people/alex", "content": f"Unpublished complete proposal {self.count}."}])}, {"cost": 0.01}
 
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="many-blocks")
-    c.consolidate(chat, blocks, meta, ManyBlocks(), knowledge_context=ctx)
-    saved = json.loads(blocks.read_text())
-    assert saved[0]["type"] == "era" and len(saved) == 8
+    c.consolidate(chat, blocks, meta, ManyBlocks(), knowledge_context=ctx, completed_task={"id": "fixture"})
+    store = ChronicleStore(tmp_path)
+    assert len(store.records(kinds=["episode"])) == 1
     assert k.read_knowledge_note(original.address).raw == original.raw
-    records = [json.loads(line) for line in (tmp_path / "memory" / "knowledge_history.jsonl").read_text().splitlines()]
+    records = [json.loads(line) for line in (tmp_path / "memory/knowledge_history.jsonl").read_text(encoding="utf-8").splitlines()]
     nominations = next(row for row in records if row.get("type") == "dialogue_knowledge_nominations")
-    assert len(nominations["nominations"]) == 11
-    assert nominations["nominations"][0]["entries"][0]["content"] == "Unpublished complete proposal 1."
-    assert len([row for row in records if row.get("type") == "dialogue_knowledge_writes_incomplete"]) == 11
-    # The era object carries no knowledge_writes, so the batch receipt lives in meta:
-    # without it the incomplete publication would vanish from every resident surface.
-    assert "knowledge_writes" not in saved[0]
-    pending = json.loads(meta.read_text())["pending_knowledge_nominations"]
-    assert len(pending) == 11
-    assert all(row["id"].startswith(nominations["entry_id"] + ":") for row in pending)
-    assert all(row["reason"] == "revision_required" for row in pending)
+    assert nominations["nominations"][0]["content"] == "Unpublished complete proposal 1."
+    pending = store.scan_state()["pending_knowledge_nominations"]
+    assert len(pending) == 1 and pending[0]["reason"] == "revision_required"
+    assert pending[0]["id"].startswith(nominations["entry_id"] + ":")
+    store.append_episode("1", "An additional complete account. " * 100, [], {"kind": "mind"})
+    c.consolidate(chat, blocks, meta, fit_helpers._LLM(), knowledge_context=ctx,
+                  completed_task={"id": "fixture"}, compact_chronicle=True, pressure_fits=lambda: False)
+    assert store.records(kinds=["digest"]) and store.scan_state()["pending_knowledge_nominations"] == pending
+    assert k.read_knowledge_note(original.address).raw == original.raw
+    assert not blocks.exists() and not meta.exists()

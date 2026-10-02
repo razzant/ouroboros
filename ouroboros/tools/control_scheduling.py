@@ -535,21 +535,8 @@ def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
             and input_source_fields.get("input_sources") != "declared"):
         raise ValueError("input_sources=shared cannot widen an inherited declared selection")
     if input_source_fields.get("input_sources") == "declared":
-        # Omit whole prior-case narrative carriers; keep the predecessor source
-        # that grants lineage reads. Input selection must not alter that access.
-        predecessor = (parent_contract or {}).get("predecessor_authority")
-        parent_contract = {
-            key: value for key, value in (parent_contract or {}).items()
-            if key not in {"notes", "review_notes", "predecessor_authority"}
-        }
-        if isinstance(predecessor, dict) and predecessor:
-            reference_keys = {"source", "task_id", "authority_sha256", "authority_chars", "digest_semantics"}
-            reference = {key: value for key, value in predecessor.items() if key in reference_keys}
-            omitted = predecessor.get("omitted_fields")
-            reference["omitted_fields"] = sorted(set(
-                [str(key) for key in predecessor if key not in reference_keys | {"omitted_fields"}]
-                + (list(omitted) if isinstance(omitted, list) else [])))
-            parent_contract["predecessor_authority"] = reference
+        from ouroboros.subagent_work_order import declared_parent_contract
+        parent_contract = declared_parent_contract(parent_contract or {}, str(spec.get("context") or ""))
         input_source_fields["context"] = str(spec.get("context") or "")
     objective = spec.get("objective", "")
     expected_output = spec.get("expected_output", "")
@@ -721,12 +708,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     except SubagentSelectionError as exc:
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR", f"⚠️ {exc.code}: {exc.detail}")
     route = configured_subagent.get("route") if isinstance(configured_subagent.get("route"), dict) else {}
-    if fields.get("input_sources") == "declared" and route.get("kind") != "api_model":
-        return _publish_scheduling_refusal(
-            ctx, "error", "TOOL_ARG_ERROR",
-            "⚠️ INPUT_SOURCE_SELECTION_UNSUPPORTED (schedule_subagent): input_sources=declared "
-            "requires an api_model actor; agent_session composition is not qualified.",
-            reason="INPUT_SOURCE_SELECTION_UNSUPPORTED")
     if fields.get("directory_strategy") == "copy" and route.get("kind") != "agent_session":
         return _publish_scheduling_refusal(
             ctx, "error", "TOOL_ARG_ERROR",
@@ -908,6 +889,9 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         **intent_fields,
         "subagent_envelope": envelope,
     }
+    if route.get("kind") == "agent_session" and child_contract.get("input_sources") != "declared":
+        from ouroboros.chronicle_view import helper_memory_reference
+        child_facts["memory_reference"] = helper_memory_reference(ctx, task=child_facts)
     evt = {
         **child_facts,
         "type": "schedule_subagent",

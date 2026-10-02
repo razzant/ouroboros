@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ouroboros.config import runtime_setting
+from ouroboros.context_budget import context_fit_event_fields as _context_fit_event_fields
 
 import contextlib
 import hashlib
@@ -34,7 +35,7 @@ from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death
 from ouroboros._usage_response import provider_cost_value as _provider_cost_value
-from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context
+from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context, last_physical_attempt_capture
 from ouroboros.utils import (
     append_jsonl,
     emit_cognitive_operation_event,
@@ -914,6 +915,7 @@ def _record_llm_call_error(
     display_message = getattr(error, "display_message", None)
     display_error = sanitize_tool_result_for_log(display_message) if isinstance(display_message, str) and display_message else safe_error
     custody_fields = attempt_custody_event_fields(error)
+    capture = getattr(error, "physical_attempt_capture", None)
     will_retry = classification.retry_same_request
     repeats = _transport_death_repeats(ctx.accumulated_usage, ctx.round_id)
     backoff = None
@@ -964,6 +966,7 @@ def _record_llm_call_error(
         "observed_route": dict(getattr(error, "route", {}) or {}),
         **custody_fields,
         **(ctx.context_fit_event_fields or {}),
+        "context_memory_view": getattr(getattr(capture, "physical_context", None), "memory_view", None),
         "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
     }
     if not append_jsonl(ctx.drive_logs / "events.jsonl", error_event) or not has_log_sink():
@@ -1085,27 +1088,6 @@ def _emit_empty_response_events(
         "request_ref": (details.get("request_ref") or {}).get("manifest_ref"),
         "response_ref": (details.get("response_ref") or {}).get("manifest_ref"),
     })
-
-
-def _context_fit_event_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "context_route_fp": str(usage.get("_context_route_fp") or ""),
-        "estimated_prompt_tokens": int(usage.get("_context_prompt_estimate") or 0),
-        "context_fit_mode": str(usage.get("_context_fit_mode") or ""),
-        "context_profile": str(usage.get("_context_profile") or ""),
-        "context_measurement_basis": str(usage.get("_context_measurement_basis") or ""),
-        "context_measurement_density": float(usage.get("_context_measurement_density") or 0.0),
-        "context_target_total_tokens": usage.get("_context_target_total_tokens"),
-        "context_capacity_total_tokens": usage.get("_context_capacity_total_tokens"),
-        "context_target_deficit_tokens": usage.get("_context_target_deficit_tokens"),
-        "context_capacity_deficit_tokens": usage.get("_context_capacity_deficit_tokens"),
-        "context_reclaim_goal_tokens": int(usage.get("_context_reclaim_goal_tokens") or 0),
-        "context_target_miss": bool(usage.get("_context_target_miss")),
-        "context_automatic_pass_used": bool(usage.get("_context_automatic_pass_used")),
-        "context_predicted_capacity_miss": bool(
-            usage.get("_context_predicted_capacity_miss")
-        ),
-    }
 
 
 def _record_round_cache_facts(
@@ -1289,16 +1271,10 @@ def _emit_llm_operation(
 
 
 def call_llm_with_retry(
-    llm: LLMClient,
-    messages: List[Dict[str, Any]],
-    model: str,
-    tools: Optional[List[Dict[str, Any]]],
-    effort: str,
-    max_retries: int,
-    drive_logs: pathlib.Path, task_id: str,
-    round_idx: int,
-    event_queue: Optional[queue.Queue],
-    accumulated_usage: Dict[str, Any],
+    llm: LLMClient, messages: List[Dict[str, Any]], model: str,
+    tools: Optional[List[Dict[str, Any]]], effort: str, max_retries: int,
+    drive_logs: pathlib.Path, task_id: str, round_idx: int,
+    event_queue: Optional[queue.Queue], accumulated_usage: Dict[str, Any],
     task_type: str = "", use_local: bool = False,
     deadline_ts: Optional[float] = None,
     attempt_cap: Optional[int] = None,
@@ -1313,14 +1289,15 @@ def call_llm_with_retry(
     model_role: str = "main", model_turn_state: Any = None,
     model_account_override: Optional[str] = None, processing_preference: Optional[str] = None,
     model_context_observer: Any = None, send_clock_policy: Any = None,
+    prepare_main_context: Any = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
     """Call one model with bounded retries and deadline-aware transport."""
     from ouroboros.model_slots import resolve_processing_preference
-
     processing_preference = resolve_processing_preference(model_role, override=processing_preference)
     _replace_response_meta(response_meta_out)
     drive_root = pathlib.Path(drive_logs).parent
     accumulated_usage.pop(RETRY_WALL_EXHAUSTED_KEY, None)  # last-invocation marker (see key)
+    accumulated_usage.pop("_context_memory_view", None)
     execution_id = str(accumulated_usage.setdefault("execution_id", new_execution_id()))
     round_id = f"{execution_id}:round:{round_idx}"
     _transport_death_repeats(accumulated_usage, round_id)  # drops another round's record before anything reads it
@@ -1346,6 +1323,9 @@ def call_llm_with_retry(
                 llm=llm, accumulated_usage=accumulated_usage, drive_root=drive_root, task_id=task_id,
                 event_queue=event_queue, use_local=use_local, task_attempt=task_attempt, deadline_ts=deadline_ts,
             )
+            if callable(prepare_main_context):
+                send_messages, physical_context = prepare_main_context(send_messages)
+                context_fit_event_fields = _context_fit_event_fields(accumulated_usage)
             _emit_live_log(event_queue, {
                 "type": "llm_round_started",
                 "task_id": task_id,
@@ -1421,6 +1401,9 @@ def call_llm_with_retry(
                 send_clock_policy=send_clock_policy, canonical_messages=messages,
             )
             host_route = usage.get("model_role_route") or {}
+            captured_context = getattr(last_physical_attempt_capture(), "physical_context", None)
+            accumulated_usage["_context_memory_view"] = (
+                captured_context.memory_view if captured_context is not None and captured_context.round_id == round_id else None)
             model, use_local = host_route.get("model", model), host_route.get("use_local", use_local)
             model_facts = usage.get("claudexor") or {}
             accumulated_usage["_model_route"] = dict(model_facts.get("route") or {})

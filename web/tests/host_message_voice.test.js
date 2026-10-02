@@ -26,10 +26,13 @@ test('command replies use System voice while typed proactive model speech stays 
     try {
         c.handlers.get('chat')({ chat_id: 1, role: 'system', system_type: 'command_reply',
             content: 'Background consciousness: enabled <plain>', markdown: false,
+            origin_message_ref: { chat_id: 1, client_message_id: 'command-1' },
+            task_terminal_status: 'completed',
             ts: '2026-09-19T00:00:00Z' });
         c.handlers.get('chat')({ chat_id: 1, role: 'assistant', system_type: 'proactive_message',
             content: 'My own reply', markdown: false, ts: '2026-09-19T00:00:01Z' });
         assert.equal(bubbles(c.messages(), 'system').length, 1);
+        assert.equal(walkCard(c.messages(), 'command-1'), null, 'settled command is not a completed model task');
         assert.match(bubbles(c.messages(), 'system')[0].innerHTML, /&lt;plain&gt;/);
         assert.equal(bubbles(c.messages(), 'assistant').length, 1);
         assert.match(bubbles(c.messages(), 'assistant')[0].innerHTML, /My own reply/);

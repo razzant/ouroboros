@@ -34,6 +34,11 @@ def late(tmp_path, monkeypatch, fresh_sends):
     monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps({'triad': [
         {'slot_id': str(i), 'route': {'kind': 'api_chat', 'target_id': 'openai/gpt-4.1-nano'}} for i in range(3)],
         'scope': [{'slot_id': 'unused-scope', 'route': {'kind': 'api_chat', 'target_id': 'openai/gpt-4.1-nano'}}]}))
+    # This fixture models review custody, not live catalog availability or latency.
+    # Install both facts here so fresh spawned workers inherit the same test route.
+    monkeypatch.setattr('ouroboros.llm.LLMClient.openrouter_context_length', lambda *_a, **_k: 1_000_000)
+    monkeypatch.setattr('ouroboros.pricing.get_pricing', lambda **_k: {
+        'openai/gpt-4.1-nano': (1.0, None, None, 1.0)})
     calls, gates = [], []
     config = SimpleNamespace(fail=False, verdict='PASS', slot_gates={}, slot_verdicts={})
 

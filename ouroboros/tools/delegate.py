@@ -337,21 +337,6 @@ def _start_argument_refusal(ctx: ToolContext, text: str, selector_root: str, ret
     continuation selector shapes one call cannot combine: a retry replays an old
     key byte-identically while a continuation is a NEW intention over a settled
     run, and a skill-payload selector run keeps its own target semantics."""
-    from ouroboros.contracts.task_contract import task_input_sources
-
-    # Retry replay bypasses assignment composition, so reject the unsupported
-    # source selection before either start path can prepare or replay a request.
-    if task_input_sources({
-        "task_contract": getattr(ctx, "task_contract", {}),
-        "metadata": getattr(ctx, "task_metadata", {}),
-    }) == "declared":
-        return "", _fail(
-            "delegate_start", "INPUT_SOURCE_SELECTION_UNSUPPORTED",
-            "Declared input selection supports scheduled API-model children only; "
-            "native-session composition is not qualified.",
-            definitely_unrun=True, host_fallback=False,
-        )
-
     if not text.strip():
         return "", _fail("delegate_start", "empty_prompt", "prompt is required")
     refusal = _payload_selector_refusal(selector_root, retry_of, bucket, skill_name)
@@ -384,12 +369,16 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     _resolved_binding: Any = None,
                     _canonical_work_order_fingerprint: str = "",
                     _work_order_source_request: Any = None,
-                    _coordination_context: str = "") -> ToolResult:
+                    _coordination_context: str = "", input_sources: Optional[str] = None) -> ToolResult:
     from ouroboros.claudexor_daemon import ensure_owned_gateway
     from ouroboros.delegate_evidence import record_start_blocked
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.subagents import delegated_execution_workspace_root, resolve_subagent_executor, route_health
 
+    from ouroboros.subagent_work_order import direct_start_selection, direct_start_instructions, chosen_request_fingerprint
+    selection, refusal = direct_start_selection(ctx, input_sources, retry_of)
+    if refusal:
+        return refusal
     text = str(prompt or "")
     selector_root = str(root or "").strip()
     continuation_token, argument_refusal = _start_argument_refusal(
@@ -398,8 +387,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         return argument_refusal
     seconds_basis = ""
     if not str(retry_of or "").strip():
-        # Decided BEFORE the daemon is touched: a spent lifetime or a sub-second
-        # deadline is a definite no-run, and the basis rides both custody rows.
+        # Check remaining lifetime before transport; retain the basis in custody.
         bound = bounded_max_seconds(ctx, max_seconds)
         if bound.refusal_code:
             return _fail("delegate_start", bound.refusal_code, bound.refusal_detail, definitely_unrun=True)
@@ -413,9 +401,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     resource_ref, directory_options, continuation = {}, {}, {}
     retry_token = str(retry_of or "").strip()
     source_binding = prepare_work_order_start_binding(
-        ctx, drive, retry_token, _canonical_work_order_fingerprint, text,
-        _work_order_source_request,
-    )
+        ctx, drive, retry_token, _canonical_work_order_fingerprint, text, _work_order_source_request)
     work_order_source_request = source_binding["request"]
     work_order_fingerprint = source_binding["fingerprint"]
     recovering = source_binding["recovering"]
@@ -436,8 +422,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
          project_persistent, seconds, snapshot_id, target_root, baseline_sha,
          authority_source, resource_ref, processing_info, binding_fingerprint) = binding
         invocation_id = retry_token
-        # A replay presents the recorded body byte-identically, so its cap
-        # basis is the recorded one too — never re-derived from today's clocks.
+        # Replay the original cap basis with the body, never today's clocks.
         seconds_basis = str((custody.invocation_record(drive, retry_token) or {}).get("max_seconds_basis") or "")
         if directory_strategy is not None or scope_paths is not None:
             return _fail("delegate_start", "retry_selector_conflict",
@@ -457,12 +442,18 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
 
     if refusal := blocked_geometry_refusal(ctx, authority, selector_root, directory_strategy, scope_paths):
         return refusal
+    memory_reference = ""
     if not recovering:
-        assignment = "" if bool(actor.get("compiled_work_order")) else _assignment_instructions(ctx)
+        try:
+            assignment, memory_reference = direct_start_instructions(ctx, actor, selection, input_sources, bool(work_order_source_request))
+        except ValueError as exc:
+            return _fail("delegate_start", "configured_input_selection_mismatch", str(exc))
         payload_skill = str(((payload_auth or {}).get("resource_ref") or {}).get("skill_name") or "")
         instructions = _host_instructions(
             authority, assignment, payload_skill=payload_skill, coordination_context=_coordination_context,
         )
+        if memory_reference:
+            instructions += "\n\n" + memory_reference
 
     access = authority.access
     requested = recovering  # Recovery may already own a physical run.
@@ -478,8 +469,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         selected_subagent_id=actor_facts["selected_subagent_id"], task_id=str(getattr(ctx, "task_id", "") or ""),
         route=route.route_id, processing=processing_info if recovering else {"requested": actor.get("processing_preference")})
     try:
-        # Health checks the stored route/confinement shape on retries, never current
-        # environment defaults; blockers stay typed instead of falling through to API spend.
+        # Check the recorded retry route; typed refusal never falls through to API spend.
         unavailable, reset_at = route_health(
             gateway, route.route_id, authority, route_model=route.model, pinned_profile=route.profile_id)
         resolution = resolve_subagent_executor(
@@ -569,6 +559,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                                           seconds, instructions, execution_root,
                                           **({"directory_options": directory_options} if directory_options else {}))
             request_body, processing_info = _processing_start_request(request_body, actor, gateway, route)
+            if memory_reference or (selection == "declared" and not actor.get("compiled_work_order")):
+                actor_facts["work_order_fingerprint"] = chosen_request_fingerprint(request_body)
             history_facts["access"] = request_body["access"]
             key = custody.idempotency_key(getattr(ctx, "task_id", ""), route.route_id,
                                           access, authority.mode, authority.isolation,
@@ -622,14 +614,11 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                          **_retire_orphaned_registration(ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
                              definite_refusal=False, reason="queued_without_run_id", invocation_id=invocation_id))
     except ClaudexorUnavailable as exc:
-        # A registration we created BEFORE the start must not outlive a failed start.
-        # It used to be left behind with nothing anywhere naming its id.
+        # Retire owned registration after a definite refusal; preserve unknown starts.
         status = int(getattr(exc, "status_code", 0) or 0)
         definite = 400 <= status < 500 or not requested
-        # An UNKNOWN outcome hands back the retry token: only the caller can say
-        # whether the next call is a retry of this intention or a new intention, and
-        # without the token every next call is a new one. A definite refusal retires
-        # the id, so no token rides a refusal.
+        # Unknown outcomes return the token for explicit same-intention retry.
+        # A plain call is new; a definite refusal retires the original id.
         pending = ({} if definite or not invocation_id else
                    {"pending_invocation_id": invocation_id,
                     "retry_hint": _RETRY_HINT})
@@ -640,11 +629,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                          definite_refusal=definite, reason=str(getattr(exc, "code", "")),
                          invocation_id=invocation_id, snapshot_id=("" if recovering else snapshot_id)))
     except BaseException as exc:
-        # EVERY pre-custody exit leaves a durable disposition, including the ones no
-        # typed handler claims (a bug here, a timeout, a signal). NEVER retired: an
-        # untyped exit says nothing about whether the POST reached the daemon, so a run
-        # may be live against it. Named with a typed reason so the sweep's
-        # pending-invocation recovery finds it, then re-raised — disclosure, not a swallow.
+        # Unexpected exits retain an unknown-outcome receipt for the recovery sweep:
+        # POST may have landed. Preserve the invocation, then re-raise.
         _retire_orphaned_registration(ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
                                       definite_refusal=False,
                                       reason=f"pre_custody_exit_{type(exc).__name__}",
@@ -1373,6 +1359,8 @@ def get_tools() -> List[ToolEntry]:
                 "prompt": {"type": "string", "description":
                     "Complete task for a direct start; for the configured snapshotted session (retry/"
                     "replacement), only optional advisory coordination context — the host supplies the canonical work order."},
+                "input_sources": {"type": "string", "enum": ["shared", "declared"], "description":
+                    "Fresh direct starts only. shared (default) adds the parent's selected memory as a labeled reference; declared keeps your prompt and full task authority without inherited narrative. Inherited declared cannot widen. Omit on retry and scheduled-session replacement; their chosen inputs are already recorded. Vendor native context remains unobserved."},
                 "subagent_id": {"type": "string", "description":
                     "Required for a fresh start made directly: exact agent_session actor id from Available "
                     "subagents. Omit for the current configured snapshotted route and for retry_of. API actor ids are refused here "

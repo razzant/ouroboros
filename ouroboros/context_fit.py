@@ -13,7 +13,7 @@ import json
 import logging
 import math
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Tuple
 from copy import deepcopy
@@ -21,21 +21,10 @@ from copy import deepcopy
 from ouroboros.context_layout import reference_doc_sections
 from ouroboros.reference_books import ReferenceBook
 from ouroboros.utils import estimate_tokens
+from ouroboros.context_budget import extract_plain_text_from_content
 
 log = logging.getLogger(__name__)
 
-
-def extract_plain_text_from_content(content: Any) -> str:
-    """Text of a string or multipart message content, for transcript sealing.
-
-    The one extractor lives in ``loop_messages`` (the retired ``delivery_protocol``
-    leaf carried a copy). Read at CALL time: ``loop_messages`` imports
-    ``ouroboros.llm`` at module top and the LLM lanes import this module, so a
-    top-level import here would be an import cycle.
-    """
-    from ouroboros.loop_messages import _extract_plain_text_from_content
-
-    return _extract_plain_text_from_content(content)
 
 ContextProfile = Literal["owner_max", "owner_low", "owner_nano", "task_local_low"]
 MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
@@ -174,15 +163,19 @@ class ContextFitProjection:
     calibration_ratio: float
     fits_known_window: Optional[bool]
     user_content_json: Optional[str] = None
+    memory_facts: Dict[str, Any] = field(default_factory=dict)
 
     def system_message(self) -> Dict[str, Any]:
         from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
 
-        # Declared for the OpenAI-family and Claudexor send projection (llm_messages.split_leading_system_prefix):
-        # block 0 (SYSTEM.md, BIBLE, reference docs) is byte-stable across conversations, while
-        # the semi-stable memory block changes with every consolidation (8 of 59 Aika events),
-        # so keeping it in the cached unit would lose the whole unit on those events.
-        return {"role": "system", "content": json.loads(self.system_content_json), STABLE_PREFIX_BLOCKS_KEY: 1}
+        content = json.loads(self.system_content_json)
+        # Governance and the optional published common history precede all
+        # task-specific facts. The declaration never promotes a missing block.
+        stable = 2 if isinstance(content, list) and len(content) > 1 and isinstance(content[1], dict) and content[1].get("_shared_memory") is True else 1
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict):
+                block.pop("_shared_memory", None)
+        return {"role": "system", "content": content, STABLE_PREFIX_BLOCKS_KEY: stable}
 
 
 @dataclass(frozen=True)
@@ -243,6 +236,11 @@ class ContextFitPlan:
     model_route: Dict[str, Any] = field(default_factory=dict)
     evidence_source: str = ""
     nano_projection: Optional[ContextFitProjection] = None
+    # Adopted view, independent from owner intent; empty on older plan records.
+    rendered_mode: str = ""
+    chronicle_state_json: str = ""
+    system_templates_json: Dict[str, str] = field(default_factory=dict)
+    context_task: Dict[str, Any] = field(default_factory=dict)
 
     def projection(self, mode: str) -> ContextFitProjection:
         if str(mode or "").lower() == "nano" and self.nano_projection is not None:
@@ -270,6 +268,81 @@ class ContextFitPlan:
         else:
             rebuilt.insert(0, self.projection(mode).system_message())
         return rebuilt
+
+    def fit_prepared_memory(self, messages, tools, mode, *, reasoning_effort="", clock_messages=()):
+        """Size the captured memory against the prepared host request, not just its task text."""
+        from ouroboros.capability_evidence import is_known
+        from ouroboros.chronicle_view import CHRONICLE_MARKER, render_system_view
+
+        template = self.system_templates_json.get(mode)
+        if not self.chronicle_state_json or not template:
+            return self
+        system = json.loads(template)
+        empty = deepcopy(system)
+        for block in empty:
+            if isinstance(block.get("text"), str):
+                block["text"] = block["text"].replace(CHRONICLE_MARKER, "")
+        other = [{"role": "system", "content": empty}, *messages[1:], *clock_messages]
+        ratio = _route_calibration_ratio(None, self.route_fp, self.model)
+        task = {**self.context_task, "owner_context_mode": self.preferred_mode,
+                "context_non_memory_tokens": estimate_context_prompt_tokens(
+            other, tools, provider=self.provider, reasoning_effort=reasoning_effort)}
+        facts = {}
+        system = render_system_view(system, self.chronicle_state_json, mode=mode,
+            window_tokens=self.window_tokens if is_known(self, require_fresh=True) else 0,
+            calibration_ratio=ratio, output_reserve_tokens=self.output_reserve_tokens, task=task,
+            facts_out=facts)
+        facts["prepared_input_tokens_estimate"] = estimate_context_prompt_tokens(
+            [{"role": "system", "content": system}, *messages[1:], *clock_messages], tools,
+            provider=self.provider, reasoning_effort=reasoning_effort)
+        # Projection estimates keep their original schema-free initial-message
+        # contract; only the allowance calculation uses the complete request.
+        estimated = estimate_context_prompt_tokens([
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.loads(self.projection(mode).user_content_json or self.user_content_json)}])
+        projection = replace(self.projection(mode), system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
+            estimated_tokens=estimated, calibrated_tokens=math.ceil(estimated * ratio),
+            calibration_ratio=ratio, memory_facts=facts)
+        return replace(self, context_task=task, **{mode + "_projection": projection})
+
+    def with_active_marks(self, marks: list, source_status: Optional[dict] = None):
+        """Update explicit mark choices while keeping every captured room/source frozen."""
+        from ouroboros.capability_evidence import is_known
+        from ouroboros.chronicle_view import render_system_view
+        from ouroboros.context_budget import canonical_context_json, NANO_MIN_HEADROOM_TOKENS, OWNER_NANO_TARGET_TOKENS
+
+        snapshot = json.loads(self.chronicle_state_json)
+        if snapshot.get("marks", []) == marks and snapshot.get("mark_source_status") == source_status:
+            return self
+        snapshot["marks"] = marks
+        if source_status is None:
+            snapshot.pop("mark_source_status", None)
+        else:
+            snapshot["mark_source_status"] = source_status
+        encoded = canonical_context_json(snapshot)
+        changed = {}
+        known = is_known(self, require_fresh=True)
+        for mode in ("max", "low", "nano"):
+            projection = getattr(self, mode + "_projection")
+            template = self.system_templates_json.get(mode)
+            if projection is None or not template:
+                continue
+            facts = {}
+            content = render_system_view(json.loads(template), encoded, mode=mode,
+                window_tokens=self.window_tokens if known else 0, calibration_ratio=projection.calibration_ratio,
+                output_reserve_tokens=self.output_reserve_tokens,
+                task={**self.context_task, "owner_context_mode": self.preferred_mode}, facts_out=facts)
+            estimated = estimate_context_prompt_tokens([{"role": "system", "content": content},
+                {"role": "user", "content": json.loads(projection.user_content_json or self.user_content_json)}])
+            calibrated = math.ceil(estimated * projection.calibration_ratio)
+            reserve = NANO_MIN_HEADROOM_TOKENS if mode == "nano" else self.output_reserve_tokens
+            bound = min(OWNER_NANO_TARGET_TOKENS, self.window_tokens) if mode == "nano" else self.window_tokens
+            changed[mode + "_projection"] = replace(projection,
+                system_content_json=json.dumps(content, ensure_ascii=False, sort_keys=True),
+                estimated_tokens=estimated, calibrated_tokens=calibrated,
+                fits_known_window=calibrated + reserve <= bound if known else None, memory_facts=facts)
+        return replace(self, chronicle_state_json=encoded,
+            core_sha256=hashlib.sha256((self.core_sha256 + encoded).encode("utf-8")).hexdigest(), **changed)
 
     def projected_tokens_with_tools(
         self,
@@ -315,6 +388,7 @@ class ContextCore:
     reference_books: Tuple[ReferenceBook, ...] = ()
     compact_reference_docs: bool = False
     reference_book_errors: Tuple[str, ...] = ()
+    chronicle_state_json: str = ""
 
 
 def _render_context_system_content(
@@ -342,8 +416,8 @@ def _render_context_system_content(
     static_parts.extend(core.reference_book_errors)
     # Stable governance/policy is first; mutable task evidence is last: the
     # cache-friendly ordering for Anthropic-style breakpoints. OpenAI's public API
-    # (and the Codex backend) caches the whole leading system section as one unit,
-    # so their send copies keep only block 0 there (declared in ``system_message``).
+    # (and the Codex backend) reuse complete input items: send copies give each
+    # declared shared block its own system item (see ``system_message``).
     return [
         {
             "type": "text",
@@ -788,6 +862,11 @@ def build_context_fit_plan(
     )
     known_window = is_known(evidence, require_fresh=True)
     rendered = {}
+    templates = {}
+    context_task = {"type": task.get("type"), "owner_context_mode": preferred,
+                    "_is_direct_chat": bool(task.get("_is_direct_chat")),
+                    "delegation_role": task.get("delegation_role") or meta.get("delegation_role"),
+                    "context_user_tokens": estimate_tokens(core.user_content_json)}
     input_source = None
 
     def _projection(mode: str) -> ContextFitProjection:
@@ -795,12 +874,23 @@ def build_context_fit_plan(
         from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS, OWNER_NANO_TARGET_TOKENS
 
         view_mode = "low" if core.compact_reference_docs or mode == "nano" else mode
-        if view_mode not in rendered:
+        if mode not in rendered:
             system_content = _render_context_system_content(env, core, mode=view_mode)
+            templates[mode] = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
+            memory_facts = {}
+            if core.chronicle_state_json:
+                from ouroboros.chronicle_view import render_system_view
+
+                system_content = render_system_view(
+                    system_content, core.chronicle_state_json, mode=mode,
+                    window_tokens=int(evidence.window_tokens) if known_window else 0,
+                    calibration_ratio=ratio, output_reserve_tokens=output_reserve, task=context_task,
+                    facts_out=memory_facts,
+                )
             messages = [{"role": "system", "content": system_content}, {"role": "user", "content": user_content}]
-            rendered[view_mode] = (json.dumps(system_content, ensure_ascii=False, sort_keys=True),
-                                   estimate_context_prompt_tokens(messages))
-        system_content_json, estimated = rendered[view_mode]
+            rendered[mode] = (json.dumps(system_content, ensure_ascii=False, sort_keys=True),
+                                   estimate_context_prompt_tokens(messages), memory_facts)
+        system_content_json, estimated, memory_facts = rendered[mode]
         user_projection = None
         target = OWNER_NANO_TARGET_TOKENS if mode == "nano" else None
         if preferred == "nano" and target is not None and estimated + NANO_MIN_HEADROOM_TOKENS > target:
@@ -843,6 +933,7 @@ def build_context_fit_plan(
             calibration_ratio=ratio,
             fits_known_window=fits,
             user_content_json=user_projection,
+            memory_facts=memory_facts,
         )
 
     max_projection = _projection("max")
@@ -865,6 +956,8 @@ def build_context_fit_plan(
             "docs_need_development": core.docs_need_development,
             "compact_reference_docs": core.compact_reference_docs,
             "reference_book_errors": core.reference_book_errors,
+            "chronicle_state_json": core.chronicle_state_json,
+            "context_task": context_task if core.chronicle_state_json else {},
             "reference_sources": [(book.book_id, source.source_path, source.sha256)
                                   for book in core.reference_books for source in (book.entrypoint, *book.chapters)],
         },
@@ -894,4 +987,7 @@ def build_context_fit_plan(
             "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or ""),
         } if route["provider"] == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
+        chronicle_state_json=core.chronicle_state_json,
+        system_templates_json=templates if core.chronicle_state_json else {},
+        context_task=context_task if core.chronicle_state_json else {},
     )

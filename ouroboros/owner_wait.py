@@ -135,6 +135,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     trace, usage, route, delivery candidate, acceptance identities, owner
     directives — so a second serializer could only drift from this one.
     """
+    from ouroboros.context_fit import ContextFitPlan
+
     candidate = getattr(ctx, "_delivery_candidate", None)
     cost_ceiling = getattr(ctx, "_cost_ceiling", None)
     model_wait = getattr(ctx, "model_wait_context", None)
@@ -145,6 +147,11 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "cost_ceiling": asdict(cost_ceiling) if cost_ceiling is not None else None,
         "model_wait": model_state,
         "context_model_role": getattr(getattr(ctx, "context_fit_plan", None), "model_role", ""),
+        "context_fit_plan": (asdict(ctx.context_fit_plan)
+                             if isinstance(getattr(ctx, "context_fit_plan", None), ContextFitPlan) else None),
+        "context_observations": {key: getattr(ctx, key) for key in (
+            "_last_context_observation", "_inspected_context_view", "_pending_compaction",
+        ) if getattr(ctx, key, None) is not None},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
         "seen": sorted(seen), "owner_directives": getattr(ctx, "_owner_directives", []),
         "route": {key: getattr(ctx, key, None) for key in (
@@ -543,6 +550,18 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     from ouroboros.model_wait import budget_paused_seconds
 
     ctx = tools._ctx
+    saved_plan = state.get("context_fit_plan")
+    if isinstance(saved_plan, dict):
+        from ouroboros.context_fit import ContextFitPlan, ContextFitProjection
+
+        restored_plan = dict(saved_plan)
+        for key in ("max_projection", "low_projection", "nano_projection"):
+            if isinstance(restored_plan.get(key), dict):
+                restored_plan[key] = ContextFitProjection(**restored_plan[key])
+        ctx.context_fit_plan = ContextFitPlan(**restored_plan)
+    for key, value in (state.get("context_observations") or {}).items():
+        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction"}:
+            setattr(ctx, key, value)
     messages[:] = state["messages"]
     trace.update(state["trace"])
     usage.update(state["usage"])

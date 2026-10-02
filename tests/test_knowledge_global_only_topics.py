@@ -24,9 +24,9 @@ def project_ctx(tmp_path, project_id: str = "demo") -> ToolContext:
                        budget_drive_root=str(tmp_path), project_id=project_id, task_id="t1")
 
 
-def test_reserved_set_is_exactly_the_three_shared_topics():
+def test_reserved_set_names_the_shared_cognitive_topics():
     assert tools.GLOBAL_ONLY_TOPICS == frozenset({
-        tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC, tools.PATTERNS_TOPIC})
+        tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC, tools.PATTERNS_TOPIC, tools.REMEMBERING_TOPIC})
 
 
 def test_pattern_register_topic_reaches_the_drive_the_writer_and_readers_use(tmp_path):
@@ -62,7 +62,7 @@ def test_reserved_topics_resolve_globally_from_a_project_room(tmp_path, topic, s
 
 
 def test_ordinary_topic_still_follows_the_room(tmp_path):
-    """The narrowing is exactly three names — every other topic keeps both shelves."""
+    """The reserved names are explicit — every other topic keeps both shelves."""
     ctx = project_ctx(tmp_path)
 
     room = tools._address(ctx, "deploy-recipes")
@@ -150,7 +150,7 @@ def test_write_schema_states_the_rules_the_code_actually_enforces(tmp_path):
     schemas = {entry.name: entry.schema for entry in tools.get_tools()}
     props = schemas["knowledge_write"]["parameters"]["properties"]
 
-    assert "Reserved topics (improvement-backlog, overview, patterns) always resolve to global." in props["scope"]["description"]
+    assert "Reserved topics (improvement-backlog, overview, patterns, remembering) always resolve to global." in props["scope"]["description"]
     assert "people and relationships" in props["scope"]["description"]
     assert "no scope prefixes" in props["topic"]["description"]
     assert "stays resident in the index" in schemas["knowledge_write"]["description"]

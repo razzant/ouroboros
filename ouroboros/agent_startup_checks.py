@@ -707,6 +707,7 @@ def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
 # threshold in bytes, remediation pointer appended to the WARNING.
 def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
     from ouroboros.context_budget import (
+        CHRONICLE_JOURNAL_WARN_BYTES,
         EVENTS_LOG_WARN_BYTES,
         PROGRESS_LOG_WARN_BYTES,
         SCHEDULED_TASKS_WARN_BYTES,
@@ -723,6 +724,13 @@ def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
         "supervisor rotation tick (rotate_chat_log_if_needed pattern)."
     )
     return (
+        (
+            "memory/chronicle/records.jsonl",
+            CHRONICLE_JOURNAL_WARN_BYTES,
+            "Context capture loads retained interpretations; cold index rebuilds fold this journal. "
+            "Inspect chronicle_view and the rebuildable chronicle_store index for read amplification. "
+            "Preserve original records and source references; this warning does not authorize deletion.",
+        ),
         (
             "state/usage_attempts.jsonl",
             USAGE_LEDGER_WARN_BYTES,
@@ -770,7 +778,7 @@ def hot_store_growth_notes(env: Any) -> list:
 
     Reused live by context.py::build_health_invariants (the
     check_stray_server_processes pattern). Deliberately NOT TTL-cached
-    (contrast context._STRAY_PROBE_CACHE): eight os.stat calls plus two shallow
+    (contrast context._STRAY_PROBE_CACHE): a small stat table plus two shallow
     iterdir passes per task turn are orders of magnitude cheaper than the pgrep
     probe that cache exists for, and a stale reading would delay the signal."""
     from supervisor.state import ISOLATED_BENCHMARK_SENTINEL

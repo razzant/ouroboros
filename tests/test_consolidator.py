@@ -1,191 +1,122 @@
-"""Tests for ouroboros.consolidator (block-wise system)."""
+"""The public consolidation entry activates one writer and preserves legacy sources."""
 import json
-import pathlib
-import pytest
 from unittest.mock import MagicMock
 
-from ouroboros.consolidator import (
-    should_consolidate,
-    consolidate,
-    _load_meta,
-    atomic_write_json as _save_meta,
-    _count_lines,
-    _format_entries_for_block,
-    _load_blocks,
-    _write_locked_json as _save_blocks,
-    BLOCK_SIZE,
-)
+import pytest
+
+from ouroboros.consolidator import consolidate, should_consolidate, _load_meta
+from ouroboros.chronicle_store import ChronicleStore
+from ouroboros.chronicle_sources import format_source_row
+from ouroboros.utils import atomic_write_json
+from tests.test_consolidator_context_fit import fit as _fit
+
+fit = _fit
 
 
 @pytest.fixture
 def tmp_paths(tmp_path):
-    chat_path = tmp_path / "chat.jsonl"
-    blocks_path = tmp_path / "dialogue_blocks.json"
-    meta_path = tmp_path / "dialogue_meta.json"
-    return chat_path, blocks_path, meta_path
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "memory").mkdir()
+    return tmp_path / "logs/chat.jsonl", tmp_path / "memory/dialogue_blocks.json", tmp_path / "memory/dialogue_meta.json"
 
 
 def _write_chat_entries(path, count):
-    """Write count fake chat entries."""
-    with path.open("w") as f:
-        for i in range(count):
-            direction = "in" if i % 2 == 0 else "out"
-            entry = {
-                "ts": f"2026-02-25T{10 + i // 60:02d}:{i % 60:02d}:00Z",
-                "direction": direction,
-                "text": f"Message {i}",
-            }
-            f.write(json.dumps(entry) + "\n")
+    rows = [{"ts": f"2026-02-25T{10 + i // 60:02d}:{i % 60:02d}:00Z", "chat_id": 1,
+             "task_id": "fixture", "direction": "in" if i % 2 == 0 else "out", "text": f"Message {i}"}
+            for i in range(count)]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return rows
 
 
-def test_should_consolidate_no_chat(tmp_paths):
-    _, _, meta_path = tmp_paths
-    chat_path = pathlib.Path("/nonexistent/chat.jsonl")
-    assert should_consolidate(meta_path, chat_path) is False
+def test_should_consolidate_no_sources(tmp_paths):
+    chat, _, meta = tmp_paths
+    assert should_consolidate(meta, chat) is False
 
 
-def test_should_consolidate_not_enough_messages(tmp_paths):
-    chat_path, _, meta_path = tmp_paths
-    _write_chat_entries(chat_path, 5)
-    assert should_consolidate(meta_path, chat_path) is False
+@pytest.mark.parametrize("count", [1, 5, 105])
+def test_unseen_source_is_not_gated_by_a_global_message_count(tmp_paths, fit, count):
+    chat, blocks, meta = tmp_paths
+    _write_chat_entries(chat, count)
+    assert should_consolidate(meta, chat)
+    model = MagicMock()
+    model.chat.return_value = ({"content": "The actor understood the completed conversation."},
+                               {"prompt_tokens": 100, "completion_tokens": 50, "cost": .001})
+    raw = chat.read_bytes()
+    usage = consolidate(chat, blocks, meta, model, completed_task={"id": "fixture"})
+    store = ChronicleStore(meta.parent.parent)
+    assert store.activation()["kind"] == "activation"
+    assert len(store.records(kinds=["episode"])) == len(store.records(kinds=["revision"])) == 1
+    assert store.scan_state()["last_consolidated_offset"] == count
+    assert usage["cost"] == pytest.approx(.002) and model.chat.call_count == 2
+    assert chat.read_bytes() == raw and not blocks.exists() and not meta.exists()
+    assert not should_consolidate(meta, chat)
+    consolidate(chat, blocks, meta, model, completed_task={"id": "fixture"})
+    assert model.chat.call_count == 2  # a represented source is not purchased again
 
 
-def test_should_consolidate_enough_messages(tmp_paths):
-    chat_path, _, meta_path = tmp_paths
-    _write_chat_entries(chat_path, BLOCK_SIZE + 5)
-    assert should_consolidate(meta_path, chat_path) is True
+def test_an_open_room_is_retained_without_an_invented_completed_producer(tmp_paths, fit):
+    chat, blocks, meta = tmp_paths
+    _write_chat_entries(chat, 105)
+    model = MagicMock()
+    usage = consolidate(chat, blocks, meta, model)
+    assert usage["_blocks_written"] == 0
+    model.chat.assert_not_called()
+    assert not ChronicleStore(meta.parent.parent).records(kinds=["episode"])
 
 
-def test_should_consolidate_respects_offset(tmp_paths):
-    chat_path, _, meta_path = tmp_paths
-    _write_chat_entries(chat_path, BLOCK_SIZE + 5)
-    _save_meta(meta_path, {"last_consolidated_offset": BLOCK_SIZE + 2})
-    assert should_consolidate(meta_path, chat_path) is False
+def test_activation_failure_is_typed_and_never_reenters_the_old_writer(tmp_paths, monkeypatch):
+    chat, blocks, meta = tmp_paths
+    _write_chat_entries(chat, 105)
+    blocks.write_text('[{"content":"retained old memory"}]', encoding="utf-8")
+    before = blocks.read_bytes()
+    monkeypatch.setattr(ChronicleStore, "import_legacy", lambda self, **kw: {"kind": "import_pending", "reason": "source busy"})
+    model = MagicMock()
+    usage = consolidate(chat, blocks, meta, model, completed_task={"id": "fixture"})
+    assert usage["_consolidation_errors"][0]["reason"] == "chronicle_activation_incomplete"
+    assert usage["_blocks_written"] == 0 and blocks.read_bytes() == before
+    model.chat.assert_not_called()
+    events = [json.loads(row) for row in (chat.parent / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["type"] == "consolidation_skipped_source"
 
 
-def test_consolidate_creates_block(tmp_paths):
-    chat_path, blocks_path, meta_path = tmp_paths
-    _write_chat_entries(chat_path, BLOCK_SIZE + 5)
-
-    mock_llm = MagicMock()
-    mock_llm.chat.return_value = (
-        {"content": "### Block: 2026-02-25 10:00 - 11:40\n\nSummary of events."},
-        {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.001},
-    )
-
-    usage = consolidate(chat_path, blocks_path, meta_path, mock_llm)
-
-    assert usage is not None
-    assert usage["cost"] == pytest.approx(0.002)  # one room: draft and correction
-    assert mock_llm.chat.call_count == 2
-    assert blocks_path.exists()
-    blocks = json.loads(blocks_path.read_text())
-    assert len(blocks) == 1
-    assert blocks[0]["type"] == "summary"
-    assert "Summary of events" in blocks[0]["content"]
-    assert [room["room_id"] for room in blocks[0]["rooms"]] == ["unresolved:missing"]
-
-    meta = _load_meta(meta_path)
-    assert meta["last_consolidated_offset"] == BLOCK_SIZE
-
-
-def test_consolidate_not_enough_messages(tmp_paths):
-    chat_path, blocks_path, meta_path = tmp_paths
-    _write_chat_entries(chat_path, 5)
-
-    mock_llm = MagicMock()
-    result = consolidate(chat_path, blocks_path, meta_path, mock_llm)
-    assert result is None
-    mock_llm.chat.assert_not_called()
-
-
-def test_load_save_meta(tmp_paths):
-    _, _, meta_path = tmp_paths
-    assert _load_meta(meta_path) == {}
-
-    _save_meta(meta_path, {"last_consolidated_offset": 42})
-    meta = _load_meta(meta_path)
-    assert meta["last_consolidated_offset"] == 42
-
-
-def test_count_lines(tmp_paths):
-    chat_path = tmp_paths[0]
-    _write_chat_entries(chat_path, 15)
-    assert _count_lines(chat_path) == 15
+def test_legacy_cursor_and_flat_summary_remain_readable_and_byte_identical(tmp_paths, fit):
+    chat, blocks, meta = tmp_paths
+    rows = _write_chat_entries(chat, 5)
+    atomic_write_json(meta, {"last_consolidated_offset": 0})
+    atomic_write_json(blocks, [{"type": "summary", "range": "old", "content": "A retained earlier account."}])
+    flat = meta.parent / "dialogue_summary.md"
+    flat.write_text("A still older account.", encoding="utf-8")
+    originals = {path: path.read_bytes() for path in (blocks, meta, flat)}
+    model = MagicMock()
+    model.chat.return_value = ({"content": "A new understood episode."}, {"cost": .001})
+    consolidate(chat, blocks, meta, model, completed_task={"id": "fixture"})
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
+    assert _load_meta(meta) == {"last_consolidated_offset": 0}
+    store = ChronicleStore(meta.parent.parent)
+    assert {r["text"] for r in store.records(kinds=["legacy"])} == {"A retained earlier account.", "A still older account."}
+    assert store.records(kinds=["episode"])[0]["metadata"]["message_count"] == len(rows)
 
 
 def test_read_chat_entries_includes_project_rows_full_awareness(tmp_path):
-    """Full project awareness (v6.32.0): the one identity's consolidated dialogue
-    (dialogue_blocks.json) is its WHOLE conversation — main AND project threads —
-    because Ouroboros is one awareness/biography (BIBLE P1). Only A2A virtual
-    transport is excluded from the consolidation source."""
     from ouroboros.consolidator import _read_chat_entries
     from ouroboros.projects_registry import create_project
 
-    logs = tmp_path / "logs"
-    logs.mkdir(parents=True)
-    proj = create_project(tmp_path, "racer")
-    project_chat = int(proj["chat_id"])
-    chat_path = logs / "chat.jsonl"
-    rows = [
-        {"chat_id": 1, "direction": "in", "text": "main-1"},
-        {"chat_id": project_chat, "direction": "in", "text": "project-visible"},
-        {"chat_id": 1, "direction": "out", "text": "main-2"},
-        {"chat_id": -1001, "direction": "out", "text": "a2a-noise"},
-    ]
-    chat_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-
-    texts = [e.get("text") for e in _read_chat_entries(chat_path)]
-    assert "main-1" in texts and "main-2" in texts
-    assert "project-visible" in texts  # full awareness: project chat IS part of identity memory
-    assert "a2a-noise" not in texts    # only A2A virtual transport is excluded
+    (tmp_path / "logs").mkdir()
+    project_chat = int(create_project(tmp_path, "racer")["chat_id"])
+    chat = tmp_path / "logs/chat.jsonl"
+    rows = [{"chat_id": 1, "direction": "in", "text": "main-1"},
+            {"chat_id": project_chat, "direction": "in", "text": "project-visible"},
+            {"chat_id": 1, "direction": "out", "text": "main-2"},
+            {"chat_id": -1001, "direction": "out", "text": "a2a-noise"}]
+    chat.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert [row["text"] for row in _read_chat_entries(chat)] == ["main-1", "project-visible", "main-2"]
 
 
-def test_should_consolidate_handles_log_rotation(tmp_paths):
-    chat_path, _, meta_path = tmp_paths
-    _write_chat_entries(chat_path, BLOCK_SIZE + 5)
-    _save_meta(meta_path, {"last_consolidated_offset": 9999})
-    assert should_consolidate(meta_path, chat_path) is True
-
-
-def test_format_entries_for_block():
-    entries = [
-        {"ts": "2026-02-25T10:00:00Z", "direction": "in", "text": "Hello"},
-        {"ts": "2026-02-25T10:01:00Z", "direction": "out", "text": "Hi there"},
-    ]
-    formatted = _format_entries_for_block(entries)
-    assert "User: Hello" in formatted
-    assert "Ouroboros: Hi there" in formatted
-
-
-def test_load_save_blocks(tmp_path):
-    blocks_path = tmp_path / "blocks.json"
-    blocks = [{"ts": "2026-01-01", "type": "summary", "content": "test"}]
-    _save_blocks(blocks_path, blocks)
-    loaded = _load_blocks(blocks_path)
-    assert len(loaded) == 1
-    assert loaded[0]["content"] == "test"
-
-
-def test_dialogue_summary_markdown_no_longer_auto_migrates(tmp_path):
-    summary_path = tmp_path / "dialogue_summary.md"
-    blocks_path = tmp_path / "dialogue_blocks.json"
-
-    summary_path.write_text(
-        "### Episode: 2026-02-20 10:00 – 11:00\n\nFirst episode.\n\n"
-        "### Era: 2026-01-01 to 2026-01-31\n\nOld era summary.\n",
-        encoding="utf-8",
-    )
-
-    assert summary_path.exists()
-    assert not blocks_path.exists()
-
-
-def test_existing_dialogue_blocks_remain_authoritative(tmp_path):
-    summary_path = tmp_path / "dialogue_summary.md"
-    blocks_path = tmp_path / "dialogue_blocks.json"
-
-    summary_path.write_text("### Episode: test\nContent.", encoding="utf-8")
-    blocks_path.write_text("[]", encoding="utf-8")
-
-    assert json.loads(blocks_path.read_text()) == []
+def test_current_formatter_keeps_speakers_in_retained_source():
+    entries = [{"ts": "2026-02-25T10:00:00Z", "direction": "in", "text": "Hello"},
+               {"ts": "2026-02-25T10:01:00Z", "direction": "out", "text": "Hi there"}]
+    incoming, outgoing = map(format_source_row, entries)
+    assert "; User;" in incoming and incoming.endswith("\nHello")
+    assert "; Ouroboros;" in outgoing and outgoing.endswith("\nHi there")
+    assert json.loads(incoming.splitlines()[1])["direction"] == "in"
+    assert json.loads(outgoing.splitlines()[1])["direction"] == "out"

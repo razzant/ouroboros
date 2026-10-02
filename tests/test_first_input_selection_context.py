@@ -7,14 +7,15 @@ from tests.test_doc_context import _make_env_and_memory
 
 
 @pytest.mark.parametrize("selection", [None, "shared", "declared"])
-def test_capture_selects_channels_without_removing_governance_or_own_process(tmp_path, monkeypatch, selection):
+@pytest.mark.parametrize("route_kind", ["api_model", "agent_session"])
+def test_capture_selects_channels_without_removing_governance_or_own_process(tmp_path, monkeypatch, selection, route_kind):
     from ouroboros import context
 
     env, memory = _make_env_and_memory(tmp_path)
     child = {
         "id": "child", "type": "task", "delegation_role": "subagent",
         "text": "DECLARED_QUESTION", "context": "DECLARED_COMMON_FACTS",
-        "configured_subagent": {"route": {"kind": "api_model"}},
+        "configured_subagent": {"route": {"kind": route_kind}},
         "task_contract": {"constraints": "DECLARED_CONSTRAINT"},
     }
     if selection is not None:
@@ -76,7 +77,7 @@ def test_selected_runtime_omits_other_task_narratives_but_keeps_authority(tmp_pa
 
 @pytest.mark.parametrize("overrides", [
     {"delegation_role": "root"},
-    {"configured_subagent": {"route": {"kind": "agent_session"}}},
+    {"configured_subagent": {"route": {"kind": "unknown_actor"}}},
     {"configured_subagent": {}},
     {"id": ""},
 ])

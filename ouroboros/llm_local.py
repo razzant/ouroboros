@@ -170,16 +170,28 @@ class _LocalLaneMixin:
                 continue
             content = msg.get("content")
             if isinstance(content, list):
-                for idx, block in enumerate(content):
+                for block in content:
                     if not isinstance(block, dict) or block.get("type") != "text":
                         continue
                     block_text = str(block.get("text", ""))
-                    if idx == 0:
-                        block["text"] = _compact_local_text(block_text, "static")
-                    elif idx == 1:
-                        block["text"] = _compact_local_text(block_text, "semi_stable")
-                    else:
-                        block["text"] = _compact_local_text(block_text, "dynamic")
+                    preserve = set().union(*(item[0] for item in _LOCAL_COMPACTION_MODES.values()))
+                    preserve.update({"Recent chat", "Working sources", "Shared understanding"})
+                    from ouroboros.context_budget import MEMORY_BEGIN, MEMORY_END
+                    pieces, remaining, valid = [], block_text, True
+                    while MEMORY_BEGIN in remaining:
+                        prefix, _begin, tail = remaining.partition(MEMORY_BEGIN)
+                        body, end, remaining = tail.partition(MEMORY_END)
+                        if not end or MEMORY_BEGIN in body or MEMORY_END in prefix:
+                            valid = False
+                            break
+                        pieces.extend((_compact_markdown_sections(prefix, preserve_titles=preserve,
+                            reason="Non-core local context omitted."), MEMORY_BEGIN + body + MEMORY_END))
+                    if valid and MEMORY_END not in remaining:
+                        pieces.append(_compact_markdown_sections(remaining, preserve_titles=preserve,
+                            reason="Source-backed cognitive sections are preserved regardless of block placement."))
+                        block["text"] = "".join(pieces)
+                    # An ambiguous memory boundary stays whole; headings inside
+                    # quoted source text must never become truncation boundaries.
             elif isinstance(content, str):
                 msg["content"] = _compact_local_text(content, "system")
             break

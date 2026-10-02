@@ -334,4 +334,6 @@ def test_command_voice_survives_live_delivery_and_history(tmp_path, monkeypatch)
     for collection in (rows, replay):
         assert all(r["role"] == "system" and r["system_type"] == "command_reply"
                    and not r.get("markdown") for r in collection)
+        assert all(r.get("task_terminal_status") == "completed" for r in collection)
+    assert all(r.get("origin_message_ref") for r in rows)
     assert [r["content"] for r in rows] == [r["text"] for r in replay]

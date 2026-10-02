@@ -618,7 +618,37 @@ def _run_chat_consolidation(env, memory, llm, task, drive_logs):
         chat_path = drive_logs / "chat.jsonl"
         blocks_path = env.drive_path("memory") / "dialogue_blocks.json"
         meta_path = env.drive_path("memory") / "dialogue_meta.json"
-        if should_consolidate(meta_path, chat_path):
+        pending = should_consolidate(meta_path, chat_path)
+        pressure_fits, demand_facts = None, None
+        from ouroboros.chronicle_store import ChronicleStore
+        store = ChronicleStore(meta_path.parent.parent)
+        maintain_published = False
+        if store.log_path.exists() and store.activation():
+            from ouroboros.chronicle_view import maintenance_projection
+            pressure_fits, demand_facts = maintenance_projection(env, memory, task)
+            # The projection callback refreshes this same dict after publication.
+            demand_facts.update(route_fingerprint=demand_facts.get("route_fp"),
+                                rendered_mode=demand_facts.get("mode"))
+            owner_mode = demand_facts.get("owner_context_mode", demand_facts.get("mode"))
+            if owner_mode in {"low", "nano"}:
+                from ouroboros.context_budget import OWNER_LOW_TARGET_TOKENS, OWNER_NANO_TARGET_TOKENS
+                demand_facts.update(purpose="owner_mode", requirement_tokens=(
+                    OWNER_NANO_TARGET_TOKENS if owner_mode == "nano" else OWNER_LOW_TARGET_TOKENS))
+                maintain_published = True
+            else:
+                demand_facts.update(purpose="working_headroom",
+                                    requirement_tokens=demand_facts.get("window_tokens") or None)
+                maintain_published = True
+        # Old and new representations share ordinary incremental maintenance.
+        # A useful publication returns with the remaining measured need; this
+        # is not an obligation to convert the whole biography in this task.
+        if demand_facts is not None:
+            demand_facts["ordinary_maintenance"] = True
+            from ouroboros.room_consolidation import record_maintenance_fit
+            if pressure_fits is not None:
+                pressure_fits()
+                record_maintenance_fit(store, demand_facts)
+        if pending or (maintain_published and pressure_fits is not None and not pressure_fits()):
             _id, _ident, _llm, _logs = task.get("id"), memory.load_identity(), llm, drive_logs
             from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
 
@@ -645,7 +675,13 @@ def _run_chat_consolidation(env, memory, llm, task, drive_logs):
                 u = consolidate(chat_path=chat_path, blocks_path=blocks_path,
                                 meta_path=meta_path, llm_client=_llm, identity_text=_ident,
                                 knowledge_context=knowledge_context,
-                                room_registry_root=knowledge_context.budget_drive_root)
+                                room_registry_root=knowledge_context.budget_drive_root,
+                                completed_task=task,
+                                **({"compact_chronicle": True, "pressure_fits": pressure_fits,
+                                    "fitting_demand": demand_facts}
+                                   if maintain_published and pressure_fits is not None else {}))
+                if pressure_fits is not None:
+                    pressure_fits()  # Retain the measured remaining need after this transaction.
             if u:
                 # A run that produced no block and a run that never happened look the
                 # same in this stream without a written count; last_error_kind names the
@@ -661,6 +697,7 @@ def _run_chat_consolidation(env, memory, llm, task, drive_logs):
                     "blocks_written": u.get("_blocks_written"),
                     "last_error_kind": (errors[-1] or {}).get("kind") if errors else None,
                     "coverage": consolidation_coverage(u.get("_coverage")),
+                    **({"memory_view_demand": demand_facts} if demand_facts is not None else {}),
                     "cost_usd": (
                         round(float(u["cost"]), 6)
                         if u.get("cost") is not None

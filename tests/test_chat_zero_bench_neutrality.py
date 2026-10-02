@@ -10,6 +10,7 @@ the answer reader), and a live host TOAST must not be written there at all, or a
 supervisor line would be published as something the model said.
 """
 
+import ast
 import json
 import pathlib
 import sys
@@ -113,8 +114,13 @@ def test_the_deep_review_acknowledgement_is_typed_and_cannot_be_read_as_an_answe
     SYSTEM row, so a run's recorded answer cannot be replaced by it.
     """
     source = (REPO / "supervisor/queue.py").read_text(encoding="utf-8")
-    ack = next(line for line in source.splitlines() if "Deep self-review queued" in line)
-    assert 'role="system"' in ack and "system_type=" in ack, ack.strip()
+    (ack,) = [node for node in ast.walk(ast.parse(source))
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "send_with_budget" and len(node.args) > 1
+              and any(isinstance(part, ast.Constant) and isinstance(part.value, str)
+                      and "Deep self-review queued" in part.value for part in ast.walk(node.args[1]))]
+    keywords = {key.arg: key.value.value for key in ack.keywords if isinstance(key.value, ast.Constant)}
+    assert keywords["role"] == "system" and keywords["system_type"] == "deep_self_review_queued"
 
 
 def test_the_degraded_reason_change_moves_no_benchmark_classification():

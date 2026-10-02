@@ -2,11 +2,10 @@
 
 Every host decision that used to vanish is a typed fact, each proven in both
 directions: a consolidation skipped on the lock, an era withheld because it was
-not shorter (with its ``era_retry`` record), a scratchpad pass and its outcome,
+not shorter (with its source-bound receipt), a scratchpad pass and its outcome,
 a reflection lesson the host declined, and the ``writer``/``route``/
 ``writer_input_ref``/``old_chars``/``new_chars`` stamp on every
-``source_capture`` history row. An era is built from summary blocks, never from
-an earlier era. The reader-less ``knowledge_journal.jsonl`` writer is gone.
+``source_capture`` history row. Published digests may be coarsened again while exact sources and gaps remain. The reader-less ``knowledge_journal.jsonl`` writer is gone.
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ from ouroboros import reflection
 from ouroboros.memory import Memory
 from ouroboros.tools import knowledge as knowledge_tools
 from ouroboros.tools.registry import ToolContext
+from ouroboros.utils import atomic_write_json
 from tests import test_consolidator_context_fit as fit_helpers
 from tests.test_consolidator_context_fit import _LLM, _paths, _write_chat
 
@@ -49,11 +49,6 @@ def _summary_blocks(count, start=0):
              "message_count": 1, "content": f"block-{i} " + "x" * 40} for i in range(start, start + count)]
 
 
-def _era_block(label="old"):
-    return {"ts": "2025-12-31T00:00:00Z", "type": "era", "range": "2025-12-01 to 2025-12-31",
-            "message_count": 4, "content": f"### Era: {label}\n" + "e" * 30}
-
-
 # --- the consolidation lock ---------------------------------------------------------
 
 
@@ -65,7 +60,11 @@ def test_a_lock_skip_is_a_typed_event_and_a_free_run_is_not(tmp_path, fit):
     c._lock_nb(holder)
     try:
         ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="held")
-        assert c.consolidate(chat, blocks, meta, _LLM(), knowledge_context=ctx) is None
+        llm = _LLM()
+        outcome = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx, represented_only=True)
+        assert outcome["_blocks_written"] == 0 and not llm.calls
+        assert [(row["kind"], row["reason"]) for row in outcome["_consolidation_errors"]] == [
+            ("temporarily_unavailable", "consolidation_lock_held")]
     finally:
         c._unlock(holder)
         os.close(holder)
@@ -74,248 +73,193 @@ def test_a_lock_skip_is_a_typed_event_and_a_free_run_is_not(tmp_path, fit):
     assert skipped[0]["lock_path"].endswith(".consolidation.lock")
     assert not blocks.exists()  # the holder owned the run; nothing was consolidated twice
 
-    assert c.consolidate(chat, blocks, meta, _LLM())["_blocks_written"] == 1
+    assert c.consolidate(chat, blocks, meta, _LLM(), completed_task={"id": "fixture"})["_blocks_written"] == 1
     assert len(_events(tmp_path, "consolidation_skipped_locked")) == 1
 
 
-# --- an era is a compression of summary blocks, never of an era ---------------------
+# --- room digests retain sources, gaps and truthful retry evidence -------------------
 
 
-def _seed_run(tmp_path, old_blocks, *, chat_count=c.BLOCK_SIZE):
-    chat, blocks_path, meta_path = _paths(tmp_path)
-    _write_chat(chat, count=chat_count, text_size=2)
-    blocks_path.parent.mkdir(parents=True, exist_ok=True)
-    blocks_path.write_text(json.dumps(old_blocks), encoding="utf-8")
-    return chat, blocks_path, meta_path
+def _digest_store(root, rooms=("a",)):
+    from ouroboros.chronicle_store import ChronicleStore
+    chronicle = ChronicleStore(root)
+    chronicle.import_legacy()
+    original = [chronicle.append_episode(room, f"Room {room} history. " * 50, [], {"kind": "mind"}) for room in rooms]
+    return chronicle, original
 
 
-def _fake_era(monkeypatch, *, shorter):
-    seen = []
-
-    def fake(run, *_args, **_kwargs):
-        seen.append(list(run))
-        source_len = sum(len(b["content"]) for b in run)
-        content = "e" * (max(1, source_len // 4) if shorter else source_len + 10)
-        return {"type": "era", "range": "era", "message_count": len(run), "content": content}, {
-            "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.01}
-
-    monkeypatch.setattr(c, "_compress_blocks_to_era", fake)
-    return seen
+def _digest_run(root, llm, *, fits=lambda: False, fitting_demand=None):
+    chat, blocks, meta = _paths(root)
+    return c.consolidate(chat, blocks, meta, llm, knowledge_context=ToolContext(
+        repo_dir=root, drive_root=root, task_id="digest-maintenance"), compact_chronicle=True, pressure_fits=fits, fitting_demand=fitting_demand)
 
 
-def test_an_earlier_era_bounds_the_run_and_is_never_recompressed(tmp_path, fit, monkeypatch):
-    old = [_era_block(), *_summary_blocks(9)]
-    chat, blocks_path, meta_path = _seed_run(tmp_path, old)
-    seen = _fake_era(monkeypatch, shorter=True)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    run = old[1:1 + c.ERA_COMPRESS_COUNT]
-    assert seen == [run]  # the oldest run of summary blocks, the era ahead of it excluded
-    stored = json.loads(blocks_path.read_text(encoding="utf-8"))
-    assert stored[0] == old[0]  # the old era keeps its place and bytes
-    assert stored[1]["type"] == "era" and stored[1]["content"] != old[0]["content"]
-    assert stored[2:2 + len(old) - 1 - c.ERA_COMPRESS_COUNT] == old[1 + c.ERA_COMPRESS_COUNT:]  # the rest untouched
+def _long_digest():
+    return _LLM(effect=lambda llm, _prompt: ({"content": "Longer than the source. " * 1000}, dict(llm.usage)))
 
 
-def test_eras_ahead_of_the_run_never_hide_the_later_summaries(tmp_path, fit, monkeypatch):
-    # Once the oldest four blocks were eras, a fixed four-block window found no
-    # summary to compress and the later summaries were never compressed (review F1).
-    old = [_era_block(str(i)) for i in range(c.ERA_COMPRESS_COUNT)] + _summary_blocks(6)
-    chat, blocks_path, meta_path = _seed_run(tmp_path, old)
-    seen = _fake_era(monkeypatch, shorter=True)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    run = old[c.ERA_COMPRESS_COUNT:2 * c.ERA_COMPRESS_COUNT]
-    assert seen == [run]
-    stored = json.loads(blocks_path.read_text(encoding="utf-8"))
-    assert stored[:c.ERA_COMPRESS_COUNT] == old[:c.ERA_COMPRESS_COUNT]  # the old eras keep their bytes
-    assert stored[c.ERA_COMPRESS_COUNT]["type"] == "era" and stored[c.ERA_COMPRESS_COUNT] not in old
-    assert stored[c.ERA_COMPRESS_COUNT + 1:-1] == old[2 * c.ERA_COMPRESS_COUNT:]
-    assert len(stored) == len(old) + 1 - c.ERA_COMPRESS_COUNT + 1
-
-
-def test_a_history_of_eras_alone_makes_no_call_and_keeps_every_block(tmp_path, fit, monkeypatch):
-    old = [_era_block(str(i)) for i in range(c.MAX_SUMMARY_BLOCKS)]
-    chat, blocks_path, meta_path = _seed_run(tmp_path, old)
-    seen = _fake_era(monkeypatch, shorter=True)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    assert seen == []  # the newest summary block is never its own era; nothing else is compressible
-    stored = json.loads(blocks_path.read_text(encoding="utf-8"))
-    assert stored[:len(old)] == old and len(stored) == len(old) + 1
-
-
-def test_the_chronicle_pass_treats_eras_and_gaps_as_boundaries(tmp_path, fit, monkeypatch):
-    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
-    blocks_path.parent.mkdir(parents=True)
-    gap = {"gap_id": "g1", "type": "gap", "content": "[MEMORY GAP]"}
-    summaries = _summary_blocks(3)
-    blocks = [_era_block(), summaries[0], summaries[1], gap, summaries[2]]
-    blocks_path.write_text(json.dumps(blocks), encoding="utf-8")
-    seen = _fake_era(monkeypatch, shorter=True)
-    c._compact_chronicle(blocks_path, _LLM(), "", None)
-    assert seen == [summaries[:2], summaries[2:]]
-    stored = json.loads(blocks_path.read_text(encoding="utf-8"))
-    assert stored[0] == blocks[0] and stored[2] == gap
-    assert [b["type"] for b in stored] == ["era", "era", "gap", "era"]
-
-
-def test_the_chronicle_pass_consults_and_records_the_same_era_retry(tmp_path, fit, monkeypatch):
-    # Review F2: a throwaway meta let every pressure pass pay again for a run that was not
-    # shorter, and a recorded refusal (no call, no usage) would have crashed the pass.
-    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
-    meta_path = tmp_path / "memory" / "dialogue_meta.json"
-    blocks_path.parent.mkdir(parents=True)
-    blocks = _summary_blocks(3)
-    blocks_path.write_text(json.dumps(blocks), encoding="utf-8")
-    c.atomic_write_json(meta_path, {"last_consolidated_offset": 7})
-    seen = _fake_era(monkeypatch, shorter=False)
-
-    first = c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert len(seen) == 1 and first["cost"] == 0.01
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert meta["last_consolidated_offset"] == 7  # the rest of meta survives the record
-    (record,) = meta["era_retry"].values()
-    assert record["route"] == {"model": "test/model", "use_local": False}
-    assert json.loads(blocks_path.read_text(encoding="utf-8")) == blocks
-
-    second = c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert len(seen) == 1  # the recorded refusal made no second paid call
-    assert second["cost"] == 0 and second["_consolidation_errors"] == []  # no call was made
-    assert [e["attempted"] for e in _events(tmp_path, "era_not_shorter")] == [True, False]
-    assert json.loads(blocks_path.read_text(encoding="utf-8")) == blocks
-
-    # A pass without a meta path still pays the attempt; it reads and records no era_retry.
-    assert c._compact_chronicle(blocks_path, _LLM(), "", None)["cost"] == 0.01
-    assert len(seen) == 2 and json.loads(meta_path.read_text(encoding="utf-8")) == meta
-
-
-def test_each_run_keeps_its_own_refusal_and_a_success_erases_only_its_own(tmp_path, fit, monkeypatch):
-    # Review N1: one refusal record for the whole chronicle paid again for run A on every
-    # pass once run B's refusal overwrote it, and run B's success erased run A's record.
-    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
-    meta_path = tmp_path / "memory" / "dialogue_meta.json"
-    blocks_path.parent.mkdir(parents=True)
-    gap = {"gap_id": "g1", "type": "gap", "content": "[MEMORY GAP]"}
-    run_a, run_b = _summary_blocks(2), [{**b, "range": "b-" + b["range"]} for b in _summary_blocks(2)]
-    blocks_path.write_text(json.dumps([*run_a, gap, *run_b]), encoding="utf-8")
-    c.atomic_write_json(meta_path, {})
-    seen = _fake_era(monkeypatch, shorter=False)
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert seen == [run_a, run_b]
-    runs = c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8")))
-    assert len(runs) == 2  # both refusals remembered, keyed by source
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert seen == [run_a, run_b]  # neither run is paid for again
-
-    seen.clear()
-    shorter = _fake_era(monkeypatch, shorter=True)
-    monkeypatch.setattr(c, "_consolidation_route", lambda: ("other/model", False))  # a new route re-attempts
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert shorter == [run_a, run_b]
-    assert "era_retry" not in json.loads(meta_path.read_text(encoding="utf-8"))  # each success cleared its own
-    assert [b["type"] for b in json.loads(blocks_path.read_text(encoding="utf-8"))] == ["era", "gap", "era"]
-
-
-def test_era_retry_is_keyed_on_the_effective_binding_dispatch_uses(tmp_path, fit, monkeypatch):
-    # Round 2 (critical 2): dispatch applies the Light account pin and the live
-    # model-wait override; a refusal recorded under one effective binding must not
-    # suppress the paid retry under another, while an unchanged binding still does.
-    from contextlib import nullcontext
-
-    from ouroboros import model_slots, model_wait
-
-    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
-    meta_path = tmp_path / "memory" / "dialogue_meta.json"
-    blocks_path.parent.mkdir(parents=True)
-    blocks_path.write_text(json.dumps(_summary_blocks(3)), encoding="utf-8")
-    c.atomic_write_json(meta_path, {})
-    seen = _fake_era(monkeypatch, shorter=False)
-
-    def record():
-        (row,) = c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8"))).values()
-        return row["route"]
-
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert len(seen) == 1 and record() == {"model": "test/model", "use_local": False}  # unchanged: suppressed
-
-    # The Light account pin changes; the configured lane does not.
-    monkeypatch.setattr(model_slots, "model_role_option", lambda key, role, **_kw: "acct-B" if role == "light" else "")
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert len(seen) == 2 and record() == {"model": "test/model", "use_local": False, "model_account_override": "acct-B"}
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert len(seen) == 2  # the same pin: suppressed again
-
-    # A model-wait override rebinds the role; lane and pin are unchanged.
-    override = {"model": "override/model", "use_local": False, "model_account_override": "acct-B"}
-    waiter = SimpleNamespace(overrides={"light": override}, register_reprepare=lambda role, callback: nullcontext())
-    monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert len(seen) == 3 and record() == override
-    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
-    assert len(seen) == 3
-    assert [e["attempted"] for e in _events(tmp_path, "era_not_shorter")] == [True, False, True, False, True, False]
-
-    # One helper feeds both sites: the key IS the binding a real call dispatches on.
-    assert c._light_dispatch_binding() == override
+def test_existing_digest_can_be_coarsened_without_changing_its_original_sources(tmp_path, fit):
+    chronicle, (original,) = _digest_store(tmp_path)
+    prior = chronicle.append_episode("a", "A prior digest. " * 20, [], {"kind": "helper"}, kind="digest",
+        metadata={"covers_record_ids": [original["id"]]})
     llm = _LLM()
-    assert c._call_consolidation_llm(llm, "prompt", "probe")[0] == "summary-1"
-    sent = llm.calls[0]
-    assert {key: sent[key] for key in override} == override
+    _digest_run(tmp_path, llm)
+    _digest_run(tmp_path, llm, fitting_demand={"memory_budget_tokens": 100})
+    assert not llm.calls  # a changed leftover allowance is not a new semantic request
+    _digest_run(tmp_path, llm, fitting_demand={"purpose": "explicit_revision", "memory_budget_tokens": 100})
+    assert not llm.calls  # A new purpose label alone does not authorize a rebuy either.
+    _digest_run(tmp_path, llm, fitting_demand={"purpose": "owner_mode", "rendered_mode": "nano",
+                                             "requirement_tokens": 85000, "memory_budget_tokens": 100})
+    latest = chronicle.records(kinds=["digest"])[-1]
+    assert len(llm.calls) == 1 and latest["metadata"]["covers_record_ids"] == [original["id"]]
+    request = str(llm.calls[0]["messages"])
+    assert original["text"] in request and prior["text"] not in request
+    assert chronicle.get(original["id"])["text"] == original["text"]
+    assert chronicle.get(prior["id"])["text"] == prior["text"]
+    assert latest["source_refs"] and latest["author"]["kind"] == "helper"
+    assert len(latest["text"]) < len(prior["text"])
 
 
-def test_era_retry_is_keyed_to_the_binding_the_era_call_executed_on(tmp_path, fit, monkeypatch):
-    # Round 3 (critical F2): an owner ``switch`` during a model wait INSIDE the era call
-    # rebinds the role's override before the paid send, so a key captured before the
-    # call named the binding that never answered: the one that did paid again on the
-    # next pass, and a fresh attempt on the captured one was suppressed by its outcome.
+def test_fitting_projection_never_buys_an_automatic_digest(tmp_path, fit):
+    chronicle, originals = _digest_store(tmp_path, ("a", "b"))
+    llm = _LLM()
+    _digest_run(tmp_path, llm, fits=lambda: True)
+    assert llm.calls == [] and chronicle.records(kinds=["digest"]) == []
+    assert [chronicle.get(row["id"])["text"] for row in originals] == [row["text"] for row in originals]
+
+
+def test_imported_gap_remains_visible_after_digest_even_if_helper_omits_it(tmp_path, fit):
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.chronicle_view import capture_chronicle, render_memory
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    original = [*_summary_blocks(3), {"type": "gap", "gap_id": "durable-hole", "content": "[MEMORY GAP]"}]
+    path = memory / "dialogue_blocks.json"
+    path.write_text(json.dumps(original), encoding="utf-8")
+    before = path.read_bytes()
+    chronicle = ChronicleStore(tmp_path)
+    chronicle.import_legacy()
+    _digest_run(tmp_path, _LLM())
+    text, _facts = render_memory(json.loads(capture_chronicle(Memory(tmp_path), {"id": "view", "chat_id": 1})))
+    assert "durable-hole" in text and "gap" in text.lower()
+    assert path.read_bytes() == before
+    gaps, _identities = Memory(tmp_path)._durable_dialogue_gaps()
+    assert any(row["gap_id"] == "durable-hole" for row in gaps)
+
+
+def test_not_shorter_digest_is_recorded_and_same_inputs_are_not_rebought(tmp_path, fit):
+    chronicle, (original,) = _digest_store(tmp_path)
+    first = _long_digest()
+    assert _digest_run(tmp_path, first)["cost"] == 0.01
+    assert len(first.calls) == 1 and chronicle.records(kinds=["digest"]) == []
+    (receipt,) = [r for r in chronicle.records(kinds=["maintenance"]) if r.get("status") == "not_shorter"]
+    assert receipt["source_keys"] == [[original["id"], original["id"]]]
+    second = _long_digest()
+    assert _digest_run(tmp_path, second)["cost"] == 0
+    assert second.calls == []
+    assert chronicle.get(original["id"])["text"] == original["text"]
+
+
+def test_each_room_keeps_its_own_refusal_when_another_room_changes_and_succeeds(tmp_path, fit):
+    chronicle, originals = _digest_store(tmp_path, ("a", "b"))
+    first = _long_digest()
+    _digest_run(tmp_path, first)
+    maintenance = chronicle.records(kinds=["maintenance"])
+    receipts = [row for row in maintenance if row.get("status") == "not_shorter"]
+    assert len(receipts) == 2 and {row["room_id"] for row in receipts} == {"a", "b"}
+    measured = [row for row in maintenance if row["id"].startswith("digest-fit:")]
+    assert len(measured) == 2 and {row["target_id"] for row in measured} == {row["id"] for row in receipts}
+    assert all(row["published_progress"] is False and row["target_fits"] is False for row in measured)
+    chronicle.revise(originals[0]["id"], originals[0]["text"] + "New cause.", {"kind": "mind"})
+    next_model = _LLM()
+    _digest_run(tmp_path, next_model)
+    assert len(next_model.calls) == 1
+    assert [row["room_id"] for row in chronicle.records(kinds=["digest"])] == ["a"]
+    assert all(chronicle.get(row["id"]) for row in receipts)  # history was not erased by unrelated success
+    unchanged = _long_digest()
+    _digest_run(tmp_path, unchanged)
+    assert all("Room b history" not in call["messages"][0]["content"] for call in unchanged.calls)
+
+
+def test_digest_retry_uses_effective_account_and_model_binding(tmp_path, fit, monkeypatch):
     from contextlib import nullcontext
-
-    from ouroboros import model_wait
-
-    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
-    meta_path = tmp_path / "memory" / "dialogue_meta.json"
-    blocks_path.parent.mkdir(parents=True)
-    blocks = _summary_blocks(3)
-    blocks_path.write_text(json.dumps(blocks), encoding="utf-8")
-    c.atomic_write_json(meta_path, {})
-    route_a = {"model": "test/model", "use_local": False}
-    route_b = {"model": "switched/model", "use_local": False, "model_account_override": "acct-B"}
-    waiter = SimpleNamespace(overrides={}, register_reprepare=lambda role, callback: nullcontext())
+    from ouroboros import model_slots, model_wait
+    chronicle, (original,) = _digest_store(tmp_path)
+    calls = []
+    def run(demand=None):
+        llm = _long_digest()
+        usage = _digest_run(tmp_path, llm, fitting_demand=demand)
+        calls.extend(llm.calls)
+        return usage
+    run()
+    run()
+    assert len(calls) == 1
+    monkeypatch.setattr(model_slots, "model_role_option", lambda key, role, **_kw: "acct-B" if role == "light" else "")
+    run()
+    assert len(calls) == 1  # moving completed source work to another account does not buy it again
+    demand = {"purpose": "owner_mode", "requirement_tokens": 250000, "rendered_mode": "low"}
+    usage = run(demand)
+    run({**demand, "requirement_tokens": 250009})
+    assert len(calls) == 2 and calls[-1]["model_account_override"] == "acct-B"
+    assert usage["_light_dispatch_binding"]["model_account_override"] == "acct-B"
+    override = {"model": "override/model", "use_local": False, "model_account_override": "acct-B"}
+    waiter = SimpleNamespace(overrides={"light": override}, register_reprepare=lambda *_: nullcontext())
     monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
-    not_shorter = "e" * (sum(len(b["content"]) for b in blocks) + 10)
+    run(demand)
+    assert len(calls) == 2  # a model change alone is not another source requirement either
+    revision = chronicle.revise(original["id"], original["text"] + "New source meaning.", {"kind": "mind"})
+    usage = run(demand)
+    run(demand)
+    assert len(calls) == 3 and {key: calls[-1][key] for key in override} == override
+    assert usage["_light_dispatch_binding"] == override and "New source meaning." in str(calls[-1]["messages"])
+    receipts = [row for row in chronicle.records(kinds=["maintenance"]) if row.get("status") == "not_shorter"]
+    assert len(receipts) == 3 and receipts[-1]["source_keys"] == [[original["id"], revision["id"]]]
+    assert chronicle.get(original["id"])["text"] == original["text"]
 
-    def switch_inside_the_call(llm, prompt):
-        # The real era path: the first send dispatched on A; the owner switches the
-        # role while it is in flight, and the rest of the unit dispatches on B.
-        if len(llm.calls) == 1:
-            assert c._light_route() == route_a
-            waiter.overrides["light"] = dict(route_b)
-        return {"content": not_shorter}, dict(llm.usage)
 
-    def record():
-        (row,) = c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8"))).values()
-        return row["route"]
-
-    llm = _LLM(effect=switch_inside_the_call)
-    c._compact_chronicle(blocks_path, llm, "", None, meta_path=meta_path)
-    assert llm.calls[0]["model"] == "test/model" and llm.calls[-1]["model"] == "switched/model"
-    assert record() == route_b  # keyed to the executed binding, not the one captured before the call
-    (event,) = _events(tmp_path, "era_not_shorter")
-    assert event["attempted"] is True and event["route"] == route_b
-    assert json.loads(blocks_path.read_text(encoding="utf-8")) == blocks
-
-    # The override still binds B: B's own refusal suppresses the paid retry on B.
-    still_b = _LLM(effect=lambda llm, prompt: ({"content": not_shorter}, dict(llm.usage)))
-    c._compact_chronicle(blocks_path, still_b, "", None, meta_path=meta_path)
-    assert still_b.calls == [] and record() == route_b
-
-    # Back on A, which never answered for this run: A is paid for once, then keyed honestly.
+def test_digest_retry_is_bound_to_the_request_after_model_wait_reprepare(tmp_path, fit, monkeypatch):
+    from contextlib import nullcontext
+    import hashlib
+    from ouroboros import model_wait
+    from ouroboros.memory_guidance import remembering_guidance
+    chronicle, (original,) = _digest_store(tmp_path)
+    callbacks = {}
+    def register(role, callback):
+        callbacks[role] = callback
+        return nullcontext()
+    waiter = SimpleNamespace(overrides={}, register_reprepare=register)
+    monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
+    route_b = {"model": "switched/model", "use_local": False, "model_account_override": "acct-B"}
+    long_text = "A non-shrinking interpretation. " * 1000
+    def rebound(model, _prompt):
+        # Exercise the actual reprepare callback, not a settings-only change.
+        waiter.overrides["light"] = dict(route_b)
+        callbacks["light"]({**model.calls[-1], **route_b})
+        return {"content": long_text}, {**model.usage, "provider": "openrouter", "resolved_model": "switched/model"}
+    first = _LLM(effect=rebound)
+    usage = _digest_run(tmp_path, first)
+    assert len(first.calls) == 1 and usage["_light_dispatch_binding"] == route_b
+    (receipt,) = [row for row in chronicle.records(kinds=["maintenance"]) if row.get("status") == "not_shorter"]
+    fit_receipt = chronicle.get(receipt["id"].replace("digest-attempt:", "digest-fit:", 1))
+    assert fit_receipt["target_id"] == receipt["id"] and fit_receipt["target_fits"] is False
+    assert receipt["source_keys"] == [[original["id"], original["id"]]]
+    assert receipt["guidance_sha256"] == usage["_remembering_guidance_sha256"] == hashlib.sha256(
+        remembering_guidance(tmp_path).encode("utf-8")).hexdigest()
+    still_b = _long_digest()
+    _digest_run(tmp_path, still_b)
+    assert still_b.calls == []
     waiter.overrides.clear()
-    on_a = _LLM(effect=lambda llm, prompt: ({"content": not_shorter}, dict(llm.usage)))
-    c._compact_chronicle(blocks_path, on_a, "", None, meta_path=meta_path)
-    assert on_a.calls and all(call["model"] == "test/model" for call in on_a.calls)
-    assert record() == route_a
-    assert [(e["attempted"], e["route"]) for e in _events(tmp_path, "era_not_shorter")] == [
-        (True, route_b), (False, route_b), (True, route_a)]
+    on_a = _long_digest()
+    _digest_run(tmp_path, on_a)
+    assert on_a.calls == []  # the completed judgment is source-bound, even after returning to A
+    _digest_run(tmp_path, on_a, fitting_demand={"purpose": "explicit_revision"})
+    assert on_a.calls == []  # Rewording the same demand does not undo the reprepare receipt.
+    next_usage = _digest_run(tmp_path, on_a, fitting_demand={"purpose": "owner_mode", "rendered_mode": "nano",
+                                                           "requirement_tokens": 85000})
+    assert len(on_a.calls) == 1 and on_a.calls[0]["model"] == "test/model"
+    assert next_usage["_light_dispatch_binding"]["model"] == "test/model"
+    assert original["text"] in str(on_a.calls[0]["messages"])
+    assert len([row for row in chronicle.records(kinds=["maintenance"]) if row.get("status") == "not_shorter"]) == 2
 
 
 def test_a_legacy_single_era_retry_record_is_read_as_one_run(tmp_path):
@@ -324,73 +268,19 @@ def test_a_legacy_single_era_retry_record_is_read_as_one_run(tmp_path):
     assert c._era_retry_runs({"era_retry": "garbage"}) == {} and c._era_retry_runs({}) == {}
 
 
-# --- a not-shorter era is recorded, visible, and not paid for twice -----------------
-
-
-def test_a_not_shorter_era_records_era_retry_and_the_event(tmp_path, fit, monkeypatch):
-    old = _summary_blocks(c.MAX_SUMMARY_BLOCKS)
-    chat, blocks_path, meta_path = _seed_run(tmp_path, old)
-    seen = _fake_era(monkeypatch, shorter=False)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    assert len(seen) == 1
-    stored = json.loads(blocks_path.read_text(encoding="utf-8"))
-    assert stored[:c.MAX_SUMMARY_BLOCKS] == old and not any(b["type"] == "era" for b in stored)
-    retry = json.loads(meta_path.read_text(encoding="utf-8"))["era_retry"]
-    (source_sha256, record), = retry.items()
-    assert record == {"route": {"model": "test/model", "use_local": False},
-                      "observed_route": store.UNKNOWN_STAMP}  # the fake era usage names no physical route
-    events = _events(tmp_path, "era_not_shorter")
-    assert len(events) == 1 and events[0]["attempted"] is True and events[0]["observed_route"] == store.UNKNOWN_STAMP
-    assert events[0]["source_sha256"] == source_sha256 and events[0]["blocks"] == c.ERA_COMPRESS_COUNT
-    assert events[0]["era_chars"] > events[0]["source_chars"]
-
-
-def test_the_same_run_on_the_same_route_is_not_paid_again_until_either_changes(tmp_path, fit, monkeypatch):
-    old = _summary_blocks(c.MAX_SUMMARY_BLOCKS)
-    chat, blocks_path, meta_path = _seed_run(tmp_path, old)
-    seen = _fake_era(monkeypatch, shorter=False)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    _write_chat(chat, count=2 * c.BLOCK_SIZE, text_size=2)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    assert len(seen) == 1  # the second run made no era call
-    events = _events(tmp_path, "era_not_shorter")
-    assert [event["attempted"] for event in events] == [True, False]
-    assert events[1]["source_sha256"] == events[0]["source_sha256"]
-
-    monkeypatch.setattr(c, "_consolidation_route", lambda: ("other/model", False))
-    _write_chat(chat, count=3 * c.BLOCK_SIZE, text_size=2)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    assert len(seen) == 2  # a new route earns a new attempt
-    (record,) = c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8"))).values()
-    assert record["route"] == {"model": "other/model", "use_local": False}
-
-
-def test_a_shorter_era_replaces_the_run_and_clears_era_retry(tmp_path, fit, monkeypatch):
-    old = _summary_blocks(c.MAX_SUMMARY_BLOCKS)
-    chat, blocks_path, meta_path = _seed_run(tmp_path, old)
-    meta_path.write_text(json.dumps({"era_retry": {"source_sha256": "stale", "route": "unknown"}}), encoding="utf-8")
-    seen = _fake_era(monkeypatch, shorter=True)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    assert len(seen) == 1
-    stored = json.loads(blocks_path.read_text(encoding="utf-8"))
-    assert stored[0]["type"] == "era" and stored[1:c.MAX_SUMMARY_BLOCKS - c.ERA_COMPRESS_COUNT + 1] == old[c.ERA_COMPRESS_COUNT:]
-    # Another run's (legacy-shaped) refusal survives this run's success; this run never had one.
-    assert c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8"))) == {"stale": {"route": "unknown"}}
-    assert _events(tmp_path, "era_not_shorter") == []
-
-
 def test_health_names_a_withheld_era_without_a_timestamp(tmp_path):
     (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path,
                           repo_path=lambda p: tmp_path / p, drive_path=lambda p: tmp_path / p)
-    c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", {"last_consolidated_offset": 100})
+    atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", {"last_consolidated_offset": 100})
     assert not any("ERA COMPRESSION" in line for line in context_health._memory_health_lines(env))
-    c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", {
+    atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", {
         "era_retry": {"abcdef0123456789": {"route": {"model": "light/model", "use_local": False}},
                       "0123456789abcdef": {"route": "unknown"}}})
     rows = [line for line in context_health._memory_health_lines(env) if "ERA COMPRESSION WITHHELD" in line]
     assert len(rows) == 2 and "abcdef012345" in rows[0] and "light/model" in rows[0] and "2026-" not in rows[0]
     assert "0123456789ab" in rows[1]
+
 
 
 # --- every scratchpad pass names its outcome ------------------------------------------
@@ -680,17 +570,17 @@ def test_dialogue_consolidation_stamps_each_nomination_with_its_own_correction_r
     chat, blocks, meta = _paths(tmp_path)
     chat.parent.mkdir(parents=True, exist_ok=True)
     rows = [{"ts": f"2026-01-01T{index // 60:02d}:{index % 60:02d}:00Z", "direction": "in",
-             "text": f"entry-{index} ", "chat_id": 1 if index < 34 else 2 if index < 67 else 3} for index in range(100)]
+             "text": f"entry-{index} ", "task_id": "consolidate", "chat_id": 1 if index < 34 else 2 if index < 67 else 3} for index in range(100)]
     chat.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="consolidate")
     llm = _ThreeRoomNominating()
-    usage = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx)
-    assert llm.corrections == ["A", "B", "C"] and usage["_blocks_written"] == 1
+    usage = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx, completed_task={"id": "consolidate"})
+    assert llm.corrections == ["A", "B", "C"] and usage["_blocks_written"] == 3
     # The block-wide stamp is the LAST call's known route (room C's correction) ...
     assert c._route_stamp(usage)["account"] == "acct-2"
     captures = {row["topic"]: row for row in _history(tmp_path) if row.get("publication") == "source_capture"}
     assert set(captures) == {"people/alex", "people/bob", "people/cara"}
-    assert all(row["writer"] == "consolidation" for row in captures.values())
+    assert all(row["writer"] == "chronicle_correction" for row in captures.values())
     # ... yet each nomination carries the route of the correction that released IT:
     # an explicit unknown outranks the known block stamp, two known routes stay
     # distinct within one block, and the forged model stamp reached none of them.
@@ -699,16 +589,18 @@ def test_dialogue_consolidation_stamps_each_nomination_with_its_own_correction_r
         "provider": "claudexor", "model": "light/served", "source": "codex", "account": "acct-1"}
     assert captures["people/cara"]["route"] == {
         "provider": "claudexor", "model": "light/served", "source": "codex", "account": "acct-2"}
-    block = json.loads(blocks.read_text(encoding="utf-8"))[0]
-    assert all(row["writer_input_ref"] == block["knowledge_source_ref"] for row in captures.values())
-    assert block["knowledge_source_ref"]["entry_id"] and len(block["knowledge_writes"]) == 3
-    assert "_nomination_route" not in block  # a history stamp, never a persisted block field
-    # The retained nominations row keeps the HOST stamp per entry, never the model's.
-    nominations = _history(tmp_path)[0]
-    assert nominations["type"] == "dialogue_knowledge_nominations"
-    assert [(entry["topic"], entry["_nomination_route"]) for entry in nominations["nominations"][0]["entries"]] == [
-        ("people/alex", store.UNKNOWN_STAMP), ("people/bob", captures["people/bob"]["route"]),
-        ("people/cara", captures["people/cara"]["route"])]
+    from ouroboros.chronicle_store import ChronicleStore
+    chronicle = ChronicleStore(tmp_path)
+    for topic, capture in captures.items():
+        ref = capture["writer_input_ref"]
+        revision = chronicle.get(ref["record_id"])
+        assert ref["kind"] == "chronicle" and revision["metadata"]["source_refs"] == ref["source_refs"]
+        (entry,) = revision["metadata"]["knowledge_entries"]
+        assert entry["topic"] == topic and "_nomination_route" not in entry
+    nominations = [row for row in _history(tmp_path) if row.get("type") == "dialogue_knowledge_nominations"]
+    assert len(nominations) == 3
+    assert {entry["topic"] for row in nominations for entry in row["nominations"]} == set(captures)
+    assert not any("_nomination_route" in entry for row in nominations for entry in row["nominations"])
 
 
 def test_scratchpad_consolidation_stamps_its_journal_source(tmp_path):

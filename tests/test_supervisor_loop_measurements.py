@@ -610,6 +610,19 @@ def test_stall_end_carries_samples_top_frames_and_the_last_stack(monkeypatch, jo
     assert server_liveness._innermost_repo_frame(["/srv/app/x.py:3 in f", *runtime_only]) == "/srv/app/x.py:f"
 
 
+def test_runtime_frame_classification_handles_packaged_python_prefix(monkeypatch):
+    """The packaged interpreter prefix retains ../ while its code paths do not."""
+    from types import SimpleNamespace
+    from ouroboros import server_liveness
+
+    prefix = "/Applications/Ouroboros.app/Contents/Resources/python-standalone/bin/../../../Frameworks/python-standalone"
+    monkeypatch.setattr(server_liveness, "sys", SimpleNamespace(prefix=prefix, base_prefix=prefix))
+    runtime = "/Applications/Ouroboros.app/Contents/Frameworks/python-standalone/lib/python3.10/threading.py:324 in wait"
+    assert server_liveness._innermost_repo_frame([runtime]) == ""
+    assert server_liveness._innermost_repo_frame(["/srv/app/work.py:3 in perform", runtime]) == "/srv/app/work.py:perform"
+    assert server_liveness._innermost_repo_frame(["ouroboros/loop.py:9 in run", runtime]) == "ouroboros/loop.py:run"
+
+
 def test_stack_rows_parse_windows_drives_and_colons_inside_paths():
     """A row is ``path:line in func`` with the path before the LAST ``:<line> in ``: a Windows
     drive letter (``C:``) is part of an absolute path, never a relative path named ``C``."""

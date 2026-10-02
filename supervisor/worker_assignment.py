@@ -168,7 +168,7 @@ def _mirror_assigned_running_status(task: Dict[str, Any]) -> None:
                 task_group=task.get("task_group"),
                 subagent_envelope=task.get("subagent_envelope"),
                 configured_subagent=task.get("configured_subagent"),
-                parent_cognitive_route=task.get("parent_cognitive_route"),
+                parent_cognitive_route=task.get("parent_cognitive_route"), memory_reference=task.get("memory_reference"),
                 metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
             )
         else:

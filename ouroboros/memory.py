@@ -406,7 +406,12 @@ class Memory:
 
         gaps: List[Dict[str, Any]] = []
         identities: List[str] = []
-        for index, block in enumerate(self.load_dialogue_blocks() if blocks is None else blocks):
+        from ouroboros.chronicle_store import ChronicleStore
+
+        store = ChronicleStore(self.drive_root)
+        if blocks is None:
+            blocks = [] if store.log_path.exists() and store.activation() else self.load_dialogue_blocks()
+        for index, block in enumerate(blocks):
             if not isinstance(block, dict):
                 continue
             gap_id = str(block.get("gap_id") or "").strip()
@@ -424,6 +429,18 @@ class Memory:
                 "block_index": index,
                 "detail": "A durable dialogue block records a known history discontinuity.",
             })
+        if store.log_path.exists():
+            try:
+                for record in store.records(kinds=["gap"]):
+                    identity = str((record.get("metadata") or {}).get("legacy_gap_id") or record["id"])
+                    if identity in identities:
+                        continue
+                    identities.append(identity)
+                    gaps.append({"kind": "durable_consolidation_gap", "gap_id": identity,
+                                 "record_id": record["id"], "detail": record.get("text", "Recorded memory discontinuity"),
+                                 "reader": f"memory_read(node_id={record['id']!r})"})
+            except (OSError, ValueError) as exc:
+                gaps.append({"kind": "chronicle_gap_projection_unavailable", "detail": str(exc)})
         return gaps, identities
 
     def load_dialogue_meta(self) -> Dict[str, Any]:

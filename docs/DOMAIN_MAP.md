@@ -8,9 +8,9 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 
 | domain | name | modules | proposed |
 |---|---|---:|---:|
-| D01 | Agent core & main loop | 40 | 0 |
+| D01 | Agent core & main loop | 41 | 0 |
 | D02 | LLM client, routing & providers | 39 | 0 |
-| D03 | Context assembly, fit & compaction | 12 | 0 |
+| D03 | Context assembly, fit & compaction | 13 | 0 |
 | D04 | Tool execution: registry, access & typed results | 22 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 29 | 0 |
 | D06 | Review stack | 71 | 0 |
@@ -22,13 +22,13 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D12 | Settings & configuration | 15 | 0 |
 | D13 | Safety, guards & runtime mode | 9 | 0 |
 | D14 | Skills & extensions | 56 | 0 |
-| D15 | Memory, knowledge, consciousness & self-evolution | 23 | 0 |
+| D15 | Memory, knowledge, consciousness & self-evolution | 28 | 0 |
 | D16 | Observability, usage accounting & cost | 14 | 0 |
 | D17 | Projects, workspaces & task results | 27 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 15 | 0 |
 | D19 | Frozen contracts (ABI) | 10 | 0 |
 | D20 | Presence | 10 | 0 |
-| **total** | | **603** | **0** |
+| **total** | | **610** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **109**
+- lazy-only cross-domain pairs: **110**
   - D01->D08
   - D01->D10
   - D01->D11
@@ -97,6 +97,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D06->D05
   - D06->D08
   - D06->D15
+  - D07->D03
   - D07->D09
   - D07->D10
   - D07->D11
@@ -208,6 +209,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/loop_delivery.py`
 - `ouroboros/loop_forced_finalization.py`
 - `ouroboros/loop_llm_call.py`
+- `ouroboros/loop_memory.py`
 - `ouroboros/loop_messages.py`
 - `ouroboros/loop_model_call.py`
 - `ouroboros/loop_nudges.py`
@@ -273,6 +275,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 ### D03 — Context assembly, fit & compaction
 
 - `ouroboros/capability_evidence.py`
+- `ouroboros/chronicle_view.py`
 - `ouroboros/context.py`
 - `ouroboros/context_budget.py`
 - `ouroboros/context_compaction.py`
@@ -733,6 +736,9 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 
 ### D15 — Memory, knowledge, consciousness & self-evolution
 
+- `ouroboros/chronicle_import.py`
+- `ouroboros/chronicle_sources.py`
+- `ouroboros/chronicle_store.py`
 - `ouroboros/consciousness.py`
 - `ouroboros/consciousness_allowance.py`
 - `ouroboros/consciousness_authority.py`
@@ -744,6 +750,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/improvement_backlog.py`
 - `ouroboros/knowledge.py`
 - `ouroboros/memory.py`
+- `ouroboros/memory_guidance.py`
 - `ouroboros/memory_journal_compaction.py`
 - `ouroboros/memory_nomination_receipts.py`
 - `ouroboros/post_task_evolution.py`
@@ -751,6 +758,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/reflection.py`
 - `ouroboros/room_consolidation.py`
 - `ouroboros/semantic_dedup.py`
+- `ouroboros/tools/chronicle.py`
 - `ouroboros/tools/evolution_stats.py`
 - `ouroboros/tools/knowledge.py`
 - `ouroboros/tools/memory_tools.py`

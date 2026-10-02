@@ -9,7 +9,7 @@ They are deliberately SEPARATE from the REVIEW-prompt budget family
 prompts, not the agent's own context. Merging the two would couple unrelated
 concerns and is explicitly avoided.
 
-Constants, frozen context-reclaim records, and pure classification helpers
+Constants, frozen context-reclaim records, and pure context-payload helpers
 only. This module must stay import-pure: no imports from ``ouroboros.llm``,
 ``ouroboros.loop*``, or any other runtime module, so every seam can import
 the shared vocabulary without cycles.
@@ -21,19 +21,78 @@ the comments give the approximate token equivalents.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Dict, Literal, Optional, Tuple
+
+
+def canonical_context_json(value: Any) -> str:
+    """Stable context/source presentation bytes, shared by capture and reclaim."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def context_fit_event_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """Project captured context facts into the public attempt-event vocabulary."""
+    return {
+        "context_memory_view": usage.get("_context_memory_view"),
+        "context_route_fp": str(usage.get("_context_route_fp") or ""),
+        "estimated_prompt_tokens": int(usage.get("_context_prompt_estimate") or 0),
+        "context_fit_mode": str(usage.get("_context_fit_mode") or ""),
+        "context_profile": str(usage.get("_context_profile") or ""),
+        "context_measurement_basis": str(usage.get("_context_measurement_basis") or ""),
+        "context_measurement_density": float(usage.get("_context_measurement_density") or 0.0),
+        "context_target_total_tokens": usage.get("_context_target_total_tokens"),
+        "context_capacity_total_tokens": usage.get("_context_capacity_total_tokens"),
+        "context_target_deficit_tokens": usage.get("_context_target_deficit_tokens"),
+        "context_capacity_deficit_tokens": usage.get("_context_capacity_deficit_tokens"),
+        "context_reclaim_goal_tokens": int(usage.get("_context_reclaim_goal_tokens") or 0),
+        "context_target_miss": bool(usage.get("_context_target_miss")),
+        "context_automatic_pass_used": bool(usage.get("_context_automatic_pass_used")),
+        "context_predicted_capacity_miss": bool(
+            usage.get("_context_predicted_capacity_miss")
+        ),
+    }
+
+
+def extract_plain_text_from_content(content: Any) -> str:
+    """Extract text from strings or multipart content for transcript sealing."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(block.get("text", ""))
+        return "".join(parts)
+    return str(content) if content is not None else ""
+
+
+# Host context presentation shared by renderers and physical-attempt accounting.
+# These delimit sources; they never select semantic behavior or authorize work.
+MEMORY_BEGIN = "\n[Ouroboros memory begins]\n"
+MEMORY_END = "\n[Ouroboros memory ends]\n"
+MEMORY_FACTS_PREFIX = "\n[Memory view facts] "
+HOST_CONTEXT_NOTICE_BEFORE_TASK = (
+    "Host context for this turn: memory, knowledge index, runtime facts and recent "
+    "activity, rendered by the runtime as a continuation of the system prompt. Not "
+    "written by my human and not a message to answer; the message to act on follows next."
+)
+HOST_CONTEXT_NOTICE_AFTER_TASK = (
+    "Host context for this turn: memory, knowledge index, runtime facts and recent "
+    "activity, rendered by the runtime as a continuation of the system prompt. Not "
+    "written by my human and not a message to answer; the message to act on is the one above."
+)
 
 # Owner-selected Low's total-context economy/short-window target. This is an
 # elastic target, not a provider admission ceiling: Phase 2 measures the sealed
 # Main input plus its unchanged response reserve against T and the selected
 # route capacity W, requests at most one useful reclaim pass, then sends best
 # effort. Crossing T never creates a task failure.
-OWNER_LOW_TARGET_TOKENS = 200_000
+OWNER_LOW_TARGET_TOKENS = 250_000
 
 # Nano's owner-selected total window and free input headroom. The send boundary
 # chooses the largest output allowance up to the caller's existing ceiling;
 # the headroom is a minimum, never a fixed generation cap.
-OWNER_NANO_TARGET_TOKENS = 81_920
+OWNER_NANO_TARGET_TOKENS = 85_000
 NANO_MIN_HEADROOM_TOKENS = 8_192
 
 # Low-water sizing of the automatic context-reclaim pass. The TRIGGER is
@@ -44,7 +103,7 @@ NANO_MIN_HEADROOM_TOKENS = 8_192
 # sized to the deficit alone lands exactly AT the boundary, so the next round's
 # ordinary growth re-arms it (a summarizer pass nearly every round). Sized this
 # way it lands about an eighth of the boundary below (~125K tokens on a 1M
-# route, ~25K under the 200K Low target), so the next pass needs that much real
+# route, ~31K under the 250K Low target), so the next pass needs that much real
 # growth. Structural constant, not a setting: 8 (12.5 % of the boundary) is a
 # disclosed design choice, not a measured optimum; change it here and only here
 # (tests/test_context_budget_ssot.py pins it). Cost: older history is condensed
@@ -300,6 +359,11 @@ PROGRESS_LOG_WARN_BYTES = 8_000_000
 SCHEDULED_TASKS_WARN_BYTES = 2_000_000
 # Compact root-task -> skill review index used by acceptance packet assembly.
 SKILL_REVIEW_ROOT_TASKS_WARN_BYTES = 20_000_000
+# Chronicle capture loads retained interpretations from its rebuildable index;
+# a cold rebuild also folds the immutable journal. Use the existing indexed
+# ledger warning scale to expose that growth, not as a retention or summary
+# trigger: original memory must survive any future projection optimization.
+CHRONICLE_JOURNAL_WARN_BYTES = 20_000_000
 # ``chat_history`` can deliberately replay the archive chain, while ordinary
 # context reads only the unconsolidated generation suffix.  Warn before an
 # explicit full-history read becomes seconds-scale; this is observability, not

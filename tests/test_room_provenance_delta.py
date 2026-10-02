@@ -7,7 +7,7 @@ import pytest
 
 from ouroboros import consolidator as c, projects_registry, room_consolidation as rc
 from ouroboros.context import build_recent_sections
-from ouroboros.dialogue_provenance import RoomLabelResolver, source_continuation_note
+from ouroboros.dialogue_provenance import RoomLabelResolver
 from ouroboros.memory import Memory
 from tests.test_consolidator_context_fit import _LLM, fit as _fit
 
@@ -143,233 +143,162 @@ def test_focused_project_and_explicit_history_remain_byte_identical(tmp_path, mo
 
 
 @pytest.mark.parametrize("direction", ["in", "incoming", "out", "outgoing", "system"])
-def test_block_format_retains_author_direction_transport_and_body(direction):
+def test_chronicle_source_retains_author_direction_transport_and_body(direction):
+    from ouroboros.chronicle_sources import format_source_row
     row = {"ts": "2026-01-01T00:00:00Z", "chat_id": 1500, "direction": direction,
            "sender_label": "Alex", "text": "line one\r\n\r\nЖ🙂 line two\n",
            "transport": {"provider": "mail", "account_id": "acct", "conversation_id": "conv",
                          "thread_id": "thread", "delivery": {"state": "accepted"}}}
     resolver = RoomLabelResolver(projects=[{"id": "alpha", "chat_id": 1500, "name": "Alpha"}])
-    old = c._format_entries_for_block([row])
-    new = c._format_entries_for_block([row], include_room_labels=True, room_resolver=resolver)
-    assert new.replace("[room=Project Alpha [chat_id=1500]] ", "", 1).encode() == old.encode()
+    new = format_source_row(row)
     assert new.endswith(row["text"])
-    assert "provider=mail; account=acct; conversation=conv; thread=thread; delivery=accepted" in new
+    metadata = json.loads(new.splitlines()[1])
+    assert metadata["transport"] == row["transport"] and metadata["direction"] == direction
+    assert resolver.label(metadata) == "Project Alpha [chat_id=1500]"
     assert ("Ouroboros" if direction in {"out", "outgoing", "system"} else "Alex") in new
 
 
 @pytest.mark.parametrize("rooms", [(1, 1, 1, 1), (1, 1500, 987654, None)])
-def test_actual_consolidation_labels_every_source_and_retains_token_ceiling(tmp_path, fit, monkeypatch, rooms):
+def test_actual_consolidation_labels_closed_room_sources_and_retains_token_ceiling(tmp_path, fit, monkeypatch, rooms):
+    from ouroboros.chronicle_store import ChronicleStore
     _registry(tmp_path, [{"id": "alpha", "chat_id": 1500, "name": "Alpha"}])
-    rows = [{"ts": f"2026-01-01T00:{i:02d}:00Z", "chat_id": room, "direction": "in", "text": str(i)}
-            for i, room in enumerate(rooms)]
+    rows = [{"ts": f"2026-01-01T00:{i:02d}:00Z", "chat_id": room, "task_id": "finished",
+             "direction": "in", "text": str(i)} for i, room in enumerate(rooms)]
     chat = _write_chat(tmp_path, [*rows, {"chat_id": -10, "text": "A2A EXCLUDED"}])
-    monkeypatch.setattr(c, "BLOCK_SIZE", 2)
     read = projects_registry.list_reserved_projects
     calls = []
     monkeypatch.setattr(projects_registry, "list_reserved_projects", lambda root: (calls.append(root), read(root))[1])
     llm = _LLM()
-    c.consolidate(chat, tmp_path / "memory/blocks.json", tmp_path / "memory/meta.json", llm)
+    c.consolidate(chat, tmp_path / "memory/blocks.json", tmp_path / "memory/meta.json", llm,
+                  completed_task={"id": "finished"})
     assert calls == [tmp_path]
-    # Each room is drafted and then source-checked; two logical chunks are
-    # processed, with one or two rooms per chunk depending on the fixture.
-    assert len(llm.calls) == (4 if len(set(rooms)) == 1 else 8)
+    assert len(llm.calls) == 2 * len(set(rooms))
+    episodes = ChronicleStore(tmp_path).records(kinds=["episode"])
+    resolver = RoomLabelResolver(projects=read(tmp_path))
+    assert {row["metadata"]["label"] for row in episodes} == {resolver.label(row) for row in rows}
     for call in llm.calls:
         assert call["max_tokens"] == 16384
         assert "A2A EXCLUDED" not in call["messages"][0]["content"]
-        assert "[room=" in call["messages"][0]["content"]
+    # Exact source retains typed actor and room fields; its room assignment is host-owned.
+    from ouroboros.artifacts import read_actor_source_bytes
+    for episode in episodes:
+        ref = episode["source_refs"][0]
+        source = json.loads(read_actor_source_bytes(tmp_path, ref["task_id"], ref))
+        assert all(resolver.room_id(row) == episode["room_id"] for row in source)
 
 
-def test_room_source_split_preserves_exact_bytes_and_boundaries():
-    rows = [
-        {"chat_id": 1500, "direction": "in", "text": "A body\n\n" * 80},
-        {"chat_id": 1501, "direction": "out", "text": "B body\n\n" * 80},
-    ]
-    resolver = RoomLabelResolver(projects=[
-        {"id": "alpha", "chat_id": 1500, "name": "Alpha"},
-        {"id": "beta", "chat_id": 1501, "name": "Beta"},
-    ])
-    spans = []
-    source = c._format_entries_for_block(rows, include_room_labels=True, room_resolver=resolver, source_spans=spans)
-    left, right = rc.split_source_text(source, tuple(start for start, _, _ in spans))
-    assert left + right == source
-    assert right.startswith(spans[1][2])
-    assert "[room=Fake]" not in source
-
-
-def test_boundary_split_does_not_add_rooms_and_prompts_are_adaptive():
-    spans = []
-    source = c._format_entries_for_block([
-        {"chat_id": 1, "text": "body\n\n" * 20},
-        {"chat_id": 555, "text": "other\n\n" * 20},
-    ], include_room_labels=True, source_spans=spans)
-    left, right = rc.split_source_text(source, tuple(start for start, _, _ in spans))
-    assert left + right == source and right.startswith(spans[1][2])
-    assert source_continuation_note(spans, len(left), len(source)) == ""
-    assert spans[0][2] in source_continuation_note(spans, 0, 2)
-    prompt = rc.room_draft_prompt(source, room_label="test", block_range_text="range", message_count=2)
+def test_room_partition_retains_complete_bodies_without_adding_rooms():
+    rows = [{"chat_id": 1500, "direction": "in", "text": "A body\n\nЖ🙂" * 80},
+            {"chat_id": 1501, "direction": "out", "text": "B body\n\n" * 80},
+            {"chat_id": 1500, "direction": "in", "text": "A final event."}]
+    resolver = RoomLabelResolver(projects=[{"id": "alpha", "chat_id": 1500, "name": "Alpha"},
+                                         {"id": "beta", "chat_id": 1501, "name": "Beta"}])
+    parts = rc.partition_entries(rows, resolver)
+    assert [part.entries for part in parts] == [[rows[0], rows[2]], [rows[1]]]
+    assert {part.room_id for part in parts} == {"1500", "1501"}
+    exact = json.dumps(parts[0].entries, sort_keys=True, ensure_ascii=False)
+    prompt = rc.room_draft_prompt(exact, room_label="Alpha", block_range_text="range", message_count=2, helper=True)
+    assert json.loads(prompt.split(rc.DRAFT_SOURCE_HEADING + "\n", 1)[1]) == parts[0].entries
     assert "fixed total word range" not in prompt
-    assert "First person as Ouroboros" in prompt and "source" in prompt
+    assert "helper reconstruction" in prompt and "First person as Ouroboros" not in prompt
 
 
-def test_era_prompt_preserves_rooms_with_original_token_ceiling(fit):
-    llm = _LLM()
-    era, _ = c._compress_blocks_to_era([
-        {"range": "2026-01-01 00:00 - 00:01", "message_count": 1, "content": "Project A decision"},
-        {"range": "2026-01-01 00:02 - 00:03", "message_count": 1, "content": "Project B approval"},
-    ], llm, "")
-    assert era and len(llm.calls) == 2  # legacy records share one unknown-provenance room
-    call = llm.calls[0]
-    prompt = call["messages"][0]["content"]
-    assert "one room" in prompt and "other rooms are compressed separately" in prompt
-    assert "open commitments" in prompt and "one first-person Ouroboros" in prompt
-    assert call["max_tokens"] == 16384
+def test_failed_correction_keeps_original_but_does_not_publish_draft_nominations(tmp_path, fit):
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.tools.registry import ToolContext
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="correction")
+    chronicle = ChronicleStore(tmp_path)
+    chronicle.import_legacy()
+    source = c.retain_memory_source(ctx, "episode", b"The owner asked a question, without approval.")
+    draft = 'Draft claim.\nKNOWLEDGE_ENTRIES_JSON: [{"topic":"leak","content":"owner approved"}]'
+    original = chronicle.append_episode("1", draft, [source], {"kind": "helper"})
+    llm = _LLM(effect=lambda model, _prompt: ({"content": ""}, dict(model.usage)))
+    usage = c.consolidate(tmp_path / "logs/chat.jsonl", tmp_path / "memory/dialogue_blocks.json",
+                         tmp_path / "memory/dialogue_meta.json", llm, knowledge_context=ctx)
+    assert usage["_consolidation_errors"][-1]["kind"] == "empty_summary"
+    assert chronicle.get(original["id"])["text"] == draft
+    assert chronicle.records(kinds=["revision"]) == []
+    assert not (tmp_path / "memory/knowledge/leak.md").exists()
+    c.consolidate(tmp_path / "logs/chat.jsonl", tmp_path / "memory/dialogue_blocks.json",
+                  tmp_path / "memory/dialogue_meta.json", _LLM(), knowledge_context=ctx)
+    assert chronicle.room_records("1")[0]["current_text"] == "summary-1"
+    assert not (tmp_path / "memory/knowledge/leak.md").exists()
 
 
-def test_draft_nominations_are_released_only_with_their_corrected_part():
-    """A draft whose correction failed never entered the block, so its
-    nominations must not survive the split that replaces it (claim_2)."""
-    spans = []
-    rows = [{"ts": f"2026-01-01T00:0{i}:00Z", "direction": "in", "text": f"entry-{i} " + "Ж🙂x" * 40, "chat_id": 1}
-            for i in range(2)]
-    text = c._format_entries_for_block(rows, include_room_labels=True, source_spans=spans)
-    spans = [(start, end, note) for start, end, note in spans]
-
-    class _Knowledge:
-        def bind_entries(self, entries):
-            return list(entries or [])
-
-    calls = []
-
-    def call(prompt, label, *, fixed_prompt="", input_limit=None, call_type=""):
-        calls.append((label, prompt))
-        usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0}
-        if label == "Room summary":
-            nomination = "" if len(calls) > 1 else '\nKNOWLEDGE_ENTRIES_JSON: [{"topic":"leak","scope":"global","content":"from a discarded draft"}]'
-            return f"draft-{len(calls)}{nomination}", usage, _Knowledge()
-        if len(calls) == 2:  # the FIRST correction (whole source) overflows -> the part is split
-            return "", {**usage, "_consolidation_errors": [{
-                "kind": "context_overflow", "preflight_only": True, "message": "too big",
-                "fixed_tokens": 1, "fixed_bytes": 1}]}, _Knowledge()
-        return f"corrected-{len(calls)}", usage, _Knowledge()
-
-    draft_prompt = lambda part, note: rc.room_draft_prompt(  # noqa: E731
-        part, room_label="Main", block_range_text="r", message_count=2, identity_text="", continuation_note=note)
-    correct_prompt = lambda draft, part, note: rc.correction_prompt(  # noqa: E731
-        draft, part, room_label="Main", scope="block r", identity_text="", continuation_note=note)
-    content, usage = rc.summarize_source(call, text, spans, draft_prompt, correct_prompt)
-
-    assert content and "corrected-" in content
-    labels = [label for label, _ in calls]
-    assert labels == ["Room summary", "Room correction"] + ["Room summary", "Room correction"] * 2
-    assert "_knowledge_entries" not in usage, usage.get("_knowledge_entries")
-
-
-def test_correction_prefix_over_the_limit_still_splits_and_redrafts_the_halves():
-    """A correction's fixed prompt carries the whole draft; when that alone
-    exceeds the route limit the part is still split and each half re-drafted,
-    instead of the chunk being withheld forever."""
-    spans = []
-    rows = [{"ts": f"2026-01-01T00:0{i}:00Z", "direction": "in", "text": f"entry-{i} " + "Ж🙂x" * 40, "chat_id": 1}
-            for i in range(2)]
-    text = c._format_entries_for_block(rows, include_room_labels=True, source_spans=spans)
-    calls = []
-
-    def call(prompt, label, *, fixed_prompt="", input_limit=None, call_type=""):
-        calls.append(label)
-        usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0}
-        if len(calls) == 2:  # whole-source correction: its fixed prefix alone is over the limit
-            return "", {**usage, "_consolidation_errors": [{
-                "kind": "context_overflow", "preflight_only": True, "message": "too big",
-                "fixed_tokens": 900, "input_limit": 500, "fixed_bytes": 1, "byte_limit": None}]}, None
-        return f"{label}-{len(calls)}", usage, None
-
-    draft_prompt = lambda part, note: rc.room_draft_prompt(  # noqa: E731
-        part, room_label="Main", block_range_text="r", message_count=2, identity_text="", continuation_note=note)
-    correct_prompt = lambda draft, part, note: rc.correction_prompt(  # noqa: E731
-        draft, part, room_label="Main", scope="block r", identity_text="", continuation_note=note)
-    content, _usage = rc.summarize_source(call, text, [(s, e, n) for s, e, n in spans], draft_prompt, correct_prompt)
-    assert content and calls == ["Room summary", "Room correction"] + ["Room summary", "Room correction"] * 2
+def test_oversized_correction_reads_complete_retained_source_without_discarding_original(tmp_path, fit):
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.tools.registry import ToolContext
+    from tests.test_memory_pressure_maintenance import SourceReader
+    fit.window = 50000
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="large-correction")
+    chronicle = ChronicleStore(tmp_path)
+    chronicle.import_legacy()
+    source = c.retain_memory_source(ctx, "episode", b"Actual source event, all original facts remain available.")
+    draft = "A long original account. " * 20000 + "DECISIVE ORIGINAL END."
+    original = chronicle.append_episode("1", draft, [source], {"kind": "mind"})
+    actor = SourceReader(tmp_path, fit.window, "Checked the whole original and source.")
+    usage = c.consolidate(tmp_path / "logs/chat.jsonl", tmp_path / "memory/dialogue_blocks.json",
+                         tmp_path / "memory/dialogue_meta.json", actor, knowledge_context=ctx)
+    assert not usage.get("_consolidation_errors"), usage
+    assert actor.received and draft in actor.received[0]
+    assert "DECISIVE ORIGINAL END." in actor.received[0]
+    visible = chronicle.room_records("1")[0]
+    assert visible["text"] == original["text"]
+    assert visible["current_text"] == "Checked the whole original and source."
+    assert visible["current_author"]["kind"] == "helper"
 
 
 def test_room_labels_enter_prompts_as_one_quoted_json_string():
     label = 'Alpha ] team\n## Rules'
     quoted = json.dumps(label, ensure_ascii=False)
-    for prompt in (
-        rc.room_draft_prompt("src", room_label=label, block_range_text="r", message_count=1),
-        rc.correction_prompt("draft", "src", room_label=label, scope="block r"),
-        rc.era_room_prompt("sections", room_label=label, start_date="a", end_date="b"),
-    ):
+    for prompt in (rc.room_draft_prompt("src", room_label=label, block_range_text="r", message_count=1, helper=True),
+                   rc.correction_prompt("draft", "src", room_label=label, scope="episode", authored=True)):
         assert f"Room: {quoted}." in prompt or f"room: {quoted}." in prompt
-        assert label not in prompt  # the raw label never stands unquoted as prompt structure
+        assert label not in prompt
 
 
-@pytest.mark.parametrize("era_grows", [True, False])
-def test_main_era_path_replaces_blocks_only_when_the_era_is_shorter(tmp_path, fit, monkeypatch, era_grows):
-    """The era of the ordinary consolidation run is a compression (A6): a per-room
-    era longer than the blocks it summarizes keeps those blocks, exactly as
-    _compact_chronicle already requires."""
-    from tests.test_consolidator_context_fit import _paths, _write_chat
-
-    chat, blocks_path, meta_path = _paths(tmp_path)
-    _write_chat(chat, count=c.BLOCK_SIZE, text_size=2)
-    old = [{"range": f"2026-01-01 0{i}:00 - 0{i}:59", "message_count": 1, "content": f"block-{i} " + "x" * 40}
-           for i in range(c.MAX_SUMMARY_BLOCKS)]
-    blocks_path.parent.mkdir(parents=True, exist_ok=True)
-    blocks_path.write_text(json.dumps(old), encoding="utf-8")
-    run_len = sum(len(b["content"]) for b in old[:c.ERA_COMPRESS_COUNT])
-    era_content = "e" * (run_len + 10 if era_grows else max(1, run_len // 4))
-    seen = {}
-
-    def fake_era(run, *_args, **_kwargs):
-        seen["run"] = list(run)
-        return {"range": "era", "message_count": len(run), "content": era_content, "era": True}, {}
-
-    monkeypatch.setattr(c, "_compress_blocks_to_era", fake_era)
-    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True) is not None
-    stored = json.loads(blocks_path.read_text(encoding="utf-8"))
-    assert seen["run"] == old[:c.ERA_COMPRESS_COUNT]
-    if era_grows:
-        assert stored[:c.MAX_SUMMARY_BLOCKS] == old and not any(b.get("era") for b in stored)
-    else:
-        assert stored[0]["content"] == era_content and stored[1:c.MAX_SUMMARY_BLOCKS - c.ERA_COMPRESS_COUNT + 1] == old[c.ERA_COMPRESS_COUNT:]
-    assert len(stored) == (c.MAX_SUMMARY_BLOCKS if era_grows else c.MAX_SUMMARY_BLOCKS - c.ERA_COMPRESS_COUNT + 1) + 1
+@pytest.mark.parametrize("digest_grows", [True, False])
+def test_digest_replaces_view_only_when_shorter_and_always_keeps_sources(tmp_path, fit, digest_grows):
+    from tests.test_memory_maintenance_visibility import _digest_run, _digest_store
+    from ouroboros.chronicle_view import _cuts
+    chronicle, originals = _digest_store(tmp_path)
+    answer = "long " * 1000 if digest_grows else "Shorter faithful history."
+    llm = _LLM(effect=lambda model, _prompt: ({"content": answer}, dict(model.usage)))
+    _digest_run(tmp_path, llm)
+    assert len(llm.calls) == 1
+    digests = chronicle.records(kinds=["digest"])
+    assert len(digests) == (0 if digest_grows else 1)
+    visible = _cuts(chronicle.room_records("a"))[-1]
+    assert visible[0]["current_text"] == (originals[0]["text"] if digest_grows else answer)
+    assert chronicle.get(originals[0]["id"])["text"] == originals[0]["text"]
 
 
-def test_nominations_come_from_the_corrected_response_not_the_draft():
-    """A false claim the correction removed from the memory cannot survive as a
-    durable knowledge entry: only the CORRECTED response's block is released."""
-    spans = []
-    rows = [{"ts": f"2026-01-01T00:0{i}:00Z", "direction": "in", "text": f"entry-{i} plain", "chat_id": 1} for i in range(2)]
-    text = c._format_entries_for_block(rows, include_room_labels=True, source_spans=spans)
-    spans = [(start, end, note) for start, end, note in spans]
-
-    class _Knowledge:
-        def bind_entries(self, entries):
-            return list(entries or [])
-
-    prompts = []
-
-    def call(prompt, label, *, fixed_prompt="", input_limit=None, call_type=""):
-        prompts.append((label, prompt))
-        usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0, "_consolidation_errors": []}
-        if label == "Room summary":
-            return ('draft memory\nKNOWLEDGE_ENTRIES_JSON: [{"topic":"leak","scope":"global","content":"owner approved"}]',
-                    usage, _Knowledge())
-        return ('corrected memory\nKNOWLEDGE_ENTRIES_JSON: [{"topic":"leak","scope":"global","content":"owner asked"},'
-                ' {"topic":"invented","scope":"global","content":"never read"}]',
-                usage, _Knowledge())
-
-    content, usage = rc.summarize_source(
-        call, text, spans,
-        lambda part, note: rc.room_draft_prompt(part, room_label="Main", block_range_text="r", message_count=2, continuation_note=note),
-        lambda draft, part, note: rc.correction_prompt(draft, part, room_label="Main", scope="block r", continuation_note=note),
-    )
-    assert content == "corrected memory"
-    # The draft's proposed block reaches the correction...
-    assert "KNOWLEDGE_ENTRIES_JSON" in prompts[1][1] and "owner approved" in prompts[1][1]
-    # ...and only the corrected block is released: the draft's topic with the
-    # corrected content, never an additional topic outside this correction's scope.
-    assert [(e["topic"], e["content"]) for e in usage["_knowledge_entries"]] == [("leak", "owner asked")]
+def test_only_corrected_nominations_publish_and_unread_existing_topic_is_preserved(tmp_path, fit):
+    from ouroboros import knowledge
+    from ouroboros.tools.registry import ToolContext
+    from tests.test_room_knowledge_correction import _consolidate
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="nomination-provenance")
+    address = knowledge.resolve_knowledge_address(tmp_path, "unread", "global")
+    original = knowledge.write_knowledge_note(address, "An existing complete understanding.").current
+    class Nominating:
+        def __init__(self):
+            self.prompts = []
+        def chat(self, **kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            self.prompts.append(prompt)
+            if prompt.startswith("Compare this draft memory"):
+                return {"content": 'Corrected memory.\nKNOWLEDGE_ENTRIES_JSON: '
+                    '[{"topic":"leak","scope":"global","content":"owner asked"},'
+                    '{"topic":"unread","scope":"global","content":"invented replacement"}]'}, {"cost": 0.01}
+            return {"content": 'Draft memory.\nKNOWLEDGE_ENTRIES_JSON: '
+                '[{"topic":"leak","scope":"global","content":"owner approved"}]'}, {"cost": 0.01}
+    llm = Nominating()
+    entries, outcomes = _consolidate(ctx, llm, "The owner asked, without approval.")
+    assert "owner approved" in llm.prompts[1]  # the exact original was checked, not discarded
+    assert entries[0]["content"] == "owner asked" and outcomes[0]["ok"]
+    assert outcomes[1]["reason"] == "revision_required" and not outcomes[1]["ok"]
+    assert knowledge.read_knowledge_note(address).raw == original.raw
+    assert knowledge.read_knowledge_note(knowledge.resolve_knowledge_address(tmp_path, "leak", "global")).text.endswith("owner asked")
 
 
 def test_presence_rows_of_one_room_share_one_label_from_transport_facts():

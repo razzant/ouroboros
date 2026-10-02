@@ -752,7 +752,7 @@ def _render_scratchpad_for_context(memory: "Memory", budget: int) -> str:
 
 
 def build_memory_sections(memory: Memory, partition: str = "all", durable_dialogue_gaps_out: Optional[List[Dict[str, Any]]] = None,
-                          *, include_scratchpad: bool = True) -> List[str]:
+                          *, include_scratchpad: bool = True, include_dialogue: bool = True) -> List[str]:
     sections = []
 
     include_stable = partition in {"all", "stable"}
@@ -784,7 +784,7 @@ def build_memory_sections(memory: Memory, partition: str = "all", durable_dialog
             _warn_if_over_budget("world", world_raw)
             sections.append("## Environment Profile (from `memory/WORLD.md` — already loaded; delete WORLD.md and restart to regenerate if the host environment changes)\n\n" + world_raw)
 
-    if include_volatile:
+    if include_volatile and include_dialogue:
         dialogue_blocks = memory.load_dialogue_blocks()
         if dialogue_blocks:
             blocks_md = memory.format_blocks_as_markdown(dialogue_blocks)
@@ -874,87 +874,89 @@ def _format_recent_reflections(entries: List[Dict[str, Any]], limit: int = 10) -
 def build_recent_sections(
     memory: Memory, env: Any, task_id: str = "", thread_chat_id: int = 0,
     project_id: str = "", chat_coverage_out: Optional[Dict[str, Any]] = None,
+    *, include_chat: bool = True,
 ) -> List[str]:
     sections = []
 
-    # Full project awareness (v6.32.0): registry membership is the SSOT for "is
-    # this a project thread" (a numeric range cannot disambiguate large external
-    # transport ids). The one identity (main chat + background consciousness) sees
-    # its WHOLE conversation, project threads included, because Ouroboros is one
-    # awareness/biography (BIBLE P1). A project TASK gets a FOCUSED view of its own
-    # thread as working context to reduce interference — focus, not isolation.
-    try:
-        from ouroboros.dialogue_provenance import RoomLabelResolver
+    if include_chat:
+        # Full project awareness (v6.32.0): registry membership is the SSOT for "is
+        # this a project thread" (a numeric range cannot disambiguate large external
+        # transport ids). The one identity (main chat + background consciousness) sees
+        # its WHOLE conversation, project threads included, because Ouroboros is one
+        # awareness/biography (BIBLE P1). A project TASK gets a FOCUSED view of its own
+        # thread as working context to reduce interference — focus, not isolation.
+        try:
+            from ouroboros.dialogue_provenance import RoomLabelResolver
 
-        _room_resolver = RoomLabelResolver(memory.drive_root)
-        _project_chat_ids = _room_resolver.project_chat_ids
-    except Exception:
-        _room_resolver = None
-        _project_chat_ids = set()
+            _room_resolver = RoomLabelResolver(memory.drive_root)
+            _project_chat_ids = _room_resolver.project_chat_ids
+        except Exception:
+            _room_resolver = None
+            _project_chat_ids = set()
 
-    _chat_tail = MAX_RECENT_CHAT_TAIL
-    retained_project_origins: List[Dict[str, Any]] = []
+        _chat_tail = MAX_RECENT_CHAT_TAIL
+        retained_project_origins: List[Dict[str, Any]] = []
 
-    _focused_project = bool(thread_chat_id and thread_chat_id in _project_chat_ids)
-    if _focused_project:
-        # Post-hoc bindings and retention-proof origins belong to the existing
-        # Project dialogue read model; focus changes the working view, not memory.
-        from ouroboros.project_dialogue import project_recent_dialogue
+        _focused_project = bool(thread_chat_id and thread_chat_id in _project_chat_ids)
+        if _focused_project:
+            # Post-hoc bindings and retention-proof origins belong to the existing
+            # Project dialogue read model; focus changes the working view, not memory.
+            from ouroboros.project_dialogue import project_recent_dialogue
 
-        chat_entries, chat_coverage, retained_project_origins = project_recent_dialogue(
-            memory, thread_chat_id, _chat_tail,
-        )
-    else:
-        dialogue_meta = memory.load_dialogue_meta()
-        # The Memory owner returns one bounded, truthfully-gapped raw suffix.
-        chat_entries, chat_coverage = memory.read_unconsolidated_chat(
-            dialogue_meta, _chat_tail,
-        )
-    if chat_coverage_out is not None:
-        chat_coverage_out.update(chat_coverage)
-    chat_summary = memory.summarize_chat(
-        chat_entries, limit=_chat_tail,
-        include_room_labels=not _focused_project,
-        room_resolver=_room_resolver,
-    )
-    if chat_summary:
-        sections.append("## Recent chat\n\n" + chat_summary)
-    if retained_project_origins:
-        sections.append(
-            "## Project owner origins (retention-proof bindings)\n\n"
-            + memory.summarize_chat(
-                retained_project_origins, limit=len(retained_project_origins),
+            chat_entries, chat_coverage, retained_project_origins = project_recent_dialogue(
+                memory, thread_chat_id, _chat_tail,
             )
+        else:
+            dialogue_meta = memory.load_dialogue_meta()
+            # The Memory owner returns one bounded, truthfully-gapped raw suffix.
+            chat_entries, chat_coverage = memory.read_unconsolidated_chat(
+                dialogue_meta, _chat_tail,
+            )
+        if chat_coverage_out is not None:
+            chat_coverage_out.update(chat_coverage)
+        chat_summary = memory.summarize_chat(
+            chat_entries, limit=_chat_tail,
+            include_room_labels=not _focused_project,
+            room_resolver=_room_resolver,
         )
-    if chat_entries or chat_coverage.get("gaps"):
-        generation_count = len(chat_coverage.get("generations") or [])
-        compact_gaps = [
-            {
-                key: gap[key]
-                for key in (
-                    "kind", "detail", "first_line_sha256", "offset", "error",
-                    "count", "omitted_bytes_at_least", "omitted_rows",
+        if chat_summary:
+            sections.append("## Recent chat\n\n" + chat_summary)
+        if retained_project_origins:
+            sections.append(
+                "## Project owner origins (retention-proof bindings)\n\n"
+                + memory.summarize_chat(
+                    retained_project_origins, limit=len(retained_project_origins),
                 )
-                if key in gap
+            )
+        if chat_entries or chat_coverage.get("gaps"):
+            generation_count = len(chat_coverage.get("generations") or [])
+            compact_gaps = [
+                {
+                    key: gap[key]
+                    for key in (
+                        "kind", "detail", "first_line_sha256", "offset", "error",
+                        "count", "omitted_bytes_at_least", "omitted_rows",
+                    )
+                    if key in gap
+                }
+                for gap in (chat_coverage.get("gaps") or [])
+                if isinstance(gap, dict)
+            ]
+            coverage_projection = {
+                "matched_rows": int(chat_coverage.get("matched_rows") or 0),
+                "shown_rows": int(chat_coverage.get("shown_rows") or 0),
+                "omitted_matching_rows": int(chat_coverage.get("omitted_matching_rows") or 0),
+                "omitted_matching_rows_unknown": bool(
+                    chat_coverage.get("omitted_matching_rows_unknown")
+                ),
+                "generation_count": generation_count,
+                "gaps": compact_gaps,
+                "reader": str(chat_coverage.get("reader") or "chat_history(count, offset, search)"),
             }
-            for gap in (chat_coverage.get("gaps") or [])
-            if isinstance(gap, dict)
-        ]
-        coverage_projection = {
-            "matched_rows": int(chat_coverage.get("matched_rows") or 0),
-            "shown_rows": int(chat_coverage.get("shown_rows") or 0),
-            "omitted_matching_rows": int(chat_coverage.get("omitted_matching_rows") or 0),
-            "omitted_matching_rows_unknown": bool(
-                chat_coverage.get("omitted_matching_rows_unknown")
-            ),
-            "generation_count": generation_count,
-            "gaps": compact_gaps,
-            "reader": str(chat_coverage.get("reader") or "chat_history(count, offset, search)"),
-        }
-        sections.append(
-            "## Recent chat coverage\n\n"
-            + json.dumps(coverage_projection, ensure_ascii=False, sort_keys=True, default=str)
-        )
+            sections.append(
+                "## Recent chat coverage\n\n"
+                + json.dumps(coverage_projection, ensure_ascii=False, sort_keys=True, default=str)
+            )
 
     # Each task reads ITS OWN newest rows through a bounded window (#131): a
     # global tail filtered afterwards handed every task whatever share of the
@@ -1147,6 +1149,7 @@ def _capture_context_core(
     task: Dict[str, Any],
     review_context_builder: Optional[Any],
     ctx: Any,
+    *, raw_memory_chars: Optional[int] = None,
 ) -> _ContextCore:
     """Read each context source once before producing route-specific views."""
     declared = task_input_sources(task) == "declared"
@@ -1197,6 +1200,15 @@ def _capture_context_core(
         else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
     )
     context_memory.ensure_files()
+    from ouroboros.chronicle_view import CHRONICLE_MARKER, capture_chronicle
+
+    chronicle_state_json = ""
+    chronicle_error = ""
+    try:
+        chronicle_state_json = capture_chronicle(context_memory, task, rendered_chars_budget=raw_memory_chars)
+    except (OSError, ValueError, TypeError) as exc:
+        chronicle_error = f"Memory projection unavailable ({type(exc).__name__}); legacy source view retained. {exc}"
+        log.warning("%s", chronicle_error)
     context_env = SimpleNamespace(
         repo_dir=env.repo_dir,
         drive_root=canonical_root,
@@ -1238,10 +1250,15 @@ def _capture_context_core(
             )
     except Exception:
         log.debug("Failed to build Available subagents catalog", exc_info=True)
-    semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable"))
-
-    semi_stable_parts.extend(build_knowledge_sections(context_env, project_id=resolve_project_id(task),
-                                                     include_pattern_body=not is_child))
+    memory_orientation = build_memory_sections(context_memory, partition="stable")
+    memory_orientation.extend(build_knowledge_sections(context_env, project_id=resolve_project_id(task),
+                                                       include_pattern_body=not is_child))
+    semi_stable_parts.extend(memory_orientation)
+    if chronicle_state_json:
+        snapshot = json.loads(chronicle_state_json)
+        snapshot["captured_at"] = captured_at
+        snapshot["shared_orientation"] = "\n\n".join(memory_orientation)
+        chronicle_state_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
 
     deep_review_path = context_env.drive_path("memory/deep_review.md")
     try:
@@ -1267,7 +1284,12 @@ def _capture_context_core(
     dynamic_parts = []
     if health_section:
         dynamic_parts.append(health_section)
-    dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile", include_scratchpad=not is_child))
+    dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile", include_scratchpad=not is_child,
+                                               include_dialogue=not bool(chronicle_state_json)))
+    if chronicle_state_json:
+        dynamic_parts.append(CHRONICLE_MARKER)
+    if chronicle_error:
+        dynamic_parts.append(chronicle_error)
 
     registry_digest = _build_registry_digest(context_env)
     if registry_digest:
@@ -1330,11 +1352,11 @@ def _capture_context_core(
     if is_child:
         dynamic_parts.append(
             "## Working sources\n\n"
-            "The shared biography is loaded above; your own recent process (progress, tools, events) "
-            "is loaded below. Your parent's selected discussion and working sources are in this "
-            "assignment's context. Other raw conversations, the global scratchpad and earlier task "
-            "reports are not preloaded: use chat_history, knowledge_read, get_task_result or ask "
-            "your parent for exact sources when useful."
+            "Shared life is compact above; the parent room has the finest fitting source view with explicit "
+            "coverage. Your own recent process is below and selected references remain in the assignment. "
+            "The global scratchpad and other rooms' raw details are not preloaded. Use memory_read, "
+            "chat_history, knowledge_read or get_task_result for exact sources; choose declared inputs "
+            "when an independent assignment needs only its named material."
         )
         # A child keeps its own process memory too (owner decision 2026-09-22):
         # its execution drive holds exactly its worker rows, progress is canonical.
@@ -1343,7 +1365,7 @@ def _capture_context_core(
     else:
         recent = build_recent_sections(
             context_memory, env, task_id=task.get("id", ""), thread_chat_id=int(task.get("chat_id") or 0),
-            project_id=_reflections_pid,
+            project_id=_reflections_pid, include_chat=not bool(chronicle_state_json),
         )
     dynamic_parts.extend(snapshot_labelled(section, captured_at) for section in recent)
     try:
@@ -1374,6 +1396,7 @@ def _capture_context_core(
         reference_books=tuple(books),
         reference_book_errors=tuple(book_errors),
         compact_reference_docs=is_child,
+        chronicle_state_json=chronicle_state_json,
     )
 
 
@@ -1396,14 +1419,25 @@ def build_context_fit_plan(
     ctx: Any = None,
 ) -> ContextFitPlan:
     """Compatibility wrapper over the cohesive context-fit implementation."""
-    core = _capture_context_core(env, memory, task, review_context_builder, ctx)
-    return _build_context_fit_plan(
-        env,
-        core,
-        task,
-        preferred_mode=str(preferred_mode or get_context_mode() or "max"),
-        route_resolver=_context_fit_route,
-    )
+    preferred = str(preferred_mode or get_context_mode() or "max")
+    from ouroboros.capability_evidence import is_known
+    from ouroboros.context_budget import OWNER_LOW_TARGET_TOKENS, OWNER_NANO_TARGET_TOKENS
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    child = str(task.get("delegation_role") or metadata.get("delegation_role") or "") == "subagent"
+    route_snapshot = None
+    try:
+        route_snapshot = _context_fit_route(task, allow_fetch=not child)
+    except Exception:
+        log.debug("Route unavailable before memory capture", exc_info=True)
+    window = (int(route_snapshot[1].window_tokens) if route_snapshot and
+              is_known(route_snapshot[1], require_fresh=True) else 0)
+    target = {"low": OWNER_LOW_TARGET_TOKENS, "nano": OWNER_NANO_TARGET_TOKENS}.get(preferred, window)
+    bound = min(window, target) if window and target else target
+    core = _capture_context_core(env, memory, task, review_context_builder, ctx,
+                                 raw_memory_chars=bound * 4 if bound else None)
+    return _build_context_fit_plan(env, core, task, preferred_mode=preferred,
+        route_resolver=(lambda *_a, **_kw: route_snapshot) if route_snapshot else _context_fit_route)
 
 
 def build_llm_messages(
@@ -1454,7 +1488,7 @@ def build_llm_messages(
                 return fits()
 
             maintenance = maintain_memory_pressure(working_memory, llm, maintenance_ctx, fits=rebuild_and_fit,
-                                                   current_topic=str(task.get("text") or ""))
+                                                   current_topic=str(task.get("text") or ""), include_chronicle=not bool(plan.chronicle_state_json))
             from ouroboros.utils import append_jsonl
 
             if not append_jsonl(canonical_root / "logs/events.jsonl", {

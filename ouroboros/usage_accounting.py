@@ -191,7 +191,6 @@ class BudgetExceeded(UsageAccountingError):
         self.limit_scope = str(limit_scope or "global")
         self.root_task_id = str(root_task_id or "")
 
-
 class DispatchFenced(BudgetExceeded):
     """Raised before dispatch while the task is entering an exact budget pause.
 
@@ -249,6 +248,7 @@ class PhysicalAttemptContext:
     capacity_total_tokens: Optional[int]
     context_target_miss: bool
     automatic_pass_used: bool
+    memory_view: Optional[Dict[str, Any]] = None
 @dataclass(frozen=True)
 class AttemptRequest:
     model: str

@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import _emit_live_log
 from ouroboros.utils import sanitize_tool_result_for_log
+from ouroboros.context_budget import extract_plain_text_from_content as _extract_plain_text_from_content  # noqa: F401 -- historical loop facade
 
 
 log = logging.getLogger("ouroboros.loop")
@@ -54,7 +55,9 @@ def _emit_checkpoint_event(
     data: Dict[str, Any],
 ) -> bool:
     """Emit a checkpoint; an explicit System row also projects to chat history."""
-    payload = {"type": "task_checkpoint", "task_id": task_id, **data}
+    payload = {**data, "type": "task_checkpoint", "task_id": task_id}
+    if not payload.get("checkpoint_kind") and data.get("type") not in (None, "task_checkpoint"):
+        payload["checkpoint_kind"] = data["type"]
     if event_queue is not None:
         _emit_live_log(event_queue, payload)
     elif drive_logs:
@@ -66,19 +69,6 @@ def _emit_checkpoint_event(
                 append_jsonl(drive_logs / "progress.jsonl", payload)
         except Exception:
             pass
-
-
-def _extract_plain_text_from_content(content: Any) -> str:
-    """Extract text from strings or multipart content for transcript sealing."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                parts.append(block.get("text", ""))
-        return "".join(parts)
-    return str(content) if content is not None else ""
 
 
 def _append_or_merge_user_message(

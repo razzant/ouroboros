@@ -547,6 +547,9 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
     """
     # Membership, not truthiness: a review asked for from the hidden partition
     # is answered there, not silently re-routed to the owner's main chat.
+    from ouroboros.task_finalization import host_operation_reply_kwargs
+
+    source_ref = (origin or {}).get("origin_message_ref")
     target_chat_id = notification_chat_route(chat_id, load_state().get("owner_chat_id"))
     if target_chat_id is None:
         return None
@@ -570,12 +573,14 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
             int(target_chat_id),
             f"Deep self-review could not be queued: {reason}.{hint}",
             role="system", system_type="deep_self_review_unavailable",
+            **host_operation_reply_kwargs(source_ref, "failed"),
         )
         return None
     persist_queue_snapshot(reason="deep_self_review_enqueued")
     # Typed SYSTEM row: an acknowledgement is never a task's answer, and the bench
     # trajectory reader takes the last UNTYPED outbound row as one.
-    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})", role="system", system_type="deep_self_review_queued")
+    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})",
+                     role="system", system_type="deep_self_review_queued", **host_operation_reply_kwargs(source_ref))
     return tid
 
 

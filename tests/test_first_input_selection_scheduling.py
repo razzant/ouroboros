@@ -190,19 +190,47 @@ def test_declared_parent_cannot_request_shared_descendant(registry):
     assert registry._ctx.pending_events == []
 
 
-def test_session_route_refused_before_child_or_attachment_side_effects(registry, monkeypatch):
-    import ouroboros.tools.control_scheduling as scheduling
+@pytest.mark.parametrize("selection", ["shared", "declared"])
+def test_session_selected_memory_survives_canonical_queue_and_source(registry, monkeypatch, selection):
+    from ouroboros.subagent_work_order import compile_external_work_order, work_order_source_projection
+    from ouroboros import chronicle_view
+    from supervisor import queue as task_queue
 
     monkeypatch.setattr(control, "load_settings", lambda: _settings("agent_session"))
-    monkeypatch.setattr(scheduling, "_prepare_child_drive",
-                        lambda *_args, **_kwargs: pytest.fail("drive prepared before route refusal"))
-    monkeypatch.setattr(scheduling, "_materialize_child_attachment_manifest",
-                        lambda *_args, **_kwargs: pytest.fail("attachments prepared before route refusal"))
-    result = _schedule(registry, input_sources="declared")
-    assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR"), result.text
-    assert result.meta["reason"] == "INPUT_SOURCE_SELECTION_UNSUPPORTED"
-    assert registry._ctx.pending_events == []
-    assert not (registry._ctx.drive_root / "task_results").exists()
+    reference = {"text": "SHARED_LIFE_AND_EXACT_PARENT", "facts": {"external_fit": "unobserved"}, "snapshot_sha256": "a" * 64}
+    calls = []
+    def capture(ctx, task=None):
+        calls.append(task)
+        return reference
+    monkeypatch.setattr(chronicle_view, "helper_memory_reference", capture)
+    result = _schedule(registry, input_sources=selection, context="EXPLICIT_EVIDENCE")
+    assert result.status == "ok", result.text
+    event = registry._ctx.pending_events[-1]
+    assert event["requested_executor"] == "harness"
+    saved = json.loads((registry._ctx.drive_root / "task_results" / f"{event['task_id']}.json").read_text(encoding="utf-8"))
+    task = build_scheduled_task_payload({**event, "tid": event["task_id"], "parent_id": "parent",
+                                        "task_context": event["context"], "desc": event["objective"]})
+    if selection == "shared":
+        assert len(calls) == 1
+        assert task["memory_reference"] == saved["memory_reference"] == reference
+    else:
+        assert calls == []
+        assert not saved.get("memory_reference") and not task.get("memory_reference")
+    rendered = compile_external_work_order(task)
+    assert rendered.count(reference["text"]) == (1 if selection == "shared" else 0)
+    assert "EXPLICIT_EVIDENCE" in rendered
+    if selection == "declared":
+        assert "PREVIOUS_CASE" not in rendered
+        assert "disabled_tools" in rendered
+    projection, reason = work_order_source_projection(task, 0, len(rendered))
+    assert not reason and projection["text"] == rendered
+    pending, running = [task], {}
+    task_queue.init(registry._ctx.drive_root)
+    task_queue.init_queue_refs(pending, running, {"value": 0})
+    assert task_queue.persist_queue_snapshot(reason="memory-reference")
+    pending.clear()
+    assert task_queue.restore_pending_from_snapshot() == 1
+    assert compile_external_work_order(pending[0]) == rendered
 
 
 def test_contract_selection_is_additive_strict_and_has_consistent_precedence():
@@ -237,3 +265,40 @@ def test_child_builder_cannot_drop_inherited_selection():
         _build_child_subagent_contract({
             "parent_contract": selected, "input_sources": "shared",
         })
+
+
+@pytest.mark.parametrize("selection", ["shared", "declared"])
+def test_scheduled_session_bootstrap_sends_canonical_selected_inputs_once(registry, monkeypatch, selection):
+    from ouroboros import chronicle_view, claudexor_daemon
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.subagent_bootstrap import bootstrap_before_context
+    from ouroboros.subagent_work_order import compile_external_work_order
+    from ouroboros.tools.registry import ToolContext
+    from tests._delegated_transport_shared import _LiveRunStub
+    settings = _settings("agent_session")
+    settings["OUROBOROS_SUBAGENTS"]["items"][0]["route"]["target_id"] = "some-route=ordinary-model"
+    monkeypatch.setattr(control, "load_settings", lambda: settings)
+    reference = {"text": "ONE_PARENT_MEMORY_COPY", "snapshot_sha256": "fixed", "facts": {}}
+    monkeypatch.setattr(chronicle_view, "helper_memory_reference", lambda *_a, **_kw: reference)
+    result = _schedule(registry, input_sources=selection, context="CHOSEN_CASE")
+    assert result.status == "ok", result.text
+    event = registry._ctx.pending_events[-1]
+    task = build_scheduled_task_payload({**event, "tid": event["task_id"], "parent_id": "parent",
+                                        "task_context": event["context"], "desc": event["objective"]})
+    requests = []
+    class Stub(_LiveRunStub):
+        def start_run(self, request, *, idempotency_key=""):
+            requests.append(request)
+            return super().start_run(request, idempotency_key=idempotency_key)
+    monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda: Stub())
+    monkeypatch.setattr(chronicle_view, "helper_memory_reference", lambda *_a, **_kw: pytest.fail("compiled work recaptured memory"))
+    child = ToolContext(repo_dir=registry._ctx.repo_dir, drive_root=registry._ctx.drive_root,
+        task_id=task["id"], task_metadata=task["metadata"], task_contract=task["task_contract"],
+        task_constraint=TaskConstraint(mode="local_readonly_subagent"))
+    wake = json.loads(bootstrap_before_context(child, task, SimpleNamespace(blocked=False)))
+    assert wake["status"] == "configured_session_started", wake
+    assert len(requests) == 1
+    assert requests[0]["prompt"] == compile_external_work_order(task)
+    assert json.dumps(requests[0]).count("ONE_PARENT_MEMORY_COPY") == (1 if selection == "shared" else 0)
+    assert "CHOSEN_CASE" in requests[0]["prompt"]
+    assert "disabled_tools" in requests[0]["prompt"]

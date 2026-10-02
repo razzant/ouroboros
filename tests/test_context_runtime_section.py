@@ -609,9 +609,9 @@ def test_captured_recent_and_drive_sections_carry_one_capture_label(tmp_path, mo
         encoding="utf-8")
     messages, _info = build_llm_messages(env=env, memory=memory, task={
         "id": "t-labels", "type": "task", "text": "hi", "_is_direct_chat": True, "chat_id": 1, "metadata": {}})
-    dynamic = messages[0]["content"][2]["text"]
+    dynamic = messages[0]["content"][-1]["text"]
     label = "_Snapshot captured at 2027-01-15T12:00:00+00:00 when this context was built; not refreshed during this run._"
-    assert "## Drive state\n" + label in dynamic and "## Recent chat coverage\n" + label in dynamic
+    assert "## Drive state\n" + label in dynamic and "## Recent chat\n" + label in dynamic
     assert '"context_captured_at": "2027-01-15T12:00:00+00:00"' in dynamic
     headings = [line for line in dynamic.splitlines() if line.startswith(("## Recent ", "## Drive state"))]
     assert headings and all(dynamic.split(heading + "\n", 1)[1].startswith(label) for heading in headings)

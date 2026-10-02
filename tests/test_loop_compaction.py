@@ -51,18 +51,9 @@ def _fit(
 
 
 def _plan(*, preferred="max"):
-    def reproject(messages, mode):
-        rebuilt = list(messages)
-        rebuilt[0] = {"role": "system", "content": f"{mode.upper()}_SYSTEM"}
-        return rebuilt
+    from tests.test_context_fit_v664 import _plan as fit_plan
 
-    return SimpleNamespace(
-        model="same-model",
-        route_fp="route-a",
-        preferred_mode=preferred,
-        core_sha256="a" * 64,
-        reproject_transcript=reproject,
-    )
+    return replace(fit_plan(preferred=preferred), model="same-model")
 
 
 def _ctx(tmp_path, *, preferred="max", mode="max"):
@@ -438,7 +429,7 @@ def test_predicted_reclaim_runs_once_then_sends_target_miss(tmp_path, monkeypatc
     assert context.accumulated_usage["_context_target_miss"] is True
 
 
-def test_actual_max_overflow_reprojects_and_retries_only_smaller_context(tmp_path, monkeypatch):
+def test_actual_max_overflow_defers_low_until_recovery_owner(tmp_path, monkeypatch):
     from ouroboros import loop
 
     context = _ctx(tmp_path)
@@ -449,7 +440,7 @@ def test_actual_max_overflow_reprojects_and_retries_only_smaller_context(tmp_pat
     ])
 
     def measure(ctx, **_kwargs):
-        disposition = next(fits)
+        disposition = next(fits, _fit(profile="task_local_low", mode="low", used=True))
         loop._remember_main_fit(ctx, disposition)
         return disposition
 
@@ -476,11 +467,15 @@ def test_actual_max_overflow_reprojects_and_retries_only_smaller_context(tmp_pat
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     msg, _cost, mode = loop._call_round_model(context)
+    assert msg is None and mode == "max"
+    from ouroboros.loop_memory import _recover_deferred_memory_refusal
+    recovered, msg, _cost = _recover_deferred_memory_refusal(context.tools)
+    mode = recovered.active_context_mode
     assert msg["content"] == "fits"
     assert sends == ["failed-main", "smaller-retry"]
     assert mode == "low"
-    assert context.messages[0]["content"] == "LOW_SYSTEM"
-    assert ("route-a", "exec:round:1") in context.tools._ctx._context_overflow_retries
+    assert recovered.messages[0]["content"] == "LOW_SYSTEM"
+    assert ("route-a", "exec:round:1") not in context.tools._ctx._context_overflow_retries
 
 
 def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch):
@@ -497,7 +492,7 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
     provider_sends = 0
 
     def measure(ctx, **_kwargs):
-        disposition = next(fits)
+        disposition = next(fits, _fit(profile="task_local_low", mode="low", used=True))
         loop._remember_main_fit(ctx, disposition)
         return disposition
 
@@ -521,8 +516,9 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **kw: events.append(kw or _a[-1]))
     msg, _cost, mode = loop._call_round_model(context)
-    assert msg is None
-    assert mode == "low"
+    assert msg is None and mode == "max"
+    from ouroboros.loop_memory import _recover_deferred_memory_refusal
+    assert _recover_deferred_memory_refusal(context.tools)[1] is None
     assert provider_sends == 1
     assert any(event.get("reason") == "context_candidate_not_strictly_smaller" for event in events)
 
@@ -617,7 +613,7 @@ def test_failed_main_capture_is_snapshotted_before_reclaim_attempt(tmp_path, mon
     """A receipted summarizer must not replace the failed Main comparison candidate."""
     from ouroboros import loop
 
-    context = _ctx(tmp_path)
+    context = _ctx(tmp_path, preferred="low", mode="low")
     fits = iter([
         _fit(),
         _fit(profile="task_local_low", mode="low"),
@@ -750,9 +746,192 @@ def test_overflow_retry_is_skipped_while_the_round_holds_an_unresolved_attempt(t
     assert ("route-a", "exec:round:1") not in context.tools._ctx._context_overflow_retries
     assert mode == "max"  # the retry was refused before any low re-projection
     rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines() if line.strip()]
-    skipped = [row for row in rows if row.get("type") == "context_overflow_retry_skipped"]
+    skipped = [row for row in rows if row.get("type") == "task_checkpoint"
+               and row.get("checkpoint_kind") == "context_overflow_retry_skipped"]
     assert [row["reason"] for row in skipped] == ["round_holds_unresolved_attempt"]
     api_errors = [row for row in rows if row.get("type") == "llm_api_error"]
     assert [(row["error_kind"], row["retry_same_request"]) for row in api_errors] == [
         ("provider_outcome_unknown", True), ("context_overflow", False),
     ]
+
+
+@pytest.fixture
+def real_main_reclaim(tmp_path, monkeypatch):
+    """Real Main/materializer boundary with only the paid actor and event sinks stubbed."""
+    from copy import deepcopy
+    from ouroboros import context_compaction as cc, loop
+    from tests.test_context_reclaim_materializer import _SPEC, _request, _unit
+
+    calls, events, accounted = [], [], []
+    monkeypatch.setattr(cc, "_summarizer_spec", lambda: dict(_SPEC))
+
+    def summarize(parts, **kwargs):
+        calls.extend(parts)
+        kwargs["usage_total"].update(cost=0.01, prompt_tokens=10, completion_tokens=5)
+        return {part.source_id: "The source was inspected; its original remains available." for part in parts}
+
+    monkeypatch.setattr(cc, "_call_summarizer", summarize)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _q, _t, _d, row: events.append(row))
+    monkeypatch.setattr(loop, "_account_compaction_usage", lambda usage, fact, *_args: accounted.append(fact))
+    old_source = _unit("old", "old evidence ")
+    compacted, receipt, _usage = cc.compact_tool_history_llm(
+        old_source, request=_request(old_source, 500), drive_root=tmp_path, task_id="seed-old",
+        exposed_units=cc.exposed_context_units(old_source, old_source),
+    )
+    assert receipt.status == "applied" and len(compacted) == 1
+    capsule = deepcopy(compacted[0])
+    assert cc._capsule_metadata(capsule)[1]["generation"] == 1
+    calls.clear()
+    context = _ctx(tmp_path, preferred="low", mode="low")
+    context.messages.extend([capsule, *_unit("new", "new evidence ")])
+    context.tools._ctx._last_context_observation = {
+        "exposed_units": cc.exposed_context_units(context.messages, context.messages),
+    }
+    return SimpleNamespace(context=context, capsule=deepcopy(capsule), calls=calls,
+                           events=events, accounted=accounted, root=tmp_path)
+
+
+def test_main_unreachable_reclaim_retains_capsule_without_paid_checkpoint(real_main_reclaim):
+    from copy import deepcopy
+    from ouroboros import context_compaction as cc, loop
+
+    run = real_main_reclaim
+    context = run.context
+    units = cc._atomic_units(context.messages)
+    raw_capacity = sum(unit.context_size_tokens for unit in units if unit.generation == 0)
+    capsule_capacity = sum(unit.context_size_tokens for unit in units if unit.generation > 0)
+    deficit = raw_capacity + max(1, capsule_capacity // 2)
+    before = deepcopy(context.messages)
+    before_files = {str(path) for path in run.root.rglob("*") if path.is_file()}
+    disposition = _fit(action="reclaim_once", profile="owner_low", mode="low",
+                       goal=deficit + 25000, target_deficit=deficit, capacity_deficit=0)
+
+    receipt = loop._run_main_reclaim(context, disposition)
+
+    assert receipt.status == "no_positive_reclaim"
+    assert receipt.fit["reason"] == "automatic_reclaim_unreachable"
+    assert receipt.fit["required_reclaim_tokens"] == deficit
+    assert receipt.fit["maximum_reclaim_tokens"] < deficit
+    assert receipt.fit["measurement_basis"] == "cold_estimate"
+    assert receipt.fit["measurement_density"] == 1.0
+    assert receipt.checkpoint_ref is None and receipt.capsule_refs == ()
+    assert run.calls == [] and run.accounted == []
+    assert context.messages[:len(before)] == before  # any appended host fact cannot rewrite residue
+    assert {str(path) for path in run.root.rglob("*") if path.is_file()} == before_files
+    assert run.events[-1]["reclaim_fit"] == receipt.fit
+    calls = len(run.events)
+    assert loop._run_main_reclaim(context, disposition) is None
+    assert len(run.events) == calls  # route/round fact is not repeated
+    context.round_idx = 2
+    next_round = replace(disposition, measurement=replace(disposition.measurement, round_id="exec:round:2"))
+    again = loop._run_main_reclaim(context, next_round)
+    assert again.status == "no_positive_reclaim" and not run.calls
+    notices = [message for message in context.messages if isinstance(message.get("content"), str)
+               and message["content"].startswith("[Context reclaim facts:")]
+    assert len(notices) == 1  # an unchanged impossible boundary does not grow the next prompt
+    assert len(run.events) == calls + 1  # the new round still has its own checkpoint facts
+
+
+def test_main_partial_margin_reclaim_uses_only_new_raw_and_keeps_old_capsule(real_main_reclaim):
+    from ouroboros import context_compaction as cc, loop
+
+    run = real_main_reclaim
+    context = run.context
+    raw = [unit for unit in cc._atomic_units(context.messages) if unit.generation == 0]
+    assert len(raw) == 1
+    deficit = max(1, raw[0].context_size_tokens // 4)
+    goal = raw[0].context_size_tokens + 25000
+    disposition = _fit(action="reclaim_once", profile="owner_low", mode="low",
+                       goal=goal, target_deficit=0, capacity_deficit=deficit)
+
+    receipt = loop._run_main_reclaim(context, disposition)
+
+    assert receipt.status == "applied" and receipt.checkpoint_ref
+    assert receipt.reclaimed_tokens >= deficit
+    assert receipt.goal_reached is False  # optional headroom cannot veto useful shrink
+    assert run.calls and run.accounted
+    assert {part.root_id for part in run.calls} == {raw[0].unit_id}
+    assert "new evidence" in "".join(part.text for part in run.calls)
+    assert "old evidence" not in "".join(part.text for part in run.calls)
+    assert context.messages[2] == run.capsule
+    assert cc._capsule_metadata(context.messages[2])[1]["generation"] == 1
+    assert cc._capsule_metadata(context.messages[3])[1]["generation"] == 1
+    assert run.events[-1]["reclaim_goal_tokens"] == goal
+    assert run.events[-1]["goal_reached"] is False
+
+
+def test_main_new_exposed_raw_after_unreachable_round_can_progress(real_main_reclaim):
+    from ouroboros import context_compaction as cc, loop
+    from tests.test_context_reclaim_materializer import _unit
+
+    run = real_main_reclaim
+    context = run.context
+    raw_capacity = sum(unit.context_size_tokens for unit in cc._atomic_units(context.messages) if not unit.generation)
+    old_unit_id = next(unit.unit_id for unit in cc._atomic_units(context.messages) if unit.generation)
+    deficit = raw_capacity + 1000
+    disposition = _fit(action="reclaim_once", profile="owner_low", mode="low",
+                       goal=deficit + 25000, target_deficit=deficit, capacity_deficit=0)
+    assert loop._run_main_reclaim(context, disposition).status == "no_positive_reclaim"
+    assert not run.calls
+    context.messages.extend(_unit("later", "later complete source " * 2))
+    context.tools._ctx._last_context_observation = {
+        "exposed_units": cc.exposed_context_units(context.messages, context.messages),
+    }
+    context.round_idx = 2
+    disposition = replace(disposition, measurement=replace(disposition.measurement, round_id="exec:round:2"))
+
+    receipt = loop._run_main_reclaim(context, disposition)
+
+    assert receipt.status == "applied" and receipt.reclaimed_tokens >= deficit
+    assert run.calls and context.messages[2] == run.capsule
+    assert all(part.root_id != old_unit_id for part in run.calls)
+    assert "later complete source" in "".join(part.text for part in run.calls)
+
+
+def test_main_real_overflow_without_predicted_deficit_allows_partial_shrink(real_main_reclaim):
+    from ouroboros import context_compaction as cc, loop
+
+    run = real_main_reclaim
+    context = run.context
+    raw_capacity = sum(unit.context_size_tokens for unit in cc._atomic_units(context.messages) if not unit.generation)
+    minimum_goal = raw_capacity + 25000
+    disposition = _fit(action="send", profile="owner_low", mode="low", goal=0,
+                       target_deficit=0, capacity_deficit=0)
+
+    receipt = loop._run_main_reclaim(context, disposition, minimum_goal_tokens=minimum_goal)
+
+    assert receipt.status == "applied" and receipt.reclaimed_tokens > 0
+    assert not receipt.goal_reached
+    assert context.messages[2] == run.capsule
+    assert run.calls and run.events[-1]["deficit_tokens"] == 0
+    assert run.events[-1]["reclaim_goal_tokens"] == minimum_goal
+
+
+def test_main_unexposed_new_raw_cannot_make_automatic_reclaim_reachable(real_main_reclaim):
+    from ouroboros import context_compaction as cc, loop
+
+    run = real_main_reclaim
+    context = run.context
+    only_old = context.messages[:3]
+    context.tools._ctx._last_context_observation = {
+        "exposed_units": cc.exposed_context_units(only_old, only_old),
+    }
+    receipt = loop._run_main_reclaim(context, _fit(action="reclaim_once", profile="owner_low",
+        mode="low", goal=1000, target_deficit=500, capacity_deficit=0))
+
+    assert receipt.status == "no_eligible"
+    assert not run.calls and not receipt.checkpoint_ref
+    assert context.messages[2] == run.capsule
+    assert context.messages[3]["tool_calls"][0]["id"] == "new"
+
+
+@pytest.mark.parametrize("physical", [0, 100, 1000000])
+def test_economic_target_cannot_veto_real_pressure_relief(real_main_reclaim, physical):
+    from ouroboros import loop
+    run = real_main_reclaim
+    fit = _fit(action="reclaim_once", profile="owner_low", mode="low",
+        goal=1000000, target_deficit=1000000, capacity_deficit=physical)
+    receipt = loop._run_main_reclaim(run.context, fit, minimum_goal_tokens=1000)
+    assert receipt.status == "applied" and receipt.reclaimed_tokens > 0
+    assert receipt.fit["required_reclaim_tokens"] == 0  # Actual refusal supplies no numeric deficit.
+    assert run.calls

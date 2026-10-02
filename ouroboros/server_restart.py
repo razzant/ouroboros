@@ -63,9 +63,9 @@ def _perform_owner_restart(ctx: Any, reply=None) -> tuple[bool, str]:
             # Say only what happened: with nothing owned the stop sentence
             # named a task that was never running.
             reply(
-                "Stopping active task. New settings apply to the next message."
-                if stopped_task_ids else "New settings apply to the next message.",
-                "",
+                "Stopping active task. Restart confirmed. New settings apply to the next message."
+                if stopped_task_ids else "Restart confirmed. New settings apply to the next message.",
+                "completed",
             )
     except Exception:
         log.warning("Failed to send owner restart stop notice; continuing restart", exc_info=True)

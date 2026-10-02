@@ -229,7 +229,8 @@ def test_openai_family_route_never_admits_a_compatible_server_serving_the_family
 # (b) the split does NOT apply: other families, undeclared and degenerate shapes
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("model,env", _OTHER_FAMILY_ROUTES, ids=[m for m, _ in _OTHER_FAMILY_ROUTES])
-def test_declared_system_prefix_is_left_whole_on_every_other_family(monkeypatch, model, env):
+@pytest.mark.parametrize("declared", [1, 2])
+def test_declared_system_prefix_is_left_whole_on_every_other_family(monkeypatch, model, env, declared):
     """Catches ``openai_family_route`` admitting too much: a predicate returning True for
     an Anthropic/Gemini OpenRouter id, direct DeepSeek or an OpenAI-compatible server
     would split these systems and stamp ``wire_layout``. Also catches the
@@ -237,7 +238,7 @@ def test_declared_system_prefix_is_left_whole_on_every_other_family(monkeypatch,
     client = LLMClient(api_key="unused")
     target = _target(monkeypatch, client, model, env)
     assert not openai_family_route(target), model
-    messages = _declared()
+    messages = _declared(declared=declared)
     before = copy.deepcopy(messages)
 
     kwargs = _build(client, target, messages)
@@ -402,8 +403,43 @@ def test_split_moves_only_non_empty_tail_blocks_and_honors_the_declared_count():
     two[0][STABLE_PREFIX_BLOCKS_KEY] = 2
     projected, moved = split_leading_system_prefix(two)
     assert moved == 1
-    assert [block["text"] for block in projected[0]["content"]] == [STABLE, MEMORY]
-    assert projected[1]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)
+    assert [message["role"] for message in projected[:2]] == ["system", "system"]
+    assert [_system_texts(message) for message in projected[:2]] == [[STABLE], [MEMORY]]
+    assert projected[2]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)
+
+
+@pytest.mark.parametrize("placement", SYSTEM_PREFIX_SPLIT_PLACEMENTS)
+def test_shared_prefix_items_preserve_roles_text_and_transcript(placement):
+    messages = _declared(declared=2, memory="Owner: wait.\r\nЯ помню 🐍\u2028source: exact")
+    before = copy.deepcopy(messages)
+    projected, moved = split_leading_system_prefix(messages, placement=placement)
+    assert messages == before and moved == 1
+    assert [message["role"] for message in projected[:2]] == ["system", "system"]
+    assert [message["content"][0] for message in projected[:2]] == before[0]["content"][:2]
+    expected_tail = ([before[1], {"role": "developer", "content":
+        _notice(HOST_CONTEXT_NOTICE_AFTER_TASK, EVIDENCE)}] if placement == "after_task" else
+        [{"role": "user", "content": _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)}, before[1]])
+    assert projected[2:] == expected_tail
+    assert split_leading_system_prefix(projected) == (projected, 0)
+    assert LLMClient._normalize_system_message_placement(projected) == projected
+
+
+@pytest.mark.parametrize("model,env", _OPENAI_FAMILY_ROUTES)
+def test_changed_shared_memory_keeps_a_complete_governance_item(monkeypatch, model, env):
+    client = LLMClient(api_key="unused")
+    payloads = []
+    for memory in ("Legacy source: owner rejected X.", "Helper digest: owner rejected X; Y remains open."):
+        messages = _declared(declared=2, memory=memory)
+        original = copy.deepcopy(messages)
+        wire = _build(client, _target(monkeypatch, client, model, env), messages)["messages"]
+        assert messages == original
+        assert [m["role"] for m in wire[:2]] == ["system", "system"]
+        assert _system_texts(wire[0]) == [STABLE] and _system_texts(wire[1]) == [memory]
+        assert wire[2]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)
+        payloads.append(wire)
+    assert payloads[0][0] == payloads[1][0]
+    assert payloads[0][1] != payloads[1][1]
+    assert payloads[0][2:] == payloads[1][2:]
 
 
 # ---------------------------------------------------------------------------

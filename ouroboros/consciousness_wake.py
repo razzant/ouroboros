@@ -2,14 +2,15 @@
 
 A wake-up is an ordinary Main turn nobody typed: ``prompts/CONSCIOUSNESS.md`` is its USER
 message (system prompt, memory and tools are Main's own, owner decision В15).
-``observe_wake`` captures what happened since the last ACCEPTED wake from two sources, with
-no count cut or category priority: positions in the append-only chat chain (owner and
+``observe_wake`` captures chat, task results and memory changes since the last ACCEPTED
+wake, with no count cut or category priority: positions in the append-only chat chain (owner and
 Presence-correspondent input by producer provenance, runner failures, and the chat rows that
 announce a transition) and, by identity, the transitions the task results themselves record —
 a task's terminal, a card's closed state, a late acceptance settlement — whether or not any
 chat row announced them (an orphan sweep, a lost ``task_done``, an expired card). The whole
 inventory of answerable owner cards follows. What the wake accepts is a chain position plus
-the transition identities of every observed task (``_transitions_since``), not the
+the transition identities of every observed task (``_transitions_since``) and the last
+observed immutable memory sequence. The boundary is not the
 alarm's finish time, so a fact written during a wake, or written late with an older stamp,
 reaches the next wake. ``bind_wake_observation`` stores the complete observation as an exact
 source under the registered wake; when the actual request cannot fit it, the context fit
@@ -351,6 +352,7 @@ _KIND_WORDS = {  # (one, many)
     "late_review": ("late review", "late reviews"), "task_error": ("task runner failure", "task runner failures"),
     "card_state": ("card closed unanswered", "cards closed unanswered"),
     "outstanding_card": ("outstanding card", "outstanding cards"),
+    "memory_change": ("memory change", "memory changes"),
 }
 
 
@@ -570,6 +572,12 @@ class WakeObservation:
         text = (f"chat log bytes {window.get('lower', 0)}–{window.get('upper', 0)} "
                 f"({str(window.get('basis') or '').replace('_', ' ')}); task results: "
                 f"{_TRANSITION_BASIS.get(str(window.get('transitions_basis') or ''), 'not read')}")
+        if memory := window.get("memory"):
+            text += f"; memory records: {memory.get('lower')}–{memory.get('upper', 'unknown')} ({memory['basis']})"
+            if memory["basis"] == "initial_baseline":
+                text += ("; first observed sequence, earlier changes not inventoried; baseline record: "
+                         f"memory_read(node_id={memory.get('last_record_id')}); inspect earlier room records with "
+                         f"memory_read(room_id=..., after_seq=0), through sequence {memory['upper']}")
         return text + (f"; gaps: {', '.join(self.gaps)}" if self.gaps else "")
 
     def full_text(self) -> str:
@@ -578,13 +586,17 @@ class WakeObservation:
         if self.events:
             lines.append(f"Observed since the last accepted wake ({self.composition()}; {self._coverage()}):")
             unannounced = False
+            memory_announced = False
             for kind, offset, line in self.events:
-                if offset is None and not unannounced:
+                if kind == "memory_change" and not memory_announced:
+                    memory_announced = True
+                    lines.append("Recorded in memory after the accepted sequence (source dates do not order publication):")
+                if offset is None and kind != "memory_change" and not unannounced:
                     unannounced = True
                     lines.append("Recorded in task results with no chat row in this window (by their own stamps):")
                 if kind != "direct_turn":
                     lines.append(line)
-        elif self.gaps:
+        elif self.gaps or self.window.get("memory"):
             lines.append(f"Observation coverage: {self._coverage()}")
         if self.outstanding:
             lines.append(f"Outstanding owner cards ({len(self.outstanding)}):")
@@ -602,7 +614,7 @@ class WakeObservation:
         lines.append(
             f"Source: {json.dumps(read, ensure_ascii=False, sort_keys=True)} — "
             f"{source.get('lines')} JSON lines (a header, then one event per line: chat-positioned in append "
-            f"order, then transitions no chat row announced; then outstanding cards), sha256 "
+            f"order, then transitions no chat row announced and memory changes; then outstanding cards), sha256 "
             f"{source.get('sha256')}. Read the ranges you need; this pointer is neither a summary nor a "
             "priority order.")
         return "\n" + "\n".join(lines)
@@ -650,6 +662,7 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
             inventory = stored["transitions"]
             if (header.get("kind") != "wake_observation" or header.get("captured_at") != accepted.get("captured_at")
                     or any(stored.get(key) != accepted.get(key) for key in _CHAT_BOUNDARY_KEYS)
+                    or stored.get("memory") != accepted.get("memory")
                     or inventory.get("version") != TRANSITIONS_VERSION
                     or not isinstance(inventory.get("inventory"), dict)
                     or any(not isinstance(keys, list) or not all(isinstance(key, str) for key in keys)
@@ -723,6 +736,13 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
                             key=lambda item: (item[1]["stamp"] is None, item[1]["stamp"] or 0.0, item[0])):
         kind, line = _transition_line(fact, results, rooms, root, now, projects)
         events.append((kind, None, line))
+    from ouroboros.memory_guidance import memory_wake_changes
+    memory_boundary = accepted.get("memory")
+    if not source_unreadable:
+        memory_events, memory_boundary, memory_window = memory_wake_changes(root, memory_boundary, gaps)
+        events.extend(memory_events)
+        if memory_window:
+            window["memory"] = memory_window
     cards = []
     for task_id, row in results.items():
         quizzes = row.get("owner_quiz") if isinstance(row.get("owner_quiz"), dict) else {}
@@ -733,7 +753,8 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
                     task_id, str(quiz_id), block, now=now, owner_wait=row.get("owner_wait"))))
     trigger, _trigger_task = _trigger_line(projects, reason, rows, now=now)
     chat_boundary = window.get("boundary") or {key: accepted[key] for key in _CHAT_BOUNDARY_KEYS if key in accepted}
-    state_to_accept = {**chat_boundary, **({"transitions": state} if isinstance(state, dict) else {})}
+    state_to_accept = {**chat_boundary, **({"transitions": state} if isinstance(state, dict) else {}),
+                       **({"memory": memory_boundary} if memory_boundary is not None else {})}
     return WakeObservation(
         trigger=trigger, events=tuple(events),
         outstanding=tuple(line for _stamp, line in sorted(cards, reverse=True)),
@@ -769,6 +790,8 @@ def bind_wake_observation(drive_root: Any, task: Dict[str, Any], observation: Wa
         facts.update(source=source, projection_text=render(observation.overview_text(source)))
         if observation.boundary is not None and (observation.boundary.get("transitions") or {}).get("version") == TRANSITIONS_VERSION:
             accepted = {key: observation.boundary[key] for key in _CHAT_BOUNDARY_KEYS if key in observation.boundary}
+            if "memory" in observation.boundary:
+                accepted["memory"] = observation.boundary["memory"]
             accepted.update(transitions={"version": TRANSITIONS_VERSION, "source_ref": source},
                             task_id=str(task["id"]), captured_at=observation.captured_at)
     except Exception as exc:

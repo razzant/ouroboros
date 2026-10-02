@@ -587,8 +587,11 @@ def _task_source_contract_valid(ref: Dict[str, Any]) -> bool:
     return bool(
         ref.get("root") == "artifact_store"
         and read.get("tool") == "read_file"
-        and arguments.get("root") == ref.get("root")
-        and str(arguments.get("path") or "") == path
+        and ((arguments.get("root") == ref.get("root")
+              and str(arguments.get("path") or "") == path)
+             or (arguments.get("root") == "runtime_data" and ref.get("task_id")
+                 and str(arguments.get("path") or "") ==
+                 f"task_results/artifacts/{ref['task_id']}/{path}"))
     )
 
 

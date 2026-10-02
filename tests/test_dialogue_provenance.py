@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from ouroboros.consolidator import _format_entries_for_block
+from ouroboros.chronicle_sources import format_source_row
 from ouroboros.dialogue_provenance import (
     dialogue_author,
     presence_provenance_from_task,
@@ -30,7 +30,7 @@ def test_presence_provenance_survives_recent_and_consolidated_rendering():
     expected = "Alex [provider=telegram; account=bot-1; conversation=room-1; thread=topic-1]"
     assert dialogue_author(_row()) == expected
     assert expected in Memory._format_chat_line(_row(), compact=False)
-    assert expected in _format_entries_for_block([_row()])
+    assert expected in format_source_row(_row())
 
 
 def _presence_task():

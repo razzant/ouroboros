@@ -19,25 +19,16 @@ from typing import Any, Dict, List
 from ouroboros.anthropic_native_custody import custody_private_key, scrub_native_custody
 from ouroboros.llm_attempt import _VALID_CACHE_TTLS
 from ouroboros.provider_models import normalize_model_identity
+from ouroboros.context_budget import HOST_CONTEXT_NOTICE_BEFORE_TASK, HOST_CONTEXT_NOTICE_AFTER_TASK
 
 # The Main context builder's declaration on its leading system message: how many leading
-# text blocks are byte-stable across conversations (governance). A provider whose prompt
-# cache treats the whole leading system section as one unit keeps only those blocks
-# there (``split_leading_system_prefix``). Host-only metadata: popped from every send copy.
+# text blocks are shared across conversations. Each gets its own system input item,
+# so a changed memory cover leaves governance independently reusable. Host-only
+# metadata: popped from every send copy (``split_leading_system_prefix``).
 STABLE_PREFIX_BLOCKS_KEY = "_stable_prefix_blocks"
 
 # Byte-stable provenance header of the projected host-context notice (no clocks, hashes
 # or ids: round N+1's send copy must remain a prefix extension of round N's).
-HOST_CONTEXT_NOTICE_BEFORE_TASK = (
-    "Host context for this turn: memory, knowledge index, runtime facts and recent "
-    "activity, rendered by the runtime as a continuation of the system prompt. Not "
-    "written by my human and not a message to answer; the message to act on follows next."
-)
-HOST_CONTEXT_NOTICE_AFTER_TASK = (
-    "Host context for this turn: memory, knowledge index, runtime facts and recent "
-    "activity, rendered by the runtime as a continuation of the system prompt. Not "
-    "written by my human and not a message to answer; the message to act on is the one above."
-)
 SYSTEM_PREFIX_SPLIT_PLACEMENTS = ("before_task", "after_task")
 
 
@@ -52,7 +43,7 @@ def split_leading_system_prefix(
     list of text blocks longer than the declared count, and no second system message
     leads the transcript; every other shape — string systems, undeclared multi-block
     review prompts, several leading system messages — comes back unchanged with ``0``.
-    The declared blocks stay the system message; the remaining non-empty text blocks
+    Each declared block stays in a separate system message; remaining non-empty blocks
     become ONE ``[SYSTEM NOTICE]`` message with a byte-stable provenance header: a user
     message right before the task (``before_task``) or a developer message right after
     the first user message (``after_task``). A pure function of the canonical messages
@@ -79,8 +70,11 @@ def split_leading_system_prefix(
     moved = [block["text"] for block in content[declared:] if block["text"].strip()]
     if not moved:
         return messages, 0
-    system = {key: copy.deepcopy(value) for key, value in leading.items() if key != STABLE_PREFIX_BLOCKS_KEY}
-    system["content"] = copy.deepcopy(content[:declared])
+    systems = []
+    for block in content[:declared]:
+        system = {key: copy.deepcopy(value) for key, value in leading.items() if key != STABLE_PREFIX_BLOCKS_KEY}
+        system["content"] = [copy.deepcopy(block)]
+        systems.append(system)
     rest = [copy.deepcopy(message) for message in messages[1:]]
     body = "\n\n".join(moved)
     if placement == "after_task":
@@ -89,9 +83,9 @@ def split_leading_system_prefix(
         if first_user is not None:
             notice = _MessageShapingMixin._content_with_system_notice_marker(HOST_CONTEXT_NOTICE_AFTER_TASK + "\n\n" + body)
             rest.insert(first_user + 1, {"role": "developer", "content": notice})
-            return [system, *rest], len(moved)
+            return [*systems, *rest], len(moved)
     notice = _MessageShapingMixin._content_with_system_notice_marker(HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\n" + body)
-    return [system, {"role": "user", "content": notice}, *rest], len(moved)
+    return [*systems, {"role": "user", "content": notice}, *rest], len(moved)
 
 
 def project_declared_system_prefix(target: Dict[str, Any], messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

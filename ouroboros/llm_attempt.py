@@ -409,6 +409,57 @@ def effort_request_facts(target: Dict[str, Any], payload: Dict[str, Any]) -> Dic
             "sent_source": "host_candidate", "reported": None, "report_source": None}
 
 
+def memory_view_measurement(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Measure only marked host memory in this final candidate, never a tool's quotation."""
+    from ouroboros.context_budget import (
+        MEMORY_BEGIN, MEMORY_END, MEMORY_FACTS_PREFIX, HOST_CONTEXT_NOTICE_BEFORE_TASK, HOST_CONTEXT_NOTICE_AFTER_TASK)
+    from ouroboros.utils import estimate_tokens
+
+    contents = [payload[key] for key in ("system", "instructions") if key in payload]
+    turns = payload.get("messages") or payload.get("input")
+    for message in turns if isinstance(turns, list) else ():
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content", "")
+        prefix = content if isinstance(content, str) else "".join(
+            str(block.get("text", "")) for block in content if isinstance(block, dict)) if isinstance(content, list) else ""
+        if message.get("role") in {"system", "developer"} or (
+            message.get("role") == "user" and any(prefix.startswith("[SYSTEM NOTICE]\n" + header)
+                for header in (HOST_CONTEXT_NOTICE_BEFORE_TASK, HOST_CONTEXT_NOTICE_AFTER_TASK))):
+            contents.append(content)
+    sections, facts, ambiguous = [], [], False
+    for content in contents:
+        texts = [content] if isinstance(content, str) else [block.get("text", "")
+            for block in content if isinstance(block, dict)] if isinstance(content, list) else []
+        for text in texts:
+            if not isinstance(text, str):
+                continue
+            rest = text
+            while MEMORY_BEGIN in rest:
+                before, _, tail = rest.partition(MEMORY_BEGIN)
+                body, end, rest = tail.partition(MEMORY_END)
+                if not end or MEMORY_BEGIN in body or MEMORY_END in before:
+                    ambiguous = True
+                    break
+                sections.append(body)
+                if rest.startswith(MEMORY_FACTS_PREFIX):
+                    try:
+                        fact, _ = json.JSONDecoder().raw_decode(rest[len(MEMORY_FACTS_PREFIX):])
+                        if isinstance(fact, dict):
+                            facts.append(fact)
+                    except (ValueError, TypeError):
+                        pass  # Exact body bytes remain measurable without projection metadata.
+            ambiguous = ambiguous or MEMORY_END in rest
+    if ambiguous or not sections:
+        return {"status": "ambiguous" if ambiguous else "unobserved", "chars": None, "utf8_bytes": None,
+                "estimated_tokens": None, "projection_target_miss": None, "basis": "host_physical_candidate"}
+    return {"status": "observed", "chars": sum(len(text) for text in sections),
+            "utf8_bytes": sum(len(text.encode("utf-8")) for text in sections),
+            "estimated_tokens": sum(estimate_tokens(text) for text in sections),
+            "token_estimate_basis": "chars_div_4", "sections": len(sections), "basis": "host_physical_candidate",
+            "projection_target_miss": any(fact.get("target_miss") is True for fact in facts) if facts else None}
+
+
 def _attempt_request(
     target: Dict[str, Any],
     payload: Dict[str, Any],
@@ -450,6 +501,10 @@ def _attempt_request(
     clock_note, clock_free = split_clock_note(payload)
     raw_sha256 = hashlib.sha256(raw).hexdigest()
     record_candidate(raw_sha256, clock_note)
+    from dataclasses import replace
+    physical_context = current_physical_attempt_context()
+    if physical_context is not None:
+        physical_context = replace(physical_context, memory_view=memory_view_measurement(payload))
     return AttemptRequest(
         model=str(target.get("usage_model") or target.get("resolved_model") or payload.get("model") or ""),
         provider=str(target.get("provider") or "unknown"),
@@ -462,7 +517,7 @@ def _attempt_request(
         candidate_context_sha256=hashlib.sha256(context).hexdigest(),
         candidate_context_size_bytes=len(context),
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=current_physical_attempt_context(),
+        physical_context=physical_context,
         route_is_loopback=is_loopback_base_url(target.get("base_url")),
         prompt_tokens_bounded_estimate=bounded_tokens,
         processing_preference=str(target.get("processing_preference") or ""),
@@ -744,7 +799,7 @@ class _PayloadCachePolicyMixin:
         must precede a shorter one — 5m tools before 1h system is a hard 400) and never
         creates a marker on an earlier segment; a bare marker is the provider default and
         ranks as 5m; the ONLY marker it ever adds is on the last tool schema, and only when
-        the tools segment carries none (unconditional on this family in both deleted sites —
+        the tools segment carries none and a breakpoint remains available (
         a tool-free payload therefore stays uncached HERE, and system/messages never gain a
         marker they did not declare; a tool-free lane is cached only by DECLARING its stable
         prefix at the caller, as the review surfaces and the safety supervisor do via
@@ -777,7 +832,8 @@ class _PayloadCachePolicyMixin:
         note: Optional[Dict[str, Any]] = None
         if _route_normalizes_cache_breakpoints(target):
             tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
-            if not any(isinstance(t, dict) and isinstance(t.get("cache_control"), dict) for t in tools):
+            if len(breakpoints) < self._MAX_CACHE_BREAKPOINTS and not any(
+                    isinstance(t, dict) and isinstance(t.get("cache_control"), dict) for t in tools):
                 for tool in reversed(tools):
                     # Schema entries only — skips an appended openrouter:web_search tool.
                     if isinstance(tool, dict) and (

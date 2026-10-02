@@ -384,7 +384,7 @@ def test_owner_restart_copy_is_explicit_about_stopped_task(tmp_path, monkeypatch
     from ouroboros import server_restart
 
     source = _read("ouroboros/server_restart.py")
-    assert "Stopping active task. New settings apply to the next message." in source
+    assert "Stopping active task. Restart confirmed. New settings apply to the next message." in source
     assert "owner_restart_no_resume.flag" in source
     assert "owner_restart_no_resume" in source
     assert "panic_stop.flag" in source
@@ -415,7 +415,7 @@ def test_owner_restart_copy_is_explicit_about_stopped_task(tmp_path, monkeypatch
 
     def notice(text, _suffix):
         assert calls == ["checked", "stopped"]
-        assert text == "Stopping active task. New settings apply to the next message."
+        assert text == "Stopping active task. Restart confirmed. New settings apply to the next message."
         calls.append("notice")
 
     monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
@@ -523,7 +523,7 @@ def test_owner_restart_proceeds_when_worker_shutdown_fails(tmp_path, monkeypatch
 
     assert (tmp_path / "state" / "owner_restart_no_resume.flag").exists()
     assert (tmp_path / "state" / "panic_stop.flag").exists()
-    assert "New settings apply to the next message." in messages
+    assert "Restart confirmed. New settings apply to the next message." in messages
     assert not any("Stopping active task" in text for text in messages)
     assert not any("cancelled" in text or "deferred" in text for text in messages)
     assert exits == [True]

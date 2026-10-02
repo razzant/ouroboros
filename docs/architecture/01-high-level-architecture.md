@@ -120,6 +120,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── acceptance_history.py, owner_source.py, acceptance_late.py ← Frozen answer debt, cap and owner authority; historical review operation/settlement (§6 Task acceptance)
       ├── loop_acceptance.py, loop_acceptance_review.py, acceptance_preparation.py, acceptance_retrieving.py ← Acceptance machinery (external names re-exported from `loop`): fence/obligations (`ACCEPTANCE_DECISION_REASONS`, sole decision writer `_set_acceptance_decision`); HOST packet/panel (`_execute_task_acceptance_panel`), `acceptance_dialogue_history`, paid identity/free replay `_refuse_identical_acceptance`; retrieving source/first-send fit; local pre-binding incident, material identity, one-use source-bound retry, informed author finish/stop and card/decision projections (§6 Task acceptance)
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
+      ├── loop_memory.py       ← Published-memory fitting and source-bound repair after real refusals (§6)
       ├── transcript_prefix.py ← Append-only transcript invariant between the sends of one loop execution: `unsent_in_previous_send` allows tail merging only when the last observed send proves that row absent; without that knowledge producers append a new row; content digests cover role, plain text and tool-call identity (not cache markers or block shape), and a break is the `prompt_prefix_break` checkpoint fact (`kind` = system_rewritten | tail_replaced | rewritten | shrunk, plus `sanctioned_by` stamped through `sanction_rewrite`; a context-fit reprojection after a real overflow is an ordinary break). It RECORDS, never blocks — OpenAI-family caches reuse a request only when it is a byte-prefix of the next, so a transient tail or an in-place rewrite discards the whole conversation cache (§6 Task lifecycle)
       ├── loop_transport.py    ← Transport-outage wait episodes and provider-failure terminal text; bounded backoff with free redial (§6 Context fitting, retry, and compaction)
       ├── loop_delivery.py ← Delivery candidates and the delivery-control protocol: the candidate with inherited host-control provenance, the control prompt and parsers, child-result dispositions, acceptance bindings, candidate publish/replace/degrade, the no-tool final (§6 Task lifecycle)
@@ -195,13 +196,15 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── consciousness_wake.py ← Complete wake USER input and wake_task_metadata authority envelope; physical chat cursor plus transition inventory; exact pageable source when actual capacity requires it (§6)
       ├── consciousness_authority.py ← The three autonomy levels of a wake (observe/act/full) and their consequences — `disabled_tools`, bound at dispatch only so the prompt prefix matches an owner turn's, `runtime_mode_cap=light` below Full, and Observe's argument-level narrowing of the mutating names it keeps (§6 Background consciousness and Evolution)
       ├── consciousness_allowance.py ← Rolling-24h consciousness spend read off the usage ledger; typed `allowance_unknown` on a read failure; read by the alarm and the single admission door in `supervisor/queue.py`
-      ├── room_consolidation.py ← Per-room Light draft/correction and deterministic assembly; no cross-room LLM recombine (§6)
-      ├── consolidator.py      ← Generation cursor, explicit `[MEMORY GAP]`, and knowledge nomination outcomes in `dialogue_meta.json` (§6)
+      ├── room_consolidation.py ← Per-room helper episodes, attributed corrections/digests and nomination custody (§6)
+      ├── consolidator.py      ← Generation capture, Light transport and scratchpad maintenance; activates the chronicle before dialogue writes (§6)
       ├── memory_nomination_receipts.py ← Source-addressed pending nominations; no cross-batch retirement (§6)
+      ├── chronicle_store.py, chronicle_import.py, chronicle_sources.py ← Append-only memory, deterministic import, rebuildable SQLite index and source reads (§6)
+      ├── chronicle_view.py, memory_guidance.py ← Frozen adaptive biography views and the revisable remembering note (§6)
       ├── memory.py            ← Scratchpad, identity, chat history
-      ├── knowledge.py         ← `ouroboros/knowledge.py`: linked-Markdown note addressing, exact source reads, generated shelf indexes for global and project knowledge, and revision-checked writes, so concurrent cognition cannot silently overwrite a newer note (§6 Durable memory and project focus)
+      ├── knowledge.py         ← Global/project Markdown sources, revision-checked anchored writes and shelf indexes (§6)
       ├── memory_journal_compaction.py ← Startup read-only size facts (`memory_journal_observation`); new history stays complete, old digests unrecoverable
-      ├── project_facts.py     ← project_id resolution (explicit `--project-id` or workspace-path hash); Unicode names for NEW folders; per-project knowledge dir `projects/<id>/knowledge` isolated from `memory/knowledge`; journal/workpad helpers
+      ├── project_facts.py     ← Explicit/path-derived project identity, Unicode names, project knowledge/journal/workpad paths (§6)
       ├── task_tree_ledger.py  ← Append-only `data/task_trees/<root>/blackboard.jsonl`: EPHEMERAL typed swarm coordination (`tree_note`/`tree_read`), mirrored into the durable project journal at root completion; pruned on root terminal
       ├── projects_registry.py, project_admission.py ← 80-char names; active|deleting|tombstoned; optional folder; delete keeps bindings/history/folder/memory; tombstones never recreate or prune; strict admission/workspace claims (§6 Project registry and lease)
       ├── project_handoff.py   ← The Main transfer receipt (`project_handoff` row) owed through the terminal outbox after a durable bind: `handoff_identity` (ingress message + Project), the typed `RECEIPT_STATES` answer — never a boolean — and no Main default for a binding without a recorded Main origin (§3 Project handoff receipts)
@@ -211,8 +214,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── context_input_selection.py ← Optional declared-source API-child composition and validation; ordinary shared continuity stays default (§6 Selected first-input sources)
       ├── main_context_authority.py ← Deep-copies the context authority; replaces only oversized raw result strings with source-resolvable narrative or a typed gap
       ├── client_surface.py    ← Closed-key bounded client-surface normalizer; surface identity excludes viewport/narrow_layout (§4 WebSocket protocol)
-      ├── context_fit.py       ← Deterministic Max/Low/Nano context projections from one immutable core with labelled measurement + typed reclaim deficit; owns the ONE message-side transcript cache seal; no routing/retry/global-mode authority (§6 Context fitting, retry, and compaction)
-      ├── context_budget.py    ← Context budget vocabulary + typed reclaim SSOT (owner-Low 200K economy target, Nano bounded horizon); `estimate_message_chars` (images at `IMAGE_BLOCK_CHAR_EQUIVALENT`), the basis of the local compaction proxy
+      ├── context_fit.py       ← Frozen-source Max/Low/Nano views, route sizing/rebind and typed reclaim; transcript cache seal (§6)
+      ├── context_budget.py    ← Agent budget/reclaim SSOT: Low 250K, Nano 85K total targets; bounded image proxy (§6)
       ├── context_mode_compat.py ← One-window compatibility shim for the retired persistent context auto-Low state
       ├── capability_evidence.py ← Sourced capability and token-density evidence in `data/state/capability_evidence.json`; windows size sends and grant no review authority. `observe_token_density` records measured witnesses; `cold_start_density_probe` supplies one bounded exact-model witness when the triad packet cannot fit a cold route (§6 Prompt size, density and windows)
       ├── context_layout.py    ← Doc-layout SSOT: tier-0 always full; `book_navigation` is the compact view of a reference book (authored introductions + heading index with ranges into the PHYSICAL chapter file); ARCHITECTURE composed in Max, navigated in Low/Nano; reduction by relocation with a visible pointer, never silent truncation (§6 Context fitting, retry, and compaction)
@@ -442,10 +445,10 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── browser.py       ← Playwright browser tools with per-ToolContext lifecycle and thread affinity (§6 MCP and browser-facing external tools)
       │   ├── vision.py        ← Vision LLM tools for browser screenshots and uploaded images
       │   ├── vision_process.py ← Tracked vision-child IPC: validated model/physical-attempt receipts, result recovery and parent-owned cancellation
-      │   ├── knowledge.py     ← Persistent topic-based knowledge files with an auto-maintained index
+      │   ├── knowledge.py, chronicle.py ← Knowledge tools plus authored episodes, source/revision reads and freeform marks (§6)
       │   ├── memory_tools.py  ← Memory registry tools for tracking data sources, gaps, and trust
       │   ├── health.py        ← Codebase health tool: complexity metrics and self-assessment
-      │   ├── compact_context.py ← LLM-requested tool-history compaction trigger; stores the pending request for the next round
+      │   ├── compact_context.py ← Physical-source observation, inspect/restore handles and pending working-view requests (§6)
       │   ├── control.py       ← Control tools: restart, timeout settings, scheduling, review, chat history and model switching; publishes the strict `subagent_id`+objective `schedule_subagent` contract and the compact `wait_task` projections (§6 Delegated subagents)
       │   ├── control_delegation.py ← Delegation-budget and in-task project-scoping affordances (`ensure_project_scope` handler; §6 In-task project scoping)
       │   ├── control_events.py, control_routing.py, control_runtime.py, control_scheduling.py, control_subagent_spec.py, control_task_results.py ← The control tools' leaves: emitting one control event and waiting for its durable handler outcome; routing real work out of a conversation lane into a supervised task; runtime self-control (restart, promotion, evolution, memory, model); scheduling one live subagent; the published `schedule_subagent` parameter surface and its validation; absorbing a child — reading one result or waiting on a batch
@@ -684,8 +687,11 @@ Bundled resources use the CLI / Headless Boundary lookup order rather than assum
 │   ├── memory/
 │   │   ├── identity.md            ← durable identity
 │   │   ├── scratchpad.md          ← auto-generated from scratchpad_blocks.json (rendered newest-first; FIFO eviction of the oldest blocks until BOTH the 10-block count cap and the SCRATCHPAD_MAX_CONTENT_CHARS content cap hold)
-│   │   ├── dialogue_blocks.json   ← consolidated dialogue memory blocks (dialogue_summary.md remains a read-only legacy fallback when present)
-│   │   ├── dialogue_meta.json     ← consolidation cursor/metadata for the dialogue blocks
+│   │   ├── dialogue_blocks.json   ← legacy biography; frozen after chronicle activation
+│   │   ├── dialogue_meta.json     ← legacy cursor/debt; frozen after activation
+│   │   ├── chronicle/            ← .publication.lock serializes publication/projection
+│   │   │   ├── records.jsonl      ← authoritative append-only transactions
+│   │   │   └── index.sqlite3      ← rebuildable query index
 │   │   ├── WORLD.md               ← host profile generated on first run
 │   │   ├── knowledge/             ← topic files + auto-maintained index; patterns.md (Pattern Register), improvement-backlog.md (backlog SSOT), *_journal.jsonl + *history.jsonl provenance
 │   │   ├── deep_review.md         ← written by the deep-self-review task

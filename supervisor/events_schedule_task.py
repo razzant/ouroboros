@@ -219,6 +219,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     subagent_envelope = evt.get("subagent_envelope") if isinstance(evt.get("subagent_envelope"), dict) else {}
     configured_subagent = evt.get("configured_subagent") if isinstance(evt.get("configured_subagent"), dict) else {}
     parent_cognitive_route = evt.get("parent_cognitive_route") if isinstance(evt.get("parent_cognitive_route"), dict) else {}
+    memory_reference = evt.get("memory_reference") if isinstance(evt.get("memory_reference"), dict) else {}
     task_constraint = evt.get("task_constraint") if isinstance(evt.get("task_constraint"), dict) else None
     required_capabilities = [
         str(item or "").strip().lower()
@@ -326,7 +327,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         "task_group": task_group,
         "subagent_envelope": subagent_envelope,
         "configured_subagent": configured_subagent,
-        "parent_cognitive_route": parent_cognitive_route,
+        "parent_cognitive_route": parent_cognitive_route, "memory_reference": memory_reference,
     }
     if delegation_role == "subagent":
         parent_budget = _events()._parent_delegation_budget(
@@ -576,7 +577,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "task_group": task_group,
             "subagent_envelope": subagent_envelope,
             "configured_subagent": configured_subagent,
-            "parent_cognitive_route": parent_cognitive_route,
+            "parent_cognitive_route": parent_cognitive_route, "memory_reference": memory_reference,
             "parent_id": parent_id,
             "origin_metadata": evt.get("origin_metadata"),
             **({"presence_binding_authority": evt["presence_binding_authority"]}

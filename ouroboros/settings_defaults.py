@@ -246,8 +246,8 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # Runtime mode: light | advanced | pro; pro still requires review gates.
     "OUROBOROS_RUNTIME_MODE": "advanced",
     # Context mode: nano | low | max. Owner-only working-context size profile. max = full always-on docs +
-    # current memory granularity; low = ARCHITECTURE as a navigation map + deeper memory consolidation,
-    # sized for ~200k / local models. Cognitive-horizon knob (BIBLE P1): the agent cannot lower it
+    # current memory granularity; low = ARCHITECTURE as a navigation map + a 250k soft total target;
+    # nano targets 85k. All modes preserve the memory horizon at a fitting published resolution. Cognitive-horizon knob (BIBLE P1): the agent cannot lower it
     # (owner-only), and it never changes model / reasoning-effort / output-token budgets.
     "OUROBOROS_CONTEXT_MODE": "max",
     # One-window compatibility tombstone for the retired persistent auto-Low mechanism.

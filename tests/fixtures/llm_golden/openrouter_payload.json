@@ -2969,9 +2969,9 @@
             "prompt_cache_ttl": "1h",
             "cost_final": true,
             "prompt_cache_breakpoints_reduced": {
-              "declared": 6,
+              "declared": 5,
               "kept": 4,
-              "dropped": 2
+              "dropped": 1
             },
             "request_wire": {
               "requested_effort": "medium",
@@ -2986,7 +2986,7 @@
               "reason_code": "requested_wire_form",
               "source_profile_fingerprint": "5123c189414df91b972f8d20078a251c6b26563d52feb572364a70836d591302",
               "accepted_profile_fingerprint": "5123c189414df91b972f8d20078a251c6b26563d52feb572364a70836d591302",
-              "candidate_sha256": "a37d8eb2c30f67ed9d5185ce8da8bd78785e76aa72832ad4f71416d0aabc7743",
+              "candidate_sha256": "405c9475c8198e3b05aa644766398a06223d85c47ec287897fbb0cbb8c83317e",
               "ladder_ordinal": 1,
               "applied_actions": [],
               "task_local": false,
@@ -3058,6 +3058,10 @@
                 {
                   "content": [
                     {
+                      "cache_control": {
+                        "ttl": "1h",
+                        "type": "ephemeral"
+                      },
                       "text": "a1",
                       "type": "text"
                     }
@@ -3077,10 +3081,6 @@
               "model": "anthropic/claude-sonnet-4.6",
               "tools": [
                 {
-                  "cache_control": {
-                    "ttl": "1h",
-                    "type": "ephemeral"
-                  },
                   "function": {
                     "description": "read",
                     "name": "read_file",
@@ -3098,7 +3098,7 @@
                 }
               ]
             },
-            "payload_sha256": "a37d8eb2c30f67ed9d5185ce8da8bd78785e76aa72832ad4f71416d0aabc7743"
+            "payload_sha256": "405c9475c8198e3b05aa644766398a06223d85c47ec287897fbb0cbb8c83317e"
           }
         ],
         "physical_attempts": [
@@ -3106,7 +3106,7 @@
             "source": "llm.chat",
             "model": "anthropic/claude-sonnet-4.6",
             "provider": "openrouter",
-            "candidate_raw_sha256": "a37d8eb2c30f67ed9d5185ce8da8bd78785e76aa72832ad4f71416d0aabc7743",
+            "candidate_raw_sha256": "405c9475c8198e3b05aa644766398a06223d85c47ec287897fbb0cbb8c83317e",
             "candidate_raw_size_bytes": 885,
             "candidate_measurement_kind": "canonical_json_v1",
             "states": [

@@ -16,6 +16,7 @@ OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
 # ouroboros/presence_authority.py::build_presence_capability_ceiling.
 COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
+    "chronicle_write", "memory_read", "memory_mark",
     "update_scratchpad", "update_identity", "chat_history",
 })
 
@@ -89,7 +90,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "switch_model",
     "read_file", "list_files", "search_code", "query_code",
     "vcs_status", "vcs_diff",
-    "knowledge_read", "knowledge_list",
+    "knowledge_read", "knowledge_list", "memory_read",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "await_messages",
     "escalate",
@@ -152,7 +153,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "forward_to_worker", "peek_task", "cancel_task", "discard_child_result",
     "resume_child_task",
     "verify_and_record",
-    "knowledge_read", "knowledge_list",
+    "knowledge_read", "knowledge_list", "memory_read",
     "tree_note", "tree_read", "override_delegation_constraint",
     # Same nanny verbs, same host-derived profile — an acting child hosts a
     # workspace_write session confined to a private snapshot of its own write
@@ -206,6 +207,7 @@ STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
 
 # Full outputs are semantic (review verdicts, advisory findings, status).
 UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
+    "memory_read", "chronicle_write", "memory_mark",
     "commit_reviewed",
     "vcs_commit_reviewed",
     "plan_task",

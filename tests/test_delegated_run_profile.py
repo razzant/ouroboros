@@ -145,13 +145,15 @@ def test_the_model_has_no_argument_that_could_widen_the_profile():
     # `continue_from` names this task's OWN settled run (custody-checked, same
     # executor and authority, #1196); root/bucket/skill_name are a SELECTOR
     # resolved through the same ResolvedResourceBinding authorizer as ordinary
-    # writes (R1 item 9).
+    # writes (R1 item 9). input_sources selects inherited reference material,
+    # never access or authority; declared cannot widen an inherited narrow input.
     assert properties == {
         "prompt", "subagent_id", "max_seconds", "retry_of", "continue_from", "root", "bucket",
-        "skill_name", "directory_strategy", "scope_paths", "access",
+        "skill_name", "directory_strategy", "scope_paths", "access", "input_sources",
     }
     assert entry.schema["parameters"]["properties"]["root"]["enum"] == ["active_workspace", "skill_payload"]
     assert entry.schema["parameters"]["properties"]["access"]["enum"] == ["readonly", "workspace_write"]
+    assert entry.schema["parameters"]["properties"]["input_sources"]["enum"] == ["shared", "declared"]
     assert not properties & {"mode", "isolation", "scope", "write_surface", "cwd"}
 
 
