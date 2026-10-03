@@ -17,6 +17,20 @@ from ouroboros.gateway.schema import (
     validate_ingress,
 )
 
+# The contracts' own TypedDict flavour: typing on 3.11+ (3.11 keeps no
+# __orig_bases__ on a TypedDict subclass), typing_extensions on 3.10.
+from ouroboros.gateway.contracts import NotRequired, Required, TypedDict
+
+
+class _InheritedBase(TypedDict):
+    needed: str
+    optional: NotRequired[str]
+
+
+class _InheritedRequest(_InheritedBase, total=False):
+    extra: str
+    pinned: Required[int]
+
 
 class TestDerivation:
     def test_chat_inbound_schema_shape(self):
@@ -43,6 +57,13 @@ class TestDerivation:
         executor = schema["properties"]["executor_ref"]
         assert executor["type"] == "object"
         assert executor["required"] == ["type"]
+
+    def test_requiredness_follows_the_declaring_class_and_qualifiers(self):
+        schema = json_schema_for(_InheritedRequest)
+        assert schema["required"] == ["needed", "pinned"]
+        assert validate_ingress({"needed": "x"}, _InheritedRequest) == ["pinned is required"]
+        assert validate_ingress({"pinned": 1}, _InheritedRequest) == ["needed is required"]
+        assert validate_ingress({"needed": "x", "pinned": 1}, _InheritedRequest) == []
 
     def test_optional_none_maps_to_anyof_null(self):
         from ouroboros.gateway.contracts import ChatOutbound
