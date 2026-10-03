@@ -1128,6 +1128,7 @@ def _finish_captured_running(
     """
     q = _queue_module()
     from supervisor.worker_pool_lifecycle import kill_worker_tree
+    from ouroboros.mcp_task_sessions import settle_dead_task
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
 
     task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
@@ -1161,6 +1162,8 @@ def _finish_captured_running(
         _release_intent_claim(q, task_id, error="worker survived kill escalation", intent=intent)
         return CANCEL_FAILED
 
+    # Its death revoked every bridge call; close what the bridges left behind.
+    settle_dead_task(q.DRIVE_ROOT, task_id)
     _reconcile_dead_review_owner(q.DRIVE_ROOT, int(getattr(worker.proc, "pid", 0) or 0))
     with q._queue_lock:
         from supervisor.worker_health import retire_confirmed_worker_consumers

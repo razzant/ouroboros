@@ -679,6 +679,17 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
     if ctx.drive_root is None or not ctx.task_id:
         return False
     try:
+        from ouroboros.mcp_task_sessions import stop_task as stop_task_mcp_bridges
+
+        try:
+            bridge_outcomes = stop_task_mcp_bridges(ctx.tools._ctx)
+        except Exception as exc:
+            bridge_outcomes = [{"closure": f"unconfirmed: {type(exc).__name__}: {exc}"}]
+        if bridge_outcomes:
+            _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
+                "checkpoint_kind": "mcp_browser_bridges_stopped",
+                "bridges": bridge_outcomes,
+            })
         from ouroboros.tools.services import stop_task_services
 
         finalized = stop_task_services(ctx.tools._ctx)
