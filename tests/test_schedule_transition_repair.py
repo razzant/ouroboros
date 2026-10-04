@@ -44,6 +44,12 @@ def _clock(monkeypatch):
     clock_module = SimpleNamespace(datetime=Clock, timezone=datetime.timezone, timedelta=datetime.timedelta)
     for module in (queue_schedules, occurrence, schedule_time):
         monkeypatch.setattr(module, "datetime", clock_module)
+    from ouroboros import retention
+
+    age_cutoff = retention.age_cutoff
+    # Schedule consumption and its GC cutoff must use the same advancing clock.
+    monkeypatch.setattr(retention, "age_cutoff", lambda days, now=None: age_cutoff(
+        days, Clock.instant.timestamp() if now is None else now))
     return Clock
 
 
