@@ -178,7 +178,9 @@ def test_mixed_case_names_follow_canonical_glob(tmp_path, monkeypatch, suffix, w
     source = tmp_path / "source"
     path = _put(source, "child", delegation_role="subagent", parent_task_id="parent",
                 status="completed", result="completed disk child")
-    path.rename(path.with_suffix(suffix))
+    content = path.read_bytes()
+    path.unlink()
+    path.with_suffix(suffix).write_bytes(content)
     if windows_glob:
         # Emulate only the Windows canonical filename selection on POSIX too.
         # Real Windows runs also exercise its native glob in the other branch.
