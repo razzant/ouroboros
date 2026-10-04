@@ -1257,12 +1257,7 @@ def find_child_tasks(
 
     events_index = _EventsTailIndex(drive_root)
     rows: Dict[str, Dict[str, Any]] = {}
-    try:
-        admitted = list_task_results(drive_root, _paths=paths)
-    except OSError:
-        # A result directory that cannot be traversed still leaves the queue
-        # snapshot available as an observation of live children.
-        admitted = []
+    admitted = list_task_results(drive_root, _paths=paths)
     for row in (
         effective_task_result(
             pathlib.Path(drive_root), item,
@@ -1309,14 +1304,9 @@ def find_child_tasks(
                 # ts. Materialize the disk row now (bounded — this runs only for
                 # the handful of actual queue children) so a live lineage-less
                 # child keeps its content, not just its id.
-                try:
-                    disk = load_effective_task_result(
-                        drive_root, tid, materialize_artifacts=materialize_artifacts
-                    )
-                except OSError:
-                    # A missing or inaccessible result directory cannot erase
-                    # a child still present in the queue snapshot.
-                    disk = {}
+                disk = load_effective_task_result(
+                    drive_root, tid, materialize_artifacts=materialize_artifacts
+                )
                 if disk:
                     combined = dict(disk)
                     for key, value in row.items():

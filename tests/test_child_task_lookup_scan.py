@@ -339,6 +339,13 @@ def test_navigation_directory_failure_keeps_queue_overlay(tmp_path, monkeypatch,
             return original_glob(directory, pattern)
 
         monkeypatch.setattr(pathlib.Path, "glob", denied_glob)
+    if kind != "missing":
+        # Navigation failure falls back to canonical admission, whose original
+        # directory-error policy must not become a queue-only success.
+        with pytest.raises(OSError):
+            task_status.find_child_tasks(tmp_path, parent_task_id="parent", scope="direct",
+                                         materialize_artifacts=False)
+        return
     rows = task_status.find_child_tasks(tmp_path, parent_task_id="parent", scope="direct",
                                         materialize_artifacts=False)
     assert _ids(rows) == ["queued"] and rows[0]["status"] == "scheduled"
