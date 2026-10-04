@@ -407,7 +407,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── contracts.py     ← Active WS/HTTP envelope contract owner
       │   ├── decision_contracts.py ← Typed request/response contracts for decision families, re-exported by contracts.py; each ingress owns runtime validation
       │   ├── endpoint_index.py ← `HTTP_ENDPOINTS` index (re-exported by contracts.py); routers own the Route objects
-      │   ├── schema.py, task_list_scan.py ← Executable JSON Schema ingress contract and the gateway wrapper over task_result_scan's shared navigation facts for list ordering, SSE discovery and Main routing
+      │   ├── schema.py, task_list_scan.py ← TypedDict-derived JSON Schema ingress; task_result_scan wrapper for list/SSE/Main navigation
       │   ├── router.py        ← Starlette route collector for /api/* and /ws (§4)
       │   ├── ws.py            ← WS manager, extension WS dispatch (a synchronous in-process handler runs in a worker thread like the HTTP dispatcher, so one skill's blocking callback never stalls the ASGI loop), broadcast (§4 WebSocket protocol)
       │   ├── state.py         ← /api/health + /api/state

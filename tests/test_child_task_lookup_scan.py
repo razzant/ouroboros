@@ -29,6 +29,27 @@ def _ids(rows):
     return [row["task_id"] for row in rows]
 
 
+def _root_normalized_json(rows, root):
+    # Replace the JSON representation, including escaped Windows separators.
+    return json.dumps(rows).replace(json.dumps(str(root))[1:-1], "<root>")
+
+
+@pytest.mark.parametrize("old,new", [
+    ("/fixture/old", "/fixture/new"),
+    (r"C:\fixture\old", r"C:\fixture\new"),
+])
+def test_root_comparison_preserves_nested_payload_and_windows_paths(old, new):
+    def rows(root):
+        return [{"metadata": {"child_drive_root": root + "/split"},
+                 "artifacts": [{"path": root + "/recorded.txt"}],
+                 "result": "full payload", "status": "completed"}]
+
+    assert _root_normalized_json(rows(old), old) == _root_normalized_json(rows(new), new)
+    changed = rows(new)
+    changed[0]["result"] = "different payload"
+    assert _root_normalized_json(rows(old), old) != _root_normalized_json(changed, new)
+
+
 def _old_lookup(monkeypatch, root, **kwargs):
     """Exercise the same public function with its original full-list call."""
     materialize = kwargs.pop("materialize_artifacts", False)
@@ -339,15 +360,21 @@ def test_navigation_directory_failure_keeps_queue_overlay(tmp_path, monkeypatch,
             return original_glob(directory, pattern)
 
         monkeypatch.setattr(pathlib.Path, "glob", denied_glob)
-    if kind != "missing":
-        # Navigation failure falls back to canonical admission, whose original
-        # directory-error policy must not become a queue-only success.
-        with pytest.raises(OSError):
+    # Match canonical glob behavior on this platform: a non-directory can
+    # yield no files on Windows but raise on POSIX. Do not change that policy.
+    try:
+        old = _old_lookup(monkeypatch, tmp_path, parent_task_id="parent", scope="direct")
+    except OSError as error:
+        with pytest.raises(type(error)):
             task_status.find_child_tasks(tmp_path, parent_task_id="parent", scope="direct",
                                          materialize_artifacts=False)
+        if kind == "inaccessible":
+            assert isinstance(error, PermissionError)
         return
+    assert kind != "inaccessible", "injected canonical PermissionError must propagate"
     rows = task_status.find_child_tasks(tmp_path, parent_task_id="parent", scope="direct",
                                         materialize_artifacts=False)
+    assert rows == old
     assert _ids(rows) == ["queued"] and rows[0]["status"] == "scheduled"
 
 
@@ -415,8 +442,7 @@ def test_split_child_metadata_and_artifact_modes(tmp_path, monkeypatch, root_fie
             values.append(task_status.find_child_tasks(
                 root, parent_task_id="parent", scope="direct",
                 materialize_artifacts=materialize))
-    assert json.dumps(values[0]).replace(str(old_root), "<root>") == (
-        json.dumps(values[1]).replace(str(new_root), "<root>"))
+    assert _root_normalized_json(values[0], old_root) == _root_normalized_json(values[1], new_root)
     assert _ids(values[1]) == ["child"]
     assert values[1][0]["result"] == "replica terminal"
     assert values[1][0]["status"] == "completed"
