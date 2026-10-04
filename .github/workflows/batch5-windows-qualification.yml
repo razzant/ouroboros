@@ -16,8 +16,8 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 55
     env:
-      QUALIFICATION_SOURCE_SHA: 90187bef4a4689a6ed9d63e2ef46337f6f9e3892
-      QUALIFICATION_SOURCE_TREE: 2692f3831045debc5fa8a934383772c55c99f367
+      QUALIFICATION_SOURCE_SHA: 3f69fa4abb9021ef6c98d25165ff6ccc603b1576
+      QUALIFICATION_SOURCE_TREE: 0809269116f8d8a308e9e2aad8f1a714f9914452
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
       # Applies only to this disposable runner's Git invocations and preserves source bytes.
@@ -75,13 +75,23 @@ jobs:
           $diagnostic = (Resolve-Path control/scripts/qualification/batch5/sitecustomize.py).Path
           python -c "import pathlib,sys,sysconfig; source=pathlib.Path(sys.argv[1]); target=pathlib.Path(sysconfig.get_path('purelib'))/'sitecustomize.py'; assert not target.exists(), 'Refusing to replace an existing sitecustomize'; target.write_bytes(source.read_bytes()); print('Diagnostic hook installed:',target)" $diagnostic
           exit $LASTEXITCODE
+      - name: Prove private pipe isolation before the loaded Quit scenario
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $safe = (Resolve-Path candidate/scripts/safe_test.py).Path
+          $log = Join-Path $env:RUNNER_TEMP 'batch5-windows-pipe-precheck-c.log'
+          python -I -S $safe --temp-parent $env:RUNNER_TEMP -- python -m pytest -o addopts='' tests/test_shutdown_signal_1142.py -k 'launcher_pipe_only_an_explicit_quit or private_launcher_reader or direct_server' -q 2>&1 | Tee-Object -FilePath $log
+          $producer = $LASTEXITCODE
+          "producer_exit=$producer" | Out-File -FilePath "$log-producer.txt" -Encoding utf8
+          exit $producer
       - name: Qualify actual launcher Quit with 24 running tasks and 15 retained descendants
         timeout-minutes: 20
         run: |
           $ErrorActionPreference = 'Stop'
           $source = (Resolve-Path candidate).Path
           $probe = (Resolve-Path control/scripts/qualification/batch5/qualify_quit.py).Path
-          $root = Join-Path $env:RUNNER_TEMP 'batch5-windows-quit-b'
+          $root = Join-Path $env:RUNNER_TEMP 'batch5-windows-quit-c'
           $log = "$root.log"
           python -u $probe --source $source --run-root $root --expected-sha $env:QUALIFICATION_SOURCE_SHA --require-windows --workers 24 --tasks 24 --extra-processes --daemon-descendants 15 2>&1 | Tee-Object -FilePath $log
           # Tee-Object is a PowerShell cmdlet, so LASTEXITCODE still belongs to Python.
@@ -94,9 +104,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $safe = (Resolve-Path candidate/scripts/safe_test.py).Path
-          $log = Join-Path $env:RUNNER_TEMP 'batch5-windows-focused-b.log'
-          $xml = Join-Path $env:RUNNER_TEMP 'batch5-windows-focused-b.xml'
-          $evidence = Join-Path $env:RUNNER_TEMP 'batch5-windows-focused-b-evidence'
+          $log = Join-Path $env:RUNNER_TEMP 'batch5-windows-focused-c.log'
+          $xml = Join-Path $env:RUNNER_TEMP 'batch5-windows-focused-c.xml'
+          $evidence = Join-Path $env:RUNNER_TEMP 'batch5-windows-focused-c-evidence'
           python -I -S $safe --temp-parent $env:RUNNER_TEMP -- python -m pytest -o addopts='' tests/test_update_dirty_stash.py tests/test_update_stash_recovery.py tests/test_shared_daemon_processes.py tests/test_shutdown_signal_1142.py tests/test_server_shutdown.py -q --junitxml=$xml --ci-evidence-dir=$evidence 2>&1 | Tee-Object -FilePath $log
           $producer = $LASTEXITCODE
           "producer_exit=$producer" | Out-File -FilePath "$log-producer.txt" -Encoding utf8
@@ -107,12 +117,14 @@ jobs:
         with:
           name: batch5-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/batch5-windows-quit-b/
-            ${{ runner.temp }}/batch5-windows-quit-b.log
-            ${{ runner.temp }}/batch5-windows-quit-b-producer.txt
-            ${{ runner.temp }}/batch5-windows-focused-b.log
-            ${{ runner.temp }}/batch5-windows-focused-b.log-producer.txt
-            ${{ runner.temp }}/batch5-windows-focused-b.xml
-            ${{ runner.temp }}/batch5-windows-focused-b-evidence/
+            ${{ runner.temp }}/batch5-windows-pipe-precheck-c.log
+            ${{ runner.temp }}/batch5-windows-pipe-precheck-c.log-producer.txt
+            ${{ runner.temp }}/batch5-windows-quit-c/
+            ${{ runner.temp }}/batch5-windows-quit-c.log
+            ${{ runner.temp }}/batch5-windows-quit-c-producer.txt
+            ${{ runner.temp }}/batch5-windows-focused-c.log
+            ${{ runner.temp }}/batch5-windows-focused-c.log-producer.txt
+            ${{ runner.temp }}/batch5-windows-focused-c.xml
+            ${{ runner.temp }}/batch5-windows-focused-c-evidence/
           if-no-files-found: error
           retention-days: 30
