@@ -3,6 +3,7 @@
 export const CHECKPOINT_LABELS = {
     context_fit_low_retry: 'Context rebuilt in Low mode',
     context_fit_route_rebound: 'Context fit rebound the route',
+    context_fit_physical_mode: 'Context starts in a smaller mode (window too small)',
     context_view: 'Context inspected',
     context_reclaim_manual: 'Context reclaimed on request',
     context_reclaim_automatic: 'Context reclaimed automatically',

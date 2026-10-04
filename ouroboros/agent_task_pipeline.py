@@ -236,11 +236,11 @@ def _run_post_task_processing_async(
                 return failure
 
             # All late model work belongs to this one scoped worker.  This keeps
-            # the root checkpoint non-final until consolidation, reflection,
-            # and promotion have all stopped billing.
+            # the root checkpoint non-final until the fallback memory draft,
+            # consolidation, reflection and promotion have all stopped billing.
             stages: List[tuple[str, Callable[[], Any]]] = [
-                ("chat_consolidation", lambda: _run_chat_consolidation(
-                    env, task_memory, llm_client, task_snapshot, drive_logs)),
+                ("memory_fallback_draft", lambda: _run_memory_fallback_draft(
+                    env, task_snapshot, llm_client, drive_logs, trace_snapshot)),
                 ("scratchpad_consolidation", lambda: _run_scratchpad_consolidation(
                     env, task_memory, llm_client)),
                 ("reflection", (lambda: finish_published_reflection(env, task_snapshot, result["reflection_entry"]))
@@ -1464,7 +1464,7 @@ from ouroboros.post_task_synthesis import (  # noqa: E402, F401 -- intentional p
     _compact_review_projection,
     _record_task_facts,
     _post_task_paid_interruption,
-    _run_chat_consolidation,
+    _run_memory_fallback_draft,
     _run_scratchpad_consolidation,
     _run_reflection,
     finish_published_reflection,

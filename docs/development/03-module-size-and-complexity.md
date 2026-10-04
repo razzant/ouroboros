@@ -223,7 +223,7 @@ carry the per-module contracts.
 
 | Store / surface | Complete producer and source | Interactive projection / consumer | Growth and retention proof |
 |---|---|---|---|
-| Chat and biography | Canonical `logs/chat.jsonl`, rotated generations, and dialogue blocks | Main/Project context and archive-aware `chat_history` | Rotation/archive readers carry generation/gap coverage; blocks are the compression path, not a deletion of the horizon |
+| Chat and biography | Canonical `logs/chat.jsonl`, rotated generations, and `memory/chronicle/records.jsonl` (dialogue blocks stay read-only legacy) | the memory view (`memory_view.py`) and archive-aware `chat_history` | Rotation/archive readers carry generation/gap coverage; pages and parts are the compression path, not a deletion of the horizon; the journal warns at 64 MB (`CHRONICLE_JOURNAL_WARN_BYTES`) |
 | Plan/review evidence | Exact task-artifact/observability bodies and reviewer route/thread receipts | Bounded review hot index, obligations, and latest-wave status | Exact artifact refs and candidate SHA bind the decision; index rotation cannot certify a missing or partial wave |
 | Skill-review root tasks | Per-skill `state/skills/<name>/review_history.jsonl`; `skill_review_runner._append_terminal_history` projects terminal identities to `state/skill_review_root_tasks.jsonl` | `skill_readiness._skill_names_from_review_history` reads a bounded newest-first suffix for acceptance | Derived index is append-only and idempotent by root/task/outcome identity; `SKILL_REVIEW_ROOT_TASKS_WARN_BYTES` warns at 20 MB |
 | Task/project execution | Canonical task result plus promoted child artifacts and summaries | Status cards, terminal rows, and Main/Project summary projections | Canonical promotion precedes child-drive GC; disposable task scratch follows the unified retention owner |
@@ -236,8 +236,8 @@ router contract requires `predecessor_task_id` (`""` = fresh; omission or
 Main receives only a defensive provider projection of the predecessor authority
 — never a raw head/tail slice, an invented summary, or a mutation of the
 canonical result (the contract and the projection rules: ARCHITECTURE §1
-"CLI / Headless Boundary"). The authored continuation narrative is written at
-the result owner together with its exact `get_task_result(include_authority=True)`
+"CLI / Headless Boundary"). A legacy authored continuation narrative is read at
+the result owner with its exact `get_task_result(include_authority=True)`
 source; the projection thresholds only the closed raw keys `result` and
 `final_answer`, at `context_budget.PREDECESSOR_RESULT_INLINE_CHARS`.
 

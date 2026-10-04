@@ -1,0 +1,6 @@
+73
+The context and growth matrix's chat-and-biography row names the chronicle journal
+memory/chronicle/records.jsonl as the canonical source (the dialogue blocks stay
+read-only legacy), the memory view as its projection, and pages and parts as the
+compression path, as the key-invariants chapter does. The row grew 80 bytes; an
+earlier commit of this change had already trimmed 7 from the chapter.

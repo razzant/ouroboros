@@ -1,0 +1,3 @@
+137
+Main's automatic pass may re-fold earlier capsules after the provider's typed context-overflow
+refusal, after every raw unit; proactive passes stay raw-only.

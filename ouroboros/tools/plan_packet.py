@@ -5,8 +5,8 @@ evidence): the system prompt carries the findings-only stance, the domain-free
 rubric, the blocking rule, the convergence rule (cycle ≥2), the checklist
 section verbatim, and the governance pack (W3: BIBLE.md + ARCHITECTURE.md in full for a
 self-modification plan, their navigation maps otherwise); the user content carries
-TASK OBJECTIVE · SPEC · PLAN PROSE · EVIDENCE · OWN ROOM DIALOGUE · RELATED
-ROOM POINTERS · ROOT EXPLORATION LOG · PRIOR CYCLES in that order. The full
+TASK OBJECTIVE · OWNER WORDS · SPEC · PLAN PROSE · EVIDENCE · OWN ROOM DIALOGUE ·
+RELATED ROOM POINTERS · ROOT EXPLORATION LOG · PRIOR CYCLES in that order. The full
 redacted dialogue uses task source custody and route-sized projections; only
 exploration and prior-cycle summaries retain independent display bounds. The
 ``PLAN_REVIEW_CONTROL_JSON`` control line is NOT emitted here (Phase C owns it).
@@ -315,14 +315,18 @@ def build_plan_review_user_content(
     The delivery layer selects a newest source range only when the actual route
     cannot fit the complete dialogue beside governance and the operative plan.
     Exploration and prior cycles retain their existing disclosed display bounds.
+    The owner's words that caused the work (``manifest["owner_words"]``) follow
+    the objective whole, in the cache-stable prefix; no key, no section.
     """
     from ouroboros.tools.plan_dialogue import render_dialogue
 
     view = spec_with_ids(spec)
     if goal and not view.get("goal"):
         view["goal"] = goal
+    owner_words = str(manifest.get("owner_words") or "")
     sections = [
         "## TASK OBJECTIVE\n\n" + (objective or "(none declared)") + "\n",
+        *([owner_words + "\n"] if owner_words.strip() else []),
         "## SPEC (ids are the only valid `breaks` targets)\n\n" + _json_block(view) + "\n",
         "## PLAN PROSE\n\n" + (plan_prose or "(none)") + "\n",
         "## EVIDENCE\n\n" + _render_evidence(manifest),

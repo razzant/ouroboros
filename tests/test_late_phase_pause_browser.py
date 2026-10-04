@@ -36,6 +36,7 @@ def _history(root: pathlib.Path) -> None:
     """The delivered answer and the host-attested control marker of this root's card;
     the dialogue the late phase consolidates lives in another room."""
     logs = root / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
     (logs / "progress.jsonl").write_text(json.dumps({
         "ts": "2026-08-17T10:00:00+00:00", "type": "send_message", "task_id": ROOT, "is_progress": True,
         "direction": "out", "chat_id": 1, "user_id": 1, "text": "step one", "content": "step one",
@@ -62,7 +63,7 @@ def test_browser_pauses_and_resumes_late_work_with_the_delivered_answer_intact(s
                            Route("/api/tasks/{task_id}/resume", api_task_resume, methods=["POST"])])
     app.state.drive_root = f.root
     entered, release, posts = threading.Event(), threading.Event(), []
-    f.light.hooks["draft"] = [lambda: (entered.set(), release.wait(30))]
+    f.light.hooks["scratchpad"] = [lambda: (entered.set(), release.wait(30))]
     spawned: list = []
     threads = _start(f)
     try:
@@ -106,7 +107,7 @@ def test_browser_pauses_and_resumes_late_work_with_the_delivered_answer_intact(s
 
             release.set()
             _join(threads)
-            assert _phase(f) == "paused" and f.light.kinds() == ["draft"]
+            assert _phase(f) == "paused" and f.light.kinds() == ["scratchpad"]
             page.wait_for_function("(el) => /Paused/.test(el.closest('.chat-live-card').innerText)",
                                    arg=chip.element_handle(), timeout=15000)
             assert page.get_by_text("Already delivered answer").count() == 1
@@ -117,7 +118,7 @@ def test_browser_pauses_and_resumes_late_work_with_the_delivered_answer_intact(s
             page.wait_for_function("() => !document.querySelector('.task-control-menu')")
             _join(spawned)
             assert posts[-1][0].endswith("/resume") and posts[-1][2]["ok"], posts
-            assert _phase(f) == "completed" and f.light.kinds() == ["draft", "correction"]
+            assert _phase(f) == "completed" and f.light.kinds() == ["scratchpad"] * 3
             page.get_by_text("Resuming: the work left after the delivered answer continues.").wait_for(timeout=10000)
             page.wait_for_function(
                 "(el) => !/Paused|Pausing|Finalizing/.test(el.closest('.chat-live-card').innerText)",

@@ -97,21 +97,23 @@ _LOCAL_COMPACTION_MODES = {
         "Use a larger-context model or read the source file directly if this section becomes necessary.",
     ),
     "semi_stable": (
-        {"Identity", "Shared understanding"},
-        "Identity and the shared understanding were preserved; non-core stable memory "
+        {"Identity", "My story", "My story — unavailable now", "Shared understanding"},
+        "Identity, my story and the shared understanding were preserved; non-core stable memory "
         "sections were compacted for local execution.",
     ),
     "dynamic": (
         {
+            "Shared understanding",
+            "Words of my human that caused this work",
+            "Marks I keep in view",
+            "This room",
             "Scratchpad",
-            "Dialogue History",
-            "Dialogue Summary",
             "Memory Registry (what I know / don't know)",
             "Drive state",
             "Runtime context",
             "Health Invariants",
         },
-        "Working-memory and runtime sections were preserved; non-core recent/history sections were compacted for local execution.",
+        "Working-memory, room and runtime sections were preserved; non-core recent/history sections were compacted for local execution.",
     ),
     "system": (
         {

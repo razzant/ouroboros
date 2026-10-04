@@ -491,7 +491,7 @@ def _verbatim_trace_pointer(knowledge_context: Any, llm_trace: Dict[str, Any]) -
     if not any(_cut(tc, count) for _, tc, count, _, _ in _fold_identical_calls(tool_calls)):
         return ""
     try:
-        from ouroboros.consolidator import retain_memory_source
+        from ouroboros.chat_chain import retain_memory_source
         from ouroboros.observability import redact_projection
 
         def _exact_ref(tc: Dict[str, Any]) -> str:
@@ -602,7 +602,7 @@ def generate_reflection(
         from ouroboros.settings_scales import resolve_effort
 
         knowledge = KnowledgeReadContext(knowledge_context, "task_reflection")
-        from ouroboros.consolidator import retain_memory_source
+        from ouroboros.chat_chain import retain_memory_source
         complete_prompt = KNOWLEDGE_MAINTENANCE_PROMPT + prompt
         source_ref = retain_memory_source(knowledge_context, "task_input_reflection", complete_prompt.encode("utf-8"))
         raw_reflection_text, refl_usage = _call_consolidation_llm(
@@ -939,7 +939,7 @@ def _bind_reflection_action_source(canonical: pathlib.Path, entry: Dict[str, Any
     try:
         from types import SimpleNamespace
 
-        from ouroboros.consolidator import retain_memory_source
+        from ouroboros.chat_chain import retain_memory_source
 
         ref = retain_memory_source(
             SimpleNamespace(drive_root=canonical, task_id=str(entry.get("task_id") or "reflection")),

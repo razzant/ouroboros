@@ -1,7 +1,9 @@
 """Task-local schema residency over the registry's permitted capability envelope.
 
 Low/Max start complete. Nano selects canonical schemas while retaining the
-existing discovery/reclaim transport. Residency never grants execution authority.
+existing discovery/reclaim transport. A route whose provider caps the schemas in
+one request leaves the overflow unloaded (``fit_tool_schemas_to_limit``).
+Residency never grants execution authority.
 The tool namespaces and the bounded catalog/name-miss renderings live here too.
 """
 
@@ -11,7 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Protocol, Sequence
 
-from ouroboros.tool_capabilities import META_TOOL_NAMES
+from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
 
 
 NANO_SCHEMA_META_NAMES = META_TOOL_NAMES | frozenset({"compact_context"})
@@ -89,6 +91,37 @@ def initial_tool_schemas(
     """
     return list(select_tool_schemas(registry.schemas(), context_mode=context_mode,
                                     schema_names=schema_names).schemas)
+
+
+def fit_tool_schemas_to_limit(
+    schemas: Sequence[Dict[str, Any]], limit: int | None, *, keep: Iterable[str] = (),
+) -> tuple[List[Dict[str, Any]], tuple[str, ...]]:
+    """Fit one request's schemas under a route's physical ceiling: ``(kept, left_out)``.
+
+    Under the ceiling (or without one) the list is unchanged. Above it, core and meta
+    schemas stay first, then ``keep`` (names the actor loaded on purpose), then the
+    rest in their own order; the tail beyond the ceiling is left out. Kept schemas
+    retain their order, so the request's prefix is stable. Nothing is withdrawn from
+    the registry: a left-out schema stays callable and ``enable_tools`` loads it.
+    """
+    if limit is None or len(schemas) <= limit:
+        return list(schemas), ()
+    keep = frozenset(keep)
+    names = [str(schema["function"]["name"]) for schema in schemas]
+    rank = [0 if name in CORE_TOOL_NAMES or name in META_TOOL_NAMES else 1 if name in keep else 2
+            for name in names]
+    kept = set(sorted(range(len(names)), key=lambda index: (rank[index], index))[:max(0, limit)])
+    return ([schema for index, schema in enumerate(schemas) if index in kept],
+            tuple(name for index, name in enumerate(names) if index not in kept))
+
+
+def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequence[str]) -> str:
+    """The fact an actor reads when its route could not carry the whole catalog."""
+    return ("[SYSTEM NOTICE]\n"
+            f"The route {model} accepts at most {limit} tool schemas in one request; this task's catalog "
+            f"has {total}. Not loaded for now: {', '.join(left_out)}. They stay callable: "
+            "list_available_tools marks them not loaded, and enable_tools loads one (the request then "
+            "leaves out another schema to stay within the limit).")
 
 
 def compact_tool_catalog(

@@ -33,7 +33,7 @@ The context-delivery registry:
 
 | Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
 |------|----------|-----------------|----------------|
-| Main task context (`context.py`) | full tier-0 | full composition in Max, a subagent child excepted (issue #1026); book navigation in Low/Nano and for every subagent child | book navigation in Low/Nano and for a subagent child; in Max full when the active binding targets the system repo (evolution/self-body work, `workspace="none"`, a project-room turn with no external binding), else a visible on-demand pointer (external workspace, API/CLI/scheduled surface) |
+| Main task context (`context.py`) | full tier-0 | full composition in Max, a subagent child excepted (issue #1026), which starts from the helper start composition — no whole dialogue history or resident knowledge, a nanny without the life account; book navigation in Low/Nano and for every subagent child | book navigation in Low/Nano and for a subagent child; in Max full when the active binding targets the system repo (evolution/self-body work, `workspace="none"`, a project-room turn with no external binding), else a visible on-demand pointer (external workspace, API/CLI/scheduled surface) |
 | Triad review (`tools/review.py`) | full via API preamble or retrieving task | Tier 3: book navigation; packet rows also receive sections naming touched files within the inline share | Tier 2: review protocol and chapters naming touched files within the share; the rest remains navigable |
 | ↳ Cold-start density rung | — | — | Triad packets only: an oversized packet without fresh exact-model density evidence gets one bounded probe of its own 80,000-char slice and one rebuild; a budget refusal stays disclosed (`review_admission.density_probe_before_size_refusal`). Retrieving surfaces have no packet-fit rung. |
 | ↳ Anti-thrashing | — | — | Open obligations from `review_state` (`load_state(drive_root)` + `make_repo_key(repo_dir)`) enter `_build_review_history_section`; the scope brief does the same when `drive_root` is available (`scope_review_session.build_scope_session_task`). |
@@ -100,7 +100,12 @@ shared `OUROBOROS_REVIEW_MAX_CYCLES` (`ouroboros/review_cycles.py`).
 mode's projection of the two books (ARCHITECTURE §6 "Context fitting, retry, and
 compaction"); Max binds `DEVELOPMENT.md` to the active repository — a path fact,
 never a guess from message text. Tier-0 identity and constitutional context
-stays full in every mode. Predicted Max pressure never swaps in Low documents:
+stays full in every mode. Predicted Max pressure never swaps in Low documents,
+with one physical exception: when the route window is known and even the
+shortest memory view (every floor step applied) with the books, tools and reply
+reserve cannot fit on the calibrated estimate — a refusal that is inevitable —
+the task starts in the next physically possible mode (Max → Low → Nano,
+`memory_floor.physical_mode`, checkpoint `context_fit_physical_mode`). Otherwise
 only actual provider overflow may use a task-local Low projection, then at most
 one same-route strictly-smaller call, and none of it changes owner mode or P3
 commit/scope review. Disclosed residual: an explicit per-task handbook override

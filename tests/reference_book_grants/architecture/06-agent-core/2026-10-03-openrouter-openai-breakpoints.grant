@@ -1,0 +1,6 @@
+339
+Prompt caching now states the OpenRouter OpenAI-family breakpoint translation
+(block markers become prompt_cache_breakpoint on GPT-5.6+, so the marked
+memory block stays its own system item there) and the per-data-root affinity
+of Light memory and compaction-summary calls; the stale whole-unit claim was
+shortened.

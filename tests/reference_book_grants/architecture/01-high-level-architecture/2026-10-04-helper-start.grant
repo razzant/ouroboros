@@ -1,0 +1,4 @@
+32
+The module map row of subagent_work_order.py names the owner's originating words:
+the external work order and a direct delegate start carry the words that
+caused the work verbatim, after the parent context and after the host contract.

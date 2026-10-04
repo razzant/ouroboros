@@ -6,11 +6,17 @@ by theme; every moved block is verbatim. Covers the durable
 reconciliation, startup recovery of pending/indeterminate synthesis, the
 shared pre-synthesis usage snapshot taken once before worker dispatch, and
 that snapshot reaching (or staying out of) the free facts row and the
-reflection prompt.
+reflection prompt; and that the retired dialogue writer leaves no trace in the
+phase: the frozen legacy dialogue files stay byte-identical and no Light call
+is bought for the dialogue, while reflection and scratchpad upkeep still run;
+the one memory call left, the fallback draft of one unit, is made only while
+consciousness is off.
 """
 
 import json
 from types import SimpleNamespace
+
+import pytest
 
 import ouroboros.agent_task_pipeline as pipeline
 
@@ -248,8 +254,8 @@ def test_root_synthesis_uses_one_shared_nonfinal_subtree_cost_snapshot(tmp_path,
     monkeypatch.setattr(llm_mod, "LLMClient", lambda: object())
     monkeypatch.setattr(memory_mod, "Memory", lambda **_kwargs: object())
     monkeypatch.setattr(
-        pipeline, "_run_chat_consolidation",
-        lambda *args, **kwargs: order.append("chat_consolidation"),
+        pipeline, "_run_memory_fallback_draft",
+        lambda *args, **kwargs: order.append("memory_fallback_draft"),
     )
     monkeypatch.setattr(
         pipeline, "_run_scratchpad_consolidation",
@@ -294,10 +300,7 @@ def test_root_synthesis_uses_one_shared_nonfinal_subtree_cost_snapshot(tmp_path,
     )
 
     assert reads == [(tmp_path, "root-synthesis", "")]
-    assert order[:5] == [
-        "snapshot", "facts", "chat_consolidation", "scratchpad_consolidation",
-        "reflection",
-    ]
+    assert order[:5] == ["snapshot", "facts", "memory_fallback_draft", "scratchpad_consolidation", "reflection"]
     assert len(snapshots) == 2 and snapshots[0] is snapshots[1]
     snapshot = snapshots[0]
     assert snapshot["accounted_upper_bound_usd_with_children"] == 4.75
@@ -561,3 +564,159 @@ def test_child_legacy_usage_does_not_claim_a_subtree_snapshot(tmp_path, monkeypa
     assert "accounted_upper_bound_usd_with_children" not in prompt
     assert "cost_snapshot_at" not in prompt
     assert "accounted_upper_bound_usd_with_children" not in row and "cost_snapshot_at" not in row
+
+
+# --- the retired dialogue writer: a root's post-phase buys no dialogue Light call ---------------
+
+class _RecordingLight:
+    """Every Light send of the post-task phase: scratchpad upkeep answers JSON, reflection prose."""
+
+    prompts: list = []
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def chat(self, *, messages, **_kwargs):
+        prompt = str(messages[0]["content"])
+        type(self).prompts.append(prompt)
+        usage = {"prompt_tokens": 3, "completion_tokens": 2, "cost": 0.0}
+        if "scratchpad working memory" in prompt:
+            return {"content": json.dumps({"knowledge_entries": [],
+                                           "compressed_block": "COMPRESSED scratchpad memory."})}, usage
+        return {"content": "I understand this run.\nMEMORY_ACTIONS_JSON: []"}, usage
+
+
+def _frozen_dialogue_install(root):
+    """A data root the old writer would have consolidated: 250 chat rows past a frozen cursor,
+    frozen legacy blocks, an identity, and a scratchpad big enough for its own upkeep."""
+    from ouroboros.memory import Memory
+
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    with (root / "logs" / "chat.jsonl").open("w", encoding="utf-8") as handle:
+        for index in range(250):
+            handle.write(json.dumps({"ts": f"2026-09-01T{index // 60:02d}:{index % 60:02d}:00Z", "chat_id": 1,
+                                     "direction": "in" if index % 2 else "out",
+                                     "text": f"DIALOGUE-ROW-{index} owner and I discussed the plan."}) + "\n")
+    blocks = [{"ts": "2026-08-31T00:00:00Z", "type": "summary", "range": "2026-08-31", "message_count": 40,
+               "content": "### Block\nA legacy retelling of earlier dialogue."}]
+    (root / "memory" / "dialogue_blocks.json").write_text(json.dumps(blocks), encoding="utf-8")
+    (root / "memory" / "dialogue_meta.json").write_text(
+        json.dumps({"last_consolidated_offset": 40, "pending_knowledge_nominations": []}), encoding="utf-8")
+    (root / "memory" / "identity.md").write_text("I am Ouroboros. " * 20, encoding="utf-8")
+    memory = Memory(root)
+    for index in range(4):
+        memory.append_scratchpad_block(f"note-{index}-" + (chr(97 + index) * 8_000), source=f"task-{index}")
+    return memory
+
+
+def test_root_post_phase_keeps_frozen_dialogue_memory_and_buys_no_dialogue_light_call(tmp_path, monkeypatch):
+    """After N root tasks the frozen ``dialogue_blocks.json``/``dialogue_meta.json`` are byte-identical
+    and no Light send carries the dialogue (the guard: the writer and its stage are gone), while the
+    reflection of every root and the scratchpad upkeep still run (what stays). The install's chronicle is
+    not active, so the fallback draft has nothing to read; its conditional sides are pinned below."""
+    import ouroboros.llm as llm_mod
+    import ouroboros.post_task_evolution as post_task_evolution
+
+    from ouroboros import consolidator, context_fit
+    from ouroboros.capability_evidence import CapabilityEvidence
+
+    monkeypatch.setattr(consolidator, "_consolidation_route", lambda: ("test/model", False))
+    monkeypatch.setattr(context_fit, "resolve_context_fit_route", lambda task, *, allow_fetch: (
+        {"model": task["model"], "provider": "openrouter"},
+        CapabilityEvidence(1_000_000, "confirmed", "test", "route-test", model=task["model"], provider="openrouter")))
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(_RecordingLight, "prompts", [])
+    monkeypatch.setattr(llm_mod, "LLMClient", _RecordingLight)
+    monkeypatch.setattr(post_task_evolution, "maybe_promote", lambda *_args, **_kwargs: None)
+    memory = _frozen_dialogue_install(tmp_path)
+    frozen = {name: (tmp_path / "memory" / name).read_bytes() for name in ("dialogue_blocks.json", "dialogue_meta.json")}
+    scratch_before = memory.load_scratchpad_blocks()
+    env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+    trace = {"tool_calls": [{"tool": "run_command", "status": "error", "is_error": True,
+                             "result": "TOOL_ERROR: a failure worth reflecting on"}], "reasoning_notes": []}
+    roots = [f"root-{index}" for index in range(3)]
+    for task_id in roots:
+        task = {"id": task_id, "root_task_id": task_id, "type": "task", "chat_id": 1,
+                "text": f"Finish the work of {task_id}", "drive_root": str(tmp_path)}
+        pipeline._store_task_result(env, task, "Done.", {"rounds": 3, "cost": 0.0}, trace)
+        pipeline._run_post_task_processing_async(env, task, {"rounds": 3, "cost": 0.0}, trace, {},
+                                                 tmp_path / "logs", blocking=True)
+
+    # The guard: nothing of the dialogue was sent to Light, and the frozen files never changed.
+    prompts = _RecordingLight.prompts
+    assert prompts and not [prompt for prompt in prompts if "DIALOGUE-ROW-" in prompt]
+    assert not [prompt for prompt in prompts if "Messages to summarize" in prompt or "Compare this draft memory" in prompt]
+    assert {name: (tmp_path / "memory" / name).read_bytes() for name in frozen} == frozen
+    events = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert not [row for row in events if row.get("type") in {"chat_block_consolidation", "consolidation_skipped_locked"}]
+    # What stays: every root reflected (and its error evidence reached the Pattern Register),
+    # the scratchpad was consolidated, every phase completed. No other Light send exists.
+    scratchpad = [prompt for prompt in prompts if "scratchpad working memory" in prompt]
+    reflections = [prompt for prompt in prompts if "MEMORY_ACTIONS_JSON and BACKLOG_CANDIDATES_JSON" in prompt]
+    patterns = [prompt for prompt in prompts if "You maintain a Pattern Register" in prompt]
+    assert len(scratchpad) == 1 and len(reflections) == len(patterns) == len(roots)
+    assert len(prompts) == len(scratchpad) + len(reflections) + len(patterns)
+    assert memory.load_scratchpad_blocks() != scratch_before
+    assert memory.load_scratchpad_blocks()[0]["content"] == "COMPRESSED scratchpad memory."
+    for task_id in roots:
+        checkpoint = pipeline.load_task_result(tmp_path, task_id)["root_phase_checkpoint"]
+        assert checkpoint["post_task_synthesis"] == "completed", checkpoint
+
+
+class _RecordingLightWithDrafts(_RecordingLight):
+    """The same Light, answering the fallback writer's draft request with a JSON page."""
+
+    prompts: list = []
+
+    def chat(self, *, messages, **kwargs):
+        prompt = str(messages[0]["content"])
+        if prompt.startswith("You are a helper drafting one memory"):
+            type(self).prompts.append(prompt)
+            return {"content": json.dumps({"text": "A helper account of the period.", "quotes": []})}, {
+                "prompt_tokens": 3, "completion_tokens": 2, "cost": 0.0}
+        return super().chat(messages=messages, **kwargs)
+
+
+@pytest.mark.parametrize("consciousness", [False, True])
+def test_the_one_memory_light_call_of_a_root_is_the_fallback_draft_and_only_while_consciousness_is_off(
+        tmp_path, monkeypatch, consciousness):
+    """The one exception to that rule, and its condition: with consciousness off and unfolded old periods of blocks 1-22, a
+    queued root's post-phase sends exactly one memory Light call, the fallback draft of one period, which
+    stands as a helper draft; with consciousness on the same root sends none and writes nothing."""
+    import ouroboros.llm as llm_mod
+    import ouroboros.post_task_evolution as post_task_evolution
+    from ouroboros import consolidator, context_fit, memory_fallback
+    from ouroboros.capability_evidence import CapabilityEvidence
+    from ouroboros.chronicle_store import ChronicleStore
+    from tests import _memory_inventory_shared as shared
+
+    monkeypatch.setattr(consolidator, "_consolidation_route", lambda: ("test/model", False))
+    monkeypatch.setattr(context_fit, "resolve_context_fit_route", lambda task, *, allow_fetch: (
+        {"model": task["model"], "provider": "openrouter"},
+        CapabilityEvidence(1_000_000, "confirmed", "test", "route-test", model=task["model"], provider="openrouter")))
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(_RecordingLightWithDrafts, "prompts", [])
+    monkeypatch.setattr(llm_mod, "LLMClient", _RecordingLightWithDrafts)
+    monkeypatch.setattr(post_task_evolution, "maybe_promote", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(memory_fallback, "fallback_active", lambda: not consciousness)
+    shared.world(tmp_path)
+    journal = (tmp_path / "memory" / "chronicle" / "records.jsonl").read_bytes()
+    env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    task = {"id": "root-queued", "root_task_id": "root-queued", "type": "task", "chat_id": 1,
+            "text": "Finish the queued work", "drive_root": str(tmp_path)}
+    pipeline._store_task_result(env, task, "Done.", {"rounds": 3, "cost": 0.0}, trace)
+    pipeline._run_post_task_processing_async(env, task, {"rounds": 3, "cost": 0.0}, trace, {},
+                                             tmp_path / "logs", blocking=True)
+
+    drafts = [record for record in ChronicleStore(tmp_path).records(kinds=("page", "part"))
+              if record["author"]["kind"] == "helper"]
+    if consciousness:
+        assert _RecordingLightWithDrafts.prompts == [] and drafts == []
+        assert (tmp_path / "memory" / "chronicle" / "records.jsonl").read_bytes() == journal
+    else:
+        assert len(_RecordingLightWithDrafts.prompts) == 1 and len(drafts) == 1
+        assert drafts[0]["metadata"]["unit"]["kind"] == "legacy" and drafts[0]["covers"]["stream_span"] == [6, 7]
+    checkpoint = pipeline.load_task_result(tmp_path, "root-queued")["root_phase_checkpoint"]
+    assert checkpoint["post_task_synthesis"] == "completed", checkpoint

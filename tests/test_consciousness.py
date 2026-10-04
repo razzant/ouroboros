@@ -204,7 +204,7 @@ def test_a_refused_wake_consumes_no_transition_and_the_admitted_one_persists_obs
 
 @pytest.mark.parametrize('failure', ['write', 'readback', 'corrupt_previous', 'missing_previous'])
 def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkeypatch, failure):
-    from ouroboros import artifacts, consolidator
+    from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
 
     _chat_row(root=clock.root, ts=_iso(T0 + 1), direction='in', chat_id=1, source='web', text='first')
@@ -221,7 +221,7 @@ def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkey
         elif failure == 'missing_previous':
             path.unlink()
         elif failure == 'write':
-            fault.setattr(consolidator, 'retain_memory_source', lambda *a, **kw: (_ for _ in ()).throw(OSError('write failed')))
+            fault.setattr(chat_chain, 'retain_memory_source', lambda *a, **kw: (_ for _ in ()).throw(OSError('write failed')))
         else:
             read = artifacts.read_actor_source_bytes
             fault.setattr(artifacts, 'read_actor_source_bytes', lambda root, task, ref: read(root, task, ref)
@@ -266,14 +266,14 @@ def test_inline_inventory_migrates_and_retains_closed_task_late_review(clock, ve
 @pytest.mark.parametrize('failure', ['write', 'readback', 'bootstrap_write'])
 @pytest.mark.parametrize('restart', [False, True])
 def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, failure, restart):
-    from ouroboros import artifacts, consolidator
+    from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
     from tests.test_consciousness_wake import _write
 
     _chat_row(root=clock.root, ts=_iso(T0 - 1), direction='in', chat_id=1, source='web', text='before bootstrap')
     with monkeypatch.context() as fault:
         if failure in {'write', 'bootstrap_write'}:
-            fault.setattr(consolidator, 'retain_memory_source', lambda *a, **kw: (_ for _ in ()).throw(OSError('write failed')))
+            fault.setattr(chat_chain, 'retain_memory_source', lambda *a, **kw: (_ for _ in ()).throw(OSError('write failed')))
         else:
             fault.setattr(artifacts, 'read_actor_source_bytes', lambda *a, **kw: b'bad readback')
         if failure == 'bootstrap_write':

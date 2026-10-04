@@ -1,0 +1,6 @@
+657
+In-task compaction now states that Main's automatic pass takes only
+never-summarized units that reached the wire, skips the paid helper when the
+measured deficit is unreachable, writes third-person host records in the user
+role with adjacent records merged, returns restore_ref handles on inspect, and
+keeps the exposure observation across an owner-wait resume.

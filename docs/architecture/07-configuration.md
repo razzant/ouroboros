@@ -32,7 +32,7 @@ Providers name the same output budget differently: OpenRouter/Anthropic-compatib
 | Main task loop (`loop_llm_call.MAIN_LOOP_MAX_TOKENS`) | 65,536 |
 | `LLMClient.vision_query()` and VLM tools (`analyze_screenshot`, `vlm_query`) | 32,768 |
 | Review synthesis dedup | 16,384 |
-| Chat block consolidation, era compression, scratchpad consolidation | 16,384 |
+| Scratchpad consolidation, Light memory drafts (`memory_fallback`) | 16,384 |
 | Execution reflection and pattern-register update | 16,384 |
 | Post-task summary (`agent_task_pipeline`) | 16,384 |
 | Improvement-backlog grooming (`improvement_backlog.groom_backlog`) | 8,192 |

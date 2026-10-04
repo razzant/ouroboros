@@ -3,7 +3,6 @@
 import json
 from copy import deepcopy
 
-import pytest
 
 from ouroboros import consolidator as c, knowledge as k
 from ouroboros.context_fit import estimate_context_prompt_tokens
@@ -66,8 +65,7 @@ def test_tool_result_projection_never_credits_undelivered_body_or_header(tmp_pat
     assert not reads.reads
 
 
-@pytest.mark.parametrize("room_correction", [False, True])
-def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(tmp_path, fit, room_correction):
+def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(tmp_path, fit):
     fit.window = 50000
     ctx, original, reads = _setup(tmp_path, "Original account of events. " * 7000 + "DECISIVE LAST EVENT.")
     chunk = 40000
@@ -79,8 +77,6 @@ def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(
         "old_text": "DECISIVE LAST EVENT.", "new_text": revised,
         "basis": "The complete source and new episode correct the final event."}]}]
     answer = "I read the full account and retained what changed."
-    if room_correction:
-        answer += "\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(nomination)
 
     class Reader:
         def __init__(self):
@@ -90,9 +86,6 @@ def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(
             self.calls.append(deepcopy(kwargs))
             assert estimate_context_prompt_tokens(kwargs["messages"], kwargs["tools"]) + kwargs["max_tokens"] <= fit.window
             assert episode in kwargs["messages"][0]["content"]
-            if room_correction and not kwargs["messages"][0]["content"].startswith("Compare this draft memory"):
-                # No draft read credit: the correction must earn its own, across views.
-                return {"content": "Draft.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(nomination)}, {"cost": 0.01}
             if self.stage == "read":
                 if self.next_start >= total:
                     assert "DECISIVE LAST EVENT." in kwargs["messages"][-1]["content"]
@@ -115,16 +108,8 @@ def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(
             return {"content": "", "tool_calls": [call]}, {"cost": 0.01}
 
     llm = Reader()
-    if room_correction:
-        from ouroboros import room_consolidation as rc
-        room = rc.RoomSource("1", "Main", [{"text": episode}], episode)
-        content, usage = rc.summarize_block(c._light_call(llm, ctx, {}), [room],
-            first_ts="2026-09-01T10:00:00Z", last_ts="2026-09-01T10:01:00Z",
-            knowledge_instruction=c.KNOWLEDGE_MAINTENANCE_PROMPT)
-        bound = usage["_knowledge_entries"]
-    else:
-        content, usage = c._call_consolidation_llm(llm, episode, "multiwindow", knowledge=reads)
-        bound = reads.bind_entries(nomination)
+    content, usage = c._call_consolidation_llm(llm, episode, "multiwindow", knowledge=reads)
+    bound = reads.bind_entries(nomination)
     assert content, usage
     assert len(llm.revisions) > 2
     assert bound[0]["expected_revision"] == original.revision

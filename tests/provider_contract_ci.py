@@ -805,6 +805,14 @@ def run_provider_contract_canary(
         ),
     }]
     tool_choice = _named_tool_choice() if canary.named_tool_choice else "auto"
+    from ouroboros.provider_models import tool_schema_limit
+    from ouroboros.tool_policy import fit_tool_schemas_to_limit
+
+    # The route's physical ceiling applies as in Main (loop_model_call._fit_route_tool_ceiling);
+    # the requested tool stays loaded like a schema the actor loaded on purpose.
+    sent_tools, _left_out = fit_tool_schemas_to_limit(
+        tools, tool_schema_limit(canary.model), keep=(CANARY_TOOL_NAME,),
+    )
     message, usage = _chat_canary_turn(
         client,
         canary=canary,
@@ -812,7 +820,7 @@ def run_provider_contract_canary(
         chat_kwargs={
             "messages": conversation,
             "model": canary.model,
-            "tools": copy.deepcopy(tools),
+            "tools": copy.deepcopy(sent_tools),
             "tool_choice": tool_choice,
             "reasoning_effort": canary.reasoning_effort,
             "max_tokens": CANARY_MAX_TOKENS,

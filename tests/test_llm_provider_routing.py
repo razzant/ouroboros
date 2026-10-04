@@ -634,7 +634,12 @@ def test_openrouter_gemini_preserves_message_cache_blocks_and_strips_tool_cache(
         ]},
     ]
 
-    or_target = client._resolve_remote_target("openai/gpt-4.1")
+    tool_schema = {
+        "type": "function",
+        "function": {"name": "alpha_tool", "description": "a", "parameters": {"type": "object"}},
+        "cache_control": {"type": "ephemeral"},
+    }
+    or_target = client._resolve_remote_target("x-ai/grok-4")
     kwargs = client._build_remote_kwargs(
         or_target,
         messages,
@@ -642,11 +647,7 @@ def test_openrouter_gemini_preserves_message_cache_blocks_and_strips_tool_cache(
         512,
         "auto",
         None,
-        [{
-            "type": "function",
-            "function": {"name": "alpha_tool", "description": "a", "parameters": {"type": "object"}},
-            "cache_control": {"type": "ephemeral"},
-        }],
+        [dict(tool_schema)],
     )
 
     assert kwargs["messages"][0]["content"] == "cached result"
@@ -657,6 +658,17 @@ def test_openrouter_gemini_preserves_message_cache_blocks_and_strips_tool_cache(
     assert "cache_control" not in kwargs["tools"][0]
     assert "cache_control" in messages[0]["content"][0]
     assert "cache_control" in messages[1]["content"][0]
+
+    # OpenAI on OpenRouter keeps the message markers (OpenRouter translates them to
+    # prompt_cache_breakpoint on GPT-5.6+); tools and TTLs still gain nothing.
+    or_target = client._resolve_remote_target("openai/gpt-4.1")
+    kwargs = client._build_remote_kwargs(or_target, messages, "medium", 512, "auto", None, [dict(tool_schema)])
+    assert kwargs["messages"][0]["content"][0] == {"type": "text", "text": "cached result",
+                                                   "cache_control": {"type": "ephemeral"}}
+    assert kwargs["messages"][1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in kwargs["tools"][0]
+    assert client._normalize_payload_cache_ttl(or_target, kwargs) == "default"
+    assert "cache_control" not in kwargs["tools"][0]
 
     kwargs = client._build_remote_kwargs(
         or_target,

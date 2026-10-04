@@ -566,7 +566,6 @@ class TestEmitTaskResultsReflectionNotOnCriticalPath:
         with mock.patch("ouroboros.agent_task_pipeline._run_reflection") as mock_refl, \
              mock.patch("ouroboros.agent_task_pipeline._update_improvement_backlog") as mock_bl, \
              mock.patch("ouroboros.agent_task_pipeline._run_post_task_processing_async") as mock_async, \
-             mock.patch("ouroboros.agent_task_pipeline._run_chat_consolidation"), \
              mock.patch("ouroboros.agent_task_pipeline._run_scratchpad_consolidation"), \
              mock.patch("ouroboros.agent_task_pipeline._store_task_result"), \
              mock.patch("ouroboros.review_evidence.collect_review_evidence",

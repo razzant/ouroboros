@@ -214,7 +214,7 @@ def test_tree_tools_available_to_subagents_but_writes_stay_blocked():
         assert name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
         assert name in ACTING_SUBAGENT_TOOL_NAMES
     # a read-only subagent that can tree_note must STILL NOT escalate to real writes
-    for blocked in ("write_file", "edit_text", "run_command", "commit_reviewed", "knowledge_write"):
+    for blocked in ("write_file", "edit_text", "run_command", "commit_reviewed", "update_identity"):
         assert blocked not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
 
 

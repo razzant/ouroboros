@@ -66,6 +66,44 @@ def observed_route_stamp(usage: Any) -> Any:
     return stamp
 
 
+def focus_signature(ctx: Any) -> Dict[str, Any]:
+    """The host's signature of the focus that writes a memory record, never the writer's own claim.
+
+    ``{"kind": "mind", "focus": {role, task_id, parent_task_id, root_task_id,
+    chat_id}, "task_id", "route"}``. The role is read from host-copied task
+    metadata, first match wins: ``nanny`` (the configured agent-session route,
+    the one dispatch fact), ``child`` (``delegation_role == "subagent"``),
+    ``consciousness`` (a wake's own ledger category; work a wake starts is a
+    ``root``), ``presence``, ``main`` (the direct chat turn), else ``root``.
+    The model never supplies it.
+    """
+    from ouroboros.consciousness_authority import CONSCIOUSNESS_CATEGORY
+    from ouroboros.dialogue_provenance import is_presence_task
+    from ouroboros.subagent_dispatch_notes import _nanny_route_dispatched_for  # D15->D07 is lazy-only
+
+    raw = getattr(ctx, "task_metadata", None)
+    meta = dict(raw) if isinstance(raw, Mapping) else {}
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    if _nanny_route_dispatched_for(meta, None):
+        role = "nanny"
+    elif str(meta.get("delegation_role") or "").strip().lower() == "subagent":
+        role = "child"
+    elif meta.get("usage_category") == CONSCIOUSNESS_CATEGORY:
+        role = "consciousness"
+    elif is_presence_task({"metadata": meta}):
+        role = "presence"
+    elif getattr(ctx, "is_direct_chat", False):
+        role = "main"
+    else:
+        role = "root"
+    chat_id = getattr(ctx, "current_chat_id", None)
+    focus = {"role": role, "task_id": task_id, "parent_task_id": str(meta.get("parent_task_id") or ""),
+             "root_task_id": str(meta.get("root_task_id") or task_id),
+             "chat_id": chat_id if chat_id is not None else meta.get("chat_id")}
+    return {"kind": "mind", "focus": focus, "task_id": task_id,
+            "route": observed_route_stamp(getattr(ctx, "_accumulated_usage", None))}
+
+
 def sanitize_topic(topic: str) -> str:
     """Keep a shelf-relative topic identity, including useful nested names."""
     if not isinstance(topic, str) or not topic.strip():
@@ -447,14 +485,15 @@ def write_knowledge_note(
     address: KnowledgeAddress, content: str, mode: str = "overwrite",
     expected_revision: str | None = None, task_id: str = "", old_str: str | None = None,
     *, writer: str = "", route: Any = None, writer_input_ref: Any = None,
-    edits: Any = None, summary: str | None = None,
+    edits: Any = None, summary: str | None = None, focus: Any = None,
 ) -> KnowledgeWriteResult:
     """Publish a note against the actual current source, with no inference lock.
 
     ``writer`` names the seam that authored ``content`` (turn, consolidation,
     scratchpad_consolidation, reflection, knowledge_maintenance), ``route`` the
-    model route it ran on and ``writer_input_ref`` what it saw. They are host
-    facts stamped on the history row, never on the note body; a caller that
+    model route it ran on, ``writer_input_ref`` what it saw and ``focus`` which
+    focus of the subject wrote it (``focus_signature(ctx)["focus"]``). They are
+    host facts stamped on the history row, never on the note body; a caller that
     cannot name one leaves the honest ``unknown``, which is also how rows written
     before the stamp existed read.
 
@@ -538,7 +577,7 @@ def write_knowledge_note(
         history = {"ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
                    "address": address.as_dict(), "publication": "source_capture",
                    "writer": writer or UNKNOWN_STAMP, "route": route or UNKNOWN_STAMP,
-                   "writer_input_ref": writer_input_ref or UNKNOWN_STAMP,
+                   "writer_input_ref": writer_input_ref or UNKNOWN_STAMP, "focus": focus or UNKNOWN_STAMP,
                    "old_chars": len(old_text), "new_chars": len(updated.text),
                    "old_sha256": hashlib.sha256(current.raw).hexdigest() if current and current.raw else "",
                    "new_sha256": updated.revision if raw else "", "old_content": old_text,

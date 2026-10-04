@@ -1,12 +1,20 @@
 import json
 from types import SimpleNamespace
 
-from ouroboros.consolidator import _format_entries_for_block
 from ouroboros.dialogue_provenance import (
     dialogue_author,
     presence_provenance_from_task,
 )
 from ouroboros.memory import Memory
+
+
+def _chronicle_view(row):
+    """One chat row as ``memory_read`` renders it — the successor of the retired block formatter."""
+    from ouroboros import chat_chain
+    from ouroboros.tools.chronicle import _row_line
+
+    header, text = _row_line(chat_chain.row_address(row), row, 0, {})
+    return f"{header} {text}"
 
 
 def _row():
@@ -30,7 +38,7 @@ def test_presence_provenance_survives_recent_and_consolidated_rendering():
     expected = "Alex [provider=telegram; account=bot-1; conversation=room-1; thread=topic-1]"
     assert dialogue_author(_row()) == expected
     assert expected in Memory._format_chat_line(_row(), compact=False)
-    assert expected in _format_entries_for_block([_row()])
+    assert expected in _chronicle_view(_row())
 
 
 def _presence_task():
@@ -133,3 +141,19 @@ def test_presence_reflection_entry_is_stamped_before_append(tmp_path, monkeypatc
     )
     assert entry == captured[0]
     assert captured[0]["presence_provenance"] == presence_provenance_from_task(_presence_task())
+
+
+def test_one_row_grammar_serves_memory_read_and_the_view_and_only_indents_later_lines():
+    from ouroboros import chat_chain
+    from ouroboros.dialogue_provenance import memory_row_header, render_memory_row, row_author
+
+    row = {**_row(), "text": "first line\n## not a section"}
+    address = chat_chain.row_address(row)
+    author = row_author(row)
+    header = memory_row_header(address, row, author=author)
+    assert header == (f"[2026-08-21T10:00:00+00:00; {author['label']}; {chat_chain.format_address(address)}]")
+    assert render_memory_row(address, row, author=author) == _chronicle_view(row)  # memory_read prints it as is
+    indented = render_memory_row(address, row, author=author, indent="  ")
+    assert indented == header + " first line\n  ## not a section"
+    assert "\n## " in _chronicle_view(row) and "\n## " not in indented
+    assert memory_row_header(address, {"ts": ""}, author={}).startswith("[time not recorded; author not recorded; ")

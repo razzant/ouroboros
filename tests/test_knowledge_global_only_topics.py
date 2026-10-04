@@ -85,20 +85,28 @@ def test_overview_written_from_a_project_room_is_read_back_globally(tmp_path):
 
 def test_light_nominations_inherit_the_rule(tmp_path):
     """Light nominates through `_write_knowledge_entries`, which shares `_address`,
-    so the consolidator cannot mint a per-project overview either."""
+    so the consolidator cannot mint a per-project note of a reserved topic: a
+    nominated `patterns` note from a project room lands on the global shelf. The
+    overview itself is the acting mind's own words: a Light nomination of it is
+    refused, while the room note beside it is written."""
     from ouroboros.consolidator import _write_knowledge_entries
 
     ctx = project_ctx(tmp_path)
     shelf = tmp_path / "projects" / "demo" / "knowledge"
 
-    shared, room = _write_knowledge_entries(shelf, [
+    shared, reserved, room = _write_knowledge_entries(shelf, [
         {"topic": "overview", "content": "# Orientation\n\nShared.\n"},
+        {"topic": "patterns", "content": "# Patterns\n\nA recurring class.\n"},
         {"topic": "room-notes", "content": "# Room\n\nProject detail.\n"},
     ], context=ctx)
 
-    assert (shared["topic"], shared["scope"], shared["ok"]) == ("overview", "global", True)
+    assert (shared["topic"], shared["scope"], shared["ok"]) == ("overview", "global", False)
+    assert shared["reason"] == "overview_is_mind_authored"
+    assert (reserved["topic"], reserved["scope"], reserved["ok"]) == ("patterns", "global", True)
     assert (room["topic"], room["scope"], room["ok"]) == ("room-notes", "project:demo", True)
-    assert (tmp_path / "memory" / "knowledge" / "overview.md").exists()
+    assert not (tmp_path / "memory" / "knowledge" / "overview.md").exists()
+    assert not (shelf / "overview.md").exists()
+    assert (tmp_path / "memory" / "knowledge" / "patterns.md").exists() and not (shelf / "patterns.md").exists()
     assert (shelf / "room-notes.md").exists()
 
 

@@ -498,3 +498,23 @@ def test_sse_follow_tick_reads_only_appended_bytes_and_zero_artifact_work(
     assert end_offset - start_offset == appended_bytes  # ONLY the appended bytes
     assert all(offset > 0 for _p, offset, _e in reads)  # nothing re-read from 0
     assert artifact_counters == {"collect": 0, "copy": 0, "disposition": 0}
+
+
+def test_the_chronicle_journal_is_an_enrolled_hot_store_that_warns_only_past_its_threshold(tmp_path, monkeypatch):
+    """The memory journal is read on every task context, so it
+    is enrolled in the hot-store tripwire (DEVELOPMENT 03 projection-over-replay rule): quiet
+    at or below its threshold, one WARNING past it."""
+    from ouroboros import context_budget
+    from ouroboros.agent_startup_checks import _hot_store_thresholds, hot_store_growth_notes
+
+    assert ("memory/chronicle/records.jsonl", context_budget.CHRONICLE_JOURNAL_WARN_BYTES) in {
+        (relative, threshold) for relative, threshold, _remediation in _hot_store_thresholds()}
+    monkeypatch.setattr(context_budget, "CHRONICLE_JOURNAL_WARN_BYTES", 10)
+    env = types.SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+    journal = tmp_path / "memory" / "chronicle" / "records.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"x" * 10)
+    assert hot_store_growth_notes(env) == []
+    journal.write_bytes(b"x" * 11)
+    [note] = hot_store_growth_notes(env)
+    assert "memory/chronicle/records.jsonl" in note and "never delete records" in note

@@ -1,0 +1,3 @@
+61
+The chat-and-biography row names the memory journal's hot-store warning (64 MB,
+CHRONICLE_JOURNAL_WARN_BYTES), the fix that enrolls the journal in the tripwire.

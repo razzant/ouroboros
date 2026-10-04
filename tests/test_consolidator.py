@@ -1,125 +1,18 @@
-"""Tests for ouroboros.consolidator (block-wise system)."""
+"""The chat stream the legacy memory was cut from, after the old dialogue writer is retired.
+
+The writer's tests (block size, cursor, eras, formatter) left with it. What stays is
+the stream it read and the chronicle import still positions legacy blocks on: every
+room of the one identity, A2A transport excluded.
+"""
 import json
-import pathlib
-import pytest
-from unittest.mock import MagicMock
 
-from ouroboros.consolidator import (
-    should_consolidate,
-    consolidate,
-    _load_meta,
-    atomic_write_json as _save_meta,
-    _count_lines,
-    _format_entries_for_block,
-    _load_blocks,
-    _write_locked_json as _save_blocks,
-    BLOCK_SIZE,
-)
-
-
-@pytest.fixture
-def tmp_paths(tmp_path):
-    chat_path = tmp_path / "chat.jsonl"
-    blocks_path = tmp_path / "dialogue_blocks.json"
-    meta_path = tmp_path / "dialogue_meta.json"
-    return chat_path, blocks_path, meta_path
-
-
-def _write_chat_entries(path, count):
-    """Write count fake chat entries."""
-    with path.open("w") as f:
-        for i in range(count):
-            direction = "in" if i % 2 == 0 else "out"
-            entry = {
-                "ts": f"2026-02-25T{10 + i // 60:02d}:{i % 60:02d}:00Z",
-                "direction": direction,
-                "text": f"Message {i}",
-            }
-            f.write(json.dumps(entry) + "\n")
-
-
-def test_should_consolidate_no_chat(tmp_paths):
-    _, _, meta_path = tmp_paths
-    chat_path = pathlib.Path("/nonexistent/chat.jsonl")
-    assert should_consolidate(meta_path, chat_path) is False
-
-
-def test_should_consolidate_not_enough_messages(tmp_paths):
-    chat_path, _, meta_path = tmp_paths
-    _write_chat_entries(chat_path, 5)
-    assert should_consolidate(meta_path, chat_path) is False
-
-
-def test_should_consolidate_enough_messages(tmp_paths):
-    chat_path, _, meta_path = tmp_paths
-    _write_chat_entries(chat_path, BLOCK_SIZE + 5)
-    assert should_consolidate(meta_path, chat_path) is True
-
-
-def test_should_consolidate_respects_offset(tmp_paths):
-    chat_path, _, meta_path = tmp_paths
-    _write_chat_entries(chat_path, BLOCK_SIZE + 5)
-    _save_meta(meta_path, {"last_consolidated_offset": BLOCK_SIZE + 2})
-    assert should_consolidate(meta_path, chat_path) is False
-
-
-def test_consolidate_creates_block(tmp_paths):
-    chat_path, blocks_path, meta_path = tmp_paths
-    _write_chat_entries(chat_path, BLOCK_SIZE + 5)
-
-    mock_llm = MagicMock()
-    mock_llm.chat.return_value = (
-        {"content": "### Block: 2026-02-25 10:00 - 11:40\n\nSummary of events."},
-        {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.001},
-    )
-
-    usage = consolidate(chat_path, blocks_path, meta_path, mock_llm)
-
-    assert usage is not None
-    assert usage["cost"] == pytest.approx(0.002)  # one room: draft and correction
-    assert mock_llm.chat.call_count == 2
-    assert blocks_path.exists()
-    blocks = json.loads(blocks_path.read_text())
-    assert len(blocks) == 1
-    assert blocks[0]["type"] == "summary"
-    assert "Summary of events" in blocks[0]["content"]
-    assert [room["room_id"] for room in blocks[0]["rooms"]] == ["unresolved:missing"]
-
-    meta = _load_meta(meta_path)
-    assert meta["last_consolidated_offset"] == BLOCK_SIZE
-
-
-def test_consolidate_not_enough_messages(tmp_paths):
-    chat_path, blocks_path, meta_path = tmp_paths
-    _write_chat_entries(chat_path, 5)
-
-    mock_llm = MagicMock()
-    result = consolidate(chat_path, blocks_path, meta_path, mock_llm)
-    assert result is None
-    mock_llm.chat.assert_not_called()
-
-
-def test_load_save_meta(tmp_paths):
-    _, _, meta_path = tmp_paths
-    assert _load_meta(meta_path) == {}
-
-    _save_meta(meta_path, {"last_consolidated_offset": 42})
-    meta = _load_meta(meta_path)
-    assert meta["last_consolidated_offset"] == 42
-
-
-def test_count_lines(tmp_paths):
-    chat_path = tmp_paths[0]
-    _write_chat_entries(chat_path, 15)
-    assert _count_lines(chat_path) == 15
+from ouroboros.chat_chain import _read_chat_entries
 
 
 def test_read_chat_entries_includes_project_rows_full_awareness(tmp_path):
-    """Full project awareness (v6.32.0): the one identity's consolidated dialogue
-    (dialogue_blocks.json) is its WHOLE conversation — main AND project threads —
-    because Ouroboros is one awareness/biography (BIBLE P1). Only A2A virtual
-    transport is excluded from the consolidation source."""
-    from ouroboros.consolidator import _read_chat_entries
+    """Full project awareness (v6.32.0): the one identity's dialogue memory is its WHOLE
+    conversation — main AND project threads — because Ouroboros is one awareness/biography
+    (BIBLE P1). Only A2A virtual transport is excluded from the stream."""
     from ouroboros.projects_registry import create_project
 
     logs = tmp_path / "logs"
@@ -136,56 +29,4 @@ def test_read_chat_entries_includes_project_rows_full_awareness(tmp_path):
     chat_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
     texts = [e.get("text") for e in _read_chat_entries(chat_path)]
-    assert "main-1" in texts and "main-2" in texts
-    assert "project-visible" in texts  # full awareness: project chat IS part of identity memory
-    assert "a2a-noise" not in texts    # only A2A virtual transport is excluded
-
-
-def test_should_consolidate_handles_log_rotation(tmp_paths):
-    chat_path, _, meta_path = tmp_paths
-    _write_chat_entries(chat_path, BLOCK_SIZE + 5)
-    _save_meta(meta_path, {"last_consolidated_offset": 9999})
-    assert should_consolidate(meta_path, chat_path) is True
-
-
-def test_format_entries_for_block():
-    entries = [
-        {"ts": "2026-02-25T10:00:00Z", "direction": "in", "text": "Hello"},
-        {"ts": "2026-02-25T10:01:00Z", "direction": "out", "text": "Hi there"},
-    ]
-    formatted = _format_entries_for_block(entries)
-    assert "User: Hello" in formatted
-    assert "Ouroboros: Hi there" in formatted
-
-
-def test_load_save_blocks(tmp_path):
-    blocks_path = tmp_path / "blocks.json"
-    blocks = [{"ts": "2026-01-01", "type": "summary", "content": "test"}]
-    _save_blocks(blocks_path, blocks)
-    loaded = _load_blocks(blocks_path)
-    assert len(loaded) == 1
-    assert loaded[0]["content"] == "test"
-
-
-def test_dialogue_summary_markdown_no_longer_auto_migrates(tmp_path):
-    summary_path = tmp_path / "dialogue_summary.md"
-    blocks_path = tmp_path / "dialogue_blocks.json"
-
-    summary_path.write_text(
-        "### Episode: 2026-02-20 10:00 – 11:00\n\nFirst episode.\n\n"
-        "### Era: 2026-01-01 to 2026-01-31\n\nOld era summary.\n",
-        encoding="utf-8",
-    )
-
-    assert summary_path.exists()
-    assert not blocks_path.exists()
-
-
-def test_existing_dialogue_blocks_remain_authoritative(tmp_path):
-    summary_path = tmp_path / "dialogue_summary.md"
-    blocks_path = tmp_path / "dialogue_blocks.json"
-
-    summary_path.write_text("### Episode: test\nContent.", encoding="utf-8")
-    blocks_path.write_text("[]", encoding="utf-8")
-
-    assert json.loads(blocks_path.read_text()) == []
+    assert texts == ["main-1", "project-visible", "main-2"]  # full awareness, A2A excluded

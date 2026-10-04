@@ -77,15 +77,20 @@ def test_summary_and_background_token_budgets():
     from pathlib import Path
     from ouroboros import context_compaction
 
+    from ouroboros import consolidator
+
     expectations = {
         "ouroboros/tools/review_synthesis.py": "max_tokens=16384",
-        "ouroboros/consolidator.py": "max_tokens=16384",
+        # The Light answer ceiling is one named constant since the memory
+        # writers landed; the floor itself is pinned on the constant below.
+        "ouroboros/consolidator.py": "max_tokens=LIGHT_ANSWER_CEILING_TOKENS",
         "ouroboros/reflection.py": "max_tokens=16384",
         "ouroboros/tools/skill_publish.py": "max_tokens=8192",
     }
     for path, needle in expectations.items():
         src = Path(path).read_text(encoding="utf-8").replace(" ", "")
         assert needle in src, f"{path} must contain {needle}"
+    assert consolidator.LIGHT_ANSWER_CEILING_TOKENS == 16384
     # Owner decision 2=A (TZ-2 C5): the paid task narrative is gone; the free
     # facts row buys no model call, so the synthesis leaf holds no summary call.
     synthesis = Path("ouroboros/post_task_synthesis.py").read_text(encoding="utf-8")

@@ -1356,8 +1356,10 @@ def get_tools() -> List[ToolEntry]:
                 "required": ["prompt"],
                 "properties": {
                 "prompt": {"type": "string", "description":
-                    "Complete task for a direct start; for the configured snapshotted session (retry/"
-                    "replacement), only optional advisory coordination context — the host supplies the canonical work order."},
+                    "Complete task for a direct start, standing on its own: the session has none of my memory, so write "
+                    "why the work exists, what is already decided and where the materials are (paths); the host appends "
+                    "my human's originating words verbatim. For the configured snapshotted session (retry/replacement), "
+                    "only optional advisory coordination context — the host supplies the canonical work order."},
                 "subagent_id": {"type": "string", "description":
                     "Required for a fresh start made directly: exact agent_session actor id from Available "
                     "subagents. Omit for the current configured snapshotted route and for retry_of. API actor ids are refused here "

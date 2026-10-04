@@ -1,0 +1,4 @@
+67
+The owner-authority row names the chronicle journal memory/chronicle/records.jsonl
+as the canonical source (the retold dialogue_blocks.json stays read-only legacy)
+and the memory view as its bounded projection, replacing the dialogue-block cells.

@@ -55,16 +55,23 @@ _RESPONSE_METADATA_LABEL_MAX_CHARS = 160
 def _project_openai_family_system(target: Dict[str, Any], messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The OpenAI-family send copy of a declared leading system message.
 
-    OpenAI's public API caches the whole leading system section plus tools as ONE unit
-    (``llm_attempt.openai_family_model``): keep only the builder-declared stable governance
-    blocks there and carry the mutable context as a host notice before the task, so a new
-    conversation is served the prefix its predecessors already cached. Runs before the
-    direct/OpenRouter branch split and the marker strip, so direct OpenAI, OpenRouter and
-    the prospective wrap-up candidate project the same copy; the canonical transcript keeps
-    its single system message. The shape that was sent rides ``target["wire_layout"]``
-    (per-call, never a thread-local) into ``usage`` in ``_normalize_remote_response``.
+    Without explicit breakpoints OpenAI looks a cache up only at the end of the leading
+    system group (``llm_attempt.openai_family_model``): keep only the builder-declared stable
+    governance blocks there and carry the mutable context as a host notice before the task,
+    so a new conversation is served the prefix its predecessors already cached. OpenRouter
+    turns the block markers into explicit breakpoints for this family, so there each marked
+    leading block also stays its own system item and is reused independently. Runs before
+    the direct/OpenRouter branch split and the marker strip, so direct OpenAI, OpenRouter
+    and the prospective wrap-up candidate project from one function; the canonical
+    transcript keeps its single system message. The shape that was sent rides
+    ``target["wire_layout"]`` (per-call, never a thread-local) into ``usage`` in
+    ``_normalize_remote_response``.
     """
-    return project_declared_system_prefix(target, messages) if openai_family_route(target) else messages
+    if not openai_family_route(target):
+        return messages
+    keep_marked = bool(target.get("supports_openrouter_extensions")) and supports_message_cache_control(
+        str(target.get("resolved_model") or ""))
+    return project_declared_system_prefix(target, messages, keep_marked=keep_marked)
 
 
 def _bounded_response_metadata_label(value: Any) -> Optional[str]:
@@ -182,10 +189,14 @@ class _OpenAICompatibleLaneMixin:
                 cache_identity = self._prompt_cache_identity(
                     str(target.get("usage_model") or resolved_model),
                     clean_messages,
+                ) or self._explicit_cache_affinity_identity(
+                    str(target.get("usage_model") or resolved_model), cache_affinity,
                 )
                 if cache_identity:
                     # OpenAI's named affinity key keeps requests sharing the
-                    # stable governance prefix on the same cache bucket.
+                    # stable governance prefix on the same cache bucket; a
+                    # request without a leading system (a Light prompt) uses
+                    # its caller-declared affinity instead.
                     kwargs["prompt_cache_key"] = cache_identity
             requested_effort = normalize_reasoning_effort(reasoning_effort)
             if direct_openai:

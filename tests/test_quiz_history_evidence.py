@@ -285,17 +285,21 @@ def test_history_recovers_evicted_answer_without_an_extra_bubble(runtime):
 
 
 def test_recent_room_and_history_share_parent_root_and_origin_membership(runtime):
+    from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.gateway.history import _make_thread_filter
-    from ouroboros.project_dialogue import project_recent_dialogue
+    from ouroboros.memory_inventory import open_room_rows
     from ouroboros.projects_registry import bind_task_to_project, create_project
 
     project = create_project(runtime.root, "membership", name="Membership")
     bind_task_to_project(runtime.root, "parent", project["id"], origin={"absent": "system"})
+    ChronicleStore(runtime.root).ensure_activated()
     for field in ("parent_task_id", "root_task_id"):
         message_bus.log_chat("out", 1, 0, field, task_id="child-" + field,
                              message_meta={field: "parent"}, drive_root=runtime.root)
-    rows, coverage, _origins = project_recent_dialogue(Memory(runtime.root), project["chat_id"], 20)
-    assert {row["text"] for row in rows} == {"parent_task_id", "root_task_id"}
+    # The memory view's open rows of the Project's room (``memory_inventory``): the lineage of both rows.
+    rows = [meta for _address, meta, _pos in open_room_rows(runtime.root, project["chat_id"])]
+    assert {row["task_id"] for row in rows} == {"child-parent_task_id", "child-root_task_id"}
+    assert open_room_rows(runtime.root, 1) == []  # bound by lineage: not Main's
     project_filter = _make_thread_filter(project["chat_id"], {project["chat_id"]}, [], {"parent": project["chat_id"]})
     main_filter = _make_thread_filter(1, {project["chat_id"]}, [], {"parent": project["chat_id"]})
     assert all(project_filter(row["chat_id"], row) and not main_filter(row["chat_id"], row) for row in rows)

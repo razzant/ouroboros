@@ -387,12 +387,15 @@ def _build_advisory_prompt(
     the caller already built for its durable record (one tiering per brief);
     a direct caller gets its own. ``prompt_context["governance_facts"]``, when
     the caller supplies a dict, receives the delivered manifest — the same
-    out-parameter shape ``options["execution"]`` uses on the run path."""
+    out-parameter shape ``options["execution"]`` uses on the run path.
+    ``prompt_context["owner_words"]`` is the host-attested section of the
+    owner's words that caused the work; both goal sections carry it."""
     prompt_context = dict(prompt_context or {})
     diff: Optional[str] = prompt_context.get("diff")
     changed_files: Optional[str] = prompt_context.get("changed_files")
     review_surface = str(prompt_context.get("review_surface") or "repo")
     expected_items = prompt_context.get("expected_items")
+    owner_words = str(prompt_context.get("owner_words") or "")
     checklist_name = "Skill Review Checklist" if review_surface == "skill" else "Repo Commit Checklist"
     checklists = str(prompt_context.get("checklist_section") or "")
     if not checklists:
@@ -415,7 +418,7 @@ def _build_advisory_prompt(
     if changed_files is None:
         changed_files = _car()._get_changed_file_list(repo_dir, paths=resolved_paths)
     if review_surface == "skill":
-        goal_section = _car().build_goal_section(goal, "", commit_message)
+        goal_section = _car().build_goal_section(goal, "", commit_message, owner_words)
         scope_section = (
             "## Skill payload pack\n\n"
             "The following text is the complete reviewed skill payload pack. "
@@ -423,7 +426,7 @@ def _build_advisory_prompt(
             f"{scope}"
         )
     else:
-        goal_section = _car().build_goal_section(goal, scope, commit_message)
+        goal_section = _car().build_goal_section(goal, scope, commit_message, owner_words)
         scope_section = _car().build_scope_section(scope)
 
     # Include blocking history when durable state is available.

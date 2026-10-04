@@ -5,14 +5,16 @@ from __future__ import annotations
 import logging
 import copy
 import json
+from pathlib import Path
 from typing import List
 
 from ouroboros.tools.registry import ToolEntry
 
 log = logging.getLogger(__name__)
+_CANONICAL_OBSERVATION = object()
 
 
-def record_context_view(ctx, messages, tool_schemas) -> None:
+def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONICAL_OBSERVATION) -> None:
     """Capture a usable turn's canonical source; prospective pricing never calls this.
 
     Nothing is added to the prompt or cache identity. Inspect pins this one
@@ -27,6 +29,32 @@ def record_context_view(ctx, messages, tool_schemas) -> None:
         "revision": context_reclaim_transcript_sha256(observed),
         "messages": observed, "tool_schemas": copy.deepcopy(tool_schemas),
     }
+    if physical_capture is _CANONICAL_OBSERVATION:
+        return  # Existing non-Main actors retain their own observation boundary.
+    observation = ctx._last_context_observation
+    observation.update(exposed_units=[], physical_source_status="unavailable")
+    if physical_capture is None or not physical_capture.candidate_manifest_ref:
+        return
+    from ouroboros.context_compaction import exposed_context_units
+    from ouroboros.observability import read_blob_ref, read_call_manifest_ref
+
+    for root in (getattr(ctx, "budget_drive_root", None), getattr(ctx, "drive_root", None)):
+        if root is None:
+            continue
+        try:
+            manifest = read_call_manifest_ref(Path(root), physical_capture.candidate_manifest_ref, task_id=ctx.task_id)
+            payload = read_blob_ref(Path(root), manifest["full_payload_ref"])
+            physical_messages = payload.get("messages")
+            if not isinstance(physical_messages, list):
+                continue
+            observation.update(
+                exposed_units=list(exposed_context_units(observed, physical_messages)),
+                physical_source_status="observed_projection", physical_attempt_id=physical_capture.attempt_id,
+                physical_source_ref=physical_capture.candidate_manifest_ref,
+            )
+            return
+        except (OSError, ValueError, KeyError, TypeError):
+            log.debug("Physical context source unavailable", exc_info=True)
 
 
 def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = False,
@@ -43,14 +71,41 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_REPORTED_FAILURE",
                 text="Context view unavailable: this actor has no recorded model-send observation yet."))
         ctx._inspected_context_view = observed
+        units = _atomic_units(observed["messages"])
+        checkpoint = observed.get("checkpoint_ref")
+        if not checkpoint and getattr(ctx, "task_id", "") and getattr(ctx, "drive_root", None):
+            from ouroboros.artifacts import store_actor_source_bytes
+
+            try:
+                roots = dict.fromkeys((Path(getattr(ctx, "budget_drive_root", None) or ctx.drive_root).resolve(),
+                                       Path(ctx.drive_root).resolve()))
+                raw = json.dumps({"messages": observed["messages"],
+                    "observed_view_revision": observed["revision"], "selection_fingerprint": observed["revision"],
+                    "selected_unit_ids": [unit.unit_id for unit in units]}, ensure_ascii=False).encode("utf-8")
+                for root in roots:
+                    checkpoint = store_actor_source_bytes(root, ctx.task_id, category="context_checkpoints",
+                        source_id="view", data=raw, extension="json")
+                observed["checkpoint_ref"] = checkpoint
+            except (OSError, ValueError):
+                checkpoint = None
+                log.debug("Inspected context source could not be retained", exc_info=True)
+        # Every restore ref remains self-contained. The reader needs the stable
+        # content-addressed path/size/hash, not a repeated read_file invocation.
+        # Keep the full reader hint on the pinned observation, outside this O(N) reply.
+        restore_checkpoint = ({key: checkpoint[key] for key in ("kind", "root", "path", "size", "sha256")}
+                              if checkpoint else None)
         return json.dumps({
             "view_revision": observed["revision"],
             "units": [{"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256,
-                       "estimated_tokens": unit.context_size_tokens, "source_refs": unit.source_refs}
-                      for unit in _atomic_units(observed["messages"])],
+                       "estimated_tokens": unit.context_size_tokens, "source_refs": unit.source_refs,
+                       "restore_ref": {"checkpoint_ref": restore_checkpoint, "unit_id": unit.unit_id,
+                                       "raw_sha256": unit.raw_sha256} if checkpoint else None,
+                       "physically_exposed": ({"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}
+                                              in observed["exposed_units"]) if "exposed_units" in observed else None}
+                      for unit in units],
             "schema_names": [s["function"]["name"] for s in observed["tool_schemas"]],
             "rule": "This revision names the observed messages; schemas are listed separately. Select complete unit IDs to keep, write one working_note, and preserve original sources. Newer owner/tool messages remain untouched.",
-        }, ensure_ascii=False)
+        }, ensure_ascii=False, separators=(",", ":"))
     if working_note is not None:
         # This invocation is a response to the actor's recorded physical send.
         # The host already owns that causal binding; echoing its hash is only

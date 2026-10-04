@@ -236,7 +236,10 @@ def test_readonly_child_can_review_auth_sources_and_scoped_knowledge(environment
     assert 'KNOWLEDGE_READ' in reg.execute('knowledge_read', {'topic': 'topic'})
     assert 'OTHER_PROJECT_FACT' not in reg.execute('knowledge_read', {'topic': 'hidden'})
     assert sorted(str(p) for p in data.rglob('*')) == before
-    assert reg.get_schema_by_name('knowledge_write') is None
+    # A child writes knowledge and chronicle drafts in its own name; identity stays the parent's.
+    assert reg.get_schema_by_name('knowledge_write') is not None
+    assert reg.get_schema_by_name('update_identity') is None
+    assert reg.get_schema_by_name('chronicle_write') is not None
     assert 'LOCAL_READONLY_SUBAGENT_BLOCKED' in reg.execute('write_file', {'path': 'x', 'content': 'x'})
 
 

@@ -69,7 +69,6 @@ def test_root_checkpoint_prevents_a_second_facts_row_and_buys_no_summary(tmp_pat
     llm = Llm()
     monkeypatch.setattr(llm_mod, "LLMClient", lambda: llm)
     monkeypatch.setattr(memory_mod, "Memory", lambda **_kwargs: object())
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *_a, **_k: None)
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *_a, **_k: None)
     monkeypatch.setattr(pipeline, "_run_reflection", lambda *_a, **_k: None)
     monkeypatch.setattr(pipeline, "_update_improvement_backlog", lambda *_a, **_k: 0)
@@ -444,12 +443,14 @@ def test_duplicate_task_done_after_child_copyback_appends_one_canonical_projecti
 
 
 def test_child_projection_enters_main_cognition_and_project_lineage_not_main_ui(tmp_path):
-    from ouroboros.context import build_recent_sections
     from ouroboros.gateway.history import make_chat_history_endpoint
-    from ouroboros.memory import Memory
     from ouroboros.project_dialogue import append_terminal_task_projection
     from ouroboros.projects_registry import create_project
+    from tests._memory_view_context import blocks, section
+    from tests.test_cache_optimization import _make_env_and_memory
 
+    env, memory = _make_env_and_memory(tmp_path / "home")
+    tmp_path = memory.drive_root  # the installation the rest of the test reads
     project = create_project(tmp_path, "launch", name="Launch")
     project_chat = int(project["chat_id"])
     child = {
@@ -464,17 +465,17 @@ def test_child_projection_enters_main_cognition_and_project_lineage_not_main_ui(
         {"chat_id": project_chat, "status": "completed"},
     )
 
-    main_context = "\n\n".join(build_recent_sections(Memory(tmp_path), env=None))
-    project_context = "\n\n".join(
-        build_recent_sections(Memory(tmp_path), env=None, thread_chat_id=project_chat)
-    )
-    # ``memory._format_chat_line`` renders the text and drops every typed
-    # field, so lineage must stay in words. The child's own answer is not
-    # repeated here: it is a turn of its own in the room this row lives in.
-    assert "(child child-review of root)" in main_context
-    assert "Reviewed exact SHA" not in main_context
-    assert "(child child-review of root)" in project_context
-    assert "Reviewed exact SHA" not in project_context
+    room = f"Project Launch [chat_id={project_chat}]"
+    _a, _b, main_context, _cap = blocks(env, memory, {"id": "main-turn", "chat_id": 1})
+    _a, _b, project_context, _cap = blocks(env, memory, {"id": "project-turn", "chat_id": project_chat})
+    # The memory view: the child's terminal row is a host fact of its root task in the Project's
+    # room (lane 2, one line per root task); Main names that room in one line. The child's own
+    # answer is never repeated: it is a turn of its own, read by address.
+    assert f"### {room} — open" in section(main_context, "## Live rooms")
+    assert "task facts 1" in section(main_context, "## Live rooms")
+    lane = section(project_context, f"## This room ({room})")
+    assert "; host; task root] " in lane and "children 1 (completed 1)" in lane
+    assert "Reviewed exact SHA" not in main_context and "Reviewed exact SHA" not in project_context
 
     import asyncio
 
@@ -498,8 +499,9 @@ def test_child_projection_enters_main_cognition_and_project_lineage_not_main_ui(
          "result": "Unscoped child truth", "outcome_axes": {"execution": {"status": "ok"}}},
         {"chat_id": 1, "status": "completed"},
     )
-    main_context = "\n\n".join(build_recent_sections(Memory(tmp_path), env=None))
-    assert "researcher (child child-main of main-root)" in main_context
+    _a, _b, main_context, _cap = blocks(env, memory, {"id": "main-turn-2", "chat_id": 1})
+    lane = section(main_context, "## This room (Main)")
+    assert "; host; task main-root] " in lane and "children 1 (completed 1)" in lane
     assert "Unscoped child truth" not in main_context
     main_rows = json.loads(asyncio.run(endpoint(SimpleNamespace(
         query_params={"chat_id": "1"},

@@ -1,0 +1,5 @@
+234
+The module map gains the owner_words.py row: the owner's words that caused a
+work tree, carried by value to helpers, resolved from the origin, binding and
+annotation carriers for tasks scheduled before the field existed, and rendered
+verbatim for children, external sessions and reviewers.

@@ -726,12 +726,15 @@ class OuroborosAgent:
         self._emit_typing_start()
         canonical_drive = pathlib.Path(task.get("budget_drive_root") or self.env.budget_drive_root or self.env.drive_root)
         review_env = self.env if canonical_drive.resolve(strict=False) == self.env.drive_root.resolve(strict=False) else replace(self.env, drive_root=canonical_drive)
+        from ouroboros.config import get_context_mode
+        from ouroboros.tool_policy import initial_tool_schemas  # the schemas count in the memory view's floor
         messages, cap_info = build_llm_messages(
             env=self.env,
             memory=self.memory,
             task=task,
             review_context_builder=lambda: build_review_context(review_env),
             ctx=ctx,
+            tool_schemas=initial_tool_schemas(self.tools, context_mode=get_context_mode()),
         )
         # The second of the three places a reduction must reach (the durable record
         # above is the first, `[SUBTASK_OUTCOME]` the third). It is appended HERE,

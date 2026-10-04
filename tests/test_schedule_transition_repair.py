@@ -44,11 +44,12 @@ def _clock(monkeypatch):
     clock_module = SimpleNamespace(datetime=Clock, timezone=datetime.timezone, timedelta=datetime.timedelta)
     for module in (queue_schedules, occurrence, schedule_time):
         monkeypatch.setattr(module, "datetime", clock_module)
+    # The consumed one-shot GC measures age against the real clock; without this the fixed
+    # instant above ages past the retention window and a just-completed row is pruned.
     from ouroboros import retention
 
-    age_cutoff = retention.age_cutoff
-    # Schedule consumption and its GC cutoff must use the same advancing clock.
-    monkeypatch.setattr(retention, "age_cutoff", lambda days, now=None: age_cutoff(
+    real_cutoff = retention.age_cutoff
+    monkeypatch.setattr(retention, "age_cutoff", lambda days, now=None: real_cutoff(
         days, Clock.instant.timestamp() if now is None else now))
     return Clock
 

@@ -331,6 +331,207 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
     return text
 
 
+# Source attribution of one canonical chat row: who wrote it is read from the row's
+# own fields, never from its text, which anyone can imitate. The fields a delegated child's
+# message carries (``SUBAGENT_MESSAGE_FIELDS``); a row with none of them predates the
+# lineage epoch or is the root's own speech.
+_LINEAGE_FIELDS = ("subagent_task_id", "delegation_role", "parent_task_id")
+LEGACY_RETELLING_SUMMARY_KIND = "authored_root_summary"
+# Typed rows that state facts about work rather than speak to people (lane 2).
+_FACT_TYPES = frozenset({"task_summary", "project_completion_summary"})
+_HOST_FACT_FIELDS = (("status", "status"), ("outcome", "outcome"), ("phase", "outcome_phase"),
+                     ("reason", "reason_code"))
+
+
+def _direction(row: Mapping[str, Any]) -> str:
+    value = _text(row.get("direction")).lower()
+    return "out" if value == "outgoing" else value
+
+
+def _with_transport(label: str, row: Mapping[str, Any]) -> str:
+    """A transport-delivered row keeps its delivery provenance beside the author."""
+    provenance = dialogue_provenance(row) if row.get("transport") else ""
+    return f"{label} [{provenance}]" if provenance else label
+
+
+def _ouroboros_author(row: Mapping[str, Any], **extra: str) -> dict[str, Any]:
+    author: dict[str, Any] = {"kind": "ouroboros", "label": _with_transport("Ouroboros", row), **extra}
+    if _text(row.get("initiator")) == "consciousness":
+        author["focus"] = "consciousness"
+    return author
+
+
+def _child_author(task_id: Any, parent: Any, root: Any, role: Any = "", **extra: str) -> dict[str, Any]:
+    task_id, parent, root, role = _text(task_id), _text(parent), _text(root), _text(role)
+    label = f"child {task_id or '(task not recorded)'}" + (f" ({role})" if role else "") + (
+        f" of {parent}" if parent else "")
+    author = {"kind": "child", "label": label, "task_id": task_id, "parent_task_id": parent,
+              "root_task_id": root, **extra}
+    if role:
+        author["role"] = role
+    return author
+
+
+def _pre_epoch_author(row: Mapping[str, Any], lineage_lookup: Any) -> dict[str, Any]:
+    """An outgoing row written before lineage was recorded: the task result decides, never the text."""
+    task_id = _text(row.get("task_id"))
+    facts = lineage_lookup(task_id) if lineage_lookup is not None and task_id else None
+    facts = _mapping(facts)
+    if facts.get("is_root_task"):
+        return _ouroboros_author(row, lineage="task_results")
+    if _text(facts.get("delegation_role")).lower() == "subagent" or _text(facts.get("parent_task_id")):
+        return _child_author(task_id, facts.get("parent_task_id"), facts.get("root_task_id"), lineage="task_results")
+    return {"kind": "unattributed", "label": "outgoing, author not recorded", "lineage": "unrecorded"}
+
+
+def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch: Mapping[str, Any] | None = None,
+               lineage_lookup: Any = None) -> dict[str, Any]:
+    """Who wrote one canonical chat row, as ``{"kind", "label", ...}``, read from its fields alone.
+
+    ``kind`` is ``human`` (``in`` rows and an owner's quiz answer), ``child`` (an
+    outgoing row with a delegated child's lineage), ``helper`` (the retired Light
+    retelling), ``host`` (every other ``system`` row), ``ouroboros`` or
+    ``unattributed``. ``lineage_epoch`` (``{"pos", ...}``, the first row that
+    carries lineage, else the chain end at activation, recorded by the import as
+    a data fact) splits outgoing rows without lineage: before it a row is the
+    root's own words only when ``lineage_lookup(task_id)`` (a
+    ``resolve_task_lineage`` projection or ``None``) says so, a child's evidence
+    when it names a child, and otherwise ``unattributed`` — never silently
+    "Ouroboros". That rule needs the row's stream ``pos``: with an epoch and no
+    ``pos`` such a row raises ``TypeError``. Without an epoch (the chain was
+    empty at activation, or the chronicle is not active) ``pos`` is not needed.
+    """
+    if row.get("type") == "quiz_answer":
+        return {"kind": "human", "label": "Owner", "via": "quiz"}
+    direction = _direction(row)
+    if direction == "in":
+        return {"kind": "human", "label": dialogue_author(row)}
+    if direction == "system":
+        if row.get("summary_kind") == LEGACY_RETELLING_SUMMARY_KIND:
+            return {"kind": "helper", "label": "Light (legacy retelling)"}
+        host: dict[str, Any] = {"kind": "host", "label": _with_transport("host", row)}
+        host.update({key: _text(row.get(key)) for key in ("type", "summary_kind") if _text(row.get(key))})
+        return host
+    if _text(row.get("subagent_task_id")) or _text(row.get("delegation_role")).lower() == "subagent":
+        return _child_author(row.get("subagent_task_id") or row.get("task_id"), row.get("parent_task_id"),
+                             row.get("root_task_id"), row.get("subagent_role"))
+    if lineage_epoch is not None and not any(_text(row.get(key)) for key in _LINEAGE_FIELDS):
+        if pos is None:
+            raise TypeError("row_author: an outgoing row without lineage needs its stream pos "
+                            "when a lineage_epoch is given")
+        if pos < int(lineage_epoch["pos"]):
+            return _pre_epoch_author(row, lineage_lookup)
+    return _ouroboros_author(row)
+
+
+def row_class(row: Mapping[str, Any], **lineage: Any) -> dict[str, Any]:
+    """``{"lane": 1|2, "author": row_author(...)}``: people and my own words to them are lane 1;
+    children's reports, host facts, the legacy retelling and unattributed rows are lane 2."""
+    author = row_author(row, **lineage)
+    spoken = author["kind"] in {"human", "ouroboros"} and row.get("type") not in _FACT_TYPES
+    return {"lane": 1 if spoken else 2, "author": author}
+
+
+def _question_text(row: Mapping[str, Any], quiz: Mapping[str, Any]) -> str:
+    """A quiz card as text: question, each option's ``label`` and the recommendation."""
+    options = quiz.get("options") if isinstance(quiz.get("options"), list) else []
+    labels = [_text(option.get("label")) if isinstance(option, Mapping) else str(option) for option in options]
+    recommended = quiz.get("recommended_index")
+    if type(recommended) is not int:
+        recommended = next((index for index, option in enumerate(options)
+                            if isinstance(option, Mapping) and option.get("recommended") is True), None)
+    listed = " ".join(f"({index}) {label}" for index, label in enumerate(labels, start=1))
+    question = quiz.get("question") or row.get("text") or ""
+    return (f"[question {_text(quiz.get('quiz_id'))}] {question} — options: {listed}"
+            + (f"; recommended ({recommended + 1})" if type(recommended) is int else ""))
+
+
+def _host_facts_text(row: Mapping[str, Any]) -> str:
+    """A host facts row has no text: its status fields and result address are the text."""
+    task_id = _text(row.get("task_id"))
+    facts = "; ".join(f"{label}={_text(row.get(key))}" for label, key in _HOST_FACT_FIELDS if _text(row.get(key)))
+    ref = _mapping(row.get("result_ref"))
+    reader, ref_task = _text(ref.get("reader")), _text(ref.get("task_id")) or task_id
+    result = f"result: {reader}(task_id={ref_task})" if reader and ref_task else ""
+    return f"host facts for {task_id or '(task not recorded)'}: " + "; ".join(part for part in (facts, result) if part)
+
+
+def _detail_words(value: Any, sep: str = ", ") -> str:
+    """A delivery detail as words: ``key value`` pairs (by key) and list items joined by ``sep``, never JSON."""
+    if isinstance(value, Mapping):
+        return sep.join(f"{key} {_detail_words(value[key])}" for key in sorted(value, key=str)
+                        if value[key] not in (None, "", [], {}))
+    if isinstance(value, (list, tuple)):
+        return sep.join(_detail_words(item) for item in value)
+    return str(value)
+
+
+def render_row_text(row: Mapping[str, Any]) -> str:
+    """The text of one chat row without JSON: quiz options and answers, empty host facts and
+    a Presence delivery's details, as words (``chat_history`` keeps ``dialogue_text``)."""
+    message = _mapping(_mapping(row.get("transport")).get("message"))
+    if row.get("type") == "presence_delivery" and message:
+        return str(row.get("text", "")) + f"\n[Delivery details: {_detail_words(message, '; ')}]"
+    quiz = row.get("quiz")
+    if row.get("type") == "quiz_answer" and isinstance(quiz, dict):
+        from ouroboros.tools.plan_dialogue import _quiz_text  # D15->D06 is allowed only as a lazy import
+
+        return _quiz_text(dict(row))
+    if row.get("type") == "quiz" and isinstance(quiz, dict):
+        return _question_text(row, quiz)
+    if row.get("type") == "task_summary" and not _text(row.get("text")):
+        return _host_facts_text(row)
+    return dialogue_text(row)
+
+
+def memory_row_header(address: Mapping[str, Any], row: Mapping[str, Any], *, author: Mapping[str, Any]) -> str:
+    """``[<ts>; <author label>; row:<chat_id>@<ts>#<sha12>]``: the one header of a chat row in memory text.
+
+    ``memory_read`` rows, the memory view's open conversation and the page writer's
+    input all print a row with this header; ``author`` is ``row_author``'s answer.
+    """
+    from ouroboros.chat_chain import format_address
+
+    label = _text(_mapping(author).get("label")) or "author not recorded"
+    return f"[{row.get('ts') or 'time not recorded'}; {label}; {format_address(dict(address))}]"
+
+
+def render_memory_row(address: Mapping[str, Any], row: Mapping[str, Any], *, author: Mapping[str, Any],
+                      indent: str = "") -> str:
+    """One chat row in memory text: its header, a space, its words (``render_row_text``), never cut.
+
+    Each later line of the words starts with ``indent``: the view indents them so a row's own
+    ``## …`` lines never read as sections; ``memory_read`` prints them as they are.
+    """
+    words = render_row_text(row)
+    if indent:
+        words = words.replace("\n", "\n" + indent)
+    return memory_row_header(address, row, author=author) + " " + words
+
+
+def task_lineage_lookup(drive_root: Any):
+    """``lineage_lookup`` for ``row_author``: a strict, read-only task-result lineage reader.
+
+    One per pass (cached by task id). A missing, unreadable or invalid result is
+    ``None`` — no fact — and the strict read never quarantines a file.
+    """
+    cache: dict[str, Any] = {}
+
+    def lookup(task_id: Any) -> dict[str, Any] | None:
+        tid = _text(task_id)
+        if tid and tid not in cache:
+            from ouroboros.task_results import load_task_result, resolve_task_lineage  # D15->D17 lazy-only
+
+            try:
+                result = load_task_result(Path(drive_root), tid, strict=True)
+            except (OSError, ValueError):
+                result = None
+            cache[tid] = resolve_task_lineage(tid, metadata=result) if isinstance(result, dict) and result else None
+        return cache.get(tid)
+
+    return lookup
+
+
 class RoomLabelResolver:
     """Resolve source-room labels from one immutable registry snapshot.
 
@@ -455,6 +656,12 @@ __all__ = [
     "dialogue_provenance",
     "dialogue_speaker",
     "dialogue_text",
+    "memory_row_header",
+    "render_memory_row",
+    "render_row_text",
+    "row_author",
+    "row_class",
+    "task_lineage_lookup",
     "RoomLabelResolver",
     "source_continuation_note",
     "is_presence_task",

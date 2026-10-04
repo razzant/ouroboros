@@ -30,6 +30,7 @@ from ouroboros.contracts.task_contract import (
     normalize_allowed_resources,
 )
 from ouroboros.headless import prepare_task_drive, task_state_dir
+from ouroboros.owner_words import governing_words_for_schedule
 from ouroboros.subagent_history import snapshot_handle
 from ouroboros.subagent_runtime import (
     SubagentSelectionError,
@@ -881,6 +882,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "parent_cognitive_route": parent_cognitive_route,
         **{key: fields[key] for key in ("directory_strategy", "scope_paths") if key in fields},
     }
+    owner_origin = governing_words_for_schedule(ctx)  # the owner's words that caused this tree, by value
     child_facts = {
         "objective": objective,
         "expected_output": expected_output,
@@ -900,6 +902,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "allowed_resources": allowed_resources,
         "required_capabilities": required_caps,
         **intent_fields,
+        **owner_origin,
         "subagent_envelope": envelope,
     }
     evt = {
@@ -912,7 +915,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "write_surface": requested_surface,
         "resource_intent": ({"kind": "explicit_none"} if folderless_scratch_dir(ctx) is not None
                             else dict(metadata.get("resource_intent") or {})),
-        "origin_metadata": consciousness_origin_metadata(metadata),  # a consciousness child: label, category, level
+        "origin_metadata": {**consciousness_origin_metadata(metadata), **owner_origin},  # tree origin: consciousness label/level + owner words
         **presence_binding_authority_metadata(metadata, task_contract=getattr(ctx, "task_contract", None)),  # never speaker
     }
     _populate_subagent_event_extras(

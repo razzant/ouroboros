@@ -707,6 +707,7 @@ def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
 # threshold in bytes, remediation pointer appended to the WARNING.
 def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
     from ouroboros.context_budget import (
+        CHRONICLE_JOURNAL_WARN_BYTES,
         EVENTS_LOG_WARN_BYTES,
         PROGRESS_LOG_WARN_BYTES,
         SCHEDULED_TASKS_WARN_BYTES,
@@ -762,6 +763,13 @@ def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
             "Acceptance packet assembly reads this compact skill-review index; "
             "archive old root-task rows with their review histories.",
         ),
+        (
+            "memory/chronicle/records.jsonl",
+            CHRONICLE_JOURNAL_WARN_BYTES,
+            "Every task context decodes each acting page and part of this journal; it is "
+            "never rotated or cut. Select acting records through the index before loading "
+            "bodies (or fold more of the story) — never delete records.",
+        ),
     )
 
 
@@ -770,7 +778,7 @@ def hot_store_growth_notes(env: Any) -> list:
 
     Reused live by context.py::build_health_invariants (the
     check_stray_server_processes pattern). Deliberately NOT TTL-cached
-    (contrast context._STRAY_PROBE_CACHE): eight os.stat calls plus two shallow
+    (contrast context._STRAY_PROBE_CACHE): nine os.stat calls plus two shallow
     iterdir passes per task turn are orders of magnitude cheaper than the pgrep
     probe that cache exists for, and a stale reading would delay the signal."""
     from supervisor.state import ISOLATED_BENCHMARK_SENTINEL
@@ -807,7 +815,8 @@ def hot_store_growth_notes(env: Any) -> list:
             "WARNING: HOT STORE GROWTH — archive/chat_*.jsonl totals "
             f"{archive_size / 1_000_000:.1f} MB (threshold "
             f"{CHAT_ARCHIVE_SCAN_WARN_BYTES // 1_000_000} MB). Ordinary context reads "
-            "the consolidation-owned suffix; explicit chat_history replay scans this chain. "
+            "only rows after the legacy frontier; explicit chat_history, memory_read(rows=true) "
+            "and page covers replay this chain. "
             "Investigate archive indexing/compaction without shortening the memory horizon."
         )
     # Custody replay walks the whole events chain (live + rotated segments), so

@@ -4,23 +4,8 @@ from __future__ import annotations
 
 import json
 
-from ouroboros.consolidator import _format_entries_for_block
+from ouroboros.dialogue_provenance import render_row_text, row_author
 from ouroboros.memory import Memory
-
-
-def test_summarize_chat_marks_system_entries(tmp_path):
-    memory = Memory(drive_root=tmp_path)
-    summary = memory.summarize_chat([
-        {
-            "ts": "2026-03-19T16:53:30.629879+00:00",
-            "direction": "system",
-            "type": "task_summary",
-            "text": "The user requested a restart of the scenario.",
-        }
-    ])
-
-    assert "📋 16:53 [task_summary] The user requested a restart of the scenario." in summary
-    assert "[User]" not in summary
 
 
 def test_chat_history_marks_system_entries(tmp_path):
@@ -43,14 +28,17 @@ def test_chat_history_marks_system_entries(tmp_path):
     assert "[User]" not in history
 
 
-def test_consolidator_preserves_system_direction():
-    formatted = _format_entries_for_block([
-        {
-            "ts": "2026-03-19T16:53:30.629879+00:00",
-            "direction": "system",
-            "type": "task_summary",
-            "text": "Detailed task summary.",
-        }
-    ])
-
-    assert "[2026-03-19 16:53] [system] System: Detailed task summary." in formatted
+def test_memory_read_keeps_a_system_row_a_host_fact():
+    """The retired block formatter signed system rows "Ouroboros"; the row's own fields now
+    sign it as the host's fact, never my speech, with its text intact."""
+    row = {
+        "ts": "2026-03-19T16:53:30.629879+00:00",
+        "direction": "system",
+        "type": "task_summary",
+        "text": "Detailed task summary.",
+    }
+    author = row_author(row)
+    assert author["kind"] == "host" and author["type"] == "task_summary"
+    assert "Ouroboros" not in author["label"]
+    assert render_row_text(row) == "Detailed task summary."
+    assert row_author({**row, "direction": "out"})["kind"] == "ouroboros"

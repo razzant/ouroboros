@@ -37,20 +37,20 @@ def _chat_id(row: dict) -> int:
         return 1  # The same legacy missing-address convention as chat_history.
 
 
-def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None) -> dict:
-    from ouroboros.dialogue_provenance import dialogue_author
+def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, pos: int | None = None,
+                    lineage: dict | None = None) -> dict:
+    from ouroboros.dialogue_provenance import row_author
 
     result = {key: row[key] for key in _ROW_FACTS if key in row}
     result.update(stream=stream, source_ordinal=ordinal)
     result["text"] = str(row.get("content", row.get("text", "")) or "")
-    if row.get("type") == "quiz_answer":
-        result["author"] = "Owner"
-    elif stream == "mailbox":
+    # One attribution source, the row's own fields: a quiz answer is the Owner's, a
+    # mailbox delivery keeps its own provenance, every other row is signed by its fields
+    # and, for a chat row with a stream position, by the activation's lineage epoch.
+    if stream == "mailbox" and row.get("type") != "quiz_answer":
         result["author"] = str(row.get("provenance") or "Owner")
-    elif row.get("direction") == "in":
-        result["author"] = dialogue_author(row)
     else:
-        result["author"] = "System" if row.get("direction") == "system" else "Ouroboros"
+        result["author"] = row_author(row, pos=pos, **(lineage if pos is not None and lineage else {}))["label"]
     # Payload bytes are never interpreted as dialogue. Existing attachment
     # manifests carry the owner-visible file names alongside custody handles.
     attachments = row.get("attachment_manifest")
@@ -114,13 +114,23 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     if chat_id not in projects and chat_id not in {0, 1} and not rows:
         return None
     annotations = latest_chat_annotations(root)
+    from ouroboros.chat_chain import iter_room_rows, source_row_id  # D06->D15 is lazy-only
+    from ouroboros.chronicle_import import row_lineage
+
+    # An activated chronicle records the lineage epoch: an outgoing row before it is signed by
+    # its task result, never assumed mine. That rule needs each room row's stream position.
+    lineage, positions = row_lineage(root), {}
+    if lineage:
+        for address, _row, pos in iter_room_rows(root, chat_id):
+            positions.setdefault(address["row_sha256"], pos)
     source_rows = []
     for index, row in enumerate(rows, 1):
+        pos = positions.get(source_row_id(row)) if positions else None
         annotation = annotations.get(str(row.get("client_message_id") or ""), {})
         if (row.get("direction") == "in" and not row.get("attachment_manifest")
                 and not row.get("attachment_manifest_ref") and isinstance(annotation.get("attachment_manifest"), list)):
             row = {**row, "attachment_manifest": annotation["attachment_manifest"]}
-        source_rows.append(_row_projection(row, "chat", index, root))
+        source_rows.append(_row_projection(row, "chat", index, root, pos=pos, lineage=lineage))
     # Pre-existing accepted blocks are another retained projection of the same
     # quiz producer. Recover them where still available; never call an old ask
     # currently open merely because its lifecycle projection was evicted.

@@ -467,6 +467,7 @@ def prepare_scope_review(
             scope_required_sources, staged_tree_identity, staged_touched_paths,
             touched_manifest,
         )
+        from ouroboros.owner_words import owner_words_text
         from ouroboros.tools.scope_review_session import ScopeIntentContext as _Intent
         from ouroboros.tools.scope_review_session import (
             ScopeBriefInputs, build_scope_session_task,
@@ -481,7 +482,7 @@ def prepare_scope_review(
             commit_message=commit_message,
             intent=_Intent(goal=goal, scope=scope, review_rebuttal=review_rebuttal,
                            review_history=review_history,
-                           scope_review_history=scope_review_history),
+                           scope_review_history=scope_review_history, owner_words=owner_words_text(ctx)),
             drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
             governance_repo_dir=governance_repo,
             managed_subject=subject,

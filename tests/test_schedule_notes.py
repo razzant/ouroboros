@@ -247,14 +247,14 @@ def test_history_shows_the_row_and_only_live_frames_ring(host):
 
 
 def test_the_next_turn_reads_the_note_as_a_host_fact(host):
-    from ouroboros.memory import Memory
+    from tests._memory_view_context import room_text
 
     _note(host.queue)
     host.queue.check_scheduled_tasks()
-    memory = Memory(drive_root=host.root)
-    entries, _coverage = memory.read_unconsolidated_chat(memory.load_dialogue_meta(), 50)
-    rendered = memory.summarize_chat(entries)
-    assert "📋 " in rendered and "[reminder] Reminder · Ouroboros · written " in rendered, rendered
+    rendered = room_text(host.root)  # the room of Main's next turn: a notice shows by its words
+    [line] = [line for line in rendered.splitlines() if "Reminder · Ouroboros · written " in line]
+    assert line.startswith("[") and "; host" in line.split("]", 1)[0], line
+    assert "Call mother" in rendered and "; Ouroboros;" not in line  # a host fact, never my speech
 
 
 def test_a_note_never_becomes_a_model_task(host):

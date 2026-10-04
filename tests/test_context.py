@@ -491,7 +491,10 @@ def test_health_invariants_come_first_in_dynamic_context(tmp_path):
     )
 
     dynamic_text = messages[0]["content"][2]["text"]
-    assert dynamic_text.startswith("## Health Invariants")
+    # Knowledge and my rooms lead the changing block; the runtime sections follow, health first.
+    assert dynamic_text.startswith("## Shared understanding")
+    assert dynamic_text.index("## This room (Main)") < dynamic_text.index("## Health Invariants")
+    assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Scratchpad")
     assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Drive state")
 
 
@@ -551,151 +554,74 @@ def test_health_invariants_come_first_in_a_consciousness_wake_context(tmp_path):
     )
 
     dynamic_text = messages[0]["content"][2]["text"]
-    assert dynamic_text.startswith("## Health Invariants")
+    assert dynamic_text.startswith("## Shared understanding")
+    assert "## This room" not in dynamic_text  # a wake has no current room
+    assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Scratchpad")
     assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Drive state")
 
 
-def test_project_recent_chat_filters_archives_before_recent_bound(tmp_path, monkeypatch):
-    """Sibling traffic cannot hide an older own-project directive before filtering."""
-    from ouroboros.context import build_recent_sections
-    from ouroboros.memory import Memory
+def test_project_room_keeps_an_older_own_directive_beside_sibling_traffic(tmp_path, monkeypatch):
+    """Sibling traffic cannot hide an older own-room directive: the room's open rows are its own."""
     from ouroboros.projects_registry import create_project
+    from tests._memory_view_context import blocks, section
+    from tests.test_cache_optimization import _make_env_and_memory
 
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
-    logs = tmp_path / "logs"
-    archive = tmp_path / "archive"
-    logs.mkdir(parents=True)
-    archive.mkdir(parents=True)
-    own = create_project(tmp_path, "own")
-    sibling = create_project(tmp_path, "sibling")
-    own_chat = int(own["chat_id"])
-    sibling_chat = int(sibling["chat_id"])
+    env, memory = _make_env_and_memory(tmp_path)
+    root = memory.drive_root
+    own = create_project(root, "own", name="Own")
+    sibling = create_project(root, "sibling", name="Sibling")
+    own_chat, sibling_chat = int(own["chat_id"]), int(sibling["chat_id"])
     decisive = "CLAUDEXOR_ONLY_AND_THREE_LEVEL_NESTING"
-    (archive / "chat_20260820T010000.jsonl").write_text(
-        json.dumps({"chat_id": own_chat, "direction": "in", "text": decisive}) + "\n",
+    (root / "archive").mkdir(parents=True, exist_ok=True)
+    (root / "archive" / "chat_20260820T010000.jsonl").write_text(
+        json.dumps({"chat_id": own_chat, "direction": "in", "ts": "2026-08-20T01:00:00+00:00", "text": decisive}) + "\n",
         encoding="utf-8",
     )
-    (logs / "chat.jsonl").write_text(
-        "\n".join(
-            json.dumps({"chat_id": sibling_chat, "direction": "in", "text": f"noise-{i}"})
-            for i in range(4500)
-        ) + "\n",
-        encoding="utf-8",
-    )
+    (root / "logs" / "chat.jsonl").write_text("".join(
+        json.dumps({"chat_id": sibling_chat, "direction": "in", "ts": "2026-08-21T00:00:00+00:00",
+                    "text": f"noise-{i}"}) + "\n" for i in range(4500)), encoding="utf-8")
 
-    combined = "\n\n".join(build_recent_sections(
-        Memory(drive_root=tmp_path), env=None, thread_chat_id=own_chat,
-    ))
-
-    assert decisive in combined
-    assert "noise-4499" not in combined
-    assert '\"omitted_matching_rows\": 0' in combined
-    assert "chat_history(count, offset, search)" in combined
-    assert str(tmp_path) not in combined
+    _a, _b, changing, _cap = blocks(env, memory, {"id": "own-task", "chat_id": own_chat})
+    room = section(changing, f"## This room (Project Own [chat_id={own_chat}])")
+    assert decisive in room
+    assert "noise-" not in changing  # the sibling room is one line in ## Live rooms
+    assert f"Project Sibling [chat_id={sibling_chat}]" in section(changing, "## Live rooms")
+    assert str(root) not in room
 
 
-def test_project_context_keeps_retention_proof_cross_thread_cat_directive_once(tmp_path):
-    from ouroboros.context import build_recent_sections
-    from ouroboros.memory import Memory
+def test_project_room_keeps_the_retention_proof_cross_room_directive_once(tmp_path):
+    """The owner's words that started a Project stay visible once: in the open conversation of the
+    room they were written in, else under ``Words that started this work``."""
     from ouroboros.project_dialogue import build_owner_message_ref
     from ouroboros.projects_registry import bind_task_to_project, create_project
+    from tests._memory_view_context import blocks, section
+    from tests.test_cache_optimization import _make_env_and_memory
 
-    logs = tmp_path / "logs"
-    logs.mkdir(parents=True)
-    project = create_project(tmp_path, "cat-tower")
+    env, memory = _make_env_and_memory(tmp_path)
+    root = memory.drive_root
+    project = create_project(root, "cat-tower", name="Cat tower")
     project_chat = int(project["chat_id"])
     directive = "d" * 500 + " CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3"
-    ref = build_owner_message_ref(
-        chat_id=1, client_message_id="cat-origin", ts="2026-08-21T00:00:00Z", text=directive,
-    )
-    bind_task_to_project(
-        tmp_path, "cat-root", "cat-tower", project_chat,
-        origin={"ref": ref, "text": directive},
-    )
+    ref = build_owner_message_ref(chat_id=1, client_message_id="cat-origin", ts="2026-08-21T00:00:00Z", text=directive)
+    bind_task_to_project(root, "cat-root", "cat-tower", project_chat, origin={"ref": ref, "text": directive})
     source_row = {**ref, "direction": "in", "text": directive}
-    (logs / "chat.jsonl").write_text(
-        json.dumps(source_row) + "\n"
-        + json.dumps({"chat_id": project_chat, "direction": "in", "text": "continue"}) + "\n",
-        encoding="utf-8",
-    )
-    present = "\n\n".join(build_recent_sections(
-        Memory(drive_root=tmp_path), env=None, thread_chat_id=project_chat,
-    ))
-    assert present.count("CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3") == 1
+    follow = {"chat_id": project_chat, "direction": "in", "ts": "2026-08-21T00:01:00Z", "text": "continue"}
+    (root / "logs" / "chat.jsonl").write_text(json.dumps(source_row) + "\n" + json.dumps(follow) + "\n",
+                                              encoding="utf-8")
+    label = f"## This room (Project Cat tower [chat_id={project_chat}])"
+    _a, _b, present, _cap = blocks(env, memory, {"id": "cat-root", "chat_id": project_chat})
+    room = section(present, label)
+    assert room.count("CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3") == 1  # an open row of this room
+    assert "### Words that started this work" not in room
 
-    (logs / "chat.jsonl").write_text(
-        json.dumps({"chat_id": project_chat, "direction": "in", "text": "continue"}) + "\n",
-        encoding="utf-8",
-    )
-
-    combined = "\n\n".join(build_recent_sections(
-        Memory(drive_root=tmp_path), env=None, thread_chat_id=project_chat,
-    ))
-
-    assert directive in combined
-    assert combined.count("CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3") == 1
-    assert "Project owner origins (retention-proof bindings)" in combined
-
-
-def test_automatic_recent_context_reads_only_bounded_generation_suffix(tmp_path, monkeypatch):
-    import pathlib
-
-    from ouroboros.memory import Memory, _AUTOMATIC_CHAT_GENERATIONS
-
-    logs, archive = tmp_path / "logs", tmp_path / "archive"
-    logs.mkdir(parents=True)
-    archive.mkdir()
-    for index in range(10):
-        (archive / f"chat_20260820T{index:02d}0000.jsonl").write_text(
-            json.dumps({"direction": "in", "text": f"archive-{index}"}) + "\n",
-            encoding="utf-8",
-        )
-    (logs / "chat.jsonl").write_text(
-        json.dumps({"direction": "in", "text": "live-latest"}) + "\n",
-        encoding="utf-8",
-    )
-    memory = Memory(tmp_path)
-    reads = []
-    original = memory._read_chat_generation
-
-    def _counted(path, **kwargs):
-        reads.append(path)
-        return original(path, **kwargs)
-
-    monkeypatch.setattr(memory, "_read_chat_generation", _counted)
-    entries, coverage = memory.read_unconsolidated_chat({}, 20)
-
-    assert len(reads) <= _AUTOMATIC_CHAT_GENERATIONS
-    assert entries[-1]["text"] == "live-latest"
-    assert coverage["omitted_matching_rows_unknown"] is True
-    assert any(gap["kind"] == "unscanned_unconsolidated_generations" for gap in coverage["gaps"])
-    assert [pathlib.Path(row["path"]).name for row in coverage["generations"]] == [
-        "chat_20260820T080000.jsonl", "chat_20260820T090000.jsonl", "chat.jsonl",
-    ]
-
-
-def test_automatic_recent_context_materializes_a_bounded_row_suffix(tmp_path):
-    from ouroboros.memory import Memory
-
-    logs = tmp_path / "logs"
-    logs.mkdir(parents=True)
-    (logs / "chat.jsonl").write_text(
-        "".join(
-            json.dumps({"direction": "in", "text": f"row-{index}"}) + "\n"
-            for index in range(20_000)
-        ),
-        encoding="utf-8",
-    )
-
-    entries, coverage = Memory(tmp_path).read_unconsolidated_chat({}, 1)
-
-    assert [entry["text"] for entry in entries] == ["row-19999"]
-    assert coverage["generations"][0]["rows"] <= 100
-    assert coverage["omitted_matching_rows_unknown"] is True
-    assert any(
-        gap["kind"] in {"generation_prefix_unscanned", "generation_tail_rows_unscanned"}
-        for gap in coverage["gaps"]
-    )
+    origin = root / "memory" / "chronicle"
+    assert origin.is_dir()  # the first capture activated the chronicle
+    (root / "logs" / "chat.jsonl").write_text(json.dumps(follow) + "\n", encoding="utf-8")
+    _a, _b, later, _cap = blocks(env, memory, {"id": "cat-root", "chat_id": project_chat})
+    room = section(later, label)
+    assert room.count("CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3") == 1  # retention-proof: the binding kept it
+    assert "### Words that started this work (retention-proof)" in room
 
 
 def test_chat_history_surfaces_malformed_gap_even_when_search_matches_nothing(tmp_path):
@@ -714,41 +640,6 @@ def test_chat_history_surfaces_malformed_gap_even_when_search_matches_nothing(tm
     assert "jsonl_malformed" in result
 
 
-def test_main_recent_chat_resumes_unconsolidated_archived_generation(tmp_path):
-    from ouroboros.context import build_recent_sections
-    from ouroboros.memory import Memory
-    from ouroboros.utils import jsonl_generation_signature
-
-    logs = tmp_path / "logs"
-    archive = tmp_path / "archive"
-    memory_dir = tmp_path / "memory"
-    logs.mkdir(parents=True)
-    archive.mkdir(parents=True)
-    memory_dir.mkdir(parents=True)
-    old = archive / "chat_20260820T010000.jsonl"
-    old.write_text(
-        "\n".join(json.dumps({"direction": "in", "text": f"old-{i}"}) for i in range(5)) + "\n",
-        encoding="utf-8",
-    )
-    (logs / "chat.jsonl").write_text(
-        json.dumps({"direction": "in", "text": "new-live"}) + "\n",
-        encoding="utf-8",
-    )
-    (memory_dir / "dialogue_meta.json").write_text(json.dumps({
-        "last_consolidated_offset": 3,
-        "chat_log_signature": jsonl_generation_signature(old),
-    }), encoding="utf-8")
-
-    combined = "\n\n".join(build_recent_sections(Memory(drive_root=tmp_path), env=None))
-
-    assert "old-0" not in combined
-    assert "old-2" not in combined
-    assert "old-3" in combined
-    assert "old-4" in combined
-    assert "new-live" in combined
-    assert '\"gaps\": []' in combined
-
-
 def test_archive_only_chat_chain_is_complete_while_live_file_is_absent(tmp_path):
     from ouroboros.memory import Memory
 
@@ -763,32 +654,6 @@ def test_archive_only_chat_chain_is_complete_while_live_file_is_absent(tmp_path)
 
     assert [entry["text"] for entry in entries] == ["archive-only"]
     assert coverage["gaps"] == []
-
-
-def test_missing_cursor_generation_hot_path_never_replays_full_archive(tmp_path, monkeypatch):
-    from ouroboros.memory import Memory
-
-    logs = tmp_path / "logs"
-    logs.mkdir(parents=True)
-    (logs / "chat.jsonl").write_text(
-        json.dumps({"direction": "in", "text": "bounded-live"}) + "\n",
-        encoding="utf-8",
-    )
-    memory = Memory(drive_root=tmp_path)
-
-    def _forbidden_full_replay(**_kwargs):
-        raise AssertionError("automatic gap recovery must not scan every archive generation")
-
-    monkeypatch.setattr(memory, "read_chat_generations", _forbidden_full_replay)
-    entries, coverage = memory.read_unconsolidated_chat({
-        "last_consolidated_offset": 50,
-        "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 999},
-    }, 20)
-
-    assert [entry["text"] for entry in entries] == ["bounded-live"]
-    assert coverage["omitted_matching_rows_unknown"] is True
-    assert coverage["gaps"][0]["kind"] == "consolidation_cursor_generation_missing"
-    assert coverage["reader"] == "chat_history(count, offset, search)"
 
 
 def test_runtime_section_carries_official_update_fact(tmp_path, monkeypatch):

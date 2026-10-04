@@ -1401,7 +1401,7 @@
     },
     {
       "id": "openrouter.payload.openai_family_system_prefix_split",
-      "route": "OpenRouter openai/ family: a builder-declared 3-block system keeps only its stable block on the wire, the remaining blocks ride as ONE [SYSTEM NOTICE] user message before the task, and the sticky session is prefix-only (measured 2026-09-25: OpenAI's public API reuses a prompt cache for the whole leading system section as one unit under one routing key)",
+      "route": "OpenRouter openai/ family: a builder-declared 3-block system keeps its stable block and each following marked block as separate system items with their markers (OpenRouter turns them into explicit prompt_cache_breakpoints, guide read 2026-10-03), the unmarked rest rides as ONE [SYSTEM NOTICE] user message before the task, and the sticky session is prefix-only (measured 2026-09-25 under one routing key)",
       "spec": {
         "env": {
           "OPENROUTER_API_KEY": "or-fixture-key"
@@ -1454,13 +1454,28 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "stable policy prefix"
+                    "text": "stable policy prefix",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "semi-stable memory block",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
                   }
                 ]
               },
               {
                 "role": "user",
-                "content": "[SYSTEM NOTICE]\nHost context for this turn: memory, knowledge index, runtime facts and recent activity, rendered by the runtime as a continuation of the system prompt. Not written by my human and not a message to answer; the message to act on follows next.\n\nsemi-stable memory block\n\nmutable task evidence"
+                "content": "[SYSTEM NOTICE]\nHost context for this turn: memory, knowledge index, runtime facts and recent activity, rendered by the runtime as a continuation of the system prompt. Not written by my human and not a message to answer; the message to act on follows next.\n\nmutable task evidence"
               },
               {
                 "role": "user",
@@ -1476,7 +1491,7 @@
               "session_id": "ouroboros-session-254615c202ffb1309fea7d9e5316083e"
             }
           },
-          "value_sha256": "28234a3882088dedab5cef719fcac76f9011787c5724318d7ab3a55dc5651810"
+          "value_sha256": "4fcb56bc34913ce3fae7561f4e892068e8656b7359c94de0a74484c37dd40f1e"
         },
         "sends": [],
         "unused_script_steps": 0

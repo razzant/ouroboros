@@ -41,7 +41,7 @@ _STRING = {"type": "string"}
 _DICT = {"type": "object"}
 _NULL_INT = {"type": ["integer", "null"]}
 _CONTEXT = _object({
-    "profile": {"enum": ["owner_max", "owner_low", "owner_nano", "task_local_low"]},
+    "profile": {"enum": ["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]},
     "rendered_mode": {"enum": ["max", "low", "nano"]},
     "measurement_basis": {"enum": ["fresh_route_usage", "fresh_model_usage", "cold_estimate"]},
     "route_fp": _STRING, "round_id": _STRING,

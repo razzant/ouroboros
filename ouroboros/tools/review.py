@@ -14,6 +14,7 @@ from ouroboros.utils import (
     utc_now_iso,
 )
 from ouroboros import config as _cfg
+from ouroboros.owner_words import owner_words_text
 from ouroboros.review_substrate import SLOT_ID_PREFIX, TYPED_FAILURE_FACT_KEYS, slot_id_for_row  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.tools.registry import ToolEntry, ToolContext
 from ouroboros.triad_review import (
@@ -1174,7 +1175,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         task_evidence = materialize_commit_review_session_view(task_evidence, target_repo)
         ctx._commit_review_evidence = task_evidence
     task_evidence_compact = False
-    goal_section = build_goal_section(goal, scope, commit_message)
+    goal_section = build_goal_section(goal, scope, commit_message, owner_words_text(ctx))
     scope_section = build_scope_section(scope)
 
     # The change-class governance block opens the DYNAMIC half: tier 1 stays in

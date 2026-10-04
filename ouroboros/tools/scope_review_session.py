@@ -91,9 +91,10 @@ DIFF_SOURCE_ID = "scope-staged-diff"
 class ScopeIntentContext:
     """The intent/history cluster the scope brief takes, as one value.
 
-    These five always travel together, so they ride as one immutable parameter
-    object (the ``ReviewAssignment`` pattern) instead of five parallel arguments
-    that a caller can silently mis-order.
+    These six always travel together, so they ride as one immutable parameter
+    object (the ``ReviewAssignment`` pattern) instead of six parallel arguments
+    that a caller can silently mis-order. ``owner_words`` is the host-attested
+    section of the owner's words that caused the work (``owner_words_text``).
     """
 
     goal: str = ""
@@ -101,6 +102,7 @@ class ScopeIntentContext:
     review_rebuttal: str = ""
     review_history: Optional[list] = None
     scope_review_history: Optional[list] = None
+    owner_words: str = ""
 
 
 @dataclass(frozen=True)
@@ -436,7 +438,7 @@ def build_scope_session_task(
         )
     repo_dir = pathlib.Path(repo_dir)
     intent = brief.intent
-    goal_section = build_goal_section(intent.goal, intent.scope, brief.commit_message)
+    goal_section = build_goal_section(intent.goal, intent.scope, brief.commit_message, intent.owner_words)
     scope_section = build_scope_section(intent.scope)
     rebuttal_section = build_rebuttal_section(intent.review_rebuttal)
     open_obligations = []

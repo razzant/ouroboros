@@ -207,6 +207,18 @@ def provider_for_model(model: str) -> str:
     return "openrouter"
 
 
+# Physical per-request ceilings on tool schemas, by execution provider; a provider
+# absent here has no known ceiling. OpenAI's own API refuses a longer `tools` array
+# (400 array_above_max_length); the same models through OpenRouter accepted 129
+# (provider canary, CI run 37204372307, 2026-10-04).
+PROVIDER_TOOL_SCHEMA_LIMITS: dict[str, int] = {"openai": 128}
+
+
+def tool_schema_limit(model: str, *, use_local: bool = False) -> int | None:
+    """The route's ceiling on tool schemas in one request, or None when none is known."""
+    return None if use_local else PROVIDER_TOOL_SCHEMA_LIMITS.get(provider_for_model(model))
+
+
 def parse_claudexor_model(model: str) -> tuple[str, str]:
     """Split the model transport's opaque source and model, never an account pin."""
     if not str(model).startswith("claudexor::"):

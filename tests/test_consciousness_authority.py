@@ -530,9 +530,10 @@ def test_subagent_payload_lands_the_origin_on_the_child_metadata():
 
 
 def test_schedule_subagent_event_names_the_origin():
-    """The tool stamps ``origin_metadata`` on the schedule event beside the envelope."""
+    """The tool stamps ``origin_metadata`` on the schedule event beside the envelope:
+    the consciousness origin and the owner's words that caused the tree, by value."""
     source = pathlib.Path("ouroboros/tools/control_scheduling.py").read_text(encoding="utf-8")
-    assert '"origin_metadata": consciousness_origin_metadata(metadata),' in source
+    assert '"origin_metadata": {**consciousness_origin_metadata(metadata), **owner_origin},' in source
     handler = pathlib.Path("supervisor/events_schedule_task.py").read_text(encoding="utf-8")
     assert '"origin_metadata": evt.get("origin_metadata"),' in handler
 

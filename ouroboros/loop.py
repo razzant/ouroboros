@@ -360,7 +360,7 @@ def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
     """
     from ouroboros.tools.compact_context import record_context_view
 
-    record_context_view(ctx, messages, tool_schemas)
+    record_context_view(ctx, messages, tool_schemas, physical_capture=getattr(ctx, "_usable_main_capture", None))
     fact = _observe_transcript_send(ctx, messages, round_idx=round_idx)
     if not fact:
         return
@@ -429,6 +429,10 @@ def run_llm_loop(
     (active_model, active_effort, active_use_local, _preferred_context_mode, active_context_mode,
      context_fit_plan) = _initial_round_route(ctx, llm, initial_effort)
     llm_trace: Dict[str, Any] = {"reasoning_notes": [], "tool_calls": []}
+    if isinstance(getattr(ctx, "memory_view_facts", None), dict):  # this task's view fact (read back as a memory shortage)
+        from ouroboros.memory_inventory import VIEW_TRACE_KEY
+
+        llm_trace[VIEW_TRACE_KEY] = dict(ctx.memory_view_facts)
     accumulated_usage: Dict[str, Any] = {"_task_attempt": getattr(ctx, "task_attempt", None)}
     ctx._accumulated_usage = accumulated_usage
     invalidate_task_cache_splits(task_id or getattr(ctx, "task_id", ""))  # rebuilt attempt = new prefix
@@ -439,6 +443,7 @@ def run_llm_loop(
         accumulated_usage["initial_model_request"] = {
             "model": active_model, "use_local": active_use_local,
         }
+        _emit_physical_mode(event_queue, task_id, drive_logs, context_fit_plan, active_context_mode)
     cost_ceiling = _resolve_task_cost_ceiling(ctx, budget_remaining_usd)
     if cost_ceiling.root_cap_usd is not None:
         # A resumed/late-started tree member must see tree spend before its
@@ -797,6 +802,7 @@ from ouroboros.loop_model_call import (  # noqa: E402, F401 -- intentional publi
     _restore_context_fit_usage,
     _run_cross_model_fallback_chain,
     _rebind_context_fit_plan,
+    _emit_physical_mode,
     _RoundModelCallContext,
     _context_fit_round_id,
     _main_context_profile,

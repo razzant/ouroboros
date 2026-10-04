@@ -74,6 +74,39 @@ def test_system_memory_section_keeps_its_earlier_obligations():
     assert "stale unless recently verified" in memory
 
 
+def test_system_states_the_chronicle_contract_and_each_writer_in_one_home():
+    """The chronicle's writers in the mind's own prompt: the mind seals, marks and reads
+    by address; the overview is the mind's; a Light helper drafts one page or part only
+    while the wakes are off; an offer to fold the old retelling is settled by a global
+    mark. A delegated child's start and its drafts live in Delegation, the
+    self-contained assignment in Memory. The two claims the chronicle made false
+    (nothing project-related hidden, read-only helpers writing nothing) are gone."""
+    system = _read("prompts/SYSTEM.md")
+    memory, delegation, tools = (_section(system, name) for name in ("Memory", "Delegation", "Tools"))
+    claims = _claims(memory)
+
+    for tool in ("`chronicle_write`", "`memory_mark`", "`memory_read`"):
+        assert tool in memory, tool
+    assert any("overview" in c and "my own words" in c and "helpers do not write it" in c for c in claims)
+    assert any("light helper" in c and "one page or part" in c and "wakes are off" in c for c in claims)
+    assert any("fold" in c and "ordinary background task" in c for c in claims)
+    assert any("global mark" in c and "`memory_mark`" in c for c in claims)
+    # One home each: the child's start and drafts in Delegation, the assignment rule in Memory.
+    assert "never my whole dialogue history" in delegation
+    assert "drafts in its own name, which the integrating mind accepts or rejects" in delegation
+    assert "drafts in its own name" not in memory
+    assert "must stand on its own" in memory and "must stand on its own" not in delegation
+    # The memory tools and the chronicle's own path are named where file writes are ruled out.
+    assert "`chronicle_write`, `memory_mark`" in tools and "`memory/chronicle/*`" in tools
+    assert "chronicle page and part drafts in their own name" in tools
+    # Everything the host guarantees a child at start, its memory marks included (memory_view.ROLE_DEFAULTS).
+    assert "its room's page, the memory marks of that room and the global ones, my whole assignment" in delegation
+    assert "which I accept or reject" not in delegation  # a child that schedules a grandchild does not decide
+    flat = " ".join(system.split())
+    assert "nothing project-related is hidden" not in flat
+    assert "Read-only helpers do not write" not in flat
+
+
 def test_system_learns_a_person_through_the_relationship_not_only_on_demand():
     human = _section(_read("prompts/SYSTEM.md"), "Environment and My Human")
     claims = _claims(human)

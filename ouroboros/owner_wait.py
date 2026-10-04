@@ -152,6 +152,10 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "cost_ceiling": asdict(cost_ceiling) if cost_ceiling is not None else None,
         "model_wait": model_state,
         "context_model_role": getattr(getattr(ctx, "context_fit_plan", None), "model_role", ""),
+        # Exposure facts gate automatic compaction; a resumed task keeps them.
+        "context_observations": {key: getattr(ctx, key) for key in (
+            "_last_context_observation", "_inspected_context_view", "_pending_compaction",
+        ) if getattr(ctx, key, None) is not None},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
         "seen": sorted(seen), "owner_directives": getattr(ctx, "_owner_directives", []),
         "route": {key: getattr(ctx, key, None) for key in (
@@ -624,6 +628,9 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     from ouroboros.model_wait import budget_paused_seconds
 
     ctx = tools._ctx
+    for key, value in (state.get("context_observations") or {}).items():
+        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction"}:
+            setattr(ctx, key, value)
     messages[:] = state["messages"]
     trace.update(state["trace"])
     usage.update(state["usage"])

@@ -3,8 +3,9 @@
 Main Max keeps the full Architecture capability/WHY map for every task class;
 its Development handbook remains tied to the active self-body binding. Low and
 Nano carry both books' authored chapter introductions and physical pointers.
-Children use that compact orientation while retaining their shared biography;
-parent-selected details arrive through ordinary source reads and working views.
+Children use that compact orientation; their memory view (``memory_view.ROLE_DEFAULTS``)
+decides what of my story and room they carry, and parent-selected details arrive
+through ordinary source reads and working views.
 
 Source bytes belong to ReferenceBook; this module only renders the selected
 view. Stable full prefixes contain no cwd, task identity or revision counters.
@@ -19,14 +20,16 @@ from typing import Any, List
 from ouroboros.reference_books import ReferenceBook, compose_book, load_reference_book, overview_book
 
 # Protected core: always rendered in full, in every context mode. Encoded as
-# data so a drift-guard test can assert no future change demotes it.
+# data so a drift-guard test can assert no future change demotes it. The marks I
+# keep in view never become addresses (``memory_floor`` has no step for them);
+# conversations are the memory view's, whose physical floor alone degrades them.
 TIER0_ALWAYS_FULL = frozenset({
     "system",
     "bible",
     "identity",
     "scratchpad",
     "knowledge_index",
-    "recent_dialogue",
+    "memory_marks",
 })
 
 

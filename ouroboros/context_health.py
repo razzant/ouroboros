@@ -193,13 +193,11 @@ def _plan_review_note(env: Any, task_id: str) -> str:
 
 
 def _memory_health_lines(env: Any) -> List[str]:
-    """Own-memory maintenance signals: the two authored files and the dialogue pipeline.
+    """Own-memory maintenance signals for the two authored files, identity and scratchpad.
 
-    Health is where stale memory becomes visible, so a dialogue-consolidation run that
-    failed, or a nomination batch that was accepted and then not published, is named
-    here rather than left to a log nobody reads. Both lines are STATE read from
-    ``memory/dialogue_meta.json``; neither carries a timestamp, because this block is
-    rendered dynamically and the facts are latest-run facts, not events.
+    The old dialogue writer's state lines (unreadable cursor, open nominations, a failed
+    run, a withheld era) left with that writer: its pending nominations are imported as
+    marks the mind releases, and an unreadable cursor is the import's ``cursor_gap``.
     """
     import time as _time
 
@@ -231,61 +229,6 @@ def _memory_health_lines(env: Any) -> List[str]:
             lines.append(f"OK: scratchpad size ({sp_len} chars)")
     except Exception:
         pass
-
-    from ouroboros.memory_nomination_receipts import DialogueMetaUnreadable, load_meta
-
-    try:
-        meta = load_meta(env.drive_path("memory/dialogue_meta.json"))
-    except DialogueMetaUnreadable:
-        # A broken existing meta file is not an empty nomination/cursor state.
-        lines.append("WARNING: DIALOGUE META UNREADABLE — memory/dialogue_meta.json; "
-                     "consolidation withheld to preserve existing bytes")
-    else:
-        pending = meta.get("pending_knowledge_nominations")
-        if pending:
-            # load_meta already validates the whole list; malformed state raises.
-            sample = ", ".join(row["id"].split(":")[0][:12] + ":" +
-                               ":".join(row["id"].split(":")[-2:])
-                               for row in pending[:3])
-            lines.append(
-                f"WARNING: DIALOGUE KNOWLEDGE PUBLICATION OPEN — {len(pending)} source-addressed "
-                f"nominations (first {min(3, len(pending))}: {sample}; omitted {max(0, len(pending)-3)}). "
-                "Read memory/dialogue_meta.json and memory/knowledge_history.jsonl for full source. "
-                "No automatic or tool-level discharge exists yet; later successes cannot retire older entries."
-            )
-        receipt = meta.get("last_unpublished_nominations")
-        if isinstance(receipt, dict):
-            failed = receipt.get("failed")
-            if type(failed) is int and failed > 0:
-                # This old batch receipt cannot be retired by a later new-source success.
-                lines.append(
-                    f"WARNING: LAST DIALOGUE KNOWLEDGE PUBLICATION INCOMPLETE — {failed} of "
-                    f"{receipt.get('total')} nominations in a legacy consolidation batch remain unresolved "
-                    f"(entry_id {receipt.get('entry_id')}); from the main chat, read_file(root='runtime_data', "
-                    "path='memory/knowledge_history.jsonl') and publish what still holds"
-                )
-            elif failed is not None and failed != 0:
-                lines.append("WARNING: DIALOGUE LEGACY NOMINATION RECEIPT INVALID — "
-                             "memory/dialogue_meta.json; inspect the original receipt")
-        error = meta.get("last_consolidation_error")
-        if isinstance(error, dict):
-            lines.append(
-                f"WARNING: LAST DIALOGUE CONSOLIDATION FAILED — kind={error.get('kind') or 'unknown'} "
-                f"at cursor {error.get('cursor_offset')}"
-            )
-        from ouroboros.consolidator import _era_retry_runs
-        runs = _era_retry_runs(meta)
-        for shown, (source_sha256, record) in enumerate(runs.items()):
-            if shown == 3:
-                lines.append(f"WARNING: DIALOGUE ERA COMPRESSION WITHHELD — {len(runs) - 3} more run(s) recorded in era_retry")
-                break
-            route = record.get("route")
-            lines.append(
-                f"WARNING: DIALOGUE ERA COMPRESSION WITHHELD — the era for source run "
-                f"{source_sha256[:12]} on route "
-                f"{route.get('model') if isinstance(route, dict) else route} was not shorter than its blocks; "
-                "blocks retained, no paid repeat until that run or the route changes"
-            )
     return lines
 
 

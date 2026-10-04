@@ -43,8 +43,8 @@ def test_native_agent_returns_durable_result_before_synthesis_and_retry_reuses_i
         assert release.wait(5), "test releases the existing synthesis worker"
         stages.append("consolidation")
 
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", consolidate)
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *_a: stages.append("scratchpad"))
+    # The first paid late stage (scratchpad consolidation since the dialogue writer is retired).
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", consolidate)
     monkeypatch.setattr(pipeline, "_record_task_facts", lambda *_a, **_k: stages.append("facts"))
     monkeypatch.setattr(pipeline, "_run_reflection", lambda *_a, **_k: stages.append("reflection"))
     monkeypatch.setattr(pipeline, "_apply_reflection_memory_actions", lambda *_a, **_k: stages.append("memory"))

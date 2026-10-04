@@ -6,6 +6,7 @@ import pathlib
 from typing import Any
 
 from ouroboros.dialogue_evidence import own_room_chat, read_room_source, task_room_record
+from ouroboros.owner_words import owner_words_text
 from ouroboros.projects_registry import all_task_bindings, list_reserved_projects
 from ouroboros.task_results import load_plan_review_state
 
@@ -60,6 +61,9 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
     Room growth is evidence for the next changed author request. It cannot
     itself mint another paid plan envelope. Health/roster/cycle rails stay with
     the existing engine, which still decides whether any dispatch is earned.
+    The owner's words that caused the work follow the same rule: a replay takes
+    the recorded section (a wave recorded without one stays without), a fresh
+    request takes the run's words now (``owner_words_text``).
     """
     from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
 
@@ -80,6 +84,7 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
         else:
             own = dict(previous)  # An explicit missing-room fact also replays exactly.
         pointers = (exact.get("evidence_manifest_full") or {}).get("related_rooms") or []
+        words = (exact.get("evidence_manifest_full") or {}).get("owner_words") or ""
     else:
         chat = own_room_chat(ctx, root)
         source = read_room_source(root, chat, task_id=task_id, mailbox_root=ctx.drive_root) if chat is not None else None
@@ -92,8 +97,9 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
             ) if persist else None
             own = _source_view(root, task_id, source, ref)
         pointers = related_rooms(ctx, root, chat)
+        words = owner_words_text(ctx, audience="plan")
     return {**manifest, "author_request_fingerprint": author_fingerprint,
-            "own_dialogue": own, "related_rooms": pointers}
+            "own_dialogue": own, "related_rooms": pointers, **({"owner_words": words} if words else {})}
 
 
 def plan_chat_reader(root: pathlib.Path, task_id: str):

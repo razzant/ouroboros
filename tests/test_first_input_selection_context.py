@@ -36,14 +36,35 @@ def test_capture_selects_channels_without_removing_governance_or_own_process(tmp
         monkeypatch.setattr(context, name, source(marker, marker))
     monkeypatch.setattr(memory, "recent_activity_sections", source("OWN_PROCESS", ["OWN_PROCESS"]))
     core = context._capture_context_core(env, memory, child, source(omitted[6], omitted[6]), None)
-    text = core.base_prompt + core.bible_md + core.semi_stable_text + core.dynamic_text + core.user_content_json
+    text = (core.base_prompt + core.bible_md + core.semi_stable_text + core.dynamic_head_text + core.dynamic_text
+            + core.user_content_json)
     assert "You are Ouroboros." in text and "Principle 0: Agency" in text
     assert "DECLARED_QUESTION" in text and "DECLARED_COMMON_FACTS" in text
     assert "DECLARED_CONSTRAINT" in text and "OWN_PROCESS" in text
+    # A child's memory view holds no knowledge (it reads it with knowledge_read), whatever the selection.
+    knowledge = omitted[1]
+    assert knowledge not in text and knowledge not in calls
     for marker in omitted:
-        assert (marker in text) == (selection != "declared")
-        assert (marker in calls) == (selection != "declared")
+        if marker != knowledge:
+            assert (marker in text) == (selection != "declared")
+            assert (marker in calls) == (selection != "declared")
+    assert bool(core.memory_view_json) == (selection != "declared")  # a declared child carries no view
     assert ("Input source selection" in text) == (selection == "declared")
+
+
+@pytest.mark.parametrize("explicit", [None, {"knowledge": True}])
+def test_a_child_loads_knowledge_only_when_its_view_holds_it(tmp_path, monkeypatch, explicit):
+    from ouroboros import context
+
+    env, memory = _make_env_and_memory(tmp_path)
+    child = {"id": "child", "type": "task", "delegation_role": "subagent", "text": "Q",
+             "configured_subagent": {"route": {"kind": "api_model"}}}
+    if explicit is not None:
+        child["memory_view"] = explicit
+    monkeypatch.setattr(context, "build_knowledge_sections", lambda *_a, **_kw: ["KNOWLEDGE_MARKER"])
+    core = context._capture_context_core(env, memory, child, None, None)
+    assert ("KNOWLEDGE_MARKER" in core.dynamic_head_text) == (explicit is not None)
+    assert "KNOWLEDGE_MARKER" not in core.semi_stable_text + core.dynamic_text
 
 
 def test_selected_runtime_omits_other_task_narratives_but_keeps_authority(tmp_path, monkeypatch):

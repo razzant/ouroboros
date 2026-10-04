@@ -1,0 +1,3 @@
+33
+The hot-store invariant names the memory journal (memory/chronicle/records.jsonl) as its
+ninth enrolled store, the fix that enrolls it under CHRONICLE_JOURNAL_WARN_BYTES.

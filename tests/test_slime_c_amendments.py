@@ -94,7 +94,6 @@ class TestLiveFinalAnswerDelivery:
             observed["sealed_final"] = kwargs.get("sealed_final")
             return None
 
-        monkeypatch.setattr(atp, "_run_chat_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", hanging_post_task)
 
@@ -134,7 +133,6 @@ class TestLiveFinalAnswerDelivery:
 
         event_queue = queue.Queue()
         pending_events = []
-        monkeypatch.setattr(atp, "_run_chat_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
@@ -198,7 +196,6 @@ class TestLiveFinalAnswerDelivery:
             "task_id": "proact1", "parent_task_id": "", "root_task_id": "",
         }
         pending_events = [proactive]
-        monkeypatch.setattr(atp, "_run_chat_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
@@ -296,7 +293,6 @@ class TestLiveFinalAnswerDelivery:
                 raise RuntimeError("manager gone")
 
         pending_events = []
-        monkeypatch.setattr(atp, "_run_chat_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
@@ -317,7 +313,6 @@ class TestLiveFinalAnswerDelivery:
 
         event_queue = queue.Queue()
         pending_events = []
-        monkeypatch.setattr(atp, "_run_chat_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
@@ -430,7 +425,6 @@ class TestSealedFinalPackage:
         import ouroboros.agent_task_pipeline as atp
 
         observed = {}
-        monkeypatch.setattr(atp, "_run_chat_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(
             atp, "_run_post_task_processing_async",

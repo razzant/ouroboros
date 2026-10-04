@@ -1,29 +1,38 @@
-"""One-time owner notices about defaults an install runs under (#1334, #1335).
+"""One-time owner notices about what an update leaves an install running (#1334, #1335).
 
 An update may change a shipped default without changing what an existing
 install actually runs: a settings document an earlier release wrote keeps the
 finite round/lifetime bounds it ran under, and an install that never saved a
 reviewer panel follows whatever panel ships. Neither is migrated silently or
 behind the owner's back; each is stated ONCE, factually, in the owner's chat.
+The same holds for the memory the old dialogue writer left: the chronicle
+imports it unchanged, it keeps working in that format and is folded gradually,
+and the owner hears once how much of it there is and how to fold it at once.
 
-The facts are only what the document and environment show — a key absent from
-the document, an invalid value, a saved value, an environment variable. A saved
-value is never presented as proof of a manual choice. Delivery follows the
-existing retired-settings notice (``server_maintenance``): nothing is sent or
-marked while no owner chat is bound, and ``state.json`` records each notice
-only after it was handed to the owner-chat writer, so a failed write is retried
-at a later boot rather than claimed as published.
+The facts are only what the document, the environment and the imported memory
+show — a key absent from the document, an invalid value, a saved value, an
+environment variable, the imported legacy sections. A saved value is never
+presented as proof of a manual choice. Delivery follows the existing
+retired-settings notice (``server_maintenance``): nothing is sent or marked
+while no owner chat is bound, and ``state.json`` records each notice only after
+it was handed to the owner-chat writer, so a failed write is retried at a later
+boot rather than claimed as published.
 """
 
 from __future__ import annotations
 
 import logging
+import pathlib
 from typing import Any, Dict, List, Mapping, Optional
 
 log = logging.getLogger(__name__)
 
 REVIEWER_DEFAULT_NOTICE_KEY = "reviewer_default_delivery_notified"
 OPTIONAL_BOUNDS_NOTICE_KEY = "optional_bounds_notified"
+LEGACY_MEMORY_NOTICE_KEY = "legacy_memory_notified"
+# The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
+_LEGACY_MEMORY_FILES = ("dialogue_blocks.json", "dialogue_summary.md")
+_NOT_PIECES = frozenset({"gap", "cursor_gap"})
 
 _BOUND_LABELS = {
     "OUROBOROS_MAX_ROUNDS": ("Max Rounds per Task", "rounds"),
@@ -105,6 +114,60 @@ REVIEWER_DEFAULT_NOTICE = (
 )
 
 
+def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
+    """How much memory the old dialogue writer left, as the chronicle imported it; ``None`` = unknown.
+
+    Without a chronicle journal and without the old writer's block or summary file
+    there is no old memory: nothing is read or created. Otherwise the journal is
+    activated by the same import the first memory view runs; while that import is
+    pending (another importer holds the legacy lock) or refused, the facts stay
+    unknown, so the notice stays owed for a later boot. A piece is one imported
+    ``legacy`` section (gaps are not pieces), a period is one old block, and the
+    span is the sections' chat-row time bounds, else the block labels the old
+    writer wrote (in period order). A model is never asked.
+    """
+    from ouroboros.chronicle_store import ChronicleStore
+
+    root = pathlib.Path(root)
+    store = ChronicleStore(root)
+    if not store.log_path.exists() and not any((root / "memory" / name).exists() for name in _LEGACY_MEMORY_FILES):
+        return None
+    if store.ensure_activated().get("kind") != "activation":
+        return None
+    pieces = [pointer for pointer in store.legacy_pointer_rows()
+              if pointer.get("kind") == "legacy" and pointer.get("legacy_type") not in _NOT_PIECES]
+    spans = [((pointer.get("covers") or {}).get("raw_range") or {}).get("ts_span") or {} for pointer in pieces]
+    starts = [span["start"][:10] for span in spans if isinstance(span.get("start"), str)]
+    ends = [span["end"][:10] for span in spans if isinstance(span.get("end"), str)]
+    labels = [str(pointer["range_text"]).strip() for pointer in pieces
+              if isinstance(pointer.get("range_text"), str) and pointer["range_text"].strip()]
+    return {"pieces": len(pieces),
+            "periods": len({pointer["legacy_block"] for pointer in pieces if type(pointer.get("legacy_block")) is int}),
+            "start": min(starts) if starts else None, "end": max(ends) if ends else None,
+            "labels": [labels[0], labels[-1]] if labels else []}
+
+
+def legacy_memory_notice(facts: Optional[Mapping[str, Any]]) -> str:
+    """The owner-facing sentence for ``legacy_memory_facts`` ('' when there is no old memory to tell about)."""
+    if not facts or not facts.get("pieces"):
+        return ""
+
+    def counted(number: int, word: str) -> str:
+        return f"{number} {word}{'' if number == 1 else 's'}"
+
+    amount = counted(int(facts["pieces"]), "piece")
+    if facts.get("periods"):
+        amount += " over " + counted(int(facts["periods"]), "period")
+    start, end, labels = facts.get("start"), facts.get("end"), list(facts.get("labels") or [])
+    if start and end:
+        amount += f" ({start} to {end})" if start != end else f" ({start})"
+    elif labels:
+        amount += f" (labelled {labels[0]} … {labels[-1]})" if labels[0] != labels[-1] else f" (labelled {labels[0]})"
+    return ("🧠 Memory: what Ouroboros remembered before this update is kept in its previous format — "
+            f"{amount}. It works as it is and is folded into the new format gradually. "
+            "To fold it all now, ask Ouroboros to fold the old memory.")
+
+
 def _raw_settings_document() -> Optional[Dict[str, Any]]:
     """The settings document exactly as written (no defaults, no coercion), ``None`` if absent."""
     from ouroboros import config
@@ -138,6 +201,14 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
             text = optional_bounds_notice(optional_bound_facts(_raw_settings_document(), settings or {}))
             if text:
                 owed.append((OPTIONAL_BOUNDS_NOTICE_KEY, text, "optional_bounds_notice"))
+        if not state.get(LEGACY_MEMORY_NOTICE_KEY) and message_bus.DATA_DIR:
+            try:
+                text = legacy_memory_notice(legacy_memory_facts(message_bus.DATA_DIR))
+            except Exception:  # an unreadable journal leaves this notice owed, never the others
+                log.debug("legacy memory facts unavailable", exc_info=True)
+                text = ""
+            if text:
+                owed.append((LEGACY_MEMORY_NOTICE_KEY, text, "legacy_memory_notice"))
         # Recover the gap between the durable owner-chat write and the state
         # marker. The chat row itself is the receipt; no second notice ledger.
         recorded = set()

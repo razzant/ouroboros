@@ -204,12 +204,16 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── mcp_client.py        ← MCP client: normalizes server identity without wire-name changes, rejects collisions, masks tokens, prefixes tools `mcp_<server>__<tool>`; a task's listing passes its launch admission per server; MCP descriptions/results stay untrusted data (§6 MCP and browser-facing external tools)
       ├── safety.py            ← Safety Supervisor call with a bounded newest-first context budget; typed non-verdict `⚠️ SAFETY_UNAVAILABLE` (a 429 is an infrastructure fact, not a verdict: one retry, a storm latch, `safety_check_rate_limited`) and the fail-closed `⚠️ SAFETY_SUBJECT_TOO_LARGE_BLOCKED` over the 250k-char `_SAFETY_SUBJECT_CHAR_BUDGET` — never truncated, because anything past a cut would run unreviewed (§6 Safety Supervisor outcomes, fail-open cases included)
       ├── consciousness.py     ← Background alarm: supervisor tick admits an ordinary Main turn through handle_wake_direct; notify pulls the wake forward; legacy inbox is archived unread (§6 Background consciousness and Evolution)
-      ├── consciousness_wake.py ← Complete wake USER input and wake_task_metadata authority envelope; physical chat cursor plus transition inventory; exact pageable source when actual capacity requires it (§6)
+      ├── consciousness_wake.py ← Complete wake USER input and wake_task_metadata authority envelope; physical chat cursor, transition inventory and memory-journal sequence; exact pageable source when actual capacity requires it (§6)
       ├── consciousness_authority.py ← The three autonomy levels of a wake (observe/act/full) and their consequences — `disabled_tools`, bound at dispatch only so the prompt prefix matches an owner turn's, `runtime_mode_cap=light` below Full, and Observe's argument-level narrowing of the mutating names it keeps (§6 Background consciousness and Evolution)
       ├── consciousness_allowance.py ← Rolling-24h consciousness spend read off the usage ledger; typed `allowance_unknown` on a read failure; read by the alarm and the single admission door in `supervisor/queue.py`
-      ├── room_consolidation.py ← Per-room Light draft/correction and deterministic assembly; no cross-room LLM recombine (§6)
-      ├── consolidator.py      ← Generation cursor, explicit `[MEMORY GAP]`, and knowledge nomination outcomes in `dialogue_meta.json` (§6)
-      ├── memory_nomination_receipts.py ← Source-addressed pending nominations; no cross-batch retirement (§6)
+      ├── chat_chain.py        ← The chat generation chain (archives, then live), the A2A-free row stream with the legacy cursor's positions, index-free row addresses `row:<chat_id>@<ts>#<sha12>` (hint, then the archive rotated after `ts`) and `retain_memory_source` (§6)
+      ├── chronicle_store.py   ← Append-only derived memory (`records.jsonl` authority, disposable SQLite index): pages seal row sets once, parts fold adjacent records once, room-head checks, typed refusals (§6)
+      ├── chronicle_import.py  ← One model-free import of the legacy dialogue memory: a `legacy` record per room section with its positional `raw_range`, nominations as global marks, the `legacy_frontier` scan state and the activation receipt (§6)
+      ├── consolidator.py      ← Shared Light transport, scratchpad and knowledge upkeep for reflection; no dialogue writer (§6)
+      ├── memory_nomination_receipts.py ← Strict read of the frozen cursor's pending nominations, imported once as marks (§6)
+      ├── memory_inventory.py  ← What of memory is open or folded, computed once: a room's chat rows after the legacy frontier outside its sealed set (an incremental row projection), and a legacy unit folded by a part or by pages sealing all its rows (§6)
+      ├── memory_fallback.py   ← While consciousness is off, one signed Light helper draft per root task: the room's oldest open stretch the view showed by address, a part over narrative it showed by pointer, or (after a queued task) the oldest unfolded old period of blocks 1-22; a refusal on the same input and route is a receipt, never a repeat (§6)
       ├── memory.py            ← Scratchpad, identity, chat history
       ├── knowledge.py         ← `ouroboros/knowledge.py`: linked-Markdown note addressing, exact source reads, generated shelf indexes for global and project knowledge, and revision-checked writes, so concurrent cognition cannot silently overwrite a newer note (§6 Durable memory and project focus)
       ├── memory_journal_compaction.py ← Startup read-only size facts (`memory_journal_observation`); new history stays complete, old digests unrecoverable
@@ -218,14 +222,18 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── projects_registry.py, project_admission.py ← 80-char names; active|deleting|tombstoned; optional folder; delete keeps bindings/history/folder/memory; tombstones never recreate or prune; strict admission/workspace claims (§6 Project registry and lease)
       ├── project_handoff.py   ← The Main transfer receipt (`project_handoff` row) owed through the terminal outbox after a durable bind: `handoff_identity` (ingress message + Project), the typed `RECEIPT_STATES` answer — never a boolean — and no Main default for a binding without a recorded Main origin (§3 Project handoff receipts)
       ├── project_dialogue.py  ← Read-only chat lens + append-only `logs/chat_annotations.jsonl`; the sidecar routes nothing but the token-bound `needs_manual_target` decision card; `build_owner_message_ref`, `routing_refusal_cause` (the owner-facing `cause` sentence), `room_membership` (§3 Chat and Projects)
+      ├── owner_words.py       ← The owner's words that caused a work tree: carried by value to helpers, resolved from origin/binding/annotation carriers for older tasks, rendered verbatim for children, sessions and reviewers
       ├── project_lease.py     ← One-writer-per-project lease in `assign_tasks`; same-project subagent swarms exempt; `""` is no lane
       ├── context.py           ← Main context assembly and Available-subagents catalog; ordinary shared context retains authored knowledge summaries and an explicit missing-overview gap
       ├── context_input_selection.py ← Optional declared-source child composition and validation (API model or configured session); ordinary shared continuity stays default (§6 Selected first-input sources)
       ├── main_context_authority.py ← Deep-copies the context authority; replaces only oversized raw result strings with source-resolvable narrative or a typed gap
       ├── client_surface.py    ← Closed-key bounded client-surface normalizer; surface identity excludes viewport/narrow_layout (§4 WebSocket protocol)
       ├── context_fit.py       ← Deterministic Max/Low/Nano context projections from one immutable core with labelled measurement + typed reclaim deficit; owns the ONE message-side transcript cache seal; no routing/retry/global-mode authority (§6 Context fitting, retry, and compaction)
-      ├── context_budget.py    ← Context budget vocabulary + typed reclaim SSOT (owner-Low 200K economy target, Nano bounded horizon); `estimate_message_chars` (images at `IMAGE_BLOCK_CHAR_EQUIVALENT`), the basis of the local compaction proxy
+      ├── context_budget.py    ← Context budget vocabulary + typed reclaim SSOT (owner-Low 250K economy target, Nano bounded horizon); `estimate_message_chars` (images at `IMAGE_BLOCK_CHAR_EQUIVALENT`), the basis of the local compaction proxy
       ├── context_mode_compat.py ← One-window compatibility shim for the retired persistent context auto-Low state
+      ├── memory_view.py       ← The acting mind's resident memory view, one render by role (`ViewSpec`): my story of sealed pages and the retold old memory, marks, live rooms and the current room's two lanes; activates the chronicle once (§6)
+      ├── memory_view_legacy.py ← A retold old record whole (the first block, to an integrating focus) or one line: room, period, rows or the old writer's count, length, address (§6)
+      ├── memory_floor.py      ← The memory view's physical floor: one pass down the ladder turns what a window cannot hold into address lines, people's words last; an owner Low/Nano target bounds only its steps; the starting mode drops only when the shortest view cannot fit (§6)
       ├── capability_evidence.py ← Sourced capability and token-density evidence in `data/state/capability_evidence.json`; windows size sends and grant no review authority. `observe_token_density` records measured witnesses; `cold_start_density_probe` supplies one bounded exact-model witness when the triad packet cannot fit a cold route (§6 Prompt size, density and windows)
       ├── context_layout.py    ← Doc-layout SSOT: tier-0 always full; `book_navigation` is the compact view of a reference book (authored introductions + heading index with ranges into the PHYSICAL chapter file); ARCHITECTURE composed in Max, navigated in Low/Nano; reduction by relocation with a visible pointer, never silent truncation (§6 Context fitting, retry, and compaction)
       ├── reference_books.py   ← The ordered Architecture/Development reader over explicit chapter membership — overviews, physical source/range views, legacy single-file composition; `book_path_role`/`book_entrypoint_for`; `validate_reference_books` (DEVELOPMENT "Documentation contract")
@@ -253,7 +261,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── configured_subagents.py ← Canonical `OUROBOROS_SUBAGENTS` parser/serializer: strict validation, stable ids, fingerprinting; owner free text is never host-parsed
       ├── subagent_runtime.py  ← Immutable task-start subagent snapshots, exact `subagent_id` selection, typed alternatives, bounded legacy-input seam
       ├── subagent_route_health.py ← Route health: the ONE manifest reader behind every delegated dispatch
-      ├── subagent_work_order.py ← Complete chosen work-order compiler and normalized host authority without arbitrary admission cuts
+      ├── subagent_work_order.py ← Complete chosen work-order compiler, normalized host authority and the owner's originating words, without arbitrary admission cuts
       ├── subagent_bootstrap.py ← Host pre-start of the exact snapshotted leaf BEFORE the first metered round, through the same wrapper as `delegate_start(prompt="")`; the host never waits (`configured_session_started`); only a definite typed refusal ends unrun at $0 — everything ambiguous wakes the model (§6 Delegated subagents)
       ├── delegate_supervision.py ← Event-only sleeping-nanny loop: quiet windows renew without a model call; a meaningful event (or one reasoned checkpoint) triggers a durable wake with read-only coordination context (`time.state = "not_set"` rather than a latched anchor) (§6 Delegated subagents; `usage_attempts.lock` recovery: Platform substrate below)
       ├── delegate_start_instructions.py ← Stable host start instructions + a complete separately-hashed coordination appendix; host pre-start sends no appendix
@@ -467,6 +475,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── vision.py        ← Vision LLM tools for browser screenshots and uploaded images
       │   ├── vision_process.py ← Tracked vision-child IPC: validated model/physical-attempt receipts, result recovery and parent-owned cancellation
       │   ├── knowledge.py     ← Persistent topic-based knowledge files with an auto-maintained index
+      │   ├── chronicle.py     ← `chronicle_write`/`memory_read`/`memory_mark`, exported by knowledge.py: host-expanded page row sets, task stamps, checked quotes; reads paged at the source (§6)
       │   ├── memory_tools.py  ← Memory registry tools for tracking data sources, gaps, and trust
       │   ├── health.py        ← Codebase health tool: complexity metrics and self-assessment
       │   ├── compact_context.py ← LLM-requested tool-history compaction trigger; stores the pending request for the next round
@@ -713,8 +722,9 @@ Bundled resources use the CLI / Headless Boundary lookup order rather than assum
 │   ├── memory/
 │   │   ├── identity.md            ← durable identity
 │   │   ├── scratchpad.md          ← auto-generated from scratchpad_blocks.json (rendered newest-first; FIFO eviction of the oldest blocks until BOTH the 10-block count cap and the SCRATCHPAD_MAX_CONTENT_CHARS content cap hold)
-│   │   ├── dialogue_blocks.json   ← consolidated dialogue memory blocks (dialogue_summary.md remains a read-only legacy fallback when present)
-│   │   ├── dialogue_meta.json     ← consolidation cursor/metadata for the dialogue blocks
+│   │   ├── dialogue_blocks.json   ← legacy dialogue blocks (and dialogue_summary.md), frozen; read once by the chronicle import
+│   │   ├── dialogue_meta.json     ← legacy cursor and pending nominations, frozen; read once by the chronicle import
+│   │   ├── chronicle/             ← records.jsonl (append-only derived memory, the authority), index.sqlite3 (disposable), .publication.lock
 │   │   ├── WORLD.md               ← host profile generated on first run
 │   │   ├── knowledge/             ← topic files + auto-maintained index; patterns.md (Pattern Register), improvement-backlog.md (backlog SSOT), *_journal.jsonl + *history.jsonl provenance
 │   │   ├── deep_review.md         ← written by the deep-self-review task

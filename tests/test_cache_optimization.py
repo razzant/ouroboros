@@ -41,11 +41,12 @@ def test_build_llm_messages_returns_three_system_blocks():
     assert system_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert system_msg["content"][1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in system_msg["content"][2]
-    # The real render declares block 0 as the cross-conversation stable prefix
-    # (llm_messages.split_leading_system_prefix reads it on the OpenAI-family/Codex wire).
+    # The real render declares blocks 0 (governance, books) and 1 (identity, my story) as the
+    # cross-conversation stable prefix (llm_messages.split_leading_system_prefix reads it on
+    # the OpenAI-family/Codex wire; the Codex cache is read only inside that leading group).
     from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
 
-    assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == 1
+    assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == 2
 
 
 def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
@@ -69,17 +70,20 @@ def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
     stable_text = messages[0]["content"][1]["text"]
     dynamic_text = messages[0]["content"][2]["text"]
 
+    # Block 1: identity, the deep review and my story; knowledge leads block 2, where its
+    # many daily edits never cost the cached story.
     assert "## Identity" in stable_text
-    assert "## Knowledge base" in stable_text
-    assert "## Known error patterns (Pattern Register)" in stable_text
+    assert "## My story" in stable_text
     assert "## Last Deep Self-Review" in stable_text
+    for knowledge in ("## Shared understanding", "## Knowledge base", "## Known error patterns (Pattern Register)"):
+        assert knowledge in dynamic_text and knowledge not in stable_text, knowledge
     assert "## Scratchpad" not in stable_text
-    assert "## Dialogue History" not in stable_text
-    assert "## Dialogue Summary" not in stable_text
     assert "## Memory Registry" not in stable_text
 
     assert "## Scratchpad" in dynamic_text
-    assert ("## Dialogue Summary" in dynamic_text) or ("## Dialogue History" in dynamic_text)
+    assert "## This room (Main)" in dynamic_text and "## My story" not in dynamic_text
+    for gone in ("## Dialogue History", "## Dialogue Summary", "## Recent chat"):
+        assert gone not in stable_text and gone not in dynamic_text, gone
     assert "## Memory Registry (what I know / don't know)" in dynamic_text
     assert "## Memory Registry\n\n" not in dynamic_text
     assert "## Memory Registry (what I know / don't know)" not in stable_text
@@ -220,10 +224,9 @@ def test_build_memory_sections_partition_modes():
     assert any(section.startswith("## Identity") for section in stable)
     assert not any(section.startswith("## Scratchpad") for section in stable)
     assert any(section.startswith("## Scratchpad") for section in volatile)
-    assert any(
-        section.startswith("## Dialogue Summary") or section.startswith("## Dialogue History")
-        for section in volatile
-    )
+    # The retold dialogue is the memory view's (``## My story``), never a memory section.
+    assert not any(section.startswith(("## Dialogue Summary", "## Dialogue History", "## Legacy Dialogue"))
+                   for section in [*stable, *volatile, *all_sections])
     assert not any(section.startswith("## Memory Registry") for section in volatile)
     assert registry_digest.startswith("## Memory Registry (what I know / don't know)")
     assert any(section.startswith("## Identity") for section in all_sections)

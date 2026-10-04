@@ -606,6 +606,7 @@ def build_goal_section(
     goal: str = "",
     scope: str = "",
     commit_message: str = "",
+    owner_words: str = "",
 ) -> str:
     """Format the 'Intended transformation' section.
 
@@ -614,6 +615,11 @@ def build_goal_section(
     commit body, if different from the subject, is included as a separate
     ``## Informational context`` block and explicitly flagged as narrative
     so reviewers don't fact-check commit-message wording against the code.
+
+    ``owner_words`` is the host-attested section of the owner's words that
+    caused the work (``owner_words.owner_words_text``), placed right after the
+    intent: what was asked, beside the author's account of the change. Empty
+    keeps the section byte-identical to a review without it.
     """
     resolved_text, source = resolve_intent(goal, scope, commit_message)
     sections = [
@@ -624,6 +630,8 @@ def build_goal_section(
         "including tests, prompts, docs, architecture touchpoints, and adjacent surfaces\n"
         "that may have been forgotten.",
     ]
+    if owner_words.strip():
+        sections.append(f"\n\n{owner_words}")
 
     commit_text = commit_message.strip()
     if commit_text and commit_text != resolved_text:

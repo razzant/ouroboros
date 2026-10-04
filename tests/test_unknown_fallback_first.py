@@ -372,7 +372,8 @@ def test_route_facts_reach_only_the_acting_routes_own_next_round(monkeypatch):
         messages = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "tool round"}]
         loop_model_call._call_round_model(SimpleNamespace(
             tools=SimpleNamespace(_ctx=tool_ctx), messages=messages, defer_resource_wait=defer,
-            attempt_cap=None, accumulated_usage={}, active_context_mode="max"))
+            attempt_cap=None, accumulated_usage={}, active_context_mode="max",
+            active_model="m", active_use_local=False, tool_schemas=[]))
         return messages
 
     assert call(True)[-1]["content"] == "tool round"  # a candidate's copy never takes the note

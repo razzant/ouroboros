@@ -144,12 +144,21 @@ def test_declared_system_prefix_split_is_projected_once_inside_the_candidate_bui
     for entering, wire, layout in builds:
         assert entering[0][STABLE_PREFIX_BLOCKS_KEY] == 1 and len(entering[0]["content"]) == 3, \
             "the canonical declared system enters the builder: nothing split it earlier"
-        assert wire[0] == {"role": "system", "content": [{"type": "text", "text": "policy"}]}
+        if model.startswith("openai/"):
+            # OpenRouter keeps markers for this family: the marked memory block stays
+            # its own system item and only the unmarked evidence moves.
+            marked = {"cache_control": {"type": "ephemeral"}}
+            assert wire[:2] == [{"role": "system", "content": [{"type": "text", "text": "policy", **marked}]},
+                                {"role": "system", "content": [{"type": "text", "text": "memory", **marked}]}]
+            moved, wire = ("evidence", 1), [wire[0], *wire[2:]]
+        else:
+            assert wire[0] == {"role": "system", "content": [{"type": "text", "text": "policy"}]}
+            moved = ("memory\n\nevidence", 2)
         assert wire[1]["role"] == "user"
-        assert wire[1]["content"] == "[SYSTEM NOTICE]\n" + HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\nmemory\n\nevidence"
+        assert wire[1]["content"] == "[SYSTEM NOTICE]\n" + HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\n" + moved[0]
         assert wire[2] == {"role": "user", "content": "wrap up"}
         assert all(STABLE_PREFIX_BLOCKS_KEY not in message for message in wire)
-        assert layout == {"system_prefix_split": True, "moved_blocks": 2}
+        assert layout == {"system_prefix_split": True, "moved_blocks": moved[1]}
     assert builds[0][1] == builds[1][1], "the priced copy and the sent copy are one wire"
 
 

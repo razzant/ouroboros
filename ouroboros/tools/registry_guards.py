@@ -144,9 +144,10 @@ def _subagent_and_update_guard_result(
         return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
             "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
             "local repo/data/history plus web/browser surfaces and enabled "
-            "external tools, but may not call first-party local tool "
-            f"{name!r}. Parent tasks must perform writes, commits, review "
-            "gates, tool expansion, runtime control, shell, and skills. "
+            "external tools and may write knowledge notes, memory marks and "
+            "chronicle page drafts in its own name, but may not call first-party "
+            f"local tool {name!r}. Parent tasks must perform other writes, commits, "
+            "review gates, tool expansion, runtime control, shell, and skills. "
             "Nested readonly delegation is allowed only through schedule_subagent "
             "within configured depth/cap limits."
         ))
@@ -159,7 +160,8 @@ def _subagent_and_update_guard_result(
             "write inside its assigned write root and run shell/services "
             f"there, but may not call first-party tool {name!r}. It cannot "
             "commit the live body, run review/runtime/skills lifecycle, enable "
-            "tools, or write cognitive memory; the parent applies isolated patches "
+            "tools, or write identity or scratchpad (chronicle pages and parts only "
+            "as its own drafts); the parent applies isolated patches "
             "or verifies shared external files and is the sole live-body committer."
         ))
     if acting_subagent and entry is None and (ext_tool or is_mcp) and acting_tool_grants is not None and name not in acting_tool_grants:

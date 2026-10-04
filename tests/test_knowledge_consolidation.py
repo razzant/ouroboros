@@ -1,4 +1,8 @@
-"""Light revises actual current knowledge in the same existing memory operation."""
+"""Light revises actual current knowledge in the same existing memory operation.
+
+Reflection and scratchpad consolidation are those operations now (the pressure maintenance
+is retired too); the retired dialogue writer's nomination-debt receipts left with it.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,6 @@ from ouroboros import consolidator as c, knowledge as k, reflection
 from ouroboros.memory import Memory
 from ouroboros.tools.registry import ToolContext
 from tests import test_consolidator_context_fit as fit_helpers
-from tests.test_consolidator_context_fit import _paths, _write_chat
 
 fit = fit_helpers.fit
 
@@ -34,15 +37,6 @@ class MemoryLLM:
 
     def chat(self, **kwargs):
         self.calls.append(deepcopy(kwargs))
-        if kwargs["messages"][0]["content"].startswith("Compare this draft memory"):
-            if kwargs["messages"][-1]["role"] != "tool":
-                return {"content": "", "tool_calls": [_call()]}, {"cost": 0.01}
-            # Corrected existing-note replacements require this operation's read.
-            prompt = kwargs["messages"][0]["content"]
-            block = prompt.split("## Draft memory", 1)[1].split("\n\n", 1)[0] if "## Draft memory" in prompt else ""
-            nominations = block[block.index("KNOWLEDGE_ENTRIES_JSON:"):] if "KNOWLEDGE_ENTRIES_JSON:" in block else ""
-            return {"content": "Checked interpretation." + ("\n" + nominations if nominations else "")}, {
-                "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10, "cost": 0.02}
         if len(self.calls) == 1:
             return {"content": "", "tool_calls": [_call()]}, {
                 "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.01}
@@ -168,13 +162,6 @@ def test_every_nomination_keeps_one_positional_outcome_and_its_host_stamp(tmp_pa
     assert (change["mode"], change["writer"], change["route"], change["writer_input_ref"]) == (
         "edit", "consolidation", {"provider": "p", "model": "m"}, {"id": 1})
     assert [("edits" in row, "summary" in row, row["route"]) for row in rows[-2:]] == [(False, False, "block")] * 2
-    # Settlement is positional: only the three published entries retire their debt.
-    from ouroboros.memory_nomination_receipts import prepare, settle
-    meta = {}
-    ids = prepare(meta, "source", [(None, entries)])
-    settle(meta, ids, outcomes)
-    assert {row["id"] for row in meta["pending_knowledge_nominations"]} == {
-        f"source:0:{i}" for i in range(len(entries) - 3)}
 
 
 def test_summary_revision_keeps_recursive_yaml_and_the_rest_of_its_batch(tmp_path):
@@ -201,10 +188,6 @@ def test_summary_revision_keeps_recursive_yaml_and_the_rest_of_its_batch(tmp_pat
     assert [(row["topic"], row["mode"]) for row in rows] == [("recursive", "edit"), ("fresh", "overwrite")]
     assert (rows[0]["old_content"], rows[0]["new_content"]) == (original.text, current.text)
     assert (rows[0]["edits"], rows[0]["summary"], rows[0]["writer"]) == (edit, "New view.", "consolidation")
-    from ouroboros.memory_nomination_receipts import prepare, settle
-    meta = {}
-    settle(meta, prepare(meta, "source", [(None, entries)]), outcomes)
-    assert [row["id"] for row in meta["pending_knowledge_nominations"]] == ["source:0:1"]
     # The same summary and a body-only edit keep the re-rendered preamble bytes.
     for extra, old, new in (({"summary": "New view."}, "New.", "Newer."), ({}, "Kept.", "Still kept.")):
         before = k.read_knowledge_note(target)
@@ -254,32 +237,6 @@ def test_scratchpad_source_and_failed_revisions_remain_durable(tmp_path, fit, co
         assert current.text.endswith("# Alex\n\nTwo original episodes, context differs.\nDECISIVE ORIGINAL TAIL.\n")
     if concurrent:
         assert "not published" in blocks[0]["content"]
-
-
-def test_dialogue_consolidation_retains_nominations_and_commits_shared_note(tmp_path, fit):
-    original = _initial(tmp_path)
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat, text_size=0)
-    answer = "### Block: episode\nI learned why the requested depth changes.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
-        {"topic": "people/alex", "edits": [{"old_text": "He asked for brevity while hurried.",
-            "new_text": "Current understanding with original episode evidence.",
-            "basis": "The episode established a more precise preference."}]}])
-    llm = MemoryLLM(answer)
-    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="dialogue-memory")
-    usage = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx)
-    assert usage["cost"] == pytest.approx(0.06)  # draft read/answer, correction read/answer
-    block = json.loads(blocks.read_text())[0]
-    assert "KNOWLEDGE_ENTRIES_JSON" not in block["content"]
-    assert block["rooms"][0]["content"] == "Checked interpretation."
-    source_id = block["knowledge_source_ref"]["entry_id"]
-    rows = [json.loads(line) for line in (tmp_path / "memory" / "knowledge_history.jsonl").read_text().splitlines()]
-    source = next(row for row in rows if row.get("entry_id") == source_id)
-    assert source["nominations"][0]["entries"][0]["expected_revision"] == original.revision
-    assert block["knowledge_writes"][0]["ok"]
-    assert "Current understanding" in k.read_knowledge_note(original.address).text
-    assert "DECISIVE ORIGINAL TAIL." in k.read_knowledge_note(original.address).text
-    assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
-    assert "pending_knowledge_nominations" not in json.loads(meta.read_text())
 
 
 def test_reflection_reads_current_note_preserves_full_update_and_counts_only_actual_write(tmp_path, fit):
@@ -370,39 +327,3 @@ def test_oversized_requested_note_is_retained_and_only_delivered_prefix_is_credi
     assert usage["cost"] == pytest.approx(0.03)
 
 
-def test_era_compression_cannot_erase_unpublished_knowledge_proposals(tmp_path, fit):
-    original = _initial(tmp_path)
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat, count=1100, text_size=0)
-
-    class ManyBlocks:
-        count = 0
-
-        def chat(self, **kwargs):
-            prompt = kwargs["messages"][0]["content"]
-            if prompt.startswith("Compress these older memory blocks"):
-                return {"content": "The full historical span remains represented."}, {"cost": 0.01}
-            if prompt.startswith("Compare this draft memory"):
-                return {"content": f"Episode {self.count}, checked.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
-                    {"topic": "people/alex", "content": f"Unpublished complete proposal {self.count}."}])}, {"cost": 0.01}
-            self.count += 1
-            return {"content": f"Episode {self.count}.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
-                {"topic": "people/alex", "content": f"Unpublished complete proposal {self.count}."}])}, {"cost": 0.01}
-
-    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="many-blocks")
-    c.consolidate(chat, blocks, meta, ManyBlocks(), knowledge_context=ctx)
-    saved = json.loads(blocks.read_text())
-    assert saved[0]["type"] == "era" and len(saved) == 8
-    assert k.read_knowledge_note(original.address).raw == original.raw
-    records = [json.loads(line) for line in (tmp_path / "memory" / "knowledge_history.jsonl").read_text().splitlines()]
-    nominations = next(row for row in records if row.get("type") == "dialogue_knowledge_nominations")
-    assert len(nominations["nominations"]) == 11
-    assert nominations["nominations"][0]["entries"][0]["content"] == "Unpublished complete proposal 1."
-    assert len([row for row in records if row.get("type") == "dialogue_knowledge_writes_incomplete"]) == 11
-    # The era object carries no knowledge_writes, so the batch receipt lives in meta:
-    # without it the incomplete publication would vanish from every resident surface.
-    assert "knowledge_writes" not in saved[0]
-    pending = json.loads(meta.read_text())["pending_knowledge_nominations"]
-    assert len(pending) == 11
-    assert all(row["id"].startswith(nominations["entry_id"] + ":") for row in pending)
-    assert all(row["reason"] == "revision_required" for row in pending)

@@ -339,7 +339,7 @@ def test_finalizer_never_marks_non_openrouter_routes(provider, model):
 
 def test_finalizer_leaves_unsupported_openrouter_family_untouched():
     client = LLMClient(api_key="unused")
-    target = _openrouter_target("openai/gpt-5.5")
+    target = _openrouter_target("x-ai/grok-4")
     kwargs = client._build_remote_kwargs(
         target, _review_pack(), "high", 512, "auto", None, _tools(),
         skip_capability_fetch=True,
@@ -349,7 +349,7 @@ def test_finalizer_leaves_unsupported_openrouter_family_untouched():
     assert client._normalize_payload_cache_ttl(target, kwargs) is None
 
     assert kwargs == before
-    assert not supports_message_cache_control("openai/gpt-5.5")
+    assert not supports_message_cache_control("x-ai/grok-4")
 
 
 def test_finalizer_keeps_gemini_markers_bare_and_adds_no_tool_marker():
@@ -991,7 +991,7 @@ def test_cached_prompt_blocks_projects_the_global_setting(monkeypatch):
 def test_reviewer_models_support_cache_markers_where_expected():
     assert supports_message_cache_control("anthropic/claude-fable-5")
     assert supports_message_cache_control("google/gemini-3.5-flash")
-    assert not supports_message_cache_control("openai/gpt-5.6-sol")
+    assert supports_message_cache_control("openai/gpt-5.6-sol")
 
 
 # ---------------------------------------------------------------------------

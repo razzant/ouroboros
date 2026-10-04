@@ -7,16 +7,28 @@ from ouroboros import context_layout as cl
 
 def test_tier0_protected_core_declared():
     """The protected always-full core is a data invariant; future context-mode
-    work must not silently demote any of these (BIBLE P1 / P4)."""
-    expected = {
-        "system",
-        "bible",
-        "identity",
-        "scratchpad",
-        "knowledge_index",
-        "recent_dialogue",
-    }
-    assert expected <= set(cl.TIER0_ALWAYS_FULL)
+    work must not silently demote any of these (BIBLE P1 / P4). The marks I keep
+    in view joined it when conversations became the memory view's, whose physical
+    floor alone turns old lines into addresses: the recent-dialogue horizon left."""
+    kept = {"system", "bible", "identity", "scratchpad", "knowledge_index"}
+    assert kept <= set(cl.TIER0_ALWAYS_FULL)
+    assert "memory_marks" in cl.TIER0_ALWAYS_FULL
+    assert "recent_dialogue" not in cl.TIER0_ALWAYS_FULL
+    assert set(cl.TIER0_ALWAYS_FULL) == kept | {"memory_marks"}
+
+
+def test_the_memory_floor_never_takes_the_marks_it_keeps_in_tier_zero():
+    """``memory_marks`` in the tier-0 core is true only while no floor step addresses a mark."""
+    from ouroboros import memory_floor
+    from tests._memory_view_synthetic import actor
+
+    view = actor("main")
+    assert view.marks, "the synthetic Main view carries marks"
+    elements = memory_floor.floor_elements(view)
+    assert elements, "the floor has elements to take on this view"
+    mark_ids = {mark["id"] for mark in view.marks}
+    assert not mark_ids & {ident for _step, ident, _whole, _short in elements}
+    assert all(mark["text"] not in whole for mark in view.marks for _step, _ident, whole, _short in elements)
 
 
 def test_nav_map_lists_h2_through_h4_as_inclusive_complete_subtrees():

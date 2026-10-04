@@ -34,20 +34,21 @@ def _summary(root, task_id: str, text: str) -> None:
     })
 
 
-def test_authored_summary_is_persisted_and_wins_without_chat_access(tmp_path):
-    from ouroboros.project_dialogue import append_authored_task_summary
+def test_a_stored_authored_narrative_wins_without_chat_access(tmp_path):
+    # Nothing writes an authored narrative any more; the readers keep serving the
+    # ones earlier versions stored beside a task result and in the chat log.
     from ouroboros.task_results import load_task_result, write_task_result
 
     task_id = "narrative-root"
-    write_task_result(tmp_path, task_id, "completed", result="raw")
     ref = _ref(task_id)
     row = {
-        "type": "task_summary", "summary_kind": "authored_root_summary",
+        "summary_kind": "authored_root_summary",
         "summary_id": f"task-narrative:{task_id}", "task_id": task_id,
         "result_ref": ref, "source_coverage": {"task_result": ref},
         "text": "The authored account of what actually happened.",
     }
-    assert append_authored_task_summary(tmp_path, tmp_path, row)
+    _summary(tmp_path, task_id, row["text"])
+    write_task_result(tmp_path, task_id, "completed", result="raw", continuation_narrative=row)
     stored = load_task_result(tmp_path, task_id)
     assert stored["status"] == "completed"
     assert stored["continuation_narrative"]["text"] == row["text"]

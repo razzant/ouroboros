@@ -434,7 +434,7 @@ def _run_cross_model_fallback_chain(
         retry_call.context_fit_plan, retry_call.active_context_mode = _loop()._rebind_context_fit_plan(
             retry_call.context_fit_plan, tools, retry_call.messages,
             model=retry_call.active_model, use_local=retry_call.active_use_local,
-            preferred_mode=retry_call.active_context_mode, tool_schemas=tool_schemas,
+            start_mode=retry_call.active_context_mode, tool_schemas=tool_schemas,
             model_role=role, model_route={}, credential_profile_id=account)
         msg, _cost, active_context_mode = _loop()._call_round_model(retry_call)
         if msg is not None and deferred_candidate is not None:
@@ -545,11 +545,12 @@ def _rebind_context_fit_plan(
     *,
     model: str,
     use_local: bool,
-    preferred_mode: str,
+    preferred_mode: Optional[str] = None,  # the owner's mode; None keeps the plan's
     tool_schemas: List[Dict[str, Any]],
     model_role: str = "",
     model_route: Optional[Dict[str, Any]] = None,
     credential_profile_id: Optional[str] = None,
+    start_mode: Optional[str] = None,  # the mode the task runs in: a new route may lower it, never raise it
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -559,7 +560,6 @@ def _rebind_context_fit_plan(
         )
     from ouroboros.capability_evidence import is_known
     from ouroboros.context import _context_fit_route
-    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS, OWNER_NANO_TARGET_TOKENS
     from ouroboros.context_fit import _failed_route_evidence, _route_calibration_ratio, main_output_reserve_tokens
     from ouroboros.provider_models import parse_claudexor_model
 
@@ -588,45 +588,16 @@ def _rebind_context_fit_plan(
     known_window = is_known(evidence, require_fresh=True)
     window_tokens = int(getattr(evidence, "window_tokens", 0) or 0)
     output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)))
-
-    def project(projection: Any) -> Any:
-        calibrated = int(int(projection.estimated_tokens or 0) * ratio)
-        nano = projection.mode == "nano"
-        reserve = NANO_MIN_HEADROOM_TOKENS if nano else output_reserve
-        capacity = min(OWNER_NANO_TARGET_TOKENS, window_tokens) if nano else window_tokens
-        fits = (
-            calibrated + reserve <= capacity
-            if known_window else None
-        )
-        return replace(
-            projection,
-            calibrated_tokens=calibrated,
-            calibration_ratio=ratio,
-            fits_known_window=fits,
-        )
-
-    max_projection = project(plan.max_projection)
-    low_projection = project(plan.low_projection)
-    nano_projection = (
-        project(plan.nano_projection)
-        if getattr(plan, "nano_projection", None) is not None else None
-    )
-    preferred = preferred_mode if preferred_mode in {"low", "max", "nano"} else "max"
-    initial_mode = preferred
+    preferred = preferred_mode or getattr(plan, "preferred_mode", "")
+    preferred = preferred if preferred in {"low", "max", "nano"} else "max"
     rebound = replace(
         plan,
         preferred_mode=preferred,
-        initial_mode=initial_mode,
         model=str(route.get("model") or model),
         provider=str(route.get("provider") or ""),
         route_fp=str(getattr(evidence, "route_fp", "") or ""),
         status=str(getattr(evidence, "status", "") or ""),
         stale=bool(getattr(evidence, "stale", False)),
-        window_tokens=window_tokens,
-        output_reserve_tokens=output_reserve,
-        max_projection=max_projection,
-        low_projection=low_projection,
-        nano_projection=nano_projection,
         model_role=task["model_role"],
         model_route={
             "source": str(getattr(evidence, "source_id", "") or ""),
@@ -635,15 +606,21 @@ def _rebind_context_fit_plan(
             "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or ""),
         } if route.get("provider") == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
-    )
-    mode = initial_mode
+    ).reproject_for_route(  # the memory view re-rendered for this route's window, from the same capture
+        window_tokens=window_tokens, known_window=known_window, ratio=ratio, output_reserve=output_reserve,
+        tool_schemas=tool_schemas, start_mode=start_mode)
+    mode = rebound.initial_mode
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
     messages[:] = rebound.reproject_transcript(messages, mode)
     invalidate_task_cache_splits(getattr(tools._ctx, "task_id", ""))
     tools._ctx.context_fit_plan = rebound
     tools._ctx.messages = messages
     tools._ctx.active_context_mode = mode
+    _adopt_view_facts(tools._ctx, rebound, mode)
     try:
+        if mode != start_mode:  # a task that already ran in this mode was told so before
+            _emit_physical_mode(getattr(tools._ctx, "event_queue", None), str(getattr(tools._ctx, "task_id", "") or ""),
+                                tools._ctx.drive_logs(), rebound, mode)
         _loop()._emit_checkpoint_event(
             getattr(tools._ctx, "event_queue", None),
             str(getattr(tools._ctx, "task_id", "") or ""),
@@ -663,6 +640,40 @@ def _rebind_context_fit_plan(
     except Exception:
         log.debug("Failed to emit route-switch context-fit checkpoint", exc_info=True)
     return rebound, mode
+
+
+def _adopt_view_facts(tool_ctx: Any, plan: Any, mode: str) -> None:
+    """The view fact of the projection now sent: on the task context and in the task trace."""
+    receipt = dict(getattr(plan.projection(mode), "memory_facts", None) or {})
+    if not receipt:
+        return
+    from ouroboros.memory_floor import trace_facts
+    from ouroboros.memory_inventory import VIEW_TRACE_KEY
+
+    tool_ctx.memory_view_facts = trace_facts(receipt)
+    trace = getattr(tool_ctx, "_execution_trace", None)
+    if isinstance(trace, dict):
+        trace[VIEW_TRACE_KEY] = dict(tool_ctx.memory_view_facts)
+
+
+def _emit_physical_mode(event_queue: Any, task_id: str, drive_logs: Any, plan: Any, mode: str) -> None:
+    """The known window lowered this plan's starting mode (no shorter view fit): one owner-visible checkpoint.
+
+    The sent projection's own fact says so (``mode_switch``); a lower mode a task kept from before
+    (task-local Low after an overflow, an earlier route's choice) is not this window's doing.
+    """
+    projection = plan.projection(mode) if hasattr(plan, "projection") else None
+    switch = ((getattr(projection, "memory_facts", None) or {}).get("floor") or {}).get("mode_switch")
+    if not switch or mode != str(getattr(plan, "initial_mode", "") or ""):
+        return
+    _loop()._emit_checkpoint_event(event_queue, task_id, drive_logs, {
+        "checkpoint_kind": "context_fit_physical_mode",
+        "route_fp": str(getattr(plan, "route_fp", "") or ""),
+        "preferred_mode": str(switch.get("from") or ""),
+        "effective_mode": mode,
+        "window_tokens": int(getattr(plan, "window_tokens", 0) or 0),
+        "owner_visible": True,
+    })
 
 
 @dataclass
@@ -730,8 +741,8 @@ def _context_fit_round_id(ctx: _RoundModelCallContext) -> str:
 
 
 def _main_context_profile(plan: Any, rendered_mode: str) -> str:
-    if rendered_mode == "nano":
-        return "owner_nano"
+    if rendered_mode == "nano":  # the owner's Nano carries its target; a Nano the window chose, the window alone
+        return "owner_nano" if str(getattr(plan, "preferred_mode", "")) == "nano" else "task_local_nano"
     if rendered_mode != "low":
         return "owner_max"
     # Effective Low is the sizing authority even when a bare env override
@@ -855,6 +866,7 @@ def _dispatch_round_model(
     elif ctx.task_type == "presence":
         ctx.tools._ctx._deferred_resource_refusal = None
     previous_call = ctx.accumulated_usage.get("_last_llm_call_meta")
+    ctx.tools._ctx._usable_main_capture = None
     from ouroboros.acceptance_settlement import expose_acceptance_feedback
 
     import copy
@@ -906,6 +918,7 @@ def _dispatch_round_model(
             send_clock_policy=main_clock_policy(
                 getattr(ctx.tools._ctx, "task_metadata", {}), task_type=ctx.task_type),
         )
+    capture = _loop().last_physical_attempt_capture()
     if primary and deferral is not None and deferral.fact and result[0] is None:
         ctx.tools._ctx._deferred_resource_refusal = deferral
         if not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
@@ -931,7 +944,7 @@ def _dispatch_round_model(
         # the prior account's capacity before another physical call is prepared.
         ctx.context_fit_plan, ctx.active_context_mode = _loop()._rebind_context_fit_plan(
             ctx.context_fit_plan, ctx.tools, ctx.messages, model=ctx.active_model,
-            use_local=ctx.active_use_local, preferred_mode=ctx.active_context_mode,
+            use_local=ctx.active_use_local, start_mode=ctx.active_context_mode,
             tool_schemas=ctx.tool_schemas, model_role=role, model_route=observed,
             credential_profile_id=(waiter.overrides.get(role, {}).get("model_account_override") if waiter else None))
     emit_model_substitution(ctx.accumulated_usage, task_id=ctx.task_id,
@@ -943,6 +956,8 @@ def _dispatch_round_model(
             and call.get("round_id") == f"{execution_id}:round:{ctx.round_idx}"
             and call.get("llm_call_id")):
         call["usable_solve_response"] = True
+        if capture is not None and capture.physical_context is not None and capture.physical_context.round_id == call["round_id"]:
+            ctx.tools._ctx._usable_main_capture = capture
     return result
 
 
@@ -970,7 +985,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     ctx.messages[:] = prepared
     ctx.context_fit_plan, ctx.active_context_mode = _loop()._rebind_context_fit_plan(
         ctx.context_fit_plan, ctx.tools, ctx.messages, model=model, use_local=use_local,
-        preferred_mode=ctx.active_context_mode, tool_schemas=ctx.tool_schemas,
+        start_mode=ctx.active_context_mode, tool_schemas=ctx.tool_schemas,
         model_role=role, model_route=observed or {},
         credential_profile_id=kwargs.get("model_account_override"))
     ctx.active_model, ctx.active_use_local = model, use_local
@@ -1023,12 +1038,17 @@ def _run_main_reclaim(
     disposition: Any,
     *,
     minimum_goal_tokens: int = 0,
+    provider_refused: bool = False,
 ) -> Any:
     measurement = disposition.measurement
     key = _fit_key(disposition)
     passes = _loop()._context_reclaim_passes(ctx.tools._ctx)
     if key in passes:
         return None
+    economic_deficit = int(measurement.target_deficit_tokens or 0)
+    physical_deficit = int(measurement.capacity_deficit_tokens or 0)
+    # A soft economic target cannot veto useful relief of physical pressure.
+    deficit = 0 if minimum_goal_tokens else physical_deficit or economic_deficit
     request = ContextReclaimRequest(
         route_fp=measurement.route_fp,
         round_id=measurement.round_id,
@@ -1048,6 +1068,9 @@ def _run_main_reclaim(
         task_id=ctx.task_id,
         negative_memo=reclaim_negative_memo(ctx.tools._ctx),
         trace_refs_by_tool_call_id=reclaim_trace_refs(ctx.tools._ctx),
+        exposed_units=(getattr(ctx.tools._ctx, "_last_context_observation", {}) or {}).get("exposed_units", []),
+        automatic_deficit_tokens=deficit,
+        provider_refused=provider_refused,
     )
     passes.add(key)
     # The checkpoint is written only after non-empty selection and immediately
@@ -1067,8 +1090,6 @@ def _run_main_reclaim(
     # boundary, so the landing is re-measured on the SAME fit basis as the trigger
     # and "reached the boundary" stays distinct from "achieved the margin"
     # (reclaimed == deficit is AT the boundary, not below it).
-    deficit = max(int(measurement.target_deficit_tokens or 0),
-                  int(measurement.capacity_deficit_tokens or 0))
     requested_margin = int(request.reclaim_goal_tokens) - deficit
     landed = measurement
     if receipt.status == "applied":
@@ -1097,6 +1118,7 @@ def _run_main_reclaim(
         "reclaimed_tokens": receipt.reclaimed_tokens,
         "goal_reached": receipt.goal_reached,
         "checkpoint_ref": receipt.checkpoint_ref,
+        "reclaim_fit": receipt.fit,
         "deficit_tokens": deficit,
         "requested_margin_tokens": requested_margin,
         "achieved_headroom_tokens": headroom,
@@ -1105,6 +1127,22 @@ def _run_main_reclaim(
         "rounds_since_previous_pass": (
             int(ctx.round_idx) - int(previous_round) if previous_round is not None else None),
     })
+    if (receipt.fit or {}).get("reason") == "automatic_reclaim_unreachable":
+        # One anchored notice per route/boundary; repeated impossible rounds
+        # update the existing checkpoint rail rather than growing the transcript.
+        marker = (f"[Context reclaim facts: {measurement.route_fp}; "
+                  f"target={measurement.target_total_tokens}; capacity={measurement.capacity_total_tokens}]")
+        if not any(message.get("role") == "user" and isinstance(message.get("content"), str)
+                   and message["content"].startswith(marker) for message in ctx.messages):
+            ctx.messages.append({"role": "user", "content": (
+                f"{marker} At round {ctx.round_idx}, on the {measurement.measurement_basis} estimate "
+                f"(density {measurement.measurement_density}), removing all eligible exposed sources could "
+                f"free at most {receipt.fit['maximum_reclaim_tokens']} tokens, below the triggering "
+                f"deficit of {deficit}. Input was {measurement.estimated_input_tokens} tokens plus "
+                f"{measurement.response_reserve_tokens} reserved for output. The host kept earlier records "
+                "and unconsumed sources and skipped the helper call. These are estimates, not a provider refusal. "
+                "Choose how to reshape your working view or recover sources; later measurements are in the "
+                "task checkpoints. This is a host fact, not an owner instruction.")})
     return receipt
 
 
@@ -1310,12 +1348,35 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     return True
 
 
+def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> None:
+    """Keep the resident schemas within the acting route's physical ceiling (OpenAI: 128).
+
+    In place, before measurement, so the fit, the priced candidate and the send carry
+    one list and discovery reports true residency. Names left out earlier and loaded
+    again by the actor stay; the newly left-out names reach the actor as a fact.
+    """
+    from ouroboros.provider_models import tool_schema_limit
+    from ouroboros.tool_policy import fit_tool_schemas_to_limit, route_tool_limit_notice
+
+    schemas, limit = ctx.tool_schemas, tool_schema_limit(ctx.active_model, use_local=ctx.active_use_local)
+    if limit is None or schemas is None or len(schemas) <= limit:
+        return
+    earlier = frozenset(getattr(ctx.tools._ctx, "_route_left_out_tool_names", ()) or ())
+    total = len(schemas)
+    schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier)
+    ctx.tools._ctx._route_left_out_tool_names = earlier | set(left_out)
+    invalidate_task_cache_splits(ctx.task_id)
+    _loop()._append_or_merge_user_message(
+        ctx.messages, route_tool_limit_notice(ctx.active_model, limit, total, left_out))
+
+
 def _call_round_model(ctx: _RoundModelCallContext) -> Tuple[Any, float, str]:
     """Measure, optionally reclaim, dispatch, and recover one Main round."""
     facts = getattr(ctx.tools._ctx, "_route_facts_pending", "")
     if facts and ctx.defer_resource_wait is None:  # the acting route's first own round after a switch
         ctx.tools._ctx._route_facts_pending = ""
         _loop()._append_or_merge_user_message(ctx.messages, facts)
+    _fit_route_tool_ceiling(ctx)
     _append_routing_receipts(ctx)
     _project_wake_input(ctx)
     disposition = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
@@ -1359,16 +1420,22 @@ def _call_round_model(ctx: _RoundModelCallContext) -> Tuple[Any, float, str]:
     if overflow_fit is None:
         return msg, cost, ctx.active_context_mode
     key = _fit_key(overflow_fit)
+    if key not in _loop()._context_reclaim_materializations(ctx.tools._ctx):
+        # A skipped (unreachable or empty) automatic pass did not consume the
+        # physical recovery work: the refusal may still shrink exposed raw units.
+        _loop()._context_reclaim_passes(ctx.tools._ctx).discard(key)
     if key not in _loop()._context_reclaim_passes(ctx.tools._ctx):
         # The provider proved the prediction short by an unknown amount: request a
         # low-water-sized pass, never a token-sized one, so the single strict-shrink
         # retry has real headroom (the goal already carries the margin when the
-        # measurement itself found a deficit).
+        # measurement itself found a deficit). Its typed refusal (checked above) is
+        # what lets this pass re-fold earlier capsules after every raw source.
         from ouroboros.context_fit import reclaim_low_water_margin
 
         landed = overflow_fit.measurement
         _loop()._run_main_reclaim(ctx, overflow_fit, minimum_goal_tokens=max(
-            1, reclaim_low_water_margin(landed.target_total_tokens, landed.capacity_total_tokens)))
+            1, reclaim_low_water_margin(landed.target_total_tokens, landed.capacity_total_tokens)),
+            provider_refused=True)
         overflow_fit = _measure_after_reclaim(ctx)
         if overflow_fit is None:
             return msg, cost, ctx.active_context_mode

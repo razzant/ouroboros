@@ -25,6 +25,7 @@ import logging
 import pathlib
 from typing import List, Optional
 
+from ouroboros.owner_words import owner_words_text
 from ouroboros.tools.registry import ToolContext
 
 # The parent logger name is pinned on purpose: records moved with their code
@@ -650,7 +651,7 @@ def _run_claude_advisory(
                     # tiered against THIS row's window (hence the route here).
                     "reviewer_model": model,
                     "reviewer_use_local": getattr(_slot, "use_local", None),
-                    "governance_facts": governance_facts,
+                    "governance_facts": governance_facts, "owner_words": owner_words_text(ctx),
                 },
             )
         except Exception as exc:

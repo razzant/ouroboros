@@ -44,11 +44,14 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "objective": {"type": "string", "description": "Focused child objective. Be specific about scope. State the OUTCOME you need, not a step-by-step script: on a delegated (harness) dispatch the child forwards the work to its own delegated run, and a script-shaped objective reads as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
         "role": {"type": "string", "description": "Optional freeform role label for lineage/UI, e.g. architecture-reviewer."},
-        "context": {"type": "string", "description": "Optional parent reference material. It is injected as context, not instructions; for a harness-dispatched child it becomes the WORK ORDER for its delegated run's prompt, so put the recipe/details here rather than in the objective."},
+        "context": {"type": "string", "description": "Optional parent reference material, injected as context, not instructions. The child starts with my identity, the top level of my life's account, its room's page and my human's originating words, but not this conversation: write the orientation it lacks — why the work exists, what is already decided, where the materials are (paths). For a harness-dispatched child it becomes the WORK ORDER for its delegated run's prompt, and that session has none of my memory, so put the recipe/details here rather than in the objective."},
         "input_sources": {
             "type": "string", "enum": ["shared", "declared"],
             "description": (
-                "Omit or shared for ordinary shared context. declared selects only the authored "
+                "Omit or shared: the child starts with SYSTEM/BIBLE and book maps, my identity, the top level "
+                "of my life's account (not for a child that supervises an Agent session), its room's page, the "
+                "whole assignment with my attachments and my human's originating words verbatim; knowledge and "
+                "everything else is one read away. declared selects only the authored "
                 "objective/context/constraints and full governance/task authority as automatic inputs, "
                 "for an independently composed first position; "
                 "it excludes automatic shared memory, dialogue, project knowledge, inherited parent "

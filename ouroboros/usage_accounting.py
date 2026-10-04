@@ -253,7 +253,7 @@ class UsageScope:
     root_limit_revision: Optional[str] = None
 @dataclass(frozen=True)
 class PhysicalAttemptContext:
-    profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low"]
+    profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
     rendered_mode: Literal["max", "low", "nano"]
     measurement_basis: Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
     route_fp: str

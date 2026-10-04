@@ -28,7 +28,6 @@ def test_direct_project_completion_writes_the_real_last_result_pointer(tmp_path,
 def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     memory_calls = []
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: memory_calls.append("chat"))
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: memory_calls.append("scratchpad"))
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: memory_calls.append("post_task"))
 
@@ -125,7 +124,6 @@ def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypat
 def test_lineage_child_without_delegation_role_cannot_run_global_post_task(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     memory_calls = []
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *a, **k: memory_calls.append("chat"))
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: memory_calls.append("scratchpad"))
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: memory_calls.append("post_task"))
     drive_logs = tmp_path / "logs-child-lineage"
@@ -161,7 +159,6 @@ def test_split_drive_root_runs_one_canonical_post_task_synthesis(tmp_path, monke
     (child / "logs").mkdir()
     (canonical / "logs").mkdir()
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: None)
     calls = []
 
@@ -243,7 +240,6 @@ def test_task_result_and_task_done_mirror_authoritative_review_status(tmp_path, 
 def test_direct_typed_routing_delivers_nonempty_final_and_keeps_receipt_metadata(tmp_path, monkeypatch):
     """A typed receipt annotates the owner message; normalized final model prose
     remains one durable assistant reply for every routing action."""
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: None)
     drive_logs = tmp_path / "routing-logs"
@@ -298,7 +294,6 @@ def test_direct_typed_routing_delivers_nonempty_final_and_keeps_receipt_metadata
 def test_emit_project_scoped_parent_drive_gets_only_global_backlog_channel(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "load_task_result", lambda *args, **kwargs: {})
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
 
     parent = tmp_path / "parent"
@@ -377,7 +372,6 @@ def test_emit_task_results_surfaces_receipt_absent_flag_in_event_stream(tmp_path
     # outcome, so the event stream never saw it.
     captured = {}
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *a, **k: captured.update(k))
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
 
@@ -518,7 +512,7 @@ def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):
 
 # --- "Stop now" while the paid synthesis is ALREADY in flight (audit point 4, G18) ---
 
-_STAGES = ("chat_consolidation", "scratchpad_consolidation", "reflection", "promotion")
+_STAGES = ("memory_fallback_draft", "scratchpad_consolidation", "reflection", "promotion")
 
 
 def _stubbed_stages(monkeypatch, calls, *, on_first=None):
@@ -532,12 +526,12 @@ def _stubbed_stages(monkeypatch, calls, *, on_first=None):
     def _stage(name, ret=None):
         def _f(*a, **k):
             calls.append(name)
-            if name == "chat_consolidation" and on_first is not None:
+            if name == "memory_fallback_draft" and on_first is not None:
                 on_first()
             return ret
         return _f
 
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", _stage("chat_consolidation"))
+    monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", _stage("memory_fallback_draft"))
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", _stage("scratchpad_consolidation"))
     monkeypatch.setattr(pipeline, "_record_task_facts", _stage("facts"))
     monkeypatch.setattr(pipeline, "_run_reflection", _stage(
@@ -586,7 +580,7 @@ def test_stop_now_during_inflight_synthesis_skips_the_remaining_paid_stages(tmp_
     pipeline._run_post_task_processing_async(
         env, task, {"rounds": 20, "cost": 0.02}, {"tool_calls": [], "reasoning_notes": []}, {}, root / "logs", blocking=True)
 
-    assert calls == ["facts", "chat_consolidation"], calls
+    assert calls == ["facts", "memory_fallback_draft"], calls
     checkpoint = (pipeline.load_task_result(root, task_id) or {}).get("root_phase_checkpoint") or {}
     assert checkpoint.get("post_task_synthesis") == "degraded", checkpoint
     assert checkpoint.get("post_task_stop_reason") == (

@@ -20,6 +20,7 @@ the comments give the approximate token equivalents.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional, Tuple
 
@@ -27,13 +28,14 @@ from typing import Any, Dict, Literal, Optional, Tuple
 # elastic target, not a provider admission ceiling: Phase 2 measures the sealed
 # Main input plus its unchanged response reserve against T and the selected
 # route capacity W, requests at most one useful reclaim pass, then sends best
-# effort. Crossing T never creates a task failure.
-OWNER_LOW_TARGET_TOKENS = 200_000
+# effort. Crossing T never creates a task failure. Low 250K and Nano 85K are the
+# owner's choice of 2026-09-29.
+OWNER_LOW_TARGET_TOKENS = 250_000
 
 # Nano's owner-selected total window and free input headroom. The send boundary
 # chooses the largest output allowance up to the caller's existing ceiling;
 # the headroom is a minimum, never a fixed generation cap.
-OWNER_NANO_TARGET_TOKENS = 81_920
+OWNER_NANO_TARGET_TOKENS = 85_000
 NANO_MIN_HEADROOM_TOKENS = 8_192
 
 # Low-water sizing of the automatic context-reclaim pass. The TRIGGER is
@@ -44,7 +46,7 @@ NANO_MIN_HEADROOM_TOKENS = 8_192
 # sized to the deficit alone lands exactly AT the boundary, so the next round's
 # ordinary growth re-arms it (a summarizer pass nearly every round). Sized this
 # way it lands about an eighth of the boundary below (~125K tokens on a 1M
-# route, ~25K under the 200K Low target), so the next pass needs that much real
+# route, ~31K under the 250K Low target), so the next pass needs that much real
 # growth. Structural constant, not a setting: 8 (12.5 % of the boundary) is a
 # disclosed design choice, not a measured optimum; change it here and only here
 # (tests/test_context_budget_ssot.py pins it). Cost: older history is condensed
@@ -53,6 +55,74 @@ NANO_MIN_HEADROOM_TOKENS = 8_192
 # margin versus achieved headroom (context_fit.measure_main_fit,
 # loop_model_call._run_main_reclaim).
 RECLAIM_LOW_WATER_DIVISOR = 8
+
+# Working room the memory view's physical floor leaves under a known route
+# window: two low-water levels of the reclaim pass above, ceil(W / divisor)
+# each. One is the level an in-task reclaim pass lands on (its goal is the
+# deficit plus one level), the other is room for the work between two passes;
+# with less, the first tool results of a task would re-arm a paid reclaim. The
+# floor turns host facts, room headers, legacy pointers and old pages into
+# addresses only when the view does not fit the window minus the reply reserve
+# and this room; my own replies and people's words become addresses only when
+# the window minus the reply reserve cannot hold them. It never adds memory to
+# fill the room. Structural constant, not a setting;
+# tests/test_context_budget_ssot.py pins it.
+MEMORY_VIEW_WORKING_MARGINS = 2
+
+# Low-water levels left to the work under an owner-selected Low or Nano target
+# (the target bounds the view the way a window does, with the full reply
+# reserve). One level keeps a Low view at most 250 000 - 65 536 - 31 250 =
+# 153 214 estimated input tokens and a Nano view 85 000 - 8 192 - 10 625 =
+# 66 183, so an in-task reclaim pass still has a level to land on below the
+# target; 0 makes the target a plain frame. The owner chose one level; the
+# value changes here and only here (tests/test_context_budget_ssot.py pins it).
+MODE_TARGET_WORKING_MARGINS = 1
+
+
+def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) -> Tuple[Optional[int], int]:
+    """``(owner target, reply reserve)`` of a rendered mode.
+
+    A target binds only the mode the owner selected: task-local Low and a mode the
+    window lowered keep the window alone. Nano keeps its own headroom either way.
+    """
+    target = {"low": OWNER_LOW_TARGET_TOKENS, "nano": OWNER_NANO_TARGET_TOKENS}.get(mode) if mode == owner_mode else None
+    return target, NANO_MIN_HEADROOM_TOKENS if mode == "nano" else output_reserve_tokens
+
+
+def request_context_budget(
+    *, window_tokens: Optional[int], output_reserve_tokens: Optional[int], non_memory_tokens: int,
+    target_tokens: Optional[int] = None, calibration_ratio: float = 1.0, margin_count: int = 1,
+) -> Dict[str, Any]:
+    """One measured frame: the memory allowance with and without the working margins.
+
+    The boundary is the smaller known of an owner target and the route window;
+    with neither known every allowance is ``None`` (unknown evidence never
+    prohibits a route). Input and returned allowances use estimator tokens;
+    boundary, reserve, margin and free space use calibrated tokens. Unknown
+    reply space gives an explicitly optimistic upper estimate, never a known
+    zero or native-fit proof. A zero margin count measures a physical frame
+    without a working reserve.
+    """
+    known = [int(v) for v in (target_tokens, window_tokens) if v is not None and int(v) > 0]
+    boundary = min(known) if known else None
+    ratio = max(float(calibration_ratio or 1), 0.01)
+    reserve = max(0, int(output_reserve_tokens or 0))
+    measured = math.ceil(max(0, int(non_memory_tokens)) * ratio)
+    margin = (math.ceil(boundary / RECLAIM_LOW_WATER_DIVISOR) * margin_count
+              if boundary is not None else 0)
+    free = boundary - reserve - measured if boundary is not None else None
+
+    def allowance(extra: int) -> Optional[int]:
+        return (max(0, math.floor((boundary - reserve - extra) / ratio) - non_memory_tokens)
+                if boundary is not None else None)
+
+    return {"boundary_tokens": boundary, "target_tokens": target_tokens, "window_tokens": window_tokens,
+            "output_reserve_tokens": output_reserve_tokens, "reserve_known": output_reserve_tokens is not None,
+            "working_margin_tokens": margin, "non_memory_tokens": non_memory_tokens,
+            "calibrated_input_tokens": measured, "calibration_ratio": ratio, "free_tokens": free,
+            "with_margin_tokens": allowance(margin), "without_margin_tokens": allowance(0),
+            "target_deficit_tokens": (max(0, measured + reserve - target_tokens) if target_tokens else None),
+            "capacity_deficit_tokens": (max(0, measured + reserve - window_tokens) if window_tokens else None)}
 
 # One overflow vocabulary for every seam that must recognize a CONTEXT-WINDOW
 # overflow (Main provider-code precedence, the local transport, and the
@@ -216,11 +286,6 @@ CONTINUATION_NARRATIVE_LEGACY_GENERATIONS = 3
 CONTINUATION_NARRATIVE_LEGACY_TAIL_BYTES = 512 * 1024
 CONTINUATION_NARRATIVE_LEGACY_MAX_ROWS = 5_000
 
-# Raw recent-dialogue tail shown when no valid consolidation can represent older
-# dialogue. The universal temporal renderer remains issue #220; this PR neither
-# shortens nor reinterprets that horizon.
-MAX_RECENT_CHAT_TAIL = 1000
-
 # --- Native image blocks (v6.26.0 multimodal chat) ---------------------------
 # Char-equivalent for ONE image block in chars/4 token estimates (~1.1K tokens):
 # vision models bill per tile, not per base64 char.
@@ -300,8 +365,15 @@ PROGRESS_LOG_WARN_BYTES = 8_000_000
 SCHEDULED_TASKS_WARN_BYTES = 2_000_000
 # Compact root-task -> skill review index used by acceptance packet assembly.
 SKILL_REVIEW_ROOT_TASKS_WARN_BYTES = 20_000_000
-# ``chat_history`` can deliberately replay the archive chain, while ordinary
-# context reads only the unconsolidated generation suffix.  Warn before an
+# memory/chronicle/records.jsonl is my memory's only authority and is never rotated
+# (records are never rewritten). Every task context decodes each acting page and part
+# body from its index (memory_view._story_pages), and an owner's install imports about
+# 4.4 MB of legacy memory at activation (measured on a copy, 2026-10-04). 64MB is ~15x that: past
+# it, decoding the story on every task context stops being free and a projection of the
+# acting records is due. Observability, never a retention gate: nothing is cut.
+CHRONICLE_JOURNAL_WARN_BYTES = 64_000_000
+# ``chat_history`` can deliberately replay the archive chain, while the memory
+# view reads only rows after the retold-memory frontier.  Warn before an
 # explicit full-history read becomes seconds-scale; this is observability, not
 # a retention gate and never shortens the memory horizon.
 CHAT_ARCHIVE_SCAN_WARN_BYTES = 100_000_000

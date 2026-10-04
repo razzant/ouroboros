@@ -1465,7 +1465,7 @@ def test_chat_history_tool_spans_all_threads_full_awareness(tmp_path):
     """Full project awareness (v6.32.0): the chat_history TOOL is the one mind's
     DELIBERATE recall — it spans the WHOLE conversation (main + ALL project
     threads), only A2A virtual transport excluded. Project-task FOCUS lives in the
-    passive default context (build_recent_sections), NOT in this recall tool, so
+    passive default context (the memory view's room), NOT in this recall tool, so
     the one identity can recall anything it chooses (BIBLE P1)."""
     import json
 
@@ -1525,38 +1525,39 @@ def test_chat_history_tool_uses_canonical_budget_root_and_archive_pagination(tmp
     assert "old-0" in second and "old-1" in second
 
 
-def test_recent_context_full_awareness_and_project_focus_with_bindings(tmp_path):
-    """Passive context (v6.32.0): the one identity's MAIN recent context sees
-    EVERYTHING, including a post-hoc bound task's rows (one mind, BIBLE P1). A
-    PROJECT task's recent context is FOCUSED on its own thread + rows of tasks
-    bound to it; unrelated main chat is left out of the focused working view
-    (focus in the passive default, not isolation)."""
+def test_memory_view_main_names_the_bound_room_and_the_project_task_sees_its_rows(tmp_path):
+    """One mind, rooms by membership (memory view): the rows of a task bound to a Project are
+    that room's. Main keeps its own words verbatim and names the Project in one line of
+    ``## Live rooms`` (its rows one memory_read away); the Project task reads them in its own
+    room, and Main's words stay out of its view."""
     import json
 
-    from ouroboros.context import build_recent_sections
-    from ouroboros.memory import Memory
     from ouroboros.projects_registry import bind_task_to_project, create_project
+    from tests._memory_view_context import blocks, section
+    from tests.test_cache_optimization import _make_env_and_memory
 
-    logs = tmp_path / "logs"
-    logs.mkdir(parents=True)
-    proj = create_project(tmp_path, "promoted")
+    env, mem = _make_env_and_memory(tmp_path)
+    root = mem.drive_root
+    proj = create_project(root, "promoted", name="Promoted")
     pchat = int(proj["chat_id"])
-    bind_task_to_project(tmp_path, "task-7", "promoted", pchat, origin={"absent": "system"})
+    bind_task_to_project(root, "task-7", "promoted", pchat, origin={"absent": "system"})
     rows = [
-        {"direction": "in", "text": "plain-main", "chat_id": 1},
-        {"direction": "out", "text": "bound-task-row", "chat_id": 1, "task_id": "task-7"},
+        {"direction": "in", "text": "plain-main", "chat_id": 1, "ts": "2026-09-01T00:00:00+00:00"},
+        {"direction": "out", "text": "bound-task-row", "chat_id": 1, "task_id": "task-7",
+         "ts": "2026-09-01T00:01:00+00:00"},
     ]
-    (logs / "chat.jsonl").write_text(
-        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    mem = Memory(drive_root=tmp_path)
+    (root / "logs" / "chat.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
-    # Main passive context: full awareness sees everything.
-    main_ctx = "\n".join(build_recent_sections(mem, env=None))
-    assert "plain-main" in main_ctx and "bound-task-row" in main_ctx
+    _a, _b, main_ctx, _cap = blocks(env, mem, {"id": "main-turn", "chat_id": 1})
+    assert "] plain-main" in section(main_ctx, "## This room (Main)")
+    assert "bound-task-row" not in main_ctx
+    assert f"### Project Promoted [chat_id={pchat}] — open" in section(main_ctx, "## Live rooms")
 
-    # Project task passive context: focused on its own thread + bound-task rows.
-    proj_ctx = "\n".join(build_recent_sections(mem, env=None, thread_chat_id=pchat))
-    assert "bound-task-row" in proj_ctx
+    _a, _b, proj_ctx, _cap = blocks(env, mem, {"id": "task-7", "chat_id": 1})  # bound: its room is the Project
+    room = section(proj_ctx, f"## This room (Project Promoted [chat_id={pchat}])")
+    # An outgoing row with no delegation lineage before the lineage epoch is a host fact of its
+    # task (lane 2, never "Ouroboros" in lane 1): one line, its address one read away.
+    assert "; host; task task-7] " in room and "get_task_result(task_id='task-7')" in room
     assert "plain-main" not in proj_ctx
 
 

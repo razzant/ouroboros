@@ -359,7 +359,9 @@ def test_materialized_units_never_swallow_intervening_user_turn(monkeypatch, tmp
 
     assert receipt.status == "applied"
     assert len(rebuilt) == 3
-    assert [message for message in rebuilt if message.get("role") == "user"] == [owner_turn]
+    assert [message for message in rebuilt if message.get("role") == "user"
+            and not cc._capsule_metadata(message)[0]] == [owner_turn]
+    assert rebuilt[1] == owner_turn
     assert rebuilt[1] is owner_turn
 
 

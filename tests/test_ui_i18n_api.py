@@ -13,13 +13,14 @@ import pytest
 @pytest.fixture(autouse=True)
 def _own_settings_file(tmp_path, monkeypatch):
     """The language writer goes through the owner settings writer, which writes `config.SETTINGS_PATH`:
-    point it at this test's root so no test leaves a settings.json in the session-wide data root.
-    These gateway-only tests also own their hook list: a generator registered by
-    an earlier boot test must not enqueue its catalog into this fixture's memory."""
+    point it at this test's root so no test leaves a settings.json in the session-wide data root."""
     import ouroboros.config as cfg
-    from ouroboros.gateway import ui_i18n
 
     monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "settings.json")
+    from ouroboros.gateway import ui_i18n
+
+    # A server lifespan earlier in this worker registers the generator hook process-wide;
+    # each test starts from an empty hook list so a language choice queues no catalog.
     monkeypatch.setattr(ui_i18n, "_LANGUAGE_HOOKS", [])
 
 

@@ -1,0 +1,3 @@
+56
+The memory view's description says retold pointers carry their sizes and that the room-less
+retellings, which predate rooms and were Main's memory, stand whole in Main's room page.

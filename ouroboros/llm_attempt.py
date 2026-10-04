@@ -184,19 +184,25 @@ def cache_ttl_seconds(applied_ttl: Any) -> Optional[int]:
 
 
 def supports_message_cache_control(model: str) -> bool:
-    """Whether the OpenRouter family honors message cache breakpoints."""
+    """Families whose message cache markers OpenRouter accepts or translates.
+
+    Dated external fact (OpenRouter prompt-caching guide, read 2026-10-03): a text
+    block's ``cache_control`` becomes ``prompt_cache_breakpoint`` on supporting
+    OpenAI models (GPT-5.6+), and its TTL is dropped toward OpenAI. Keeping the hint
+    is not a claim that every ``openai/`` model caches it; older ones ignore it.
+    """
     m = str(model or "").strip().lstrip("~")
-    return m.startswith("anthropic/") or m.startswith("google/gemini-")
+    return m.startswith(("anthropic/", "google/gemini-", "openai/"))
 
 
 def openai_family_model(model: str) -> bool:
     """Whether a model id names OpenAI's public-API family (``openai/…`` on OpenRouter,
     ``openai::…`` direct; the ``~`` processing prefix and a ``:online`` suffix keep it).
 
-    Dated external fact (probes 2026-09-25; inventory row in DEVELOPMENT §2): this family
-    reuses a prompt cache only for the WHOLE leading system section plus tool schemas as
-    one unit, or for an exact earlier prompt as a prefix, and the routing key partitions
-    it. That is why its send copy keeps mutable context out of the leading system message
+    Dated external fact (probes 2026-09-25; OpenAI prompt-caching guide read 2026-10-03):
+    without an explicit breakpoint this family looks a cache up only at message ends, and
+    in the leading system/developer group only at the END of its last message. That is
+    why its send copy keeps mutable context out of the leading system group
     (``llm_messages.split_leading_system_prefix``) and shares one sticky session per model
     and governance prefix (``_openrouter_session_identity``). OpenRouter ``openai/gpt-oss-*``
     ids are served by third parties and merely inherit the projection: disclosed, not gated.
@@ -561,8 +567,10 @@ def _fit_output_payload(target: Dict[str, Any], payload: Dict[str, Any], api_sur
     if provider == "local":
         limit_enforced = measured["input_is_exact"] and (target.get("local_input_measurement") or {}).get("output_limit_enforced") is True
     nano = target.get("context_mode") == "nano"
+    # Only the owner's Nano is bounded by its target; a Nano the window chose answers to the window alone.
+    owner_nano = nano and getattr(current_physical_attempt_context(), "profile", "owner_nano") != "task_local_nano"
     fit = resolve_call_context_fit(**measured, caller_max_tokens=payload[field],
-        total_target_tokens=OWNER_NANO_TARGET_TOKENS if nano else None,
+        total_target_tokens=OWNER_NANO_TARGET_TOKENS if owner_nano else None,
         minimum_free_tokens=NANO_MIN_HEADROOM_TOKENS if nano else 0, output_limit_enforced=limit_enforced,
         reasoning_included_in_limit=True if limit_enforced else None)
     facts = asdict(fit)

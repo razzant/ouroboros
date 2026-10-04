@@ -60,10 +60,8 @@ class TestTaskDoneOrdering:
 
         # Monkeypatch consolidation to no-op (avoid LLM calls)
         import ouroboros.agent_task_pipeline as atp
-        orig_chat_consol = atp._run_chat_consolidation
         orig_scratchpad_consol = atp._run_scratchpad_consolidation
         orig_post_task = atp._run_post_task_processing_async
-        atp._run_chat_consolidation = lambda *a, **kw: None
         atp._run_scratchpad_consolidation = lambda *a, **kw: None
         atp._run_post_task_processing_async = lambda *a, **kw: None
 
@@ -79,7 +77,6 @@ class TestTaskDoneOrdering:
                 ctx=ctx,
             )
         finally:
-            atp._run_chat_consolidation = orig_chat_consol
             atp._run_scratchpad_consolidation = orig_scratchpad_consol
             atp._run_post_task_processing_async = orig_post_task
 
@@ -112,10 +109,8 @@ class TestTaskDoneOrdering:
         llm_trace = {"tool_calls": [], "reasoning_notes": []}
 
         import ouroboros.agent_task_pipeline as atp
-        orig_chat_consol = atp._run_chat_consolidation
         orig_scratchpad_consol = atp._run_scratchpad_consolidation
         orig_post_task = atp._run_post_task_processing_async
-        atp._run_chat_consolidation = lambda *a, **kw: None
         atp._run_scratchpad_consolidation = lambda *a, **kw: None
         atp._run_post_task_processing_async = lambda *a, **kw: None
 
@@ -131,7 +126,6 @@ class TestTaskDoneOrdering:
                 ctx=ctx,
             )
         finally:
-            atp._run_chat_consolidation = orig_chat_consol
             atp._run_scratchpad_consolidation = orig_scratchpad_consol
             atp._run_post_task_processing_async = orig_post_task
 

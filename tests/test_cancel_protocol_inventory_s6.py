@@ -104,7 +104,6 @@ TERMINAL_WRITERS = {
     ('ouroboros/terminal_projection.py::append_terminal_projection', 'status'): 'dynamic',
     ('ouroboros/terminal_projection.py::clear_terminal_projection_obligation', 'str(expected.get("status") or "completed")'): 'terminal',
     ('ouroboros/project_naming.py::spawn_turn_namer._work', 'status'): 'dynamic',
-    ('ouroboros/project_dialogue.py::persist_continuation_narrative', 'requested_status'): 'dynamic',
     # The locked field projector preserves the existing status, including a
     # terminal one; publishing review evidence never completes the task itself.
     ('ouroboros/review_projection.py::publish_acceptance_checkpoint', '"running"'): 'dynamic',

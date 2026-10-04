@@ -240,7 +240,7 @@ def test_spawned_worker_public_request_waits_for_real_original_owner(late, tmp_p
             entered.set()
             assert release.wait(20)
         monkeypatch.setattr(pipeline, '_record_task_facts', hold)
-        for name in ('_run_chat_consolidation', '_run_scratchpad_consolidation', '_run_reflection', '_update_improvement_backlog'):
+        for name in ('_run_scratchpad_consolidation', '_run_reflection', '_update_improvement_backlog'):
             monkeypatch.setattr(pipeline, name, lambda *_a, **_k: None)
         monkeypatch.setattr('ouroboros.post_task_evolution.maybe_promote', lambda *_a, **_k: None)
         task = {**f.task, 'drive_root': str(f.root), '_is_direct_chat': True}
