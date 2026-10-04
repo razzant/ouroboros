@@ -172,6 +172,34 @@ def test_private_paths_empty_and_strict_always_full(tmp_path):
     assert _ids(task_results.list_task_results(tmp_path, _paths=[], strict=True)) == ["good"]
 
 
+@pytest.mark.parametrize("suffix", [".json", ".JSON", ".JsOn"])
+@pytest.mark.parametrize("windows_glob", [False, True])
+def test_mixed_case_names_follow_canonical_glob(tmp_path, monkeypatch, suffix, windows_glob):
+    source = tmp_path / "source"
+    path = _put(source, "child", delegation_role="subagent", parent_task_id="parent",
+                status="completed", result="completed disk child")
+    path.rename(path.with_suffix(suffix))
+    if windows_glob:
+        # Emulate only the Windows canonical filename selection on POSIX too.
+        # Real Windows runs also exercise its native glob in the other branch.
+        original_glob = pathlib.Path.glob
+
+        def folded_glob(directory, pattern):
+            if directory.name == "task_results" and pattern == "*.json":
+                return (p for p in directory.iterdir() if p.suffix.lower() == ".json")
+            return original_glob(directory, pattern)
+
+        monkeypatch.setattr(pathlib.Path, "glob", folded_glob)
+    _, _, rows = _pair(tmp_path, monkeypatch, source,
+                       parent_task_id="parent", scope="direct")
+    if windows_glob or suffix == ".json" or os.name == "nt":
+        assert _ids(rows) == ["child"]
+        assert rows[0]["result"] == "completed disk child"
+        assert rows[0]["status"] == "completed"
+    else:
+        assert rows == []
+
+
 def test_atomic_replacement_during_metadata_read_is_admitted_fresh(tmp_path, monkeypatch):
     path = _put(tmp_path, "changing", delegation_role="subagent",
                 parent_task_id="other", root_task_id="other", result="old")

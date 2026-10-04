@@ -6,7 +6,6 @@ It never admits a row or replaces the full schema reader.
 
 from __future__ import annotations
 
-import os
 import pathlib
 from typing import Dict, List
 
@@ -38,8 +37,9 @@ def raw_result_facts(results_dir: pathlib.Path, *, reader=None) -> tuple[Dict[st
 
     reader = reader or read_json_dict
     try:
-        with os.scandir(results_dir) as entries:
-            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+        # Use the canonical reader's platform-native glob, including Windows
+        # case folding. A navigation selector must not drop admitted filenames.
+        names = sorted(path.name for path in results_dir.glob("*.json"))
     except FileNotFoundError:
         names = []
     dir_key = str(results_dir)
