@@ -192,6 +192,8 @@ def test_mixed_case_names_follow_canonical_glob(tmp_path, monkeypatch, suffix, w
             return original_glob(directory, pattern)
 
         monkeypatch.setattr(pathlib.Path, "glob", folded_glob)
+        monkeypatch.setattr(pathlib.Path, "match", lambda path, pattern:
+                            pathlib.PureWindowsPath(str(path)).match(pattern))
     _, _, rows = _pair(tmp_path, monkeypatch, source,
                        parent_task_id="parent", scope="direct")
     if windows_glob or suffix == ".json" or os.name == "nt":
