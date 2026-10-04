@@ -200,6 +200,13 @@ def restart_current_process(
     from ouroboros import platform_layer
 
     if platform_layer.IS_WINDOWS:
+        # Match CPython's multiprocessing Windows venv launch: the venv exe is
+        # a redirector, whose Popen PID is not the interpreting successor PID.
+        # Launch the base interpreter while preserving the venv selection.
+        base_executable = getattr(sys, "_base_executable", sys.executable)
+        if base_executable != sys.executable:
+            argv[0] = base_executable
+            env["__PYVENV_LAUNCHER__"] = sys.executable
         # Windows CRT exec is spawn-plus-exit; use the custodied spawn directly.
         # Keep its console group so Ctrl+C still reaches the replacement.
         log.info("Starting replacement direct server mode on %s:%d", desired_host, port)

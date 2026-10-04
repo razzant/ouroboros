@@ -136,6 +136,8 @@ def test_direct_restart_uses_custodied_spawn_on_windows_and_exec_on_posix(monkey
     from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    base_interpreter = str(tmp_path / "base-python.exe")
+    monkeypatch.setattr(sys, "_base_executable", base_interpreter)
     monkeypatch.setattr(sys, "argv", ["server.py", "--port", "9123"])
     monkeypatch.setenv(PLANNED_RESTART_TRANSACTION_ENV, "planned-same-attempt")
     monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
@@ -171,7 +173,8 @@ def test_direct_restart_uses_custodied_spawn_on_windows_and_exec_on_posix(monkey
         assert kwargs["close_fds"] is True
         assert kwargs["env"][delegate_recovery.WINDOWS_RESTART_PARENT_HANDLE_ENV] == str(handle)
     calls.clear()
-    assert cmd == [sys.executable, "server.py", "--port", "9123"]
+    assert cmd == [base_interpreter, "server.py", "--port", "9123"]
+    assert kwargs["env"]["__PYVENV_LAUNCHER__"] == sys.executable
     assert kwargs["drive_root"] == tmp_path
     assert kwargs["purpose"] == "server_restart_fallback"
     assert kwargs["scope"] == "daemon"
@@ -187,7 +190,8 @@ def test_direct_restart_uses_custodied_spawn_on_windows_and_exec_on_posix(monkey
                                            log=logging.getLogger("test"))
     assert len(calls) == 1 and calls[0][0] == "exec"
     _, executable, argv, env = calls[0]
-    assert executable == sys.executable and argv == cmd
+    assert executable == sys.executable
+    assert argv == [sys.executable, "server.py", "--port", "9123"]
     assert env[PLANNED_RESTART_TRANSACTION_ENV] == "planned-same-attempt"
     assert env["OUROBOROS_SERVER_PORT"] == "9123"
 
