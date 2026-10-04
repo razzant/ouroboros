@@ -803,22 +803,20 @@ def list_task_results(
     *,
     statuses: Optional[List[str]] = None,
     strict: bool = False,
+    _paths: Optional[List[pathlib.Path]] = None,
 ) -> List[Dict[str, Any]]:
-    """List task results, optionally refusing an incomplete authority scan.
+    """List admitted results; strict always scans all files and never moves refusals.
 
-    Most observational callers remain tolerant of a malformed historical row.
-    Authority reducers such as direct-child admission pass ``strict=True`` so
-    an unreadable row cannot be silently reinterpreted as an absent child.
-
-    Schema admission (ABI 7.0, Q8=B): the fail-soft scan QUARANTINES every
-    inadmissible row it meets and reports the whole sweep as ONE durable
-    event; the strict scan raises WITHOUT moving anything. Rows already under
-    ``task_results/quarantine/`` are outside this scan (non-recursive glob).
+    Tolerant scans quarantine refused rows they visit and emit ONE batch event.
+    Private ``_paths`` limits only tolerant scans; ``None`` uses the original
+    nonrecursive glob. ``quarantine/`` is never scanned.
     """
     wanted = {str(item) for item in list(statuses or []) if str(item).strip()}
     results: List[Dict[str, Any]] = []
     quarantined: List[Dict[str, str]] = []
-    for path in sorted(task_results_dir(drive_root, create=False).glob("*.json")):
+    paths = (_paths if _paths is not None and not strict
+             else task_results_dir(drive_root, create=False).glob("*.json"))
+    for path in sorted(paths):
         data = read_json_dict(path)
         if data is None and not path.is_file():
             continue  # vanished mid-scan — nothing to admit or quarantine

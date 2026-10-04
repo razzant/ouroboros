@@ -1,99 +1,27 @@
 """Compact, stat-invalidated result facts for interactive read projections.
 
-The files and their schema readers remain authoritative. This process-local
-memo serves name ordering, SSE lineage discovery and Main's newest-result
-selection; selected full results still pass the existing admission reader.
+The files and their schema readers remain authoritative. The shared memo in
+task_result_scan serves child lookup, name ordering, SSE lineage discovery
+and Main's newest-result selection; selected full results still pass admission.
 """
 
 from __future__ import annotations
 
-import os
 import logging
 import pathlib
 from typing import Dict, List
 
-from ouroboros.presence_authority import presence_metadata_binding, presence_record_binding
+from ouroboros.task_result_scan import raw_result_facts as _raw_result_facts
 from ouroboros.task_result_schema import (
     quarantine_task_result,
     task_result_schema_refusal,
 )
 from ouroboros.utils import read_json_dict
 
-# Never retain bodies: a cached row only chooses which authoritative files to
-# read. Immutable tuple values publish atomically; concurrent scans may repeat
-# a read, while the next stat invalidates a superseded observation.
-_RAW_TS_MEMO: Dict[tuple, tuple] = {}
-_RESULT_FACT_KEYS = (
-    "task_id", "id", "ts", "updated_at", "delegation_role", "parent_task_id",
-    # A project room offers its OWN recent roots, so the selection needs the
-    # project of each row - one small scalar, no extra read. Status and cancel
-    # facts stay out: every row the selection keeps is then loaded WHOLE and
-    # carries them from there, while `cancel_state` lives in the durable
-    # cancel-intent projection, so a memo copy would be a second source nobody
-    # reads.
-    "project_id",
-    "root_task_id", "child_drive_root", "headless_child_drive_root",
-)
-
-
-def _result_stat(path: pathlib.Path) -> tuple:
-    stat = path.stat()
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-
 
 def raw_result_facts(results_dir: pathlib.Path, *, reader=None) -> tuple[Dict[str, dict], List[str]]:
-    """Read changed/new files only, never caching failed or concurrent reads.
-
-    Parseable inadmissible rows retain their refusal for callers to apply their
-    own schema-reader contract; the memo never admits or quarantines a row.
-    ``reader`` keeps the legacy gateway.tasks read seam injectable.
-    """
-    reader = reader or read_json_dict
-    try:
-        with os.scandir(results_dir) as entries:
-            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
-    except FileNotFoundError:
-        names = []
-    dir_key = str(results_dir)
-    present = set(names)
-    for key in [k for k in list(_RAW_TS_MEMO) if k[0] == dir_key and k[1] not in present]:
-        _RAW_TS_MEMO.pop(key, None)
-    rows: Dict[str, dict] = {}
-    malformed: List[str] = []
-    for name in names:
-        key = (dir_key, name)
-        path = results_dir / name
-        try:
-            signature = _result_stat(path)
-            cached = _RAW_TS_MEMO.get(key)
-            if cached is not None and cached[0] == signature:
-                rows[name] = dict(cached[1])
-                continue
-            _RAW_TS_MEMO.pop(key, None)
-            data = reader(path)
-            if data is None or _result_stat(path) != signature:
-                malformed.append(name)
-                continue
-        except OSError:
-            _RAW_TS_MEMO.pop(key, None)
-            malformed.append(name)
-            continue
-        facts = {field: str(data.get(field) or "") for field in _RESULT_FACT_KEYS}
-        # One derived scalar selects a Presence binding's own work without a
-        # second read; the full row still decides once the selection loads it.
-        facts["presence_binding_id"] = presence_record_binding(data)
-        # An empty scalar is not proof of absent provenance: a malformed carrier or
-        # lost metadata under an inherited ceiling must never inherit a queue claim.
-        metadata = data.get("metadata")
-        contract = data.get("task_contract")
-        facts["presence_authority_recorded"] = (
-            presence_metadata_binding(metadata) is not None
-            or isinstance(contract, dict) and "capability_ceiling" in contract
-        )
-        facts["schema_refusal"] = task_result_schema_refusal(data)
-        rows[name] = facts
-        _RAW_TS_MEMO[key] = (signature, tuple(facts.items()))
-    return rows, malformed
+    """Gateway read injection over the shared task-result navigation memo."""
+    return _raw_result_facts(results_dir, reader=reader or read_json_dict)
 
 
 def _raw_sorted_result_names(results_dir: pathlib.Path) -> tuple[List[str], List[str]]:
