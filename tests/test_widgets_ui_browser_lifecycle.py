@@ -470,14 +470,14 @@ def test_ui_smoke_widget_launch_policy_and_ordered_stop(direct_server_with_data,
                     page.locator(card(tab_id)).wait_for(state="visible", timeout=30_000)
 
                 # auto → mounts on show (the `start:"auto"` survival path); manual → facade,
-                # no frame; declarative → host-drawn, no Start/Stop and no policy menu.
+                # no frame; declarative → host-drawn, no Start/Stop, its menu has widths only.
                 wait_frame(page, "auto", True)
                 wait_frame(page, "hang", True)
                 page.locator(f"{card('manual')} [data-widget-facade]").wait_for(state="visible", timeout=10_000)
                 assert frame_count(page, "manual") == 0
                 assert page.locator(f"{card('manual')} [data-widget-power]").inner_text() == "Start"
                 assert page.locator(f"{card('gauge')} [data-widget-power]").count() == 0
-                assert page.locator(f"{card('gauge')} [data-widget-menu-trigger]").count() == 0
+                assert page.locator(f"{card('gauge')} [data-widget-start-mode]").count() == 0
                 page.wait_for_function(
                     "(selector) => document.querySelector(`${selector} [data-widget-power]`)?.textContent === 'Stop'",
                     arg=card("auto"),

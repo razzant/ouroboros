@@ -1066,6 +1066,14 @@ is the only hook into it.
 These geometry keys are valid only for framed `iframe` and `module` renders;
 declarative renders remain content-driven and reject them.
 
+Any render kind may add `span`: `1` (the default) or `2`, the card's default
+column span on the Widgets masonry (`grid_span` is read as an alias; a larger
+number counts as `2`, anything else as `1`). The board fits it to the columns
+it has (a narrow list is one column), and the owner's width from the card
+menu or the card's edge (1, 2, 3 columns or full width) wins for that card
+until the owner resets it; the card's height always follows its content (the
+board: `docs/DESIGN.md` "Widgets board").
+
 For auto-height module CSS, prefer one owner of padding and box geometry between
 `body` and `#root`, and choose `border-box` deliberately. Nested percentage
 `min-height`/padding owners, especially with `overflow-x: hidden`, can compute

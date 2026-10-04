@@ -1,16 +1,18 @@
-/* Widgets card chrome for framed (module / route-iframe) cards: the effective
+/* Widgets card chrome: for framed (module / route-iframe) cards the effective
    launch policy (and whether it keeps the card running while Widgets is
-   hidden), the card's ONE primary control (Start / Stop), the secondary
-   launch-policy menu, and the facade a stopped card shows in place of its
-   frame.
+   hidden), the card's ONE primary control (Start / Stop) and the facade a
+   stopped card shows in place of its frame; for every card the card menu —
+   the launch policy of a framed card and the owner's width steps (column
+   spans: web/modules/widget_size.js).
    widgets.js owns the registry and decides WHEN a card mounts or stops; this
    module only renders and reads the controls. Declarative cards are host-drawn
-   and get none of this. */
+   and get only the menu's width steps. */
 
 import { PAGE_ICONS } from './page_icons.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { widgetKey } from './widget_list.js';
 import { frameHeight, setFrameHeight } from './widget_module.js';
+import { WIDGET_WIDTH_STEPS } from './widget_size.js';
 import { bindMenu } from './ui_interactions.js';
 
 // Mirrors the validator's WIDGET_START_MODES (ouroboros/extension_ui_validation.py,
@@ -64,23 +66,30 @@ export function withWidgetStartMode(current, key, mode) {
     return next;
 }
 
-// Head controls of a framed card: status (dot + text), the one primary button,
-// and the launch-policy menu on the Skills card menu primitive
-// (`.skills-card-menu` + `<dialog role="menu">`). The checked item is set by
-// `syncWidgetCardControls` once the page knows the owner's preferences.
+// Head controls: a framed card's status (dot + text) and its one primary
+// button, then the card menu on the Skills card menu primitive
+// (`.skills-card-menu` + `<dialog role="menu">`): a framed card's launch policy
+// and every card's width steps, each a radio group. The checked policy is set
+// by `syncWidgetCardControls` once the page knows the owner's preferences; the
+// checked width when the menu opens (`bindWidgetCardMenus`).
 export function renderWidgetCardControls(tab) {
-    if (!isFramedWidget(tab)) return '';
-    const items = WIDGET_START_MODES.map((mode) => (
-        `<button type="button" role="menuitemradio" class="skills-menu-item widgets-menu-item" data-widget-start-mode="${mode}" aria-checked="false"><span class="widgets-menu-check" aria-hidden="true">✓</span>${escapeHtml(WIDGET_START_MODE_LABELS[mode])}</button>`
-    )).join('');
-    return `<span class="ui-status" data-tone="neutral" data-widget-status hidden>Stopped</span>
-        <button type="button" class="btn btn-primary btn-sm" data-widget-power>Start</button>
+    const item = (attrs, label, role = 'menuitemradio') => (
+        `<button type="button" role="${role}" class="skills-menu-item widgets-menu-item" ${attrs}><span class="widgets-menu-check" aria-hidden="true">${role === 'menuitemradio' ? '✓' : ''}</span>${escapeHtml(label)}</button>`
+    );
+    const group = (label, items) => `<div role="group" aria-label="${label}"><div class="widgets-menu-heading" aria-hidden="true">${label}</div>${items}</div>`;
+    const framed = isFramedWidget(tab);
+    const policy = framed ? group('Launch policy', WIDGET_START_MODES.map((mode) => (
+        item(`data-widget-start-mode="${mode}" aria-checked="false"`, WIDGET_START_MODE_LABELS[mode])
+    )).join('')) : '';
+    const sizes = group('Size', `<p class="widgets-menu-note" data-widget-size-note hidden>Widths apply when the list is wide.</p>${
+        WIDGET_WIDTH_STEPS.map(({ w, label }) => item(`data-widget-size="${w}" aria-checked="false"`, label)).join('')
+    }${item('data-widget-size="reset"', 'Reset size', 'menuitem')}`);
+    const power = framed ? `<span class="ui-status" data-tone="neutral" data-widget-status hidden>Stopped</span>
+        <button type="button" class="btn btn-primary btn-sm" data-widget-power>Start</button>` : '';
+    return `${power}
         <div class="skills-card-menu">
-            <button type="button" class="skills-card-menu-trigger" aria-label="Launch policy" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</button>
-            <dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Launch policy">
-                <div class="widgets-menu-heading">Launch policy</div>
-                ${items}
-            </dialog>
+            <button type="button" class="skills-card-menu-trigger" aria-label="Widget options" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</button>
+            <dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Widget options">${policy}${sizes}</dialog>
         </div>`;
 }
 
@@ -154,8 +163,14 @@ export function renderWidgetFacade(mount, tab) {
     setFrameHeight(mount.firstElementChild, frameHeight(tab.render || {}));
 }
 
-/** Launch-policy domain adapter over the shared keyboard/viewport menu. */
-export function bindWidgetCardMenus(list, onSelectMode) {
+/**
+ * Card-menu domain adapter over the shared keyboard/viewport menu: a launch
+ * policy goes to `onSelectMode(key, mode)`, a width step (or Reset, `null`) to
+ * `widths.setWidth(key, w)`; the menu opens with the card's current width
+ * (`widths.widthOf(key)`) checked, and on the stacked column it says that
+ * widths apply to the wide board only.
+ */
+export function bindWidgetCardMenus(list, onSelectMode, widths = null) {
     if (!list) return { close() {}, destroy() {} };
     let active = null;
     const close = () => active?.binding.close();
@@ -169,23 +184,29 @@ export function bindWidgetCardMenus(list, onSelectMode) {
         const popover = trigger.closest('.skills-card-menu')?.querySelector('.skills-card-menu-dialog');
         const key = card?.dataset.widgetKey || '';
         if (!popover || !key) return;
+        const width = widths?.widthOf(key) || 0;
+        popover.querySelectorAll('[data-widget-size][role="menuitemradio"]').forEach((item) => {
+            item.setAttribute('aria-checked', Number(item.dataset.widgetSize) === width ? 'true' : 'false');
+        });
+        popover.querySelector('[data-widget-size-note]')?.toggleAttribute('hidden', list.dataset.widgetLayout !== 'stack');
         // Capture the owning card before moving the popup outside clipped cards.
         const home = popover.parentNode;
         home.ownerDocument.body.append(popover);
         popover.show();
         trigger.setAttribute('aria-expanded', 'true');
-        const onMode = (selection) => {
-            const item = selection.target.closest('[data-widget-start-mode]');
+        const onSelect = (selection) => {
+            const item = selection.target.closest('[data-widget-start-mode], [data-widget-size]');
             if (!item) return;
-            const mode = item.dataset.widgetStartMode || '';
             active?.binding.close({ restoreFocus: true });
-            onSelectMode(key, mode);
+            const size = item.dataset.widgetSize;
+            if (!size) onSelectMode(key, item.dataset.widgetStartMode || '');
+            else widths?.setWidth(key, size === 'reset' ? null : Number(size));
         };
-        popover.addEventListener('click', onMode);
+        popover.addEventListener('click', onSelect);
         const binding = bindMenu(popover, {
             anchor: trigger,
             onClose() {
-                popover.removeEventListener('click', onMode);
+                popover.removeEventListener('click', onSelect);
                 popover.close();
                 if (home.isConnected) home.append(popover);
                 else popover.remove();

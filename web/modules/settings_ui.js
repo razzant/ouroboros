@@ -411,12 +411,12 @@ export function renderSettingsPage() {
 
                 <section class="settings-panel" data-settings-panel="behavior">
                     <div class="form-section" data-autostart-settings hidden>
-                        <!-- Future keep-running-after-close control shares this section. -->
                         <h3>Startup &amp; background</h3>
                         <div class="settings-section-copy">
                             Applies immediately to the host computer running Ouroboros, including when you
                             connect from another device. Signing in preserves Panic stops and saved pauses.
-                            Closing the desktop window still exits Ouroboros.
+                            In the background, tasks, schedules and Telegram keep working; an icon reopens
+                            the window or quits.
                         </div>
                         <div class="settings-effort-card">
                             <label class="local-toggle ui-field ui-field-inline">
@@ -424,6 +424,13 @@ export function renderSettingsPage() {
                                 Start Ouroboros on the host computer when you sign in
                             </label>
                             <div class="settings-inline-status" data-autostart-status role="status" aria-live="polite"></div>
+                            <div data-background-row hidden>
+                                <label class="local-toggle ui-field ui-field-inline">
+                                    <input type="checkbox" class="ui-checkbox" data-background-toggle>
+                                    When the window is closed, keep Ouroboros running in the background
+                                </label>
+                                <div class="settings-inline-status" data-background-status role="status" aria-live="polite"></div>
+                            </div>
                         </div>
                     </div>
 
@@ -779,7 +786,9 @@ export function renderSettingsPage() {
                         <div class="settings-section-copy">
                             While this client is running, Ouroboros can pull you back to a question or a
                             finished task. Notifications arrive whether or not this window has focus, and
-                            clicking one opens its source.
+                            clicking one opens its source; a banner from the tray or menu-bar indicator
+                            opens the window as you left it. Sound silences this client's tone and the
+                            macOS sound; a Windows tray balloon follows Windows' own sound setting.
                             <br><strong>Per device, not per account:</strong> like the theme above, these choices
                             are stored by this client alone and never sent to the server.
                             Where this system exposes no notifications, or permission is denied, alerts appear

@@ -374,7 +374,10 @@ def test_widgets_launch_policy_controls_and_stop_suppression():
     assert "stopVanishedRetainedWidgets();" in reconcile
     assert reconcile.index("listDirty = true;") < reconcile.index("stopVanishedRetainedWidgets();")
     assert "const KIND_DEFAULT_START = { declarative: 'auto', module: 'manual', iframe: 'manual' };" in card
-    assert "if (!isFramedWidget(tab)) return '';" in card
+    # Start/Stop, the status and the launch policy are framed-only; the width
+    # steps are on every card's menu (docs/DESIGN.md "Widgets board").
+    assert "const power = framed ? `<span class=\"ui-status\"" in card
+    assert "const policy = framed ? group('Launch policy'," in card
     assert card.count("btn btn-primary") == 1
     assert 'role="menuitemradio"' in card
     assert '<dialog class="skills-card-menu-dialog ui-popup" role="menu"' in card
@@ -417,7 +420,7 @@ def test_widgets_launch_policy_controls_and_stop_suppression():
     assert "startModeWrites = write.catch(() => {});" in page
     set_mode = page.split("async function setWidgetStartMode(key, mode) {", 1)[1].split("bindWidgetCardMenus", 1)[0]
     assert set_mode.index("await write;") < set_mode.index("const card = liveCardFor(list, key);")
-    assert "bindWidgetCardMenus(list, setWidgetStartMode);" in page
+    assert "bindWidgetCardMenus(list, setWidgetStartMode, widths);" in page
     assert "event.target.closest('[data-widget-power]')" in page
     # Force-stop + eviction on a vanished card; the frame keeps its ack window.
     removed_branch = page.split("for (const key of plan.removed) {", 1)[1].split("for (const tab of nextTabs) {", 1)[0]
@@ -469,15 +472,20 @@ def test_widgets_cards_do_not_stretch_to_row_height():
     (`--masonry-w/-x/-y` per card, `--masonry-h` on the list) that one static
     rule set in web/style.css applies; the generated per-container `<style>`
     with `:nth-child` rules is gone, and `applyMasonry` returns an idempotent
-    disposer for its three observers and the pending frame."""
+    disposer for its three observers and the pending frame. The owner's column
+    spans (docs/DESIGN.md "Widgets board") reach the plan by key and replace the
+    author's span class; the frame itself is the target's masonry."""
     source = _widgets_js()
+    reorder = _read("web/modules/widget_reorder.js")
     css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
     masonry = (REPO_ROOT / "web" / "modules" / "masonry.js").read_text(encoding="utf-8")
     assert "const span = Number(tab.span || tab.grid_span || 1);" in source
     assert "widgets-card-span-2" in source
-    assert "const relayout = () => applyMasonry(list, { order: currentWidgetOrder() });" in source
+    assert "const relayout = widths.relayout;" in source
+    assert "applyMasonry(list, { order: options.tabs().map(widgetKey), spans, onLayout });" in reorder
     assert "function layout(container, config)" in masonry
     assert "item.classList.contains(spanClass) ? 2 : 1" in masonry
+    assert "owner: config.spans[keys[idx]]," in masonry
     assert "Math.min(desiredColumns, availableColumns)" in masonry
     assert "itemResizeObserver" in masonry
     assert "observeItems()" in masonry
@@ -498,8 +506,57 @@ def test_widgets_cards_do_not_stretch_to_row_height():
     assert "width: var(--masonry-w, auto);" in card_block
     assert "transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));" in card_block
     # `widgets-card-span-2` is the JS span signal only (masonry reads the class);
-    # the inert `grid-column: span 2` rules from the grid era are gone (CA-9).
+    # the inert `grid-column: span 2` rules from the grid era are gone (CA-9), and
+    # so are the rows of the rejected 12-column frame.
     assert ".widgets-card-span-2" not in css
+    for gone in ("--widget-w", "--widget-order", "grid-template-columns: repeat(12"):
+        assert gone not in css, gone
+
+
+def test_widgets_card_width_is_owner_ui_preference():
+    """The owner's card width (`ui_preferences.widget_size`, a column span) comes
+    from the card menu on every surface and, on a board of two or more columns,
+    from the card's edge handle (pointer drag with a live preview, arrow keys); a
+    list too narrow for two columns is a stack that hides the handle.
+    `createWidgetWidths` adopts a change at once, relayouts through the masonry
+    and saves one write at a time through the page's preferences client; a list
+    read takes its reader as it begins, so a change made or written while it was
+    out is not undone by its reply."""
+    source = _widgets_js()
+    reorder = _read("web/modules/widget_reorder.js")
+    card = _read("web/modules/widget_card.js")
+    css = _read("web/style.css")
+    assert "data-widget-resize-handle" in source
+    assert "Resize width: drag or use arrow keys" in source
+    assert "data-widget-arrange-status role=\"status\" aria-live=\"polite\"" in source
+    sync = source.split("async function syncWidgets(generation) {", 1)[1].split("\n    }\n", 1)[0]
+    assert sync.index("const readSizes = widths.beginRead();") < sync.index("requestWidgetListPayload(apiClient, controller)")
+    assert "widget_size: readSizes(prefs.widget_size)," in sync
+    assert "widths.readSizes(" not in source
+    assert "save: (payload) => apiClient.saveUiPreferences(payload)," in source
+    assert "const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths);" in source
+    assert "export function createWidgetWidths(list, options)" in reorder
+    assert "list.parentElement?.querySelector('[data-widget-arrange-status]')" in reorder
+    assert "const mode = plan.availableColumns > 1 ? 'columns' : 'stack';" in reorder
+    assert "handle.addEventListener('pointerdown'" in reorder
+    assert "handle.setPointerCapture?.(event.pointerId);" in reorder
+    assert "if (event.key !== 'Escape') return;" in reorder
+    assert "options.save({ widget_size: saving })" in reorder
+    for moved in (".before(", ".after(", ".prepend(", ".append(", "insertBefore", "appendChild", "replaceWith"):
+        assert moved not in reorder, moved
+    assert "else widths?.setWidth(key, size === 'reset' ? null : Number(size));" in card
+    assert "toggleAttribute('hidden', list.dataset.widgetLayout !== 'stack')" in card
+    handle = css.split(".widgets-card-resize {", 1)[1].split("}", 1)[0]
+    assert "touch-action: none;" in handle
+    assert "cursor: col-resize;" in handle
+    assert '.widgets-list[data-widget-layout="stack"] .widgets-card-resize,' in css
+    # A card no step can widen or narrow (the only card on a wide board) offers no
+    # edge: the masonry answers what each step would make of it (`replan`), and the
+    # card, not the list, carries the mark, so the menu keeps its wide-list note off.
+    assert "item.toggleAttribute('data-widget-width-fixed', fixed);" in reorder
+    assert ".widgets-card[data-widget-width-fixed] .widgets-card-resize {" in css
+    assert "(index, owner) => planMasonryLayout(" in _read("web/modules/masonry.js")
+    assert ".widgets-list.resizing iframe {" in css
 
 
 def test_widget_form_label_is_accessible_heading_fallback():
@@ -556,6 +613,13 @@ def test_widgets_card_order_is_owner_ui_preference():
     assert "event.key === 'ArrowUp'" in reorder
     assert "apiClient.uiPreferences()" in source
     assert "apiClient.saveUiPreferences({ widget_order: normalized })" in source
+    # A reorder of the shown cards is merged into the stored order (a card that
+    # is off keeps its slot); a card the order lacks keeps its shown place and a
+    # new one joins the end (docs/DESIGN.md "Widgets board").
+    assert "export function mergeWidgetOrder(stored, shown)" in reorder
+    assert "const normalized = mergeWidgetOrder(uiPreferences.widget_order, order);" in source
+    assert "export function sortTabsByWidgetOrder(tabs, order, shown = [])" in reorder
+    assert "uiPreferences.widget_order, currentWidgetOrder()," in source
     assert "export function moveWidgetKey(order, key, toIndex)" in reorder
     assert "export function bindWidgetCardReorder(list, currentOrder, onOrderChange)" in reorder
     assert "bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder);" in source

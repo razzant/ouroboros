@@ -291,6 +291,10 @@ export const apiClient = {
     desktopAutostart: () => fetchJson('/api/desktop/autostart', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
     setDesktopAutostart: (enabled) => jsonPost('/api/desktop/autostart', { enabled: Boolean(enabled) }),
+    /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
+    desktopBackground: () => fetchJson('/api/desktop/background', { cache: 'no-store' }),
+    /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
+    setDesktopBackground: (enabled) => jsonPost('/api/desktop/background', { enabled: Boolean(enabled) }),
     saveSettings: (payload) => fetchJson('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -16,6 +16,26 @@ just before dispatch, and after the call; a missing, ambiguous or moved answer
 refuses the action. Nothing makes the last read and the action atomic: a page
 that navigates on its own in between is a disclosed race, not a closed one.
 
+That read judges only the selected page. The requests Playwright routes — an
+iframe, a fetch, a beacon, a form post, a worker's or service worker's fetch,
+a headless popup's document — are judged by the host's
+``browser_request_block_reason``, the decision ``tools/browser.py`` routes its
+own requests through. The host installs ``_GUARD_JS`` through upstream's own
+``browser.initPage`` seam (``PLAYWRIGHT_MCP_INIT_PAGE``): playwright-core
+``tools/backend/tab.ts`` runs each init page with the Playwright ``page`` of
+every tab before ``ensureTab`` returns, so the guard's ``context.route`` exists
+before the first tool touches a page, and the context route also holds every
+later page and frame of that context. Each request waits on the host's verdict
+over a private socket; only an explicit allowance lets it on. The guard
+acknowledges itself on the same tab listing the host reads before an action,
+and an action without that acknowledgement is refused: an owner configuration
+that replaces the init page leaves no silent unguarded route. A route never
+sees a native redirect hop (a 307 carries a form's POST on) or a WebSocket,
+and with ``--extension`` a page-opened tab is attached only after Chrome
+created it, so its first requests go unjudged. Service-worker coverage is
+specific to this pinned core and assumes the owner has not set
+``PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK=1`` in the server environment.
+
 Each bridge process inherits a containment marker scoped to this installation
 and task before it exists, so task Stop, cancel and Panic find its live members
 in the process table without a ledger row having been written first.
@@ -24,13 +44,17 @@ in the process table without a ledger row having been written first.
 from __future__ import annotations
 
 import asyncio
+import collections
 import concurrent.futures
 import dataclasses
 import hashlib
+import json
 import logging
+import os
 import pathlib
 import tempfile
 import threading
+import types
 from typing import Any
 
 from ouroboros import browser_policy
@@ -56,6 +80,71 @@ _STATE_TOOL = "browser_tabs"
 _STATE_ARGS = {"action": "list"}
 _SCRIPT_TOOLS = frozenset({"browser_evaluate", "browser_run_code_unsafe"})
 _CLOSE_GRACE_SEC = 5
+_GUARD_ENV = "OUROBOROS_BROWSER_GUARD"
+_GUARD_FACTS_LIMIT = 64 * 1024 * 1024  # Larger request facts are refused, not judged partially.
+# Loaded by upstream as ``const { default: func } = require(initPage)``. It runs
+# in the bridge's Node process; a page cannot reach it or the host's socket.
+_GUARD_JS = r"""'use strict';
+const net = require('net');
+const socketPath = process.env.OUROBOROS_BROWSER_GUARD;
+const guarded = new WeakSet();
+
+function ask(facts) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    const chunks = [];
+    socket.setTimeout(30000, () => socket.destroy(new Error('the host did not answer')));
+    socket.on('connect', () => socket.end(JSON.stringify(facts) + '\n'));
+    socket.on('data', chunk => chunks.push(chunk));
+    socket.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (error) { reject(error); }
+    });
+    socket.on('error', reject);
+  });
+}
+
+async function decide(route) {
+  let answer = {};
+  try {
+    const request = route.request();
+    answer = await ask({ url: request.url(), method: request.method(), post_data: request.postData() });
+  } catch (error) {
+    answer = {};
+  }
+  // Only the host's explicit allowance lets a request on; anything else aborts it.
+  if (answer && answer.block === '')
+    await route.fallback();
+  else
+    await route.abort('blockedbyclient');
+}
+
+exports.default = async ({ page }) => {
+  if (!socketPath)
+    throw new Error('OUROBOROS_BROWSER_GUARD is not set');
+  const context = page.context();
+  if (!guarded.has(context)) {
+    await context.route('**/*', route => decide(route).catch(() => {}));
+    guarded.add(context);
+  }
+  const answer = await ask({ armed: true });
+  if (!answer || answer.armed !== true)
+    throw new Error('the Ouroboros host did not acknowledge the request guard');
+};
+"""
+# Node-side code runs beside the guard, not behind it: it can remove the
+# guard's route or send requests no route sees (``page.request``), and a
+# continuing ``browser_route`` handler runs before the guard and sends the
+# request on itself. Page JavaScript (``browser_evaluate``) stays behind it.
+_GUARD_BYPASS_TOOLS = frozenset({"browser_run_code_unsafe", "browser_route"})
+
+
+def _private_socket_dir() -> tempfile.TemporaryDirectory:
+    """A 0700 directory for the guard and its socket; an AF_UNIX path holds about 100 bytes."""
+    directory = tempfile.TemporaryDirectory(prefix="ouroboros-mcpg-")
+    if len(directory.name) > 80 and os.path.isdir("/tmp"):
+        directory.cleanup()
+        directory = tempfile.TemporaryDirectory(prefix="ouroboros-mcpg-", dir="/tmp")
+    return directory
 
 
 class BrowserBridgeRefusal(PermissionError):
@@ -121,13 +210,32 @@ def _page_state(result: Any) -> dict[str, Any]:
     return {"url": url, "tab_index": index, "open_tabs": len(lines)}
 
 
-def _block_reason(ctx: Any, url: str) -> str:
+def _policy_inputs(ctx: Any) -> tuple[bool, str]:
     from ouroboros.config import get_runtime_mode
     from ouroboros.tools.core import is_restricted_subagent_profile
 
-    return browser_policy.browser_url_block_reason(
-        url, ctx, restricted=is_restricted_subagent_profile(ctx), runtime_mode=get_runtime_mode(),
-    )
+    return is_restricted_subagent_profile(ctx), get_runtime_mode()
+
+
+def _block_reason(ctx: Any, url: str) -> str:
+    restricted, runtime_mode = _policy_inputs(ctx)
+    return browser_policy.browser_url_block_reason(url, ctx, restricted=restricted, runtime_mode=runtime_mode)
+
+
+def _request_block_reason(ctx: Any, facts: Any) -> str:
+    """The host verdict on one request the guard paused, as ``tools/browser.py`` decides its own."""
+    try:
+        if not isinstance(facts.get("url"), str) or not isinstance(facts.get("method"), str):
+            raise ValueError("request url or method missing")
+        if facts.get("post_data") is not None and not isinstance(facts["post_data"], str):
+            raise ValueError("request body is not text")
+        request = types.SimpleNamespace(url=facts["url"], method=facts["method"], post_data=facts.get("post_data"))
+        restricted, runtime_mode = _policy_inputs(ctx)
+        return browser_policy.browser_request_block_reason(
+            request, ctx, restricted=restricted, runtime_mode=runtime_mode)
+    except Exception:
+        log.warning("Browser bridge request policy could not read the request or its target", exc_info=True)
+        return "BROWSER_POLICY_UNAVAILABLE: the request or its target identity could not be read"
 
 
 def _authority(ctx: Any, name: str, args: dict, state: dict[str, Any]) -> None:
@@ -155,6 +263,18 @@ def _authority(ctx: Any, name: str, args: dict, state: dict[str, Any]) -> None:
             raise BrowserBridgeRefusal(
                 "BROWSER_LOCAL_READONLY_BLOCKED: local-readonly subagents cannot run arbitrary browser JavaScript."
             )
+    # A fulfilling route answers from the server itself and sends nothing on.
+    fulfils = name == "browser_route" and (args.get("body") is not None or args.get("status") is not None)
+    if name in _GUARD_BYPASS_TOOLS and not fulfils:
+        from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
+
+        restricted, runtime_mode = _policy_inputs(ctx)
+        if restricted or not mode_has_unrestricted_agency(runtime_mode):
+            raise BrowserBridgeRefusal(
+                f"BROWSER_REQUEST_GUARD_BYPASS: {name} runs in the browser server beside the request guard, "
+                "where it can remove the guard or send requests no guard sees; browser policy binds in this "
+                "runtime mode. Page tools and page JavaScript run behind the guard."
+            )
 
 
 class TaskBrowserSession:
@@ -167,6 +287,7 @@ class TaskBrowserSession:
             raise RuntimeError("MCP browser bridge requires process custody not yet available on Windows")
         task, self.attempt = _owner(ctx)
         self.cfg = cfg
+        self.ctx = ctx  # The request guard's policy context; each call refreshes it.
         self.key = (task, cfg.id)
         self.data_root = _data_root(ctx)
         self.container = ProcessContainer(_scope(self.data_root, task))
@@ -183,6 +304,9 @@ class TaskBrowserSession:
         self._reaped = False
         self._started = False
         self.scratch: tempfile.TemporaryDirectory | None = None
+        self.guard_dir = _private_socket_dir()
+        self.guard_armed = False
+        self._blocked: collections.deque = collections.deque(maxlen=20)
 
     def start(self, timeout: int) -> list[dict]:
         if not self._started:
@@ -214,6 +338,7 @@ class TaskBrowserSession:
             self._reap()
             if self.scratch is not None:
                 self.scratch.cleanup()
+            self.guard_dir.cleanup()
 
     def _reap(self) -> str:
         with self._reap_lock:
@@ -223,19 +348,58 @@ class TaskBrowserSession:
                 self.close_outcome = "confirmed" if not outcome else f"unconfirmed: {outcome}"
             return self.close_outcome
 
+    async def _answer_guard(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """One guard question: an acknowledgement, or a paused request to judge."""
+        try:
+            try:
+                facts = json.loads(await reader.readline())
+                if not isinstance(facts, dict):
+                    raise ValueError("request facts are not an object")
+            except (ValueError, UnicodeDecodeError) as exc:  # oversized, truncated or malformed
+                facts, reason = {}, f"BROWSER_POLICY_UNAVAILABLE: unreadable request facts ({type(exc).__name__})"
+            else:
+                reason = ""
+            if facts.get("armed") is True and not self.revoked:
+                self.guard_armed = True
+                answer: dict[str, Any] = {"armed": True}
+            else:
+                if self.revoked:
+                    reason = "BROWSER_SESSION_REVOKED: the task's browser session is closing"
+                # DNS/service identity may block; keep the MCP reader and other
+                # paused requests live while this exact policy decision runs.
+                reason = reason or await asyncio.to_thread(_request_block_reason, self.ctx, facts)
+                if self.revoked:
+                    reason = "BROWSER_SESSION_REVOKED: the task's browser session is closing"
+                if reason:
+                    self._blocked.append(f"{reason} — {str(facts.get('method') or '?')[:10]} "
+                                         f"{str(facts.get('url') or '?')[:200]}")
+                answer = {"block": reason}
+            writer.write(json.dumps(answer).encode("utf-8") + b"\n")
+            await writer.drain()
+        except (ConnectionError, OSError):
+            pass  # The guard then aborts the request: no answer is no allowance.
+        finally:
+            writer.close()
+
     async def _serve(self) -> None:
         from ouroboros.mcp_client import ClientSession, _transport_factory
 
         if not self.cfg.cwd:
             self.scratch = tempfile.TemporaryDirectory(prefix="ouroboros-mcp-browser-")
+        guard = pathlib.Path(self.guard_dir.name)
+        (guard / "guard.cjs").write_text(_GUARD_JS, encoding="utf-8")
+        server = await asyncio.start_unix_server(
+            self._answer_guard, path=str(guard / "g.sock"), limit=_GUARD_FACTS_LIMIT)
         # The SDK starts the server in its own session; the marker is inherited
-        # from birth and survives that and a descendant's later setsid.
+        # from birth and survives that and a descendant's later setsid. The
+        # host's guard replaces any init page the entry's own env names.
         cfg = dataclasses.replace(
             self.cfg,
             cwd=self.cfg.cwd or (self.scratch.name if self.scratch is not None else ""),
-            env={**self.cfg.env, **self.container.containment_env()},
+            env={**self.cfg.env, **self.container.containment_env(),
+                 "PLAYWRIGHT_MCP_INIT_PAGE": str(guard / "guard.cjs"), _GUARD_ENV: str(guard / "g.sock")},
         )
-        async with _transport_factory(cfg) as streams:
+        async with server, _transport_factory(cfg) as streams:
             pids = pids_with_env_marker(self.token)
             if not pids:
                 raise RuntimeError("MCP browser process identity could not be observed")
@@ -308,15 +472,22 @@ class TaskBrowserSession:
         except RuntimeError as exc:  # Unknown state refuses; nothing was dispatched.
             raise BrowserBridgeRefusal(f"{exc}; the action was not dispatched") from exc
 
-    def call(self, prefixed: str, name: str, args: dict, ctx: Any, timeout: int) -> tuple[ToolResult, str]:
-        """The result and any Safety advice; a pre-dispatch refusal raises."""
+    def call(self, prefixed: str, name: str, args: dict, ctx: Any, timeout: int) -> tuple[ToolResult, str, str]:
+        """The result, any Safety advice and the guard's refusals; a pre-dispatch refusal raises."""
         from ouroboros.mcp_client import _tool_result_from_call_result
         from ouroboros.safety import check_safety
 
         with self._call_lock:  # Observation, assessment and action share one turn.
             if self.revoked or _owner(ctx) != (self.key[0], self.attempt):
                 raise BrowserBridgeRefusal("MCP browser session owner has changed or been revoked")
+            self.ctx = ctx
             state = self._observe_before(timeout)
+            if not self.guard_armed:  # The listing ran upstream's ensureTab, and so every init page.
+                raise BrowserBridgeRefusal(
+                    "BROWSER_REQUEST_GUARD_UNAVAILABLE: the bridge never acknowledged the host's request guard "
+                    "(an init page in the server's own CLI arguments replaces it); the action was "
+                    "not dispatched"
+                )
             _authority(ctx, name, args, state)
             allowed, advice = check_safety(
                 prefixed, args, messages=getattr(ctx, "messages", None), ctx=ctx,
@@ -329,7 +500,9 @@ class TaskBrowserSession:
                     "BROWSER_STATE_CHANGED: the current tab or its url changed during the assessment; "
                     "the action was not dispatched"
                 )
+            self._blocked.clear()  # Earlier refusals were background requests between calls.
             result = _tool_result_from_call_result(self._request(name, args, timeout, dispatch=True))
+            blocked = [self._blocked.popleft() for _ in range(len(self._blocked))]
             try:
                 after = self._observe(timeout)
                 reason = _block_reason(ctx, after["url"])
@@ -340,7 +513,10 @@ class TaskBrowserSession:
                             f"effect stands, but the page afterwards is not confirmed inside browser policy "
                             f"({reason}). Its result is withheld; read the current state before any retry.")
                 result = ToolResult(status="error", code="MCP_ERROR", text=withheld, meta={"host_verdict": True})
-            return result, advice
+            note = ("⚠️ BROWSER_REQUEST_BLOCKED: the host request guard aborted these requests during the call; "
+                    "the page saw a network failure for each:\n" + "\n".join(f"- {line}" for line in blocked)
+                    ) if blocked else ""
+            return result, advice, note
 
     def stop(self) -> str:
         """Revoke new calls, close the connection, then scan the marked tree."""
@@ -405,7 +581,7 @@ def discover(cfg: Any, ctx: Any, timeout: int) -> list[dict]:
         raise
 
 
-def call(cfg: Any, prefixed: str, name: str, args: dict, ctx: Any, timeout: int) -> tuple[ToolResult, str]:
+def call(cfg: Any, prefixed: str, name: str, args: dict, ctx: Any, timeout: int) -> tuple[ToolResult, str, str]:
     task, attempt = _owner(ctx)
     with _lock:
         session = _sessions.get((task, cfg.id))

@@ -64,19 +64,24 @@ def test_external_opener_returns_thread_start_failure(monkeypatch):
     }
 
 
-def test_main_bridge_request_attention_delegates_window_and_sound(monkeypatch):
+def test_main_bridge_request_attention_delegates_to_the_background_policy(monkeypatch):
+    """The bridge only forwards: the window-or-banner choice belongs to launcher_background
+    (a window hidden on purpose is never raised). `notify_owner` is the same method under the
+    name newer pages feature-detect to send the alert text; older launchers lack it."""
     import launcher
 
     source = inspect.getsource(launcher.main)
     node = next(node for node in ast.walk(ast.parse(source))
                 if isinstance(node, ast.ClassDef) and node.name == "MainApi")
-    shown = []
+    seen = []
     namespace = {
         "_open_external_url": launcher._open_external_url,
-        "_webview_window": type("Window", (), {"show": lambda self: shown.append(True)})(),
-        "request_native_attention": lambda show, sound=True: (show(), {"ok": True, "sound": sound})[1],
+        "background": type("Background", (), {
+            "attention": lambda self, *args: seen.append(args) or {"ok": True}})(),
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "MainApi", "exec"), namespace)
-    result = namespace["MainApi"]().request_attention(False)
-    assert result == {"ok": True, "sound": False}
-    assert shown == [True]
+    api = namespace["MainApi"]()
+    assert api.request_attention(False) == {"ok": True}  # an older page: sound only
+    assert api.notify_owner(1, "Task finished", None) == {"ok": True}
+    assert api.notify_owner(True, "Task finished", "", False) == {"ok": True}  # a page with its own banner asks first
+    assert seen == [(False, "", "", True), (True, "Task finished", "", True), (True, "Task finished", "", False)]

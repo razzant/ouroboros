@@ -7,10 +7,17 @@ Linux selects one registration: native packages use systemd, portable builds XDG
 The native unit is the one the deb/rpm installed, which a managed update never
 replaces: an older package's unit starts the launcher with owner intent, which
 lifts a Panic stop, so it is never enabled (an existing registration still turns off).
+
+The section's second control, keep running after the window closes, is an owner
+choice in settings.json that the launcher reads at close time
+(``launcher_background``). It is available only where the running launcher says it
+can keep a hidden window reachable (``BACKGROUND_ENV``): Windows and macOS builds
+that carry the indicator; Linux is not available yet.
 """
 from __future__ import annotations
 
 import configparser
+import json
 import logging
 import os
 from pathlib import Path
@@ -21,7 +28,7 @@ import subprocess
 import sys
 from xml.parsers.expat import ExpatError
 
-from ouroboros import windows_autostart
+from ouroboros import config, windows_autostart
 from ouroboros.launcher_bootstrap import appimage_extracts_and_runs
 from ouroboros.platform_layer import BUNDLE_DIR_ENV, is_unstable_macos_app_path
 from ouroboros.utils import write_bytes_atomic, write_text_atomic
@@ -32,6 +39,8 @@ NATIVE_LAUNCHER = Path("/opt/ouroboros/Ouroboros")
 NATIVE_UNIT = Path("/usr/lib/systemd/user/ouroboros.service")
 AUTOMATIC_ARGS = ["--launch-intent", "automatic"]
 UPDATE_PACKAGE = "Update the Ouroboros deb/rpm package to use sign-in startup."
+KEEP_RUNNING = "OUROBOROS_DESKTOP_KEEP_RUNNING"
+BACKGROUND_ENV = "OUROBOROS_DESKTOP_BACKGROUND"  # "1": this launcher can keep running with its window hidden
 
 
 def launcher_target() -> tuple[Path | None, str]:
@@ -209,6 +218,39 @@ def autostart_status(enabled: bool | None = None) -> dict[str, str]:
     return {"state": state, "reason": UPDATE_PACKAGE if exe == NATIVE_LAUNCHER else "The packaged sign-in service is unavailable."}
 
 
+def keep_running_choice() -> str:
+    """'' until the owner decides (in Settings or at the first close's one question), else 'true'/'false'."""
+    try:
+        value = json.loads(config.SETTINGS_PATH.read_text(encoding="utf-8")).get(KEEP_RUNNING, "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    text = str(value).strip().lower()
+    return "" if not text else "true" if text in {"1", "true", "yes", "on"} else "false"
+
+
+def set_keep_running(enabled: bool) -> None:
+    """Record the owner's choice: this one key, inside the settings lock (BIBLE P1: no lost update)."""
+    from ouroboros.gateway.owner_settings import _owner_update_settings
+
+    value = "true" if enabled else "false"
+    _owner_update_settings(lambda current: {**current, KEEP_RUNNING: value}, authored_keys=(KEEP_RUNNING,))
+
+
+def background_status(enabled: bool | None = None) -> dict[str, str]:
+    """Whether closing the host's desktop window keeps Ouroboros running; a boolean records the choice first."""
+    if os.environ.get("OUROBOROS_PRESENTATION") != "desktop_window" or os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER") != "1":
+        reason = "Available only when the host runs the packaged desktop app."
+    elif sys.platform not in ("win32", "darwin"):
+        reason = "Not available on Linux yet: closing the window quits Ouroboros."
+    elif os.environ.get(BACKGROUND_ENV) != "1":
+        reason = "Needs a newer app build: this one quits when its window closes."
+    else:
+        if enabled is not None:
+            set_keep_running(enabled)
+        return {"state": "on" if keep_running_choice() == "true" else "off"}
+    return {"state": "unavailable", "reason": reason}
+
+
 def runtime_facts() -> dict:
     """One task-start observation; OS read failures do not break model context."""
     try:
@@ -216,5 +258,5 @@ def runtime_facts() -> dict:
     except OSError as exc:
         logging.getLogger(__name__).warning("Autostart state unavailable: %s", exc)
         status = {"state": "unavailable", "reason": str(exc)}
-    return {"autostart": status["state"], "keep_running_after_close": False,
+    return {"autostart": status["state"], "keep_running_after_close": background_status()["state"] == "on",
             **({"autostart_reason": status["reason"]} if status.get("reason") else {})}

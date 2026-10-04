@@ -86,6 +86,8 @@ Every `/api/files/*` operation resolves its requested path and refuses the opera
 | POST | `/api/ui/i18n/regenerate` | `gateway.ui_i18n.api_ui_i18n_regenerate_post` — drop generated entries, keep owner and imported ones |
 | GET | `/api/desktop/autostart` | `gateway.desktop_autostart.api_desktop_autostart_get`: host OS `{state}`, plus `reason` when unavailable |
 | POST | `/api/desktop/autostart` | `gateway.desktop_autostart.api_desktop_autostart_post`: exactly `{enabled: boolean}`, returns observed `{state}`; 400 invalid body, 409 unavailable, 500 OS failure; public `owner_audit`, no settings mirror |
+| GET | `/api/desktop/background` | `gateway.desktop_autostart.api_desktop_background_get`: keep running after the window closes, `{state: unavailable\|off\|on}` plus `reason` when unavailable |
+| POST | `/api/desktop/background` | `gateway.desktop_autostart.api_desktop_background_post`: exactly `{enabled: boolean}`; writes `OUROBOROS_DESKTOP_KEEP_RUNNING` under the document lock; 400/409 `saved=false`, 503 contended lock; `owner_audit` |
 | GET | `/api/model-catalog` | `gateway.models.api_model_catalog` |
 | POST | `/api/openai-compatible/models` | `gateway.models.api_openai_compatible_models` |
 | POST | `/api/providers/test` | `gateway.models.api_provider_test` |

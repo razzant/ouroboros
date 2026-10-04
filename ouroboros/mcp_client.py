@@ -1322,11 +1322,11 @@ class MCPManager:
             return resolution.refusal(prefixed_name)
         from ouroboros.mcp_task_sessions import BrowserBridgeTimeout
 
-        advice = ""
+        advice = note = ""
         try:
             if cfg.browser_bridge:
                 from ouroboros.mcp_task_sessions import call as scoped_call
-                result, advice = scoped_call(cfg, prefixed_name, tool.raw_name, arguments or {}, ctx, timeout)
+                result, advice, note = scoped_call(cfg, prefixed_name, tool.raw_name, arguments or {}, ctx, timeout)
             else:
                 result = _run_async(
                     lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
@@ -1377,11 +1377,12 @@ class MCPManager:
             text=text,
             meta={**dict(result.meta), "dynamic_provider": True},
         )
-        if not advice:
+        if not advice and not note:
             return final
-        # The bridge's Safety assessment ran after its page read; annotate like dispatch does.
-        return _replace_tool_result(_compose_execute_result_result(prefixed_name, final, "", advice),
-                                    meta_updates={"safety_warning": True})
+        # The bridge's Safety assessment ran after its page read and its guard
+        # judged the call's requests: host notes, annotated like dispatch does.
+        return _replace_tool_result(_compose_execute_result_result(prefixed_name, final, note, advice),
+                                    meta_updates={"safety_warning": True} if advice else None)
 
     def call_tool(self, prefixed_name: str, arguments: Dict[str, Any]) -> str:
         """Synchronously invoke an MCP tool and return its text projection."""

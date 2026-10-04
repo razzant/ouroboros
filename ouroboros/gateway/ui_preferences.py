@@ -19,6 +19,12 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # checked against live widgets, so a temporarily disabled or removed skill keeps
     # the owner's choice instead of losing it with the next discovery.
     "widget_start_mode": {},
+    # Owner width of a Widgets card, keyed like widget_start_mode: {"w": masonry columns
+    # the card spans, 12 = full width; "h": 0}. ``h`` is reserved for a pinned card height
+    # and is stored as 0 until that exists. A POST merges by key and a null value deletes
+    # one (the card falls back to its author ``span``); keys are never checked
+    # against live widgets. Semantics: docs/DESIGN.md "Widgets board".
+    "widget_size": {},
     "nested_subagents_expanded": False,
     # Resizable side sections (0 = use the CSS default). Clamped to sane ranges so
     # a stored value can never collapse or run away with the layout.
@@ -39,6 +45,8 @@ _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200
 _MAX_WIDGET_START_MODE_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
+_MAX_WIDGET_SIZE_ITEMS = 200
+WIDGET_GRID_COLUMNS = 12  # the bound of w and its full-width value (web/modules/widget_size.js WIDGET_FULL_SPAN)
 _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX = 180, 560
 _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX = 320, 1100
 _MAX_PROJECT_CURSORS = 1000
@@ -70,6 +78,25 @@ def _normalize_width(value: Any, lo: int, hi: int) -> int:
     if n <= 0:
         return 0
     return max(lo, min(hi, n))
+
+
+def _normalize_widget_size(value: Any) -> dict[str, dict[str, int] | None]:
+    """Owner card widths clamped to the board; ``None`` is a key a POST deletes."""
+    if not isinstance(value, dict):
+        raise ValueError("widget_size must be an object of {widget_key: {w, h}}")
+    sizes: dict[str, dict[str, int] | None] = {}
+    for widget_key, size in list(value.items())[:_MAX_WIDGET_SIZE_ITEMS]:
+        key = str(widget_key or "").strip()
+        if not key or len(key) > _MAX_WIDGET_KEY_LENGTH:
+            continue
+        if size is None:
+            sizes[key] = None
+            continue
+        w, h = (size.get("w"), size.get("h", 0)) if isinstance(size, dict) else (None, None)
+        if not all(isinstance(n, int) and not isinstance(n, bool) for n in (w, h)):
+            raise ValueError("widget_size values must be null or objects of integer w and h")
+        sizes[key] = {"w": max(1, min(WIDGET_GRID_COLUMNS, w)), "h": 0}
+    return sizes
 
 
 def _normalize_preferences(
@@ -118,6 +145,9 @@ def _normalize_preferences(
                     )
                 modes[key] = mode
             prefs["widget_start_mode"] = modes
+    if "widget_size" in raw:
+        value = raw.get("widget_size")
+        prefs["widget_size"] = {} if value is None else _normalize_widget_size(value)
     if "nested_subagents_expanded" in raw:
         value = raw.get("nested_subagents_expanded")
         if not isinstance(value, bool):
@@ -217,6 +247,18 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
                     # ensure tombstones/unknown ids are not newly admitted here.
                     merged = dict(list(merged.items())[-_MAX_PROJECT_CURSORS:])
                 prefs["project_seen_revision"] = merged
+            if "widget_size" in incoming:
+                # Merge by card: a write names only the cards it changes, a null value
+                # deletes one, a null map clears them all. A changed key moves last,
+                # so the bound keeps the most recently sized cards.
+                sizes = {} if body.get("widget_size") is None else {
+                    key: size for key, size in prefs["widget_size"].items() if size is not None
+                }
+                for key, size in incoming.pop("widget_size").items():
+                    sizes.pop(key, None)
+                    if size is not None:
+                        sizes[key] = size
+                prefs["widget_size"] = dict(list(sizes.items())[-_MAX_WIDGET_SIZE_ITEMS:])
             prefs.update(incoming)
             atomic_write_json(path, prefs, trailing_newline=True)
     except ValueError as exc:

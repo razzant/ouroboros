@@ -1207,6 +1207,67 @@ and post-task checkpoint, not the presence of answer text or a cost estimate.
 Failed main work stays visibly failed after history reload while post-work
 controls remain live; the unfinished checkpoint never erases the outcome.
 
+### Widgets board
+
+The Widgets page is a board of live cards. The owner arranges the board; each
+widget's content belongs to its author.
+
+- **A masonry in the owner's order.** Cards are packed into columns the way a
+  Pinterest board is: in the order the owner set with each card's move handle,
+  every card goes to the lowest free place its width fits, so cards of
+  different heights stack without the voids of a row layout. The board decides
+  how many columns it has from the list's width and from the widths its cards
+  ask for. A board where the owner has set no width is exactly the board
+  before owner widths existed. A new widget joins the end of the order; the
+  order is stored when the owner moves a card, so after a window reload the
+  widgets added since the last move follow the stored ones alphabetically. A
+  widget whose skill is off is not drawn; its place in the order (moving the
+  other cards keeps its slot) and its width stay stored for its return, and
+  nothing is reserved meanwhile.
+- **Width is a column span, the owner's over the author's.** A card spans 1,
+  2 or 3 columns, or Full width. Until the owner picks one, the author's `span`
+  decides (`1` one column, `2` two), and the board may widen a lone one-column
+  card beside wide ones to fill its lane. The board never widens or narrows a
+  width the owner chose, except that no card is wider than the board: 3
+  columns on a board of 2 is the whole row. Full width is always the whole
+  row. Because the column count follows the widths the cards ask for, a
+  card's width can make the other cards' columns wider or narrower. The
+  owner's choice holds for that card on every screen of the installation
+  until Reset size returns the author's default.
+- **Widths that do not tile leave gaps; the board does not backfill.** A
+  card that cannot fit beside the cards above it starts below them: a
+  3-column card after a 2-column one on a 4-column board leaves the column
+  beside the first card empty above it. The board never repacks cards out of
+  the owner's order to hide such a gap; the owner closes it by changing a
+  width or the order.
+- **Height follows content.** A card is as tall as its widget: a table shows
+  every row, a framed widget its declared or reported frame height
+  (`docs/CREATING_SKILLS.md`). No card is pinned to a height. When a card
+  grows or shrinks, the masonry packs again, so cards after it can move,
+  even to another column.
+- **A narrow list is one column.** When the list is too narrow for two
+  columns of 280px — a phone, the Telegram mini app, a narrow window — the
+  cards stack at full width in the same order and widths do not apply; the
+  board returns when the list is wide again. The list's own width decides,
+  not the viewport.
+- **The card menu works on every surface.** Every card's ⋮ menu carries Size
+  (1, 2, 3 columns, Full width and Reset size) beside a framed card's launch
+  policy, so a touch screen, a keyboard or the mini app — no hover there, and
+  a vertical drag collapses it — can size any card; on a narrow list the menu
+  says that widths apply when the list is wide. Wherever a step would change a
+  card's width, its right edge can also be dragged between the widths the
+  steps give it (Escape cancels) or stepped with its arrow keys; the only card
+  on a board, which every step leaves the whole row, offers no edge.
+- **Arranging never restarts a widget.** Reordering, resizing or a change of
+  the column count changes only where a card is painted; a running widget
+  keeps its frame and its state. Keyboard focus keeps the card's original
+  position until the window reloads.
+- **One arrangement per installation.** Order and widths are owner UI state
+  stored on the server, the same for every window and device of the
+  installation; when two windows arrange at once the last change wins. A
+  width that failed to save stays on screen and says so under the list until
+  a later width change saves it; nothing retries on its own.
+
 ## 6. Account group / row anatomy
 
 For a repeated identity row (a connected agent account, a reviewer slot,
@@ -1389,12 +1450,12 @@ engineering rules; no second policy list may exist.
 never *look, I am still working*. It exists so the owner can leave the window
 and still be reached by a question or a finished task.
 
-**Startup & background.** Settings → Behavior owns host lifecycle choices, separate from the client-local Appearance controls. Sign-in startup is off until the owner opts in and always names the computer running Ouroboros, even in a remote client. OS registration is the truth: another copy, an OS-disabled entry and an unavailable app build remain visible rather than becoming a saved-settings guess. Automatic startup preserves Panic stops and saved pauses; an explicit owner start releases Panic. Closing the desktop window still exits; keeping it running after close has no control yet. Android deliberately keeps its existing automatic boot entry by default, with the same Panic-preservation contract.
+**Startup & background.** Settings → Behavior owns host lifecycle choices, separate from the client-local Appearance controls. Sign-in startup is off until the owner opts in and always names the computer running Ouroboros, even in a remote client. OS registration is the truth: another copy, an OS-disabled entry and an unavailable app build remain visible rather than becoming a saved-settings guess. Automatic startup preserves Panic stops and saved pauses; an explicit owner start releases Panic. The second control, *keep Ouroboros running in the background when the window is closed*, is also off until chosen and lives in the host's settings. Until the owner decides, the first close of the desktop window asks once — Ouroboros will keep working in the background (tasks, schedules, Telegram): keep it running, or quit? — and the answer becomes that checkbox; dismissing the question quits. macOS labels its two buttons Keep running and Quit; Windows keeps its standard OK and Cancel, with a line saying that OK keeps it running and Cancel quits. While it is on, closing hides the window behind a live indicator (the Windows notification-area icon; the macOS menu-bar item and Dock) whose menu shows the server's real state (work only from confirmed phases; starting, an error, unconfirmed activity or no answer said as such) and offers Open, Panic and Quit; if no indicator appears the close quits, so a hidden process always has a visible way back. Quit, Cmd+Q and signing out always quit, unasked. A sign-in start stays hidden only when both checkboxes are on and the indicator actually appeared, and opening the app while it is still starting shows the window; there is no third "start minimized" setting. Linux shows the background control as not available yet and closing quits there. Android deliberately keeps its existing automatic boot entry by default, with the same Panic-preservation contract.
 
-**When the client runs.** Notifications are a property of a running client. This
-version adds no tray agent, no background process and no push channel, so
-closing Ouroboros ends them. The existing Telegram bridge remains the separate
-path that reaches the owner while nothing is open.
+**When the client runs.** Notifications are a property of a running client, and
+there is no push channel. On the desktop the Telegram bridge runs inside the same
+server, so it reaches the owner while the window is closed only in background
+mode; quitting ends it together with the server.
 
 **Focus does not suppress, and neither does a closed room.** While a category is
 on, its event notifies whether or not the window has focus and whether or not
@@ -1447,7 +1508,12 @@ collapsed. The same holds for the several wire shapes a finished task has.
 **One sound.** At most one sound per event. Where the system shows a banner, the
 system owns the sound; where a desktop bridge is available, the launcher owns
 one system sound (or reports that it could not play one); otherwise the app
-plays one short tone. Never both, and the Sound choice remains authoritative.
+plays one short tone. Never both, and the Sound choice remains authoritative,
+with one stated exception: the banner the Windows notification-area icon shows
+while the window is hidden in background mode sounds by Windows' own
+notification settings (the WinForms balloon call has no silent form), so
+turning Sound off silences the page tone, the macOS sound and the Windows beep,
+not that balloon.
 
 **Each open window is its own client.** Settings, permission and the
 duplicate-collapsing that keeps one event to one notification all belong to one
@@ -1457,19 +1523,28 @@ honest consequence of per-client settings, not a bug we have hidden.
 
 **Click goes to the source.** A notification opens the question or the result it
 is about — the Project room and the exact question when it has one, otherwise
-the conversation. No reply is composed from the banner.
+the conversation. No reply is composed from the banner. The one exception is the
+banner the desktop indicator itself shows while the window is hidden in
+background mode (Windows): its click opens the window as it was left and does not
+navigate.
 
 **Content is private by default.** Only the kind of event is shown until the
 owner turns message text on, because a banner can appear on a shared screen.
 
 **Deliberately absent.** No numeric badge, no repeated reminder, no inline
-reply, no tray icon, no Telegram escalation, and no promise of a native
-Notification Center/toast banner or attention after the application closes.
-When the packaged desktop launcher exposes its optional `request_attention`
-bridge, a live notification may raise that window and ask the operating system
-for one standard sound. This is a native attention cue, not proof that a
-system banner was delivered; unsupported or older launchers fall back to the
-browser banner or in-app toast and report that capability honestly.
+reply, no Telegram escalation, and no promise of a native Notification
+Center/toast banner or attention after the application quits. When the packaged
+desktop launcher exposes its optional `request_attention` bridge, a live
+notification may raise a visible window and ask the operating system for one
+standard sound. A window the owner hid in background mode is never raised by an
+alert: Windows shows a banner from its notification-area icon, macOS marks and
+bounces the Dock icon with the system sound, and the window opens from that
+banner, the indicator or the Dock. That holds with browser notifications allowed
+too: the page asks the launcher before showing a browser banner, whose click
+could not bring a hidden window back; a visible window keeps the browser banner,
+which owns the sound. These are native attention cues, not proof
+that a system banner was delivered; unsupported or older launchers fall back to
+the browser banner or in-app toast and report that capability honestly.
 
 **Settings.** The controls live on **Settings → Appearance**, under the theme
 block, and are stored per client exactly like the appearance choice: the desktop
@@ -1492,3 +1567,7 @@ notification, including a denied permission.
   first observed frame is its terminal — it would notify once.
 - An event that happens while the socket is down never rings: reconnect replays
   history, and history is deliberately silent.
+- The Windows notification-area balloon shown while the window is hidden in
+  background mode follows Windows' own sound setting; the client's Sound choice
+  does not silence it. A silent native send needs a direct shell call that this
+  version does not make.

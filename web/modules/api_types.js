@@ -1405,7 +1405,6 @@
  * @property {string=} archived_at
  * @property {string=} archived_reason
  */
-
 /**
  * Same request/live-attempt or already armed latch returns one acknowledgement with duplicate=true.
  * @typedef {Object} TaskHurryResponse
@@ -1437,6 +1436,7 @@
  * @typedef {Object} UiPreferencesResponse
  * @property {string[]} widget_order
  * @property {Object.<string,'auto'|'manual'|'retain'>} widget_start_mode  // owner per-card launch-policy override, keyed "<skill>:<tab_id>"
+ * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card width: w masonry columns the card spans (12 = full width), h 0 (reserved)
  * @property {boolean} nested_subagents_expanded
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
@@ -1445,7 +1445,7 @@
  * @property {boolean=} ok
  */
 /**
- * Host sign-in registration as its OS reports it; `reason` only when unavailable.
+ * Host sign-in registration as its OS reports it, or (/api/desktop/background) the keep-running choice; `reason` only when unavailable.
  * @typedef {Object} DesktopAutostartResponse
  * @property {'unavailable'|'off'|'on'|'other_copy'|'disabled_by_os'} state
  * @property {string=} reason

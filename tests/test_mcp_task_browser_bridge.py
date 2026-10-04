@@ -4,7 +4,7 @@ The synthetic server speaks only what the pinned ``@playwright/mcp@0.0.82``
 speaks: ``browser_tabs`` answers ``### Result`` with
 ``renderTabsMarkdown`` lines and page tools answer ``### Page`` sections
 (playwright-core ``tools/backend/response.ts``). Like upstream, it starts its
-"browser" lazily as a detached process group. The opt-in last test drives the
+"browser" lazily as a detached process group. The opt-in last tests drive the
 real upstream package headless.
 """
 
@@ -28,20 +28,31 @@ pytestmark = pytest.mark.serial  # Real subprocesses (tests/conftest lane policy
 
 
 SERVER = r'''
-import subprocess, sys, time
+import json, os, socket, subprocess, sys, time
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("Playwright")
 tabs = [{"title": "Start", "url": "http://localhost:8765/"}]
 state = {"current": 0, "browser": None, "redirect_in": 0, "snapshots": 0, "clicks": 0}
 
+def guard(facts):
+    # The host's init page, as upstream's context route would ask it.
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.connect(os.environ["OUROBOROS_BROWSER_GUARD"])
+        conn.sendall(json.dumps(facts).encode() + b"\n")
+        conn.shutdown(socket.SHUT_WR)
+        return json.loads(b"".join(iter(lambda: conn.recv(65536), b"")))
+
 def ensure_browser():
-    # Upstream launches its browser on first use, detached into its own group.
+    # Upstream launches its browser on first use, detached into its own group,
+    # and runs every init page on the tab before any tool acts on it.
     if state["browser"] is None:
         state["browser"] = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(120)"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True)
+        if os.environ.get("PLAYWRIGHT_MCP_INIT_PAGE", "").endswith("guard.cjs") and not os.environ.get("FAKE_OWN_INIT_PAGE"):
+            assert guard({"armed": True}) == {"armed": True}
 
 def tabs_markdown():
     return "\n".join(f"- {i}:{' (current)' if i == state['current'] else ''} [{t['title']}]({t['url']})"
@@ -80,6 +91,22 @@ def browser_snapshot() -> str:
 def browser_click(target: str, element: str | None = None) -> str:
     state["clicks"] += 1
     return f"### Ran Playwright code\n```js\nawait page.click({target!r});\n```\n" + page_section()
+
+@mcp.tool(structured_output=False)
+def browser_page_request(url: str, method: str = "GET", post_data: str | dict | None = None) -> str:
+    # What the page's own iframe, fetch or form does: the context route pauses it on the guard.
+    # (FastMCP hands a JSON-looking string argument over already parsed.)
+    body = json.dumps(post_data) if isinstance(post_data, dict) else post_data
+    answer = guard({"url": url, "method": method, "post_data": body})
+    return "### Result\n" + ("sent" if answer.get("block") == "" else "aborted")
+
+@mcp.tool(structured_output=False)
+def browser_run_code_unsafe(code: str) -> str:
+    return "### Result\nran"
+
+@mcp.tool(structured_output=False)
+def browser_route(pattern: str, status: int | None = None, body: str | None = None) -> str:
+    return "### Result\nrouted"
 
 @mcp.tool(structured_output=False)
 def browser_slow_click() -> str:
@@ -317,6 +344,219 @@ def test_ownerless_discovery_and_settings_probe_do_not_spawn(tmp_path):
     assert manager.test_server(_entry(script))["code"] == "MCP_TASK_OWNER_REQUIRED"
 
 
+# -- the request guard: the requests Playwright routes ----------------------------
+
+
+@pytest.fixture
+def guarded(tmp_path, monkeypatch, safety):
+    """The actual request policy (no URL stub) and a proven Ouroboros endpoint."""
+    pytest.importorskip("mcp")
+    from ouroboros import config, owner_pause
+    from ouroboros.server_process import record_service_binding
+
+    monkeypatch.setattr(owner_pause, "submit_async_preparation", lambda factory, **_kw: factory())
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "pro")
+    record_service_binding(tmp_path, "main", "127.0.0.1", 49159, pid=os.getpid())
+    instance = mcp_client.MCPManager()
+    entry = _entry(_server(tmp_path))
+    instance.reconfigure({"MCP_ENABLED": True, "MCP_SERVERS": [entry]})
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: instance)
+    ctx = _ctx(tmp_path)
+    state = SimpleNamespace(instance=instance, ctx=ctx, entry=entry, config=config,
+                            ours="http://127.0.0.1:49159", other="http://127.0.0.1:49160")
+    yield state
+    mcp_task_sessions.stop_task(state.ctx)
+
+
+def _page_request(ctx, url, method="GET", post_data=None):
+    return _dispatch(ctx, "browser_page_request", {"url": url, "method": method, "post_data": post_data})
+
+
+def test_guard_judges_each_page_request_with_the_existing_request_policy(guarded, monkeypatch):
+    ctx = guarded.ctx
+    assert guarded.instance.refresh_server("browser", authority=ctx)["ok"] is True
+    owner_post = f"{guarded.ours}/api/owner/safety-mode"
+    settings = '{"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"}'
+    blocked = _page_request(ctx, owner_post, "POST", "{}")
+    assert blocked.status == "ok" and "aborted" in blocked.text, blocked.text  # The action ran; its request did not.
+    assert "BROWSER_REQUEST_BLOCKED" in blocked.text and "BROWSER_OWNER_CONTROL_BLOCKED" in blocked.text
+    assert blocked.meta["route_note"] and "External MCP" not in blocked.text.split("BROWSER_REQUEST_BLOCKED")[1]
+    assert "aborted" in _page_request(ctx, f"{guarded.ours}/api/settings", "POST", settings).text
+    assert "aborted" in _page_request(ctx, "http://169.254.169.254/latest/meta-data").text
+    # An unrelated application reusing the pathname, and ordinary reads, go on.
+    sent = _page_request(ctx, f"{guarded.other}/api/settings", "POST", settings)
+    assert "sent" in sent.text and "BROWSER_REQUEST_BLOCKED" not in sent.text
+    assert "sent" in _page_request(ctx, f"{guarded.ours}/", "GET").text
+    monkeypatch.setattr(guarded.config, "_BOOT_RUNTIME_MODE", "cyber_pro")  # read per request
+    assert "sent" in _page_request(ctx, owner_post, "POST", "{}").text
+
+
+def test_restricted_child_requests_to_an_ouroboros_endpoint_are_aborted(guarded):
+    ctx = guarded.ctx
+    ctx.task_constraint = {"mode": "local_readonly_subagent"}
+    assert guarded.instance.refresh_server("browser", authority=ctx)["ok"] is True
+    framed = _page_request(ctx, f"{guarded.ours}/frame")
+    assert "aborted" in framed.text and "BROWSER_LOCAL_READONLY_BLOCKED" in framed.text
+    assert "sent" in _page_request(ctx, f"{guarded.other}/frame").text  # literal loopback keeps its reach
+
+
+def test_unacknowledged_guard_refuses_every_action_undispatched(guarded):
+    ctx = guarded.ctx
+    # An init page of the owner's own replaces the host's: upstream never runs the guard.
+    guarded.instance.reconfigure({"MCP_ENABLED": True, "MCP_SERVERS": [
+        {**guarded.entry, "env": {"FAKE_OWN_INIT_PAGE": "1"}}]})
+    assert guarded.instance.refresh_server("browser", authority=ctx)["ok"] is True
+    refused = _dispatch(ctx, "browser_navigate", {"url": "http://localhost:8765/next"})
+    assert (refused.status, refused.code) == ("blocked", "LEGACY_BLOCKED")
+    assert "BROWSER_REQUEST_GUARD_UNAVAILABLE" in refused.text
+    assert _dispatch(ctx, "browser_click", {"target": "e1"}).code == "LEGACY_BLOCKED"
+    raw = _session(ctx)._request("browser_snapshot", {}, 10)
+    assert "localhost:8765/ " not in raw.content[0].text and "clicks 0" in raw.content[0].text
+
+
+def test_server_side_code_beside_the_guard_is_refused_where_policy_binds(guarded, monkeypatch):
+    ctx = guarded.ctx
+    guarded.instance.refresh_server("browser", authority=ctx)
+    code = {"code": "async (page) => page.context().unrouteAll()"}
+    refused = _dispatch(ctx, "browser_run_code_unsafe", code)
+    assert refused.code == "LEGACY_BLOCKED" and "BROWSER_REQUEST_GUARD_BYPASS" in refused.text
+    assert "BROWSER_REQUEST_GUARD_BYPASS" in _dispatch(ctx, "browser_route", {"pattern": "**"}).text
+    assert "routed" in _dispatch(ctx, "browser_route", {"pattern": "**/x", "body": "mock"}).text  # fulfils
+    monkeypatch.setattr(guarded.config, "_BOOT_RUNTIME_MODE", "cyber_pro")
+    assert "ran" in _dispatch(ctx, "browser_run_code_unsafe", code).text
+    ctx.task_constraint = {"mode": "local_readonly_subagent"}  # Still binding for a read-only child.
+    assert _dispatch(ctx, "browser_route", {"pattern": "**"}).code == "LEGACY_BLOCKED"
+
+
+def _ask_guard(path, payload):
+    import socket
+
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.connect(path)
+        conn.sendall(payload)
+        conn.shutdown(socket.SHUT_WR)
+        return b"".join(iter(lambda: conn.recv(65536), b""))
+
+
+@pytest.mark.parametrize("revoke", [False, True])
+def test_guard_policy_runs_off_loop_and_rechecks_revocation(guarded, monkeypatch, revoke):
+    import asyncio
+    import json
+    import threading
+
+    guarded.instance.refresh_server("browser", authority=guarded.ctx)
+    session = _session(guarded.ctx)
+    loop_thread = threading.get_ident()
+    started, released = threading.Event(), threading.Event()
+    policy_threads = []
+
+    def policy(_ctx, _facts):
+        policy_threads.append(threading.get_ident())
+        started.set()
+        assert released.wait(2)
+        return ""
+
+    monkeypatch.setattr(mcp_task_sessions, "_request_block_reason", policy)
+
+    class Writer:
+        data = b""
+        def write(self, data):
+            self.data += data
+        async def drain(self):
+            pass
+        def close(self):
+            pass
+
+    async def check():
+        reader, writer = asyncio.StreamReader(), Writer()
+        reader.feed_data(b'{"url":"http://example.test/","method":"GET"}\n')
+        reader.feed_eof()
+        pending = asyncio.create_task(session._answer_guard(reader, writer))
+        try:
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+            # This coroutine must advance while the DNS/policy thread waits.
+            if revoke:
+                session.revoked = True
+            released.set()
+            await pending
+            return json.loads(writer.data)
+        finally:
+            released.set()
+
+    try:
+        answer = asyncio.run(check())
+        assert policy_threads and all(t != loop_thread for t in policy_threads)
+        assert answer["block"].startswith("BROWSER_SESSION_REVOKED") if revoke else answer == {"block": ""}
+    finally:
+        session.revoked = False  # Let fixture close the real transport normally.
+
+
+def test_guard_answers_fail_closed_and_close_with_the_session(guarded):
+    import json
+
+    ctx = guarded.ctx
+    guarded.instance.refresh_server("browser", authority=ctx)
+    session = _session(ctx)
+    path = os.path.join(session.guard_dir.name, "g.sock")
+    for payload in (b"not json\n", b"[1]\n", b'{"url": 5, "method": "GET"}\n', b'{"url": "http://x.test/"}\n', b""):
+        assert json.loads(_ask_guard(path, payload))["block"].startswith("BROWSER_POLICY_UNAVAILABLE")
+    assert mcp_task_sessions.stop_task(ctx) == [{"server": "browser", "closure": "confirmed"}]
+    assert not os.path.exists(session.guard_dir.name)  # No answer remains: the guard aborts.
+
+
+def test_guard_script_routes_each_request_on_the_host_verdict(guarded, tmp_path):
+    """The shipped guard under a fake Playwright surface, against the live host socket."""
+    import json
+    import shutil
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not available")
+    ctx = guarded.ctx
+    guarded.instance.refresh_server("browser", authority=ctx)
+    script = tmp_path / "guard.cjs"
+    script.write_text(mcp_task_sessions._GUARD_JS)
+    harness = tmp_path / "harness.cjs"
+    harness.write_text(textwrap.dedent("""
+        const guard = require(process.argv[2]);
+        const routes = [];
+        const context = { route: async (pattern, handler) => { routes.push([pattern, handler]); } };
+        const page = { context: () => context };
+        (async () => {
+          let armed = 'armed';
+          try { await guard.default({ page }); await guard.default({ page }); } catch (e) { armed = String(e); }
+          const outcomes = [];
+          for (const [url, method, body] of JSON.parse(process.argv[3])) {
+            const outcome = [];
+            await routes[0][1]({
+              request: () => ({ url: () => url, method: () => method, postData: () => body }),
+              fallback: async () => { outcome.push('fallback'); },
+              abort: async code => { outcome.push('abort:' + code); },
+            });
+            outcomes.push(outcome.join());
+          }
+          console.log(JSON.stringify({ armed, patterns: routes.map(r => r[0]), outcomes }));
+        })();
+    """))
+    cases = json.dumps([[f"{guarded.ours}/api/owner/safety-mode", "POST", "{}"],
+                        [f"{guarded.other}/page", "GET", None]])
+    socket_path = os.path.join(_session(ctx).guard_dir.name, "g.sock")
+
+    def run(path):
+        done = subprocess.run([node, str(harness), str(script), cases], env={**os.environ, "OUROBOROS_BROWSER_GUARD": path},
+                              capture_output=True, text=True, timeout=60, check=True)
+        return json.loads(done.stdout)
+
+    assert run(socket_path) == {"armed": "armed", "patterns": ["**/*"],  # one route per context
+                                "outcomes": ["abort:blockedbyclient", "fallback"]}
+    assert _session(ctx).guard_armed
+    unreachable = run(str(tmp_path / "gone.sock"))
+    assert unreachable["armed"] != "armed"  # upstream's tab initialization fails with it
+    assert unreachable["outcomes"] == ["abort:blockedbyclient"] * 2
+
+
 # -- custody: task end, reopen, Panic and cancel ----------------------------------
 
 
@@ -493,10 +733,10 @@ def test_actual_upstream_playwright_mcp_headless(tmp_path, monkeypatch, policy, 
     try:
         assert "browser_tabs" in {tool["name"] for tool in mcp_task_sessions.discover(cfg, ctx, 60)}
         marker = _session(ctx).token
-        navigated, _advice = mcp_task_sessions.call(
+        navigated, _advice, _note = mcp_task_sessions.call(
             cfg, "mcp_browser__browser_navigate", "browser_navigate", {"url": f"{base}/a.html"}, ctx, 60)
         assert navigated.status == "ok", navigated.text
-        snap, _advice = mcp_task_sessions.call(
+        snap, _advice, _note = mcp_task_sessions.call(
             cfg, "mcp_browser__browser_snapshot", "browser_snapshot", {}, ctx, 60)
         assert snap.status == "ok" and "next" in snap.text
         assert safety.calls[-1]["page"]["url"] == f"{base}/a.html"
@@ -509,3 +749,189 @@ def test_actual_upstream_playwright_mcp_headless(tmp_path, monkeypatch, policy, 
     finally:
         mcp_task_sessions.stop_task(ctx)
         httpd.shutdown()
+
+
+@pytest.fixture
+def upstream(tmp_path, monkeypatch, safety):
+    """The actual upstream package and real request policy against two local sites:
+    ``plain`` is an ordinary loopback app, ``ours`` a proven Ouroboros endpoint
+    recording every request it receives. Opt-in, as the test above."""
+    import http.server
+    import shutil
+    import threading
+    from ouroboros import config, owner_pause
+    from ouroboros.server_process import clear_service_binding, record_service_binding
+
+    cli = os.environ.get("OUROBOROS_PLAYWRIGHT_MCP_CLI", "")
+    shell = os.environ.get("OUROBOROS_PLAYWRIGHT_HEADLESS_SHELL", "")
+    node = shutil.which("node")
+    if not (cli and shell and node and "headless-shell" in os.path.basename(shell)):
+        pytest.skip("actual upstream consumer is opt-in")
+    hits = {"plain": [], "ours": []}
+    pages, redirects = {}, {}
+
+    def site(name):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _answer(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                hits[name].append((self.command, self.path, self.rfile.read(length).decode()))
+                if self.path in redirects:
+                    self.send_response(307)
+                    self.send_header("Location", redirects[self.path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = pages.get(self.path, "<title>ok</title><p>ok</p>").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript" if self.path.endswith(".js") else "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")  # a page fetch reads the answer
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST = _answer
+
+            def log_message(self, *_args):
+                pass
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    monkeypatch.setattr(owner_pause, "submit_async_preparation", lambda factory, **_kw: factory())
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "pro")
+    (plain, plain_url), (ours, ours_url) = site("plain"), site("ours")
+    binding = record_service_binding(tmp_path, "main", "127.0.0.1", ours.server_address[1], pid=os.getpid())
+    pages.update({
+        "/form.html": f"<title>Form</title><form method='post' action='{ours_url}/api/settings'>"
+                      "<input type='hidden' name='OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS' value='true'>"
+                      "<button id='save'>Save</button></form>",
+        "/frame.html": f"<title>Frame</title><iframe src='{ours_url}/frame'></iframe><p>framed</p>",
+        "/popup.html": f"<title>Popup</title><button id='open' onclick=\"window.open('{ours_url}/popup')\">Open</button>",
+    })
+    entry = {"id": "browser", "enabled": True, "transport": "stdio", "command": node, "browser_bridge": True,
+             "args": [cli, "--headless", "--isolated", "--browser", "chromium", "--executable-path", shell]}
+    instance = mcp_client.MCPManager()
+    instance.reconfigure({"MCP_ENABLED": True, "MCP_SERVERS": [entry]})
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: instance)
+    state = SimpleNamespace(instance=instance, entry=entry, ctx=_ctx(tmp_path), config=config, hits=hits,
+                            plain=plain_url, ours=ours_url, pages=pages, redirects=redirects)
+    try:
+        yield state
+    finally:
+        mcp_task_sessions.stop_task(state.ctx)
+        for httpd in (plain, ours):
+            httpd.shutdown()
+            httpd.server_close()
+        clear_service_binding(tmp_path, "main", binding)
+
+
+def _settle(seconds=1.0):
+    time.sleep(seconds)  # page-initiated requests finish after the tool returns
+
+
+def test_actual_upstream_guard_refuses_form_and_fetch_control_posts(upstream, monkeypatch):
+    ctx, ours = upstream.ctx, upstream.ours
+    assert upstream.instance.refresh_server("browser", authority=ctx)["ok"] is True
+    session = _session(ctx)
+    assert _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/form.html"}).status == "ok"
+    clicked = _dispatch(ctx, "browser_click", {"target": "#save"})  # the page posts the form
+    _settle()
+    assert ("POST", "/api/settings") not in [hit[:2] for hit in upstream.hits["ours"]]
+    assert "BROWSER_OWNER_CONTROL_BLOCKED" in clicked.text, clicked.text
+    # The aborted post left Chromium's error page; a page of the site fetches next.
+    assert _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/plain.html"}).status == "ok"
+    fetch = (f"() => fetch('{ours}/api/owner/safety-mode', {{method: 'POST', body: 'mode=low'}})"
+             ".then(r => 'sent ' + r.status, e => 'failed ' + e.message)")
+    failed = _dispatch(ctx, "browser_evaluate", {"function": fetch})
+    assert "failed" in failed.text and "BROWSER_OWNER_CONTROL_BLOCKED" in failed.text, failed.text
+    assert upstream.hits["ours"] == []
+    monkeypatch.setattr(upstream.config, "_BOOT_RUNTIME_MODE", "cyber_pro")  # Cyber keeps its reach.
+    assert "sent 200" in _dispatch(ctx, "browser_evaluate", {"function": fetch}).text
+    assert _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/form.html"}).status == "ok"
+    _dispatch(ctx, "browser_click", {"target": "#save"})
+    _settle()
+    assert [hit[:2] for hit in upstream.hits["ours"]] == [("POST", "/api/owner/safety-mode"), ("POST", "/api/settings")]
+    # All of it over the one retained connection, closed with a receipt.
+    assert _session(ctx) is session and session.guard_armed and len(_live(session.token)) >= 2
+    assert mcp_task_sessions.stop_task(ctx) == [{"server": "browser", "closure": "confirmed"}]
+    assert not _live(session.token) and not os.path.exists(session.guard_dir.name)
+
+
+def test_actual_upstream_guard_refuses_iframe_and_popup_of_a_restricted_child(upstream):
+    ctx = upstream.ctx
+    ctx.task_constraint = {"mode": "local_readonly_subagent"}
+    assert upstream.instance.refresh_server("browser", authority=ctx)["ok"] is True
+    framed = _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/frame.html"})
+    assert framed.status == "ok" and "BROWSER_LOCAL_READONLY_BLOCKED" in framed.text, framed.text
+    assert _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/popup.html"}).status == "ok"
+    _dispatch(ctx, "browser_click", {"target": "#open"})  # the page opens a new tab on its own
+    _settle()
+    assert upstream.hits["ours"] == []  # neither the frame nor the popup's document was requested
+    assert [hit[:2] for hit in upstream.hits["plain"]] == [("GET", "/frame.html"), ("GET", "/popup.html")]
+    ctx.task_constraint = None  # The parent's reach: the same frame and popup do load.
+    _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/frame.html"})
+    _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/popup.html"})
+    _dispatch(ctx, "browser_click", {"target": "#open"})
+    _settle()
+    assert [hit[:2] for hit in upstream.hits["ours"]] == [("GET", "/frame"), ("GET", "/popup")]
+
+
+def test_actual_upstream_owner_init_page_leaves_no_unguarded_route(upstream, tmp_path):
+    ctx = upstream.ctx
+    own = tmp_path / "own.cjs"
+    own.write_text("exports.default = async () => {};")
+    upstream.instance.reconfigure({"MCP_ENABLED": True, "MCP_SERVERS": [
+        {**upstream.entry, "args": [*upstream.entry["args"], "--init-page", str(own)]}]})
+    assert upstream.instance.refresh_server("browser", authority=ctx)["ok"] is True
+    refused = _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/form.html"})
+    assert refused.code == "LEGACY_BLOCKED" and "BROWSER_REQUEST_GUARD_UNAVAILABLE" in refused.text
+    assert upstream.hits == {"plain": [], "ours": []}
+
+
+def test_actual_upstream_guard_holds_worker_beacon_and_service_worker_posts(upstream):
+    ctx, owner = upstream.ctx, f"{upstream.ours}/api/owner/safety-mode"
+    post = f"fetch('{owner}', {{method: 'POST', body: 'mode=low'}})"
+    upstream.pages.update({
+        "/worker.html": "<title>Worker</title><script>new Worker('/w.js')</script>",
+        "/w.js": f"{post}.catch(() => 0);",
+        "/sw.html": "<title>SW</title><script>navigator.serviceWorker.register('/sw.js')"
+                    ".then(() => navigator.serviceWorker.ready).then(() => document.title = 'ready')</script>",
+        "/sw.js": "self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));"
+                  f"self.addEventListener('fetch', e => {{ if (e.request.url.endsWith('/via-sw')) e.respondWith({post}); }});",
+    })
+    assert upstream.instance.refresh_server("browser", authority=ctx)["ok"] is True
+    _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/worker.html"})
+    _settle()
+    beacon = _dispatch(ctx, "browser_evaluate", {"function": f"() => navigator.sendBeacon('{owner}', 'mode=low')"})
+    assert "BROWSER_OWNER_CONTROL_BLOCKED" in beacon.text, beacon.text
+    _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/sw.html"})
+    _settle(2.0)  # the service worker installs and activates
+    _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/sw.html"})  # now controlled by it
+    answered = _dispatch(ctx, "browser_evaluate", {
+        "function": f"() => fetch('{upstream.plain}/via-sw').then(r => 'sent ' + r.status, e => 'failed ' + e.message)"})
+    assert "failed" in answered.text and "BROWSER_OWNER_CONTROL_BLOCKED" in answered.text, answered.text
+    _settle()
+    assert upstream.hits["ours"] == []  # the worker's, the beacon's and the service worker's posts
+    assert "/w.js" in [hit[1] for hit in upstream.hits["plain"]]
+
+
+def test_actual_upstream_redirect_hop_and_websocket_pass_unjudged(upstream):
+    """The disclosed boundary, pinned so a change upstream shows up: Playwright
+    routes no native redirect hop and no WebSocket, here or in tools/browser.py."""
+    ctx, owner = upstream.ctx, f"{upstream.ours}/api/owner/safety-mode"
+    upstream.redirects["/hop"] = owner
+    upstream.pages["/hop.html"] = (f"<title>Hop</title><form method='post' action='{upstream.plain}/hop'>"
+                                   "<input name='mode' value='low'><button id='go'>Go</button></form>")
+    assert upstream.instance.refresh_server("browser", authority=ctx)["ok"] is True
+    _dispatch(ctx, "browser_navigate", {"url": f"{upstream.plain}/hop.html"})
+    hopped = _dispatch(ctx, "browser_click", {"target": "#go"})
+    _settle()
+    assert ("POST", "/api/owner/safety-mode", "mode=low") in upstream.hits["ours"]  # the 307 kept the body
+    assert "BROWSER_REQUEST_BLOCKED" not in hopped.text
+    socket_url = upstream.ours.replace("http://", "ws://") + "/ws"
+    opened = _dispatch(ctx, "browser_evaluate", {"function": f"() => new Promise(done => {{ const w = new WebSocket("
+                       f"'{socket_url}'); w.onerror = w.onopen = () => done('tried'); }})"})
+    _settle()
+    assert "tried" in opened.text and ("GET", "/ws", "") in upstream.hits["ours"]

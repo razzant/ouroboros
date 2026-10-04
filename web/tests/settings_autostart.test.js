@@ -215,3 +215,94 @@ for (const reason of ['Sign-in startup needs a newer app build (7.2.0 or later).
         assert.equal(block.status.textContent, reason);
     });
 }
+
+function fakeSection() {
+    const handlers = new Map();
+    const control = (name) => ({
+        checked: false,
+        disabled: false,
+        addEventListener: (type, fn) => { if (type === 'change') handlers.set(name, fn); },
+        removeEventListener: (type, fn) => { if (handlers.get(name) === fn) handlers.delete(name); },
+    });
+    const startup = control('startup');
+    const background = control('background');
+    const startupStatus = { textContent: '', dataset: {} };
+    const backgroundStatus = { textContent: '', dataset: {} };
+    const row = { hidden: true };
+    const section = {
+        hidden: true,
+        querySelector: (selector) => ({
+            '[data-autostart-toggle]': startup, '[data-autostart-status]': startupStatus,
+            '[data-background-row]': row, '[data-background-toggle]': background, '[data-background-status]': backgroundStatus,
+        })[selector] || null,
+    };
+    const page = { querySelector: (selector) => (selector === '[data-autostart-settings]' ? section : null) };
+    const click = (box, name, checked) => { box.checked = checked; return handlers.get(name)?.(); };
+    return { page, section, row, startup, background, backgroundStatus, handlers, click };
+}
+
+function withBothApis(t, { background, setBackground }) {
+    const saved = { read: apiClient.desktopBackground, write: apiClient.setDesktopBackground };
+    apiClient.desktopBackground = background;
+    apiClient.setDesktopBackground = setBackground || (async () => { throw new Error('unexpected write'); });
+    t.after(() => {
+        apiClient.desktopBackground = saved.read;
+        apiClient.setDesktopBackground = saved.write;
+    });
+    return withApi(t, { read: async () => ({ state: 'off' }) });
+}
+
+test('the keep-running control applies at once and reads back what the host holds', async (t) => {
+    let server = 'off';
+    let refuse = false;
+    const writes = [];
+    withBothApis(t, {
+        background: async () => ({ state: server }),
+        setBackground: async (enabled) => {
+            writes.push(enabled);
+            if (refuse) throw new Error('settings locked');
+            server = enabled ? 'on' : 'off';
+            return { state: server };
+        },
+    });
+    const block = fakeSection();
+    bindAutostartControl(block.page);
+    await settle();
+    assert.equal(block.row.hidden, false);
+    assert.equal(block.background.checked, false);
+    await block.click(block.background, 'background', true);
+    assert.deepEqual(writes, [true]);
+    assert.equal(block.background.checked, true);
+    refuse = true;
+    await block.click(block.background, 'background', false);
+    assert.equal(block.background.checked, true, 'a refused change shows the choice the host still holds');
+    assert.match(block.backgroundStatus.textContent, /Could not change the background setting: settings locked/);
+});
+
+test('hosts without background mode show the reason on a disabled control', async (t) => {
+    const reason = 'Not available on Linux yet: closing the window quits Ouroboros.';
+    withBothApis(t, { background: async () => ({ state: 'unavailable', reason }) });
+    const block = fakeSection();
+    bindAutostartControl(block.page);
+    await settle();
+    assert.equal(block.row.hidden, false);
+    assert.equal(block.background.disabled, true);
+    assert.equal(block.backgroundStatus.textContent, reason);
+});
+
+test('one Settings visit re-reads both host controls and one pagehide releases both', async (t) => {
+    let reads = 0;
+    let server = 'off';
+    const win = withBothApis(t, { background: async () => { reads += 1; return { state: server }; } });
+    const block = fakeSection();
+    bindAutostartControl(block.page);
+    await settle();
+    server = 'on'; // the desktop's first-close answer landed meanwhile
+    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    await settle();
+    assert.equal(reads, 2);
+    assert.equal(block.background.checked, true);
+    win.fire('pagehide', { persisted: false });
+    assert.equal(block.handlers.size, 0);
+    assert.equal(win.has('ouro:page-shown'), false);
+});

@@ -24,6 +24,7 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
         assert initial.json() == {
             "widget_order": [],
             "widget_start_mode": {},
+            "widget_size": {},
             "nested_subagents_expanded": False,
             "sidebar_width": 0,
             "project_panel_width": 0,
@@ -297,3 +298,117 @@ def test_ui_preferences_widget_start_mode_override(tmp_path):
         kept = bounded.json()["widget_start_mode"]
         assert len(kept) == 200
         assert all(many[key] == mode for key, mode in kept.items())
+
+
+def test_ui_preferences_widget_size_merges_by_card_and_clamps(tmp_path):
+    """Owner Widgets card widths: a POST merges by card key and null deletes one,
+    widths clamp to the 12-column board, the reserved height stays 0, keys are
+    never checked against live widgets, the map is bounded, and there is no
+    conditional write: the last write wins, like widget_order."""
+    from starlette.testclient import TestClient
+
+    app = Starlette(routes=collect_routes(data_dir=tmp_path))
+    app.state.drive_root = tmp_path
+    with TestClient(app) as client:
+        def sizes():
+            return client.get("/api/ui/preferences").json()["widget_size"]
+
+        assert sizes() == {}
+        first = client.post("/api/ui/preferences", json={"widget_size": {
+            "game:main": {"w": 12, "h": 0}, "gone_skill:old": {"w": 6, "h": 0},
+        }})
+        assert first.status_code == 200
+        assert first.json()["widget_size"] == {"game:main": {"w": 12, "h": 0}, "gone_skill:old": {"w": 6, "h": 0}}
+        # Merge: a write names only the card it changes; the others stay.
+        second = client.post("/api/ui/preferences", json={"widget_size": {"gauge:live": {"w": 4}}})
+        assert second.json()["widget_size"] == {
+            "game:main": {"w": 12, "h": 0}, "gone_skill:old": {"w": 6, "h": 0}, "gauge:live": {"w": 4, "h": 0},
+        }
+        # A null value deletes one key (the card falls back to its author span).
+        assert client.post("/api/ui/preferences", json={"widget_size": {"gone_skill:old": None}}).json()["widget_size"] == {
+            "game:main": {"w": 12, "h": 0}, "gauge:live": {"w": 4, "h": 0},
+        }
+        # Other keys leave the sizes alone, and a size write leaves the order alone.
+        assert client.post("/api/ui/preferences", json={"widget_order": ["gauge:live", "game:main"]}).json()["widget_size"] == sizes()
+        assert client.post("/api/ui/preferences", json={"widget_size": {"game:main": {"w": 8, "h": 0}}}).json()["widget_order"] == [
+            "gauge:live", "game:main",
+        ]
+        # The file is the store: a revisit (and a restart) reads the same widths back.
+        stored = json.loads((tmp_path / "state" / "ui_preferences.json").read_text(encoding="utf-8"))
+        assert stored["widget_size"] == {"game:main": {"w": 8, "h": 0}, "gauge:live": {"w": 4, "h": 0}}
+
+        # Out-of-range widths clamp to 1..12; h is reserved and stored as 0; keys are
+        # trimmed; blank and oversized keys and extra fields are dropped.
+        clamped = client.post("/api/ui/preferences", json={"widget_size": {
+            " wide:card ": {"w": 99, "h": 640, "x": 3}, "tiny:card": {"w": -5}, "": {"w": 4}, "x" * 201: {"w": 4},
+        }})
+        assert clamped.status_code == 200
+        assert {key: clamped.json()["widget_size"][key] for key in ("wide:card", "tiny:card")} == {
+            "wide:card": {"w": 12, "h": 0}, "tiny:card": {"w": 1, "h": 0},
+        }
+        assert "" not in clamped.json()["widget_size"] and "x" * 201 not in clamped.json()["widget_size"]
+
+        # Any other shape is a 400 and stores nothing; the PR-era condition key is unknown.
+        before = sizes()
+        for bad in (
+            {"widget_size": ["game:main"]},
+            {"widget_size": "wide"},
+            {"widget_size": {"game:main": [4, 0]}},
+            {"widget_size": {"game:main": {"h": 0}}},
+            {"widget_size": {"game:main": {"w": "4"}}},
+            {"widget_size": {"game:main": {"w": 4.5}}},
+            {"widget_size": {"game:main": {"w": True}}},
+            {"widget_size": {"game:main": {"w": 4, "h": None}}},
+            {"widget_sizes": {}},
+            {"widget_size": {"game:main": {"w": 4}}, "widget_layout_if": {}},
+        ):
+            assert client.post("/api/ui/preferences", json=bad).status_code == 400, bad
+        assert sizes() == before
+
+        # A null map clears every width.
+        assert client.post("/api/ui/preferences", json={"widget_size": None}).json()["widget_size"] == {}
+        # Bounded at 200 keys; the most recently changed cards are the ones kept.
+        many = {f"skill:{i}": {"w": 4, "h": 0} for i in range(250)}
+        bounded = client.post("/api/ui/preferences", json={"widget_size": many})
+        assert list(bounded.json()["widget_size"]) == list(many)[:200]
+        newest = client.post("/api/ui/preferences", json={"widget_size": {"late:card": {"w": 6}}}).json()["widget_size"]
+        assert len(newest) == 200
+        assert list(newest)[-1] == "late:card" and "skill:0" not in newest
+
+
+def test_corrupt_stored_preferences_read_as_defaults(tmp_path):
+    """The preferences file is shared (project read cursors, panel widths, the
+    empty-Main welcome); a corrupt one reads as defaults instead of failing the
+    whole surface, and the next write replaces it."""
+    from starlette.testclient import TestClient
+
+    app = Starlette(routes=collect_routes(data_dir=tmp_path))
+    app.state.drive_root = tmp_path
+    path = tmp_path / "state" / "ui_preferences.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"widget_size":')
+    with TestClient(app) as client:
+        read = client.get("/api/ui/preferences")
+        assert read.status_code == 200
+        assert read.json()["widget_size"] == {} and read.json()["sidebar_width"] == 0
+        written = client.post("/api/ui/preferences", json={"widget_size": {"game:main": {"w": 6, "h": 0}}})
+        assert written.status_code == 200
+        assert json.loads(path.read_text(encoding="utf-8"))["widget_size"] == {"game:main": {"w": 6, "h": 0}}
+
+
+def test_widget_board_bounds_have_one_value_in_python_and_the_browser():
+    """The server clamps with the bounds the browser normalizes with; its bound of `w` is Full width."""
+    import re
+    from pathlib import Path
+
+    from ouroboros.gateway import ui_preferences as prefs
+
+    source = (Path(__file__).resolve().parent.parent / "web" / "modules" / "widget_size.js").read_text(encoding="utf-8")
+
+    def js(name: str) -> int:
+        match = re.search(rf"export const {name} = (\d+);", source)
+        assert match, name
+        return int(match.group(1))
+
+    assert js("WIDGET_FULL_SPAN") == prefs.WIDGET_GRID_COLUMNS
+    assert js("WIDGET_SIZE_MAX_ITEMS") == prefs._MAX_WIDGET_SIZE_ITEMS

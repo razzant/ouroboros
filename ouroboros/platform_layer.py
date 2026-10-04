@@ -532,12 +532,13 @@ _lock_fd: Any = None
 
 
 def pid_lock_acquire(path: str) -> bool:
-    """Acquire an exclusive PID lock, closing the fd on lock failure."""
+    """Exclusive PID lock; a loser closes its fd and never truncates the holder's PID (second-launch signal)."""
     global _lock_fd
     fd_obj = None
     try:
-        fd_obj = open(path, "w")
+        fd_obj = open(path, "a")
         file_lock_exclusive_nb(fd_obj.fileno())
+        fd_obj.truncate(0)
         fd_obj.write(str(os.getpid()))
         fd_obj.flush()
         # Promote to global only after lock and PID write both succeed.
@@ -632,19 +633,22 @@ def pid_is_alive(pid: int) -> bool:
     return True
 
 
+def signal_pid(pid: int, signum: int = 0) -> bool:
+    """POSIX: deliver ``signum`` (0 only probes); False when it cannot. Delivery proves no identity."""
+    try:
+        os.kill(pid, signum)
+    except OSError:
+        return False
+    return True
+
+
 def pid_is_signalable(pid: int) -> bool:
     """Whether this caller can signal a PID: POSIX signal-zero, Windows presence.
 
     This is distinct from identity/ownership and from an access-denied live PID."""
     if pid <= 0:
         return False
-    if IS_WINDOWS:
-        return pid_is_alive(pid)
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
+    return pid_is_alive(pid) if IS_WINDOWS else signal_pid(pid)
 
 
 def pid_provably_gone(pid: int) -> bool:
@@ -1251,9 +1255,7 @@ def get_system_memory() -> str:
     os_name = platform.system()
     try:
         if os_name == "Darwin":
-            mem_bytes = int(subprocess.check_output(
-                ["sysctl", "-n", "hw.memsize"],
-            ).strip())
+            mem_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip())
             return f"{mem_bytes / (1024**3):.1f} GB"
         elif os_name == "Linux":
             out = subprocess.check_output(

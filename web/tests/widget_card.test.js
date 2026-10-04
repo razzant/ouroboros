@@ -13,6 +13,7 @@ import {
     WIDGET_START_MODES,
     withWidgetStartMode,
 } from '../modules/widget_card.js';
+import { WIDGET_WIDTH_STEPS } from '../modules/widget_size.js';
 
 function tab(render, overrides = {}) {
     return { key: 'demo:main', skill: 'demo', tab_id: 'main', title: 'Demo', render, ...overrides };
@@ -95,21 +96,44 @@ test('the status badge is honest about keep-alive: "Keeps running" only for a ru
     assert.equal(card.power.textContent, 'Start');
 });
 
-test('only framed cards carry Start/Stop and the launch-policy menu', () => {
+test('framed cards carry Start/Stop and the launch policy; every card carries the width steps', () => {
     assert.equal(isFramedWidget(tab({ kind: 'module', entry: 'widget.js' })), true);
     assert.equal(isFramedWidget(tab({ kind: 'iframe', route: 'view' })), true);
     assert.equal(isFramedWidget(tab({ kind: 'declarative', schema_version: 1, components: [] })), false);
-    assert.equal(renderWidgetCardControls(tab({ kind: 'declarative', schema_version: 1, components: [] })), '');
+    const declarative = renderWidgetCardControls(tab({ kind: 'declarative', schema_version: 1, components: [] }));
+    assert.doesNotMatch(declarative, /data-widget-power|data-widget-status|data-widget-start-mode|Launch policy/);
     const controls = renderWidgetCardControls(tab({ kind: 'module', entry: 'widget.js' }));
     // Exactly one primary control; the policy is a secondary menu of radio items.
     assert.equal((controls.match(/btn-primary/g) || []).length, 1);
     assert.match(controls, /data-widget-power>Start</);
     assert.match(controls, /class="ui-status" data-tone="neutral" data-widget-status hidden/);
-    assert.match(controls, /<dialog class="skills-card-menu-dialog ui-popup" role="menu"/);
+    for (const markup of [controls, declarative]) {
+        assert.match(markup, /<dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Widget options"/);
+        assert.match(markup, /aria-label="Widget options" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</);
+        // The width steps are one radio group; Reset is a plain item, never checked.
+        assert.match(markup, /<div role="group" aria-label="Size">/);
+        for (const { w, label } of WIDGET_WIDTH_STEPS) {
+            assert.match(markup, new RegExp(`role="menuitemradio"[^>]*data-widget-size="${w}" aria-checked="false"><span class="widgets-menu-check" aria-hidden="true">✓</span>${label}<`));
+        }
+        assert.match(markup, /role="menuitem" class="skills-menu-item widgets-menu-item" data-widget-size="reset"><span class="widgets-menu-check" aria-hidden="true"><\/span>Reset size</);
+        assert.match(markup, /data-widget-size-note hidden>Widths apply when the list is wide\.</);
+        assert.doesNotMatch(markup, /aria-checked="true"/);
+    }
+    assert.match(controls, /<div role="group" aria-label="Launch policy">/);
+    assert.ok(controls.indexOf('data-widget-start-mode') < controls.indexOf('data-widget-size'), 'the launch policy comes first');
     for (const mode of WIDGET_START_MODES) {
         assert.match(controls, new RegExp(`role="menuitemradio"[^>]*data-widget-start-mode="${mode}"`));
     }
-    assert.doesNotMatch(controls, /aria-checked="true"/);
+});
+
+test('a card menu is the same markup however many widgets the page shows', () => {
+    // The scale invariant (docs/DESIGN.md "Widgets board"): nothing in a card's
+    // label or menu depends on its neighbours, so 1 card and 18 cards read alike.
+    const one = renderWidgetCardControls(tab({ kind: 'module', entry: 'widget.js' }));
+    const many = Array.from({ length: 18 }, (_, i) => renderWidgetCardControls(
+        tab({ kind: 'module', entry: 'widget.js' }, { key: `skill${i}:main`, skill: `skill${i}` }),
+    ));
+    assert.ok(many.every((markup) => markup === one));
 });
 
 test('start-mode payload is a whole-map replace that keeps every other card', () => {

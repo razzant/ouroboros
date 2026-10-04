@@ -423,6 +423,13 @@ CURRENT_PRODUCER_CONTRACTS = {
     # voice (delegated, Presence, agent-to-agent) through native ACCESS_BLOCKED.
     "MAIN_NOTICE_BLOCKED": (True, "blocked"),
     "native:ACCESS_BLOCKED:MAIN_NOTICE_BLOCKED": (True, "blocked"),
+    # #1401: the task browser bridge's dispatched call that timed out publishes the
+    # native MCP_TIMEOUT code with the MCP_TOOL_TIMEOUT line (approved delta A.3).
+    # Its request guard's note rides a typed result as a host annotation, so the
+    # action keeps its own status; standalone, the line reads as the denial it reports.
+    "MCP_TOOL_TIMEOUT": (True, "timeout"),
+    "native:MCP_TIMEOUT:MCP_TOOL_TIMEOUT": (True, "timeout"),
+    "BROWSER_REQUEST_BLOCKED": (True, "blocked"),
 }
 
 

@@ -1,32 +1,36 @@
 import { apiClient } from './api_client.js';
 import { setInlineStatus } from './ui_primitives.js';
 
-/* Host startup is an immediate OS edit, separate from the /api/settings draft.
-   Re-read when Settings opens: the OS can change the same registration. */
+/* Startup & background: two immediate host controls, separate from the /api/settings draft.
+   Sign-in startup is the OS registration; keep-running is the host's own settings choice
+   (the desktop's first close may also set it). Both re-read when Settings opens, because the
+   OS or another client can change them meanwhile. */
 
-const NOTES = {
+const STARTUP_NOTES = {
     unavailable: 'Sign-in startup is unavailable on this host.',
     on: '',
     off: '',
     other_copy: 'This host starts Ouroboros at sign-in from a different entry (another copy, or one set up by hand). Turn this on to start this copy instead.',
     disabled_by_os: 'Turned off in the host operating system. Turn this on to enable it, or check the host’s startup settings if it stays disabled.',
 };
+const BACKGROUND_NOTES = {
+    unavailable: 'Keeping Ouroboros running after its window closes is unavailable on this host.',
+    on: '',
+    off: '',
+};
 
-export function bindAutostartControl(page) {
-    const section = page.querySelector('[data-autostart-settings]');
-    const box = section?.querySelector('[data-autostart-toggle]');
-    const status = section?.querySelector('[data-autostart-status]');
-    if (!section || !box) return () => {};
+function bindHostToggle({ container, box, status, notes, noun, read, write }) {
+    if (!container || !box) return null;
     let destroyed = false;
     let busy = false;
     let generation = 0;
 
     const paint = ({ state, reason }) => {
-        const known = Object.hasOwn(NOTES, state);
-        section.hidden = !known;
+        const known = Object.hasOwn(notes, state);
+        container.hidden = !known;
         box.checked = state === 'on';
         box.disabled = state === 'unavailable';
-        const note = known ? (reason || NOTES[state]) : '';
+        const note = known ? (reason || notes[state]) : '';
         setInlineStatus(status, note, note ? 'warn' : 'muted');
     };
 
@@ -34,14 +38,14 @@ export function bindAutostartControl(page) {
         if (busy || destroyed) return;
         const current = ++generation;
         try {
-            const snapshot = await apiClient.desktopAutostart();
+            const snapshot = await read();
             if (!destroyed && !busy && current === generation) paint(snapshot);
         } catch (error) {
             // Shown even before any state is known: a lasting read failure stays explained.
             if (destroyed || busy || current !== generation) return;
-            section.hidden = false;
+            container.hidden = false;
             box.disabled = true;
-            setInlineStatus(status, `Could not read the host startup entry: ${error.message}`, 'danger');
+            setInlineStatus(status, `Could not read the ${noun}: ${error.message}`, 'danger');
         }
     };
 
@@ -53,32 +57,59 @@ export function bindAutostartControl(page) {
         box.disabled = true;
         setInlineStatus(status, '', 'muted');
         try {
-            const snapshot = await apiClient.setDesktopAutostart(wanted);
+            const snapshot = await write(wanted);
             busy = false;
             if (!destroyed) paint(snapshot);
         } catch (error) {
-            // A refusal may land between the two OS registration writes: show what the OS now holds.
+            // A refusal may land between two writes: show what the host now holds.
             let snapshot;
-            try { snapshot = await apiClient.desktopAutostart(); } catch { /* current state is unknown */ }
+            try { snapshot = await read(); } catch { /* current state is unknown */ }
             busy = false;
             if (destroyed) return;
             if (snapshot === undefined) {
-                box.checked = !wanted; // last observed value, not a claim about the current OS registration
+                box.checked = !wanted; // last observed value, not a claim about the current host state
                 box.disabled = true;
-                setInlineStatus(status, `Could not change the host startup entry: ${error.message}. Current host state could not be read; reopen Settings to retry.`, 'danger');
+                setInlineStatus(status, `Could not change the ${noun}: ${error.message}. Current host state could not be read; reopen Settings to retry.`, 'danger');
             } else {
                 paint(snapshot);
-                setInlineStatus(status, `Could not change the host startup entry: ${error.message}`, 'danger');
+                setInlineStatus(status, `Could not change the ${noun}: ${error.message}`, 'danger');
             }
         }
     };
 
+    box.addEventListener('change', onChange);
+    return {
+        refresh,
+        dispose: () => {
+            destroyed = true;
+            box.removeEventListener('change', onChange);
+        },
+    };
+}
+
+export function bindAutostartControl(page) {
+    const section = page.querySelector('[data-autostart-settings]');
+    if (!section) return () => {};
+    const controls = [
+        bindHostToggle({
+            container: section, box: section.querySelector('[data-autostart-toggle]'),
+            status: section.querySelector('[data-autostart-status]'), notes: STARTUP_NOTES, noun: 'host startup entry',
+            read: () => apiClient.desktopAutostart(), write: (enabled) => apiClient.setDesktopAutostart(enabled),
+        }),
+        bindHostToggle({
+            container: section.querySelector('[data-background-row]'), box: section.querySelector('[data-background-toggle]'),
+            status: section.querySelector('[data-background-status]'), notes: BACKGROUND_NOTES, noun: 'background setting',
+            read: () => apiClient.desktopBackground(), write: (enabled) => apiClient.setDesktopBackground(enabled),
+        }),
+    ].filter(Boolean);
+    if (!controls.length) return () => {};
+
+    const refreshAll = () => controls.forEach((control) => { void control.refresh(); });
     const onPageShown = (event) => {
-        if (event.detail?.page === 'settings') void refresh();
+        if (event.detail?.page === 'settings') refreshAll();
     };
     const dispose = () => {
-        destroyed = true;
-        box.removeEventListener('change', onChange);
+        controls.forEach((control) => control.dispose());
         window.removeEventListener('ouro:page-shown', onPageShown);
         window.removeEventListener('pagehide', onPageHide);
     };
@@ -86,9 +117,8 @@ export function bindAutostartControl(page) {
         if (!event.persisted) dispose();
     };
 
-    box.addEventListener('change', onChange);
     window.addEventListener('ouro:page-shown', onPageShown);
     window.addEventListener('pagehide', onPageHide);
-    void refresh();
+    refreshAll();
     return dispose;
 }

@@ -5278,7 +5278,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    and writes the result ONLY as custom properties — `--masonry-h` on the list,
    `--masonry-w/-x/-y` on each card; these static rules apply them. Cards are
    positioned by transform in the owner's key order, so a reorder never moves a
-   DOM node (a moved <iframe> would reload). */
+   DOM node (a moved <iframe> would reload). The owner's column spans reach the
+   masonry plan, not these rules (docs/DESIGN.md "Widgets board"). */
 
 .widgets-list {
     position: relative;
@@ -5300,13 +5301,77 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     opacity: 0.68;
 }
 
-.widgets-card.drag-over {
+.widgets-card.drag-over,
+.widgets-card.resizing {
     border-color: var(--accent-45);
     box-shadow: 0 0 0 3px var(--accent-10);
 }
 
+/* While a width is dragged: no text selection, and frames ignore the pointer so
+   the drag keeps its events over them. */
+.widgets-list.resizing {
+    cursor: col-resize;
+    user-select: none;
+}
+
+.widgets-list.resizing iframe {
+    pointer-events: none;
+}
+
+/* The width handle: a thin strip on the card's right edge, the edge vocabulary
+   of the side-panel `.resize-handle`. A list too narrow for two columns
+   ignores widths, and a card no step can widen or narrow (the only card on the
+   board) is width-fixed: neither offers the handle; the card menu sets widths
+   everywhere. */
+.widgets-card-resize {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 8px;
+    padding: 0;
+    border: 0;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: transparent;
+    cursor: col-resize;
+    touch-action: none;
+}
+
+.widgets-card-resize:hover,
+.widgets-card.resizing .widgets-card-resize {
+    background: var(--accent-10);
+}
+
+.widgets-card-resize:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
+}
+
+.widgets-list[data-widget-layout="stack"] .widgets-card-resize,
+.widgets-card[data-widget-width-fixed] .widgets-card-resize {
+    display: none;
+}
+
+/* The board's live region: width changes are announced, not shown; a failed
+   save stays visible under the list (the shared status pair). */
+.widgets-arrange-status:not([data-tone="error"]) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+.widgets-arrange-status[data-tone="error"] {
+    display: block;
+    margin-top: 12px;
+}
+
 /* Each card is its own stacking context (transform + backdrop-filter), so an
-   open launch-policy menu would otherwise paint under a later sibling card. */
+   open card menu would otherwise paint under a later sibling card. */
 .widgets-card:has(.skills-card-menu-dialog[open]) {
     z-index: 1;
 }
@@ -5407,8 +5472,23 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     white-space: nowrap;
 }
 
+/* One check column, so a plain item (Reset size) lines up with the radios. */
+.widgets-menu-check {
+    flex: 0 0 auto;
+    width: 1em;
+}
+
 .widgets-menu-item[aria-checked="false"] .widgets-menu-check {
     visibility: hidden;
+}
+
+.widgets-menu-note {
+    max-width: 220px;
+    margin: 0;
+    padding: 0 10px 6px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--text-meta);
 }
 
 /* A stopped framed card stands in for its frame: same box, same declared

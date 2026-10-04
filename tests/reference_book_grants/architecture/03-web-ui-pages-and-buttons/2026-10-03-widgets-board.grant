@@ -1,0 +1,2 @@
+296
+The Widgets paragraph keeps the masonry and adds the widget_size key, that each card spans the owner's column count or else the author's span (DESIGN "Widgets board"), that a resize never moves a node either, and the merge-by-key width write.
