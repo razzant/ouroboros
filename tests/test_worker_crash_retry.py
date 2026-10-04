@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1205,6 +1206,7 @@ def _bridge_retry_ctx(root, task_id):
 
 
 @pytest.mark.serial  # Real marked processes (tests/conftest lane policy).
+@pytest.mark.skipif(sys.platform == "win32", reason="Detached environment-marker bridge custody is POSIX-only")
 @pytest.mark.parametrize("closure", ["confirmed", "unconfirmed", "scan_raises"])
 def test_confirmed_death_settles_bridge_scope_before_retry(tmp_path, monkeypatch, caplog, closure):
     import os

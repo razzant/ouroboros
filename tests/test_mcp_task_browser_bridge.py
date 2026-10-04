@@ -25,6 +25,7 @@ from tests._cancel_intents_shared import qenv as _qenv
 
 qenv = _qenv
 pytestmark = pytest.mark.serial  # Real subprocesses (tests/conftest lane policy).
+posix_bridge = pytest.mark.skipif(sys.platform == "win32", reason="Bridge transport and marker custody are POSIX-only")
 
 
 SERVER = r'''
@@ -170,6 +171,8 @@ def safety(monkeypatch):
 
 @pytest.fixture
 def manager(tmp_path, monkeypatch, policy, safety):
+    if sys.platform == "win32":
+        pytest.skip("Bridge transport and marker custody are POSIX-only")
     pytest.importorskip("mcp")
     from ouroboros import owner_pause
 
@@ -344,12 +347,34 @@ def test_ownerless_discovery_and_settings_probe_do_not_spawn(tmp_path):
     assert manager.test_server(_entry(script))["code"] == "MCP_TASK_OWNER_REQUIRED"
 
 
+def test_windows_bridge_refuses_before_process_or_socket_creation(tmp_path, monkeypatch):
+    from ouroboros import platform_layer
+
+    if sys.platform == "win32":
+        assert platform_layer.IS_WINDOWS  # Exercise the actual platform refusal on Windows CI.
+    else:
+        monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Windows refusal must precede process/container or socket creation")
+
+    # Discovery may read prior scope membership; this constructs no process or socket.
+    forbidden.for_scope = mcp_task_sessions.ProcessContainer.for_scope
+    monkeypatch.setattr(mcp_task_sessions, "ProcessContainer", forbidden)
+    monkeypatch.setattr(mcp_task_sessions, "_private_socket_dir", forbidden)
+    cfg = mcp_client.normalize_server_config(_entry(tmp_path / "must-not-run.py"))
+    with pytest.raises(RuntimeError, match="not yet available on Windows"):
+        mcp_task_sessions.discover(cfg, _ctx(tmp_path), 15)
+
+
 # -- the request guard: the requests Playwright routes ----------------------------
 
 
 @pytest.fixture
 def guarded(tmp_path, monkeypatch, safety):
     """The actual request policy (no URL stub) and a proven Ouroboros endpoint."""
+    if sys.platform == "win32":
+        pytest.skip("Bridge transport and marker custody are POSIX-only")
     pytest.importorskip("mcp")
     from ouroboros import config, owner_pause
     from ouroboros.server_process import record_service_binding
@@ -560,6 +585,7 @@ def test_guard_script_routes_each_request_on_the_host_verdict(guarded, tmp_path)
 # -- custody: task end, reopen, Panic and cancel ----------------------------------
 
 
+@posix_bridge
 def test_task_end_reaps_detached_descendant_and_ends_the_attempt(tmp_path, monkeypatch, policy, safety):
     pytest.importorskip("mcp")
     from ouroboros import loop_budget
@@ -586,6 +612,7 @@ def test_task_end_reaps_detached_descendant_and_ends_the_attempt(tmp_path, monke
         mcp_task_sessions.discover(cfg, ctx, 15)
 
 
+@posix_bridge
 def test_unconfirmed_close_refuses_reopen_by_a_later_attempt(tmp_path, policy, safety):
     pytest.importorskip("mcp")
     cfg, ctx = mcp_client.normalize_server_config(_entry(_server(tmp_path))), _ctx(tmp_path)
@@ -607,6 +634,7 @@ def test_unconfirmed_close_refuses_reopen_by_a_later_attempt(tmp_path, policy, s
         mcp_task_sessions.call(cfg, "mcp_browser__browser_snapshot", "browser_snapshot", {}, retry, 10)
 
 
+@posix_bridge
 def test_live_member_of_an_earlier_process_refuses_reopen(tmp_path, policy, safety):
     pytest.importorskip("mcp")
     cfg, ctx = mcp_client.normalize_server_config(_entry(_server(tmp_path))), _ctx(tmp_path)
@@ -630,6 +658,7 @@ def test_live_member_of_an_earlier_process_refuses_reopen(tmp_path, policy, safe
         mcp_task_sessions.stop_task(retry)
 
 
+@posix_bridge
 def test_panic_finds_members_without_a_ledger_row(tmp_path, monkeypatch, policy, safety):
     pytest.importorskip("mcp")
     from ouroboros import server_control
@@ -671,6 +700,7 @@ def test_panic_finds_members_without_a_ledger_row(tmp_path, monkeypatch, policy,
         mcp_task_sessions.stop_task(ctx)
 
 
+@posix_bridge
 def test_running_task_cancel_closes_bridge_after_worker_death(qenv, monkeypatch, policy, safety):
     pytest.importorskip("mcp")
     cfg, ctx = mcp_client.normalize_server_config(_entry(_server(qenv.drive))), _ctx(qenv.drive)
@@ -704,6 +734,7 @@ def test_unconfirmed_bridge_scan_never_undoes_a_confirmed_cancel(qenv, monkeypat
 # -- opt-in: the actual upstream package, headless --------------------------------
 
 
+@posix_bridge
 def test_actual_upstream_playwright_mcp_headless(tmp_path, monkeypatch, policy, safety):
     """Set OUROBOROS_PLAYWRIGHT_MCP_CLI (cli.js of @playwright/mcp@0.0.82) and
     OUROBOROS_PLAYWRIGHT_HEADLESS_SHELL (a chrome-headless-shell binary, which has
@@ -756,6 +787,8 @@ def upstream(tmp_path, monkeypatch, safety):
     """The actual upstream package and real request policy against two local sites:
     ``plain`` is an ordinary loopback app, ``ours`` a proven Ouroboros endpoint
     recording every request it receives. Opt-in, as the test above."""
+    if sys.platform == "win32":
+        pytest.skip("Bridge transport and marker custody are POSIX-only")
     import http.server
     import shutil
     import threading
