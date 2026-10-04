@@ -137,7 +137,7 @@ the answer.
   sections alike; the
   fingerprint-keyed render cache in `ouroboros/_usage_rows_memo.py`, held while
   its input is unchanged and invalidated only by advance/refold, never by TTL;
-  the `gateway/task_list_scan.py` stat-invalidated result memo and the
+  the `ouroboros/task_result_scan.py` stat-invalidated memo and the
   task-event SSE v2 cursor discipline, whose rules are stated once in
   ARCHITECTURE §3 "Chat and Projects".
 
