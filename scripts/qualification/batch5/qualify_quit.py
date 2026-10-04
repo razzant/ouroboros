@@ -23,6 +23,23 @@ import traceback
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+API_DIAGNOSTIC_PATH = None
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def stage(root, report, name, **facts):
+    event = {"stage": name, "monotonic": time.monotonic(), "wall_time": time.time(), **facts}
+    write_json(root / "progress.json", {**report, **event})
+    with (root / "stages.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    print("QUALIFICATION_STAGE " + json.dumps(event, ensure_ascii=False), flush=True)
+
+
+def record_api(facts):
+    if API_DIAGNOSTIC_PATH is not None:
+        with API_DIAGNOSTIC_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"wall_time": time.time(), **facts}, ensure_ascii=False) + "\n")
+
 
 def write_json(path, value):
     Path(path).write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -93,15 +110,16 @@ def isolated_env(source, run_root, short_temp, parent_env, windows):
 def wait_until(fn, timeout, label):
     deadline = time.monotonic() + timeout
     last = None
+    last_error = None
     while time.monotonic() < deadline:
         try:
             last = fn()
             if last:
                 return last
-        except (OSError, ValueError, urllib.error.URLError):
-            pass
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(0.2)
-    raise RuntimeError(f"timeout waiting for {label}; last={last!r}")
+    raise RuntimeError(f"timeout waiting for {label}; last={last!r}; last_error={last_error!r}")
 
 
 def api(port, route, payload=None):
@@ -110,8 +128,20 @@ def api(port, route, payload=None):
         f"http://127.0.0.1:{port}{route}", data=data,
         headers={"Content-Type": "application/json"} if data else {},
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return json.loads(response.read().decode("utf-8"))
+    facts = {"method": "GET" if payload is None else "POST", "route": route,
+             "url": request.full_url, "proxy": "disabled for this numeric-loopback fixture"}
+    try:
+        with LOOPBACK_OPENER.open(request, timeout=5 if payload is None else 60) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            record_api({**facts, "status": response.status, "body": body})
+            return json.loads(body)
+    except urllib.error.HTTPError as exc:
+        record_api({**facts, "status": exc.code,
+                    "body": exc.read().decode("utf-8", errors="replace"), "error": str(exc)})
+        raise
+    except (OSError, ValueError) as exc:
+        record_api({**facts, "error": f"{type(exc).__name__}: {exc}"})
+        raise
 
 
 class HeldModel:
@@ -162,9 +192,11 @@ class HeldModel:
 
 
 def child(args):
+    global API_DIAGNOSTIC_PATH
     root = args.run_root.resolve()
     source = args.source.resolve()
     data_root = root / "data"
+    API_DIAGNOSTIC_PATH = root / "api-observations.jsonl"
     sys.path.insert(0, str(source))
     from ouroboros.provider_models import (
         ACTIVE_MODEL_SETTING_KEYS, ALL_PROVIDER_CREDENTIAL_KEYS, LEGACY_MODEL_SETTING_KEYS,
@@ -205,6 +237,26 @@ def child(args):
     process_cohort = None
     monitor_stop = threading.Event()
     monitor = None
+    capture_stop = threading.Event()
+    capture_thread = None
+    captured_processes = {}
+    capture_errors = []
+    def capture_server_tree():
+        if proc is None or sys.platform != "win32":
+            return
+        import psutil
+        try:
+            server_process = psutil.Process(proc.pid)
+            for process in [server_process, *server_process.children(recursive=True)]:
+                try:
+                    captured_processes[process.pid] = {"pid": process.pid, "birth": process.create_time(),
+                                                      "name": process.name()}
+                except psutil.NoSuchProcess:
+                    pass
+        except psutil.NoSuchProcess:
+            pass
+        except Exception as exc:
+            capture_errors.append(f"{type(exc).__name__}: {exc}")
     report = {"platform": platform.platform(), "python": sys.version,
               "interpreter": sys.executable, "native_windows": sys.platform == "win32",
               "startup_resources": resource_facts(),
@@ -214,6 +266,7 @@ def child(args):
               "entry": "Background.request_quit -> callback -> launcher.stop_agent",
               "final_orphan_port_sweep": "NOT_RUN: host-global port sweep excluded by fixture",
               "native_menu_click": "NOT_RUN", "packaged_app": "NOT_RUN"}
+    stage(root, report, "driver_ready", source_sha=report["source_sha"])
     try:
         if args.require_windows and sys.platform != "win32":
             raise RuntimeError("native Windows qualification cannot run on this platform")
@@ -227,9 +280,22 @@ def child(args):
         report["launcher_job_created"] = launcher._agent_job is not None
         if sys.platform == "win32" and (proc.stdin is None or launcher._agent_job is None):
             raise RuntimeError("native launcher did not retain both the Job and private Quit pipe")
-        write_json(root / "progress.json", {**report, "stage": "server_started"})
-        wait_until(lambda: api(port, "/api/state").get("supervisor_ready") is True,
-                   args.startup_timeout, "supervisor_ready")
+        def observe_server_tree():
+            while not capture_stop.is_set():
+                capture_server_tree()
+                capture_stop.wait(1)
+        capture_thread = threading.Thread(target=observe_server_tree, daemon=True)
+        capture_thread.start()
+        stage(root, report, "server_started", server_pid=proc.pid)
+        def server_ready():
+            if proc.poll() is not None:
+                raise RuntimeError(f"server exited before readiness with {proc.returncode}")
+            state = api(port, "/api/state")
+            if state.get("supervisor_error"):
+                raise RuntimeError(f"server reported supervisor_error: {state['supervisor_error']}")
+            return state.get("supervisor_ready") is True
+        wait_until(server_ready, args.startup_timeout, "supervisor_ready")
+        stage(root, report, "supervisor_ready")
         ready = wait_until(
             lambda: (found if len(found := {row["pid"] for row in rows(data_root / "logs/events.jsonl")
                                            if row.get("type") == "worker_ready"}) >= args.workers else None),
@@ -237,6 +303,7 @@ def child(args):
         worker_pids = sorted(ready)
         report["worker_pids"] = worker_pids
         report["workers_ready"] = len(worker_pids)
+        stage(root, report, "workers_ready", workers_ready=len(worker_pids))
         for index in range(args.tasks):
             response = api(port, "/api/tasks", {
                 "description": f"Isolated lifecycle qualification task {index}: wait for your loopback model.",
@@ -248,7 +315,7 @@ def child(args):
                 raise RuntimeError(f"task admission failed: {response}")
             task_ids.append(task_id)
         report["task_ids"] = task_ids
-        write_json(root / "progress.json", {**report, "stage": "tasks_submitted"})
+        stage(root, report, "tasks_submitted", tasks=len(task_ids))
         if task_ids:
             wait_until(lambda: len(model.calls) >= len(task_ids), 180, "all tasks physically in loopback model")
             before = read_json(data_root / "state/queue_snapshot.json", {})
@@ -274,7 +341,7 @@ def child(args):
         request = socket.create_connection(("127.0.0.1", port), timeout=5)
         request.sendall(b"POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                         b"Content-Type: application/json\r\nContent-Length: 100000\r\n\r\n{\"OUROBOROS_MODEL\":\"")
-        write_json(root / "progress.json", {**report, "stage": "quit_ready", "provider_calls": model.calls})
+        stage(root, report, "quit_ready", provider_calls=model.calls)
         def exit_launcher():
             launcher._shutdown_event.set()
             launcher.stop_agent()
@@ -305,6 +372,7 @@ def child(args):
         background.request_quit()
         report["quit_elapsed_sec"] = time.monotonic() - started
         report["server_exit"] = proc.poll()
+        stage(root, report, "quit_returned", quit_elapsed_sec=report["quit_elapsed_sec"], server_exit=proc.poll())
         report["workers_surviving_after_quit"] = [pid for pid in worker_pids if pid_is_alive(pid)]
         report["server_shutdown"] = [row for row in rows(data_root / "logs/supervisor.jsonl")
                                      if row.get("type") == "server_shutdown"]
@@ -328,6 +396,7 @@ def child(args):
     except Exception:
         report["error"] = traceback.format_exc()
         report["passed"] = False
+        stage(root, report, "failed", error=report["error"])
     finally:
         # Preserve the pre-cleanup observation even if fixture cleanup later raises.
         write_json(root / "result-before-fixture-cleanup.json", report)
@@ -343,6 +412,8 @@ def child(args):
                 pass
         cleanup_errors = []
         try:
+            capture_server_tree()
+            stage(root, report, "fixture_cleanup_started")
             if proc and proc.poll() is None:
                 report["cleanup_required"] = True
                 launcher.stop_agent()
@@ -352,7 +423,14 @@ def child(args):
             cleanup_errors.append(traceback.format_exc())
         finally:
             model.close()
+            capture_stop.set()
+            if capture_thread is not None:
+                capture_thread.join(5)
+        report["server_returncode_after_cleanup"] = proc.poll() if proc is not None else None
+        report["captured_server_tree"] = sorted(captured_processes.values(), key=lambda row: row["pid"])
+        report["server_tree_capture_errors"] = capture_errors
         captured = set(worker_pids)
+        captured.update(captured_processes)
         if proc is not None:
             captured.add(proc.pid)
         if process_cohort is not None:
@@ -373,6 +451,9 @@ def child(args):
         if report["source_sha_after"] != report["source_sha"]:
             report["passed"] = False
         write_json(root / "result.json", report)
+        stage(root, report, "complete", passed=report["passed"],
+              remaining_pids=report["remaining_pids_after_fixture_cleanup"],
+              server_returncode=report["server_returncode_after_cleanup"])
     print(json.dumps({k: report.get(k) for k in ["passed", "source_sha", "workers_ready", "running_before",
           "quit_elapsed_sec", "server_exit", "workers_surviving_after_quit", "error"]}), flush=True)
     return 0 if report["passed"] else 1
@@ -404,7 +485,7 @@ def main():
     write_json(args.run_root / "driver_provenance.json", {
         "expected_sha": args.expected_sha, "driver": str(Path(__file__).resolve()),
         "scripts_sha256": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                            for name in ("qualify_quit.py", "process_fixture.py")},
+                            for name in ("qualify_quit.py", "process_fixture.py", "sitecustomize.py")},
         "runner_platform": platform.platform(), "interpreter": sys.executable,
     })
     completed = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--child", "--source", str(args.source),
