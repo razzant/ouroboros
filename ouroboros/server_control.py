@@ -97,6 +97,55 @@ class PanicIngress:
         return True
 
 
+def _spawn_restart_successor(
+    argv: list[str], env: dict[str, str], repo_dir: pathlib.Path, *,
+    new_process_group: bool = True,
+) -> None:
+    from ouroboros.config import DATA_DIR
+    from ouroboros.process_custody import spawn_supervised
+    from ouroboros.delegate_recovery import (
+        PLANNED_RESTART_TRANSACTION_ENV, WINDOWS_RESTART_PARENT_HANDLE_ENV,
+        bind_windows_restart_successor, open_windows_restart_parent,
+    )
+
+    root = pathlib.Path(DATA_DIR)
+    env.pop(WINDOWS_RESTART_PARENT_HANDLE_ENV, None)
+    transaction_id = env.get(PLANNED_RESTART_TRANSACTION_ENV, "")
+    observing = os.name == "nt" and not new_process_group and bool(transaction_id)
+    kernel, parent_handle = open_windows_restart_parent(root, transaction_id) if observing else (None, 0)
+    try:
+        popen_kwargs = {}
+        if observing:
+            import subprocess
+
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.lpAttributeList = {"handle_list": [parent_handle]}
+            popen_kwargs = {"startupinfo": startupinfo, "close_fds": True}
+            env[WINDOWS_RESTART_PARENT_HANDLE_ENV] = str(parent_handle)
+        proc = spawn_supervised(
+            argv,
+            drive_root=root,
+            # The replacement is the next server generation. Session scope would
+            # make its startup reap treat it as a foreign-session process.
+            purpose="server_restart_fallback",
+            scope="daemon",
+            cwd=str(repo_dir),
+            env=env,
+            new_process_group=new_process_group,
+            **popen_kwargs,
+        )
+        if observing:
+            try:
+                bind_windows_restart_successor(root, transaction_id, proc.pid)
+            except Exception:
+                proc.terminate()
+                proc.wait(timeout=5)
+                raise
+    finally:
+        if parent_handle:
+            kernel.CloseHandle(parent_handle)
+
+
 def restart_current_process(
     host: str,
     port: int,
@@ -105,7 +154,7 @@ def restart_current_process(
     log: Any,
     owner_initiated: bool = False,
 ) -> None:
-    """Re-exec this server process.
+    """Transfer direct server mode to a replacement process.
 
     ``owner_initiated`` marks the restart the OWNER asked for (the chat Restart
     button, and the control endpoints that restart on the owner's behalf). Only
@@ -148,29 +197,27 @@ def restart_current_process(
     except Exception:
         raw_argv = sys.argv
     argv = [sys.executable, *raw_argv]
+    from ouroboros import platform_layer
+
+    if platform_layer.IS_WINDOWS:
+        # Windows CRT exec is spawn-plus-exit; use the custodied spawn directly.
+        # Keep its console group so Ctrl+C still reaches the replacement.
+        log.info("Starting replacement direct server mode on %s:%d", desired_host, port)
+        try:
+            _spawn_restart_successor(argv, env, repo_dir, new_process_group=False)
+        except Exception:
+            log.exception("Spawned restart fallback failed; no successor was started.")
+            raise
+        log.info("Spawned replacement server process for Windows direct restart.")
+        return
+
     log.info("Re-executing direct server mode on %s:%d", desired_host, port)
     try:
         os.execvpe(sys.executable, argv, env)
     except Exception:
         log.exception("Direct re-exec failed; attempting spawned restart fallback.")
         try:
-            from ouroboros.config import DATA_DIR
-            from ouroboros.process_custody import spawn_supervised
-
-            spawn_supervised(
-                argv,
-                drive_root=pathlib.Path(DATA_DIR),
-                # daemon, NOT session: the replacement IS the next server
-                # generation. A session-scoped entry carries this dying
-                # generation's session id, so the new server's startup reap
-                # would see it as a foreign-session process and SIGKILL itself.
-                # daemon scope is always a reaper survivor (launcher-managed
-                # lifecycle), which is correct for a long-lived top-level server.
-                purpose="server_restart_fallback",
-                scope="daemon",
-                cwd=str(repo_dir),
-                env=env,
-            )
+            _spawn_restart_successor(argv, env, repo_dir)
             log.info("Spawned replacement server process after exec failure.")
         except Exception:
             log.exception("Spawned restart fallback failed; no successor was started.")

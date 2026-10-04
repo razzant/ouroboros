@@ -531,9 +531,9 @@ def test_delivery_binds_published_bytes_to_submitted_digest(tmp_path, monkeypatc
 
     def command(argv, **_kwargs):
         assert argv[:1] == ["docker"] and "exec" in argv
-        # This injected command observes the host-shaped argv; the benchmark
-        # itself uses POSIX mounts, while this byte-custody test runs on Windows too.
-        assert str(pathlib.Path("/workspace/final.poc").resolve()) in argv
+        # These argv paths are in the Linux container, not the host filesystem.
+        # Host Path.resolve() would turn them into drive paths on Windows.
+        assert argv[-3:] == ["bash", "/workspace/submit.sh", "/workspace/final.poc"]
         submitted.append(markers[0].read_bytes())
         if change == "changed_back_after_submit":
             markers[0].write_bytes(original)

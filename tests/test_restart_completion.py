@@ -1,11 +1,13 @@
 """The actual main/watchdog composition retains cleanup before either transfer."""
 from contextlib import contextmanager
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -129,6 +131,169 @@ def test_restart_fallback_runs_pin_handoff_before_retained_executor_cleanup(monk
     assert calls[3][1] == calls[4][1] == {"wait": False}
 
 
+def test_direct_restart_uses_custodied_spawn_on_windows_and_exec_on_posix(monkeypatch, tmp_path):
+    from ouroboros import config, delegate_recovery, platform_layer, process_custody, server_control
+    from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["server.py", "--port", "9123"])
+    monkeypatch.setenv(PLANNED_RESTART_TRANSACTION_ENV, "planned-same-attempt")
+    monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", "old-repo")
+    monkeypatch.delenv("OUROBOROS_SERVER_REEXEC_ARGV_JSON", raising=False)
+    calls = []
+    handle = 0x123456789
+    kernel = SimpleNamespace(CloseHandle=lambda value: calls.append(("close_handle", value)))
+    monkeypatch.setattr(delegate_recovery, "open_windows_restart_parent",
+                        lambda root, tx: (kernel, handle) if (root, tx) == (
+                            tmp_path, "planned-same-attempt") else pytest.fail("wrong restart transaction"))
+    monkeypatch.setattr(delegate_recovery, "bind_windows_restart_successor",
+                        lambda root, tx, pid: calls.append(("bind", root, tx, pid)))
+
+    def spawn(cmd, **kwargs):
+        calls.append(("spawn", cmd, kwargs))
+        return SimpleNamespace(pid=24680)
+
+    def execvpe(executable, argv, env):
+        calls.append(("exec", executable, argv, env))
+
+    monkeypatch.setattr(process_custody, "spawn_supervised", spawn)
+    monkeypatch.setattr(server_control.os, "execvpe", execvpe)
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
+    server_control.restart_current_process("127.0.0.1", 9123, repo_dir=tmp_path,
+                                           log=logging.getLogger("test"))
+    _, cmd, kwargs = calls.pop(0)
+    assert calls == ([
+        ("bind", tmp_path, "planned-same-attempt", 24680), ("close_handle", handle)
+    ] if os.name == "nt" else [])
+    if os.name == "nt":
+        assert kwargs["startupinfo"].lpAttributeList == {"handle_list": [handle]}
+        assert kwargs["close_fds"] is True
+        assert kwargs["env"][delegate_recovery.WINDOWS_RESTART_PARENT_HANDLE_ENV] == str(handle)
+    calls.clear()
+    assert cmd == [sys.executable, "server.py", "--port", "9123"]
+    assert kwargs["drive_root"] == tmp_path
+    assert kwargs["purpose"] == "server_restart_fallback"
+    assert kwargs["scope"] == "daemon"
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["new_process_group"] is False
+    assert kwargs["env"][PLANNED_RESTART_TRANSACTION_ENV] == "planned-same-attempt"
+    assert kwargs["env"]["OUROBOROS_SERVER_PORT"] == "9123"
+    assert "OUROBOROS_MANAGED_BY_LAUNCHER" not in kwargs["env"]
+    assert "OUROBOROS_MANAGED_REPO_DIR" not in kwargs["env"]
+
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)
+    server_control.restart_current_process("127.0.0.1", 9123, repo_dir=tmp_path,
+                                           log=logging.getLogger("test"))
+    assert len(calls) == 1 and calls[0][0] == "exec"
+    _, executable, argv, env = calls[0]
+    assert executable == sys.executable and argv == cmd
+    assert env[PLANNED_RESTART_TRANSACTION_ENV] == "planned-same-attempt"
+    assert env["OUROBOROS_SERVER_PORT"] == "9123"
+
+
+@pytest.mark.parametrize("failure", ["spawn", "bind"])
+def test_windows_direct_restart_spawn_or_binding_failure_cannot_ack(monkeypatch, tmp_path, failure):
+    """Portable Popen seam: the native STARTUPINFO/HANDLE transfer needs Windows CI."""
+    from ouroboros import config, delegate_recovery, process_custody, server_control
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_control, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(subprocess, "STARTUPINFO", lambda: SimpleNamespace(), raising=False)
+    tx = {"transaction_id": "planned", "status": "prepared", "supervisor_pid": os.getpid(),
+          "task_ids": ["wait-a"]}
+    delegate_recovery._write_restart_transaction(tmp_path, tx)
+    handle = 0x123456789  # Above DWORD: startup handle list and env must retain all bits.
+    kernel = SimpleNamespace(closed=[], CloseHandle=lambda value: kernel.closed.append(value))
+    monkeypatch.setattr(delegate_recovery, "open_windows_restart_parent", lambda *_: (kernel, handle))
+
+    child = SimpleNamespace(pid=24680, terminated=False, waited=False)
+    child.terminate = lambda: setattr(child, "terminated", True)
+    child.wait = lambda timeout: setattr(child, "waited", timeout == 5)
+
+    def spawn(_argv, **kwargs):
+        assert kwargs["new_process_group"] is False
+        assert kwargs["startupinfo"].lpAttributeList == {"handle_list": [handle]}
+        assert kwargs["close_fds"] is True
+        assert kwargs["env"][delegate_recovery.WINDOWS_RESTART_PARENT_HANDLE_ENV] == str(handle)
+        if failure == "spawn":
+            raise OSError("spawn refused")
+        return child
+
+    monkeypatch.setattr(process_custody, "spawn_supervised", spawn)
+    if failure == "bind":
+        monkeypatch.setattr(delegate_recovery, "bind_windows_restart_successor",
+                            lambda *_: (_ for _ in ()).throw(OSError("binding refused")))
+    with pytest.raises(OSError, match="spawn refused" if failure == "spawn" else "binding refused"):
+        server_control._spawn_restart_successor(
+            [sys.executable, "server.py"],
+            {delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV: "planned"},
+            tmp_path, new_process_group=False,
+        )
+    assert kernel.closed == [handle]
+    assert child.terminated is (failure == "bind")
+    assert child.waited is (failure == "bind")
+    assert delegate_recovery._read_restart_transaction(tmp_path, "planned")["status"] == "prepared"
+
+
+def test_windows_direct_restart_parent_and_successor_identity_are_bound(monkeypatch, tmp_path):
+    from ouroboros import delegate_recovery, platform_layer
+
+    tx = {"transaction_id": "planned", "status": "prepared", "supervisor_pid": os.getpid(),
+          "task_ids": ["wait-a"]}
+    delegate_recovery._write_restart_transaction(tmp_path, tx)
+    from ouroboros.utils import atomic_write_json
+    atomic_write_json(delegate_recovery._active_restart_transaction_path(tmp_path),
+                      {"transaction_id": "planned", "supervisor_pid": os.getpid()})
+
+    handle = 0x123456789
+    birth = (1 << 32) | 12345
+
+    class Kernel:
+        def __init__(self):
+            self.closed = []
+
+        def OpenProcess(self, access, inherit, pid):
+            assert (access, inherit, pid) == (0x101000, True, os.getpid())
+            return handle
+
+        def GetProcessId(self, handle):
+            assert handle == 0x123456789
+            return os.getpid()
+
+        def GetProcessTimes(self, handle, created, *_rest):
+            created._obj.dwLowDateTime = 12345
+            created._obj.dwHighDateTime = 1
+            return True
+
+        def CloseHandle(self, handle):
+            self.closed.append(handle)
+
+    kernel = Kernel()
+    monkeypatch.setattr(delegate_recovery, "_windows_restart_kernel32", lambda: kernel)
+    assert delegate_recovery.open_windows_restart_parent(tmp_path, "planned") == (kernel, handle)
+    monkeypatch.setattr(platform_layer, "process_start_time", lambda pid: "win-filetime:67890")
+    delegate_recovery.bind_windows_restart_successor(tmp_path, "planned", 24680)
+    observed = delegate_recovery._read_restart_transaction(tmp_path, "planned")
+    assert observed["direct_spawn_parent_birth"] == f"win-filetime:{birth}"
+    assert (observed["direct_spawn_successor_pid"], observed["direct_spawn_successor_birth"]) == (
+        24680, "win-filetime:67890")
+    assert observed["status"] == "prepared" and kernel.closed == []
+
+
+def test_windows_direct_restart_never_treats_same_pid_token_as_exec(monkeypatch, tmp_path):
+    from ouroboros import delegate_recovery, platform_layer
+
+    delegate_recovery._write_restart_transaction(tmp_path, {
+        "transaction_id": "planned", "status": "prepared", "supervisor_pid": os.getpid(),
+        "task_ids": ["wait-a"],
+    })
+    monkeypatch.setenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, "planned")
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
+    delegate_recovery._ack_direct_exec_successor(tmp_path)
+    assert delegate_recovery._read_restart_transaction(tmp_path, "planned")["status"] == "prepared"
+
+
 @pytest.mark.parametrize("failure", ["", "fallback", "cleanup", "reexec"],
                          ids=["reexec-ok", "spawn-fallback-ok", "cleanup-error", "reexec-error"])
 @pytest.mark.parametrize("uvicorn_returns", [False, True], ids=["held", "returned"])
@@ -144,10 +309,16 @@ from types import SimpleNamespace
 receipt = pathlib.Path(sys.argv[1])
 failure, uvicorn_returns = sys.argv[2], sys.argv[3] == "returned"
 if os.environ.get("OURO_TEST_SUCCESSOR"):
-    from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
+    from ouroboros.delegate_recovery import (PLANNED_RESTART_TRANSACTION_ENV,
+        _ack_direct_exec_successor, _read_restart_transaction)
+    from ouroboros.config import DATA_DIR
+    token = os.environ.get(PLANNED_RESTART_TRANSACTION_ENV)
+    _ack_direct_exec_successor(DATA_DIR)
     receipt.write_text(json.dumps({
         "pid": os.getpid(), "previous_pid": int(os.environ["OURO_TEST_SUCCESSOR"]),
-        "transaction": os.environ.get(PLANNED_RESTART_TRANSACTION_ENV),
+        "transaction": token,
+        "transaction_status": _read_restart_transaction(DATA_DIR, token or "").get("status"),
+        "ack_source": _read_restart_transaction(DATA_DIR, token or "").get("ack_source"),
         "port": os.environ.get("OUROBOROS_SERVER_PORT"),
         "cleanup": os.environ.get("OURO_TEST_CLEANUP"),
     }), encoding="utf-8")
@@ -155,6 +326,14 @@ if os.environ.get("OURO_TEST_SUCCESSOR"):
 
 import server
 import supervisor.update_merge
+from ouroboros import delegate_recovery
+from ouroboros.utils import atomic_write_json
+transaction = {"transaction_id": "physical-handoff", "status": "prepared",
+               "supervisor_pid": os.getpid(), "task_ids": ["held-wait"]}
+delegate_recovery._write_restart_transaction(server.DATA_DIR, transaction)
+active = delegate_recovery._active_restart_transaction_path(server.DATA_DIR)
+active.parent.mkdir(parents=True, exist_ok=True)
+atomic_write_json(active, {"transaction_id": "physical-handoff", "supervisor_pid": os.getpid()})
 class DrainEvent(threading.Event):
     def wait(self, timeout=None):
         return super().wait(0.02 if timeout == 30 else timeout)
@@ -194,12 +373,13 @@ server.write_port_file = lambda *args: None
 server.uvicorn.Config = lambda *args, **kwargs: None
 server._SignalStopServer = HeldServer
 server._emergency_process_cleanup = cleanup
-if failure in {"reexec", "fallback"}:
+if failure in {"reexec", "fallback"} or (os.name == "nt" and not failure):
     from ouroboros import server_control, process_custody
-    server_control.os.execvpe = reexec_failure
+    if failure in {"reexec", "fallback"}:
+        server_control.os.execvpe = reexec_failure
     if failure == "reexec":
         process_custody.spawn_supervised = reexec_failure
-    else:
+    elif os.name != "nt":
         spawn = process_custody.spawn_supervised
         def joined_spawn(*args, **kwargs):
             child = spawn(*args, **kwargs)
@@ -222,9 +402,20 @@ sys.exit(server.main())
         assert "fixture " + failure + " failure" in result.stderr
         assert not receipt.exists()
         return
-    assert result.returncode == (42 if failure == "fallback" else 0), result.stdout + result.stderr
+    assert result.returncode == (42 if failure == "fallback" or (os.name == "nt" and not failure) else 0), result.stdout + result.stderr
+    if os.name == "nt":
+        deadline = time.monotonic() + 10
+        while not receipt.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
     observed = json.loads(receipt.read_text(encoding="utf-8"))
     assert observed["transaction"] == "physical-handoff"
     assert observed["port"] == "9123" and observed["cleanup"] == "completed"
-    if os.name != "nt":
-        assert (observed["pid"] == observed["previous_pid"]) is (failure != "fallback")
+    assert (observed["pid"] == observed["previous_pid"]) is (not failure and os.name != "nt")
+    if os.name == "nt":
+        assert (observed["transaction_status"], observed["ack_source"]) == (
+            "normal_exit_acknowledged", "windows_direct_parent_handle")
+    elif not failure:
+        assert (observed["transaction_status"], observed["ack_source"]) == (
+            "normal_exit_acknowledged", "direct_exec_successor")
+    else:
+        assert observed["transaction_status"] == "prepared"
