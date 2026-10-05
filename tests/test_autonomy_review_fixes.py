@@ -82,9 +82,11 @@ class ReachedExec(BaseException):
 
 def direct_exec_environment(monkeypatch, root):
     import server
+    from ouroboros import platform_layer
     import ouroboros.server_control as control
 
     captured = {}
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)  # Keep this fixture on the mocked exec seam.
     monkeypatch.setattr(server, "DATA_DIR", root)
     monkeypatch.setattr(server, "_owner_restart_requested", threading.Event())
     monkeypatch.setenv("OUROBOROS_SERVER_HOST", "127.0.0.1")

@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from ouroboros import config, local_model, server_process
+from ouroboros import config, local_model, platform_layer, server_process
 from ouroboros.gateway import settings
 from ouroboros.server_control import restart_current_process
 from ouroboros.server_entrypoint import parse_server_args
@@ -123,6 +123,7 @@ def test_actual_main_captures_source_after_binding(applied_host, tmp_path, monke
 @pytest.mark.parametrize("original_host", [None, "", "0.0.0.0"])
 @pytest.mark.parametrize("explicit_cli", [False, True])
 def test_two_settings_restarts_do_not_invent_environment_authority(monkeypatch, tmp_path, original_host, explicit_cli):
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)  # Exercise the mocked exec seam on every host.
     saved = {"OUROBOROS_SERVER_HOST": "127.0.0.2"}
     monkeypatch.setattr(config, "load_settings", lambda: saved)
     if original_host is None:
@@ -149,6 +150,7 @@ def test_two_settings_restarts_do_not_invent_environment_authority(monkeypatch, 
 
 
 def test_public_cli_reexec_argv_and_environment_override_remain_intact(monkeypatch, tmp_path):
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)  # Exercise the mocked exec seam on every host.
     argv = ["-m", "ouroboros", "server", "--host", "0.0.0.0"]
     monkeypatch.setenv("OUROBOROS_SERVER_REEXEC_ARGV_JSON", json.dumps(argv))
     monkeypatch.setenv("OUROBOROS_SERVER_HOST", "0.0.0.0")
