@@ -253,6 +253,7 @@ def project_replica_task_result_fields(
     # The receiving drive's first accepted terminal transition owns provenance,
     # including its absence on historical rows; replicas cannot originate it.
     overlay.pop("canonical_terminal_projection_origin", None)
+    overlay.pop("pause_notices", None)  # confirmed host transitions alone own pending chat disclosure
     # Unread-mail custody is a union: a stale replica never drops a canonical row.
     from ouroboros.task_custody import merge_unread_mail
 

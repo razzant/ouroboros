@@ -1085,7 +1085,7 @@ def test_boot_check_writes_the_letter_before_the_readiness_broadcast(monkeypatch
     calls = []
     monkeypatch.setattr(server, "_wait_for_supervisor_update_finalize", lambda: False)
     monkeypatch.setattr(update_merge, "finalize_managed_update_on_boot",
-                        lambda supervisor_ready: {"finalized": False, "rolled_back": False})
+                        lambda supervisor_ready, **_kwargs: {"finalized": False, "rolled_back": False})
     monkeypatch.setattr(git_ops, "compute_managed_update_status", lambda fetch: _status())
     monkeypatch.setattr(ul, "refresh_after_check", lambda status, **k: calls.append(("letter", status["latest_sha"])))
     monkeypatch.setattr(server, "broadcast_ws_sync", lambda payload: calls.append((payload["type"], "")))

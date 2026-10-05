@@ -88,8 +88,13 @@ def test_actual_main_captures_source_after_binding(applied_host, tmp_path, monke
     class FakeServer:
         def __init__(self, _config):
             self.should_exit = False
+            self.stop_watcher_bound = False
+
+        def watch_launcher_stop(self):
+            self.stop_watcher_bound = True
 
         def run(self, *, sockets):
+            assert self.stop_watcher_bound
             assert sockets[0].getsockname()[1] > 0
             assert server_process._applied_server_host_source == expected_source
             assert server_process.applied_restart_settings()["OUROBOROS_SERVER_HOST"] == expected_host

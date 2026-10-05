@@ -409,3 +409,40 @@ def test_readable_question_detail_carries_no_unavailable_flag(tmp_path, monkeypa
     rows = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])
     assert rows[0]["required_question"]["quiz_state"] == "open"
     assert "required_question_unavailable" not in rows[0]
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("project_bound", [False, True])
+@pytest.mark.parametrize("registry_unavailable", [False, True])
+def test_census_wait_facts_survive_optional_project_detail_and_resume(
+    tmp_path, monkeypatch, project_bound, registry_unavailable,
+):
+    from ouroboros import projects_registry
+
+    project = create_project(tmp_path, "wait-room", name="Wait room") if project_bound else {}
+    gs = _census_row_with_quiz_wait(
+        tmp_path, monkeypatch, project_id=project.get("id", ""), chat_id=project.get("chat_id", 1),
+    )
+    if registry_unavailable:
+        monkeypatch.setattr(projects_registry, "list_reserved_projects",
+                            lambda *_: (_ for _ in ()).throw(OSError("registry unreadable")))
+    waiting = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])[0]
+    assert waiting["owner_wait"] == {"owner_wait_state": "waiting", "quiz_state": "open"}
+    assert bool(waiting.get("required_question_unavailable")) is (registry_unavailable or not project_bound)
+
+    assert record_answered(tmp_path, "t1", quiz_id="q1", option_index=0, request_id="answer")["ok"]
+    # The answer can land before the waiting worker writes resumed. Preserve
+    # both facts instead of fabricating a resumed execution state.
+    answered = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])[0]["owner_wait"]
+    assert answered["owner_wait_state"] == "waiting" and answered["quiz_state"] == "answered"
+    set_owner_wait(tmp_path, "t1", {"quiz_id": "q1", "wait_id": "w1", "state": "resumed"})
+    resumed = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])[0]["owner_wait"]
+    assert resumed["owner_wait_state"] == "resumed" and resumed["quiz_state"] == "answered"
+
+
+@pytest.mark.serial
+def test_census_does_not_turn_a_non_quiz_wait_into_an_owner_question(tmp_path, monkeypatch):
+    gs = _census_row_with_quiz_wait(tmp_path, monkeypatch, chat_id=1)
+    write_task_result(tmp_path, "t1", STATUS_RUNNING, owner_wait={"state": "waiting", "wake_at": "later"})
+    row = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])[0]
+    assert "owner_wait" not in row and "required_question" not in row

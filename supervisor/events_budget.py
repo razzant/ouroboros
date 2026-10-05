@@ -290,15 +290,22 @@ def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
         worker_id = evt.get("worker_id")
         if worker_id in ctx.WORKERS and ctx.WORKERS[worker_id].busy_task_id == task_id:
             ctx.WORKERS[worker_id].busy_task_id = None
+    from ouroboros.pause_notices import notice_fields
+    import uuid
+    episode_id = uuid.uuid4().hex
     try:
         write_task_result(
             ctx.DRIVE_ROOT,
             task_id,
             STATUS_SCHEDULED,
+            _field_projector=lambda current, incoming: {
+                **incoming, **notice_fields(current, ctx.DRIVE_ROOT, task_id, episode_id, "budget")},
             reason_code="budget_exhausted",
             resource_limit=pause,
             result="Task paused before its first model dispatch; explicit resume or cancel required.",
         )
+        from ouroboros.pause_notices import track
+        track(ctx.DRIVE_ROOT, task_id)
     except Exception:
         log.warning("Failed to persist budget pause for %s", task_id, exc_info=True)
     event = {

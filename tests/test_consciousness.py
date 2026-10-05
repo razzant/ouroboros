@@ -592,6 +592,8 @@ def _launched(clock, now=T0 + FLOOR + 1):
 
 
 def test_finish_schedules_the_chosen_interval_clamped(clock, monkeypatch):
+    from ouroboros.task_results import write_task_result
+    write_task_result(clock.root, "wake0001", "completed", result="Finished")
     finished = _launched(clock)
     monkeypatch.setattr(clock_module.time, "time", lambda: T0 + 5000)
     clock.store[INTERVAL_STATE_KEY] = 100  # below the floor
@@ -762,3 +764,33 @@ def test_start_after_a_long_off_period_never_announces_a_past_wake(clock, monkey
     message = clock.clock.start()
     assert clock.clock.enabled and clock.clock.next_wake_at == T0 + 5000
     assert "next wake-up at" in message
+
+
+@pytest.mark.parametrize("pause_state", ["paused", "pausing"])
+def test_finish_parked_wake_keeps_slot_and_runner_backoff(clock, monkeypatch, pause_state):
+    from ouroboros.task_results import write_task_result
+    write_task_result(clock.root, "wake0001", "scheduled",
+                      budget_pause={"state": pause_state, "reason": "budget"})
+    clock.clock._backoff = 8
+    clock.clock._wake_finished("wake0001", True)
+    snapshot = clock.clock.status_snapshot()
+    assert snapshot["last_wake_outcome"] == pause_state
+    assert snapshot["tasks_running"] == 1
+    assert clock.clock._backoff == 1
+
+
+def test_finish_unreadable_wake_never_reports_done(clock, monkeypatch):
+    import ouroboros.task_results as results
+    monkeypatch.setattr(results, "load_task_result", lambda *a, **k: (_ for _ in ()).throw(OSError("read failed")))
+    clock.clock._wake_finished("wake0001", True)
+    assert clock.clock.status_snapshot()["last_wake_outcome"] == "unknown"
+    assert clock.clock._backoff == 1
+
+
+def test_finish_before_dispatch_budget_pause_is_not_done(clock):
+    from ouroboros.task_results import write_task_result
+    write_task_result(clock.root, "wake0001", "scheduled", reason_code="budget_exhausted",
+                      resource_limit={"replay_safe": True, "physical_calls": 0})
+    clock.clock._wake_finished("wake0001", True)
+    assert clock.clock.status_snapshot()["last_wake_outcome"] == "paused"
+    assert clock.clock._backoff == 1

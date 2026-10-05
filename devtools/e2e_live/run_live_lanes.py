@@ -19,9 +19,9 @@ before any spend, a run whose attempts can never all be admitted. The run-root t
 value lives only in each lane's 0600 settings file and is disclosed by fingerprint). The manifest names the
 model from the APPLIED settings file, not argv. Every lane leaves ``lanes/<id>_a<n>/result.json`` (checks,
 digests, grants by fingerprint, settings sha256, seed describe, the lane's spend, a typed refusal on infra
-failure) plus screenshots when a browser client exists; a watcher prints lane states, the running spend
-against the cap, free disk on ``/`` and ``/mnt/data`` and the key headroom from an informational, bounded,
-backing-off probe.
+failure) plus screenshots when a browser client exists and the key-redacted ``traces/`` bundle of the lane
+server's journals (``traces.py``); a watcher prints lane states, the running spend against the cap, free disk
+on ``/`` and ``/mnt/data`` and the key headroom from an informational, bounded, backing-off probe.
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ from devtools.benchmarks.common.server_runner import (
     build_isolated_settings,
     seed_owner_state,
 )
-from devtools.e2e_live import stub_lane
+from devtools.e2e_live import stub_lane, traces
 from devtools.e2e_live.scenarios import SCENARIOS, STAND_PANEL_SETTINGS, LaneContext, diff_sha256, head_sha, now_iso
 from devtools.e2e_live.ui_probe import resolve_ui_client
 from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS, declared_model_settings
@@ -586,7 +586,7 @@ def _lane_row(job: tuple[str, int], args: argparse.Namespace) -> dict:
             "title": SCENARIOS[sid].title, "status": "infra_error", "stub": bool(args.stub), "profile": args.profile,
             "self_mod": bool(args.self_mod), "preflight_test_workers": int(args.preflight_test_workers),
             "started_at": now_iso(), "checks": {}, "facts": {}, "error": "",
-            "screenshots": [], "ui": {"available": False, "reason": ""}, "budget": {},
+            "screenshots": [], "ui": {"available": False, "reason": ""}, "budget": {}, "traces": {"published": False, "reason": "lane_not_started"},
             "self_mod_absorb": {"expected": bool(args.self_mod) and SCENARIOS[sid].expects_absorb}}
 
 
@@ -665,8 +665,7 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
     sid, attempt = job
     scenario = SCENARIOS[sid]
     lane = out / "lanes" / f"{sid}_a{attempt}"
-    clone, data_root, shots = lane / "clone", lane / "data", lane / "shots"
-    settings_path = data_root / "settings.json"
+    clone, data_root, shots, settings_path = lane / "clone", lane / "data", lane / "shots", lane / "data" / "settings.json"
     started = time.time()
     row = _lane_row(job, args)
 
@@ -806,6 +805,7 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
         _apply_orphan_scan(row, survivors)
         row["budget"]["spent_usd"], row["budget"]["unknown_cost_rows"] = lane_spend(data_root)
         row["ended_at"], row["duration_sec"] = now_iso(), round(time.time() - started, 1)
+        row["traces"] = traces.publish_lane_traces(lane, data_root, traces.lane_secrets(settings_path, {args.key_env: key or os.environ.get(args.key_env, "")}))
         _record_row(out, lane, row)
         if args.prune_clones:
             shutil.rmtree(clone, ignore_errors=True)

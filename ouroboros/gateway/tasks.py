@@ -303,7 +303,7 @@ def _enqueue_api_task_durably(
     """Atomically enqueue, snapshot, and publish the scheduled task result."""
     from supervisor import queue
 
-    with queue._queue_lock:
+    with queue.prepared_root_billing(task), queue._queue_lock:  # the ledger read happens before the lock
         admitted = queue.enqueue_task(task)
         if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
             admitted.update(_admission_never_admitted=True, _admission_owner_token=admission_token)
@@ -778,9 +778,9 @@ _LIST_ROW_OMITTED_FIELDS = frozenset({
 })
 
 # The raw creation-ts sort scan and the ABI-2 malformed-candidate admission
-# live in ouroboros/gateway/task_list_scan.py (module-size split); imported
+# live in ouroboros/task_result_facts.py (module-size split); imported
 # here so this module keeps the endpoint wiring surface.
-from ouroboros.gateway.task_list_scan import (  # noqa: E402
+from ouroboros.task_result_facts import (  # noqa: E402
     _quarantine_malformed_candidates,
     _raw_sorted_result_names,
 )
@@ -871,7 +871,7 @@ def _tasks_list_payload(
         ))))
     # ABI-2: a candidate whose bytes failed to parse is NOT silently dropped —
     # it reaches the same admission reader (quarantine + the batched event)
-    # even beyond the slice window (see task_list_scan).
+    # even beyond the slice window (see task_result_facts).
     quarantined.extend(_quarantine_malformed_candidates(results_dir, malformed_names))
     emit_quarantine_event(drive_root, quarantined)
     # Re-sort the slice by effective ts: the child-drive merge may have replaced

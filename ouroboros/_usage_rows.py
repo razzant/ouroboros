@@ -26,71 +26,104 @@ BINDING_KEYS = ("root_task_id", "billing_group_id", "billing_group_limit_usd", "
 _BINDING_CAPS = ("billing_group_limit_usd", "root_limit_usd")
 BINDING_AUTHORITY_FIELD, BINDING_CARRIED = "binding_authority", "carried"  # baseline header stamp
 CARRIED_ROOT_BINDING, CARRIED_GROUP_BINDING = "original_root_binding", "original_group_binding"
-UNKNOWN_BINDING = "unknown"
 # Carried value for an identity the SOURCE had not bound yet: it stays unbound,
 # so a later original row still binds it exactly as it would have uncompacted.
 NO_ORIGINAL_BINDING = "unbound"
+# Source label of a binding taken from a block row's own cap literal: an older
+# or unstamped block that carried nothing usable for that member.
+LEGACY_LIVE_SOURCE = "legacy_live"
 
 
-class LedgerBindingUnknown(ValueError):
-    """A compacted aggregate hid the original binding: unknown, never a cap."""
-
-
-def _carried(value: Any, key: str, owner) -> Any:
-    """A carried binding that is well formed and belongs to ``key``; else UNKNOWN."""
+def _carried(value: Any, key: str, owner) -> Optional[dict]:
+    """A carried binding that is well formed and belongs to ``key``; else ``None``."""
     if (not isinstance(value, dict) or not set(value) <= set(BINDING_KEYS) or owner(value) != key
             or not any(cap in value for cap in _BINDING_CAPS)):
-        return UNKNOWN_BINDING
+        return None
     for cap in _BINDING_CAPS:
         item = value.get(cap)
         if item is not None and (_number(item) is None or not math.isfinite(_number(item))):
-            return UNKNOWN_BINDING
+            return None
     return dict(value)
+
+
+_GROUP_AXIS_KEYS = ("billing_group_id", "billing_group_limit_usd", "billing_group_limit_source",
+                    "billing_group_limit_revision")
+
+
+def _block_literal(row: Dict[str, Any], keys: tuple) -> Optional[tuple]:
+    """The binding fields a block row carries on one axis, caps normalized so rows can be
+    compared; ``None`` when it carries no cap on that axis."""
+    present = tuple((k, None if row[k] is None else _number(row[k]) if k in _BINDING_CAPS else row[k])
+                    for k in keys if k in row)
+    return present if any(k in _BINDING_CAPS for k, _ in present) else None
+
+
+def _axis_keys(row: Dict[str, Any], group_axis: bool) -> tuple:
+    """Which fields must agree across a member's block rows: a group's own cap fields (the member
+    roots' caps differ by right), else everything the row carries."""
+    if not group_axis:
+        return BINDING_KEYS
+    return _GROUP_AXIS_KEYS if "billing_group_limit_usd" in row else ("root_task_id", "root_limit_usd")
 
 
 @dataclass
 class BindingIndex:
     """Earliest binding per root and billing group: the first ORIGINAL row wins.
 
-    A baseline aggregate never binds: its cap is a minimum and its position a
-    sort order. A carried block restores the source's bindings verbatim from
-    the first group row of each root/group; an explicit ``NO_ORIGINAL_BINDING``
-    there leaves that member unbound for a later original row. Missing,
-    invalid or unstamped carriage fixes that member's binding as UNKNOWN,
-    never a later row's cap. A verified archived generation may recover only
-    old missing carriage through recover_from. Equality compares the indexes.
+    A baseline aggregate's cap is a minimum and its position a sort order, so a
+    carried block (``binding_authority=carried``) restores the source's bindings
+    verbatim from the first group row of each root/group; an explicit
+    ``NO_ORIGINAL_BINDING`` there leaves that member open for a later original
+    row. Any other block row — an unstamped or ``unknown`` header, a missing,
+    ``unknown`` or malformed carriage — binds its member from the row's OWN cap
+    literal (``legacy_live``) while every block row of that member that carries
+    a cap carries the same one; a block row without a cap carries no literal and
+    does not vote (so neither row order nor the moment of compaction changes
+    the answer). A member whose block rows carry different literals stays
+    unbound, and admission applies the configured cap, disclosed on the task
+    (``legacy_default``, usage_admission). No archive is ever read. Equality
+    compares the indexes.
     """
 
     roots: Dict[str, Any] = field(default_factory=dict)
     groups: Dict[str, Any] = field(default_factory=dict)
     carried: bool = field(default=False, compare=False)
-    recovery: dict = field(default_factory=dict, compare=False)
-    recovered: set = field(default_factory=set, compare=False)
-    legacy: bool = field(default=False, compare=False)
     unbound: set = field(default_factory=set, compare=False)  # (carrier, key) the block left open
+    live: dict = field(default_factory=dict, compare=False)  # (carrier, key) -> block literal; None once disputed
 
     def fold(self, row: Dict[str, Any]) -> None:
         kind = str(row.get("kind") or "")
         if kind == "usage_baseline":
             self.carried = row.get(BINDING_AUTHORITY_FIELD) == BINDING_CARRIED
-            self.legacy = BINDING_AUTHORITY_FIELD not in row
             return
         root, group = monetary_scope_key(row), billing_group_key(row)
         if kind == "usage_baseline_group":
-            for index, key, name, owner in ((self.roots, root, CARRIED_ROOT_BINDING, monetary_scope_key),
-                                            (self.groups, group, CARRIED_GROUP_BINDING, billing_group_key)):
-                if not key or key in index or (name, key) in self.unbound:
-                    continue  # only the first block row of each member decides it
-                if not self.carried:
-                    index[key] = UNKNOWN_BINDING
-                    if self.legacy and not any(field in row for field in (CARRIED_ROOT_BINDING, CARRIED_GROUP_BINDING)):
-                        self.recovery[(name, key)] = True
-                elif row.get(name) == NO_ORIGINAL_BINDING:
+            for index, key, name, owner, keys in (
+                    (self.roots, root, CARRIED_ROOT_BINDING, monetary_scope_key, _axis_keys(row, False)),
+                    (self.groups, group, CARRIED_GROUP_BINDING, billing_group_key, _axis_keys(row, True))):
+                if not key or (name, key) in self.unbound:
+                    continue
+                if (name, key) in self.live:  # bound from a block literal: every capped block row must agree
+                    literal = _block_literal(row, keys)
+                    if literal is not None and self.live[name, key] is not None and literal != self.live[name, key]:
+                        index.pop(key, None)
+                        self.live[name, key] = None
+                    continue
+                if key in index:
+                    continue  # the first block row of each member decides it
+                carriage = row.get(name) if self.carried else None
+                if carriage == NO_ORIGINAL_BINDING:
                     self.unbound.add((name, key))
-                else:
-                    index[key] = _carried(row.get(name), key, owner)
-                    if row.get(name) == UNKNOWN_BINDING:
-                        self.recovery[(name, key)] = False
+                    continue
+                bound = _carried(carriage, key, owner)
+                if bound is None:  # nothing usable was carried: the row's own literal (legacy_live)
+                    literal = _block_literal(row, keys)
+                    if literal is None:
+                        continue  # no cap on this row: no literal, no vote
+                    self.live[name, key] = literal
+                    bound = {k: row[k] for k in BINDING_KEYS if k in row}
+                    bound["billing_group_limit_source"] = LEGACY_LIVE_SOURCE  # disclosed as a block literal
+                index[key] = bound
             return
         if ((root and root not in self.roots) or (group and group not in self.groups)) and any(
                 cap in row for cap in _BINDING_CAPS):
@@ -98,22 +131,6 @@ class BindingIndex:
             for index, key in ((self.roots, root), (self.groups, group)):
                 if key:
                     index.setdefault(key, binding)
-
-    def recover_from(self, prior: "BindingIndex") -> None:
-        """Recover old missing carriage, never repair contradictory modern facts.
-
-        A stamped UNKNOWN may only inherit a recovery proved for its exact
-        archived source generation. An unstamped old block can recover the
-        preceding original rows. Missing/invalid modern payloads remain gaps.
-        Original source/revision and explicit unlimited None stay verbatim.
-        """
-        for name, index, previous in ((CARRIED_ROOT_BINDING, self.roots, prior.roots),
-                                       (CARRIED_GROUP_BINDING, self.groups, prior.groups)):
-            for (carrier, key), legacy in self.recovery.items():
-                value = previous.get(key)
-                if carrier == name and isinstance(value, dict) and (legacy or (name, key) in prior.recovered):
-                    index[key] = dict(value)
-                    self.recovered.add((name, key))
 
 
 def row_ts_epoch(row: Any) -> Optional[float]:

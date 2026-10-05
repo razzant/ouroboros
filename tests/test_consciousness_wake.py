@@ -708,3 +708,15 @@ def test_first_wake_uses_late_publication_when_old_readiness_debt_remains(tmp_pa
     assert len(first.events) == 1 and first.events[0][0] == "task_terminal"
     assert "task late failed" in first.events[0][2]
     assert _wake(tmp_path, first.boundary, T0 + 600).events == ()
+
+
+def test_projection_discloses_parked_wake_and_unknown_outcome(describe):
+    for outcome in ("paused", "pausing"):
+        value = describe({**BASE, "last_wake_outcome": outcome, "tasks_running": 1})
+        assert value["status"] == "wake_paused"
+        assert outcome in value["detail"] and "returned while" in value["detail"]
+        assert value["tasks_running"] == 1
+    completed_since = describe({**BASE, "last_wake_outcome": "paused", "tasks_running": 0})
+    assert "still occupies" not in completed_since["detail"] and completed_since["tasks_running"] == 0
+    unknown = describe({**BASE, "last_wake_outcome": "unknown"})
+    assert unknown["status"] == "wake_outcome_unknown" and "unconfirmed" in unknown["detail"]

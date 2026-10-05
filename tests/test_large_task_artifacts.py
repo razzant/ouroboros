@@ -750,7 +750,7 @@ def test_failed_child_capture_is_explicit_and_other_files_still_publish(tmp_path
         assert recovered["status"] == "completed" and recovered["accounted_upper_bound_usd"] == 3.5
 
 
-def test_unchanged_pending_ref_retry_rewrites_nothing_and_keeps_late_facts(tmp_path):
+def test_unchanged_pending_ref_retry_rewrites_nothing_and_keeps_late_facts(tmp_path, monkeypatch):
     """#1305: retrying a still-unpromotable ref leaves bytes, mtime and updated_at alone; a
     genuine late fact still lands, survives the next retry, and a restored source converges."""
     from ouroboros.headless import prepare_task_drive, copy_child_task_result
@@ -774,13 +774,25 @@ def test_unchanged_pending_ref_retry_rewrites_nothing_and_keeps_late_facts(tmp_p
     row = task_result_path(parent, "stale")
     before, stamp = row.read_bytes(), row.stat().st_mtime_ns
     report = retry_pending_child_ref_promotions(parent)
-    assert report["retried"] == report["pending"] == ["stale"] and not report["errors"]
+    assert report["unchanged"] == report["pending"] == ["stale"]
+    assert not report["retried"] and not report["errors"]
     assert row.read_bytes() == before and row.stat().st_mtime_ns == stamp
     write_task_result(parent, "stale", "failed", accounted_upper_bound_usd=4.25)
     late = row.read_bytes()
-    assert retry_pending_child_ref_promotions(parent)["pending"] == ["stale"]
+    report = retry_pending_child_ref_promotions(parent)
+    assert report["retried"] == report["pending"] == ["stale"] and not report["unchanged"]
     assert row.read_bytes() == late and json.loads(late)["accounted_upper_bound_usd"] == 4.25
     Path(record["path"]).write_bytes(b"report")
+    attempts = []
+    def transient_copy(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("temporary destination write failure")
+    with monkeypatch.context() as failure:
+        failure.setattr(artifacts, "copy_artifact_file", transient_copy)
+        for expected_attempts in (1, 2):
+            report = retry_pending_child_ref_promotions(parent)
+            assert report["retried"] == report["pending"] == ["stale"] and not report["unchanged"]
+            assert len(attempts) == expected_attempts
     assert retry_pending_child_ref_promotions(parent)["completed"] == ["stale"]
     settled = json.loads(row.read_bytes())
     assert settled["status"] == "failed" and settled["accounted_upper_bound_usd"] == 4.25

@@ -2337,12 +2337,9 @@ def test_a_red_gate_on_a_managed_update_rolls_the_merge_back(monkeypatch):
 def test_a_gate_blocked_update_tx_is_never_promoted_by_boot_recovery():
     """A gate_blocked tx must never be finalized or resumed by boot recovery.
 
-    It exists only for the path where a check rejected the update AND the rollback
-    that should have erased the transaction failed. What is on disk at that point
-    is a merge the gate refused, with the marker still naming it. Boot recovery's
-    contract for that phase is a fresh ROLLBACK attempt (restoring pre_update_sha)
-    — never `pending_boot_smoke` promotion, never assisted resumption, never a
-    `finalized: True` report on the refused revision.
+    The marker retains a refused merge after its immediate rollback failed.
+    Boot must retry rollback to pre_update_sha, never promote it to
+    pending_boot_smoke, resume assisted work or report finalized: True.
     """
     from supervisor import update_merge
 
@@ -2351,7 +2348,9 @@ def test_a_gate_blocked_update_tx_is_never_promoted_by_boot_recovery():
         "resumes or promotes the merge a gate refused"
     )
     src = inspect.getsource(update_merge.finalize_managed_update_on_boot)
-    gate_branch = src.split("if phase == GATE_BLOCKED_PHASE:", 1)
+    assert "_finalize_managed_update_locked(" in src, "public finalizer bypasses the checked dispatch"
+    dispatch = inspect.getsource(update_merge._finalize_managed_update_locked)
+    gate_branch = dispatch.split("if phase == GATE_BLOCKED_PHASE:", 1)
     assert len(gate_branch) == 2, (
         "the finalizer has no explicit gate_blocked branch; an unhandled phase is "
         "only safe until someone widens the fallthrough"

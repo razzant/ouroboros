@@ -77,6 +77,8 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
             "phase": str(tx.get("phase") or ""),
             "task_id": str(tx.get("task_id") or ""),
             "restart_required": bool(tx.get("restart_required")),
+            **({"local_work_recovery": True} if tx.get("stash_restore")
+               or tx.get("gate_blocked_reason") == "rollback_restart_pending" else {}),
         }
         if tx
         else {"active": False}
@@ -511,22 +513,24 @@ def _fence_failure(blockers: list[str], stash_note: str = "") -> JSONResponse:
 
 
 def _rollback_fenced_update(reason: str, error: str, **extra: Any) -> JSONResponse:
-    from supervisor.update_merge import mark_update_tx_gate_blocked, rollback_managed_update
+    from supervisor.update_merge import active_update_tx, mark_update_tx_gate_blocked, rollback_managed_update
 
     update_progress.advance("rolling_back")
     ok, message = rollback_managed_update(reason)
     if ok:
         _respawn_workers_after_failed_update()
         return JSONResponse(
-            {"error": error, "rolled_back": True, "rollback": message, **extra},
+            {"error": error, "rolled_back": True, "rollback": message, "stash_note": message, **extra},
             status_code=409,
         )
-    mark_update_tx_gate_blocked(reason, message)
+    if not active_update_tx().get("stash_restore"):
+        mark_update_tx_gate_blocked(reason, message)
     return JSONResponse(
         {
             "error": error,
             "rolled_back": False,
             "rollback": message,
+            "stash_note": message,
             "restart_required": True,
             **extra,
         },
@@ -656,13 +660,13 @@ def _stash_local_work_fenced(
 
 def _unwind_stashed_update(tx: dict, context: str) -> str:
     """Undo the stash prologue when the update aborts before any repo mutation:
-    restore the exact stash entry (marker-guarded — a crash between the stash
-    apply and its drop must not let boot's replay wipe the already-restored
-    copy) and clear the tx. Returns a disclosure note ("" when clean)."""
+    restore the exact stash and clear only a confirmed restoration/preservation
+    outcome. An incomplete result retains its write-ahead marker for boot."""
     from supervisor.update_merge import clear_update_tx, restore_stash_with_marker
 
-    note = restore_stash_with_marker(tx, context)
-    if not clear_update_tx():
+    result = restore_stash_with_marker(tx, context)
+    note = result.note
+    if result.complete and not clear_update_tx():
         note = (note + "; " if note else "") + "the update transaction marker could not be cleared"
     return note
 
@@ -1101,7 +1105,18 @@ def _apply_smart_update_fenced(
         log.warning("managed smart update failed after writer fence", exc_info=True)
         from supervisor.update_merge import active_update_tx as _active_tx
 
-        if _active_tx():
+        pending = _active_tx()
+        if pending.get("stash_restore"):
+            # A restore may already have returned files even if its completion
+            # record failed. Never route that uncertainty into generic rollback.
+            record = pending["stash_restore"]
+            return JSONResponse(
+                {"error": f"managed update failed: {type(exc).__name__}: {exc}",
+                 "reason": "stash_recovery_incomplete", "restart_required": True,
+                 "stash_note": record.get("note") or "Local work recovery is pending; current files were left unchanged."},
+                status_code=500,
+            )
+        if pending:
             return _rollback_fenced_update(
                 "smart_update_exception",
                 f"managed update failed: {type(exc).__name__}: {exc}",

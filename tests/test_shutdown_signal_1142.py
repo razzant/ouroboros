@@ -168,6 +168,15 @@ def _wait_json(url: str, key: str, timeout_sec: float) -> None:
 @pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="process groups and SIGTERM are POSIX")
 def test_group_sigterm_reaches_terminal_custody_without_a_false_supervisor_alarm(tmp_path):
+    _check_real_shutdown(tmp_path, launcher_pipe=False)
+
+
+@pytest.mark.serial
+def test_launcher_pipe_reaches_server_shutdown_without_a_signal(tmp_path):
+    _check_real_shutdown(tmp_path, launcher_pipe=True)
+
+
+def _check_real_shutdown(tmp_path, *, launcher_pipe):
     """A real server in an isolated data root, SIGTERMed the way the OLD launcher does (whole
     group, so its Manager dies first) while a browser WebSocket is open: the lifespan teardown
     must still run inside the launcher budget and the owner chat must get no supervisor_failure."""
@@ -188,7 +197,8 @@ def test_group_sigterm_reaches_terminal_custody_without_a_false_supervisor_alarm
         "OUROBOROS_RUNTIME_MODE": "light",
     }), encoding="utf-8")
     # An owner chat is bound, so the false alarm WOULD be written if the crash counter fired.
-    (data_dir / "state" / "state.json").write_text(json.dumps({"owner_chat_id": 1}), encoding="utf-8")
+    from devtools.benchmarks.common.server_runner import seed_owner_state
+    seed_owner_state(data_dir)
     env = {
         **os.environ,
         "HOME": str(home),
@@ -201,11 +211,14 @@ def test_group_sigterm_reaches_terminal_custody_without_a_false_supervisor_alarm
         "OUROBOROS_HOST_SERVICE_PORT": str(port + 1),
         "OUROBOROS_MANAGED_BY_LAUNCHER": "1",
     }
+    if launcher_pipe:
+        env["OUROBOROS_LAUNCHER_STOP_STDIN"] = "1"
     url = f"http://127.0.0.1:{port}"
     container = ProcessContainer()
     proc = container.spawn(
         [sys.executable, "server.py"], cwd=REPO_ROOT, env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if launcher_pipe else subprocess.DEVNULL,
     )
     ws = None
     stuck = None
@@ -224,7 +237,12 @@ def test_group_sigterm_reaches_terminal_custody_without_a_false_supervisor_alarm
         )
         time.sleep(0.5)
         started = time.monotonic()
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # exactly what the pre-#1142 launcher does
+        if launcher_pipe:
+            proc.stdin.write(b"quit\n")
+            proc.stdin.flush()
+            proc.stdin.close()
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)  # pre-#1142 launcher
         try:
             code = proc.wait(timeout=LAUNCHER_STOP_GRACE_SEC)
         except subprocess.TimeoutExpired:
@@ -249,12 +267,205 @@ def test_group_sigterm_reaches_terminal_custody_without_a_false_supervisor_alarm
 
     # uvicorn re-raises the captured SIGTERM once the lifespan has completed, so a clean
     # signalled exit reads -SIGTERM (or 0); -SIGKILL is the launcher fallback this test forbids.
-    assert code in (0, -signal.SIGTERM), f"graceful exit expected, got {code}"
+    expected_codes = (0,) if launcher_pipe else (0, -signal.SIGTERM)
+    assert code in expected_codes, f"graceful exit expected, got {code}"
     chat_rows = _read_rows(data_dir / "logs" / "chat.jsonl")
     alarms = [row for row in chat_rows if row.get("system_type") == "supervisor_failure"
               or "Supervisor loop died" in str(row.get("text") or "")]
     assert alarms == [], alarms
     shutdown_rows = [row for row in _read_rows(data_dir / "logs" / "supervisor.jsonl")
                      if row.get("type") == "server_shutdown"]
-    assert shutdown_rows and shutdown_rows[-1].get("cause") == "external_signal", shutdown_rows
+    cause = "launcher_quit" if launcher_pipe else "external_signal"
+    assert shutdown_rows and shutdown_rows[-1].get("cause") == cause, shutdown_rows
     assert elapsed < LAUNCHER_STOP_GRACE_SEC, elapsed
+
+
+_PIPE_OWNER_PROBE = r'''
+import io, json, os, pathlib, subprocess, sys, threading
+import uvicorn
+from ouroboros import server_process as state
+root, mode = pathlib.Path(sys.argv[1]), sys.argv[2]
+server = state._SignalStopServer(uvicorn.Config(lambda scope, receive, send: None))
+opened, fdopen = [], os.fdopen
+def record_stream(*args, **kwargs):
+    stream = fdopen(*args, **kwargs)
+    opened.append(stream)
+    return stream
+os.fdopen = record_stream
+try:
+    server.watch_launcher_stop()
+finally:
+    os.fdopen = fdopen
+facts = {"private_streams": len(opened), "opt_in_consumed": "OUROBOROS_LAUNCHER_STOP_STDIN" not in os.environ}
+if opened:
+    facts.update(raw=isinstance(opened[0], io.FileIO), inheritable=os.get_inheritable(opened[0].fileno()))
+if sys.platform == "win32":
+    import ctypes, msvcrt
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetStdHandle.argtypes = (ctypes.c_uint32,)
+    kernel.GetStdHandle.restype = ctypes.c_void_p
+    facts["win32_stdin_matches_crt"] = kernel.GetStdHandle(-10) == msvcrt.get_osfhandle(0)
+try:
+    child = subprocess.run([sys.executable, "-c", "import sys; print(repr(sys.stdin.buffer.read()))"],
+                           capture_output=True, text=True, timeout=3)
+    facts["inherited_stdin_eof"] = child.returncode == 0 and child.stdout.strip() == "b''"
+except subprocess.TimeoutExpired:
+    facts["inherited_stdin_eof"] = False
+if facts["inherited_stdin_eof"]:
+    git = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=3)
+    facts["git_completed"] = git.returncode == 0 and len(git.stdout.strip()) == 40
+(root / "ready.json").write_text(json.dumps(facts), encoding="utf-8")
+if mode == "exit-open":
+    sys.exit(0)  # The owner still holds the write end; the raw reader must not stall finalization.
+readers = [thread for thread in threading.enumerate() if thread.name == "launcher-stop"]
+for reader in readers:
+    reader.join(5)
+(root / "finished.json").write_text(json.dumps({
+    "should_exit": server.should_exit, "exit_latched": state._exit_signalled.is_set(),
+    "supervisor_stopped": state._supervisor_stop.is_set(), "reader_alive": any(t.is_alive() for t in readers),
+    "private_closed": all(stream.closed for stream in opened),
+}), encoding="utf-8")
+'''
+
+
+def _launch_pipe_owner_probe(tmp_path, mode):
+    import sysconfig
+    from pathlib import Path
+
+    script = tmp_path / "pipe_owner.py"
+    script.write_text(_PIPE_OWNER_PROBE, encoding="utf-8")
+    env = {**os.environ, "OUROBOROS_LAUNCHER_STOP_STDIN": "1"}
+    env["PYTHONPATH"] = os.pathsep.join([REPO_ROOT, sysconfig.get_path("purelib"), env.get("PYTHONPATH", "")])
+    executable = getattr(sys, "_base_executable", sys.executable) if sys.platform == "win32" else sys.executable
+    proc = subprocess.Popen([executable, str(script), str(tmp_path), mode], cwd=REPO_ROOT, env=env,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        try:
+            return proc, json.loads((Path(tmp_path) / "ready.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            if proc.poll() is not None:
+                break
+            time.sleep(.02)
+    proc.kill()
+    output = proc.communicate(timeout=5)
+    pytest.fail(f"private-stdin probe never became ready: {output}")
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("message,stopped", [(b"quit\n", True), (b"", False), (b"other", False)])
+def test_launcher_pipe_only_an_explicit_quit_stops_the_server(tmp_path, message, stopped):
+    proc, ready = _launch_pipe_owner_probe(tmp_path, "receive")
+    try:
+        assert ready["inherited_stdin_eof"], "ordinary children must not read the open control pipe"
+        assert ready["git_completed"]
+        assert ready["private_streams"] == 1 and ready["raw"] and not ready["inheritable"]
+        assert ready["opt_in_consumed"]
+        if sys.platform == "win32":
+            assert ready["win32_stdin_matches_crt"], "both native stdin tables must name NUL"
+        stdout, stderr = proc.communicate(input=message, timeout=10)
+        assert proc.returncode == 0, (stdout, stderr)
+        finished = json.loads((tmp_path / "finished.json").read_text(encoding="utf-8"))
+        assert finished == {"should_exit": stopped, "exit_latched": stopped, "supervisor_stopped": stopped,
+                            "reader_alive": False, "private_closed": True}
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate(timeout=5)
+
+
+@pytest.mark.serial
+def test_private_launcher_reader_allows_normal_exit_with_owner_pipe_still_open(tmp_path):
+    proc, ready = _launch_pipe_owner_probe(tmp_path, "exit-open")
+    try:
+        assert ready["inherited_stdin_eof"] and ready["raw"]
+        proc.wait(timeout=5)  # Keep proc.stdin OPEN until the process has exited naturally.
+        assert proc.returncode == 0
+        assert not proc.stdin.closed
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        stdout, stderr = proc.communicate(timeout=5)
+    assert b"_enter_buffered_busy" not in stderr, (stdout, stderr)
+
+
+def test_direct_server_does_not_consume_stdin_without_launcher_opt_in(monkeypatch):
+    import uvicorn
+    from ouroboros import server_process as state
+    monkeypatch.delenv("OUROBOROS_LAUNCHER_STOP_STDIN", raising=False)
+    monkeypatch.setattr(state.threading, "Thread", lambda **kw: pytest.fail("unexpected stdin reader"))
+    server = state._SignalStopServer(uvicorn.Config(lambda scope, receive, send: None))
+    server.watch_launcher_stop()
+    assert not server.should_exit
+
+
+@pytest.mark.serial
+def test_direct_server_keeps_ordinary_child_stdin_without_launcher_opt_in(tmp_path):
+    import sysconfig
+
+    script = tmp_path / "direct_stdin.py"
+    script.write_text('''
+import json, subprocess, sys
+import uvicorn
+from ouroboros.server_process import _SignalStopServer
+server = _SignalStopServer(uvicorn.Config(lambda scope, receive, send: None))
+server.watch_launcher_stop()
+child = subprocess.run([sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+                       capture_output=True, text=True, timeout=3)
+print(json.dumps({"stdin": child.stdout, "child_exit": child.returncode, "should_exit": server.should_exit}))
+''', encoding="utf-8")
+    env = {**os.environ}
+    env.pop("OUROBOROS_LAUNCHER_STOP_STDIN", None)
+    env["PYTHONPATH"] = os.pathsep.join([REPO_ROOT, sysconfig.get_path("purelib"), env.get("PYTHONPATH", "")])
+    proc = subprocess.run([sys.executable, str(script)], cwd=REPO_ROOT, env=env,
+                          input="ordinary stdin survives", capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"stdin": "ordinary stdin survives", "child_exit": 0, "should_exit": False}
+
+
+def test_windows_launcher_requests_cooperative_quit_before_wait(monkeypatch):
+    import launcher
+    calls = []
+    class Pipe:
+        def write(self, data): calls.append(("write", data))
+        def flush(self): calls.append("flush")
+        def close(self): calls.append("close")
+    class Process:
+        pid = 12345
+        stdin = Pipe()
+        def terminate(self): pytest.fail("TerminateProcess must not be the graceful step")
+        def wait(self, timeout): calls.append(("wait", timeout))
+    monkeypatch.setattr(launcher, "IS_WINDOWS", True)
+    monkeypatch.setattr(launcher, "_agent_proc", Process())
+    monkeypatch.setattr(launcher, "_agent_job", None)
+    monkeypatch.setattr(launcher, "_cleanup_recorded_server_group_for_pid", lambda *args: None)
+    launcher.stop_agent()
+    assert calls == [("write", b"quit\n"), "flush", "close", ("wait", launcher.LAUNCHER_STOP_GRACE_SEC)]
+
+
+@pytest.mark.parametrize("pipe_failure", [False, True])
+def test_windows_launcher_keeps_forced_fallback_when_grace_expires(monkeypatch, pipe_failure):
+    import launcher
+    calls = []
+    class Pipe:
+        def write(self, data):
+            calls.append("request")
+            if pipe_failure: raise BrokenPipeError("fixture closed pipe")
+        def flush(self): pass
+        def close(self):
+            if pipe_failure: raise BrokenPipeError("fixture flush on close")
+    class Process:
+        pid = 12345
+        stdin = Pipe()
+        def wait(self, timeout):
+            calls.append(("wait", timeout))
+            if len([c for c in calls if isinstance(c, tuple)]) == 1:
+                raise subprocess.TimeoutExpired("server", timeout)
+    monkeypatch.setattr(launcher, "IS_WINDOWS", True)
+    monkeypatch.setattr(launcher, "_agent_proc", Process())
+    monkeypatch.setattr(launcher, "_agent_job", "owned-job")
+    monkeypatch.setattr(launcher, "terminate_job", lambda job: calls.append("force"))
+    monkeypatch.setattr(launcher, "close_job", lambda job: calls.append("close_job"))
+    monkeypatch.setattr(launcher, "_cleanup_recorded_server_group_for_pid", lambda *args: None)
+    launcher.stop_agent()
+    assert calls == ["request", ("wait", launcher.LAUNCHER_STOP_GRACE_SEC), "force", ("wait", 5), "close_job"]

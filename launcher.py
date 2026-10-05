@@ -19,13 +19,9 @@ import webbrowser
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
-# WA6: set sys.dont_write_bytecode BEFORE importing any project module. A signed
-# macOS .app must never write __pycache__/*.pyc into its own bundle at runtime
-# (that breaks the codesign seal and triggers AppTranslocation). os.environ alone
-# is INSUFFICIENT for THIS process: PYTHONDONTWRITEBYTECODE is only read at
-# interpreter startup, so mutating os.environ later does not stop the current
-# process's own subsequent imports — only sys.dont_write_bytecode does. The env
-# vars set further below propagate the same policy to child processes.
+# Seal-safe imports: the current interpreter needs the flag before project imports;
+# PYTHONDONTWRITEBYTECODE alone only affects later child interpreters. Bundle writes
+# would invalidate a macOS signature and trigger AppTranslocation.
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
@@ -396,14 +392,9 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     env["OUROBOROS_APP_VERSION"] = str(APP_VERSION)
     env["OUROBOROS_MANAGED_BY_LAUNCHER"] = "1"
     env["OUROBOROS_MANAGED_REPO_DIR"] = str(REPO_DIR.resolve())
-    # Owner Surface Fact: the launcher alone knows presentation; `_headless` is decided in main() before the
-    # lifecycle loop ever calls start_agent(), and every managed restart funnels
-    # back through here, so the export is re-stamped fresh each time. Absence of
-    # the var (source mode, Docker, Colab, CLI server) truthfully means "web".
-    # Env-only by design — never a SETTINGS_DEFAULTS key (pop-on-absent would
-    # erase an injected value). Known bounded lie: a SIGKILLed launcher can
-    # orphan the server with a stale "desktop_window" until the next launcher
-    # start reaps it — the same envelope OUROBOROS_MANAGED_BY_LAUNCHER accepts.
+    # Launcher-owned presentation is re-stamped for every generation; other hosts default
+    # to web. After a killed launcher it can remain stale until the next owned reap.
+    # Env-only: a SETTINGS_DEFAULTS entry would pop an injected value when absent on disk.
     env["OUROBOROS_PRESENTATION"] = (
         str(os.environ.get("OUROBOROS_PRESENTATION") or "web")
         if _external_ui else "browser_fallback" if _headless else "desktop_window"
@@ -415,9 +406,7 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     else:
         env.pop("OUROBOROS_EXTERNAL_HOST_UPDATE", None)
         env.pop("OUROBOROS_EXTERNAL_HOST_RESULT", None)
-    # The server runs out of the managed repo, not the bundle: without this the
-    # bundled payloads (node, ripgrep) are invisible to it (platform_layer.
-    # bundled_resource_bases).
+    # The managed server still resolves payloads from this bundle.
     env[BUNDLE_DIR_ENV] = str(_bundle_dir())
 
     server_py = REPO_DIR / "server.py"
@@ -430,6 +419,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
         "stderr": subprocess.STDOUT,
     }
     if IS_WINDOWS:
+        env["OUROBOROS_LAUNCHER_STOP_STDIN"] = "1"
+        popen_kwargs["stdin"] = subprocess.PIPE
         popen_kwargs["creationflags"] = (
             popen_kwargs.get("creationflags", 0)
             | _CREATE_NEW_PROCESS_GROUP
@@ -471,10 +462,7 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     _write_server_process_record(proc, port=port, server_py=server_py, server_host_source=host_source)
 
     def _stream_output() -> None:
-        # Size-capped copy (CPL4-C5): same bound as the server.log stdlib
-        # handler (2 MB live + numbered backups). Rotation failure must never
-        # kill the copy thread — worst case the live file keeps growing, which
-        # is exactly the pre-cap behavior.
+        # Match server.log rotation; rotation failure leaves streaming alive.
         max_bytes = 2 * 1024 * 1024
         backups = 3
 
@@ -534,8 +522,20 @@ def stop_agent() -> None:
 
     log.info("Stopping agent (pid=%s)...", proc.pid)
     try:
-        # Graceful phase signals only the server: it owns its Manager and workers (#1142).
-        proc.terminate()
+        # Windows terminate is forced: its owned stdin asks the server to drain first.
+        if IS_WINDOWS and proc.stdin is not None:
+            try:
+                proc.stdin.write(b"quit\n")
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                log.warning("Launcher stop pipe unavailable; retaining the exit wait and fallback")
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass  # A failed pipe must still reach the wait/forced cleanup.
+        else:
+            proc.terminate()
         proc.wait(timeout=LAUNCHER_STOP_GRACE_SEC)
     except subprocess.TimeoutExpired:
         if IS_WINDOWS and job is not None:

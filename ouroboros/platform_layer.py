@@ -777,10 +777,7 @@ def request_process_tree_kill(proc, *, job_handle=None) -> dict:
 
 
 def kill_process_tree(proc: subprocess.Popen, *, exclude_pids: "set[int] | None" = None) -> None:
-    """Capture descendants before termination and spare retained branches.
-
-    POSIX kills the group only when it contains no spared PID, then escaped
-    descendants. Windows uses selective PID termination when exclusions exist."""
+    """Capture then kill; retain caller-selected branches (selective PIDs on Windows)."""
     kill_pid_tree(proc.pid, exclude_pids=exclude_pids, include_process_group=True)
 
 
@@ -848,10 +845,8 @@ def current_process_group_id() -> int:
 
 
 def _group_has_spared_process(pgid: int, roots: "set[int] | None") -> bool:
-    for pid in roots or ():
-        if any(process_group_id(p) == pgid for p in [pid, *collect_descendant_pids(pid)]):
-            return True
-    return False
+    return any(process_group_id(p) == pgid for root in roots or ()
+               for p in [root, *collect_descendant_pids(root)])
 
 
 _BOOT_ID = ""  # full hex of the /proc boot id; empty until a successful read, then latched
@@ -920,10 +915,7 @@ def process_command(pid: int) -> str:
         except Exception:
             return ""
     try:
-        # -ww: unlimited width. BSD ps truncates to the terminal/128 cols
-        # otherwise, and consumers match exact argv tokens — a packaged
-        # interpreter path is long enough to push the script argument off the
-        # end of a truncated line.
+        # BSD ps needs -ww to retain long packaged interpreter/script argv.
         result = subprocess.run(["ps", "-ww", "-p", str(int(pid)), "-o", "command="],
                                 capture_output=True, text=True, timeout=3)
         return result.stdout.strip()
@@ -947,10 +939,7 @@ def force_kill_pid(pid: int) -> None:
 
 def kill_pid_tree(pid: int, exclude_pids: "set[int] | None" = None, *,
                   include_process_group: bool = False) -> None:
-    """Kill a captured PID tree, sparing excluded roots and their descendants.
-
-    The caller owns retention policy. Popen cleanup also selects its unspared group;
-    PID-only callers keep their existing selective-tree semantics."""
+    """Caller selects retained subtrees; PID callers kill selectively, Popen also uses unspared groups."""
     if IS_WINDOWS and not exclude_pids:
         try:
             _hidden_run(["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -971,31 +960,42 @@ def kill_pid_tree(pid: int, exclude_pids: "set[int] | None" = None, *,
 def _tree_kill_targets(pid: int, exclude_pids: "set[int] | None") -> tuple[list[int], set[int]]:
     """Capture before signalling; a spared root keeps its entire branch alive."""
     exclude = {int(p) for p in (exclude_pids or ())}
-    if IS_WINDOWS:
-        children = _windows_process_children()
-        descendants = _snapshot_descendants(pid, children)
-        spared = exclude | {p for root in exclude for p in _snapshot_descendants(root, children)}
-        return [p for p in [*descendants, pid] if p not in spared], spared
-    descendants = collect_descendant_pids(pid)
-    spared = exclude | {p for root in exclude for p in collect_descendant_pids(root)}
+    children = _process_children()
+    descendants = _snapshot_descendants(pid, children)
+    spared = exclude | {p for root in exclude for p in _snapshot_descendants(root, children)}
     return [p for p in [*descendants, pid] if p not in spared], spared
 
 
-def _windows_process_children() -> dict[int, list[int]]:
-    """One PID/PPID observation for both the target and retained subtrees."""
-    import psutil
-
+def _process_children() -> dict[int, list[int]] | None:
+    """One PID/PPID snapshot per walk; unavailable POSIX snapshots retain pgrep."""
     children: dict[int, list[int]] = {}
-    for process in psutil.process_iter(["pid", "ppid"]):
-        parent = process.info.get("ppid")
-        if parent is not None:
-            children.setdefault(int(parent), []).append(process.pid)
+    if IS_WINDOWS:
+        import psutil
+        for process in psutil.process_iter(["pid", "ppid"]):
+            parent = process.info.get("ppid")
+            if parent is not None:
+                children.setdefault(int(parent), []).append(process.pid)
+    else:
+        try:
+            out = subprocess.run(["ps", "-axo", "pid=,ppid="],
+                                 capture_output=True, text=True, timeout=3, check=True)
+            for line in out.stdout.splitlines():
+                pid, parent = map(int, line.split())
+                if pid <= 0 or parent < 0:
+                    return None
+                children.setdefault(parent, []).append(pid)
+            return children or None
+        except Exception:
+            return None
     return children
 
 
-def _snapshot_descendants(pid: int, children: dict[int, list[int]]) -> list[int]:
+def _snapshot_descendants(pid: int, children: dict[int, list[int]] | None) -> list[int]:
     """Children before parents, excluding the root itself."""
     result: list[int] = []
+    if children is None:
+        _collect_descendants(pid, result)
+        return result
     seen = {pid}
 
     def visit(parent: int) -> None:
@@ -1027,10 +1027,10 @@ def collect_descendant_pids(pid: int, *, exclude_pids: "set[int] | None" = None)
         targets, _ = _tree_kill_targets(int(pid), exclude_pids)
         return [target for target in targets if target != int(pid)]
     if IS_WINDOWS:
-        return _snapshot_descendants(int(pid), _windows_process_children())
+        return _snapshot_descendants(int(pid), _process_children())
     result: List[int] = []
     try:
-        _collect_descendants(int(pid), result)
+        result = _snapshot_descendants(int(pid), _process_children())
     except (TypeError, ValueError):
         pass
     return result

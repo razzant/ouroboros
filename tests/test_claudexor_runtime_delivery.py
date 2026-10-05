@@ -155,7 +155,7 @@ def test_tracked_pin_names_a_cli_capable_release():
     of this proposal converged on while the pin was still pre-CLI 3.6.0)."""
     pin = runtime.load_runtime_pin()
     assert pin is not None
-    assert pin.version == "3.19.0"
+    assert pin.version == "3.20.1"
     assert pin.cli_entrypoint == "claudexor.bundle.cjs"
 
 

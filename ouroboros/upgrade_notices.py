@@ -7,7 +7,8 @@ reviewer panel follows whatever panel ships. Neither is migrated silently or
 behind the owner's back; each is stated ONCE, factually, in the owner's chat.
 The same holds for the memory the old dialogue writer left: the chronicle
 imports it unchanged, it keeps working in that format and is folded gradually,
-and the owner hears once how much of it there is and how to fold it at once.
+and the owner hears once how much of it there is and that Ouroboros can be asked
+to keep folding it, part by part.
 
 The facts are only what the document, the environment and the imported memory
 show — a key absent from the document, an invalid value, a saved value, an
@@ -163,9 +164,12 @@ def legacy_memory_notice(facts: Optional[Mapping[str, Any]]) -> str:
         amount += f" ({start} to {end})" if start != end else f" ({start})"
     elif labels:
         amount += f" (labelled {labels[0]} … {labels[-1]})" if labels[0] != labels[-1] else f" (labelled {labels[0]})"
+    # Facts only: one request folds a part, not the whole (on the acceptance stand 23 of 377
+    # retellings), and the host knows neither the time nor the price of the rest; the mind
+    # sees its story status and can say how much is left.
     return ("🧠 Memory: what Ouroboros remembered before this update is kept in its previous format — "
-            f"{amount}. It works as it is and is folded into the new format gradually. "
-            "To fold it all now, ask Ouroboros to fold the old memory.")
+            f"{amount}. It works as it is and is folded into the new format gradually, part by part. "
+            "You can ask Ouroboros to keep folding it; it will tell you how much is left.")
 
 
 def _raw_settings_document() -> Optional[Dict[str, Any]]:

@@ -10,7 +10,8 @@ isolated real servers. `run_live_lanes.py` owns admission, seed/settings, the
 lane pool, budget and reports; `scenarios.py::SCENARIOS` owns scenario prompts,
 settings overrides and callable acceptance checks; `stub_lane.py` reuses the
 loopback model and review answers in `tests/system_e2e/harness.py` for the
-`--stub` $0 rehearsal; `ui_probe.py` owns the real-browser client.
+`--stub` $0 rehearsal; `ui_probe.py` owns the real-browser client;
+`traces.py` owns each lane's key-redacted trace bundle.
 Keep this opt-in stand outside runtime imports and default local evolution.
 
 ## Scenario acceptance
@@ -159,6 +160,27 @@ result surfaces. Post-stop `/proc` survivors fail a passing lane and name up
 to twenty PIDs/command heads with an omitted count; without `/proc` the scan
 is explicitly unavailable, never passed.
 
+After the lane server stops, on every outcome, `traces.py` copies its
+journals into `lanes/<id>_a<n>/traces/` with the data-root layout kept:
+`logs/*.jsonl`, `logs/*.log` with the rotated `server.log.<n>` backups, `task_results/*.json`,
+`state/{advisory_review.json,usage_attempts.jsonl,queue_snapshot.json,evolution_campaign.json}`
+and the observability call manifests `observability/calls/*/*.json`, for
+the lane root and every `state/headless_tasks/<id>/data` fork. Never
+`settings.json`, `memory/`, the gzip payload blobs or credential stores.
+Every credential value the lane could have seen (the `--key-env` value and
+each secret-shaped key of the lane settings file: `*_API_KEY`, `*_TOKEN`,
+`*_CREDENTIALS`, `*_PASSWORD`, `*_SECRET`) is replaced by
+`<redacted:NAME sha256:…>`, the same fingerprint the manifest discloses.
+If a value still occurs in any bundle file afterwards, the bundle is
+deleted and `result.json` records `traces: {published: false, reason:
+"secret_residue"}`; otherwise `traces: {published: true, files, bytes,
+redacted, limit_bytes, truncated}`. A bundle above 200 MiB
+(`BUNDLE_LIMIT_BYTES`) keeps the newest tail of each journal, opened by a
+`trace_truncated` line and listed in `truncated`; JSON files are never cut.
+A lane that never started records `reason: "lane_not_started"`, one
+without a data root `"no_data_root"`, and a failed copy `"collect_error"`
+with its key-redacted error.
+
 The watcher reports lane state, spend/cap and free disk on `/` and `/mnt/data`.
 Key headroom is an informational probe on its own thread, with an eight-second
 HTTP bound, at most once a minute and failure backoff. A failed probe is not
@@ -166,7 +188,7 @@ an alert or a delay of the watcher tick.
 
 Focused contracts live in `tests/test_e2e_live_runner.py` (including exact FIFO
 feasibility fixtures), `tests/test_e2e_live_sm1_checks.py`,
-`tests/test_e2e_live_sk1_plugin.py`, `tests/test_e2e_live_panel.py`,
+`tests/test_e2e_live_sk1_plugin.py`, `tests/test_e2e_live_panel.py`, `tests/test_e2e_live_traces.py`,
 `tests/test_server_runner_absorb_wait.py` and `tests/test_e2e_live_ci_lane.py`;
 `tests/test_web_typography_static.py` owns shared-source loading and variable
 resolution; `tests/test_e2e_live_sm1_palette_browser.py` exercises the two-document
@@ -180,10 +202,20 @@ The `.github/workflows/ci.yml` `e2e-live` job runs only on an explicit
 tag, and checks out the dispatched SHA (`gh workflow run CI --ref ouroboros
 -f e2e_live=true` tests the development tip). It runs one SM1 attempt with
 `--self-mod --total-budget 30 --per-task-usd 15`, reserving $30 for its two
-roots. The owner supplies `OUROBOROS_E2E_LIVE_OPENROUTER_KEY`; its absence
+roots, and `--task-timeout 4500` (75 minutes: at 2400 all four runs hit the
+deadline, and the traced one spent ~21 minutes on edits and ~17 on the review
+path before a review wave was cut off, #1501). The job's `timeout-minutes`
+outlasts the stand's own worst-case waits, so the stand's verdict and traces,
+not a job kill, end the run. The owner supplies
+`OUROBOROS_E2E_LIVE_OPENROUTER_KEY`; its absence
 produces the honest green summary `skipped: secret
 OUROBOROS_E2E_LIVE_OPENROUTER_KEY not configured`, not a claimed run.
-Upload the manifest, index, lane results and screenshots even on failure.
-The summary renders verdicts or the typed refusal/error without changing
-the stand's exit verdict. Browser PR proof and the keyless system-E2E
-schedule retain their separate existing CI owners.
+Upload the manifest, index, lane results, screenshots and each lane's
+`traces/` bundle even on failure, never a lane's `data/` tree; read a run
+with `gh run download <run-id> -n e2e-live-run`. The summary renders
+verdicts or the typed refusal/error without changing the stand's exit
+verdict. Browser PR proof and the keyless system-E2E schedule retain their
+separate existing CI owners; the latter uploads its scenario servers'
+`data/logs/`, `data/task_results/` and the journal segments rotated into
+`data/archive/*.jsonl` as `system-e2e-traces`. Both uploads are
+diagnostics: a failed upload never reddens its job.

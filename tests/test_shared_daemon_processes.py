@@ -32,7 +32,7 @@ def test_selective_windows_tree_uses_one_snapshot_without_taskkill_tree(monkeypa
     # Worker 10 owns ordinary 11/12 and shared daemon 20 with client work 21/22.
     children = {10: [11, 20], 11: [12], 20: [21], 21: [22]}
     monkeypatch.setattr(pl, "IS_WINDOWS", True)
-    monkeypatch.setattr(pl, "_windows_process_children", lambda: snapshots.append(True) or children)
+    monkeypatch.setattr(pl, "_process_children", lambda: snapshots.append(True) or children)
     monkeypatch.setattr(pl, "_hidden_run", lambda argv, **kw: calls.append(argv))
     pl.kill_pid_tree(10, exclude_pids={20})
     assert snapshots == [True]
@@ -46,14 +46,59 @@ def test_posix_forced_tree_preserves_shared_branch_even_in_same_group(monkeypatc
     if pl.IS_WINDOWS:
         pytest.skip("POSIX group branch")
     killed, groups = [], []
-    descendants = {10: [12, 11, 21, 20], 20: [21]}
-    monkeypatch.setattr(pl, "_collect_descendants", lambda pid, out: out.extend(descendants.get(pid, [])))
+    monkeypatch.setattr(pl, "_process_children", lambda: {10: [11, 20], 11: [12], 20: [21]})
     monkeypatch.setattr(pl, "process_group_id", lambda pid: 10)
     monkeypatch.setattr(pl, "kill_process_group_id", lambda pgid, **kw: groups.append(pgid))
     monkeypatch.setattr(pl, "force_kill_pid", killed.append)
     pl.kill_process_tree(SimpleNamespace(pid=10), exclude_pids={20})
     assert groups == []
     assert killed == [12, 11, 10]
+
+
+@pytest.mark.parametrize("count", [1, 15])
+@pytest.mark.parametrize("attached", [False, True])
+def test_posix_tree_reads_one_snapshot_for_target_and_whole_retained_branch(monkeypatch, count, attached):
+    monkeypatch.setattr(pl, "IS_WINDOWS", False)
+    calls = []
+    # A nested retained branch, either under the worker or owned by another worker.
+    lines = ["10 1", "11 10", "12 11", f"20 {10 if attached else 1}"]
+    lines.extend(f"{21 + index} {20 + index}" for index in range(count))
+    def snapshot(argv, **kwargs):
+        calls.append(argv)
+        assert argv == ["ps", "-axo", "pid=,ppid="]
+        assert kwargs["timeout"] == 3 and kwargs["check"] is True
+        return SimpleNamespace(stdout="\n".join(lines), returncode=0)
+    monkeypatch.setattr(pl.subprocess, "run", snapshot)
+    targets, spared = pl._tree_kill_targets(10, {20})
+    assert targets == [12, 11, 10]
+    assert spared == set(range(20, 21 + count))
+    assert len(calls) == 1, "retained subtree size must not add subprocesses per worker"
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "failed", "empty", "malformed", "negative"])
+def test_posix_snapshot_failure_retains_legacy_descendants_and_sparing(monkeypatch, failure):
+    monkeypatch.setattr(pl, "IS_WINDOWS", False)
+    calls = []
+    children = {10: [11, 20], 11: [12], 20: [21]}
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == "ps":
+            if failure == "missing":
+                raise FileNotFoundError("ps unavailable")
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, 3)
+            if failure == "failed":
+                raise subprocess.CalledProcessError(1, argv)
+            return SimpleNamespace(stdout={"empty": "", "malformed": "10 1\nunreadable",
+                                           "negative": "10 1\n-20 10"}[failure])
+        assert argv[:2] == ["pgrep", "-P"]
+        return SimpleNamespace(stdout="\n".join(map(str, children.get(int(argv[-1]), []))))
+    monkeypatch.setattr(pl.subprocess, "run", run)
+    targets, spared = pl._tree_kill_targets(10, {20})
+    assert targets == [12, 11, 10]
+    assert spared == {20, 21}
+    assert calls[0] == ["ps", "-axo", "pid=,ppid="]
+    assert any(call[0] == "pgrep" for call in calls)
 
 
 def test_windows_legacy_argv_hash_is_not_native_measurement(monkeypatch):
@@ -463,17 +508,16 @@ def test_stray_reaper_filters_descendants_before_final_root_revalidation(monkeyp
     from ouroboros import launcher_server_reaper as reaper
     events = []
     monkeypatch.setattr(pl, "IS_WINDOWS", False)
-    descendants = {10: [12, 11, 21, 20], 20: [21]}
-    def collect(pid, out):
-        events.append(("collect", pid))
-        out.extend(descendants.get(pid, []))
-    monkeypatch.setattr(pl, "_collect_descendants", collect)
+    def snapshot():
+        events.append("snapshot")
+        return {10: [11, 20], 11: [12], 20: [21]}
+    monkeypatch.setattr(pl, "_process_children", snapshot)
     monkeypatch.setattr(reaper, "_runs_our_server", lambda *a: events.append("command") or True)
     monkeypatch.setattr(reaper, "_is_launcher_managed", lambda *a: events.append("environment") or True)
     monkeypatch.setattr(reaper, "_signal_pid", lambda pid: events.append(("signal", pid)))
     monkeypatch.setattr(reaper, "_pid_gone", lambda pid: True)
     assert reaper._revalidate_and_kill(10, set(), set(), {20})
-    assert events == [("collect", 10), ("collect", 20), "command", "environment",
+    assert events == ["snapshot", "command", "environment",
                       ("signal", 10), ("signal", 12), ("signal", 11)]
 
 

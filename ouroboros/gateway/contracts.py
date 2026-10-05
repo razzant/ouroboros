@@ -725,11 +725,11 @@ class ActiveChatActivity(ActiveDirectTurn):
     awaits explicit Resume. Direct paused turns keep their ID/kind. Unreadable
     live waits or Pause authority report unknown (incomplete census); unresolved owner-question detail reports
     required_question_unavailable. Managed rows have empty client_message_id."""
-
+    owner_wait: NotRequired[Dict[str, Any]]  # quiz-bound wait facts, independent of a Project pointer
     required_question: NotRequired[Dict[str, Any]]
     required_question_unavailable: NotRequired[bool]
     project_admission_hold: NotRequired[Dict[str, Any]]
-
+    pause_cause: NotRequired[str]  # budget | owner | restart | sleep | unknown; display only
 
 class StateResponse(TypedDict):
     """Shape of ``GET /api/state`` (happy path)."""

@@ -598,5 +598,22 @@ test('Batch4: the census phase parks and releases a live card chip', () => {
 test('Batch4: chat feeds every census phase to its card', () => {
     const hydrate = chatSource.slice(chatSource.indexOf('function hydrateDirectActivities'),
         chatSource.indexOf('const isKnownProjectFrame'));
-    assert.match(hydrate, /syncParkedPhase\(record, v\.phase\);/);
+    assert.match(hydrate, /syncParkedPhase\(record, v\.phase, v\);/);
+});
+
+test('pause causes come only from current typed facts and update without a phase transition', () => {
+    const record = chipRecord();
+    for (const [pause_cause, label] of [['budget', 'budget limit'], ['owner', 'owner pause'], ['restart', 'after restart'], ['sleep', 'sleep']]) {
+        assert.equal(syncParkedPhase(record, 'budget_paused', { pause_cause }), true);
+        assert.equal(record.phaseEl.textContent, `Paused · ${label}`);
+    }
+    syncParkedPhase(record, 'budget_paused', { pause_cause: 'future-cause' });
+    assert.equal(record.phaseEl.textContent, 'Paused', 'unknown cause stays generic');
+    syncParkedPhase(record, 'budget_pausing', { pause_cause: 'owner' });
+    assert.equal(record.phaseEl.textContent, 'Pausing… · owner pause');
+    assert.equal(record.inlineTypingEl.style.display, '', 'submitted work can still settle');
+    const late = desiredLiveCardPhase({ finalizingHold: true, observedOutcome: 'error',
+        parkedPhase: 'budget_paused', pauseCause: 'owner' });
+    assert.equal(late.text, 'Failed');
+    assert.equal(late.secondary, 'Paused · owner pause');
 });

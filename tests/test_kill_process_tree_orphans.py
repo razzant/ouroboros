@@ -22,15 +22,15 @@ def test_kill_process_tree_sweeps_escaped_descendants(monkeypatch):
     killpg_calls = []
     kill_calls = []
 
-    def fake_collect(pid, result, visited=None):
-        order.append(("collect", pid))
-        result.extend(escaped)
+    def fake_snapshot():
+        order.append(("collect", 4242))
+        return {4242: escaped}
 
     def fake_killpg(pgid, sig):
         order.append(("killpg", pgid))
         killpg_calls.append((pgid, sig))
 
-    monkeypatch.setattr(pl, "_collect_descendants", fake_collect)
+    monkeypatch.setattr(pl, "_process_children", fake_snapshot)
     monkeypatch.setattr(pl.os, "getpgid", lambda pid: 7777)
     monkeypatch.setattr(pl.os, "killpg", fake_killpg)
     monkeypatch.setattr(pl.os, "kill", lambda pid, sig: kill_calls.append((pid, sig)))

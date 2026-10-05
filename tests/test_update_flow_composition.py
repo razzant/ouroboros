@@ -324,7 +324,7 @@ def test_dirty_work_survives_the_full_managed_clean_update(tmp_path, monkeypatch
     assert (repo / "a.txt").read_text() == "owner dirty work\n"
     assert (repo / "untracked.txt").read_text() == "scratch\n"
     assert (repo / "remote.txt").read_text() == "official\n"  # the update landed
-    assert not tds._git(repo, "stash", "list").stdout.strip()
+    assert tx["stash_sha"] in tds._git(repo, "stash", "list", "--format=%H").stdout
     assert update_merge.read_update_tx() == {}
 
 

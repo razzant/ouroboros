@@ -456,7 +456,17 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
 
 
 def check_budget(env: Any) -> Tuple[dict, int]:
-    """Check budget remaining with warning thresholds."""
+    """Check budget remaining with warning thresholds.
+
+    Server-side only: the projection folds the whole usage ledger, and a worker
+    process verifying itself at construction must not pay that fold (and take
+    the money lock) once per worker; the server's own check already covers the
+    install, and every reservation re-checks the limits anyway.
+    """
+    from ouroboros.utils import in_worker_process
+
+    if in_worker_process():
+        return {"status": "skipped", "reason": "worker_process"}, 0
     try:
         accounting_root = pathlib.Path(
             getattr(env, "budget_drive_root", None) or env.drive_path("state").parent

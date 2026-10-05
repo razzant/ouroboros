@@ -116,10 +116,10 @@ def fit_tool_schemas_to_limit(
 
 
 def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequence[str]) -> str:
-    """The fact an actor reads when its route could not carry the whole catalog."""
+    """The fact an actor reads when its route could not carry all of its loaded schemas."""
     return ("[SYSTEM NOTICE]\n"
-            f"The route {model} accepts at most {limit} tool schemas in one request; this task's catalog "
-            f"has {total}. Not loaded for now: {', '.join(left_out)}. They stay callable: "
+            f"The route {model} accepts at most {limit} tool schemas in one request; this task had "
+            f"{total} loaded. Not loaded for now: {', '.join(left_out)}. They stay callable: "
             "list_available_tools marks them not loaded, and enable_tools loads one (the request then "
             "leaves out another schema to stay within the limit).")
 

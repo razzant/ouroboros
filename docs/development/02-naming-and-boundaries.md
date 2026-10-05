@@ -111,7 +111,8 @@ authored summary is its resident face in the knowledge index, and an absent
 carrier renders as a visible gap, never silence. It never carries how a tool
 works: parameters, recipes, typed outcomes and "when to choose it" belong to the
 `get_tools()` schema every profile receives in full each round (delegated,
-repair, credential and contract filters narrow it), so a prompt sentence about a
+repair, credential and contract filters narrow it; a route's schema ceiling leaves
+an overflow unloaded but loadable), so a prompt sentence about a
 schema is a drifting second copy and a new tool needs NO SYSTEM.md mention.
 Runtime facts are assembled ONCE per task attempt, so the Health Invariants block
 states custody obligations as of task start and never refreshes mid-task — a
@@ -401,6 +402,7 @@ rows — review-only maintenance.
 | `ouroboros/llm_claudexor.py::cache_key_for_model` | The 2026-09-17 measurement found Codex prefix reuse across conversations requires one `prompt_cache_key` + `session_id`, while per-conversation turn states remain valid under that shared session | Provider dependent | Dated measurement beside the key derivation | Re-measure cache reads and turn state across two conversations | A stale positive pays cold prefixes or breaks turn state | Re-measure before changing the key scope |
 | `ouroboros/llm_openai_compatible.py` DeepSeek send projection | The 2026-09-03 probe found thinking accepts only `auto`/`none` tool choice; required/named calls returned 400 on both probed v4 models | Provider dependent | Dated probe recorded beside the send projection and its transport tests | Re-probe the exact endpoint/model when that dialect changes | Removing the projection too early breaks forced calls; keeping it after a provider change may suppress supported thinking | Revalidate the wire contract before changing the projection; keep its effect disclosed |
 | `ouroboros/provider_models.py::ZAI_REASONING_EFFORT_ALIASES` (Z.ai send projection) | The 2026-09-21 contributor probe (PR #1207, Coding Plan key, glm-5.3): only `low`/`high`/`max` are accepted, an absent tier is served at max, thinking cannot be disabled (400 code 1210), and forced tool_choice works with thinking on; GLM-5.2 accepts the wider scale | Provider dependent | Dated probe recorded beside the projection and its tests | Re-probe the exact endpoint/model when Z.ai changes the enum or a GLM release changes semantics | Dropping the projection bills every call at max; a stale one rejects tiers the provider would accept | Revalidate the wire contract before changing the projection; keep its effect disclosed |
+| `ouroboros/provider_models.py::PROVIDER_TOOL_SCHEMA_LIMITS` | How many tool schemas one request may carry, by execution provider: direct OpenAI refused 129 (`array_above_max_length`, max 128) in the 2026-10-04 provider canaries (CI run 37204372307) while OpenRouter, Anthropic, Gemini, Grok and DeepSeek accepted 129 | Provider dependent | A per-provider route fact (`openai: 128`); a provider absent from the table declares no ceiling | One bounded send of ceiling + 1 schemas to the exact route | Too high: every request above the real ceiling is refused; too low or invented: overflow schemas leave the request needlessly (still loadable) | Change a number only on the provider's documented limit or such a send; declare nothing for openai-compatible, Azure or local routes |
 
 ### Provider Independence
 

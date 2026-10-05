@@ -229,6 +229,26 @@ def test_reprepare_selected_vision_route_preserves_source_and_accounts_caption(m
     assert ctx.accumulated_usage["cost"] == 0.01
 
 
+@pytest.mark.parametrize("destination,ceiling", [
+    ("openai::gpt-5.6-terra", 128), ("openai/gpt-5.6-luna", None), (MODEL, None),
+])
+def test_a_wait_card_switch_sends_the_list_fitted_to_the_chosen_routes_ceiling(main_call, destination, ceiling):
+    from tests.test_route_tool_schema_limit import PINNED, _catalog, _names
+
+    ctx = main_call[0]
+    ctx.tool_schemas[:] = _catalog(129)  # extras first, then core and meta
+    catalog = _names(ctx.tool_schemas)
+    physical = loop._physical_context_for_fit(loop._measure_round_main_fit(ctx, automatic_pass_used=False))
+    with ua.bind_physical_attempt_context(physical):
+        prepared = _reprepare_waiting_main(ctx, {"messages": deepcopy(ctx.messages), "model": destination,
+                                                "model_role": "main", "tools": deepcopy(ctx.tool_schemas)})
+    sent, notice = _names(prepared.kwargs["tools"]), "at most 128 tool schemas" in str(prepared.kwargs["messages"])
+    # The switched send, its measurement and discovery carry one list: fitted on a ceiling, untouched without one.
+    assert sent == _names(ctx.tool_schemas) and notice is (ceiling is not None)
+    last_extra = catalog[-len(PINNED) - 1]
+    assert sent == ([name for name in catalog if name != last_extra] if ceiling else catalog)
+
+
 def test_processing_repair_does_not_authorize_native_source_reset(main_call, monkeypatch):
     from ouroboros import llm_claudexor
     from tests.test_processing_claudexor import refusal

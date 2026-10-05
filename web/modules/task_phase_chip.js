@@ -21,7 +21,27 @@ const CHIP = {
     unconfirmed: () => tr('task.chip.activity_unconfirmed', 'Activity unconfirmed'),
     waitingAccess: () => tr('task.chip.waiting_for_access', 'Waiting for access'),
     working: () => tr('task.chip.working', 'Working'),
+    queued: () => tr('task.chip.queued', 'Queued'),
+    ownerWait: () => tr('task.chip.waiting_for_answer', 'Waiting for your answer'),
 };
+
+export function pausePhaseLabel(phase, cause = '') {
+    const label = phase === 'budget_pausing' ? CHIP.pausing() : CHIP.paused();
+    const reasons = { budget: ['budget', 'budget limit'], owner: ['owner', 'owner pause'],
+        restart: ['restart', 'after restart'], sleep: ['sleep', 'sleep'] };
+    const reason = reasons[cause];
+    return reason ? fmt('{state} · {reason}', { state: label,
+        reason: tr(`task.pause_cause.${reason[0]}`, reason[1]) }) : label;
+}
+
+export function activityWaitPhase(activity = {}) {
+    const question = activity.owner_wait ?? activity.required_question;
+    if (question?.owner_wait_state === 'resumed' || question?.wait_ended_at
+        || ['answered', 'expired_terminal', 'superseded'].includes(question?.quiz_state)) return '';
+    if (question?.owner_wait_state === 'waiting') return 'owner_wait';
+    if (activity.required_question_unavailable || question) return 'unknown';
+    return '';
+}
 
 // Pure desired-chip projection. Terminal truth wins; while unfinished, an
 // owner stop/finalization hold stays sticky across ordinary progress frames.
@@ -48,7 +68,8 @@ export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
         // D10: the owner's Pause of that late work is the same second fact.
         const observed = String(record.observedOutcome || '');
         const lateKind = { budget_paused: 'paused', budget_pausing: 'pausing' }[record.parkedPhase] || 'finalizing';
-        const late = CHIP[lateKind]();
+        const late = lateKind === 'finalizing' ? CHIP.finalizing()
+            : pausePhaseLabel(record.parkedPhase, record.pauseCause);
         if (observed) {
             const presentation = taskPresentation(observed);
             return {
@@ -67,15 +88,17 @@ export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
     // Owner Batch4: a paused task (owner Pause, budget pause, Restart hold) is
     // not working, and neither is one still settling its Pause.
     if (record.parkedPhase === 'unknown') return { phase: 'unknown', text: CHIP.unconfirmed(), className: 'chat-live-phase warn' };
-    if (record.parkedPhase === 'budget_paused') return { phase: 'paused', text: CHIP.paused(), className: 'chat-live-phase warn' };
+    if (record.parkedPhase === 'budget_paused') return { phase: 'paused', text: pausePhaseLabel(record.parkedPhase, record.pauseCause), className: 'chat-live-phase warn' };
     if (record.parkedPhase === 'budget_pausing') return {
-        phase: 'working', text: CHIP.pausing(), className: 'chat-live-phase working waiting',
+        phase: 'working', text: pausePhaseLabel(record.parkedPhase, record.pauseCause), className: 'chat-live-phase working waiting',
     };
+    if (record.parkedPhase === 'owner_wait') return { phase: 'waiting', text: CHIP.ownerWait(), className: 'chat-live-phase warn' };
     if (record.modelWaiting) return {
         phase: 'working', text: CHIP.waitingAccess(), className: 'chat-live-phase working waiting',
     };
     // A census Project/scope verification hold: an unfinished, static amber wait.
     if (record.projectHold) return { phase: 'working', text: record.projectHold, className: 'chat-live-phase warn' };
+    if (record.parkedPhase === 'queued') return { phase: 'queued', text: CHIP.queued(), className: 'chat-live-phase warn' };
     return { phase: 'working', text: CHIP.working(), className: 'chat-live-phase working' };
 }
 
@@ -84,10 +107,14 @@ export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
  * `active_chat_activities`): paused/pausing/unknown park it until a positive
  * phase releases it. true when the chip changed.
  */
-export function syncParkedPhase(record, phase = '') {
-    const parked = ['budget_paused', 'budget_pausing', 'unknown'].includes(String(phase || '')) ? String(phase) : '';
-    if (!record || record.finished || (record.parkedPhase || '') === parked) return false;
+export function syncParkedPhase(record, phase = '', activity = {}) {
+    const observed = ['budget_paused', 'budget_pausing', 'unknown'].includes(phase) ? phase
+        : activityWaitPhase(activity) || phase;
+    const parked = ['budget_paused', 'budget_pausing', 'unknown', 'queued', 'owner_wait'].includes(observed) ? observed : '';
+    const cause = ['budget_paused', 'budget_pausing'].includes(parked) ? String(activity.pause_cause || '') : '';
+    if (!record || record.finished || (record.parkedPhase || '') === parked && (record.pauseCause || '') === cause) return false;
     record.parkedPhase = parked;
+    record.pauseCause = cause;
     const desired = desiredLiveCardPhase(record);
     return setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary);
 }
@@ -165,7 +192,7 @@ export function setLiveCardPhaseSecondary(record, text = '') {
 // remains unfinished without pretending the paused role is doing computation.
 export function setLiveCardTypingVisible(record, visible) {
     if (!record?.inlineTypingEl) return false;
-    const display = visible && !record.modelWaiting && !record.projectHold && !['budget_paused', 'unknown'].includes(record.parkedPhase)
+    const display = visible && !record.modelWaiting && !record.projectHold && !['budget_paused', 'unknown', 'queued', 'owner_wait'].includes(record.parkedPhase)
         && !record.reviewAnchor && !record.historicalUnavailable && !record.historicalUnconfirmed ? '' : 'none';
     if (record.inlineTypingEl.style.display === display) return false;
     record.inlineTypingEl.style.display = display;

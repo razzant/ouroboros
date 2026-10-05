@@ -363,7 +363,7 @@ def enqueue_with_admission_receipt(task: Dict[str, Any], *, receipt_required: bo
         window = queue.consciousness_admission_window(task)
         if window is not None:
             enqueue_kwargs["consciousness_window"] = window
-    with queue._queue_lock:
+    with queue.prepared_root_billing(task), queue._queue_lock:  # the ledger read happens before the lock
         admitted = queue.enqueue_task(task, **enqueue_kwargs)
         if not isinstance(admitted, dict) or admitted.get("_admission_blocked"):
             return admitted

@@ -67,6 +67,10 @@ def _worker(root: Path, mode: str, restart: bool) -> None:
         if len(functions) != 1:
             raise RuntimeError("frozen upstream has no unique public lookup")
         module = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
+        # The frozen function names the complete reader the current module no
+        # longer imports; bind it so old mode measures the original full scan.
+        from ouroboros.task_results import list_task_results
+        task_status.__dict__.setdefault("list_task_results", list_task_results)
         exec(compile(module, "b8233b671:ouroboros/task_status.py", "exec"), task_status.__dict__)
 
     reads = []

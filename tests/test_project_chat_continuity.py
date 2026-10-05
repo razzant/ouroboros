@@ -253,7 +253,7 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
     import pathlib
 
     fields = ActiveChatActivity.__annotations__
-    managed_keys = {"required_question", "required_question_unavailable", "project_admission_hold"}
+    managed_keys = {"required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait"}
     assert {key: value for key, value in fields.items() if key not in managed_keys} == ActiveDirectTurn.__annotations__
     assert set(fields) - set(ActiveDirectTurn.__annotations__) == managed_keys
     from typing import get_type_hints
@@ -264,7 +264,7 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
     api_types = (
         pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
     ).read_text(encoding="utf-8")
-    for needle in ("ActiveChatActivity", "active_chat_activities", "task_phase", "project_admission_hold"):
+    for needle in ("ActiveChatActivity", "active_chat_activities", "task_phase", "project_admission_hold", "owner_wait"):
         assert needle in api_types, f"api_types.js mirror is missing {needle!r}"
 
 

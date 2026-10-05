@@ -24,7 +24,7 @@ from ouroboros.headless import ARTIFACT_STATUS_FINALIZING, ARTIFACT_STATUS_PENDI
 from ouroboros.outcomes import public_task_result
 from ouroboros.task_results import load_task_result, task_results_dir, validate_task_id
 from ouroboros.task_status import FINAL_STATUSES
-from ouroboros.gateway.task_list_scan import raw_result_facts
+from ouroboros.task_result_facts import raw_result_facts
 from ouroboros.gateway.contracts import TaskEventsRequest
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.utils import jsonl_archive_segments, jsonl_chain_handles

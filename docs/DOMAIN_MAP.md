@@ -18,13 +18,13 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D08 | Supervisor: queue, workers, events & runtime control | 56 | 0 |
 | D09 | Cancellation, owner control & process custody | 14 | 0 |
 | D10 | Git, update & release machinery | 29 | 0 |
-| D11 | Gateway, server & Web UI | 66 | 0 |
+| D11 | Gateway, server & Web UI | 65 | 0 |
 | D12 | Settings & configuration | 18 | 0 |
 | D13 | Safety, guards & runtime mode | 9 | 0 |
 | D14 | Skills & extensions | 56 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 28 | 0 |
 | D16 | Observability, usage accounting & cost | 15 | 0 |
-| D17 | Projects, workspaces & task results | 29 | 0 |
+| D17 | Projects, workspaces & task results | 30 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 20 | 0 |
 | D19 | Frozen contracts (ABI) | 10 | 0 |
 | D20 | Presence | 10 | 0 |
@@ -52,7 +52,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 | **D14** | · | ✓ | · | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | · | ✓ | ✓ | · |
 | **D15** | ✓ | · | ✓ | ✓ | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | · | ✓ | ✓ | · |
 | **D16** | · | ✓ | · | · | · | ✓ | · | · | · | · | · | ✓ | · | ✓ | · | · | · | ✓ | · | · |
-| **D17** | ✓ | · | · | ✓ | · | ✓ | · | · | · | · | · | · | · | · | ✓ | ✓ | · | ✓ | ✓ | · |
+| **D17** | ✓ | · | · | ✓ | · | ✓ | · | · | · | · | · | · | · | · | ✓ | ✓ | · | ✓ | ✓ | ✓ |
 | **D18** | · | · | · | · | · | · | · | · | ✓ | ✓ | · | ✓ | · | · | · | · | · | · | · | · |
 | **D19** | · | · | · | · | · | · | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | · | · |
 | **D20** | · | · | · | ✓ | ✓ | · | · | · | · | · | · | · | · | ✓ | ✓ | · | ✓ | ✓ | ✓ | · |
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **112**
+- lazy-only cross-domain pairs: **111**
   - D01->D08
   - D01->D10
   - D01->D11
@@ -162,7 +162,6 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D17->D09
   - D17->D12
   - D17->D13
-  - D17->D20
   - D18->D01
   - D18->D07
   - D18->D11
@@ -641,7 +640,6 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/task_decision.py`
 - `ouroboros/gateway/task_events.py`
 - `ouroboros/gateway/task_hurry.py`
-- `ouroboros/gateway/task_list_scan.py`
 - `ouroboros/gateway/task_model_wait.py`
 - `ouroboros/gateway/task_pause.py`
 - `ouroboros/gateway/tasks.py`
@@ -815,6 +813,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/headless_status.py`
 - `ouroboros/history_retention.py`
 - `ouroboros/owner_words.py`
+- `ouroboros/pause_notices.py`
 - `ouroboros/project_admission.py`
 - `ouroboros/project_dialogue.py`
 - `ouroboros/project_handoff.py`
@@ -825,7 +824,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/retention.py`
 - `ouroboros/routing_wait.py`
 - `ouroboros/task_custody.py`
-- `ouroboros/task_result_scan.py`
+- `ouroboros/task_result_facts.py`
 - `ouroboros/task_result_schema.py`
 - `ouroboros/task_results.py`
 - `ouroboros/task_status.py`

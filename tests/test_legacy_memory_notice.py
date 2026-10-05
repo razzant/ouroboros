@@ -84,8 +84,8 @@ def test_an_install_with_old_memory_hears_once_how_much_and_how_to_fold_it(boot)
     assert len(rows) == 1 and rows[0]["direction"] == "system" and rows[0]["chat_id"] == 7
     text = rows[0]["text"]
     assert "3 pieces over 2 periods (2026-08-01 to 2026-09-05)" in text  # the sections' own chat rows
-    assert "works as it is" in text and "folded into the new format gradually" in text
-    assert "ask Ouroboros to fold the old memory" in text
+    assert "works as it is" in text and "folded into the new format gradually, part by part" in text
+    assert "ask Ouroboros to keep folding it; it will tell you how much is left" in text
     assert boot.state.load_state()[notices.LEGACY_MEMORY_NOTICE_KEY]
     # The facts came from the same import the first memory view runs, and the old files are untouched.
     store = ChronicleStore(boot.root)
@@ -240,9 +240,14 @@ def test_an_unreadable_journal_leaves_only_this_notice_owed(boot, monkeypatch):
 ])
 def test_the_notice_states_facts_only(facts, expected):
     text = notices.legacy_memory_notice(facts)
-    assert expected in text and text.endswith("ask Ouroboros to fold the old memory.")
+    assert expected in text and text.endswith("it will tell you how much is left.")
     # No price, duration, schedule or UI surface: the owner decides on facts.
     for word in ("$", "cost", "minute", "hour", "second", "first turn", "Settings"):
         assert word not in text
+    # No promise that one request folds everything: on the acceptance stand one request
+    # folded 23 of 377 retellings. The previous wording ("To fold it all now, ask ...") trips this.
+    for promise in ("all now", "at once", "fold it all"):
+        assert promise not in text
+    assert "part by part" in text and "keep folding" in text
     assert notices.legacy_memory_notice({**facts, "pieces": 0}) == ""
     assert notices.legacy_memory_notice(None) == ""

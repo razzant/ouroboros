@@ -48,14 +48,14 @@
  * consciousness.status_snapshot). A wake-up is an ordinary Main turn; its liveness is the direct-activity census, never a flag here.
  * @typedef {Object} BgConsciousnessState
  * @property {boolean} enabled
- * @property {string} status  // disabled | stopped | thinking | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed
+ * @property {string} status  // disabled | stopped | thinking | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
  * @property {string} detail  // one honest owner-readable line (e.g. "Sleeping until 14:05.")
  * @property {string} level  // observe | act | full
  * @property {string} next_wake_at  // ISO instant; "" when unknown
  * @property {string} pending_reason  // the event that will wake it early, "" when none
  * @property {string} last_wake_at  // ISO instant; "" before the first wake of this process
  * @property {string} last_wake_task_id
- * @property {string} last_wake_outcome  // running | done | failed | rejected:<reason> | skipped:<reason>
+ * @property {string} last_wake_outcome  // running | done | paused | pausing | unknown | failed | rejected:<reason> | skipped:<reason>
  * @property {string} last_error
  * @property {?number} spent_24h_usd  // null when the ledger could not be read
  * @property {?number} daily_usd
@@ -80,7 +80,9 @@
  */
 /**
  * @typedef {Object} ActiveChatActivity
+ * @property {Object=} owner_wait  // quiz-bound state, quiz_state and optional wait_ended_at, independent of Project detail
  * @property {Object=} project_admission_hold  // accepted unstarted work waiting for original Project authority
+ * @property {string=} pause_cause  // budget | owner | restart | sleep | unknown; display only
  * @property {Object=} required_question  // read-only pointer to the current required Project quiz
  * @property {boolean=} required_question_unavailable  // a recorded owner-question wait whose detail could not be read: possibly blocked, never "no question"
  * @property {Object.<string,Object>=} model_waits
@@ -136,7 +138,6 @@
  * @property {AvailableSubagentRoute} route
  * @property {string=} effort
  */
-
 /**
  * @typedef {Object} AvailableSubagentsSetting
  * @property {boolean} enabled
@@ -1567,7 +1568,6 @@ export const MAX_QUIZ_OPTIONS = 6;
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
 export const GATEWAY_CONTRACT_VERSION = '7.5.1';
-
 /**
  * @typedef {Object} ChatHistoryPosition
  * @property {'chat'|'progress'} source

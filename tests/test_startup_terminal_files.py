@@ -930,3 +930,47 @@ def test_the_fence_is_the_same_on_either_side_of_the_reap(roots):
         "replay_intent": None,
         "replay_result": SERVER_STOPPED_CANCEL,
     }
+
+
+def test_startup_prunes_independent_tree_but_keeps_child_and_retry_root_closure(roots, monkeypatch):
+    root, _repo = roots
+    for task_id in ("old-root", "new-root", "independent"):
+        write_task_result(root, task_id, "completed", result="saved")
+        tree = root / "task_trees" / task_id
+        tree.mkdir(parents=True)
+        (tree / "ledger.json").write_text("{}", encoding="utf-8")
+    write_task_result(root, "old-root", "completed", superseded_by="new-root", retry_task_id="new-root")
+    write_task_result(root, "new-root", "completed", original_task_id="old-root", timeout_retry_from="old-root")
+    child = headless.prepare_task_drive(root, "old-child", "empty")
+    write_task_result(root, "old-child", "completed", root_task_id="old-root", parent_task_id="old-root")
+    write_task_result(child, "old-child", "completed", root_task_id="old-root", parent_task_id="old-root")
+    # A retry can occupy its predecessor's physical execution root.
+    write_task_result(child, "new-child", "completed", root_task_id="new-root", parent_task_id="new-root")
+    write_task_result(root, "new-child", "completed", root_task_id="new-root", parent_task_id="new-root")
+    monkeypatch.setattr("ouroboros.retention.age_cutoff", lambda *a, **kw: 4_000_000_000)
+    report = {"unresolved": ["old-child"], "protected": [], "errors": []}
+    maintenance._startup_prune_sweeps(preserve_task_sources=True, recovery_report=report)
+    assert (root / "task_trees/old-root").exists() and (root / "task_trees/new-root").exists()
+    assert not (root / "task_trees/independent").exists()
+    assert child.exists()
+
+
+@pytest.mark.parametrize("gap", ["enumeration", "missing", "schema"])
+def test_unknown_startup_recovery_keeps_coarse_tree_and_temp_preservation(roots, monkeypatch, gap):
+    root, _repo = roots
+    tree = root / "task_trees/independent"
+    tree.mkdir(parents=True)
+    write_task_result(root, "independent", "completed", result="saved")
+    write_task_result(root, "unresolved", "completed", root_task_id="unresolved")
+    report = {"unresolved": ["unresolved"], "protected": [], "errors": []}
+    if gap == "enumeration":
+        report["unresolved"] = ["*"]
+        report["errors"] = ["directory unavailable"]
+    elif gap == "missing":
+        (root / "task_results/unresolved.json").unlink()
+    else:
+        (root / "task_results/unresolved.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(maintenance, "_STARTUP_TEMP_SWEEP_OWED", [False])
+    monkeypatch.setattr("ouroboros.retention.age_cutoff", lambda *a, **kw: 4_000_000_000)
+    maintenance._startup_prune_sweeps(preserve_task_sources=True, recovery_report=report)
+    assert tree.exists() and maintenance._STARTUP_TEMP_SWEEP_OWED == [False]

@@ -13,7 +13,8 @@ Depends on ``git_ops`` via the module object (``_g.X``) so monkeypatched
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from supervisor import git_ops as _g
 
@@ -151,10 +152,13 @@ def live_unmerged_paths() -> Optional[List[str]]:
     """The live repo's unmerged (conflicted) paths; ``None`` when Git itself
     failed (an unreadable inventory must never masquerade as "no conflicts" —
     callers keep their previous list or fail safe)."""
-    rc_u, unmerged_out, _ue = _g.git_capture(["git", "diff", "--name-only", "--diff-filter=U"])
-    if rc_u != 0:
+    rc_u, unmerged_out, _ue = _g._run_git_process_bounded(
+        ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
+        timeout=_GIT_RUN_TIMEOUT_SEC, cwd=_g.REPO_DIR, text=False,
+    )
+    if rc_u != 0 or not isinstance(unmerged_out, bytes):
         return None
-    return [ln.strip() for ln in unmerged_out.splitlines() if ln.strip()]
+    return [os.fsdecode(path) for path in unmerged_out.split(b"\0") if path]
 
 
 def _staged_blobs_batch(paths: List[bytes]) -> Tuple[Optional[Dict[bytes, bytes]], bytes]:
@@ -540,118 +544,142 @@ def stash_local_changes_for_update(attempt_id: str) -> Tuple[str, str, str]:
     # later. The caller fail-closes if the tree still reports dirty.
     return "ok", "", ""
 
+
+@dataclass(frozen=True)
+class StashRestoreResult:
+    """Effect, not a success-shaped note: only complete outcomes may clear a tx."""
+
+    status: Literal["not_needed", "restored", "preserved", "incomplete"]
+    note: str = ""
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def complete(self) -> bool:
+        return self.status != "incomplete"
+
+
+def _stash_recovery_note(stash_sha: str) -> str:
+    return (f"the original local changes remain in stash {stash_sha[:12]} "
+            "and current files should be inspected before "
+            f"recovering with `git stash apply {stash_sha}`")
+
+
 def restore_update_stash(
-    stash_sha: str, context: str = "", on_applied=None
-) -> Tuple[bool, str]:
-    """Apply-then-drop the exact update stash entry (matched by SHA).
+    stash_sha: str, context: str = "", *, before_cleanup=None,
+) -> StashRestoreResult:
+    """Apply the exact stash object; NEVER automatically drop an update stash.
 
-    On an apply conflict the partial apply is reset away and the stash entry is
-    KEPT, so local work is never lost — the returned note tells the owner the
-    exact `git stash apply` command. Restoring onto the pre-update tree (the
-    rollback path) always applies cleanly because the stash was taken there.
-    apply+drop (NOT pop) keeps this crash-idempotent: dying between apply and
-    drop leaves the entry in place for the replay. ``on_applied`` runs between
-    the successful apply and the drop so the caller can persist a durable
-    "restored" marker that survives a crash in that window."""
+    Transaction callers record intent before entering here and retain diagnostics
+    through ``before_cleanup`` before resetting a failed partial apply. Cleanup is
+    allowed only after a clean starting tree and is itself verified. A missing list
+    entry says nothing about restoration: the exact object is the carrier.
+    """
     if not stash_sha:
-        return True, ""
-    rc_l, listing, list_error = _g.git_capture(["git", "stash", "list", "--format=%H %gd"])
-    if rc_l != 0:
-        return False, list_error or "could not list stash entries"
-    ref = ""
-    for line in listing.splitlines():
-        sha, _sep, name = line.strip().partition(" ")
-        if sha == stash_sha and name:
-            ref = name
-            break
-    if not ref:
-        return True, (
-            "stash entry not found in the stash list (already consumed after a "
-            "verified restore, or dropped externally)"
-        )
-    # Apply by EXACT SHA (git stash apply accepts any stash-shaped commit): a
-    # concurrent stash push/drop can shift the stash@{n} selector between the
-    # list and the apply, and a selector-based apply would then touch someone
-    # else's entry.
-    rc_p, _po, apply_error = _g.git_capture(["git", "stash", "apply", stash_sha])
-    if rc_p == 0:
-        if on_applied is not None:
-            try:
-                on_applied()
-            except Exception:
-                _g.log.warning("restore_update_stash on_applied hook failed", exc_info=True)
-        # Drop needs a selector, and selectors shift under concurrent stash
-        # traffic. Drop ONLY when the list is byte-identical to the pre-apply
-        # snapshot (nothing external happened) and the selector still names our
-        # exact SHA; otherwise keep the entry — an undropped own entry is
-        # harmless litter, a dropped foreign entry is someone's lost work.
-        rc_l2, listing2, _le2 = _g.git_capture(["git", "stash", "list", "--format=%H %gd"])
-        drop_ref = ""
-        if rc_l2 == 0 and listing2 == listing:
-            for line in listing2.splitlines():
-                sha2, _sep2, name2 = line.strip().partition(" ")
-                if sha2 == stash_sha and name2:
-                    drop_ref = name2
-                    break
-        if drop_ref:
-            _g.git_capture(["git", "stash", "drop", drop_ref])
-        else:
-            _g.log.info("stash entry %s kept (list changed during restore)", stash_sha[:12])
-        from supervisor.update_merge import _log_supervisor
+        return StashRestoreResult("not_needed")
+    if _rev_parse(stash_sha) != stash_sha:
+        return StashRestoreResult("incomplete", f"could not verify update stash {stash_sha}")
+    recovery = _stash_recovery_note(stash_sha)
+    rc_s, dirty, status_error = _g.git_capture(["git", "status", "--porcelain"])
+    if rc_s != 0:
+        return StashRestoreResult("incomplete", f"could not inspect current files: {status_error}; {recovery}")
+    if dirty:
+        return StashRestoreResult("preserved", f"local changes are present, so the stash was NOT auto-applied; {recovery}")
+    rc, stdout, stderr = _g.git_capture(["git", "stash", "apply", stash_sha])
+    evidence = {"apply_returncode": rc, "stdout": stdout, "stderr": stderr}
+    if rc == 0:
+        return StashRestoreResult("restored", "local changes restored; the update stash was retained", evidence)
+    conflicts = live_unmerged_paths()
+    evidence["conflict_paths"] = conflicts
+    if conflicts:
+        import json
 
-        _log_supervisor({
-            "type": "managed_update_stash_restored",
-            "context": context,
-            "stash_sha": stash_sha,
-        })
-        return True, "local changes restored"
-    _g.git_capture(["git", "reset", "--hard", "HEAD"])
-    _g.git_capture(["git", "clean", "-fd"])
-    note = (
-        "local changes could not be restored automatically "
-        f"({(apply_error or '').strip() or 'conflict with the updated tree'}); they are "
-        f"preserved in git stash entry {stash_sha[:12]} — recover with "
-        f"`git stash apply {stash_sha}`"
-    )
-    from supervisor.update_merge import _log_supervisor
+        problem = "conflicting paths: " + ", ".join(json.dumps(path, ensure_ascii=False) for path in conflicts)
+    elif conflicts is None:
+        problem = "git stash apply failed; the conflict inventory could not be read"
+    else:
+        problem = "git stash apply failed without tracked conflicts (untracked collisions are not in that inventory)"
+    diagnostics = "\n".join(part for part in (stdout, stderr) if part)
+    note = f"{problem}; {recovery}" + (f"\nGit diagnostics:\n{diagnostics}" if diagnostics else "")
+    if before_cleanup is not None:
+        before_cleanup({"status": "cleanup_pending", "note": note, **evidence})
+    cleanup = {}
+    for name, cmd in (("reset", ["git", "reset", "--hard", "HEAD"]),
+                      ("clean", ["git", "clean", "-fd"])):
+        code, out, err = _g.git_capture(cmd)
+        cleanup[name] = {"returncode": code, "stdout": out, "stderr": err}
+        if code != 0:
+            return StashRestoreResult("incomplete", f"{note}\nPartial-apply cleanup failed at {name}: {err or out}",
+                                      {**evidence, "cleanup": cleanup})
+    rc_s, dirty, status_error = _g.git_capture(["git", "status", "--porcelain"])
+    evidence["cleanup"] = {**cleanup, "verified_clean": rc_s == 0 and not dirty}
+    if rc_s != 0 or dirty:
+        return StashRestoreResult("incomplete", f"{note}\nPartial-apply cleanup was not verified: {status_error or dirty}", evidence)
+    return StashRestoreResult("preserved", note, evidence)
 
-    _log_supervisor({
-        "type": "managed_update_stash_restore_failed",
-        "context": context,
-        "stash_sha": stash_sha,
-        "error": (apply_error or "").strip(),
-    })
-    return False, note
 
-def restore_stash_with_marker(tx: Dict[str, Any], context: str) -> str:
-    """Marker-guarded stash restore for every tx-clearing path: skips when a prior
-    attempt already restored (a crash between apply and drop must not let a REPLAY
-    conflict against the already-restored copy and reset it away), and persists the
-    ``stash_restored`` marker between apply and drop. Returns the disclosure note."""
+def restore_stash_with_marker(tx: Dict[str, Any], context: str) -> StashRestoreResult:
+    """One recovery owner for all completion paths, with write-ahead custody.
+
+    ``stash_restore`` is schema-2 evidence: old strict readers refuse it. Legacy
+    ``stash_restored`` still means a successful recorded apply, never its intent.
+    An interrupted apply/cleanup is NOT replayed: once the store works again the
+    saved backup is handed back with an honest unknown-outcome note, preserving
+    both the current files and any subsequent owner edits.
+    """
+    from supervisor import update_merge as _um
+
     stash_sha = str(tx.get("stash_sha") or "")
-    if not stash_sha or bool(tx.get("stash_restored")):
-        return ""
-    # Restoring onto a DIRTY tree is never safe: a conflicting apply's cleanup
-    # (reset --hard + clean -fd) would wipe whatever made the tree dirty — late
-    # human edits in an abort-unwind, an operator's work on a diverged head.
-    # Rollback/finalize call this on verified-clean trees, so this guard only
-    # fires where the destructive cleanup would actually cost something.
-    rc_s, dirty, _se = _g.git_capture(["git", "status", "--porcelain"])
-    if rc_s != 0 or dirty.strip():
-        return (
-            "local changes are present, so the stashed work was NOT auto-applied; it is "
-            f"preserved in git stash entry {stash_sha[:12]} — recover with "
-            f"`git stash apply {stash_sha}`"
+    record = tx.get("stash_restore") or {}
+    if not stash_sha:
+        return StashRestoreResult("not_needed")
+    if not record and tx.get("stash_restored"):
+        return StashRestoreResult("restored")  # existing schema-1 success evidence
+
+    def persist(value: Dict[str, Any]) -> None:
+        updated = {**tx, "stash_restore": {"context": context, "stash_sha": stash_sha, **value}}
+        if value["status"] == "restored":
+            updated["stash_restored"] = True
+        _um.write_update_tx(updated)
+        tx.update(updated)  # never publish an in-memory success before the write
+
+    try:
+        if record.get("status") in {"restored", "preserved"}:
+            result = StashRestoreResult(record["status"], record.get("note", ""), record.get("evidence", {}))
+        elif record:
+            if _rev_parse(stash_sha) != stash_sha:
+                return StashRestoreResult("incomplete", f"interrupted restore: could not verify stash {stash_sha}")
+            result = StashRestoreResult(
+                "preserved", "the automatic restore was interrupted; its result is unconfirmed and current files were left unchanged; "
+                + _stash_recovery_note(stash_sha)
+                + ("\n" + record["note"] if record.get("note") else ""),
+                {"interrupted": record},
+            )
+            persist({"status": result.status, "note": result.note, "evidence": result.evidence})
+        else:
+            persist({"status": "applying"})
+            result = restore_update_stash(stash_sha, context, before_cleanup=persist)
+            persist({"status": result.status, "note": result.note, "evidence": result.evidence})
+    except Exception as exc:
+        _g.log.warning("update stash recovery could not be recorded", exc_info=True)
+        return StashRestoreResult(
+            "incomplete", f"automatic stash recovery remains unconfirmed ({type(exc).__name__}: {exc}); "
+            "current files must not be reset or re-applied; " + _stash_recovery_note(stash_sha),
         )
-
-    def _mark() -> None:
-        from supervisor import update_merge as _um
-
-        tx["stash_restored"] = True
-        _um.write_update_tx(tx)
-
-    _restored, note = restore_update_stash(stash_sha, context=context, on_applied=_mark)
-    return note
+    if not result.complete:
+        return result
+    event = {"type": "managed_update_stash_restored" if result.status == "restored" else "managed_update_stash_restore_failed",
+             "context": context, "stash_sha": stash_sha, "restore_status": result.status,
+             "stash_note": result.note, **result.evidence}
+    # The existing event is the durable disclosure after the marker is removed.
+    # A failed append retains the terminal marker; retrying it never repeats Git.
+    try:
+        recorded = _um._log_supervisor(event)
+    except Exception:
+        recorded = False
+        _g.log.warning("update stash recovery event failed", exc_info=True)
+    if not recorded:
+        return StashRestoreResult("incomplete", result.note + "; recovery event could not be saved", result.evidence)
+    return result
 
 
 def destructive_apply_guard(branch: str, pre_update_sha: str) -> str:

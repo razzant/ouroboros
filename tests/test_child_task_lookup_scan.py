@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import ouroboros.task_result_facts as task_result_facts
 import ouroboros.task_results as task_results
-import ouroboros.task_result_scan as task_result_scan
 import ouroboros.task_status as task_status
 from ouroboros.task_result_schema import TASK_RESULT_SCHEMA_VERSION
 
@@ -54,9 +54,8 @@ def _old_lookup(monkeypatch, root, **kwargs):
     """Exercise the same public function with its original full-list call."""
     materialize = kwargs.pop("materialize_artifacts", False)
     with monkeypatch.context() as patch:
-        patch.setattr(task_status, "list_task_results",
-                      lambda drive, **_ignored: task_results.list_task_results(drive))
-        patch.setattr(task_status, "raw_result_facts", lambda _directory: ({}, []))
+        patch.setattr(task_status, "selected_task_results", lambda drive, may_match: [
+            row for row in task_results.list_task_results(drive) if may_match(row)])
         return task_status.find_child_tasks(root, materialize_artifacts=materialize, **kwargs)
 
 
@@ -166,12 +165,6 @@ def test_changed_appearance_removal_and_root_isolation(tmp_path):
     assert lookup(left) == []
 
 
-def test_private_paths_empty_and_strict_always_full(tmp_path):
-    _put(tmp_path, "good", delegation_role="subagent")
-    assert task_results.list_task_results(tmp_path, _paths=[]) == []
-    assert _ids(task_results.list_task_results(tmp_path, _paths=[], strict=True)) == ["good"]
-
-
 @pytest.mark.parametrize("suffix", [".json", ".JSON", ".JsOn"])
 @pytest.mark.parametrize("windows_glob", [False, True])
 def test_mixed_case_names_follow_canonical_glob(tmp_path, monkeypatch, suffix, windows_glob):
@@ -207,7 +200,7 @@ def test_mixed_case_names_follow_canonical_glob(tmp_path, monkeypatch, suffix, w
 def test_atomic_replacement_during_metadata_read_is_admitted_fresh(tmp_path, monkeypatch):
     path = _put(tmp_path, "changing", delegation_role="subagent",
                 parent_task_id="other", root_task_id="other", result="old")
-    real_reader = task_result_scan.read_json_dict
+    real_reader = task_result_facts.read_json_dict
     replaced = []
 
     def reader(candidate):
@@ -220,13 +213,14 @@ def test_atomic_replacement_during_metadata_read_is_admitted_fresh(tmp_path, mon
             replaced.append(True)
         return data
 
-    monkeypatch.setattr(task_status, "raw_result_facts",
-                        lambda directory: task_result_scan.raw_result_facts(directory, reader=reader))
+    real_facts = task_result_facts.raw_result_facts
+    monkeypatch.setattr(task_result_facts, "raw_result_facts",
+                        lambda directory, **_kw: real_facts(directory, reader=reader))
     rows = task_status.find_child_tasks(tmp_path, parent_task_id="parent", scope="direct",
                                         materialize_artifacts=False)
     assert _ids(rows) == ["changing"]
     assert rows[0]["result"] == "new"
-    assert task_result_scan._RAW_TS_MEMO.get((str(path.parent), path.name)) is None
+    assert task_result_facts._RAW_TS_MEMO.get((str(path.parent), path.name)) is None
 
 
 @pytest.mark.parametrize("pointer,first,second", [
@@ -301,7 +295,7 @@ def test_malformed_future_legacy_one_batch_and_strict_no_quarantine(tmp_path, mo
     strict_root = tmp_path / "strict"
     shutil.copytree(source, strict_root)
     with pytest.raises(ValueError):
-        task_results.list_task_results(strict_root, strict=True, _paths=[])
+        task_results.list_task_results(strict_root, strict=True)
     assert sorted(path.name for path in (strict_root / "task_results").glob("*.json")) == [
         "broken.json", "child.json", "future.json", "legacy.json"]
     _, new_root, rows = _pair(tmp_path, monkeypatch, source,
@@ -335,17 +329,18 @@ def test_concurrent_repair_kept_then_fresh_predicate(tmp_path, monkeypatch):
 def test_admitted_body_replaces_memo_fact_before_predicate(tmp_path, monkeypatch):
     path = _put(tmp_path, "selected", delegation_role="subagent",
                 parent_task_id="parent", root_task_id="parent")
-    original = task_status.list_task_results
+    original = task_result_facts.read_json_dict
     replaced = []
 
-    def replace_before_admission(root, **kwargs):
-        if not replaced:
+    def replace_before_admission(candidate):
+        # The memo already holds the matching fact; the admission read follows.
+        if not replaced and (str(path.parent), path.name) in task_result_facts._RAW_TS_MEMO:
             replaced.append(True)
             _put(tmp_path, "selected", delegation_role="subagent",
                  parent_task_id="other", root_task_id="other")
-        return original(root, **kwargs)
+        return original(candidate)
 
-    monkeypatch.setattr(task_status, "list_task_results", replace_before_admission)
+    monkeypatch.setattr(task_result_facts, "read_json_dict", replace_before_admission)
     assert task_status.find_child_tasks(tmp_path, parent_task_id="parent", scope="direct",
                                         materialize_artifacts=False) == []
     assert replaced and path.exists()
@@ -383,7 +378,7 @@ def test_navigation_directory_failure_keeps_queue_overlay(tmp_path, monkeypatch,
         def denied(directory):
             raise PermissionError("simulated directory refusal")
 
-        monkeypatch.setattr(task_status, "raw_result_facts", denied)
+        monkeypatch.setattr(task_result_facts, "raw_result_facts", denied)
         original_glob = pathlib.Path.glob
 
         def denied_glob(directory, pattern):
@@ -410,9 +405,7 @@ def test_navigation_directory_failure_keeps_queue_overlay(tmp_path, monkeypatch,
     assert _ids(rows) == ["queued"] and rows[0]["status"] == "scheduled"
 
 
-def test_gateway_wrapper_and_shared_memo_injected_reader(tmp_path):
-    import ouroboros.gateway.task_list_scan as gateway_scan
-
+def test_shared_memo_injected_reader_reads_once(tmp_path):
     path = _put(tmp_path, "gateway", ts="2026-10-04T01:00:00Z")
     directory = path.parent
     calls = []
@@ -421,30 +414,31 @@ def test_gateway_wrapper_and_shared_memo_injected_reader(tmp_path):
         calls.append(candidate)
         return json.loads(candidate.read_text())
 
-    first, bad = gateway_scan.raw_result_facts(directory, reader=reader)
+    first, bad = task_result_facts.raw_result_facts(directory, reader=reader)
     assert not bad and first["gateway.json"]["task_id"] == "gateway"
     assert calls == [path]
-    second, bad = gateway_scan.raw_result_facts(directory, reader=reader)
+    second, bad = task_result_facts.raw_result_facts(directory, reader=reader)
     assert second == first and not bad and calls == [path]
-    shared, bad = task_result_scan.raw_result_facts(directory, reader=reader)
-    assert shared == first and not bad and calls == [path]
+    default, bad = task_result_facts.raw_result_facts(directory)
+    assert default == first and not bad and calls == [path]
 
 
-def test_gateway_sorted_names_uses_shared_memo_and_wrapper_reader(tmp_path, monkeypatch):
-    import ouroboros.gateway.task_list_scan as gateway_scan
-
+def test_gateway_sorted_names_use_the_same_memo(tmp_path, monkeypatch):
     path = _put(tmp_path, "shown", ts="2026-10-04T01:00:00Z")
     calls = []
-    original = gateway_scan.read_json_dict
+    original = task_result_facts.read_json_dict
 
     def injected(candidate):
         calls.append(candidate)
         return original(candidate)
 
-    monkeypatch.setattr(gateway_scan, "read_json_dict", injected)
-    assert gateway_scan._raw_sorted_result_names(path.parent) == (["shown.json"], [])
+    monkeypatch.setattr(task_result_facts, "read_json_dict", injected)
+    assert task_result_facts._raw_sorted_result_names(path.parent) == (["shown.json"], [])
     assert calls == [path]
-    assert gateway_scan._raw_sorted_result_names(path.parent) == (["shown.json"], [])
+    assert task_result_facts._raw_sorted_result_names(path.parent) == (["shown.json"], [])
+    assert calls == [path]
+    assert _ids(task_status.find_child_tasks(path.parent.parent, parent_task_id="none",
+                                             scope="direct", materialize_artifacts=False)) == []
     assert calls == [path]
 
 
@@ -495,9 +489,8 @@ def test_public_coordination_terminal_wake_after_child_settles(tmp_path, monkeyp
         ctx = SimpleNamespace(drive_root=root, task_id="parent", task_metadata={})
         if root == old_root:
             with monkeypatch.context() as patch:
-                patch.setattr(task_status, "list_task_results",
-                              lambda drive, **_kw: task_results.list_task_results(drive))
-                patch.setattr(task_status, "raw_result_facts", lambda _dir: ({}, []))
+                patch.setattr(task_status, "selected_task_results", lambda drive, may_match: [
+                    row for row in task_results.list_task_results(drive) if may_match(row)])
                 before, cursor = supervision._coordination_wakes(ctx, {})
                 _put(root, "child", delegation_role="subagent", parent_task_id="parent",
                      root_task_id="parent", status="completed")

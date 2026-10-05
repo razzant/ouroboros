@@ -364,6 +364,26 @@ def _managed_task_budget_pausing(drive_root: Any, row: Dict[str, Any], task_id: 
         return None
 
 
+def _activity_pause_cause(row: dict, fence: dict) -> str:
+    """Explain a parked census row from its existing typed control, never its phase name."""
+    hold = row.get("_budget_pause_hold") or {}
+    if isinstance(hold, dict) and hold.get("reason") == "owner_restart_hold":
+        return "restart"
+    if fence.get("cause") == "owner_pause":
+        return "owner"
+    pause = row.get("_budget_pause") or row.get("budget_pause") or {}
+    reason = pause.get("reason") if isinstance(pause, dict) else None
+    if reason in {"budget", "owner", "sleep"}:
+        return reason
+    if isinstance(pause, dict) and pause.get("status") == "paused_before_dispatch":
+        return "budget"
+    if row.get("reason_code") in {"budget_paused", "budget_exhausted"}:
+        return "budget"
+    if row.get("reason_code") == "owner_paused":
+        return "owner"
+    return "unknown"
+
+
 def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *, direct_turns=None, availability=None) -> list:
     """Direct turns plus ROOT managed queue tasks as ONE activity list.
 
@@ -431,6 +451,9 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 "client_message_id": "",
                 "kind": "direct_chat" if row.get("_is_direct_chat") else "managed_task",
                 "phase": phase,
+                **({"pause_cause": _activity_pause_cause(
+                    row, fence_rows.get(str(row.get("root_task_id") or task_id), {}))}
+                   if phase in {"budget_paused", "budget_pausing"} else {}),
                 "started_at": started_at,
                 "task_attempt": int(row.get("_attempt") or 1),
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
@@ -508,7 +531,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 if binding.get(key):
                     activity[key] = binding[key]
     try:
-        from ouroboros.project_dialogue import project_question_pointer
+        from ouroboros.project_dialogue import owner_wait_projection, project_question_pointer
         from ouroboros.projects_registry import list_reserved_projects
 
         projects = {str(row["id"]): row for row in list_reserved_projects(drive_root)}
@@ -518,13 +541,15 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
         log.debug("Required-question activity detail unavailable", exc_info=True)
         for activity in activities:
             activity["required_question_unavailable"] = True
-        return activities
+        projects = {}  # Known wait state survives missing optional Project detail.
     for activity in activities:
         try:
             facts = _task_activity_facts(drive_root, str(activity.get("activity_id") or ""))
             wait = facts.get("owner_wait", {})
             if not wait.get("quiz_id"):
                 continue
+            activity["owner_wait"] = {**owner_wait_projection(wait["quiz_id"], wait, facts.get("quiz")),
+                                      "quiz_state": (facts.get("quiz") or {}).get("state", "unknown")}
             pointer = project_question_pointer(
                 {"task_id": activity["activity_id"], "quiz_id": wait["quiz_id"], "wait_for_answer": True},
                 facts.get("quiz"), projects.get(str(activity.get("project_id") or "")), wait,

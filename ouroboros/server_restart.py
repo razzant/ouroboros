@@ -310,6 +310,12 @@ def _safe_restart_serialized(safe_restart_fn, *, reason: str, unsynced_policy: s
             return False, "Managed update state is unreadable; restart was deferred."
         if status == "future":
             return False, "Managed update state was recorded by a newer version; restart was deferred."
+        if status == "valid" and tx.get("stash_restore"):
+            return False, (
+                "Local changes are still being recovered. Quit and reopen the desktop app, "
+                "or restart the server process for a web deployment. Restart was deferred "
+                "to preserve the current files."
+            )
         if status == "absent" and not git_ops._clear_update_intent():
             return False, (
                 "An update intent marker with no update transaction could not be removed; "

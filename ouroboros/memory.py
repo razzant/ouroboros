@@ -748,7 +748,7 @@ class Memory:
         return self._read_jsonl_entries(log_name, max_entries=max_entries)
 
     def read_task_recent(
-        self, log_name: str, task_id: str, want: int,
+        self, log_name: str, task_id: str, want: int, *, iter_objects=None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """The newest ``want`` rows of ONE task (or of the log when ``task_id`` is
         empty) through the bounded rotation-aware reader (razzant/ouroboros#131);
@@ -782,6 +782,7 @@ class Memory:
             rows = read_rotated_jsonl_entries(
                 self.logs_path(log_name), self.drive_root / "archive", stem,
                 max(1, int(want)), counts, coverage=coverage,
+                iter_objects=iter_objects,
             )
         except Exception:
             log.warning("Failed to read recent %s rows", log_name, exc_info=True)

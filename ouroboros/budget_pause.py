@@ -569,9 +569,16 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
             raise BudgetPauseSuperseded("budget pause grant changed")
         retained_wait = ({"owner_wait": {**expected_owner_wait, "state": "retained"}}
                          if expected_owner_wait is not None else {})
-        return stamp_task_result_schema({**current, **retained_wait, "budget_pause": dict(row)})
+        from ouroboros.pause_notices import notice_fields
+        notice = (notice_fields(current, root, task_id, str(row.get("pause_id") or ""), "budget")
+                  if row.get("state") == STATE_PAUSED and row.get("reason") == "budget"
+                  and (old.get("state") != STATE_PAUSED or old.get("pause_id") != row.get("pause_id")) else {})
+        return stamp_task_result_schema({**current, **retained_wait, **notice, "budget_pause": dict(row)})
 
     update_json_locked(task_result_path(root, task_id), update, strict_existing_dict=True)
+    if row.get("state") == STATE_PAUSED and row.get("reason") == "budget":
+        from ouroboros.pause_notices import track
+        track(root, task_id)
     return dict(row)
 
 

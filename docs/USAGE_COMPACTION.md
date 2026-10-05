@@ -253,26 +253,30 @@ keeps the earliest original root/group fields verbatim, including explicit
 unlimited `None`. Compaction stamps `binding_authority=carried` and puts
 `original_root_binding` / `original_group_binding` on the first aggregate for
 each identity. Exact `unbound` leaves that axis open to the first later original
-row. Missing, malformed or foreign modern carriage fixes UNKNOWN; a later cap
-or aggregate sort order cannot replace it.
+row.
 
-Older unstamped blocks may recover exact original fields through
-`usage_compaction.prepare_original_bindings`: the existing hash/size/transition
-and complete epoch/anchor validation, oldest source first. A newer UNKNOWN
-can inherit only a recovery proved for its own archived source. Unrecorded,
-pre-archive/imported or corrupt authority stays a gap, never current settings.
-Source/revision fields remain unchanged; the header's segment chain retains
-the original attempt evidence. Durable bindings and owner amendments remain
-separate authorities.
+Nothing is recovered from the archive. A block row that carries no usable
+binding — an unstamped header (a pre-carriage pass), a header stamped
+`unknown`, a missing, `unknown`, malformed or foreign carriage — binds its
+member from the row's OWN cap literal (`billing_group_limit_source=legacy_live`,
+disclosed through `ledger_billing_binding` / `original_group_limit`) while
+every block row of that member that carries a cap carries the same one (a
+group's rows must agree on the group cap; their member roots' own caps may
+differ; a row without a cap carries no literal and does not vote, so neither
+row order nor the moment of compaction changes the answer). Disagreeing
+literals leave the member open (`no_attempt_recorded`): admission then
+binds the root as its own group under the configured cap and discloses that on
+the task (`legacy_default`: `usage_admission.task_billing_fields`,
+`continuation_admission._billing_group`). Accumulated spend is preserved either
+way, and the next pass carries the literal binding — or the open member —
+forward. A binding pinned on the task result and owner amendments remain
+separate, prior authorities.
 
-Strict writer preparation recovers outside the money lock; generation/CAS and
-appended-suffix validation precede use. Its archive certificate shares the
-existing segment-cache lifetime and checks source fingerprints. Warm admission
-uses that view without parsing archives; source loss invalidates it. Display
-and raw-record reads do not initiate archive recovery. Compaction borrows only
-prepared authority, compares exact source/candidate bindings and money, and
-carries recovered values for cold reads. An unprepared explicit pass preserves
-UNKNOWN with its archive chain, allowing later off-lock recovery.
+The money path never reads an archive segment: strict writer preparation
+parses the live ledger only, display and raw-record reads the same, and
+compaction compares exact source/candidate bindings and money on the live
+rows (the pass still writes its own new segment). The archive chain stays
+available for explicit history questions (§10) and audits.
 
 ## 8. Concurrency, crash-safety, caches
 

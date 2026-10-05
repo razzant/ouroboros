@@ -161,6 +161,46 @@ def test_the_scheduled_lane_runs_the_keyless_suite_on_a_throwaway_root():
         assert all("runner.temp" in str(env[name]) for name in roots), env
 
 
+def test_the_scheduled_lane_uploads_its_servers_traces_and_never_a_settings_file():
+    """Owner, 2026-10-04: the traces are the most useful part of a CI run. The
+    scenario servers write their journals under pytest tmp_path trees — the
+    OUROBOROS_* roots of the run steps are what tests/conftest.py isolates FROM —
+    and bare pytest (no OUROBOROS_TEST_TEMP_ROOT, no TMPDIR on a hosted runner)
+    creates its session root `ouroboros-pytest-*` in the default temp directory,
+    /tmp. The upload names exactly that root, journals and task results only."""
+    jobs = _workflow()["jobs"]
+    steps = jobs[JOB]["steps"]
+    uploads = [step for step in steps if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+    assert len(uploads) == 1, uploads
+    upload = uploads[0]
+    assert steps.index(upload) == len(steps) - 1      # after both scenario passes
+    assert upload["if"] == "always()"
+    # Diagnostics only: a failed upload never reddens the job (the release bar needs it);
+    # both scenario passes still decide it.
+    assert upload.get("continue-on-error") is True
+    passes = [step for step in steps if "python -m pytest" in str(step.get("run", ""))]
+    assert len(passes) == 2 and not any("continue-on-error" in step for step in passes), passes
+    paid = next(step for step in jobs["e2e-live"]["steps"]
+                if str(step.get("uses", "")).startswith("actions/upload-artifact@"))
+    assert upload["uses"] == paid["uses"]             # one pinned action for both lanes
+    assert upload["with"]["name"] == "system-e2e-traces" and upload["with"]["retention-days"] == 30
+    assert upload["with"]["if-no-files-found"] == "warn"
+    lines = [line.strip() for line in str(upload["with"]["path"]).splitlines() if line.strip()]
+    root = "/tmp/ouroboros-pytest-*/"
+    includes = [line for line in lines if not line.startswith("!")]
+    # A keyless server carries no benchmark sentinel, so its journals past 800 KB rotate into
+    # data/archive/<prefix>_<ts>.jsonl (supervisor/state.py): the head of a long journal lives there.
+    assert includes == [f"{root}**/data/logs/**", f"{root}**/data/task_results/**",
+                        f"{root}**/data/archive/*.jsonl"], includes
+    assert [line for line in lines if line.startswith("!")] == [f"!{root}**/settings.json"], lines
+    # The root is the one conftest creates for a bare run, in the runner's default temp dir.
+    conftest = (REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    assert 'prefix="p" if _SAFE_TEMP_ROOT else "ouroboros-pytest-"' in conftest
+    for step in steps:
+        env = step.get("env") or {}
+        assert "TMPDIR" not in env and "OUROBOROS_TEST_TEMP_ROOT" not in env, step
+
+
 def test_the_scheduled_lane_asks_for_no_secret():
     """Keyless by construction: a job gets a secret only by naming it."""
     assert "secrets." not in _job_text(JOB), _job_text(JOB)

@@ -203,7 +203,7 @@ def _recent_root_results(ctx: Any, project_id: str = "") -> tuple:
     same, and counting them only until the cap reported zero while folding them
     into the cap's own number.
     """
-    from ouroboros.gateway.task_list_scan import raw_result_facts
+    from ouroboros.task_result_facts import raw_result_facts
     from ouroboros.runtime_limits import get_routing_manifest_result_rows
     from ouroboros.task_results import load_task_result, task_results_dir
 

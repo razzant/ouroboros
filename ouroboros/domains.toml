@@ -241,7 +241,6 @@ D20 = "Presence"
 "ouroboros/gateway/task_hurry.py" = "D11"
 "ouroboros/gateway/task_pause.py" = "D11"
 "ouroboros/gateway/task_continue.py" = "D11"
-"ouroboros/gateway/task_list_scan.py" = "D11"
 "ouroboros/gateway/tasks.py" = "D11"
 "ouroboros/gateway/ui_preferences.py" = "D11"
 "ouroboros/gateway/ui_i18n.py" = "D11"
@@ -468,8 +467,9 @@ D20 = "Presence"
 "ouroboros/task_finalization.py" = "D01"
 "ouroboros/task_pacing.py" = "D01"
 "ouroboros/task_results.py" = "D17"
-"ouroboros/task_result_scan.py" = "D17"
 "ouroboros/task_result_schema.py" = "D17"
+"ouroboros/task_result_facts.py" = "D17"
+"ouroboros/pause_notices.py" = "D17"
 "ouroboros/task_status.py" = "D17"
 "ouroboros/task_custody.py" = "D17"
 "ouroboros/terminal_projection.py" = "D17"
@@ -882,6 +882,7 @@ allowed = [
   "D17->D16",
   "D17->D18",
   "D17->D19",
+  "D17->D20",
   "D18->D09",
   "D18->D10",
   "D18->D12",
@@ -998,7 +999,6 @@ lazy_only = [
   "D17->D09",
   "D17->D12",
   "D17->D13",
-  "D17->D20",
   "D18->D01",
   "D18->D07",
   "D18->D11",

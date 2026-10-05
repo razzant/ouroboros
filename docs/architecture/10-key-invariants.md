@@ -73,8 +73,8 @@ projections, preserving native seals.
 `history_retention` adopts answers/files/attachments; receipts keep their union
 owner. Existing `child_ref_promotion` holds sources across restart for off-loop
 retention. Publication rechecks CURRENT; generation close stops at nodes.
-Readers resolve retained children. Unchanged unavailable sources wait on cheap
-file/result/inventory facts per process/generation; repairs reopen work, transient
+Readers resolve retained children. Unchanged unavailable sources and typed immutable-artifact identity failures wait on cheap
+source/destination/result/reference/inventory facts per process/generation; repairs reopen work, transient
 I/O and explicit retries remain real. No hold is released by this cache. Identical
 projections/diagnostics are reused. GC rechecks inventory before deletion; this does
 not prove quiescence of forgotten late tool futures. No new store/scheduler/ledger.

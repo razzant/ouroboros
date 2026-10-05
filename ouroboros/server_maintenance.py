@@ -68,7 +68,7 @@ def _live_task_ids() -> set:
     return _startup_live_task_ids(DATA_DIR)
 
 
-def _run_cancel_delivery_ref_sweep(drive_root: pathlib.Path) -> None:
+def _run_cancel_delivery_ref_sweep(drive_root: pathlib.Path, stop_event: Any = None) -> None:
     """20 s cancel/delivery/usage pass; history-sized work rides the 300 s reconcile pass."""
     try:
         try:
@@ -85,6 +85,12 @@ def _run_cancel_delivery_ref_sweep(drive_root: pathlib.Path) -> None:
             _step_recovered("terminal_delivery_replay")
         except Exception:
             _step_failed("terminal_delivery_replay")
+        try:
+            from ouroboros.pause_notices import reconcile_pause_notices
+            reconcile_pause_notices(drive_root, stop_requested=stop_event.is_set if stop_event is not None else None)
+            _step_recovered("pause_notice_replay")
+        except Exception:
+            _step_failed("pause_notice_replay")
         try:
             _reconcile_abandoned_usage(drive_root)
             _step_recovered("abandoned_usage_reconciliation")
@@ -211,7 +217,7 @@ def _periodic_supervisor_maintenance(
         if _CANCEL_INTENT_SWEEP_LOCK.acquire(blocking=False):
             _LAST_CANCEL_INTENT_SWEEP[0] = now
             _start_maintenance_thread(_CANCEL_INTENT_SWEEP_LOCK, "terminal-maintenance",
-                                      _run_cancel_delivery_ref_sweep, (pathlib.Path(DATA_DIR),))
+                                      _run_cancel_delivery_ref_sweep, (pathlib.Path(DATA_DIR), stop_event))
         else:
             _duty_busy(_CANCEL_INTENT_SWEEP_LOCK, 20)
     latch = _CUSTODY_SWEEP_LOCK  # a pass releases THIS object, never a later generation's
@@ -490,12 +496,48 @@ def prune_agent_media_uploads(
     return report
 
 
-def _startup_prune_sweeps(*, preserve_task_sources: bool = False) -> None:
+def _startup_tree_exclusions(recovery_report: dict | None) -> set[str] | None:
+    """Resolve protected logical roots and retry occupants; unknown keeps all trees."""
+    from ouroboros.task_custody import own_child_drives
+    from ouroboros.task_results import list_task_results, load_task_result
+
+    if recovery_report is None or recovery_report.get("errors"):
+        return None
+    pending = set(recovery_report.get("protected") or []) | set(recovery_report.get("unresolved") or [])
+    protected = set()
+    try:
+        while pending:
+            task_id = pending.pop()
+            if task_id in protected:
+                continue
+            protected.add(task_id)
+            canonical = load_task_result(DATA_DIR, task_id, strict=True)
+            rows = [canonical] if canonical else []
+            for child in own_child_drives(DATA_DIR, task_id):
+                rows.extend(list_task_results(child, strict=True))
+            if not rows:
+                return None
+            for row in rows:
+                metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                for field in ("task_id", "parent_task_id", "root_task_id", "retry_task_id", "superseded_by",
+                              "original_task_id", "timeout_retry_from"):
+                    linked = str(row.get(field) or metadata.get(field) or "")
+                    if linked and linked not in protected:
+                        pending.add(linked)
+    except (OSError, ValueError, TypeError):
+        return None
+    return protected
+
+
+def _startup_prune_sweeps(*, preserve_task_sources: bool = False, recovery_report: dict | None = None) -> None:
     """Startup hygiene: prune stale task drives/trees and orphaned temp files."""
     try:
         from ouroboros.headless import prune_task_trees
         from ouroboros.utils import sweep_stale_temp_files
 
+        exclusions = _startup_tree_exclusions(recovery_report) if preserve_task_sources else set()
+        if exclusions is not None:
+            prune_task_trees(DATA_DIR, exclude_root_ids=exclusions)
         if preserve_task_sources:
             log.warning("Startup task-source prune deferred: file recovery or ownership is unresolved")
         else:
@@ -503,7 +545,6 @@ def _startup_prune_sweeps(*, preserve_task_sources: bool = False) -> None:
             # (``_run_drive_custody_pass``): readiness waits on no child-store copy or hash.
             # Startup sweeps only the top-level tmp_scripts fallback (no script can be live
             # yet); the whole-tree walk for atomic temps is owed to the first reconcile pass.
-            prune_task_trees(DATA_DIR)
             sweep_stale_temp_files(DATA_DIR, atomic_temps=False)
             _STARTUP_TEMP_SWEEP_OWED[0] = True
     except Exception:

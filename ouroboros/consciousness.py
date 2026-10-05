@@ -339,13 +339,30 @@ class BackgroundConsciousness:
         return "launched"
 
     def _wake_finished(self, task_id: str, ok: bool) -> None:
-        """Runs on the wake's thread once its turn ended (success or runner failure)."""
+        """Runner success controls backoff; stored work facts describe its outcome."""
+        outcome = "unknown"
+        if ok:
+            try:
+                from ouroboros.task_results import load_task_result
+                row = load_task_result(self._drive_root, task_id, strict=True)
+                pause = (row or {}).get("budget_pause") or {}
+                owner_pause = (row or {}).get("owner_pause") or {}
+                if owner_pause.get("state") == "requested" or pause.get("state") == "pausing":
+                    outcome = "pausing"
+                elif (owner_pause.get("state") == "paused" or pause.get("state") == "paused"
+                      or row and row.get("status") == "scheduled"
+                      and row.get("reason_code") in {"budget_paused", "budget_exhausted", "owner_paused"}):
+                    outcome = "paused"
+                elif row:
+                    outcome = "done"  # the ordinary successful-turn contract is unchanged
+            except Exception:
+                log.debug("Wake outcome is unreadable for %s", task_id, exc_info=True)
         with self._lock:
             now = time.time()
             self._last_wake_at, self._last_wake_task_id = now, str(task_id)
             self._set_last_wake_at(now)
             if ok:
-                self._backoff, self._last_wake_outcome, self._last_error = 1, "done", ""
+                self._backoff, self._last_wake_outcome, self._last_error = 1, outcome, ""
             else:
                 self._backoff, self._last_wake_outcome = min(self._backoff * 2, 1024), "failed"
                 self._last_error = f"wake-up {task_id} failed in its runner (see the chat and events.jsonl)"

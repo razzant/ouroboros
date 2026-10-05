@@ -530,18 +530,30 @@ def test_openrouter_drift_check_fires_on_crossing_a_multiple_of_fifty(tmp_path, 
     state.init(tmp_path, total_budget_limit=0.0)
     state.save_state({})  # an initialized install: only explicit init creates state (#1307)
     checks = []
-    monkeypatch.setattr(state, "check_openrouter_ground_truth", lambda: checks.append(True) or None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(state, "check_openrouter_ground_truth", lambda _key: checks.append(True) or None)
     monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
     calls = {"physical_calls": 49}
     monkeypatch.setattr(accounting, "usage_writer_snapshot",
                         lambda *_a, **_k: _breakdown(1.0, 1) | {"physical_calls": calls["physical_calls"]})
 
-    assert state.update_budget_from_usage({}) is True and checks == []
+    def write_projection():
+        assert state.update_budget_from_usage({}) is True
+        diagnostic = state._OPENROUTER_DIAGNOSTIC
+        assert diagnostic.latch.acquire(timeout=5), "diagnostic did not finish"
+        diagnostic.latch.release()
+
+    write_projection()
+    assert checks == []
     calls["physical_calls"] = 51
-    assert state.update_budget_from_usage({}) is True and len(checks) == 1
+    write_projection()
+    assert len(checks) == 1
     assert state.load_state()["openrouter_last_check_call"] == 51
-    assert state.update_budget_from_usage({}) is True and len(checks) == 1  # deduped at the same count
+    write_projection()
+    assert len(checks) == 1  # deduped at the same count
     calls["physical_calls"] = 99
-    assert state.update_budget_from_usage({}) is True and len(checks) == 1
+    write_projection()
+    assert len(checks) == 1
     calls["physical_calls"] = 100
-    assert state.update_budget_from_usage({}) is True and len(checks) == 2
+    write_projection()
+    assert len(checks) == 2

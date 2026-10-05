@@ -182,7 +182,7 @@ def test_owner_pause_cause_survives_root_selection_but_not_new_budget_pause(tmp_
 
 
 def test_indexed_census_preserves_legacy_members_and_reloads_only_changed_foreign_rows(tmp_path, monkeypatch):
-    from ouroboros.gateway import task_list_scan as scan
+    from ouroboros import task_result_facts as scan
     from ouroboros.model_sleep import cold_blockers
     from ouroboros.task_results import stamp_task_result_schema, task_result_path, write_task_result
     from supervisor.continuation_admission import conflicting_writers

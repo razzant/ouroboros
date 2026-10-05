@@ -182,8 +182,8 @@ def test_build_and_apply_clean_merge(tmp_path, monkeypatch):
     ok, msg = update_merge.apply_managed_merge_update(head, plan["merge_commit"])
     assert ok, msg
     assert (repo / "b.txt").exists()
-    restored, note = update_merge.restore_update_stash(stash_sha, context="test")
-    assert restored, note
+    result = update_merge.restore_update_stash(stash_sha, context="test")
+    assert result.status == "restored", result
     assert (repo / "c.txt").read_text() == "local untracked\n"
     # Base was fast-forwardable, so official history lands as-is: HEAD is the
     # target itself, with no synthetic merge commit carrying local work.

@@ -17,9 +17,9 @@ produced by the product itself, never written as a result:
   CHARLIE is held under its own id, and the owner's Resume (chat card and
   Activity row) runs each to completion.
 
-The chat cards say what the tree is doing: ``Pausing…`` while sent work
-finishes, ``Paused`` once saved and after the Restart (a held never-started
-root too), never ``Working``; the chat header agrees.
+The cards say ``Pausing… · owner pause`` while sent work finishes and
+``Paused · owner pause`` once saved, including after Restart. A never-started
+root held by Restart says ``Paused · after restart``; the mixed header says ``Paused``.
 
 ``test_continue_is_offered_after_an_owner_restart``
   The owner Restart interrupts a running root; the Restart door records its
@@ -385,7 +385,8 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
                 expect(page.locator(".toast").last).to_contain_text("Pausing", timeout=15_000)
                 assert _wait(lambda: _fence(data_dir, ALPHA), 15, "ALPHA's fence")["state"] == "requested"
                 _wait(lambda: _phase(page, url, ALPHA) == "budget_pausing", 30, "ALPHA pausing")
-                expect(_chip(page, ALPHA)).to_have_text("Pausing…", timeout=30_000)
+                expect(_chip(page, ALPHA)).to_have_text("Pausing… · owner pause", timeout=30_000)
+                expect(_card(page, ALPHA).locator("[data-resume-run]")).to_have_count(0)
                 shot("01-pause-requested")
 
                 # 2) The ONE shared Restart confirmation, from both surfaces, warns.
@@ -415,7 +416,8 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
                 _wait(lambda: _phase(page, url, ALPHA) == "budget_paused", 30, "ALPHA paused")
                 assert _phase(page, url, CHARLIE) == "queued"
                 page.locator('[data-nav-page="chat"]').click()
-                expect(_chip(page, ALPHA)).to_have_text("Paused", timeout=30_000)
+                expect(_chip(page, ALPHA)).to_have_text("Paused · owner pause", timeout=30_000)
+                expect(_card(page, ALPHA).locator("[data-resume-run]")).to_be_visible()
                 expect(_card(page, BRAVO).locator("[data-live-phase]")).to_have_text("Working", timeout=30_000)
                 shot("04-paused-card")
                 _dialog, _title, saved_body = _restart_dialog(page, page.locator('[data-chat-command="restart"]'))
@@ -438,9 +440,10 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
                 assert bravo["status"] == "cancelled"
                 assert model.main_calls("ALPHA") == 1 and model.main_calls("CHARLIE") == 0, \
                     "a paused or held root was resumed without the owner"
-                for task_id in (ALPHA, CHARLIE):  # paused, and held after Restart: neither is Working
-                    expect(_chip(page, task_id)).to_have_text("Paused", timeout=60_000)
-                expect(page.locator("#chat-status")).to_contain_text("Paused", timeout=30_000)
+                for task_id, label in ((ALPHA, "Paused · owner pause"), (CHARLIE, "Paused · after restart")):
+                    expect(_chip(page, task_id)).to_have_text(label, timeout=60_000)
+                    expect(_card(page, task_id).locator("[data-resume-run]")).to_be_visible()
+                expect(page.locator("#chat-status")).to_have_text("Paused", timeout=30_000)
                 record["bravo_offer_after_restart"] = bravo.get("continuation_offer")
                 shot("06-after-restart-chat")
                 panel = _open_activity(page)
@@ -452,8 +455,12 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
                 # 5) The owner's Resume: ALPHA from its chat card, CHARLIE from its Activity row.
                 page.locator('[data-nav-page="chat"]').click()
                 shot("08-paused-card-before-resume")
-                actions = _menu_action(page, _card(page, ALPHA).locator("[data-cancel-run]"), "resume")
-                assert actions == ["resume", "stop_now"]
+                resume = _card(page, ALPHA).locator("[data-resume-run]")
+                expect(resume).to_be_visible()
+                actions = _menu_actions(page, _card(page, ALPHA).locator("[data-cancel-run]"),
+                                        evidence / "08-paused-card-menu.png")
+                assert actions == ["stop_now"], "Resume is direct on the card, not duplicated in its menu"
+                resume.click()
                 expect(page.locator(".toast").last).to_contain_text("Resuming", timeout=15_000)
                 _wait(lambda: _task(page, url, ALPHA)["status"] == "completed", 120, "ALPHA completed")
                 panel = _open_activity(page)

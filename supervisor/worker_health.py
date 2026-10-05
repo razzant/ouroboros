@@ -628,7 +628,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             )
         except Exception:
             log.debug("Crash-requeue retry reset failed for %s", task_id, exc_info=True)
-        with _queue_lock:
+        with queue.prepared_root_billing(task), _queue_lock:  # the ledger read happens before the lock
             if not _dead_job_is_current(job):
                 return
             _pool().RUNNING.pop(task_id)

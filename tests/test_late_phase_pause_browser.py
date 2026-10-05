@@ -113,8 +113,13 @@ def test_browser_pauses_and_resumes_late_work_with_the_delivered_answer_intact(s
             assert page.get_by_text("Already delivered answer").count() == 1
             _capture(page, f.root, "late-3-paused-answer-intact")
 
+            resume = card.locator("[data-resume-run]")
+            assert resume.is_visible(), "a confirmed pause exposes Resume directly on the card"
             card.locator("[data-cancel-run]").click()
-            page.locator('[data-task-control="resume"]').click()
+            assert page.locator('[data-task-control="stop_now"]').is_visible()
+            assert page.locator('[data-task-control="resume"]').count() == 0, "the menu has no duplicate Resume"
+            page.keyboard.press("Escape")
+            resume.click()
             page.wait_for_function("() => !document.querySelector('.task-control-menu')")
             _join(spawned)
             assert posts[-1][0].endswith("/resume") and posts[-1][2]["ok"], posts

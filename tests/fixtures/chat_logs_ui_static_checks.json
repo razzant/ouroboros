@@ -1040,12 +1040,6 @@
   {
     "id": "test_cancel_run_button_marker_gated",
     "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "cancelable: !record.historicalUnavailable && !record.historicalUnconfirmed && cancelableTaskIds.has(record.groupId),"
-  },
-  {
-    "id": "test_cancel_run_button_marker_gated",
-    "path": "web/modules/chat.js",
     "kind": "not_contains",
     "value": "data-cancel-run>"
   },

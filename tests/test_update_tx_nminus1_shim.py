@@ -56,7 +56,7 @@ def test_write_update_tx_stamps_without_mutating_the_caller(tmp_path, monkeypatc
     update_merge.write_update_tx(payload)
     assert SCHEMA_VERSION_KEY not in payload  # never mutate the caller's dict
     raw = _raw_marker()
-    assert raw[SCHEMA_VERSION_KEY] == update_merge.UPDATE_TX_SCHEMA_VERSION
+    assert raw[SCHEMA_VERSION_KEY] == 1
     status, tx = update_merge.read_update_tx_strict()
     assert status == "valid" and tx["task_id"] == "x"
 
@@ -189,7 +189,7 @@ def test_n_minus_1_pending_smoke_failure_rolls_back(tmp_path, monkeypatch):
     result = update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
 
     assert result["rolled_back"] is True
-    assert update_merge.read_update_tx_strict()[0] == "absent"
+    assert update_merge.read_update_tx()["phase"] == update_merge.MARKER_CLEANUP_RETRY_PHASE
     assert _git(repo, "rev-parse", "HEAD").stdout.strip() == cur
 
 
@@ -213,7 +213,7 @@ def test_n_minus_1_assisted_resolution_resumes_and_upgrades_the_marker(tmp_path,
     assert enqueued and enqueued[0]["task_id"] == "resolver"
     assert (repo / "a.txt").read_text() == "the resolver's precious resolution\n"
     raw = _raw_marker()  # the resume re-write stamped the surviving marker
-    assert raw[SCHEMA_VERSION_KEY] == update_merge.UPDATE_TX_SCHEMA_VERSION
+    assert raw[SCHEMA_VERSION_KEY] == 1
     assert raw["phase"] == "assisted_resolution"
 
 
@@ -253,7 +253,7 @@ def test_n_minus_1_rolling_back_resumes_the_rollback(tmp_path, monkeypatch):
     result = update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
 
     assert result["rolled_back"] is True
-    assert update_merge.read_update_tx_strict()[0] == "absent"
+    assert update_merge.read_update_tx()["phase"] == update_merge.MARKER_CLEANUP_RETRY_PHASE
     assert _git(repo, "rev-parse", "HEAD").stdout.strip() == cur
 
 

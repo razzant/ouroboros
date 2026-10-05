@@ -15,7 +15,8 @@ detached seed of the checked-out sha; the run size is FEASIBLE under the cap by
 the stand's own worst-case reservation rule computed from the code (a set that
 can never be admitted would be a red run by construction); artifacts are
 uploaded even on failure and never include a lane settings file (0600, carries
-the key); and the step summary renders EVERY manifest shape — verdicts on
+the key) or a lane data tree — the lane servers' journals travel only as the
+stand's key-redacted traces/ bundle; and the step summary renders EVERY manifest shape — verdicts on
 completion, the typed refusal or error otherwise — and never fails on its own.
 """
 
@@ -104,7 +105,8 @@ def test_the_paid_lane_fires_only_on_an_opted_in_dispatch():
             assert "inputs" not in str(job.get("if", "")), (name, job.get("if"))
     assert _job()["runs-on"] == "ubuntu-latest"
     # One SM1 lane with --self-mod: the task, the evolution cycle, the absorb
-    # wait and two hermetic preflight suites on a 4-vCPU runner.
+    # wait and two hermetic preflight suites on a 4-vCPU runner; the bound
+    # itself is derived from the stand's waits in the test below.
     assert int(_job()["timeout-minutes"]) >= 120
     # No job downstream of the release chain may wait for a paid opt-in lane.
     for name, job in workflow["jobs"].items():
@@ -152,7 +154,9 @@ def test_the_stand_runs_with_the_operator_flag_set_on_a_clean_seed_of_the_checko
     assert args["--out"].startswith("$RUNNER_TEMP/")
     assert args["--self-mod"] is None
     assert float(args["--total-budget"]) == TOTAL_BUDGET_USD
-    assert int(args["--task-timeout"]) == 2400 and float(args["--watch-interval"]) == 60
+    # 75 minutes (owner decision on #1501): at 2400 all four runs hit the deadline
+    # with review still in flight; the model and the money fence stay as they were.
+    assert int(args["--task-timeout"]) == 4500 and float(args["--watch-interval"]) == 60
     assert "--stub" not in args and "--profile" not in args and "--model" not in args
     # The seed's `git describe` and the release admission gate read history and tags.
     checkout = _job()["steps"][0]
@@ -166,6 +170,46 @@ def test_the_stand_runs_with_the_operator_flag_set_on_a_clean_seed_of_the_checko
     steps = _job()["steps"]
     assert any(step.get("uses", "").startswith("actions/setup-node@") for step in steps)
     assert any("playwright install --with-deps chromium" in str(step.get("run", "")) for step in steps)
+
+
+# The stand's fixed waits around one awaited SM1 task, each bounded on its own.
+# devtools/e2e_live/scenarios.py: the task POST (60); LaneContext.wait_task's
+# grace past the deadline (300), the cancel POST after a timeout
+# (IsolatedServer.cancel_task, 300: it answers once the task is torn down) and
+# the wait after it (300), the durable-row wait (180); the two event waits of
+# run_sm1 (scope_review_complete and llm_usage, 90 each); the palette check's
+# two page loads after the restart (goto and ready selector, 60 + 60 each,
+# devtools/e2e_live/ui_probe.py).
+# devtools/benchmarks/common/server_runner.py: the health wait wait_for_absorb
+# runs once it sees the absorb (180); the server stop at teardown (15 + 5).
+# devtools/e2e_live/run_live_lanes.py: the /api/state read after the absorb
+# (10) and the orphan scan at teardown (30).
+# Sub-minute per-call bounds (a poll's overshoot past its deadline, the
+# computed-style reads, screenshots, the browser launch) ride the provisioning
+# margin below.
+STAND_FIXED_WAITS_SEC = (60 + 300 + 300 + 300 + 180 + 90 + 90 + 2 * (60 + 60)
+                         + 180 + (15 + 5) + 10 + 30)
+# Checkout with history, the Python env, node 22, Chromium with its apt deps,
+# and the summary and upload steps after the stand.
+PROVISION_MARGIN_SEC = 15 * 60
+
+
+def test_the_job_bound_outlasts_the_stand_worst_case(monkeypatch):
+    """The stand, not GitHub, must end the run: a job killed mid-wait loses the
+    finalized manifest, the step summary's verdict and the traces bundle. The
+    worst case is server ready + the task (+ fixed waits) + the absorb wait
+    (``confirm_absorb`` reuses --task-timeout) + the post-restart health wait,
+    read from the stand's own parser over the job's exact argv, so raising
+    --task-timeout without the job bound trips here, and the bound passes only
+    with room for provisioning."""
+    from devtools.e2e_live import run_live_lanes
+
+    monkeypatch.setattr(run_live_lanes.tempfile, "gettempdir", lambda: "/tmp")
+    argv = shlex.split(_stand_step()["run"].replace("\\\n", " "))[3:]
+    parsed = run_live_lanes.parse_args(argv)
+    worst = 2 * (parsed.task_timeout + parsed.ready_timeout) + STAND_FIXED_WAITS_SEC
+    bound = int(_job()["timeout-minutes"]) * 60
+    assert bound >= worst + PROVISION_MARGIN_SEC, (bound, worst)
 
 
 def test_the_run_size_is_feasible_under_the_cap_by_the_worst_case_reservation_rule():
@@ -221,9 +265,17 @@ def test_artifacts_upload_even_on_failure_and_never_a_lane_settings_file():
     rel = [path[len(root):] for path in paths]
     assert "run_manifest.json" in rel and "lanes/*/result.json" in rel
     assert any(path.endswith(".png") for path in rel), rel
+    # The lane servers' journals travel ONLY as the stand's key-redacted traces/ bundle
+    # (devtools/e2e_live/traces.py): the one recursive glob, never a lane's data/ tree.
+    assert "lanes/*/traces/**" in rel, rel
     for path in rel:
-        assert "**" not in path and "settings" not in path and not path.endswith("/*"), path
+        assert "settings" not in path and not path.endswith("/*") and "data" not in path.split("/"), path
+        assert "**" not in path or path == "lanes/*/traces/**", path
     assert upload["with"]["if-no-files-found"] in ("warn", "ignore")
+    # Diagnostics only: a failed upload never reddens the job, the stand's own step still does.
+    assert upload.get("continue-on-error") is True
+    stand = next(step for step in steps if "devtools.e2e_live.run_live_lanes" in str(step.get("run", "")))
+    assert "continue-on-error" not in stand, stand
     summary = next(step for step in steps if "GITHUB_STEP_SUMMARY" in str(step.get("run", ""))
                    and SKIP_LINE not in str(step.get("run", "")))
     assert summary["if"] == "always() && env.HAS_E2E_LIVE_KEY == 'true'"

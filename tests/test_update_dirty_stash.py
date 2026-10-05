@@ -110,11 +110,11 @@ def test_stash_roundtrip_restores_local_work(tmp_path, monkeypatch):
     assert status == "ok" and stash_sha, error
     assert not _git(repo, "status", "--porcelain").stdout.strip()
 
-    restored, note = update_merge.restore_update_stash(stash_sha, context="test")
-    assert restored, note
+    result = update_merge.restore_update_stash(stash_sha, context="test")
+    assert result.status == "restored", result
     assert (repo / "a.txt").read_text() == "dirty\n"
     assert (repo / "untracked.txt").read_text() == "scratch\n"
-    assert not _git(repo, "stash", "list").stdout.strip()
+    assert stash_sha in _git(repo, "stash", "list", "--format=%H").stdout
 
 
 def test_stash_on_clean_tree_is_a_noop(tmp_path, monkeypatch):
@@ -123,7 +123,7 @@ def test_stash_on_clean_tree_is_a_noop(tmp_path, monkeypatch):
 
     status, stash_sha, error = update_merge.stash_local_changes_for_update("t2")
     assert status == "ok" and stash_sha == "", (stash_sha, error)
-    assert update_merge.restore_update_stash("", context="test") == (True, "")
+    assert update_merge.restore_update_stash("", context="test").status == "not_needed"
 
 
 def test_conflicting_restore_keeps_stash_and_discloses(tmp_path, monkeypatch):
@@ -137,10 +137,10 @@ def test_conflicting_restore_keeps_stash_and_discloses(tmp_path, monkeypatch):
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "official rewrite")
 
-    restored, note = update_merge.restore_update_stash(stash_sha, context="test")
+    result = update_merge.restore_update_stash(stash_sha, context="test")
 
-    assert restored is False
-    assert stash_sha[:12] in note and "git stash apply" in note
+    assert result.status == "preserved"
+    assert stash_sha[:12] in result.note and "git stash apply" in result.note
     # Worktree left clean; the stash entry survives for manual recovery.
     assert not _git(repo, "status", "--porcelain").stdout.strip()
     assert stash_sha in _git(repo, "stash", "list", "--format=%H").stdout
@@ -165,7 +165,7 @@ def test_boot_finalize_restores_stash_and_is_replay_safe(tmp_path, monkeypatch):
 
     assert result.get("finalized") is True, result
     assert (repo / "a.txt").read_text() == "owner work in flight\n"
-    assert not _git(repo, "stash", "list").stdout.strip()
+    assert stash_sha in _git(repo, "stash", "list", "--format=%H").stdout
     # Replay (e.g. double boot task): no tx left, restored content untouched.
     replay = update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
     assert replay.get("finalized") is False

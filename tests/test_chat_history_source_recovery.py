@@ -10,6 +10,8 @@ import pytest
 
 from ouroboros.gateway import history
 
+pytestmark = pytest.mark.serial  # every case installs module-global supervisor roots
+
 
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path, monkeypatch):
@@ -17,10 +19,12 @@ def isolated_runtime(tmp_path, monkeypatch):
 
     for module, names in (
         (state, ("DRIVE_ROOT", "STATE_PATH", "STATE_LAST_GOOD_PATH", "STATE_LOCK_PATH")),
-        (queue, ("DRIVE_ROOT", "QUEUE_SNAPSHOT_PATH")),
+        (queue, ("DRIVE_ROOT", "QUEUE_SNAPSHOT_PATH", "INITIALIZED")),
     ):
         for name in names:
             monkeypatch.setattr(module, name, getattr(module, name))
+    for name, value in (("PENDING", []), ("RUNNING", {}), ("BUDGET_ROOT_FENCES", {}), ("PRIOR_DIRECT_ROOTS", {})):
+        monkeypatch.setattr(queue, name, value)
     state.init(tmp_path)
     queue.init(tmp_path)
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
@@ -41,6 +45,20 @@ def row(index, **extra):
 def request(root, **params):
     response = asyncio.run(history.make_chat_history_endpoint(root)(SimpleNamespace(query_params=params)))
     return response.status_code, json.loads(response.body)
+
+
+def assert_inert_tool_carriers(messages, task_ids):
+    carriers = [row for row in messages if row.get("system_type") == "task_evidence"]
+    assert [row["task_id"] for row in carriers] == task_ids
+    for carrier in carriers:
+        assert carrier["role"] == "system" and carrier["text"] == ""
+        assert carrier["is_progress"] is carrier["narration"] is False
+        assert not {"history_id", "history_position", "task_phase", "task_terminal_status", "cancelable", "outcome_final"} & carrier.keys()
+        evidence = carrier["tool_evidence"]
+        assert evidence["observations"] == []
+        assert evidence["coverage"]["source"] == "logs/tools.jsonl"
+        assert "unreadable_source" in evidence["coverage"]["gaps"], "empty evidence must disclose unread coverage"
+    return [row for row in messages if row.get("system_type") != "task_evidence"]
 
 
 def deny_archive(monkeypatch, root, failure):
@@ -66,6 +84,9 @@ def deny_archive(monkeypatch, root, failure):
 
 @pytest.mark.parametrize("failure", ["directory", "oldest_segment"])
 def test_unavailable_archive_keeps_readable_recent_and_recovers_exact_chain(tmp_path, monkeypatch, failure):
+    from supervisor import queue
+
+    queue.PENDING.append({"id": "quiet-current", "chat_id": 1})
     write(tmp_path / "archive" / "chat_20260901T000000.jsonl", [row("archive")])
     write(tmp_path / "logs" / "chat.jsonl", [row(index) for index in range(180)])
     write(tmp_path / "logs" / "progress.jsonl", [
@@ -76,10 +97,11 @@ def test_unavailable_archive_keeps_readable_recent_and_recovers_exact_chain(tmp_
         deny_archive(denied, tmp_path, failure)
         status, partial = request(tmp_path)
     assert status == 200
-    assert [message["text"] for message in partial["messages"] if not message["is_progress"]] == [
+    physical_rows = assert_inert_tool_carriers(partial["messages"], ["quiet-current"] if failure == "directory" else [])
+    assert [message["text"] for message in physical_rows if not message["is_progress"]] == [
         f"human-{index}" for index in range(30, 180)
     ]
-    assert [message["text"] for message in partial["messages"] if message["is_progress"]] == [
+    assert [message["text"] for message in physical_rows if message["is_progress"]] == [
         f"progress-{index}" for index in range(3)
     ]
     assert partial["reason_code"] == "history_source_unavailable"
@@ -92,6 +114,7 @@ def test_unavailable_archive_keeps_readable_recent_and_recovers_exact_chain(tmp_
     # prefix never produces offsets which later point into the wrong segment.
     status, recovered = request(tmp_path)
     assert status == 200 and recovered["page_cursor"] and recovered["next_cursor"]
+    assert not any(row.get("system_type") == "task_evidence" for row in recovered["messages"]), "readable empty tool history needs no gap carrier"
     assert "reason_code" not in recovered
     status, older = request(tmp_path, cursor=recovered["next_cursor"])
     assert status == 200 and older["has_more"] is False
@@ -123,9 +146,13 @@ def test_cursor_bound_unavailable_source_keeps_the_exact_retry(tmp_path, monkeyp
 
 def test_partial_recent_uses_current_project_membership_and_legacy_limit(tmp_path, monkeypatch):
     from ouroboros.projects_registry import bind_task_to_project, create_project
+    from supervisor import queue
 
     project = create_project(tmp_path, "room", name="Room")
+    foreign = create_project(tmp_path, "foreign", name="Foreign room")
     bind_task_to_project(tmp_path, "bound", project["id"], origin={"absent": "system"})
+    queue.PENDING.extend({"id": task, "chat_id": chat} for task, chat in (
+        ("quiet-main", 1), ("bound", 1), ("hidden", 0), ("a2a", -100), ("foreign", foreign["chat_id"])))
     write(tmp_path / "logs" / "chat.jsonl", [
         row("bound", task_id="bound"), row("direct", chat_id=project["chat_id"]),
         row("main"), row("hidden", chat_id=0), row("a2a", chat_id=-100),
@@ -135,7 +162,9 @@ def test_partial_recent_uses_current_project_membership_and_legacy_limit(tmp_pat
         main_status, main = request(tmp_path, limit="1")
         project_status, project_history = request(tmp_path, chat_id=str(project["chat_id"]), limit="2")
     assert main_status == project_status == 200
-    assert [message["text"] for message in main["messages"]] == ["human-main"]
-    assert [message["text"] for message in project_history["messages"]] == ["human-bound", "human-direct"]
+    main_rows = assert_inert_tool_carriers(main["messages"], ["quiet-main"])
+    project_rows = assert_inert_tool_carriers(project_history["messages"], ["bound"])
+    assert [message["text"] for message in main_rows] == ["human-main"]
+    assert [message["text"] for message in project_rows] == ["human-bound", "human-direct"]
     assert main["reason_code"] == project_history["reason_code"] == "history_source_unavailable"
     assert main["page_cursor"] is project_history["page_cursor"] is None

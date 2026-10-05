@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import math
 import pathlib
@@ -176,6 +178,45 @@ def drain_all_pending(*, persist: bool = True) -> list:
     return drained
 
 
+# A root's billing a caller resolved before taking ``_queue_lock``: (task id, binding).
+_PREPARED_ROOT_BILLING: contextvars.ContextVar = contextvars.ContextVar("prepared_root_billing", default=None)
+
+
+def prepare_root_billing(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The whole-work binding of a ROOT about to be admitted, resolved OFF the queue lock.
+
+    The lookup may read the money ledger (its own cross-process lock; in a cold
+    process a full parse), so a caller that holds ``_queue_lock`` for its own
+    admission transaction resolves this first, inside ``prepared_root_billing``.
+    ``None`` for a child: nothing to resolve.
+    """
+    root_id = str(task.get("id") or "").strip()
+    if not root_id or str(task.get("root_task_id") or root_id) != root_id:
+        return None
+    from ouroboros.config import runtime_setting
+    from ouroboros.usage_admission import task_billing_fields
+
+    limit = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
+    return task_billing_fields(task, root_id, limit if limit > 0 else None,
+                               task.get("budget_drive_root") or DRIVE_ROOT, pin_initial=True,
+                               persist_initial=False)
+
+
+@contextlib.contextmanager
+def prepared_root_billing(task: Dict[str, Any]):
+    """Resolve a root's billing BEFORE the caller takes ``_queue_lock``.
+
+    ``enqueue_task`` called inside the block for the same task uses the result
+    instead of reading the ledger under the lock. Written as a context manager
+    so the call shape ``enqueue_task(task, ...)`` stays the same everywhere.
+    """
+    token = _PREPARED_ROOT_BILLING.set((str(task.get("id") or "").strip(), prepare_root_billing(task)))
+    try:
+        yield
+    finally:
+        _PREPARED_ROOT_BILLING.reset(token)
+
+
 def enqueue_task(
     task: Dict[str, Any], front: bool = False, *, restoring_snapshot: bool = False,
     consciousness_window: Optional[Dict[str, Any]] = None, continuation: bool = False,
@@ -183,6 +224,10 @@ def enqueue_task(
 ) -> Dict[str, Any]:
     """Add task to PENDING (thread-safe: HTTP handlers enqueue concurrently
     with the supervisor main loop, so the mutation must hold the queue lock).
+
+    A root's whole-work binding is resolved OFF the queue lock: here before the
+    lock is taken, or earlier by a caller that holds the lock for its own
+    admission transaction (``prepared_root_billing``).
 
     ``consciousness_window``: an allowance the caller already read OFF the queue lock
     (the scheduler). ``continuation``: host-derived only (a follow-up row's own
@@ -201,6 +246,15 @@ def enqueue_task(
     # starts — a window stale by milliseconds changes nothing).
     if consciousness_window is None and not restoring_snapshot:
         consciousness_window = consciousness_admission_window(t)
+    # The whole-work binding of a root may read the money ledger too (its own
+    # cross-process lock; in a cold process a full parse): resolve it here, off
+    # the queue lock, and only attach it inside. A caller whose admission
+    # transaction already holds the lock resolved it earlier (``prepared_root_billing``).
+    prepared = _PREPARED_ROOT_BILLING.get()
+    if prepared is not None and prepared[0] == str(t.get("id") or "").strip():
+        billing = prepared[1]
+    else:
+        billing = None if restoring_snapshot else prepare_root_billing(t)
     project_id = str(t.get("project_id") or "").strip()
     # The host preparation basis survives queue snapshots and retries. Legacy
     # tasks lacking one are checked against current authority without claiming
@@ -286,18 +340,13 @@ def enqueue_task(
             if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
                 ADMISSION_RESERVATIONS.pop(task_id, None)
             return t
-        if not restoring_snapshot and task_id and str(t.get("root_task_id") or task_id) == task_id:
-            from ouroboros.config import runtime_setting
-            from ouroboros.usage_admission import task_billing_fields, UNAVAILABLE_GROUP_PREFIX
+        if billing is not None:
+            from ouroboros.usage_admission import UNAVAILABLE_GROUP_PREFIX
 
-            limit = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
-            binding = task_billing_fields(t, task_id, limit if limit > 0 else None,
-                                          t.get("budget_drive_root") or DRIVE_ROOT, pin_initial=True,
-                                          persist_initial=False)
-            if str(binding["billing_group_id"]).startswith(UNAVAILABLE_GROUP_PREFIX):
+            if str(billing["billing_group_id"]).startswith(UNAVAILABLE_GROUP_PREFIX):
                 t["_admission_blocked"] = "billing_authority_unavailable"
                 return t
-            t.setdefault("metadata", {})["billing_group"] = {k: v for k, v in binding.items()
+            t.setdefault("metadata", {})["billing_group"] = {k: v for k, v in billing.items()
                                                              if k.startswith("billing_group_")}
         QUEUE_SEQ_COUNTER_REF["value"] += 1
         seq = QUEUE_SEQ_COUNTER_REF["value"]

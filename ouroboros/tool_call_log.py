@@ -193,12 +193,12 @@ def logical_calls(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return calls
 
 
-def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200) -> Dict[str, Any]:
+def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200, *, iter_objects=None) -> Dict[str, Any]:
     """Bounded canonical invocation facts for history, independent of frozen wait metrics."""
     from ouroboros.memory import Memory
     from ouroboros.tool_capabilities import routing_action_for_tool
 
-    rows, coverage = Memory(drive_root).read_task_recent("tools.jsonl", task_id, want)
+    rows, coverage = Memory(drive_root).read_task_recent("tools.jsonl", task_id, want, iter_objects=iter_objects)
     observations = []
     legacy = {"calls": 0, "errors": 0, "wait_ended": False, "unknown": False}
     for call in logical_calls(rows):
@@ -219,3 +219,33 @@ def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200) -> 
                     "status": ("error" if row.get("is_error") else "ok") if slot == "settled" else "unknown",
                     "hostError": row.get("status") == "host_error"})
     return {"observations": observations, "legacy": legacy, "coverage": coverage}
+
+
+def replay_evidence_for_tasks(drive_root: pathlib.Path, task_ids: Iterable[str]) -> Dict[str, dict]:
+    """Share exact parsed windows within ONE history read, keeping per-task quotas.
+
+    Only selected tasks are retained. Tail windows still double and archive
+    backfill stays bounded by the existing reader; no cache survives this request.
+    """
+    from ouroboros.utils import iter_jsonl_objects
+
+    selected = dict.fromkeys(task_ids)
+    windows = {}
+
+    def parse(path, *, tail_bytes=None, gap_reasons=None):
+        info = path.stat()
+        stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if windows.get(path, (None,))[0] != stamp:
+            windows[path] = stamp, {}
+        parsed = windows[path][1]
+        if tail_bytes not in parsed:
+            gaps: set = set()
+            rows = [row for row in iter_jsonl_objects(path, tail_bytes=tail_bytes, gap_reasons=gaps)
+                    if str(row.get("task_id") or "").strip() in selected]
+            parsed[tail_bytes] = rows, gaps
+        rows, gaps = parsed[tail_bytes]
+        if gap_reasons is not None:
+            gap_reasons.update(gaps)
+        return iter(rows)
+
+    return {task_id: replay_evidence(drive_root, task_id, iter_objects=parse) for task_id in selected}

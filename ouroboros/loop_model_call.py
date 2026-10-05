@@ -352,6 +352,8 @@ def _run_cross_model_fallback_chain(
                                      or _route_follows(rows[index + 1:])),
             )
         tried.append(fallback_model)
+        resident = (None if tool_schemas is None else list(tool_schemas),
+                    getattr(tools._ctx, "_route_left_out_tool_names", None))
         msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
         if deferred is None and msg is None:
             # Each fallback clears the transient context slot before its own send. Keep the
@@ -401,6 +403,12 @@ def _run_cross_model_fallback_chain(
         tools._ctx.messages = messages
         tools._ctx.active_context_mode = active_context_mode
         _restore_context_fit_usage(accumulated_usage, primary_context_usage)
+        if (resident[0] is not None and resident[0] != tool_schemas and fallback_messages is not messages
+                and deferred_candidate is not candidate_call):
+            # Its ceiling fit left with its transcript copy, notice included; the next route gets the list it had.
+            # (A same-family candidate wrote its notice into the shared transcript, so its fit stays with it.)
+            tool_schemas[:], tools._ctx._route_left_out_tool_names = resident
+            invalidate_task_cache_splits(task_id)
         if _walk_fenced(tools._ctx, accumulated_usage):
             break
         _cooled(fallback_model, fallback_use_local, fallback_role)
@@ -991,6 +999,8 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     ctx.active_model, ctx.active_use_local = model, use_local
     ctx.tools._ctx.active_model = model
     ctx.tools._ctx.active_use_local = use_local
+    if _fit_route_tool_ceiling(ctx):  # an owner's switch may land on a route with a schema ceiling
+        kwargs["tools"] = ctx.tool_schemas
     trace = getattr(ctx.tools._ctx, "_execution_trace", {})
     _pending_model_wait_handover(
         ctx.tools._ctx,
@@ -1348,26 +1358,30 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     return True
 
 
-def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> None:
+def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> bool:
     """Keep the resident schemas within the acting route's physical ceiling (OpenAI: 128).
 
     In place, before measurement, so the fit, the priced candidate and the send carry
-    one list and discovery reports true residency. Names left out earlier and loaded
-    again by the actor stay; the newly left-out names reach the actor as a fact.
+    one list and discovery reports true residency. Names the actor loaded through
+    enable_tools in this run, and names left out earlier, stay; the newly left-out
+    names reach the actor as a fact.
+    Called by every Main round and by a wait's reprepare; True when the list changed.
     """
     from ouroboros.provider_models import tool_schema_limit
     from ouroboros.tool_policy import fit_tool_schemas_to_limit, route_tool_limit_notice
 
     schemas, limit = ctx.tool_schemas, tool_schema_limit(ctx.active_model, use_local=ctx.active_use_local)
     if limit is None or schemas is None or len(schemas) <= limit:
-        return
+        return False
     earlier = frozenset(getattr(ctx.tools._ctx, "_route_left_out_tool_names", ()) or ())
+    loaded = frozenset(getattr(ctx.tools._ctx, "_actor_loaded_tool_names", ()) or ())
     total = len(schemas)
-    schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier)
+    schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier | loaded)
     ctx.tools._ctx._route_left_out_tool_names = earlier | set(left_out)
     invalidate_task_cache_splits(ctx.task_id)
     _loop()._append_or_merge_user_message(
         ctx.messages, route_tool_limit_notice(ctx.active_model, limit, total, left_out))
+    return True
 
 
 def _call_round_model(ctx: _RoundModelCallContext) -> Tuple[Any, float, str]:

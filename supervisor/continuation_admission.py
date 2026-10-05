@@ -268,23 +268,52 @@ def _billing_group(q: Any, predecessor: str, result: Dict[str, Any]) -> Dict[str
     """The whole-work group the successor spends from, and the cap it started under.
 
     A chain keeps the FIRST root's group and cap; otherwise the predecessor's
-    own earliest ledger row names the cap it started under (the configured
-    initial cap included). With neither a durable initial binding nor a ledger
-    cap, the authority is unavailable; changed configuration cannot reprice it.
+    own earliest live ledger row names the group it spent in and the cap it
+    started under (an older block's own literal included, ``legacy_live``).
+    With neither a durable initial binding nor a ledger cap, the predecessor
+    stays its own group, its spend preserved, under the configured cap — the
+    choice is pinned on the predecessor's result (``legacy_default``) so its
+    own later work and every successor share one ceiling.
     """
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     carried = result.get("billing_group") or metadata.get("billing_group") or metadata.get("continuation") or {}
     if carried.get("billing_group_id") and "billing_group_limit_usd" in carried:
         return {key: carried.get(key) for key in (
             "billing_group_id", "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")}
-    from ouroboros.usage_admission import original_group_limit
+    from ouroboros.usage_admission import ledger_billing_binding, original_group_limit
 
     group = str(result.get("root_task_id") or predecessor)
+    recorded = ledger_billing_binding(q.DRIVE_ROOT, group)  # the root's own first row: its group, not only itself
+    if recorded:
+        return {key: recorded.get(key) for key in ("billing_group_id", "billing_group_limit_usd", "billing_group_limit_source")}
     found = original_group_limit(q.DRIVE_ROOT, group)
-    if found["source"] != "ledger_first_row":
-        raise ValueError("billing_authority_unavailable")
-    return {"billing_group_id": group, "billing_group_limit_usd": found["limit_usd"],
-            "billing_group_limit_source": "ledger_first_row"}
+    if found["source"] != "no_attempt_recorded":
+        return {"billing_group_id": group, "billing_group_limit_usd": found["limit_usd"],
+                "billing_group_limit_source": found["source"]}
+    from ouroboros.config import runtime_setting
+    from ouroboros.task_results import stamp_task_result_schema, task_result_path
+    from ouroboros.utils import update_json_locked
+
+    limit = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
+    binding = {"billing_group_id": group, "billing_group_limit_usd": limit if limit > 0 else None,
+               "billing_group_limit_source": "legacy_default", "billing_group_limit_revision": utc_now_iso()}
+
+    def pin(current):
+        nonlocal binding
+        if current.get("billing_group"):  # already chosen (by an earlier Continue or admission): share it
+            binding = current["billing_group"]
+            return None
+        return stamp_task_result_schema({**current, "billing_group": binding})
+
+    if result.get("status"):  # a recorded predecessor: the choice becomes its durable binding, or nothing is admitted
+        try:
+            update_json_locked(task_result_path(q.DRIVE_ROOT, group), pin, strict_existing_dict=True)
+        except (OSError, ValueError, TimeoutError) as exc:
+            # An unpinned choice would let the predecessor's own later work follow a changed
+            # setting instead of the successor's ceiling: refuse now; the same nonce retries.
+            log.warning("Could not pin the default billing group on %s", group, exc_info=True)
+            raise ValueError("billing_authority_unavailable") from exc
+    return {key: binding.get(key) for key in ("billing_group_id", "billing_group_limit_usd", "billing_group_limit_source")}
 
 
 def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -407,7 +436,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
                 "successor_task_id": successor, "unconfirmed": True}
     task["_admission_token"] = token
     task["_continuation_prepared"] = admission["binding_sha256"]
-    with q._queue_lock:
+    with q.prepared_root_billing(task), q._queue_lock:  # the ledger read happens before the lock
         admitted = q.enqueue_task(task, project_admission=project_basis)
         if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
             q.release_task_admission(successor, token)

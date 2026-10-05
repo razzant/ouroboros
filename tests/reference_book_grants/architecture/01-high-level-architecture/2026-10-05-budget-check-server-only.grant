@@ -1,0 +1,3 @@
+53
+The module-map row for agent_startup_checks.py now says the budget check runs in the
+server process only: a worker no longer folds the whole usage ledger at construction.

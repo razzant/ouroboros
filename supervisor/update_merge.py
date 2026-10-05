@@ -32,7 +32,7 @@ from supervisor.update_candidate import (  # noqa: F401
     find_update_stash_sha, restore_stash_with_marker, restore_update_stash,
     stash_local_changes_for_update, lookup_update_stash,
     destructive_apply_guard, project_version_carriers,
-    quarantine_corrupt_update_tx_marker,
+    quarantine_corrupt_update_tx_marker, StashRestoreResult,
 )
 # The planner, the clean-plan commit builder and the live materializer — the
 # carrier engine's three insertion points — live in supervisor.update_merge_plan
@@ -44,16 +44,13 @@ from supervisor.update_merge_plan import (  # noqa: F401
 
 UPDATE_TX_MARKER_NAME = "ouroboros-update-tx.json"
 
-# ABI 7.0 / F14 N−1 transition shim: every tx write stamps the marker with the
-# shared ``_schema_version`` key. ``finalize_managed_update_on_boot`` is the
-# stable N−1→N entry point — an UNSTAMPED marker is the accepted pre-7.0 form
-# (a version-N updater must finalize the transaction its N−1 predecessor
-# recorded), a stamp ≤ ours is current, and an integer stamp ABOVE ours means
-# a NEWER release recorded the transaction: this version cannot interpret it,
-# so every strict reader fails closed (``"future"`` — never rolled back, left
-# for the owner). A rolled-back N−1 binary reads a stamped marker unchanged:
-# the stamp is one additive key its reader ignores.
-UPDATE_TX_SCHEMA_VERSION = 1
+# Strict readers accept legacy unstamped/schema-1 transactions. Stash restoration
+# and a rollback carrying stashed work need schema 2 BEFORE checking out old code:
+# a legacy rollback can otherwise restore, clear its marker and reset the returned
+# files on its own restart. Completed rollback hands schema 1's existing clear-only
+# phase across that restart. Interrupted schema-2 recovery needs this reader or
+# deliberate owner recovery; backward refusal is not automatic recovery.
+UPDATE_TX_SCHEMA_VERSION = 2
 
 # ``dict.get`` sentinel distinguishing a MISSING ``_schema_version`` key (the
 # accepted pre-7.0 unstamped form) from an explicit stored ``null`` (corrupt).
@@ -88,9 +85,12 @@ def write_update_tx(payload: Dict[str, Any]) -> None:
     from ouroboros.contracts.schema_versions import with_schema_version
     from ouroboros.utils import atomic_write_json
 
+    protected_restore = payload.get("stash_restore") or (
+        payload.get("phase") == "rolling_back" and payload.get("stash_sha")
+    )
     atomic_write_json(
         _update_tx_marker_path(),
-        with_schema_version(payload, UPDATE_TX_SCHEMA_VERSION),
+        with_schema_version(payload, 2 if protected_restore else 1),
         trailing_newline=True,
     )
 
@@ -108,8 +108,8 @@ def clear_update_tx() -> bool:
 
 _ASSISTED_PHASES = ("materializing_assisted", "assisted_resolution", "committing_assisted")
 GATE_BLOCKED_PHASE = "gate_blocked"
-# The repository is ALREADY in its final good state and only the tx-marker
-# unlink failed: recovery retries the cleanup and must never roll back. A
+# The completion outcome is recorded and only the tx-marker unlink failed:
+# recovery retries that cleanup and must never roll back. A
 # separate phase — not a gate_blocked sub-kind — because gate_blocked's boot
 # contract ("a refused merge: fresh rollback, never promotion") stays exact.
 MARKER_CLEANUP_RETRY_PHASE = "marker_cleanup_retry"
@@ -421,8 +421,9 @@ def rollback_managed_update(
     """Roll a failed managed update back to the pre-update SHA in the tx marker. Preserves
     the failed candidate — an uncommitted resolution included — on the deterministic
     branch ``failed-update-<target12>`` for inspection and retry, hard-resets the branch
-    to pre_update_sha, cleans, clears the update markers, and logs. Boot recovery keeps
-    writer admission closed until the restored process restarts. Does NOT push (unlike
+    to pre_update_sha, cleans, and logs. Boot recovery retains a clear-only transaction
+    until the restored process starts, protecting returned work from bootstrap reset.
+    Other callers clear it immediately. Does NOT push (unlike
     rollback_to_version, which can push origin — wrong for an internal recovery).
 
     Marker admission is STRICT (F14): a FUTURE-schema marker was recorded by a newer
@@ -440,12 +441,22 @@ def rollback_managed_update(
     branch = str(tx.get("pre_update_branch") or _g.BRANCH_DEV)
     if not pre:
         return False, "no pre_update_sha in update tx marker"
+    # Read the write-ahead fact BEFORE phase writes or any reset. A restore
+    # may have changed files even when its final marker never reached disk.
+    if tx.get("stash_restore"):
+        result = restore_stash_with_marker(tx, "rollback_resume")
+        rc_h, head, _he = _g.git_capture(["git", "rev-parse", "--verify", "HEAD"])
+        rc_b, current_branch, _be = _g.git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        if rc_h != 0 or head != pre or rc_b != 0 or current_branch != branch:
+            return False, "rollback left the current checkout unchanged after stash recovery; " + result.note
+        if not _g._clear_update_intent():
+            return False, "rollback could not clear update intent; " + result.note
+        return _finish_rollback(tx, pre, branch, reason, result, reopen_writer_admission)
     tx["phase"] = "rolling_back"
     tx["rollback_reason"] = str(reason or "update_rollback")
     write_update_tx(tx)
-    # Q1=C replay guard: a previous rollback attempt that already RESTORED the
-    # owner's stashed work (durable stash_restored marker, written between the
-    # stash apply and its drop) must not reset that work away on resume. When
+    # Legacy replay guard: a durable stash_restored marker proves a completed
+    # apply. It retains that meaning for older transactions. When
     # HEAD already sits at the pre-update SHA on the right branch, the repo part
     # of the rollback is done — skip the destructive re-reset and re-restore.
     resume_with_restored_work = False
@@ -460,7 +471,7 @@ def rollback_managed_update(
     if not _g._clear_update_intent():
         return False, "rollback could not clear update intent before restoring the repository"
     if resume_with_restored_work:
-        return _finish_rollback(tx, pre, branch, reason, "", reopen_writer_admission)
+        return _finish_rollback(tx, pre, branch, reason, StashRestoreResult("restored"), reopen_writer_admission)
     # Fresh rescue BEFORE the destructive reset; the persisted pointer is the replay guard.
     if not tx.get("rollback_rescue"):
         _g.rescue_into_tx(tx, key="rollback_rescue", reason=str(reason),
@@ -511,35 +522,54 @@ def rollback_managed_update(
     ):
         detail = head_error or branch_error or status_error or "rollback verification mismatch"
         return _fail(f"rollback could not be verified: {detail}")
-    # Q1=C: the pre-update tree is exactly where the stash was taken, so this
-    # restore is conflict-free; a kept stash entry is disclosed, never dropped.
-    stash_note = restore_stash_with_marker(tx, "rollback")
-    return _finish_rollback(tx, pre, branch, reason, stash_note, reopen_writer_admission)
+    result = restore_stash_with_marker(tx, "rollback")
+    return _finish_rollback(tx, pre, branch, reason, result, reopen_writer_admission)
 
 
 def _finish_rollback(
     tx: Dict[str, Any], pre: str, branch: str, reason: str,
-    stash_note: str, reopen_writer_admission: bool,
+    result: StashRestoreResult, reopen_writer_admission: bool,
 ) -> Tuple[bool, str]:
-    """Shared rollback tail: close admission, clear the tx, log, reopen, report."""
+    """Finish the effect, retaining boot custody until the restored process starts."""
+    if not result.complete:
+        return False, result.note
+    from supervisor.git_ops_reset import _record_checkout_facts
+
+    # The next bootstrap preserves the handoff instead of checking out again.
+    # Publish the verified checkout through the same owner as ordinary reset.
+    _record_checkout_facts({"current_branch": branch, "current_sha": pre})
+    stash_note = result.note
     gate_reason = "managed_update:rollback"
     try:
         from supervisor.workers import close_repo_writer_admission
 
         close_repo_writer_admission(gate_reason)
     except Exception:
-        return False, "rollback restored the repository but could not close writer admission"
-    if not clear_update_tx():
-        return False, "rollback restored the repository but could not clear update transaction"
+        return False, "rollback restored the repository but could not close writer admission; " + stash_note
     rescue = tx.get("rollback_rescue") if isinstance(tx.get("rollback_rescue"), dict) else {}
-    append_jsonl(
-        _g.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {"ts": utc_now_iso(), "type": "managed_update_rolled_back", "reason": reason,
+    if not _log_supervisor(
+        {"type": "managed_update_rolled_back", "reason": reason,
          "pre_update_sha": pre, "branch": branch,
+         "stash_note": stash_note, "stash_restore_status": result.status,
          **({"failed_update_ref": tx["failed_update_ref"]} if tx.get("failed_update_ref") else {}),
          **{f"rescue_{key}": rescue[key] for key in ("path", "ref", "ts") if rescue.get(key)},
          **({"rescue_error": tx["rollback_rescue_error"]} if tx.get("rollback_rescue_error") else {})},
-    )
+    ):
+        return False, "rollback completed but its recovery event could not be saved; " + stash_note
+    if not reopen_writer_admission:
+        # The effect and its evidence are complete. Old readers know this phase
+        # means ONLY unlink, and their bootstrap refuses to reset over it. Keep
+        # the truthful legacy success flag/OID, never forge success for a handoff.
+        handoff = {key: value for key, value in tx.items() if key != "stash_restore"}
+        handoff.update(phase=MARKER_CLEANUP_RETRY_PHASE,
+                       gate_blocked_reason="rollback_restart_pending", gate_blocked_detail=stash_note)
+        try:
+            write_update_tx(handoff)
+        except Exception:
+            _g.log.warning("rollback restart handoff could not be saved", exc_info=True)
+            return False, "rollback completed but its restart handoff could not be saved; " + stash_note
+    elif not clear_update_tx():
+        return False, "rollback restored the repository but could not clear update transaction; " + stash_note
     if reopen_writer_admission:
         try:
             from supervisor.workers import open_repo_writer_admission
@@ -805,8 +835,28 @@ def external_host_restart_smoke() -> Dict[str, Any]:
     return _run_update_smoke([sys.executable, hook, "--check"])
 
 
-def _log_supervisor(payload: Dict[str, Any]) -> None:
-    append_jsonl(_g.DRIVE_ROOT / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), **payload})
+def _log_supervisor(payload: Dict[str, Any]) -> bool:
+    try:
+        return append_jsonl(_g.DRIVE_ROOT / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), **payload})
+    except Exception:
+        _g.log.warning("managed update event could not be saved", exc_info=True)
+        return False
+
+
+def _complete_stash_recovery(
+    tx: Dict[str, Any], context: str, result: Dict[str, Any], event: Dict[str, Any],
+) -> Dict[str, Any]:
+    """The three boot completion paths share effect-checked transaction cleanup."""
+    restored = restore_stash_with_marker(tx, context)
+    disclosure = ({"stash_note": restored.note, "stash_restore_status": restored.status}
+                  if restored.note else {})
+    if not restored.complete:
+        return {"finalized": False, "reason": "stash_recovery_incomplete", **disclosure}
+    if not clear_update_tx():
+        mark_update_tx_gate_blocked("stash_marker_cleanup_failed", cleanup_only=True)
+        return {"finalized": False, "reason": "could not clear update marker", **disclosure}
+    _log_supervisor({**event, **disclosure})
+    return {**result, **disclosure}
 
 
 def _finalize_pending_boot_smoke(tx: Dict[str, Any], supervisor_ready: bool) -> Dict[str, Any]:
@@ -837,7 +887,7 @@ def _finalize_pending_boot_smoke(tx: Dict[str, Any], supervisor_ready: bool) -> 
                 "msg": msg,
                 "smoke": smoke,
             })
-            return {"finalized": False, "rolled_back": ok, "msg": msg, "smoke": smoke}
+            return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg, "smoke": smoke}
         tx["pre_restart_smoke"] = _PRE_RESTART_SMOKE_PASSED
         write_update_tx(tx)
     if bool(supervisor_ready) and merge_in_head:
@@ -848,37 +898,20 @@ def _finalize_pending_boot_smoke(tx: Dict[str, Any], supervisor_ready: bool) -> 
             )
             _log_supervisor({"type": "managed_update_native_host_failed", "ok": ok,
                              "msg": msg, "smoke": native_smoke})
-            return {"finalized": False, "rolled_back": ok, "msg": msg, "smoke": native_smoke}
+            return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg, "smoke": native_smoke}
         if not _g._clear_update_intent():
             mark_update_tx_gate_blocked("finalize_intent_cleanup_failed")
             return {"finalized": False, "reason": "could not clear update intent"}
-        # Q1=C: the boot survived on the merged tree — bring the owner's stashed
-        # local work back as uncommitted content BEFORE clearing the tx, so the
-        # durable stash_sha pointer survives a crash in this window (a replayed
-        # finalize sees "already consumed" and the restored tree stays). A
-        # conflicting restore keeps the stash entry and the note discloses the
-        # manual recovery command.
-        stash_note = restore_stash_with_marker(tx, "boot_finalize")
-        if not clear_update_tx():
-            mark_update_tx_gate_blocked("finalize_marker_cleanup_failed", cleanup_only=True)
-            return {"finalized": False, "reason": "could not clear update marker",
-                    **({"stash_note": stash_note} if stash_note else {})}
-        _log_supervisor({
-            "type": "managed_update_finalized",
-            "head": head,
-            **({"stash_note": stash_note} if stash_note else {}),
-        })
-        result = {"finalized": True}
-        if stash_note:
-            result["stash_note"] = stash_note
-        return result
+        return _complete_stash_recovery(
+            tx, "boot_finalize", {"finalized": True}, {"type": "managed_update_finalized", "head": head},
+        )
     if (bool(supervisor_ready) and head_resolved and not merge_in_head) or attempts >= 2:
         ok, msg = rollback_managed_update(
             "post_boot_smoke_failed", reopen_writer_admission=False
         )
         _log_supervisor({"type": "managed_update_rollback_after_failed_boot",
                          "ok": ok, "msg": msg, "boot_attempts": attempts})
-        return {"finalized": False, "rolled_back": ok, "msg": msg}
+        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
     tx["boot_attempts"] = attempts
     write_update_tx(tx)
     return {"finalized": False, "boot_attempts": attempts}
@@ -899,7 +932,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
             )
             _log_supervisor({"type": "managed_update_assisted_materialization_interrupted",
                              "ok": ok, "msg": msg})
-            return {"finalized": False, "rolled_back": ok, "msg": msg}
+            return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
     if state == "committed":
         # Only pending_boot_smoke proves that exact-binding verification, post-commit
         # tests, and the pre-restart smoke all passed. A commit found under an assisted
@@ -909,21 +942,17 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
         )
         _log_supervisor({"type": "managed_update_assisted_commit_unproven",
                          "ok": ok, "msg": msg})
-        return {"finalized": False, "rolled_back": ok, "msg": msg}
+        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
     if state == "diverged":
         # A real reviewed commit landed; keep it (never reset over reviewed work), abandon
         # this update — it is re-planned fresh later. The tx is the ONLY pointer that a
         # stash restore is owed: bring the owner's stashed work back (a conflicting
         # restore keeps the entry and the note discloses it) BEFORE dropping the marker.
-        stash_note = restore_stash_with_marker(tx, "boot_diverged_abandon")
-        if not clear_update_tx():
-            mark_update_tx_gate_blocked("diverged_marker_cleanup_failed", cleanup_only=True)
-            return {"finalized": False, "reason": "could not clear diverged update marker",
-                    **({"stash_note": stash_note} if stash_note else {})}
-        _log_supervisor({"type": "managed_update_assisted_abandoned_diverged",
-                         **({"stash_note": stash_note} if stash_note else {})})
-        return {"finalized": False, "abandoned": True, "reason": "head_diverged",
-                **({"stash_note": stash_note} if stash_note else {})}
+        return _complete_stash_recovery(
+            tx, "boot_diverged_abandon",
+            {"finalized": False, "abandoned": True, "reason": "head_diverged"},
+            {"type": "managed_update_assisted_abandoned_diverged"},
+        )
     if state == "in_progress":
         attempts = int(tx.get("resolution_attempts") or 0) + 1
         if attempts > _ASSISTED_BOOT_ATTEMPT_CAP:
@@ -931,7 +960,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 "assisted_resolution_expired", reopen_writer_admission=False
             )
             _log_supervisor({"type": "managed_update_assisted_expired", "ok": ok, "msg": msg})
-            return {"finalized": False, "rolled_back": ok, "msg": msg}
+            return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
         # Re-establish the merge state if the restart/rescue wiped it; preserve partial
         # progress when MERGE_HEAD + a dirty tree already survived.
         rc_d, dirty, _de = _g.git_capture(["git", "status", "--porcelain"])
@@ -954,7 +983,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                         )
                         _log_supervisor({"type": "managed_update_backfill_projection_failed",
                                          "error": bp_error, "rollback": rb_msg})
-                        return {"finalized": False, "rolled_back": rb_ok, "msg": bp_error}
+                        return {"finalized": False, "rolled_back": rb_ok, "msg": bp_error, "stash_note": rb_msg}
                     m0_backfill, m0_err = worktree_snapshot_tree("HEAD")
                     if m0_backfill:
                         tx["m0_tree"] = m0_backfill
@@ -1000,7 +1029,7 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 )
                 _log_supervisor({"type": "managed_update_assisted_rematerialize_failed",
                                  "materialize_msg": msg, "rollback": rb_msg})
-                return {"finalized": False, "rolled_back": rb_ok, "msg": msg}
+                return {"finalized": False, "rolled_back": rb_ok, "msg": msg, "stash_note": rb_msg}
         tx["phase"] = "assisted_resolution"
         tx["resolution_attempts"] = attempts
         write_update_tx(tx)
@@ -1199,7 +1228,7 @@ def abort_orphaned_assisted_tx(
                 )
         except Exception:
             _g.log.warning("abort_orphaned_assisted_tx: worker pool start failed", exc_info=True)
-        return {"acted": True, "rolled_back": ok, "msg": msg}
+        return {"acted": True, "rolled_back": ok, "msg": msg, "stash_note": msg}
     finally:
         if lock_fh is not None:
             release_update_lock(lock_fh)
@@ -1215,7 +1244,7 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
         ok, msg = rollback_managed_update(
             "replace_apply_state_unreadable", reopen_writer_admission=False
         )
-        return {"finalized": False, "rolled_back": ok, "msg": msg}
+        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
     applied = head == target and not dirty.strip()
     if applied:
         tx["phase"] = "pending_boot_smoke"
@@ -1236,107 +1265,117 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
     ok, msg = rollback_managed_update(
         "replace_apply_interrupted", reopen_writer_admission=False
     )
-    return {"finalized": False, "rolled_back": ok, "msg": msg}
+    return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
 
 
 def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, Any]:
-    """Post-boot finalization of a managed update (P2). Called ONCE after the new process
-    boots and the supervisor is ready. Acquires the update lock (skips if an apply holds it),
-    strict-reads the tx, and dispatches by phase: ``pending_boot_smoke`` (committed +
-    restarted) → health-check + boot-loop guard; an assisted phase → non-destructive
-    merge-state recovery (resume / abandon-on-divergence / rollback-on-expiry). A CORRUPT
-    marker is quarantined aside byte-intact (admission reopens) unless the tree shows an
-    in-flight merge, which stays fail-closed; a FUTURE-schema marker recorded by a newer
-    release is left untouched (F14: never rolled back by an older binary). This dispatch
-    is the stable N−1→N transition contract: an UNSTAMPED (pre-7.0) tx is driven exactly
-    like a stamped one. Best-effort; never raises."""
+    """Finish boot recovery under one update lock, never raising.
+
+    Every completed boot rollback retains custody for one re-exec: HEAD may
+    equal pre_update_sha while imported files came from an assisted merge.
+    The restored generation clears the existing handoff without another reset.
+    """
     lock_fh = None
     try:
         try:
             lock_fh = acquire_update_lock()
         except RuntimeError:
             return {"finalized": False, "reason": "update lock held by an active apply"}
-        status, tx = read_update_tx_strict()
-        if status == "absent":
-            return {"finalized": False, "reason": "no pending update"}
-        if status == "corrupt":
-            # Quarantined aside byte-intact (evidence survives, the admission
-            # latch does not) unless MERGE_HEAD shows a live merge (#447);
-            # mechanics in update_candidate.quarantine_corrupt_update_tx_marker.
-            return quarantine_corrupt_update_tx_marker()
-        if status == "future":
-            # Recorded by a NEWER release (this process is the rollback
-            # target). This version cannot interpret the transaction; rolling
-            # it back could destroy work the newer form protects — leave the
-            # marker untouched for the owner. It is not corrupt, so it is not
-            # quarantined either: the newer binary must still find it.
-            from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
-
-            _log_supervisor({
-                "type": "managed_update_tx_future_schema_on_boot",
-                "schema_version": tx.get(SCHEMA_VERSION_KEY),
-                "phase": str(tx.get("phase") or ""),
-            })
-            return {"finalized": False,
-                    "reason": "update tx recorded by a newer version — left for owner"}
-        phase = str(tx.get("phase") or "")
-        if phase == "stashing_local_work":
-            # Crash between the durable pre-stash marker and the merge apply:
-            # nothing was applied yet. Restore whatever the attempt stashed
-            # (the tx may predate the stash_sha write), then clear the marker —
-            # the owner simply retries the update.
-            sha = str(tx.get("stash_sha") or "")
-            if not sha:
-                ok_lu, sha, _lu_error = lookup_update_stash(str(tx.get("attempt_id") or ""))
-                if not ok_lu:
-                    # Unreadable stash storage is NOT "nothing was stashed":
-                    # clearing the tx here would drop the only durable pointer.
-                    _log_supervisor({"type": "managed_update_stash_recovery_unreadable"})
-                    return {"finalized": False,
-                            "reason": "stash storage unreadable — recovery left for a later boot"}
-            stash_note = ""
-            if sha:
-                tx["stash_sha"] = sha
-                stash_note = restore_stash_with_marker(tx, "boot_stash_recovery")
-            if not clear_update_tx():
-                mark_update_tx_gate_blocked("stash_recovery_marker_cleanup_failed", cleanup_only=True)
-                return {"finalized": False, "reason": "could not clear update marker"}
-            _log_supervisor({
-                "type": "managed_update_stash_recovered_on_boot",
-                **({"stash_note": stash_note} if stash_note else {}),
-            })
-            return {"finalized": False, "reason": "recovered pre-apply stash crash",
-                    **({"stash_note": stash_note} if stash_note else {})}
-        if phase == "pending_boot_smoke":
-            return _finalize_pending_boot_smoke(tx, supervisor_ready)
-        if phase == "applying_replace":
-            return _recover_replace_on_boot(tx, supervisor_ready)
-        if phase == "rolling_back":
-            ok, msg = rollback_managed_update(
-                str(tx.get("rollback_reason") or "boot_rollback_resume"),
-                reopen_writer_admission=False,
-            )
-            return {"finalized": False, "rolled_back": ok, "msg": msg}
-        if phase in _ASSISTED_PHASES:
-            return _recover_assisted_on_boot(tx, supervisor_ready)
-        if phase == MARKER_CLEANUP_RETRY_PHASE:
-            # The repository already holds its final good state; ONLY the
-            # marker unlink is retried — never a rollback.
-            if clear_update_tx():
-                _log_supervisor({"type": "managed_update_cleanup_retry_succeeded",
-                                 "reason": str(tx.get("gate_blocked_reason") or "")})
-                return {"finalized": True, "reason": "marker cleanup retried"}
-            return {"finalized": False, "reason": "marker cleanup still failing"}
-        if phase == GATE_BLOCKED_PHASE:
-            ok, msg = rollback_managed_update(
-                str(tx.get("gate_blocked_reason") or "boot_gate_recovery"),
-                reopen_writer_admission=False,
-            )
-            return {"finalized": False, "rolled_back": ok, "msg": msg}
-        return {"finalized": False, "reason": f"unhandled phase {phase}"}
+        return _finalize_managed_update_locked(supervisor_ready)
     except Exception:
         _g.log.warning("finalize_managed_update_on_boot failed", exc_info=True)
         return {"finalized": False, "error": "exception"}
     finally:
         if lock_fh is not None:
             release_update_lock(lock_fh)
+
+
+def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
+    """Dispatch the strict marker under the caller's existing update lock."""
+    status, tx = read_update_tx_strict()
+    if status == "absent":
+        return {"finalized": False, "reason": "no pending update"}
+    if status == "corrupt":
+        # Quarantined aside byte-intact (evidence survives, the admission
+        # latch does not) unless MERGE_HEAD shows a live merge (#447);
+        # mechanics in update_candidate.quarantine_corrupt_update_tx_marker.
+        return quarantine_corrupt_update_tx_marker()
+    if status == "future":
+        # Recorded by a NEWER release (this process is the rollback
+        # target). This version cannot interpret the transaction; rolling
+        # it back could destroy work the newer form protects — leave the
+        # marker untouched for the owner. It is not corrupt, so it is not
+        # quarantined either: the newer binary must still find it.
+        from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+
+        _log_supervisor({
+            "type": "managed_update_tx_future_schema_on_boot",
+            "schema_version": tx.get(SCHEMA_VERSION_KEY),
+            "phase": str(tx.get("phase") or ""),
+        })
+        return {"finalized": False,
+                "reason": "update tx recorded by a newer version — left for owner"}
+    phase = str(tx.get("phase") or "")
+    if tx.get("stash_restore") and phase != "rolling_back":
+        # Restoration is the final repository operation in these phases.
+        # Do not rerun smoke/merge recovery over already-restored or later
+        # owner work. A usable store can finish the preservation handoff.
+        return _complete_stash_recovery(
+            tx, "boot_restore_resume",
+            {"finalized": (tx.get("gate_blocked_from_phase") if phase == MARKER_CLEANUP_RETRY_PHASE
+                           else phase) == "pending_boot_smoke",
+             "reason": "resumed local work recovery"},
+            {"type": "managed_update_stash_recovered_on_boot"},
+        )
+    if phase == "stashing_local_work":
+        # Crash between the durable pre-stash marker and the merge apply:
+        # nothing was applied yet. Restore whatever the attempt stashed
+        # (the tx may predate the stash_sha write), then clear the marker —
+        # the owner simply retries the update.
+        sha = str(tx.get("stash_sha") or "")
+        if not sha:
+            ok_lu, sha, _lu_error = lookup_update_stash(str(tx.get("attempt_id") or ""))
+            if not ok_lu:
+                # Unreadable stash storage is NOT "nothing was stashed":
+                # clearing the tx here would drop the only durable pointer.
+                _log_supervisor({"type": "managed_update_stash_recovery_unreadable"})
+                return {"finalized": False,
+                        "reason": "stash storage unreadable — recovery left for a later boot"}
+        if sha:
+            tx["stash_sha"] = sha
+        return _complete_stash_recovery(
+            tx, "boot_stash_recovery",
+            {"finalized": False, "reason": "recovered pre-apply stash crash"},
+            {"type": "managed_update_stash_recovered_on_boot"},
+        )
+    if phase == "pending_boot_smoke":
+        return _finalize_pending_boot_smoke(tx, supervisor_ready)
+    if phase == "applying_replace":
+        return _recover_replace_on_boot(tx, supervisor_ready)
+    if phase == "rolling_back":
+        ok, msg = rollback_managed_update(
+            str(tx.get("rollback_reason") or "boot_rollback_resume"),
+            reopen_writer_admission=False,
+        )
+        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
+    if phase in _ASSISTED_PHASES:
+        return _recover_assisted_on_boot(tx, supervisor_ready)
+    if phase == MARKER_CLEANUP_RETRY_PHASE:
+        # This includes completed rollback crossing a process restart:
+        # bootstrap kept the files, so ONLY unlink, never reset/reapply.
+        stash_note = (str(tx.get("gate_blocked_detail") or "")
+                      if tx.get("gate_blocked_reason") == "rollback_restart_pending" else "")
+        if clear_update_tx():
+            _log_supervisor({"type": "managed_update_cleanup_retry_succeeded",
+                             "reason": str(tx.get("gate_blocked_reason") or ""), "stash_note": stash_note})
+            return {"finalized": True, "reason": "marker cleanup retried",
+                    **({"stash_note": stash_note} if stash_note else {})}
+        return {"finalized": False, "reason": "marker cleanup still failing",
+                **({"stash_note": stash_note} if stash_note else {})}
+    if phase == GATE_BLOCKED_PHASE:
+        ok, msg = rollback_managed_update(
+            str(tx.get("gate_blocked_reason") or "boot_gate_recovery"),
+            reopen_writer_admission=False,
+        )
+        return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
+    return {"finalized": False, "reason": f"unhandled phase {phase}"}

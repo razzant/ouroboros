@@ -29,6 +29,7 @@ from ouroboros.post_task_checkpoint import (
     _TERMINAL_ACCOUNTING_SCRUB_FIELDS,
     project_replica_task_result_fields,
 )
+from ouroboros.task_result_facts import selected_task_results
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
     STATUS_CANCELLED,
@@ -40,12 +41,9 @@ from ouroboros.task_results import (
     STATUS_RUNNING,
     STATUS_SCHEDULED,
     cancellation_blocks_child_result,
-    list_task_results,
     load_task_result,
-    task_results_dir,
     validate_task_id,
 )
-from ouroboros.task_result_scan import raw_result_facts
 from ouroboros.utils import iter_jsonl_objects, read_json_dict
 
 log = logging.getLogger(__name__)
@@ -1225,9 +1223,10 @@ def find_child_tasks(
     direct_only = str(scope or "subtree").strip().lower() == "direct"
 
     def _raw_row_may_match(item: Dict[str, Any]) -> bool:
-        # Prefilter on the freshly admitted disk row before paying for the
-        # effective projection (child drive, queue, store and disposition).
-        # Two classes must still be projected despite not matching
+        # Prefilter on the RAW disk row before paying for the effective
+        # projection (child-drive result, queue, store listing and disposition
+        # reads) for UNRELATED tasks. The lineage fields the filter needs are
+        # already on the raw row. Two classes must still be projected despite not matching
         # raw: a row with a retry pointer (the retry chain projects the
         # RETRY's lineage, which may match where the raw row does not), and a
         # lineage-less row is safe to skip — a LIVE one is re-discovered by
@@ -1240,32 +1239,15 @@ def find_child_tasks(
             return True
         return bool(not direct_only and root and str(item.get("root_task_id") or "") == root)
 
-    drive_root = pathlib.Path(drive_root)
-    results_dir = task_results_dir(drive_root, create=False)
-    try:
-        facts, unstable = raw_result_facts(results_dir)
-        # Include EVERY refused/unstable name so the canonical reader applies
-        # its existing admission/quarantine contract in one batch. The memo is
-        # navigation only: a changed row is filtered again after full admission.
-        names = sorted(set(unstable) | {
-            name for name, item in facts.items()
-            if item["schema_refusal"] or _raw_row_may_match(item)
-        })
-        paths = [results_dir / name for name in names]
-    except OSError:
-        paths = None  # fail soft through the original full canonical scan
-
-    events_index = _EventsTailIndex(drive_root)
+    events_index = _EventsTailIndex(pathlib.Path(drive_root))
     rows: Dict[str, Dict[str, Any]] = {}
-    admitted = list_task_results(drive_root, _paths=paths)
     for row in (
         effective_task_result(
             pathlib.Path(drive_root), item,
             materialize_artifacts=materialize_artifacts,
             _events_index=events_index,
         )
-        for item in admitted
-        if _raw_row_may_match(item)
+        for item in selected_task_results(pathlib.Path(drive_root), _raw_row_may_match)
     ):
         tid = str(row.get("task_id") or "")
         if not tid or tid == excluded:
@@ -1305,7 +1287,7 @@ def find_child_tasks(
                 # the handful of actual queue children) so a live lineage-less
                 # child keeps its content, not just its id.
                 disk = load_effective_task_result(
-                    drive_root, tid, materialize_artifacts=materialize_artifacts
+                    pathlib.Path(drive_root), tid, materialize_artifacts=materialize_artifacts
                 )
                 if disk:
                     combined = dict(disk)

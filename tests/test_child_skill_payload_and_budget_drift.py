@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 import pathlib
 
+import pytest
+
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
@@ -266,7 +268,14 @@ class TestChildDriveSkillPayload:
 # Fix 2: OpenRouter-only budget drift
 # ---------------------------------------------------------------------------
 
+@pytest.mark.serial
 class TestBudgetDriftOpenRouterOnly:
+    def _update_budget(self, sup_state, *, expected=True):
+        assert sup_state.update_budget_from_usage({}) is expected
+        diagnostic = sup_state._OPENROUTER_DIAGNOSTIC
+        assert diagnostic.latch.acquire(timeout=5), "diagnostic did not finish"
+        diagnostic.latch.release()
+
     def _setup_state(self, tmp_path, monkeypatch, *, or_settled: float, accounted: float,
                      calls: int = 50, integrity_degraded: bool = False):
         from supervisor import state as sup_state
@@ -314,10 +323,10 @@ class TestBudgetDriftOpenRouterOnly:
         self._seed_session(sup_state, total_snap=1000.0, or_snap=0.0)
         monkeypatch.setattr(
             sup_state, "check_openrouter_ground_truth",
-            lambda: {"total_usd": 1030.0, "daily_usd": 30.0},
+            lambda _key: {"total_usd": 1030.0, "daily_usd": 30.0},
         )
 
-        sup_state.update_budget_from_usage({})
+        self._update_budget(sup_state)
         st = sup_state.load_state()
         assert st["budget_drift_alert"] is False
         assert st["budget_drift_pct"] is not None
@@ -330,10 +339,10 @@ class TestBudgetDriftOpenRouterOnly:
         self._seed_session(sup_state, total_snap=1000.0, or_snap=0.0)
         monkeypatch.setattr(
             sup_state, "check_openrouter_ground_truth",
-            lambda: {"total_usd": 1100.0, "daily_usd": 100.0},
+            lambda _key: {"total_usd": 1100.0, "daily_usd": 100.0},
         )
 
-        sup_state.update_budget_from_usage({})
+        self._update_budget(sup_state)
         st = sup_state.load_state()
         assert st["budget_drift_alert"] is True
         events = (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8")
@@ -348,10 +357,10 @@ class TestBudgetDriftOpenRouterOnly:
         monkeypatch.setenv("OPENROUTER_API_KEY", "unit-test-key-2-DIFFERENT")
         monkeypatch.setattr(
             sup_state, "check_openrouter_ground_truth",
-            lambda: {"total_usd": 5555.0, "daily_usd": 1.0},
+            lambda _key: {"total_usd": 5555.0, "daily_usd": 1.0},
         )
 
-        sup_state.update_budget_from_usage({})
+        self._update_budget(sup_state)
         st = sup_state.load_state()
         assert st["budget_drift_alert"] is False
         assert st["budget_drift_pct"] is None
@@ -372,10 +381,10 @@ class TestBudgetDriftOpenRouterOnly:
         sup_state.update_state(_mut)
         monkeypatch.setattr(
             sup_state, "check_openrouter_ground_truth",
-            lambda: {"total_usd": 1100.0, "daily_usd": 100.0},
+            lambda _key: {"total_usd": 1100.0, "daily_usd": 100.0},
         )
 
-        sup_state.update_budget_from_usage({})
+        self._update_budget(sup_state)
         st = sup_state.load_state()
         assert st["budget_drift_alert"] is False
         assert st["budget_drift_pct"] is None
@@ -388,10 +397,10 @@ class TestBudgetDriftOpenRouterOnly:
         self._seed_session(sup_state, total_snap=1000.0, or_snap=0.0)
         monkeypatch.setattr(
             sup_state, "check_openrouter_ground_truth",
-            lambda: {"total_usd": 1100.0, "daily_usd": 100.0},
+            lambda _key: {"total_usd": 1100.0, "daily_usd": 100.0},
         )
 
-        sup_state.update_budget_from_usage({})
+        self._update_budget(sup_state, expected=False)
         st = sup_state.load_state()
         assert st["budget_drift_alert"] is False
         assert st["budget_drift_pct"] is None
@@ -401,9 +410,9 @@ class TestBudgetDriftOpenRouterOnly:
         self._seed_session(sup_state, total_snap=1000.0, or_snap=0.0)
         monkeypatch.setattr(
             sup_state, "check_openrouter_ground_truth",
-            lambda: {"total_usd": 1030.0, "daily_usd": 30.0},
+            lambda _key: {"total_usd": 1030.0, "daily_usd": 30.0},
         )
-        sup_state.update_budget_from_usage({})
+        self._update_budget(sup_state)
 
         text = sup_state.status_text(sup_state.load_state(), [], {})
         assert "budget_drift" in text
