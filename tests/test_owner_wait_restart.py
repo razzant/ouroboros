@@ -184,6 +184,7 @@ def test_observed_restart_restores_real_native_source_past_snapshot_age(restart_
     assert transaction["ack_source"] == ("launcher_waitpid" if transport == "launcher" else "direct_exec_successor")
 
 
+@pytest.mark.serial
 @pytest.mark.parametrize("outcome", [
     "exit42", "late_binding", "exit1", "signal", "foreign_parent_pid", "foreign_parent_birth",
     "foreign_successor_pid", "foreign_successor_birth",
