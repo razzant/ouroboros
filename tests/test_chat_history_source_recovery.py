@@ -168,3 +168,31 @@ def test_partial_recent_uses_current_project_membership_and_legacy_limit(tmp_pat
     assert [message["text"] for message in project_rows] == ["human-bound", "human-direct"]
     assert main["reason_code"] == project_history["reason_code"] == "history_source_unavailable"
     assert main["page_cursor"] is project_history["page_cursor"] is None
+
+
+def test_main_notice_alone_does_not_import_project_tool_evidence(tmp_path, monkeypatch):
+    from ouroboros import tool_call_log
+
+    seen = []
+    def replay(root, tasks):
+        seen.extend(tasks)
+        return {task: {"observations": [{"tool": "send_user_message"}], "coverage": {}}
+                for task in tasks}
+    monkeypatch.setattr(tool_call_log, "replay_evidence_for_tasks", replay)
+    notice = row("notice", direction="out", role="assistant", task_id="project-turn",
+                 type="main_notice", text="Action needed in the Project")
+    write(tmp_path / "logs" / "chat.jsonl", [notice])
+    status, payload = request(tmp_path)
+    assert status == 200
+    assert any(message.get("system_type") == "main_notice" for message in payload["messages"])
+    assert "project-turn" not in seen
+    assert not any(message.get("system_type") == "task_evidence" for message in payload["messages"])
+
+    # Ordinary represented work of the same task still receives its evidence.
+    seen.clear()
+    write(tmp_path / "logs" / "progress.jsonl", [
+        {"ts": "2026-09-12T00:00:01Z", "chat_id": 1, "task_id": "project-turn",
+         "content": "Working in this room", "narration": True}])
+    status, payload = request(tmp_path)
+    assert status == 200 and "project-turn" in seen
+    assert any(message.get("tool_evidence") for message in payload["messages"])

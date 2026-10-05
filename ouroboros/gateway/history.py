@@ -407,13 +407,13 @@ def _annotate_terminal_task_truth(
         progress_task_ids, summary_task_ids, result_task_ids = set(), set(), set()
         from ouroboros.tool_call_log import replay_evidence_for_tasks
 
-        # Carriers are host projections after physical selection, not synthetic
-        # conversation. A user's row keeps its authorship and physical identity.
+        # Tool carriers follow local work, not cross-room notices. A notice keeps
+        # its source task identity without importing that task's work here.
         represented, tool_counts = {}, {}
         carriers = {}
         for message in combined:
             task_id = str(message.get("task_id") or "")
-            if not task_id or message.get("system_type") == "project_question_pointer":
+            if not task_id or message.get("system_type") in {"project_question_pointer", "main_notice"}:
                 continue
             represented.setdefault(task_id, str(message.get("ts") or ""))
             if type(message.get("tool_calls")) is int:
