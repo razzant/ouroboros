@@ -160,7 +160,7 @@ def ws(tmp_path, monkeypatch):
         from types import SimpleNamespace
 
         target = (repo / path).resolve()
-        binding = SimpleNamespace(target_path=target, base_path=repo, root="active_workspace", skill_name="")
+        binding = SimpleNamespace(target_path=target, base_path=repo, root="active_workspace", source="active_workspace", skill_name="")
         return target, safe_relpath(path), binding, ""
 
     monkeypatch.setattr(edit_ops, "_resolve_edit_target", resolver)

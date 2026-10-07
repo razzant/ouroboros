@@ -387,7 +387,7 @@ def _str_replace_editor(
     if binding is not None and (content_block := _edit_content_block(binding, new_content, force)):
         return publish_no_effect(ctx, content_block, tool_name="edit_text")
     syntax_bypass = _syntax_check(rel_path, new_content) if force else ""
-    if data_skill_target is not None:
+    if binding is None and data_skill_target is not None:
         # Deferral 5: a data-plane skill payload edited via the active_workspace route gets
         # the SAME shrink guard as the root=skill_payload editor — no silent >30% truncation
         # of a payload file. (Intentional large rewrites go through root=skill_payload, which
@@ -395,10 +395,6 @@ def _str_replace_editor(
         from ouroboros.tools.core import _check_data_shrink_guard
 
         _shrink_block = _check_data_shrink_guard(target, new_content, force)
-        if _shrink_block:
-            return publish_no_effect(ctx, _shrink_block, tool_name="edit_text")
-    elif binding is not None:
-        _shrink_block = _git()._check_shrink_guard(binding, new_content, force)
         if _shrink_block:
             return publish_no_effect(ctx, _shrink_block, tool_name="edit_text")
     # X3 hash-bind: the ADMITTED repair task's payload edits CAS-check the

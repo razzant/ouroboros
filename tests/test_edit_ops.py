@@ -13,7 +13,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from ouroboros.tools import edit_ops
 from ouroboros.tools.edit_ops import (
     _apply_hunks_to_text,
-    _find_sequence,
     _parse_patch,
     _syntax_check,
 )
@@ -164,7 +163,7 @@ def test_pure_insertion_with_anchor():
     assert "def other(x):\n    # inserted\n    return ddd(x)" in new
 
 
-def test_sequential_hunks_advance_cursor():
+def test_nonoverlapping_hunks_use_whole_file_coordinates():
     ops, _ = _parse_patch(
         "*** Update File: s.py\n"
         "-    return ddd(x)\n"
@@ -180,9 +179,10 @@ def test_sequential_hunks_advance_cursor():
     assert "def ddd(x):" in new  # the def line was not part of either hunk
 
 
-def test_find_sequence_caps_matches():
-    lines = ["x"] * 20
-    assert len(_find_sequence(lines, ["x"], 0, fuzzy=False)) == 5
+def test_repeated_context_is_ambiguous_beyond_five_matches():
+    ops, _ = _parse_patch("*** Update File: s.py\n-x\n+y\n")
+    new, _, error = _apply_hunks_to_text("x\n" * 20, ops[0].hunks, "s.py")
+    assert new is None and "ambiguous" in error
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ def _fake_resolver(ctx):
         try:
             target = ctx.repo_path(path)
             binding = SimpleNamespace(target_path=target, base_path=ctx.repo_dir,
-                                      root="active_workspace", skill_name="")
+                                      root="active_workspace", source="active_workspace", skill_name="")
             return target, safe_relpath(path), binding, ""
         except ValueError as e:
             return None, "", None, f"⚠️ PATH_ERROR: {e}"

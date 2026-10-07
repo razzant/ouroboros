@@ -61,11 +61,8 @@ from ouroboros.tools.arg_feedback import payload_item_feedback, with_argument_no
 from ouroboros.config import get_runtime_mode
 from ouroboros.runtime_mode_policy import (
     core_patch_notice,
-    is_protected_runtime_path,
     mode_allows_protected_write,
-    normalize_repo_path,
     protected_paths_in,
-    protected_write_block_message,
 )
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
@@ -223,35 +220,7 @@ def _resolve_edit_target(
         return None, "", None, f"⚠️ {error_tag}: selected target escapes its repository root."
     if reason := _edit_mutation_block(ctx, binding, path):
         return None, "", None, f"⚠️ {error_tag}: {reason}"
-    from ouroboros.tool_access import path_is_relative_to
-    from ouroboros.tools.registry import system_repo_dir_for
-
-    system_base = system_repo_dir_for(ctx)
-    physical_system = binding_targets_system_repo(ctx, binding) or path_is_relative_to(target, system_base)
-    norm = normalize_repo_path(target.relative_to(system_base).as_posix() if physical_system else rel)
-    if (
-        physical_system
-        and is_protected_runtime_path(norm)
-        and not mode_allows_protected_write(_runtime_mode())
-        # The assisted managed-update resolver edits whatever official file the
-        # merge conflicts on; git._repo_write and _str_replace_editor both carry
-        # this exemption, so withholding it here would make these tools the one
-        # lane that cannot finish a conflict resolution.
-        and not _authorized_resolver(ctx)
-    ):
-        return None, "", None, protected_write_block_message(
-            path=norm, runtime_mode=_runtime_mode(), action="edit"
-        )
     return target, safe_relpath(rel), binding, ""
-
-
-def _authorized_resolver(ctx: ToolContext) -> bool:
-    try:
-        from ouroboros.tools.registry import _authorized_managed_update_resolver
-
-        return bool(_authorized_managed_update_resolver(ctx))
-    except Exception:
-        return False
 
 
 def _runtime_mode() -> str:
@@ -391,6 +360,13 @@ def newline_normalization_note(target: pathlib.Path) -> str:
     return "⚠️ Existing CRLF/CR line endings were normalized to LF." if b"\r" in raw else ""
 
 
+def _repo_edit_binding(binding: ResolvedResourceBinding) -> bool:
+    """Git recovery applies to repo lanes, never a payload reached by a repo alias."""
+    return binding.root in {"active_workspace", "system_repo"} and binding.source in {
+        "active_workspace", "system_repo", "project_room"
+    }
+
+
 def _edit_content_block(binding: ResolvedResourceBinding, content: str, force: bool) -> str:
     """Apply the existing syntax and shrink policies before any edit write."""
     from ouroboros.tools.core import _check_data_shrink_guard
@@ -400,9 +376,7 @@ def _edit_content_block(binding: ResolvedResourceBinding, content: str, force: b
     if syntax := _syntax_check(rel, content):
         if not force:
             return f"⚠️ WRITE_BLOCKED_SYNTAX: {syntax} for {rel}; nothing was written"
-    if binding.root in {"active_workspace", "system_repo"} and getattr(binding, "source", binding.root) in {
-        "active_workspace", "system_repo", "project_room"
-    }:
+    if _repo_edit_binding(binding):
         return _check_shrink_guard(binding, content, force) or ""
     return _check_data_shrink_guard(binding.target_path, content, force) or ""
 
@@ -724,28 +698,6 @@ def normalize_patch_paths(patch: str, normalize) -> str:
     return "".join(lines)
 
 
-def _find_sequence(
-    file_lines: List[str], seq: List[str], start: int, *, fuzzy: bool
-) -> List[int]:
-    """Indices >= start where ``seq`` matches ``file_lines`` (cap 5)."""
-    if not seq:
-        return []
-    matches: List[int] = []
-    if fuzzy:
-        hay = [l.rstrip() for l in file_lines]
-        needle = [l.rstrip() for l in seq]
-    else:
-        hay = file_lines
-        needle = seq
-    n = len(needle)
-    for i in range(start, len(hay) - n + 1):
-        if hay[i:i + n] == needle:
-            matches.append(i)
-            if len(matches) >= 5:
-                break
-    return matches
-
-
 def _apply_hunks_to_text(
     content: str, hunks: List[_Hunk], path: str
 ) -> Tuple[Optional[str], List[str], str]:
@@ -858,6 +810,8 @@ def _apply_hunks_to_text(
         changes.append((pos, pos + len(old), replacement, hi))
         if tier != "exact":
             notes.append(f"hunk {hi}: matched ignoring {tier} whitespace; unchanged context bytes preserved")
+            if tier == "indentation":
+                notes.append(f"hunk {hi}: added lines shifted by {len(shift) if shift else -len(remove_indent):+d} leading characters")
     ordered = sorted(changes, key=lambda item: (item[0], item[1]))
     for left, right in zip(ordered, ordered[1:]):
         if right[0] < left[1] or right[0] == left[0]:
@@ -904,7 +858,6 @@ def _apply_patch(
     all_notes: List[str] = []
     errors: List[str] = []
     seen: Dict[str, str] = {}  # rel path -> pending content (chained updates)
-    created: set[str] = set()
     deleted: set[str] = set()
     original: Dict[str, str] = {}
     bindings: Dict[str, ResolvedResourceBinding] = {}
@@ -947,7 +900,6 @@ def _apply_patch(
                 content += "\n"
             planned_writes.append((target, rel, content))
             seen[rel] = content
-            created.add(rel)
             original[rel] = ""
             summaries.append(f"✅ Added {rel} ({len(op.add_lines)} lines)")
             continue
@@ -958,7 +910,7 @@ def _apply_patch(
             if not target.exists():
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: Delete File {op.path}: file not found.")
                 continue
-            if root not in {"active_workspace", "system_repo"} and not force:
+            if not _repo_edit_binding(item_binding) and not force:
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: Delete File {op.path}: data-root deletion requires force=true and recovery capture.")
                 continue
             planned_deletes.append((target, rel))
@@ -966,8 +918,8 @@ def _apply_patch(
             summaries.append(f"✅ Deleted {rel}")
             continue
         # update
-        if rel in created or rel in deleted:
-            errors.append(f"Update File {op.path}: conflicts with Add/Delete File on this file")
+        if rel in deleted:
+            errors.append(f"Update File {op.path}: conflicts with Delete File on this file")
             continue
         if rel in seen:
             content = seen[rel]
@@ -1019,12 +971,14 @@ def _apply_patch(
     # Data deletion gets immutable, task-readable recovery bytes before any
     # source file is changed. A failed capture refuses the whole patch.
     recovery: List[str] = []
-    if root not in {"active_workspace", "system_repo"} and planned_deletes:
+    data_deletes = [(target, rel) for target, rel in planned_deletes
+                    if not _repo_edit_binding(bindings[rel])]
+    if data_deletes:
         from hashlib import sha256
         from ouroboros.artifacts import store_task_artifact_bytes, task_id_for_artifacts
 
         try:
-            for target, rel in planned_deletes:
+            for target, rel in data_deletes:
                 data = target.read_bytes()
                 name = f"deleted-{sha256(str(target).encode()).hexdigest()[:12]}-{sha256(data).hexdigest()[:12]}.bak"
                 receipt = store_task_artifact_bytes(ctx.drive_root, task_id_for_artifacts(ctx),
@@ -1033,6 +987,7 @@ def _apply_patch(
         except Exception as exc:
             return no_effect(f"⚠️ APPLY_PATCH_ERROR: recovery capture failed: {exc}. Nothing was deleted or edited.")
     changed_paths: List[str] = []
+    registered_outputs: List[str] = []
     for rel, (target, content) in final_content.items():
         try:
             write_text(target, content)
@@ -1047,7 +1002,10 @@ def _apply_patch(
             from ouroboros.artifacts import copy_file_to_task_artifacts
 
             try:
-                copy_file_to_task_artifacts(ctx, target, kind="user_file")
+                record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
+                if not record:
+                    raise OSError("user file recovery copy was not registered")
+                registered_outputs.append(f"ARTIFACT_OUTPUTS: registered user file -> artifact_store:{record['name']}")
             except Exception as exc:
                 return _partial_write_failure(ctx, changed_paths, "apply_patch", "APPLY_PATCH_ERROR",
                                               f"user artifact registration failed for {rel}: {exc}", mutation_binding)
@@ -1071,11 +1029,20 @@ def _apply_patch(
         body += "\nNotes:\n" + "\n".join("  " + n for n in all_notes)
     if recovery:
         body += "\nRecovery copies:\n" + "\n".join(recovery)
+    if registered_outputs:
+        body += "\n" + "\n".join(registered_outputs)
     previews = []
     for rel, (_, content) in final_content.items():
         before = original.get(rel, "")
-        points = [after for tag, _, _, after, _ in difflib.SequenceMatcher(
-            a=before, b=content, autojunk=False).get_opcodes() if tag != "equal"]
+        # Match source lines, not repeated individual characters of whole modules.
+        # Prefix sums turn changed line positions into final source-character sites.
+        lines = content.splitlines(keepends=True)
+        starts = [0]
+        for line in lines:
+            starts.append(starts[-1] + len(line))
+        points = [starts[after] for tag, _, _, after, _ in difflib.SequenceMatcher(
+            a=before.splitlines(keepends=True), b=lines, autojunk=False).get_opcodes()
+                  if tag != "equal"]
         previews.append(f"Context after {rel}:\n{numbered_edit_preview(content, points or [0])}")
     if previews:
         body += "\n" + "\n".join(previews)
@@ -1229,6 +1196,7 @@ def _edit_batch(
                                              task_id=ctx.task_id, repair_task=True):
             return refusal
     changed: List[str] = []
+    registered_outputs: List[str] = []
     for rel, text in contents.items():
         try:
             write_text(targets[rel], text)
@@ -1243,7 +1211,10 @@ def _edit_batch(
             from ouroboros.artifacts import copy_file_to_task_artifacts
 
             try:
-                copy_file_to_task_artifacts(ctx, targets[rel], kind="user_file")
+                record = copy_file_to_task_artifacts(ctx, targets[rel], kind="user_file")
+                if not record:
+                    raise OSError("user file recovery copy was not registered")
+                registered_outputs.append(f"ARTIFACT_OUTPUTS: registered user file -> artifact_store:{record['name']}")
             except Exception as exc:
                 return _partial_write_failure(ctx, changed, source_tool, "EDIT_BATCH_ERROR",
                                               f"user artifact registration failed for {rel}: {exc}", mutation_binding)
@@ -1252,6 +1223,8 @@ def _edit_batch(
     footer = _finish_mutation(ctx, changed, source_tool, mutation_binding)
     previews = "\n".join(f"Context after {rel}:\n{numbered_edit_preview(contents[rel], sites[rel])}"
                          for rel in changed)
+    if registered_outputs:
+        previews += "\n" + "\n".join(registered_outputs)
     return with_argument_notes(ctx, (
         f"✅ {source_tool} applied {len(applied)} edit(s) across {len(changed)} file(s):\n"
         + "\n".join("  " + a for a in applied)

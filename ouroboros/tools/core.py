@@ -791,9 +791,6 @@ def _edit_text(
         if content_block := _edit_content_block(binding, new_text, force):
             return publish_no_effect(ctx, content_block, tool_name="edit_text")
         syntax_bypass = _syntax_check(target.name, new_text) if force else ""
-        # Exact replace and full overwrite share the intentional-shrink contract.
-        if (shrink := _check_data_shrink_guard(target, new_text, force)):
-            return publish_no_effect(ctx, shrink, tool_name="edit_text")
         constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
         repair = selected_payload and constraint and constraint.has_selected_skill
         if repair:

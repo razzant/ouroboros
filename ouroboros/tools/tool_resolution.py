@@ -606,7 +606,7 @@ def editor_round_has_disjoint_effects(ctx: Any, calls: list[dict[str, Any]]) -> 
             if effects & seen:
                 return False
             seen.update(effects)
-        except (TypeError, ValueError, OSError, RuntimeError, KeyError):
+        except Exception:  # Footprint preflight is advisory; actual dispatch owns typed refusals.
             return False
     return True
 

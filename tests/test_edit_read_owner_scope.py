@@ -330,3 +330,130 @@ def test_shared_skill_revision_and_user_artifact_namespace_serialize(file_tools)
                   _call("two", "edit_text", {"root": "user_files", "path": str(home / "two.txt"),
                                             "old_str": "b", "new_str": "B"})]
     assert not tool_calls_can_run_parallel(user_calls, ctx)
+
+
+def test_module_preview_matches_lines_not_whole_file_characters(file_tools, monkeypatch):
+    from ouroboros.tools import edit_ops
+
+    registry, _, _, _, workspace, *_ = file_tools
+    source = ''.join(f'def function_{i}(value):\n    return value + {i}\n\n' for i in range(1400))
+    target = workspace / 'module.txt'
+    target.write_text(source)
+    original_matcher = edit_ops.difflib.SequenceMatcher
+    matched_sizes = []
+
+    def line_matcher(*args, **kwargs):
+        assert isinstance(kwargs['a'], list) and isinstance(kwargs['b'], list)
+        matched_sizes.append((len(kwargs['a']), len(kwargs['b'])))
+        return original_matcher(*args, **kwargs)
+
+    monkeypatch.setattr(edit_ops.difflib, 'SequenceMatcher', line_matcher)
+    result = registry.execute('apply_patch', {'patch':
+        '*** Update File: module.txt\n-    return value + 700\n+    return value + 7010\n'})
+    assert result.startswith('✅'), result
+    assert target.read_text() == source.replace('    return value + 700\n', '    return value + 7010\n')
+    assert matched_sizes == [(4200, 4200)]
+    assert '2102|     return value + 7010' in result
+
+
+def test_footprint_failure_falls_back_to_actual_dispatch(file_tools, monkeypatch):
+    from ouroboros.tools import tool_resolution
+    from ouroboros.loop_tool_execution import tool_calls_can_run_parallel
+
+    _, ctx, *_ = file_tools
+    calls = [_call('one', 'edit_text', {'path': 'a.txt', 'old_str': 'a', 'new_str': 'A'}),
+             _call('two', 'edit_text', {'path': 'b.txt', 'old_str': 'b', 'new_str': 'B'})]
+
+    class FootprintUnavailable(Exception):
+        pass
+
+    def unavailable(*args, **kwargs):
+        raise FootprintUnavailable('the registry will report the real refusal')
+
+    monkeypatch.setattr(tool_resolution, '_build_builtin_target_binding', unavailable)
+    assert not tool_calls_can_run_parallel(calls, ctx)
+
+
+def test_user_output_registration_is_visible_and_recoverable(file_tools):
+    from ouroboros.artifacts import registered_task_artifact
+
+    registry, _, home, _, _, data, _ = file_tools
+    source = home / 'report.txt'
+    source.write_text('alpha\nbeta\n')
+    for tool, arguments in [
+        ('edit_batch', {'edits': [{'path': str(source), 'old_str': 'alpha', 'new_str': 'ALPHA'}]}),
+        ('apply_patch', {'patch': f'*** Update File: {source}\n-beta\n+BETA\n'}),
+    ]:
+        result = registry.execute(tool, {'root': 'user_files', **arguments})
+        assert result.startswith('✅') and 'ARTIFACT_OUTPUTS: registered user file' in result
+        name = result.split('artifact_store:')[-1].splitlines()[0]
+        record = registered_task_artifact(data, 'edit-owner-scope', name)
+        assert record and pathlib.Path(record['path']).read_bytes() == source.read_bytes()
+
+
+def test_omitted_root_write_file_registry_and_direct_handler(file_tools):
+    from ouroboros.tools.core import _write_file
+
+    registry, ctx, home, *_ = file_tools
+    source = home / 'new-report.txt'
+    assert registry.execute('write_file', {'path': str(source), 'content': 'first\n'}).startswith('OK: wrote user_files:')
+    assert _write_file(ctx, path=str(source), content='second\n').startswith('OK: wrote user_files:')
+    assert source.read_text() == 'second\n'
+
+
+def test_indentation_shift_is_named_in_result():
+    from ouroboros.tools.edit_ops import _parse_patch, _apply_hunks_to_text
+
+    hunks = _parse_patch('*** Update File: f.txt\n-  before\n+  after\n')[0][0].hunks
+    result, notes, error = _apply_hunks_to_text('    before\n', hunks, 'f.txt')
+    assert not error and result == '    after\n'
+    assert any('+2 leading characters' in note for note in notes)
+
+
+def test_payload_reached_by_repo_label_is_not_git_recoverable(file_tools):
+    from dataclasses import replace
+    from ouroboros.tool_access import build_resolved_resource_binding
+    from ouroboros.tools.edit_ops import _repo_edit_binding
+
+    _, ctx, *_ = file_tools
+    binding = build_resolved_resource_binding(ctx, root='skill_payload', operation='write',
+                                             path='notes.txt', bucket='external', skill_name='demo')
+    assert not _repo_edit_binding(binding)
+    assert not _repo_edit_binding(replace(binding, root='active_workspace'))
+
+
+@pytest.mark.parametrize('root', ['active_workspace', 'system_repo', 'runtime_data',
+                                  'task_drive', 'artifact_store', 'user_files', 'skill_payload'])
+@pytest.mark.parametrize('tool', ['edit_batch', 'apply_patch'])
+def test_light_root_parity_and_readonly_ceiling(file_tools, monkeypatch, root, tool):
+    registry, ctx, *_ = file_tools
+    base = _target(file_tools, root)
+    base.mkdir(parents=True, exist_ok=True)
+    source = base / 'light.txt'
+    source.write_text('before\n')
+    path = str(source) if root == 'user_files' else 'light.txt'
+    arguments = {'root': root, **_selectors(root)}
+    if tool == 'edit_batch':
+        arguments['edits'] = [{'path': path, 'old_str': 'before', 'new_str': 'after'}]
+    else:
+        arguments['patch'] = f'*** Update File: {path}\n-before\n+after\n'
+    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'light')
+    result = registry.execute(tool, arguments)
+    if root in {'system_repo', 'runtime_data'}:
+        assert 'BLOCKED' in result.upper() or 'cognitive' in result.lower(), result
+        assert source.read_text() == 'before\n'
+    else:
+        assert result.startswith('✅') and source.read_text() == 'after\n', result
+    source.write_text('before\n')
+    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'pro')
+    monkeypatch.setattr(ctx, 'task_constraint', {'mode': 'local_readonly_subagent'})
+    denied = registry.execute(tool, arguments)
+    assert not denied.startswith('✅') and source.read_text() == 'before\n', denied
+
+
+def test_add_then_update_retains_existing_explicit_chaining(file_tools):
+    registry, _, _, _, workspace, *_ = file_tools
+    result = registry.execute('apply_patch', {'patch':
+        '*** Add File: chain.py\n+x = INVALID\n'
+        '*** Update File: chain.py\n-x = INVALID\n+x = 1\n'})
+    assert result.startswith('✅') and (workspace / 'chain.py').read_text() == 'x = 1\n', result
