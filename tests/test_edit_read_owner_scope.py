@@ -519,3 +519,73 @@ def test_public_root_schema_does_not_invent_an_explicit_default(file_tools):
         if "root" in schema:
             assert "default" not in schema["root"], entry.name
             assert "omitted" in schema["root"]["description"].lower(), entry.name
+
+
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
+                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+def test_terminal_line_deletion_keeps_old_match_number(file_tools, root):
+    registry, _, *_ = file_tools
+    base = _target(file_tools, root)
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "terminal.txt"
+    target.write_text("first\nlast\n")
+    path = str(target) if root == "user_files" else target.name
+    result = registry.execute("edit_text", {"root": root, **_selectors(root), "path": path,
+                                            "old_str": "last\n", "new_str": "", "force": True})
+    assert "line 2" in result, result
+    assert "     1| first" in result and "nearest surviving" in result
+    assert target.read_text() == "first\n"
+
+
+def test_empty_post_edit_preview_does_not_invent_a_source_line():
+    from ouroboros.tools.edit_ops import numbered_edit_preview
+
+    assert numbered_edit_preview("", [0]) == "(empty file after edit; no surviving source lines)"
+
+
+def test_editor_results_reach_the_actual_keyless_http_model_send(file_tools, tmp_path, monkeypatch):
+    import json
+    from ouroboros.llm import LLMClient
+    from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls
+    from ouroboros import usage_accounting
+    from tests.test_first_input_selection_wire import WireModel
+    from tests.system_e2e.harness import keyless_settings, MOCK_SLUG
+
+    registry, ctx, _, _, workspace, data, _ = file_tools
+    (workspace / "wire-a.txt").write_text("alpha\n")
+    (workspace / "wire-b.txt").write_text("beta\n")
+    calls = [_call("wire-a", "edit_text", {"path": "wire-a.txt", "old_str": "alpha", "new_str": "ALPHA"}),
+             _call("wire-b", "edit_batch", {"edits": [
+                 {"path": "wire-b.txt", "old_str": "beta", "new_str": "BETA"}]})]
+    messages = [{"role": "system", "content": "Synthetic file-editor wire check."},
+                {"role": "user", "content": "Apply the two declared edits."},
+                {"role": "assistant", "content": None, "tool_calls": calls}]
+    logs = data / "logs"
+    logs.mkdir()
+    stateful = StatefulToolExecutor()
+    try:
+        assert handle_tool_calls(calls, registry, logs, ctx.task_id, stateful,
+                                 messages, {"tool_calls": []}, lambda _: None) == 0
+    finally:
+        stateful.shutdown()
+    evidence = tmp_path / "wire"
+    evidence.mkdir()
+    with WireModel(evidence, retry=False) as model:
+        for key, value in keyless_settings(model).items():
+            if isinstance(value, (str, int, float)):
+                monkeypatch.setenv(key, str(value))
+        monkeypatch.setattr(usage_accounting, "estimate_cost_optional", lambda *_a, **_k: 0.0)
+        client = LLMClient()
+        try:
+            answer, _ = client.chat(messages, model=MOCK_SLUG, max_tokens=256,
+                                     no_proxy=True, timeout=30, wait_for_resources=False)
+        finally:
+            for remote in client._remote_clients.values():
+                remote.close()
+        assert answer["content"] == "Cooperation complete."
+        assert len(model.received) == 1 and not model.errors
+        wire = json.loads(pathlib.Path(model.received[0]["path"]).read_bytes())
+        delivered = [row for row in wire["messages"] if row["role"] == "tool"]
+        assert [row["tool_call_id"] for row in delivered] == ["wire-a", "wire-b"]
+        assert "     1| ALPHA" in delivered[0]["content"]
+        assert "     1| BETA" in delivered[1]["content"]

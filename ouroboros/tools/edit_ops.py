@@ -356,12 +356,16 @@ def edit_source_line(text: str, offset: int) -> int:
 
 def numbered_edit_preview(text: str, offsets: List[int], *, max_sites: int = 8) -> str:
     """Bounded numbered post-edit context at actual edited source positions."""
-    lines = text.splitlines() or [""]
+    if not text:
+        return "(empty file after edit; no surviving source lines)"
+    lines = text.splitlines()
     chosen: set[int] = set()
     for offset in offsets[:max_sites]:
         line = edit_source_line(text, offset)
         chosen.update(range(max(1, line - 2), min(len(lines), line + 2) + 1))
     rows = [f"{number:>6}| {lines[number - 1][:240]}" for number in sorted(chosen)]
+    if any(offset >= len(text) for offset in offsets[:max_sites]):
+        rows.append("Edit site is at end of file; nearest surviving source lines shown.")
     if len(offsets) > max_sites:
         rows.append(f"… {len(offsets) - max_sites} more edit site(s)")
     return "\n".join(rows)[:4000]

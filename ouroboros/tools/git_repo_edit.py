@@ -446,7 +446,7 @@ def _str_replace_editor(
     from ouroboros.tools.edit_ops import edit_source_line, numbered_edit_preview
 
     replacement_offset = content.index(old_str)
-    replacement_line = edit_source_line(new_content, replacement_offset)
+    replacement_line = edit_source_line(content, replacement_offset)
     context_preview = numbered_edit_preview(new_content, [replacement_offset])
 
     _git()._invalidate_advisory(

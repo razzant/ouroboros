@@ -801,16 +801,16 @@ def _edit_text(
             )
             if refusal:
                 return refusal
+        from ouroboros.tools.edit_ops import edit_source_line, numbered_edit_preview
+
         replacement_offset = text.index(old_str)
+        replacement_line = edit_source_line(text, replacement_offset)
         write_text_atomic(target, new_text)
         if repair:
             from ouroboros.skill_repair_admission import advance_repair_expected_hash
 
             advance_repair_expected_hash(binding.state_drive_root, constraint, task_id=ctx.task_id)
         if selected_payload:
-            from ouroboros.tools.edit_ops import edit_source_line, numbered_edit_preview
-
-            replacement_line = edit_source_line(new_text, replacement_offset)
             context_preview = numbered_edit_preview(new_text, [replacement_offset])
             result = (
                 f"✅ Replaced in {_root_display_path(normalized, path)} "
@@ -823,7 +823,7 @@ def _edit_text(
                 f"\n⚠️ SYNTAX_GUARD_BYPASSED (force=true): {syntax_bypass}" if syntax_bypass else "")
         result = (
             f"OK: edited {_root_display_path(normalized, path)} "
-            f"(resolved_root={binding.base_path}; source={binding.source})"
+            f"(line {replacement_line}; resolved_root={binding.base_path}; source={binding.source})"
         )
         from ouroboros.tools.edit_ops import numbered_edit_preview
 
