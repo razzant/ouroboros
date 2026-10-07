@@ -443,10 +443,10 @@ def _str_replace_editor(
             canonical_data_root(ctx), _repair_cas_constraint,
             task_id=str(getattr(ctx, "task_id", "") or ""))
 
-    from ouroboros.tools.edit_ops import numbered_edit_preview
+    from ouroboros.tools.edit_ops import edit_source_line, numbered_edit_preview
 
     replacement_offset = content.index(old_str)
-    replacement_line = new_content[:replacement_offset].count('\n') + 1
+    replacement_line = edit_source_line(new_content, replacement_offset)
     context_preview = numbered_edit_preview(new_content, [replacement_offset])
 
     _git()._invalidate_advisory(

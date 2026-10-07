@@ -808,9 +808,9 @@ def _edit_text(
 
             advance_repair_expected_hash(binding.state_drive_root, constraint, task_id=ctx.task_id)
         if selected_payload:
-            from ouroboros.tools.edit_ops import numbered_edit_preview
+            from ouroboros.tools.edit_ops import edit_source_line, numbered_edit_preview
 
-            replacement_line = new_text[:replacement_offset].count("\n") + 1
+            replacement_line = edit_source_line(new_text, replacement_offset)
             context_preview = numbered_edit_preview(new_text, [replacement_offset])
             result = (
                 f"✅ Replaced in {_root_display_path(normalized, path)} "
@@ -1268,13 +1268,13 @@ def _forward_to_worker(
 
 
 def get_tools() -> List[ToolEntry]:
-    from ouroboros.tools.edit_ops import _EDIT_BATCH_ITEM_PROPERTIES, _EDIT_BATCH_ITEM_REQUIRED
+    from ouroboros.tools.edit_ops import _EDIT_BATCH_ITEM_PROPERTIES, _EDIT_BATCH_ITEM_REQUIRED, _FILE_ROOT_DESCRIPTION
     return [
         ToolEntry("read_file", {
             "name": "read_file",
             "description": (
                 "Read a UTF-8 text file from a declared resource root. "
-                "Default root=active_workspace; an absolute path with no root selects the permitted root holding it. "
+                "With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. "
                 "Use max_lines (default 2000) and start_line (default 1) to read large files in chunks. "
                 "The result header shows root:path and 'lines X\u2013Y of Z'; each displayed source line has a cat -n style number and tab. "
                 "Line numbers are display guides, not file content: exclude them when copying edit context. "
@@ -1283,7 +1283,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "description": _FILE_ROOT_DESCRIPTION},
                 "max_lines": {"type": "integer", "default": 2000,
                               "description": "Maximum number of lines to return (default 2000)."},
                 "start_line": {"type": "integer", "default": 1,
@@ -1302,7 +1302,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "List files under a resource root directory.",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "default": "."},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "description": _FILE_ROOT_DESCRIPTION},
                 "max_entries": {"type": "integer", "default": 500},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
@@ -1313,7 +1313,7 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 "For canonical output use root=artifact_store (created lazily), e.g. path=report.txt. Do not assume its physical directory already exists. "
                 "Write UTF-8 file(s) to a declared resource root. "
-                "Default root=active_workspace. "
+                "With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. "
                 "OK messages show root:path. "
                 "Overwriting an existing repo file returns the unified diff vs the "
                 "previous version — CHECK IT; invalid .py/.json content is blocked "
@@ -1328,7 +1328,7 @@ def get_tools() -> List[ToolEntry]:
                 "files": {"type": "array", "items": {"type": "object",
                     "properties": {k: dict(v) for k, v in _WRITE_FILE_ITEM_PROPERTIES.items()},
                     "required": list(_WRITE_FILE_ITEM_KEYS)}},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "description": _FILE_ROOT_DESCRIPTION},
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
                 "force": {"type": "boolean", "default": False, "description": "Bypass the shrink guard for an intentional full rewrite on any root where it applies (active_workspace via the repo guard; runtime_data/task_drive/skill_payload/artifact_store/user_files via the data-plane guard)."},
                 "bucket": {
@@ -1347,7 +1347,7 @@ def get_tools() -> List[ToolEntry]:
                 "Replace exactly one occurrence of old_str with new_str in a file, "
                 "or pass edits=[{old_str,new_str,count?}, ...] for ordered atomic "
                 "replacements in that SAME file. Do not mix the forms. "
-                "Default root=active_workspace. Result messages show root:path. "
+                "With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. Result messages show root:path. "
                 "For different files, issue separate edit calls in parallel in ONE round; "
                 "disjoint targets can run together. edit_batch also handles several files. "
                 "Set bucket/skill_name ONLY for root=skill_payload (skill authoring); leave empty for normal edits."
@@ -1359,7 +1359,7 @@ def get_tools() -> List[ToolEntry]:
                 "edits": {"type": "array", "minItems": 1, "items": {"type": "object",
                           "properties": {k: dict(v) for k, v in _EDIT_BATCH_ITEM_PROPERTIES.items() if k != "path"},
                           "required": [k for k in _EDIT_BATCH_ITEM_REQUIRED if k != "path"]}},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Skill payload bucket — set ONLY when root=skill_payload; leave empty otherwise."},
                 "skill_name": {"type": "string", "description": "Skill slug — set ONLY when root=skill_payload; leave empty otherwise."},
                 "force": {"type": "boolean", "default": False, "description": "Bypass the shrink guard for a deliberate large data-plane deletion (>30% smaller)."},
@@ -1426,7 +1426,7 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search pattern (literal or regex)"},
                 "path": {"type": "string", "default": ".", "description": "Subdirectory to search (relative to repo root)"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
                 "regex": {"type": "boolean", "default": False, "description": "Treat query as a regular expression"},

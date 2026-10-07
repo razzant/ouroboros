@@ -457,3 +457,65 @@ def test_add_then_update_retains_existing_explicit_chaining(file_tools):
         '*** Add File: chain.py\n+x = INVALID\n'
         '*** Update File: chain.py\n-x = INVALID\n+x = 1\n'})
     assert result.startswith('✅') and (workspace / 'chain.py').read_text() == 'x = 1\n', result
+
+
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
+                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+def test_unicode_edit_sites_agree_with_numbered_reader(file_tools, root):
+    registry, _, *_ = file_tools
+    base = _target(file_tools, root)
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "unicode.txt"
+    path = str(target) if root == "user_files" else target.name
+    args = {"path": path, "root": root, **_selectors(root)}
+    target.write_text("first\u2028old\n", encoding="utf-8")
+    read = registry.execute("read_file", args)
+    assert "     2\told" in read
+    singleton = registry.execute("edit_text", {**args, "old_str": "old", "new_str": "new"})
+    assert "     2| new" in singleton, singleton
+    if root in {"active_workspace", "system_repo", "skill_payload"}:
+        assert "line 2" in singleton
+    listed = registry.execute("edit_text", {**args, "edits": [{"old_str": "new", "new_str": "next"}]})
+    assert "     2| next" in listed, listed
+    batched = registry.execute("edit_batch", {"root": root, **_selectors(root), "edits": [
+        {"path": path, "old_str": "next", "new_str": "last"}]})
+    assert "     2| last" in batched, batched
+    # Patch grammar uses LF-delimited context. Exercise its numbered receipt
+    # after an unchanged Unicode boundary, without changing that grammar.
+    target.write_text("first\u2028middle\nlast\n", encoding="utf-8")
+    patched = registry.execute("apply_patch", {"root": root, **_selectors(root), "patch":
+        f"*** Update File: {path}\n-last\n+final\n"})
+    assert "     3| final" in patched, patched
+
+
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
+                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("denied", ["delete", "read_bytes", "copy"])
+def test_delete_checks_its_own_policy_and_recovery_authority(file_tools, root, denied):
+    registry, ctx, _, _, _, data, _ = file_tools
+    if root in {"active_workspace", "system_repo"} and denied != "delete":
+        pytest.skip("Repo deletion does not read bytes for a data recovery copy")
+    base = _target(file_tools, root)
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "protected.txt"
+    target.write_text("preserved\n")
+    ctx.task_metadata = {"task_contract": {"resource_policy": {"protected_artifacts": [
+        {"paths": [str(target)], "deny": [denied]}]}}}
+    path = str(target) if root == "user_files" else target.name
+    result = registry.execute("apply_patch", {"root": root, **_selectors(root), "force": True,
+        "patch": f"*** Add File: {base / 'untouched.txt' if root == 'user_files' else 'untouched.txt'}\n+must not land\n*** Delete File: {path}\n"})
+    assert "NOTHING was written" in result, result
+    assert target.read_text() == "preserved\n" and not (base / "untouched.txt").exists()
+    output = data / "task_results" / "artifacts" / "edit-owner-scope"
+    assert not list(output.glob("deleted-*.bak"))
+
+
+def test_public_root_schema_does_not_invent_an_explicit_default(file_tools):
+    from ouroboros.tools.core import get_tools as core_tools
+    from ouroboros.tools.edit_ops import get_tools as edit_tools
+
+    for entry in core_tools() + edit_tools():
+        schema = entry.schema["parameters"]["properties"]
+        if "root" in schema:
+            assert "default" not in schema["root"], entry.name
+            assert "omitted" in schema["root"]["description"].lower(), entry.name

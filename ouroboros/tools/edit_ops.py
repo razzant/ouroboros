@@ -91,6 +91,10 @@ _EDIT_BATCH_ITEM_PROPERTIES: Dict[str, Dict[str, Any]] = {
 }
 _EDIT_BATCH_ITEM_KEYS: Tuple[str, ...] = tuple(_EDIT_BATCH_ITEM_PROPERTIES)
 _EDIT_BATCH_ITEM_REQUIRED: Tuple[str, ...] = ("path", "old_str", "new_str")
+_FILE_ROOT_DESCRIPTION = (
+    "When omitted, relative paths use active_workspace; absolute paths select the permitted "
+    "physical root (including user_files for home paths). Explicit roots remain explicit."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +102,7 @@ _EDIT_BATCH_ITEM_REQUIRED: Tuple[str, ...] = ("path", "old_str", "new_str")
 # ---------------------------------------------------------------------------
 
 def _edit_mutation_block(ctx: ToolContext, binding: ResolvedResourceBinding,
-                         path: str) -> str:
+                         path: str, *, operation: str = "write") -> str:
     """Physical write policy shared by single, batch and patch editors."""
     from ouroboros.config import SETTINGS_PATH, get_runtime_mode
     from ouroboros.tools.core import (
@@ -113,7 +117,7 @@ def _edit_mutation_block(ctx: ToolContext, binding: ResolvedResourceBinding,
 
     target = binding.target_path
     root = binding.root
-    if reason := block_reason_for_path(ctx, target, "write", binding):
+    if reason := block_reason_for_path(ctx, target, operation, binding):
         return f"protected artifact path blocked: {reason}"
     from ouroboros.tool_access import path_is_relative_to
     from ouroboros.tools.registry import system_repo_dir_for
@@ -333,9 +337,21 @@ def _line_positions(text: str, needle: str, limit: int = 5) -> List[str]:
         idx = text.find(needle, start)
         if idx < 0:
             break
-        positions.append(f"line {text[:idx].count(chr(10)) + 1}")
+        positions.append(f"line {edit_source_line(text, idx)}")
         start = idx + 1
     return positions
+
+
+def edit_source_line(text: str, offset: int) -> int:
+    """Locate a source position using read_file's splitlines boundary rule."""
+    offset = max(0, min(len(text), offset))
+    end = 0
+    number = 1
+    for number, line in enumerate(text.splitlines(keepends=True), 1):
+        end += len(line)
+        if offset < end:
+            return number
+    return number
 
 
 def numbered_edit_preview(text: str, offsets: List[int], *, max_sites: int = 8) -> str:
@@ -343,7 +359,7 @@ def numbered_edit_preview(text: str, offsets: List[int], *, max_sites: int = 8) 
     lines = text.splitlines() or [""]
     chosen: set[int] = set()
     for offset in offsets[:max_sites]:
-        line = min(len(lines), text[:max(0, min(len(text), offset))].count("\n") + 1)
+        line = edit_source_line(text, offset)
         chosen.update(range(max(1, line - 2), min(len(lines), line + 2) + 1))
     rows = [f"{number:>6}| {lines[number - 1][:240]}" for number in sorted(chosen)]
     if len(offsets) > max_sites:
@@ -904,6 +920,18 @@ def _apply_patch(
             summaries.append(f"✅ Added {rel} ({len(op.add_lines)} lines)")
             continue
         if op.kind == "delete":
+            if reason := _edit_mutation_block(ctx, item_binding, op.path, operation="delete"):
+                errors.append(f"Delete File {op.path}: {reason}")
+                continue
+            if not _repo_edit_binding(item_binding):
+                from ouroboros.protected_artifacts import block_reason_for_path
+
+                recovery_denial = next((reason for operation in ("read_bytes", "copy")
+                                       if (reason := block_reason_for_path(
+                                           ctx, target, operation, item_binding))), "")
+                if recovery_denial:
+                    errors.append(f"Delete File {op.path}: recovery capture blocked: {recovery_denial}")
+                    continue
             if rel in seen or rel in deleted:
                 errors.append(f"Delete File {op.path}: conflicts with another operation on this file")
                 continue
@@ -1317,7 +1345,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "patch": {"type": "string", "description": "The full patch text (envelope lines optional)."},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "artifact_store", "user_files", "skill_payload"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "artifact_store", "user_files", "skill_payload"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Skill payload bucket for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Skill slug for root=skill_payload."},
                 "force": {"type": "boolean", "default": False, "description": "Confirm a guarded shrink or syntax bypass; required for data-root deletion, which captures recovery bytes first."},
@@ -1340,7 +1368,7 @@ def get_tools() -> List[ToolEntry]:
                 "edits": {"type": "array", "items": {"type": "object",
                     "properties": {k: dict(v) for k, v in _EDIT_BATCH_ITEM_PROPERTIES.items()},
                     "required": list(_EDIT_BATCH_ITEM_REQUIRED)}},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "artifact_store", "user_files", "skill_payload"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "artifact_store", "user_files", "skill_payload"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Skill payload bucket for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Skill slug for root=skill_payload."},
                 "force": {"type": "boolean", "default": False, "description": "Confirm an intentional shrink or syntax guard bypass."},
