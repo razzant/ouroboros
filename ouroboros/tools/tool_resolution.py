@@ -7,6 +7,7 @@ targets retain the same bindings.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import pathlib
 
@@ -93,7 +94,7 @@ class _DispatchPathNormalization:
     """Exact dispatch note plus any explicit root required before dispatch."""
 
     text: str = ""
-    required_root: Literal["active_workspace"] | None = None
+    required_root: Literal["active_workspace", "mixed"] | None = None
 
 
 def _payload_write_paths(name: str, args: Dict[str, Any]) -> List[str]:
@@ -132,6 +133,27 @@ def _payload_write_paths(name: str, args: Dict[str, Any]) -> List[str]:
     return [p for p in paths if str(p or "").strip()]
 
 
+def protected_repo_write_paths(ctx: Any, name: str, args: Dict[str, Any],
+                               binding: Any, *, workspace_mode: bool,
+                               acting_system_worktree: bool) -> list[str]:
+    """Only physical repo members of a mixed binding reach the protected gate."""
+    if binding is not None:
+        from ouroboros.tool_access import path_is_relative_to
+
+        repo = system_repo_dir_for(ctx)
+        return [pathlib.Path(item.target_path).relative_to(repo).as_posix()
+                for item in _binding_items(binding)
+                if item.target_path is not None
+                and path_is_relative_to(pathlib.Path(item.target_path), repo)]
+    root = str(args.get("root") or "active_workspace")
+    if (workspace_mode and not acting_system_worktree) or root not in {"active_workspace", "system_repo"}:
+        return []
+    from ouroboros.tool_access import canonical_repo_relative_path
+
+    return [canonical_repo_relative_path(ctx, root, path)
+            for path in _payload_write_paths(name, args)]
+
+
 def _root_containing_absolute_path(ctx: Any, name: str, text: str) -> str:
     """Owner 7A: the root that physically contains an absolute path given WITHOUT
     a root — among the roots THIS profile may use for the tool's operation plus
@@ -160,6 +182,19 @@ def _root_containing_absolute_path(ctx: Any, name: str, text: str) -> str:
             if base is not None:
                 holders.append((label, base))
     return max(holders, key=lambda item: len(str(item[1])), default=("", None))[0]
+
+
+def inferred_file_root(ctx: Any, name: str, root: str | None, paths: list[str]) -> tuple[str, str]:
+    """Use the existing physical root selector for an omitted file root."""
+    if root:
+        return root, ""
+    selected = {
+        _root_containing_absolute_path(ctx, name, path) or "active_workspace"
+        for path in paths
+    }
+    if len(selected) > 1:
+        return "", "⚠️ TOOL_ARG_ERROR: paths infer different roots; pass an explicit common root or use separate calls."
+    return next(iter(selected), "active_workspace"), ""
 
 
 def _normalize_dispatch_path_args_result(
@@ -191,6 +226,19 @@ def _normalize_dispatch_path_args_result(
     if name not in _PATH_NORMALIZED_TOOLS:
         return _DispatchPathNormalization()
     root_arg = str(args.get("root") or "")
+    if not root_arg and name in _ROOT_ARG_REPO_WRITE_TOOLS:
+        paths = _payload_write_paths(name, args)
+        selected = {
+            _root_containing_absolute_path(ctx, name, path) or "active_workspace"
+            for path in paths
+        }
+        if len(selected) > 1:
+            return _DispatchPathNormalization(
+                text="⚠️ TOOL_ARG_ERROR: paths infer different roots; pass an explicit common root or use separate calls.",
+                required_root="mixed",
+            )
+        if selected and next(iter(selected)) != "active_workspace":
+            args["root"] = root_arg = next(iter(selected))
     if not root_arg and name in _ROOT_SELECTED_READ_TOOLS:
         selected = _root_containing_absolute_path(ctx, name, str(args.get("path") or ""))
         if selected and selected != "active_workspace":
@@ -478,18 +526,14 @@ def _build_builtin_target_binding(ctx: Any, name: str, args: dict[str, Any]) -> 
             skill_name=str(args.get("skill_name") or ""),
         )
     root = str(args.get("root") or "active_workspace")
-    if name in {"edit_batch", "apply_patch"} and root not in {"active_workspace", "system_repo"}:
-        # The repo-only handler owns this typed argument refusal. Resolving an
-        # unsupported payload first would ask for selectors it cannot accept.
-        return None
     bucket = str(args.get("bucket") or "")
     skill_name = str(args.get("skill_name") or "")
 
-    def _one(path: str) -> Any:
+    def _one(path: str, selected_operation: str = operation) -> Any:
         return _registry().build_resolved_resource_binding(
             ctx,
             root=root,
-            operation=operation,
+            operation=selected_operation,
             path=path or ".",
             bucket=bucket,
             skill_name=skill_name,
@@ -504,7 +548,10 @@ def _build_builtin_target_binding(ctx: Any, name: str, args: dict[str, Any]) -> 
     if name == "apply_patch":
         from ouroboros.tools.edit_ops import patch_target_paths
 
-        return tuple(_one(path) for path in patch_target_paths(str(args.get("patch") or "")))
+        from ouroboros.tools.edit_ops import _parse_patch
+
+        ops, error = _parse_patch(str(args.get("patch") or ""))
+        return tuple(_one(op.path, "edit" if op.kind == "update" else "write") for op in ops) if not error else ()
     if name == "edit_batch":
         return tuple(
             _one(str(item.get("path") or ""))
@@ -520,9 +567,53 @@ def _binding_items(binding: Any) -> tuple[Any, ...]:
     return binding if isinstance(binding, tuple) else (binding,)
 
 
+def editor_round_has_disjoint_effects(ctx: Any, calls: list[dict[str, Any]]) -> bool:
+    """Preflight physical file and shared publication effects for editor-only rounds."""
+    editors = {"edit_text", "edit_batch", "apply_patch"}
+    if len(calls) < 2 or any(str(c.get("function", {}).get("name") or "") not in editors for c in calls):
+        return False
+    seen: set[tuple[Any, ...]] = set()
+    for call in calls:
+        function = call.get("function") or {}
+        name = str(function.get("name") or "")
+        try:
+            raw = function.get("arguments") or "{}"
+            args = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            if not isinstance(args, dict):
+                return False
+            if _normalize_dispatch_path_args_result(ctx, name, args).required_root:
+                return False
+            paths = _payload_write_paths(name, args)
+            bindings = _binding_items(_build_builtin_target_binding(ctx, name, args))
+            if not paths or len(paths) != len(bindings):
+                return False
+            effects: set[tuple[Any, ...]] = set()
+            for binding in bindings:
+                target = pathlib.Path(binding.target_path)
+                effects.add(("path", str(target.resolve(strict=False))))
+                try:
+                    stat = target.stat()
+                    effects.add(("inode", stat.st_dev, stat.st_ino))
+                except OSError:
+                    pass
+                # The shared artifact manifest and skill revision are one
+                # effect even when two paths are physically disjoint.
+                if binding.root == "user_files":
+                    effects.add(("user-artifacts", str(binding.state_drive_root)))
+                if binding.skill_name:
+                    effects.add(("skill-revision", str(binding.state_drive_root), binding.skill_name))
+                effects.add(("workspace-output-name", target.name))
+            if effects & seen:
+                return False
+            seen.update(effects)
+        except (TypeError, ValueError, OSError, RuntimeError, KeyError):
+            return False
+    return True
+
+
 def _binding_set_targets_system_repo(ctx: Any, binding: Any) -> bool:
     items = _binding_items(binding)
-    return bool(items) and all(_registry().binding_targets_system_repo(ctx, item) for item in items)
+    return bool(items) and any(_registry().binding_targets_system_repo(ctx, item) for item in items)
 
 
 def _user_files_binding_reaches_repo(ctx: Any, binding: Any) -> bool:
@@ -549,7 +640,7 @@ def _user_files_binding_reaches_repo(ctx: Any, binding: Any) -> bool:
 def _binding_set_is_light_restricted(ctx: Any, binding: Any) -> bool:
     """Whether light mode must treat this file/VCS target as internal state."""
     items = _binding_items(binding)
-    return bool(items) and all(
+    return bool(items) and any(
         _registry().binding_targets_system_repo(ctx, item)
         or (item.root == "runtime_data" and item.source == "runtime_data")
         for item in items
@@ -622,7 +713,7 @@ def _binding_error_text(name: str, root: str, exc: Exception) -> str | ToolResul
         "read_file", "list_files", "search_code",
     }:
         return f"⚠️ USER_FILES_PATH_BLOCKED: {detail}"
-    if root == "skill_payload" and name in {"write_file", "edit_text"}:
+    if root == "skill_payload" and name in {"write_file", "edit_text", "edit_batch", "apply_patch"}:
         return f"⚠️ SKILL_PAYLOAD_ARG_ERROR: {detail}"
     prefixes = {
         "read_file": "READ_FILE_ERROR",
@@ -631,6 +722,8 @@ def _binding_error_text(name: str, root: str, exc: Exception) -> str | ToolResul
         "query_code": "TOOL_ARG_ERROR (query_code)",
         "write_file": "WRITE_FILE_ERROR",
         "edit_text": "EDIT_TEXT_ERROR",
+        "edit_batch": "EDIT_BATCH_ERROR",
+        "apply_patch": "APPLY_PATCH_ERROR",
         "vcs_status": "GIT_ERROR",
         "vcs_diff": "GIT_ERROR",
         "vcs_pull_ff": "PULL_ERROR",

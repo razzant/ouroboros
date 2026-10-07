@@ -77,10 +77,10 @@ def test_nothing_similar_is_said_plainly():
     assert "whitespace only" in locate_edit_miss("a\n", "  \n  ")
 
 
-def test_a_region_before_the_search_cursor_is_reported_as_an_ordering_problem():
+def test_locator_does_not_claim_cursor_ordering_for_patch_context():
     out = locate_edit_miss("one\ntwo\nthree\nfour\n", "two", cursor_line=3, needle_name="the hunk context")
-    assert "the hunk context matches line 2 ignoring whitespace (the bytes match)" in out, out
-    assert "BEFORE line 3" in out and "@@ anchor" in out
+    assert "the hunk context matches line 2 ignoring whitespace" in out, out
+    assert "BEFORE line 3" not in out
     assert "copy the exact bytes into the hunk context" in out
 
 
@@ -113,9 +113,9 @@ def test_a_needle_longer_than_the_compared_window_is_not_explained_by_blank_line
                           "the difference is in the 50 lines after them, which were not compared)"), out
     assert "read_file start_line=1 max_lines=250" in out, out
     assert "(only the first 200 of 250 old_str lines were compared; the miss may be after them)" in out, out
-    # A before-the-cursor region keeps the ordering note but never claims the bytes match.
+    # The patch matcher now searches the whole file, so no ordering note is valid.
     out = locate_edit_miss(text, "\n".join(needle_lines), cursor_line=290, needle_name="the hunk context")
-    assert "the bytes match" not in out and "BEFORE line 290" in out, out
+    assert "the bytes match" not in out and "BEFORE line 290" not in out, out
     # Tier 2 (a typo inside the compared window) discloses the window the same way.
     needle_lines[100] = "row 101 TYPO"
     out = locate_edit_miss(text, "\n".join(needle_lines))
@@ -156,10 +156,15 @@ def ws(tmp_path, monkeypatch):
     ctx = _FakeCtx(repo)
     from ouroboros.utils import safe_relpath
 
-    def resolver(_ctx, path, _root, *, error_tag, _resolved_binding=None):
-        return (repo / path).resolve(), safe_relpath(path), _resolved_binding, ""
+    def resolver(_ctx, path, _root, *, error_tag, _resolved_binding=None, **_kwargs):
+        from types import SimpleNamespace
+
+        target = (repo / path).resolve()
+        binding = SimpleNamespace(target_path=target, base_path=repo, root="active_workspace", skill_name="")
+        return target, safe_relpath(path), binding, ""
 
     monkeypatch.setattr(edit_ops, "_resolve_edit_target", resolver)
+    monkeypatch.setattr(edit_ops, "_edit_content_block", lambda *_args: "")
     monkeypatch.setattr(edit_ops, "_finish_mutation", lambda ctx_, paths, tool, binding=None: "NOT committed.")
     return ctx
 
@@ -175,21 +180,16 @@ def test_edit_batch_miss_carries_the_locator_bounded_per_call(ws):
     assert (ws.repo_dir / "m.py").read_text(encoding="utf-8") == _big_file()
 
 
-def test_apply_patch_context_miss_carries_the_locator():
+def test_apply_patch_unique_indentation_context_is_applied():
     ops, err = _parse_patch("*** Update File: m.py\n-    def compute(x):\n-        return x * 800\n+pass\n")
     assert err == ""
     new, _notes, herr = _apply_hunks_to_text(_big_file(), ops[0].hunks, "m.py")
-    assert new is None
-    assert herr.startswith("hunk 1: context not found in m.py (searched from line 1)."), herr
-    assert "the hunk context matches lines 800–801 ignoring whitespace (indentation differs" in herr, herr
-    assert "read_file start_line=800 max_lines=2" in herr
+    assert not herr and "pass" in new
+    assert any("indentation" in note for note in _notes)
 
 
-def test_apply_patch_out_of_order_hunk_is_told_to_reorder():
+def test_apply_patch_out_of_order_hunk_applies():
     ops, err = _parse_patch("*** Update File: m.py\n c\n-d\n+D\n@@\n a\n-b\n+B\n")
     assert err == ""
     new, _notes, herr = _apply_hunks_to_text("a\nb\nc\nd\n", ops[0].hunks, "m.py")
-    assert new is None
-    assert herr.startswith("hunk 2: context not found in m.py (searched from line 5)."), herr
-    assert "the hunk context matches lines 1–2 ignoring whitespace (the bytes match)" in herr, herr
-    assert "BEFORE line 5" in herr and "move this hunk earlier or add an @@ anchor" in herr
+    assert not herr and new == "a\nB\nc\nD\n"

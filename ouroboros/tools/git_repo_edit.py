@@ -291,9 +291,9 @@ def _str_replace_editor(
 ) -> str:
     """Replace exactly one occurrence of old_str with new_str in a file."""
     if not path or not path.strip():
-        return publish_no_effect(ctx, "⚠️ STR_REPLACE_ERROR: path is required.", tool_name="edit_text")
+        return publish_no_effect(ctx, "⚠️ EDIT_TEXT_ERROR: path is required.", tool_name="edit_text")
     if not old_str:
-        return publish_no_effect(ctx, "⚠️ STR_REPLACE_ERROR: old_str is required (cannot be empty).", tool_name="edit_text")
+        return publish_no_effect(ctx, "⚠️ EDIT_TEXT_ERROR: old_str is required (cannot be empty).", tool_name="edit_text")
 
     existing_tc = _git().normalize_task_constraint(getattr(ctx, "task_constraint", None))
     data_skill_target = None
@@ -312,7 +312,7 @@ def _str_replace_editor(
             drive_root=pathlib.Path(ctx.drive_root),
         )
         if short_form.error:
-            return f"⚠️ STR_REPLACE_ERROR: {short_form.error}"
+            return f"⚠️ EDIT_TEXT_ERROR: {short_form.error}"
         synth = short_form.constraint
         redirect_err = _git().cross_skill_redirect_error(existing_tc, synth)
         if redirect_err:
@@ -324,7 +324,7 @@ def _str_replace_editor(
             target = _git().resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
             data_skill_target = target
         except ValueError as e:
-            return f"⚠️ STR_REPLACE_ERROR: {e}"
+            return f"⚠️ EDIT_TEXT_ERROR: {e}"
         if _git().is_skill_control_plane_path(target, pathlib.Path(ctx.drive_root).resolve(strict=False)):
             return (
                 "⚠️ STR_REPLACE_BLOCKED: skill provenance, launcher seed, "
@@ -369,18 +369,24 @@ def _str_replace_editor(
         )
 
     if not target.exists():
-        return publish_no_effect(ctx, f"⚠️ STR_REPLACE_ERROR: file not found: {path}", tool_name="edit_text")
+        return publish_no_effect(ctx, f"⚠️ EDIT_TEXT_ERROR: file not found: {path}", tool_name="edit_text")
 
     try:
         content = target.read_text(encoding="utf-8")
     except Exception as e:
-        return publish_no_effect(ctx, f"⚠️ STR_REPLACE_ERROR: cannot read {path}: {e}", tool_name="edit_text")
+        return publish_no_effect(ctx, f"⚠️ EDIT_TEXT_ERROR: cannot read {path}: {e}", tool_name="edit_text")
 
     # Shared exact-match single-replacement (deferral 4): identical count==0/count>1
     # feedback for the repo and data-plane editors.
-    new_content, _match_err = _git()._str_match_replace(content, old_str, new_str, path, "STR_REPLACE_ERROR")
+    new_content, _match_err = _git()._str_match_replace(content, old_str, new_str, path, "EDIT_TEXT_ERROR")
     if _match_err:
         return publish_no_effect(ctx, _match_err, tool_name="edit_text")
+    from ouroboros.tools.edit_ops import _edit_content_block, _syntax_check, newline_normalization_note
+
+    newline_note = newline_normalization_note(target)
+    if binding is not None and (content_block := _edit_content_block(binding, new_content, force)):
+        return publish_no_effect(ctx, content_block, tool_name="edit_text")
+    syntax_bypass = _syntax_check(rel_path, new_content) if force else ""
     if data_skill_target is not None:
         # Deferral 5: a data-plane skill payload edited via the active_workspace route gets
         # the SAME shrink guard as the root=skill_payload editor — no silent >30% truncation
@@ -419,7 +425,16 @@ def _str_replace_editor(
     try:
         _git().write_text(target, new_content)
     except Exception as e:
-        return f"⚠️ STR_REPLACE_ERROR: write failed for {path}: {e}"
+        try:
+            changed_after_error = target.read_text(encoding="utf-8") != content
+        except OSError:
+            changed_after_error = True
+        if changed_after_error:
+            from ouroboros.tools.edit_ops import _partial_write_failure
+
+            return _partial_write_failure(ctx, [rel_path], "edit_text", "EDIT_TEXT_ERROR",
+                                          f"write failed for {path}: {e}", binding)
+        return f"⚠️ EDIT_TEXT_ERROR: write failed for {path}: {e}"
     from ouroboros.workspace_file_outputs import capture_known_workspace_outputs
 
     capture_note = capture_known_workspace_outputs(
@@ -432,12 +447,11 @@ def _str_replace_editor(
             canonical_data_root(ctx), _repair_cas_constraint,
             task_id=str(getattr(ctx, "task_id", "") or ""))
 
-    replacement_line = new_content[:new_content.index(new_str)].count('\n') + 1
-    context_start = max(0, replacement_line - 3)
-    context_lines = new_content.splitlines()[context_start:replacement_line + len(new_str.splitlines()) + 2]
-    context_preview = "\n".join(
-        f"{context_start + i + 1:>4}| {line}" for i, line in enumerate(context_lines)
-    )
+    from ouroboros.tools.edit_ops import numbered_edit_preview
+
+    replacement_offset = content.index(old_str)
+    replacement_line = new_content[:replacement_offset].count('\n') + 1
+    context_preview = numbered_edit_preview(new_content, [replacement_offset])
 
     _git()._invalidate_advisory(
         ctx,
@@ -468,6 +482,10 @@ def _str_replace_editor(
             "\nℹ️ Native seed boundary: system_repo/skills changed; the installed "
             "data/skills/native copy remains unchanged until launcher reseed."
         )
+    if newline_note:
+        result += f"\n{newline_note}"
+    if syntax_bypass:
+        result += f"\n⚠️ SYNTAX_GUARD_BYPASSED (force=true): {syntax_bypass}"
     if system_target and _git().is_protected_runtime_path(norm) and _git().mode_allows_protected_write(_git()._current_runtime_mode()):
         result += "\n\n" + _git().core_patch_notice([norm])
     return result

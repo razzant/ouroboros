@@ -81,7 +81,9 @@ def test_root_reads_credential_named_user_file_unchanged(user_files_ctx):
     source = "[default]\n" + AWS_SECRET_LINE + GITHUB_TOKEN_LINE + PEM_BLOCK
     (home / ".aws" / "credentials").write_text(source, encoding="utf-8")
     out = _read_file(ctx, ".aws/credentials", root="user_files")
-    assert source in out and "SECRET_BYTES_MASKED" not in out
+    from ouroboros.tools.core_file_tools import delivered_source_prefix
+    assert delivered_source_prefix(ctx.last_read_view, out, len(out)) == source
+    assert "SECRET_BYTES_MASKED" not in out
 
 
 def test_root_lists_and_searches_credential_named_user_files(user_files_ctx):

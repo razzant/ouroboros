@@ -44,7 +44,7 @@ def test_search_code_has_result_limit():
     from ouroboros.tool_capabilities import FOREGROUND_MUTATIVE_TOOLS
     # Publication can create a remote branch/commit/PR. Its outer timeout must
     # not return while that foreground mutator is still running.
-    assert FOREGROUND_MUTATIVE_TOOLS == frozenset({"submit_skill_to_hub"})
+    assert FOREGROUND_MUTATIVE_TOOLS == frozenset({"submit_skill_to_hub", "write_file", "edit_text", "edit_batch", "apply_patch"})
 
 
 # ---------------------------------------------------------------------------

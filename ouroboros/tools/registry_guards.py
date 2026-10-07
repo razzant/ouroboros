@@ -233,10 +233,7 @@ def _light_mode_payload_mutation_allowed(
 ) -> bool:
     """Return True for light-mode data skill payload edits that do not touch repo files."""
 
-    # apply_patch/edit_batch are DELIBERATELY absent: they refuse data-plane roots
-    # entirely (repo lanes only), so they can never be a payload edit — in light
-    # mode they stay under the generic repo-mutation block like any repo write.
-    if runtime_mode != "light" or tool_name not in {"edit_text", "write_file"}:
+    if runtime_mode != "light" or tool_name not in {"edit_text", "write_file", "edit_batch", "apply_patch"}:
         return False
     requested_root = str(args.get("root", "") or "active_workspace")
     try:
@@ -512,7 +509,7 @@ def _payload_dispatch_constraint(
         (raw_bucket or raw_skill_name)
         and short_form_decision is not None
         and short_form_decision.error
-        and name in {"write_file", "edit_text"}
+        and name in {"write_file", "edit_text", "edit_batch", "apply_patch"}
     ):
         root_arg = str(args.get("root", "") or "").strip().lower()
         if _stray_skill_payload_failsoft(root_arg, workspace_mode, task_constraint):
@@ -537,7 +534,7 @@ def _payload_dispatch_constraint(
             )
 
     redirect_err = _registry().cross_skill_redirect_error(task_constraint, synthesized)
-    if redirect_err and name in {"write_file", "edit_text"}:
+    if redirect_err and name in {"write_file", "edit_text", "edit_batch", "apply_patch"}:
         return None, ToolResult(
             status="blocked",
             code="SKILL_PAYLOAD_BLOCKED",

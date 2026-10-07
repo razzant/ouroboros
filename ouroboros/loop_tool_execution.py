@@ -375,7 +375,7 @@ def _truncate_tool_result(
     marker = f"\n... (truncated from {len(s)} chars, limit={limit})"
     if isinstance(source_ref, dict) and source_ref:
         recover = (
-            "Read the exact source above, or page this tool (offset/limit) for the omitted range."
+            "Read the exact source above, or page read_file (start_line/max_lines, with start_char for a long line) for the omitted range."
             if tool_name in _PAGEABLE_TOOL_RESULTS
             else "Do not rerun this tool to recover omitted output. Read the exact source above."
         )
@@ -1169,12 +1169,12 @@ def _await_stateful_tool(tools: ToolRegistry, tc: Dict[str, Any], drive_logs: pa
 _PARALLEL_SAFE_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS
 
 
-def tool_calls_can_run_parallel(tool_calls: List[Dict[str, Any]]) -> bool:
-    """True when a tool-call round may execute in the shared ThreadPool.
-
-    Read-only-parallel tools plus fire-and-forget enqueue tools
-    (schedule_subagent) qualify; any other tool forces sequential execution.
-    """
+def tool_calls_can_run_parallel(tool_calls: List[Dict[str, Any]], ctx: Any = None) -> bool:
+    """True for existing safe tools or physically disjoint editor-only rounds."""
+    if ctx is not None:
+        from ouroboros.tools.tool_resolution import editor_round_has_disjoint_effects
+        if editor_round_has_disjoint_effects(ctx, tool_calls):
+            return True
     return (
         len(tool_calls) > 1
         and all(
@@ -1247,6 +1247,8 @@ def handle_tool_calls(
         return result
 
     can_parallel = tool_calls_can_run_parallel(tool_calls)
+    if not can_parallel:
+        can_parallel = tool_calls_can_run_parallel(tool_calls, tools._ctx)
 
     if not can_parallel:
         results = [_execute(tc) for tc in tool_calls]
@@ -1596,5 +1598,3 @@ def process_tool_results(
             by_call[exec_result["tool_call_id"]]["image_attachment"] = observation
 
     return error_count
-
-

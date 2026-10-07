@@ -65,8 +65,8 @@ of core" step in `.github/workflows/ci.yml`); the rest is review-only.
   advisory with the requested bytes while ordinary modes keep the exclusion; the
   SSH config exception permits no key writes under `.ssh`.
 - An unlaunchable sole cmd element gets an actionable argv/shell hint, never
-  automatic splitting or an implicit shell; repo-only edit tools reject
-  unsupported roots through their existing argument categories.
+  automatic splitting or an implicit shell; file editors share physical-root
+  authority for every writable root.
 
 Resolver, fence and admission mechanics: ARCHITECTURE §6 "Tool capability and execution".
 Enforcement: `tests/test_headless_cli.py`, `tests/test_cli_entrypoint.py`,

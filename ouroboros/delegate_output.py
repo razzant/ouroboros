@@ -191,7 +191,8 @@ def _covered_whole(key: str, start: int, end: int, total: int) -> bool:
 
 def acknowledge_staged_output_read(ctx: ToolContext, target: Any, content: str,
                                    start_line: Any, max_lines: Any,
-                                   start_char: Any = 0, rendered: str = "") -> None:
+                                   start_char: Any = 0, rendered: str = "",
+                                   extent: Any = None) -> None:
     """D7's canonical acknowledgement, hooked where the reading actually happens.
 
     Called by ``read_file`` for every successful ``task_drive`` read, WITH the rendered
@@ -235,10 +236,11 @@ def acknowledge_staged_output_read(ctx: ToolContext, target: Any, content: str,
         # OUTER truncator will actually deliver (same budget, same head-cut rule).
         window_start = sum(len(line) for line in lines[:start - 1])
         body_full = max(0, sum(len(line) for line in lines[start - 1:end]) - offset)
-        header_len = len(rendered) - body_full if rendered else 0
         budget = tool_result_limit("read_file")
-        if rendered and len(rendered) > budget:
-            delivered_body = max(0, budget - header_len)
+        if rendered and extent:
+            from ouroboros.tools.core_file_tools import delivered_source_prefix
+
+            delivered_body = len(delivered_source_prefix(extent, rendered, budget))
         else:
             delivered_body = body_full
         abs_start = window_start + offset

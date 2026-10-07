@@ -14,6 +14,7 @@ from ouroboros.memory import Memory
 from ouroboros.review_evidence import build_task_acceptance_evidence
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
 from ouroboros.tools.core import _read_file
+from ouroboros.tools.core_file_tools import delivered_source_prefix
 from ouroboros.tools.registry import ToolContext
 
 
@@ -34,7 +35,8 @@ def _read_source(ctx: ToolContext, ref: dict, *, start_char: int = 0) -> str:
     assert read["tool"] == "read_file"
     args = dict(read["arguments"])
     args["start_char"] = start_char
-    return _read_file(ctx, **args)
+    display = _read_file(ctx, **args)
+    return delivered_source_prefix(ctx.last_read_view, display, len(display)) if ctx.last_read_view else display
 
 
 def test_fifo_eviction_keeps_exact_block_and_current_scratchpad_names_reader(tmp_path):
@@ -46,12 +48,9 @@ def test_fifo_eviction_keeps_exact_block_and_current_scratchpad_names_reader(tmp
     current = memory.load_scratchpad()
     assert "read_file(root='runtime_data', path='memory/scratchpad_journal.jsonl'" in current
 
-    journal = _read_file(
-        _tool_ctx(tmp_path),
-        root="runtime_data",
-        path="memory/scratchpad_journal.jsonl",
-    )
-    rows = [json.loads(line) for line in journal.splitlines()[1:] if line.startswith("{")]
+    journal = _read_source(_tool_ctx(tmp_path), {"read": {"tool": "read_file", "arguments": {
+        "root": "runtime_data", "path": "memory/scratchpad_journal.jsonl"}}})
+    rows = [json.loads(line) for line in journal.splitlines() if line.startswith("{")]
     evicted = [row for row in rows if row.get("type") == "block_evicted"]
     assert [row["evicted_block_content"] for row in evicted] == [contents[0]]
 
@@ -95,12 +94,9 @@ def test_scratchpad_consolidation_journals_exact_replaced_blocks_and_ref(tmp_pat
     }
     assert source_ref["entry_id"]
 
-    journal = _read_file(
-        _tool_ctx(tmp_path),
-        root="runtime_data",
-        path="memory/scratchpad_journal.jsonl",
-    )
-    rows = [json.loads(line) for line in journal.splitlines()[1:] if line.startswith("{")]
+    journal = _read_source(_tool_ctx(tmp_path), {"read": {"tool": "read_file", "arguments": {
+        "root": "runtime_data", "path": "memory/scratchpad_journal.jsonl"}}})
+    rows = [json.loads(line) for line in journal.splitlines() if line.startswith("{")]
     entry = next(row for row in rows if row.get("entry_id") == source_ref["entry_id"])
     assert entry["type"] == "blocks_consolidated"
     assert entry["source_blocks"] == original[:2]
@@ -244,7 +240,7 @@ def test_context_capsule_checkpoint_is_actor_readable_and_dangling_is_explicit(
     assert ref["root"] == "artifact_store"
     ctx = _tool_ctx(tmp_path, task_id="checkpoint-task")
     recovered = _read_source(ctx, ref)
-    checkpoint = json.loads(recovered.split("\n", 1)[1])
+    checkpoint = json.loads(recovered)
     assert checkpoint["messages"] == messages
 
     source_path = tmp_path / "task_results" / "artifacts" / "checkpoint-task" / ref["path"]
@@ -511,7 +507,7 @@ def test_over_limit_pageable_results_persist_their_exact_source(tmp_path):
         assert "FULL_RESULT_SOURCE_JSON=" in visible
         assert "exact source persistence failed" not in visible
         # The wording keeps the tool's own affordance instead of forbidding it.
-        assert "or page this tool (offset/limit) for the omitted range" in visible
+        assert "or page read_file (start_line/max_lines, with start_char for a long line) for the omitted range" in visible
         ref = _source_ref_from_visible_result(visible)
         assert "DECISIVE_TAIL=FAIL" in _read_source(ctx, ref, start_char=100_000)
 

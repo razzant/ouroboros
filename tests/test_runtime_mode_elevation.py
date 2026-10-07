@@ -219,7 +219,7 @@ def test_data_read_supports_line_ranges(tmp_path):
     result = _data_read(ctx, "skills/external/demo/notes.txt", start_line=2, max_lines=2)
 
     assert "lines 2–3 of 4" in result
-    assert "two\nthree\n" in result
+    assert "     2\ttwo\n     3\tthree\n" in result
     assert "one" not in result
 
 

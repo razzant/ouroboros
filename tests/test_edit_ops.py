@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -229,6 +230,7 @@ def ws(tmp_path, monkeypatch):
     # Route guard helpers around ToolContext specifics: keep the real access
     # logic out of scope — these tests exercise edit mechanics.
     monkeypatch.setattr(edit_ops, "_resolve_edit_target", _fake_resolver(ctx))
+    monkeypatch.setattr(edit_ops, "_edit_content_block", lambda *_args: "")
     monkeypatch.setattr(
         edit_ops,
         "_finish_mutation",
@@ -240,11 +242,14 @@ def ws(tmp_path, monkeypatch):
 def _fake_resolver(ctx):
     from ouroboros.utils import safe_relpath
 
-    def resolver(_ctx, path, _root, *, error_tag, _resolved_binding=None):
+    def resolver(_ctx, path, _root, *, error_tag, _resolved_binding=None, **_kwargs):
         if not path:
             return None, "", None, f"⚠️ {error_tag}: path is required."
         try:
-            return ctx.repo_path(path), safe_relpath(path), _resolved_binding, ""
+            target = ctx.repo_path(path)
+            binding = SimpleNamespace(target_path=target, base_path=ctx.repo_dir,
+                                      root="active_workspace", skill_name="")
+            return target, safe_relpath(path), binding, ""
         except ValueError as e:
             return None, "", None, f"⚠️ PATH_ERROR: {e}"
     return resolver

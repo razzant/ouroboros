@@ -132,7 +132,7 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # as any other task in the caller's tree (parent, sibling, any task sharing the
     # root) and says Presence observation gaps are disclosed inside the tree too.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "25ab2df2f9cc9c65e4971b7d4e2a5d1013041933aa070849639a01c9a4398e83"
+        "b3ccbf58d2cb7874b0f30d6c5d136101875b543664cf531f5d8134a50bf731a3"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
@@ -178,7 +178,7 @@ def test_extracted_read_and_list_result_bytes_are_stable(tmp_path):
     ctx = ToolContext(repo_dir=repo, drive_root=data)
 
     assert core_file_tools._repo_read(ctx, "sample.txt").encode() == (
-        b"# sample.txt \xe2\x80\x94 lines 1\xe2\x80\x932 of 2\nalpha\nbeta\n"
+        b"# sample.txt \xe2\x80\x94 lines 1\xe2\x80\x932 of 2\n     1\talpha\n     2\tbeta\n"
     )
     assert core_file_tools._repo_list(ctx, ".").encode() == (
         b'[\n  "nested/",\n  "sample.txt"\n]'

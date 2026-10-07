@@ -189,7 +189,8 @@ def test_omitted_trajectory_corpus_round_trips_through_artifact_reader(tmp_path,
     assert ref["root"] == "artifact_store"
     assert ref["artifact_ref"].startswith(f"artifact_store:{ref['path']}#chars=0-")
     rendered = _read_file(ctx, root=ref["root"], path=ref["path"])
-    recovered = json.loads(rendered.split("\n", 1)[1])
+    from ouroboros.tools.core_file_tools import delivered_source_prefix
+    recovered = json.loads(delivered_source_prefix(ctx.last_read_view, rendered, len(rendered)))
     assert recovered == calls
     partial = next(
         row for row in packet["__unresolved_partial_artifacts__"]
