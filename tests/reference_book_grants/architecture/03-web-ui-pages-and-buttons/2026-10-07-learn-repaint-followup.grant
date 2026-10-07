@@ -1,0 +1,2 @@
+19
+Review follow-up (9860eaec) reworded the Learn i18n paragraph to state the producer-side tr() contract precisely: overlay-excluded textareas, the data-i18n-skip opt-out, and the ouro:language-changed repaint of template textareas; net +19 bytes over the first grant's measured wording.

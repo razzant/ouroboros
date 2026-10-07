@@ -1,0 +1,2 @@
+407
+Learn guide authored in English source strings: document the i18n overlay for chrome, the tr() producer path for template drafts and runtime feedback (textareas overlay-excluded; feedback opted out with data-i18n-skip), and the ouro:language-changed repaint that lets tr() take effect after the boot dictionary read.
