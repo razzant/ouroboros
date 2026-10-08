@@ -96,6 +96,9 @@ def init_installed_body(root: pathlib.Path) -> dict[str, str]:
     repo = (root / "installed").resolve()
     repo.mkdir(parents=True)
     git(repo, "init", "-q")
+    # The golden describes these LF fixture bytes, including after checkout.
+    # Per-command -c in git() does not configure production helper invocations.
+    git(repo, "config", "core.autocrlf", "false")
     _write(repo, BASE_FILES)
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "installed body")

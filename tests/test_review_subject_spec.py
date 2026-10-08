@@ -47,8 +47,9 @@ def _repo(path, *, files):
     _git(path, "config", "user.email", "t@example.com")
     _git(path, "config", "user.name", "t")
     _git(path, "config", "commit.gpgsign", "false")
+    _git(path, "config", "core.autocrlf", "false")
     for name, text in files.items():
-        (path / name).write_text(text, encoding="utf-8")
+        (path / name).write_bytes(text.encode("utf-8"))
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "base")
     return path
@@ -57,7 +58,7 @@ def _repo(path, *, files):
 def _system_repo(tmp_path):
     """The installed body stand-in: HEAD plus one staged hunk (the gate's subject)."""
     repo = _repo(tmp_path / "system", files={"x.txt": "x\n"})
-    (repo / "x.txt").write_text("y\n", encoding="utf-8")
+    (repo / "x.txt").write_bytes(b"y\n")
     _git(repo, "add", "-A")
     return repo
 

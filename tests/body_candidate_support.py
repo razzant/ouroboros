@@ -81,22 +81,21 @@ def make_serving(root: pathlib.Path) -> pathlib.Path:
     """A committed miniature body on branch ``ouroboros`` carrying the real hook and helper."""
     repo = root / "repo"
     (repo / "ouroboros").mkdir(parents=True)
-    (repo / "ouroboros" / "__init__.py").write_text(
-        (REPO / "ouroboros" / "__init__.py").read_text(encoding="utf-8"), encoding="utf-8")
-    (repo / "ouroboros" / "version.py").write_text("def get_version():\n    return '0.0.0'\n", encoding="utf-8")
-    (repo / "ouroboros" / "body_switch.py").write_text(
-        (REPO / "ouroboros" / "body_switch.py").read_text(encoding="utf-8"), encoding="utf-8")
-    (repo / "ouroboros" / "mod_a.py").write_text("GEN = 'GEN_OLD'\n", encoding="utf-8")
-    (repo / "ouroboros" / "mod_b.py").write_text("GEN = 'GEN_OLD'\n", encoding="utf-8")
-    (repo / "ouroboros" / "gone.py").write_text("GEN = 'GEN_OLD'\n", encoding="utf-8")
-    (repo / "server.py").write_text(SERVER_PY, encoding="utf-8")
-    (repo / "launcher.py").write_text(LAUNCHER_PY, encoding="utf-8")
-    (repo / "ouroboros" / "cli.py").write_text(CLI_PY, encoding="utf-8")
-    (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    (repo / "BIBLE.md").write_text("# Constitution\n", encoding="utf-8")
-    (repo / "requirements-runtime.lock").write_text("toydep==1.0\n", encoding="utf-8")
-    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\nlocal-notes/\n", encoding="utf-8")
+    files = {
+        "ouroboros/__init__.py": (REPO / "ouroboros" / "__init__.py").read_text(encoding="utf-8"),
+        "ouroboros/version.py": "def get_version():\n    return '0.0.0'\n",
+        "ouroboros/body_switch.py": (REPO / "ouroboros" / "body_switch.py").read_text(encoding="utf-8"),
+        "ouroboros/mod_a.py": "GEN = 'GEN_OLD'\n", "ouroboros/mod_b.py": "GEN = 'GEN_OLD'\n",
+        "ouroboros/gone.py": "GEN = 'GEN_OLD'\n", "server.py": SERVER_PY,
+        "launcher.py": LAUNCHER_PY, "ouroboros/cli.py": CLI_PY, "VERSION": "1.0.0\n",
+        "BIBLE.md": "# Constitution\n", "requirements-runtime.lock": "toydep==1.0\n",
+        ".gitignore": "__pycache__/\n*.pyc\nlocal-notes/\n",
+    }
+    for relative, text in files.items():
+        (repo / relative).write_bytes(text.encode("utf-8"))
     git(repo, "init", "-q", "-b", "ouroboros")
+    # Candidate/source byte identities must not depend on the runner's Git EOL policy.
+    git(repo, "config", "core.autocrlf", "false")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "base")
     return repo
@@ -126,7 +125,7 @@ def candidate_commit(path, message="candidate change", *, files=None, delete=())
     for rel, text in (files or {"ouroboros/mod_a.py": "GEN = 'GEN_CAND'\n"}).items():
         target = pathlib.Path(path) / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        target.write_bytes(text.encode("utf-8"))
     for rel in delete:
         (pathlib.Path(path) / rel).unlink()
     git(path, "add", "-A")
