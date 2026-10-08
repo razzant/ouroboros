@@ -133,8 +133,10 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # root) and says Presence observation gaps are disclosed inside the tree too.
     # Rolled for the six owner-approved edit/read changes: numbered read views,
     # explicit omitted-root semantics and ordered same-file edit_text replacements.
+    # Force help now explicitly names the supported repo syntax bypass too;
+    # parameter shapes and required keys are unchanged.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "318f0b52119f3c5e42a91fb6a243cb16764a7c4f3b900f34e3f5627d13138c53"
+        "370f30bf2f5ff3c0bcca14646480a0bdb6e3d003d50013f4bbd9473966f3c096"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

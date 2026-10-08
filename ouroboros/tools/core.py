@@ -1360,7 +1360,7 @@ def get_tools() -> List[ToolEntry]:
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Skill payload bucket — set ONLY when root=skill_payload; leave empty otherwise."},
                 "skill_name": {"type": "string", "description": "Skill slug — set ONLY when root=skill_payload; leave empty otherwise."},
-                "force": {"type": "boolean", "default": False, "description": "Bypass the shrink guard for a deliberate large data-plane deletion (>30% smaller)."},
+                "force": {"type": "boolean", "default": False, "description": "Confirm an intentional shrink or repo-lane syntax guard bypass; the bypass is disclosed."},
             }, "required": ["path"]},
         }, _edit_text, is_code_tool=True),
         ToolEntry("send_photo", {

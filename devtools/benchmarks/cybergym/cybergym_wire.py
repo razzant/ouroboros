@@ -464,7 +464,8 @@ def _gateway_execution_status(payload: Mapping[str, Any]) -> str:
 # error) keeps the infrastructure classification.
 _AGENT_ATTRIBUTABLE_TOOL_ERROR_PREFIXES = (
     "TOOL_ARG_ERROR",
-    "STR_REPLACE_ERROR",
+    "STR_REPLACE_ERROR",  # retained historical tool records
+    "EDIT_TEXT_ERROR",
     "LIST_FILES_ERROR",
     "TOOL_TIMEOUT",
 )

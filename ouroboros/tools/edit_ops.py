@@ -395,7 +395,7 @@ def _edit_content_block(binding: ResolvedResourceBinding, content: str, force: b
     rel = binding.target_path.relative_to(binding.base_path).as_posix()
     if _repo_edit_binding(binding):
         if (syntax := _syntax_check(rel, content)) and not force:
-            return f"⚠️ WRITE_BLOCKED_SYNTAX: {syntax} for {rel}; nothing was written"
+            return f"⚠️ WRITE_BLOCKED_SYNTAX: {syntax} for {rel}; nothing was written. Use force=true for an intentional syntax bypass."
         return _check_shrink_guard(binding, content, force) or ""
     return _check_data_shrink_guard(binding.target_path, content, force) or ""
 

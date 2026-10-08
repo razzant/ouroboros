@@ -612,8 +612,9 @@ def test_data_edit_keeps_existing_non_json_text_capability(file_tools, root, too
     assert "SYNTAX_GUARD_BYPASSED" not in result
 
 
+@pytest.mark.parametrize("force", [False, True])
 @pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
-def test_repo_syntax_guard_still_refuses_before_write(file_tools, tool):
+def test_repo_syntax_guard_refusal_and_explicit_bypass(file_tools, tool, force):
     registry, _, _, _, workspace, *_ = file_tools
     target = workspace / "config.json"
     target.write_text('{"value": 1}\n')
@@ -623,9 +624,15 @@ def test_repo_syntax_guard_still_refuses_before_write(file_tools, tool):
         arguments = {"edits": [{"path": "config.json", "old_str": "1", "new_str": "invalid"}]}
     else:
         arguments = {"patch": '*** Update File: config.json\n-{"value": 1}\n+{"value": invalid}\n'}
+    arguments["force"] = force
     result = registry.execute(tool, arguments)
     assert "SYNTAX" in result, result
-    assert target.read_text() == '{"value": 1}\n'
+    if force:
+        assert "SYNTAX_GUARD_BYPASSED" in result, result
+        assert target.read_text() == '{"value": invalid}\n'
+    else:
+        assert "force=true" in result, result
+        assert target.read_text() == '{"value": 1}\n'
 
 
 def test_duplicate_occurrence_lines_use_reader_unicode_boundaries():

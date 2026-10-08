@@ -4,8 +4,8 @@
 help for a miss at line 800 — and ``edit_batch``/``apply_patch`` with a bare
 count or "context not found". ``locate_edit_miss`` is the one diagnosis all
 three attach: the closest region, the first line whose bytes differ, the
-read_file window to copy from, and (for a patch hunk) whether the region sits
-before the hunk's search cursor. Every tier is bounded, so a miss on a huge
+read_file window to copy from. Patch hunks search the whole original file;
+legacy cursor hints remain available to the locator's other callers. Every tier is bounded, so a miss on a huge
 file costs one bounded pass and a bounded block.
 """
 
