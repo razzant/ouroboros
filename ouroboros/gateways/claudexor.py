@@ -1058,15 +1058,13 @@ class ClaudexorGateway:
         ``selectedLabels`` / ``freeText`` — the strict ``ControlInteractionAnswerRequest``);
         this method is transport, not translation.
 
-        The engine's reply is TYPED at every HTTP status it owns: 200 carries
-        ``{accepted, status: "delivered"}``, and a 404/409 refusal carries the SAME
-        ``ControlInteractionAnswerResponse`` shape with ``status`` ``not_found`` /
-        ``already_resolved`` / ``rejected`` (daemon-server answers the route with the
-        parsed response at 200/404/409). Any body carrying one of those statuses is
-        returned as the ANSWER it is — an engine's ``already_resolved`` is a fact,
-        not an outage. What still raises ``ClaudexorUnavailable``: transport
-        failures, a bodyless 404 (``no such run``), the 501 of an engine build with
-        no answer service, and any other refusal without a typed status.
+        The engine returns ``ControlInteractionAnswerResponse`` directly on
+        success. Its error serializer moves ``accepted`` and the refusal status
+        into ``ControlProblem.context`` and keeps ``message`` at the top level.
+        Decode that envelope here, while retaining legacy top-level replies:
+        ``already_resolved`` is an answer fact, not an outage. Transport failures,
+        an untyped 404 (``no such run``), 501 (no answer service), and other
+        problems still raise ``ClaudexorUnavailable``.
         """
         from urllib.parse import quote
 
@@ -1086,9 +1084,15 @@ class ClaudexorGateway:
                 body = response.json()
             except ValueError:
                 body = None
-        if isinstance(body, dict) and str(body.get("status") or "") in (
-                "delivered", "not_found", "already_resolved", "rejected"):
-            return body
+        if isinstance(body, dict):
+            context = body.get("context")
+            if (response.headers.get("content-type", "").split(";", 1)[0].strip() == "application/problem+json"
+                    and body.get("code") == f"http_{response.status_code}"
+                    and isinstance(context, dict) and context.get("accepted") is False
+                    and context.get("status") in ("not_found", "already_resolved", "rejected")):
+                body = {**context, "message": body.get("message", "")}
+            if str(body.get("status") or "") in ("delivered", "not_found", "already_resolved", "rejected"):
+                return body
         if response.status_code >= 400:
             raise self._problem(response)
         raise ClaudexorUnavailable(
