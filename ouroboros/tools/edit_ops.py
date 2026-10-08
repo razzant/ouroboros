@@ -393,10 +393,9 @@ def _edit_content_block(binding: ResolvedResourceBinding, content: str, force: b
     from ouroboros.tools.git_repo_edit import _check_shrink_guard
 
     rel = binding.target_path.relative_to(binding.base_path).as_posix()
-    if syntax := _syntax_check(rel, content):
-        if not force:
-            return f"⚠️ WRITE_BLOCKED_SYNTAX: {syntax} for {rel}; nothing was written"
     if _repo_edit_binding(binding):
+        if (syntax := _syntax_check(rel, content)) and not force:
+            return f"⚠️ WRITE_BLOCKED_SYNTAX: {syntax} for {rel}; nothing was written"
         return _check_shrink_guard(binding, content, force) or ""
     return _check_data_shrink_guard(binding.target_path, content, force) or ""
 
@@ -989,7 +988,7 @@ def _apply_patch(
             return no_effect(f"⚠️ APPLY_PATCH_ERROR: {refusal}\nNothing was written.")
         if note := newline_normalization_note(target):
             all_notes.append(f"{rel}: {note}")
-        if force and (syntax := _syntax_check(rel, content)):
+        if force and _repo_edit_binding(bindings[rel]) and (syntax := _syntax_check(rel, content)):
             all_notes.append(f"{rel}: ⚠️ SYNTAX_GUARD_BYPASSED (force=true): {syntax}")
     from ouroboros.contracts.task_constraint import normalize_task_constraint
     from ouroboros.skill_repair_admission import repair_write_cas_error, advance_repair_expected_hash
@@ -1216,7 +1215,7 @@ def _edit_batch(
             return f"⚠️ EDIT_BATCH_ERROR: {refusal}\nNothing was written."
         if note := newline_normalization_note(targets[rel]):
             notes.append(f"{rel}: {note}")
-        if force and (syntax := _syntax_check(rel, text)):
+        if force and _repo_edit_binding(bindings[rel]) and (syntax := _syntax_check(rel, text)):
             notes.append(f"{rel}: ⚠️ SYNTAX_GUARD_BYPASSED (force=true): {syntax}")
     from ouroboros.contracts.task_constraint import normalize_task_constraint
     from ouroboros.skill_repair_admission import repair_write_cas_error, advance_repair_expected_hash

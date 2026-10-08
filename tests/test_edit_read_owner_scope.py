@@ -589,3 +589,48 @@ def test_editor_results_reach_the_actual_keyless_http_model_send(file_tools, tmp
         assert [row["tool_call_id"] for row in delivered] == ["wire-a", "wire-b"]
         assert "     1| ALPHA" in delivered[0]["content"]
         assert "     1| BETA" in delivered[1]["content"]
+
+
+@pytest.mark.parametrize("root", ["runtime_data", "task_drive", "artifact_store", "user_files", "skill_payload"])
+@pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
+def test_data_edit_keeps_existing_non_json_text_capability(file_tools, root, tool):
+    registry, _, *_ = file_tools
+    base = _target(file_tools, root)
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "config.json"
+    target.write_text("// comment\nold configuration\n")
+    arguments = {"root": root, **_selectors(root)}
+    if tool == "edit_text":
+        arguments.update(path="config.json", old_str="old", new_str="new")
+    elif tool == "edit_batch":
+        arguments["edits"] = [{"path": "config.json", "old_str": "old", "new_str": "new"}]
+    else:
+        arguments["patch"] = "*** Update File: config.json\n-old configuration\n+new configuration\n"
+    result = registry.execute(tool, arguments)
+    assert result.startswith(("OK: edited", "✅")), result
+    assert target.read_text() == "// comment\nnew configuration\n"
+    assert "SYNTAX_GUARD_BYPASSED" not in result
+
+
+@pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
+def test_repo_syntax_guard_still_refuses_before_write(file_tools, tool):
+    registry, _, _, _, workspace, *_ = file_tools
+    target = workspace / "config.json"
+    target.write_text('{"value": 1}\n')
+    if tool == "edit_text":
+        arguments = {"path": "config.json", "old_str": "1", "new_str": "invalid"}
+    elif tool == "edit_batch":
+        arguments = {"edits": [{"path": "config.json", "old_str": "1", "new_str": "invalid"}]}
+    else:
+        arguments = {"patch": '*** Update File: config.json\n-{"value": 1}\n+{"value": invalid}\n'}
+    result = registry.execute(tool, arguments)
+    assert "SYNTAX" in result, result
+    assert target.read_text() == '{"value": 1}\n'
+
+
+def test_duplicate_occurrence_lines_use_reader_unicode_boundaries():
+    from ouroboros.tools.core import _str_match_replace
+
+    updated, error = _str_match_replace("first\u2028same\u2029third\nsame\n", "same", "new", "sample.txt", "EDIT_TEXT_ERROR")
+    assert updated is None
+    assert "Occurrences at: line 2, line 4" in error

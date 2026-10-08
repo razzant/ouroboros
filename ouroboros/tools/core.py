@@ -214,11 +214,13 @@ def _str_match_replace(
             f"{locate_edit_miss(text, old_str)}{whole_file_preview(text)}"
         )
     if count > 1:
+        from ouroboros.tools.edit_ops import edit_source_line
+
         positions = []
         start = 0
         for _ in range(min(count, 5)):
             idx = text.index(old_str, start)
-            positions.append(f"line {text[:idx].count(chr(10)) + 1}")
+            positions.append(f"line {edit_source_line(text, idx)}")
             start = idx + 1
         return None, (
             f"⚠️ {error_tag}: old_str found {count} times in {display_path} "
@@ -785,12 +787,11 @@ def _edit_text(
         )
         if match_error:
             return publish_no_effect(ctx, match_error, tool_name="edit_text")
-        from ouroboros.tools.edit_ops import _edit_content_block, _syntax_check, newline_normalization_note
+        from ouroboros.tools.edit_ops import _edit_content_block, newline_normalization_note
 
         newline_note = newline_normalization_note(target)
         if content_block := _edit_content_block(binding, new_text, force):
             return publish_no_effect(ctx, content_block, tool_name="edit_text")
-        syntax_bypass = _syntax_check(target.name, new_text) if force else ""
         constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
         repair = selected_payload and constraint and constraint.has_selected_skill
         if repair:
@@ -819,8 +820,7 @@ def _edit_text(
                 "File is on disk but NOT committed.\n"
                 "Run skill_review for this skill before enabling or declaring it ready."
             )
-            return result + (f"\n{newline_note}" if newline_note else "") + (
-                f"\n⚠️ SYNTAX_GUARD_BYPASSED (force=true): {syntax_bypass}" if syntax_bypass else "")
+            return result + (f"\n{newline_note}" if newline_note else "")
         result = (
             f"OK: edited {_root_display_path(normalized, path)} "
             f"(line {replacement_line}; resolved_root={binding.base_path}; source={binding.source})"
@@ -834,8 +834,6 @@ def _edit_text(
                 result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
         if newline_note:
             result += f"\n{newline_note}"
-        if syntax_bypass:
-            result += f"\n⚠️ SYNTAX_GUARD_BYPASSED (force=true): {syntax_bypass}"
         return result
     except FileNotFoundError:
         return f"⚠️ EDIT_TEXT_ERROR: file not found: {_root_display_path(normalized, path)}"

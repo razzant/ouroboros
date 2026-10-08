@@ -124,13 +124,12 @@ def test_root_can_read_and_edit_ordinary_config(environment, relative):
     reg, _ctx, home, _work, _data = environment
     target = home / relative
     target.parent.mkdir(parents=True, exist_ok=True)
-    old = '"old configuration"\n' if relative.endswith('.json') else 'old configuration\n'
-    target.write_text(old, encoding='utf-8')
+    target.write_text('old configuration\n', encoding='utf-8')
     assert 'old configuration' in reg.execute('read_file', {'root': 'user_files', 'path': str(target)})
     result = reg.execute('edit_text', {'root': 'user_files', 'path': str(target),
                                     'old_str': 'old configuration', 'new_str': 'new configuration'})
     assert result.startswith('OK: edited'), result
-    assert target.read_text() == old.replace('old configuration', 'new configuration')
+    assert target.read_text() == 'new configuration\n'
 
 
 def test_owner_key_write_and_config_symlink_remain_blocked(environment):
