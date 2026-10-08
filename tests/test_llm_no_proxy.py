@@ -305,12 +305,11 @@ def test_chat_remote_passes_no_proxy_to_anthropic():
 
 
 def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection():
-    """OpenRouter no_proxy path retries once without optional sampling params."""
+    """Public no_proxy calls preserve optional-parameter recovery assertions."""
     from ouroboros.llm import LLMClient
 
     LLMClient._REJECTED_PARAMS_CACHE.clear()
     client = LLMClient(api_key="test-or-key")
-    target = client._resolve_remote_target("anthropic/claude-opus-4.8")
     messages = [{"role": "user", "content": "hello"}]
     captured_kwargs = []
 
@@ -340,14 +339,15 @@ def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection():
 
     with patch.object(client, "_make_no_proxy_client", return_value=(fake_oa_client, fake_http_client)), \
          patch("requests.get", side_effect=AssertionError("no_proxy must not fetch capabilities")):
-        msg, usage = client._chat_remote(
-            target,
-            messages,
-            None,
-            "medium",
-            1024,
-            "auto",
-            0.2,
+        # Match the public invocation used by consumers, without weakening the
+        # refusal fixture or parameter/effort/no-metadata/cleanup assertions.
+        msg, usage = client.chat(
+            messages=messages,
+            model="anthropic/claude-opus-4.8",
+            reasoning_effort="medium",
+            max_tokens=1024,
+            tool_choice="auto",
+            temperature=0.2,
             no_proxy=True,
         )
 
