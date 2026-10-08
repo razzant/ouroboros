@@ -108,7 +108,6 @@ def test_foreign_absolute_address_does_not_acquire_the_process_cwd(environment, 
 
 @pytest.mark.parametrize('tool', ['edit_batch', 'apply_patch'])
 def test_payload_edit_requires_a_skill_selector(environment, tool):
-    from ouroboros.loop_tool_execution import _extract_result_metadata
     reg, _ctx, _home, work, data = environment
     payload = {'root': 'skill_payload'}
     if tool == 'edit_batch':

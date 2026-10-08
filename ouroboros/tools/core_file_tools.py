@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import pathlib
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
@@ -151,12 +151,10 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
         whole = bisect.bisect_right(ends, offset)  # lines ending at or before the cursor: skipped whole
         partial_head = bool(body) and not (whole and ends[whole - 1] == offset)  # landed mid-line: that line is partial
         first_line = start + whole + (1 if partial_head else 0)
-        line_ends = tuple(e - offset for e in ends[whole + (1 if partial_head else 0):])
     else:
         body, header, partial_head, first_line = window, f"# {path} — lines {start}\u2013{end} of {total}\n", False, start
-        line_ends = tuple(ends)
     if not body:
-        first_line, line_ends = end + 1, ()  # nothing complete was delivered: an EMPTY range, never an inverted one
+        first_line = end + 1  # nothing complete was delivered: an EMPTY range, never an inverted one
     # Display offsets are deliberately separate from source offsets.  A number
     # prefix can be delivered without delivering any character of the file.
     display_parts: List[str] = []

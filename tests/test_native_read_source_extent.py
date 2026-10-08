@@ -133,7 +133,6 @@ def test_result_fitting_receipt_matches_exact_text_returned_to_the_reviewer(tmp_
         "id": "read-1", "function": {"name": "read_file", "arguments": json.dumps({"path": "source.md"})},
     }, {}, round_idx=1, room=1500)
     receipt = executor._tool_receipts[0]
-    body_start = executor._inspection_ctx.last_read_view["body_start"]
     shown = message["content"].index("\n⚠️ RESULT TRUNCATED:")
     delivered = delivered_source_prefix(executor._inspection_ctx.last_read_view, message["content"], shown)
     assert 0 < receipt["text_chars"] < len(raw.decode())

@@ -546,8 +546,6 @@ def _build_builtin_target_binding(ctx: Any, name: str, args: dict[str, Any]) -> 
             if isinstance(item, dict)
         )
     if name == "apply_patch":
-        from ouroboros.tools.edit_ops import patch_target_paths
-
         from ouroboros.tools.edit_ops import _parse_patch
 
         ops, error = _parse_patch(str(args.get("patch") or ""))
