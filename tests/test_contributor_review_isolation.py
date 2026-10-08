@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -198,7 +199,7 @@ def run_review_change(ctx, **arguments):
 
     here = pathlib.Path(__file__).resolve().parents[2]
     report = {
-        "machinery": _MACHINERY, "ppid": os.getppid(),
+        "machinery": _MACHINERY, "ppid": os.getppid(), "pid": os.getpid(),
         "arguments": {key: arguments.get(key) for key in ("root", "surface", "subject", "base", "head")},
         "machinery_sha": subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(here),
                                         capture_output=True, text=True).stdout.strip(),
@@ -274,6 +275,17 @@ def _fixture_repo(root: pathlib.Path) -> pathlib.Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(REPO / rel, target)
     (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+    # Windows venv python.exe may be a redirector, so Popen.pid/ppid does not
+    # identify the interpreter that entered the wrapper. Stamp its own entry
+    # once: a re-executed copy cannot replace that witness or pass the PID check.
+    wrapper = repo / "scripts" / "run_external_review.py"
+    entry = ('\nimport os as _probe_os\n'
+             'with open(_probe_os.environ["ISOLATION_WRAPPER_ENTRY"], "x") as _probe_entry:\n'
+             '    _probe_entry.write(str(_probe_os.getpid()))\n')
+    text = wrapper.read_bytes().decode("utf-8")
+    anchor = "from __future__ import annotations"
+    assert text.count(anchor) == 1
+    wrapper.write_bytes(text.replace(anchor, anchor + entry).encode("utf-8"))
     operation = repo / "ouroboros" / "tools" / "review_change.py"
     operation.write_text(_PROBE_OPERATION, encoding="utf-8")
     _git(repo, "add", "-A")
@@ -291,19 +303,24 @@ def _fixture_repo(root: pathlib.Path) -> pathlib.Path:
 
 def _review(repo: pathlib.Path, host: pathlib.Path, out: pathlib.Path, *extra: str,
             inherited: dict | None = None):
+    out.mkdir(parents=True, exist_ok=True)
+    entry_marker = out / f"wrapper-entry-{uuid.uuid4().hex}.pid"
     env = {**os.environ, "OUROBOROS_DATA_DIR": str(host),
            "OUROBOROS_SETTINGS_PATH": str(host / "settings.json"),
-           "ISOLATION_PROBE_OUT": str(out / "probe.json")}
+           "ISOLATION_PROBE_OUT": str(out / "probe.json"),
+           "ISOLATION_WRAPPER_ENTRY": str(entry_marker)}
     for key in ("OUROBOROS_SETTINGS_SHA256", "OUROBOROS_REVIEW_RUN_CAP_USD",
                 "OUROBOROS_CLAUDEXOR_ATTACH_HOME", "TOTAL_BUDGET", *_INHERITED_PANEL):
         env.pop(key, None)
     env.update(inherited or {})
-    return subprocess.run(
+    result = subprocess.run(
         [sys.executable, str(repo / "scripts" / "run_external_review.py"), "--contributor",
          "--base-ref=base", "--head-ref=proposal", f"--output={out / 'packet'}",
          f"--drive-root={out / 'drive'}", *extra, "--", "PR title"],
         cwd=str(repo), env=env, capture_output=True, text=True, timeout=600,
     )
+    result.wrapper_entry = entry_marker
+    return result
 
 
 def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
@@ -340,7 +357,7 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
     # D31: the installed body (the base checkout) ran its own review operation over the
     # frozen base..head, in the wrapper's process; the proposal's copy never ran.
     assert (report["machinery"], report["machinery_sha"]) == ("installed", base_sha)
-    assert report["ppid"] == os.getpid()  # the wrapper this test started, never a re-executed copy
+    assert report["pid"] == int(run.wrapper_entry.read_text())  # same wrapper interpreter, no re-execution
     assert report["arguments"] == {"root": "system_repo", "surface": "change", "subject": "base..head",
                                    "base": base_sha, "head": head_sha}
     # The drive is the whole data root; the host settings are read pinned, never copied.
@@ -470,6 +487,8 @@ def owned(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DATA_DIR", isolated)
     monkeypatch.setattr(claudexor_daemon, "_MANAGER", None)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # expanduser('~') selects USERPROFILE on Windows, HOME on POSIX.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("attach-only must never manage an engine")
