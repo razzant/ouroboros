@@ -115,8 +115,9 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                 "available": True,
                 "authority": "physical_attempt_ledger",
                 "limit_usd": round(limit, 6),
+                # Room above KNOWN (settled) spend, the admission rule's own number.
                 "remaining_known_usd": (
-                    round(max(0.0, limit - float(breakdown.get("accounted_usd") or 0.0)), 6)
+                    round(max(0.0, limit - float(breakdown.get("settled_usd") or 0.0)), 6)
                     if limit > 0
                     else None
                 ),

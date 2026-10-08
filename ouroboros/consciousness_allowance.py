@@ -2,7 +2,7 @@
 
 Owner decision В11/В18 (PLAN 5.5, 5.13 п.11, 5.14 п.1): the daily allowance
 gates NEW starts (a wake, a promoted/scheduled root) on the money the whole
-consciousness tree accounted in the last 24 hours. There is no root index —
+consciousness tree spent in the last 24 hours. There is no root index —
 the roots are read off the usage store: every attempt row whose transition
 timestamp (``ts_last``) lies in the last 48 h and whose category is
 ``consciousness`` (a wake's own rows) or ``consciousness_task`` (a started
@@ -12,13 +12,16 @@ root's rows) names a consciousness root; the window is then every money row
 roots whose transition timestamp lies in the last 24 h, open rows included,
 reduced by the ONE money reducer ``_usage_rows._summary``. Both selections are
 addressed (the ``(category, ts_last)`` and ``root_task_id`` indexes), so the
-answer never depends on unrelated history. ``accounted_usd`` (settled +
-reserved + unresolved) is the number: a hanging reservation can read as
-exhausted for its lifetime, disclosed rather than hidden;
-``unknown_unmetered`` makes it "at least". The TIME filter runs on every call,
-so an exhausted window frees itself as rows age out without a new write. A
-store that cannot be read yields the typed ``allowance_unknown`` outcome —
-the caller refuses the start honestly.
+answer never depends on unrelated history. ``settled_usd`` — the KNOWN spend,
+confirmed prices and disclosed estimates — is the number that decides (owner
+Q4-A, #1487), the same rule as every other money limit: a reservation or the
+upper bound of an unresolved call is shown beside it as ``accounted_usd``
+exposure, never counted as spent, so one refused oversized request cannot
+close the allowance for a day. ``unknown_unmetered`` makes the known spend "at
+least". The TIME filter runs on every call, so an exhausted window frees
+itself as rows age out without a new write. A store that cannot be read
+yields the typed ``allowance_unknown`` outcome — the caller refuses the start
+honestly.
 """
 
 from __future__ import annotations
@@ -69,20 +72,22 @@ def allowance_window(
             degraded = usage_store.integrity_degraded(root)
     except Exception as exc:  # noqa: BLE001 — every read failure is the one typed outcome
         return {"status": STATUS_UNKNOWN, "error": f"{type(exc).__name__}: {exc}",
-                "limit_usd": limit, "accounted_usd": None, "remaining_usd": None, "resets_at": ""}
+                "limit_usd": limit, "settled_usd": None, "accounted_usd": None, "remaining_usd": None,
+                "resets_at": ""}
     window = [(ts, row) for ts, row in ((row_ts_epoch(row), row) for row in rows) if ts is not None]
     summary = _summary([row for _ts, row in window])
-    accounted = float(summary["accounted_usd"])
+    known = float(summary["settled_usd"])
     oldest = min((ts for ts, _row in window), default=None)
     resets_at = (
         _dt.datetime.fromtimestamp(oldest + WINDOW_SEC, tz=_dt.timezone.utc).isoformat()
         if oldest is not None else ""
     )
     return {
-        "status": STATUS_EXHAUSTED if accounted >= limit else STATUS_AVAILABLE,
+        "status": STATUS_EXHAUSTED if known >= limit else STATUS_AVAILABLE,
         "limit_usd": limit,
-        "accounted_usd": accounted,
-        "remaining_usd": round(max(0.0, limit - accounted), 6),
+        "settled_usd": known,
+        "accounted_usd": float(summary["accounted_usd"]),
+        "remaining_usd": round(max(0.0, limit - known), 6),
         "unknown_unmetered": int(summary["unknown_unmetered"]),
         "non_final_rows": int(summary["non_final_rows"]),
         "roots": sorted(roots),

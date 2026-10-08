@@ -620,3 +620,77 @@ def test_skills_review_reads_the_list_once_and_findings_render_on_open(skills_br
         assert state["requests"].count(("POST", "/api/skills/weather/review")) == 1
     finally:
         _close_pending_browser(browser, state)
+
+
+def _failed_review_projection(tmp_path, monkeypatch, deps_reason):
+    """Two real failed runs of the review lifecycle, read back by the /api/extensions projection."""
+    from types import SimpleNamespace
+
+    from ouroboros.skill_review import SkillReviewOutcome
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking, skill_review_ui_projection
+
+    drive_root, skills_root = tmp_path / "drive", tmp_path / "skills"
+    (skills_root / "weather").mkdir(parents=True)
+    drive_root.mkdir()
+    (skills_root / "weather" / "SKILL.md").write_text(
+        "---\nname: weather\ndescription: Local forecast\nversion: 1.0\ntype: instruction\n---\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_deps_after_pass_review",
+                        lambda *_a, **_k: ("failed", deps_reason))
+    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_extension_payload",
+                        lambda *_a, **_k: {"action": None, "reason": None, "process": "", "server_reconcile": ""})
+
+    def review(impl):
+        return run_skill_review_lifecycle_blocking(
+            SimpleNamespace(drive_root=drive_root, repo_dir=tmp_path, messages=[]), "weather",
+            source="skills", review_impl=impl, repo_path=str(skills_root),
+        )
+
+    def clean(_ctx, name):
+        return SkillReviewOutcome(skill_name=name, status="pass", content_hash="",
+                                  findings=[{"item": "manifest_schema", "verdict": "PASS"}])
+
+    def broken(_ctx, _name):
+        raise RuntimeError("reviewer transport closed")
+
+    assert review(clean)["status"] == "clean"
+    with pytest.raises(RuntimeError, match="reviewer transport closed"):
+        review(broken)
+    return skill_review_ui_projection(drive_root, "weather")
+
+
+@pytest.mark.parametrize("browser_name,width", [("chromium", 1440), ("webkit", 390)])
+def test_failed_review_runs_read_as_failures_with_their_recorded_reason(
+        skills_browser, browser_name, width, tmp_path, monkeypatch):
+    """PR #782: a failed run is not an open `pending`, and a clean verdict whose dependency
+    install failed keeps both facts; a long recorded reason stays bounded on a narrow card."""
+    projection = _failed_review_projection(tmp_path, monkeypatch, "pip install failed: " + "e" * 3000)
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        state, installed = _open_skills(page)
+        state["extensions"] = [{**installed, "skill_review": projection}]
+        page.goto("http://skills.test/", wait_until="networkidle")
+        card = page.locator('.skills-card[data-skill="weather"]')
+        current = card.locator(".skills-review-current").inner_text()
+        assert current.endswith(" · review verdict unavailable · lifecycle failed"), current
+        assert "pending" not in current
+        assert card.locator(".skills-review-current + .skills-review-reason").inner_text() == (
+            "Reason: RuntimeError: reviewer transport closed")
+        card.locator(".skills-review-history > summary").click()
+        rows = card.locator(".skills-review-history li")
+        assert rows.count() == 2
+        first, second = rows.all_inner_texts()
+        assert first.splitlines()[0].endswith(" · clean · lifecycle failed · skills"), first
+        assert first.splitlines()[1].startswith("Reason: pip install failed: eee")
+        assert first.splitlines()[1].endswith("…[truncated]")
+        assert second.splitlines()[0].endswith(" · review verdict unavailable · lifecycle failed · skills")
+        reason = rows.first.locator("div.skills-review-reason")
+        assert reason.get_attribute("title").endswith("e" * 100)
+        assert reason.bounding_box()["height"] < 200, "the bounded reason stays a few lines"
+        _capture(page, browser_name, width, "review-run-failed")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    finally:
+        browser.close()

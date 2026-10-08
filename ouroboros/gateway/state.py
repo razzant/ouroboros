@@ -178,10 +178,10 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
         log.exception("Physical-attempt accounting unavailable for /api/state")
         accounting_available = False
         breakdown, accounting = {}, {}
-    # Compatibility header/bar uses the conservative dispatch authority:
-    # settled + live reservations + unresolved upper bounds.  Actual paid
-    # cost remains separately visible as accounting.settled_usd/confirmed.
-    spent = float(accounting.get("accounted_usd") or 0.0) if accounting_available else None
+    # Compatibility header/bar shows the dispatch authority's own number: KNOWN
+    # spend (settled: confirmed + estimated, #1487). Reservations and unresolved
+    # upper bounds stay separately visible in the accounting block.
+    spent = float(accounting.get("settled_usd") or 0.0) if accounting_available else None
     # De-triplication: hand the evolution snapshot the projection this request
     # already computed, so budget_remaining does not replay the ledger again —
     # but ONLY when this request's drive root IS the supervisor's root and the

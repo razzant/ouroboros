@@ -428,6 +428,9 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
                 raise ClaudexorUnavailable("daemon_unreachable", "socket died", status_code=0)
         def close(self): pass
 
+    from ouroboros.task_results import write_task_result
+    for task_id in ('t-a', 't-b'):
+        write_task_result(tmp_path, task_id, 'completed')
     gateway = _AbsentRunGateway()
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-gone", task_id="t-a", route_id="r", model="m",
@@ -451,7 +454,7 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
     kinds = _event_types(tmp_path)
     assert "delegate_run_project_retired" in kinds
     assert dc.owned_project_registrations(tmp_path) == []
-    assert gateway.removals == ["prj-owned"] * 3  # 3 lanes: close, 2 sweeps
+    assert gateway.removals == ["prj-owned"] * 2  # retirement belongs to the sweeps
 
     # 3. Absence is discharge: a 404 on the remove itself closes the run.
     class _AllGone(_AbsentRunGateway):

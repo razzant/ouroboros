@@ -190,12 +190,20 @@ def test_fence_closing_interrupts_dispatch_wait_before_lock_is_available(root, s
         assert error.value.physical_attempt_capture.state == "reserved"
 
 
+def _known_spend(root, usd):
+    """A settled, finally priced attempt: the KNOWN spend every limit decides on (#1487)."""
+    held = ua.reserve_attempt(request(root, provider="openai", reservation_usd=usd))
+    ua.mark_dispatched(held)
+    ua.settle_attempt(held, {}, cost_usd=usd, cost_final=True)
+
+
 def test_cap_is_resolved_again_after_pre_reservation_wait(root, short_acquisitions, monkeypatch):
     cap = [10]
     monkeypatch.setattr(ua, "_global_limit", lambda req: cap[0])
+    _known_spend(root, 1.0)
     with owner(root), held_lock(root) as release:
         def reduce():
-            cap[0] = .5
+            cap[0] = .5  # the owner lowers the wallet below the known $1 while the send waits
             release.set()
         timer = threading.Timer(.12, reduce)
         timer.start()
@@ -204,16 +212,17 @@ def test_cap_is_resolved_again_after_pre_reservation_wait(root, short_acquisitio
                 ua.execute_physical_attempt(request(root), lambda: pytest.fail("sent"))
         finally:
             timer.join(2)
-    assert rows(root) == []
+    assert [row["state"] for row in rows(root)] == ["settled"]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_cap_reduction_after_reservation_refuses_send_and_returns_claim(root, monkeypatch, asynchronous):
     cap = [10]
     monkeypatch.setattr(ua, "_global_limit", lambda req: cap[0])
+    _known_spend(root, 1.0)
     def before(held):
         assert rows(root)[-1]["state"] == "reserved"
-        cap[0] = .5
+        cap[0] = .5  # lowered below the known $1 between reservation and send
     def send():
         pytest.fail("provider called after cap reduction")
     async def async_send():
@@ -227,8 +236,8 @@ def test_cap_reduction_after_reservation_refuses_send_and_returns_claim(root, mo
         assert error.value.limit_scope == "global"
         assert error.value.physical_attempt_capture.state == "released"
         assert ua._PHYSICAL_LIMIT.get().used == 0
-    assert [row["state"] for row in rows(root)] == ["released"]
-    assert ua.usage_projection(root)["accounted_usd"] == 0
+    assert [row["state"] for row in rows(root)] == ["settled", "released"]
+    assert ua.usage_projection(root)["accounted_usd"] == 1.0  # the known $1 only; the claim returned
 
 
 def test_interactive_window_expiry_is_typed_and_never_quota_wait(root, short_acquisitions, monkeypatch):

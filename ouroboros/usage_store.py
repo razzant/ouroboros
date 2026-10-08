@@ -427,8 +427,8 @@ class Txn:
     def summary(self, root_task_id: Optional[str] = None, *, billing_group_id: Optional[str] = None) -> dict:
         return render_cash(self.totals(root_task_id, billing_group_id))
 
-    def exceeds_limit(self, limit, bound=None, *, root_task_id=None, billing_group_id=None, dispatch=False) -> bool:
-        return exceeds_limit(self.totals(root_task_id, billing_group_id), limit, bound, dispatch=dispatch)
+    def exceeds_limit(self, limit, *, root_task_id=None, billing_group_id=None) -> bool:
+        return exceeds_limit(self.totals(root_task_id, billing_group_id), limit)
 
     # -- writes
     def ack_dirty_owner(self, owner_id: str, revision: int) -> bool:

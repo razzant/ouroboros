@@ -1,5 +1,7 @@
 """Revisioned projection debt survives failures, changed ownership and receipts."""
 import contextlib
+import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -125,6 +127,48 @@ def test_ineligible_result_keeps_debt(env, condition):
         task(env, root_phase_checkpoint={"post_task_synthesis": "running"})
     maintenance._reconcile_abandoned_usage(env.root)
     assert dirty(env) == before
+
+
+@pytest.mark.parametrize("basis", ["owner_pause_authority_missing", "owner_pause_authority_unreadable"])
+def test_missing_authority_reports_once_and_later_projects_same_debt(env, monkeypatch, caplog, basis):
+    from ouroboros import terminal_cost_reconciliation as duty
+    from supervisor.task_ownership import TaskOwnershipRead
+
+    monkeypatch.setattr(duty, "_LAST_UNRESOLVED", {})
+    task(env)
+    attempt(env)
+    before = dirty(env)
+    original = task_results.task_result_path(env.root, "root").read_bytes()
+    load = TaskOwnershipRead.load
+
+    def unavailable(self, tid):
+        raise ValueError(basis)
+
+    monkeypatch.setattr(TaskOwnershipRead, "load", unavailable)
+    with caplog.at_level(logging.WARNING, logger=duty.__name__):
+        for _ in range(3):
+            maintenance._reconcile_abandoned_usage(env.root)
+    assert dirty(env) == before
+    assert task_results.task_result_path(env.root, "root").read_bytes() == original
+    warnings = [r for r in caplog.records if r.name == duty.__name__ and r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].exc_info is not None
+
+    path = env.root / "logs" / "supervisor.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    observations = [r for r in rows if r.get("subject") == duty.COST_PROJECTIONS]
+    assert len(observations) == 1
+    assert observations[0]["task_ids"] == ["root"]
+    assert observations[0]["by_basis"] == {f"ValueError:{basis}": 1}
+    assert "attempt_ids" not in observations[0]
+    # The same text in an attempt id is a different obligation namespace.
+    duty._publish_unresolved(env.root, {"root": basis})
+    monkeypatch.setattr(TaskOwnershipRead, "load", load)
+    warm(env)
+    stored = task_results.load_task_result(env.root, "root")
+    assert stored["cost_final"] and stored["accounted_upper_bound_usd"] == 0.4
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["subject"] == duty.COST_PROJECTIONS and rows[-1]["count"] == 0
+    assert any(r.get("attempt_ids") == ["root"] for r in rows)
 
 
 def test_equal_unknown_cost_can_ack_without_inventing_finality(env):

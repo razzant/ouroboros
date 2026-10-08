@@ -132,7 +132,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return result;
     }
 
-    function changed() { onChange(collect()); }
+    function changed(slot = '') { onChange(collect(), { slot }); }
     function rowErrors(row) {
         const errors = [];
         if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Economy or inherited processing.` });
@@ -306,7 +306,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const node = element.querySelector(`[data-model-role="${row.id}"]`);
             node.querySelector('[data-model-role-source]').addEventListener('change', (event) => {
                 row.source = sourceFromChoice(event.target.value); row.model = ''; row.account = ''; row.context = 0;
-                changed(); render();
+                changed(row.slot.slot); render();
                 host()?.querySelector(`[data-model-role="${row.id}"] [data-model-role-model]`)?.focus();
             });
             const input = getDoc().getElementById(inputIdFor(row));
@@ -315,17 +315,17 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 if (row.source === 'inherit' && row.model) row.source = effectiveSource(row);
                 if (!row.model && !['main', 'fallback'].includes(row.slot.slot)) row.source = 'inherit';
                 if (row.model.includes('::')) Object.assign(row, parseModelSource(row.model));
-                changed(); updateCatalogViews();
+                changed(row.slot.slot); updateCatalogViews();
                 for (const item of rows) void refreshRow(item);
             });
             node.querySelector('[data-model-role-account]').addEventListener('change', (event) => {
-                row.account = event.target.value; changed(); updateCatalogViews(); void refreshRow(row);
+                row.account = event.target.value; changed(row.slot.slot); updateCatalogViews(); void refreshRow(row);
             });
             node.querySelector('[data-model-role-context]')?.addEventListener('input', (event) => {
-                row.context = event.target.value; changed(); updateCatalogViews();
+                row.context = event.target.value; changed(row.slot.slot); updateCatalogViews();
             });
             node.querySelector('[data-model-role-processing]')?.addEventListener('change', (event) => {
-                row.processing_preference = event.target.value; changed(); updateCatalogViews();
+                row.processing_preference = event.target.value; changed(row.slot.slot); updateCatalogViews();
             });
             for (const [selector, delta] of [['[data-model-up]', -1], ['[data-model-down]', 1]]) {
                 node.querySelector(selector)?.addEventListener('click', () => {

@@ -109,6 +109,55 @@ def test_theme_onboarding_tristate(subscription_ui):
     assert page.evaluate("localStorage.getItem('ouroboros.theme')") == 'system'
 
 
+# Every frame gets a recording stand-in bridge, so a framed document that spoke for its
+# parent's window would be caught by its own record, not just by a missing bridge.
+_CAPTION_BRIDGE = """
+    window.pywebview = {api: {set_native_appearance: (...args) => {
+        const record = (window.top.__captionCalls = window.top.__captionCalls || []);
+        record.push([location.pathname, ...args]);
+        return Promise.resolve({ok: true, state: 'scheduled'});
+    }}};
+"""
+
+
+def test_the_desktop_caption_hears_only_the_top_document(subscription_ui):
+    """The real SPA tells its window's bridge the painted palette at boot, when the bridge
+    announces itself and on each painted change; the setup document framed inside it never
+    calls, even with a bridge of its own. The frame's choice still reaches the caption: it
+    is stored, the top document repaints from the storage event and reports that."""
+    ui = subscription_ui
+    page = ui['page']
+    page.emulate_media(color_scheme='dark')
+    page.add_init_script(_CAPTION_BRIDGE)
+    page.goto(ui['url'])
+    page.wait_for_selector('#chat-input')
+    page.evaluate("window.dispatchEvent(new CustomEvent('pywebviewready'))")
+    open_appearance(page).locator('[data-theme-choice="light"]').click()
+    page.evaluate("""() => new Promise((done) => {
+        const frame = Object.assign(document.createElement('iframe'), {src: '/onboarding', id: 'caption-frame'});
+        frame.addEventListener('load', () => done(), {once: true});
+        document.body.append(frame);
+    })""")
+    frame = page.frame_locator('#caption-frame')
+    frame.locator('.onboarding-appearance [data-theme-control] [data-theme-choice="dark"]').click()
+    page.wait_for_function("document.documentElement.dataset.theme === 'dark'")
+    page.evaluate("document.getElementById('caption-frame').contentWindow.dispatchEvent(new CustomEvent('pywebviewready'))")
+    page.wait_for_function("window.__captionCalls.length >= 4")
+    calls = page.evaluate('window.__captionCalls')
+    assert {path for path, *_ in calls} == {'/'}, calls
+    assert [(theme, sequence) for _path, theme, _page, sequence in calls] == [
+        ('dark', 1), ('dark', 2), ('light', 3), ('dark', 4)]
+    # The page names itself by when it began; the reload that replaces it began later.
+    began = page.evaluate('performance.timeOrigin')
+    assert {token for _path, _theme, token, _sequence in calls} == {began}
+    page.reload()
+    page.wait_for_selector('#chat-input')
+    page.evaluate("window.dispatchEvent(new CustomEvent('pywebviewready'))")
+    page.wait_for_function("window.__captionCalls && window.__captionCalls.length >= 2")
+    reloaded = page.evaluate('window.__captionCalls')
+    assert reloaded[0][2] == page.evaluate('performance.timeOrigin') > began, (began, reloaded)
+
+
 def test_light_contrast_and_mounted_views_follow_the_theme(subscription_ui):
     ui = subscription_ui
     page = ui['page']

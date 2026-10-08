@@ -585,6 +585,11 @@ class ClaudexorGateway:
                              **({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
         return body if isinstance(body, dict) else {}
 
+    def daemon_status(self, *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
+        """Engine-owned memory observations; old engines may refuse with 404."""
+        body = self._request("GET", "/v2/daemon/status", timeout_sec=timeout_sec)
+        return body if isinstance(body, dict) else {}
+
     def ask_input_limits(self) -> Dict[str, Dict[str, Any]]:
         """Declared native text limits with the engine's ordinary ASK framing.
 

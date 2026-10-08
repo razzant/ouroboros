@@ -20,6 +20,9 @@ The shell offers **Settings → Appearance → Light / Dark / System**. New clie
 start on System; explicit Light or Dark remains pinned. The shared semantic
 palettes in `web/ui.css` preserve geometry and status meanings. Light uses white
 reading surfaces, dark text and an opaque header, with decorative matrix hidden.
+On Windows the desktop window keeps its ordinary system caption, buttons, Snap and
+resizing; only their light or dark tint follows the painted palette — the system
+tint, not the page's colour — and a High Contrast theme keeps its own colours.
 
 Appearance belongs to a browser profile or desktop client, not an account or
 server setting. Existing saved Light/Dark choices keep their meaning. Storage
@@ -195,6 +198,12 @@ values submitted by Save or Test. Editing, clearing, reloading or leaving the
 page closes the reveal, and a late read cannot reopen it. Built-in, custom,
 skill-requested and MCP token fields use the same interaction; loading Settings
 keeps saved secrets masked. Pending reads and failures are shown at the field.
+
+A segmented choice row gives every choice the same width. Up to four fill their
+row; a longer scale wraps into equal columns of four and leaves its last row partly
+empty rather than stretching a lone choice; a narrow card stacks two; one-glyph
+values such as review cycles stay one row. An empty choice (Same as Task / Chat) is
+as real as any other, and the focused choice wears the one focus ring.
 
 Short fixed choices keep native selects, including the platform's own popup.
 A control never widens its column: a select shows its chosen label on one

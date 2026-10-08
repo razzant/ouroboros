@@ -18,7 +18,7 @@ import pytest
 
 from ouroboros import consciousness_authority as ca
 
-AVAILABLE = {"status": "available", "limit_usd": 20.0, "accounted_usd": 4.0, "remaining_usd": 16.0,
+AVAILABLE = {"status": "available", "limit_usd": 20.0, "settled_usd": 4.0, "accounted_usd": 4.0, "remaining_usd": 16.0,
              "unknown_unmetered": 0, "resets_at": ""}
 
 
@@ -78,15 +78,18 @@ def test_max_tasks_zero_means_consciousness_never_starts_tasks(door, monkeypatch
 def test_an_exhausted_allowance_refuses_with_the_window_facts(door, monkeypatch):
     queue, pending, _running = door
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window", lambda root, now=None: {
-        **AVAILABLE, "status": "exhausted", "accounted_usd": 21.5, "remaining_usd": 0.0,
+        **AVAILABLE, "status": "exhausted", "settled_usd": 21.5, "accounted_usd": 25.5, "remaining_usd": 0.0,
         "unknown_unmetered": 1, "resets_at": "2026-09-17T08:00:00+00:00"})
     refused = queue.enqueue_task(_root("c1"))
     assert refused["_admission_blocked"] == "consciousness_allowance_exhausted"
+    # Known spend decides and is called spent; open holds are shown beside it, uncounted (#1487).
     assert refused["_admission_detail"] == (
-        "$21.50 (at least) of $20.00 spent in the last 24 h; resets at 2026-09-17T08:00:00+00:00")
+        "$21.50 (at least) of $20.00 known spend in the last 24 h (plus $4.00 of open holds, "
+        "not counted); resets at 2026-09-17T08:00:00+00:00")
     assert pending == []
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window", lambda root, now=None: {
-        **AVAILABLE, "status": "exhausted", "limit_usd": 0.0, "accounted_usd": 0.0, "remaining_usd": 0.0})
+        **AVAILABLE, "status": "exhausted", "limit_usd": 0.0, "settled_usd": 0.0, "accounted_usd": 0.0,
+        "remaining_usd": 0.0})
     zero = queue.enqueue_task(_root("c2"))
     assert zero["_admission_blocked"] == "consciousness_allowance_exhausted"
     assert "OUROBOROS_CONSCIOUSNESS_DAILY_USD=0" in zero["_admission_detail"]

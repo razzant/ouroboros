@@ -1263,7 +1263,7 @@ def budget_line(force: bool = False) -> str:
                 if total > 0
                 else usage_writer_snapshot(DATA_DIR, allow_stale=True)
             )
-            display_state["spent_usd"] = float(accounting.get("accounted_usd") or 0.0)
+            display_state["spent_usd"] = float(accounting.get("settled_usd") or 0.0)  # known; holds in the detail
             display_state["usage_accounting"] = accounting
             display_state["_budget_accounting_available"] = True
         except Exception:

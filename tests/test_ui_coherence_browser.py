@@ -261,7 +261,8 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_local_table_over
         "supervisor_ready": True, "active_chat_activities": [], "projects": projects,
         "project_chat_ids": [p["chat_id"] for p in projects]})))
     data = {"total_cost": 27.4, "total_calls": 42, "accounting": {"available": True,
-            "accounted_usd": 27.4, "confirmed_usd": 25, "reserved_usd": 2,
+            "accounted_usd": 27.4, "settled_usd": 25, "confirmed_usd": 25,
+            "estimated_usd": 0, "reserved_usd": 2,
             "unresolved_upper_bound_usd": 0.4, "unknown_unmetered": 1,
             "limit_usd": 200, "cost_final": False},
             "by_model": {"provider/a-long-model-name-for-real-table-overflow": {"calls": 42, "cost": 27.4}}}

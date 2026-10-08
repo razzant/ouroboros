@@ -172,7 +172,7 @@ def _completion(text):
 def _last_fit_rail(monkeypatch, tmp_path, execute):
     """Drive the whole rail: last-fit decision -> admitted candidate -> the real send."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
-    monkeypatch.setattr("ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0})
+    monkeypatch.setattr("ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0})
     # proxy, exact probe, prepared: one fits, two do not; then the FRESH send's own admission fits.
     answers = iter((True, False, True, False, True, False, True))
     monkeypatch.setattr(task_pacing, "wrapup_reservation_fits", lambda **_kwargs: next(answers))
@@ -181,7 +181,7 @@ def _last_fit_rail(monkeypatch, tmp_path, execute):
     logs.mkdir()
     ctx = _ctx(drive_logs=logs, llm=LLMClient(api_key="unused"), active_model="openai/gpt-test")
     ctx.messages = [dict(message) for message in _MESSAGES]
-    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile(None), root_cap_usd=50.0)
+    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=50.0)
     with usage_accounting.usage_scope(usage_accounting.UsageScope(
         drive_root=tmp_path, task_id="task1", root_task_id="task1",
     )):
@@ -315,9 +315,11 @@ def test_the_budget_probe_prices_the_reply_the_window_leaves(monkeypatch, tmp_pa
     from tests.test_context_fit_v664 import _plan
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
-    monkeypatch.setattr("ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0})
+    monkeypatch.setattr("ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0})
     plan = replace(_plan(preferred=mode, window=128_000, known=True), initial_mode=mode)
-    owner_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, task_metadata={}, model_turn_state=None)
+    # The last-fit probe is an explicit profile's authored rail: the task carries that profile.
+    owner_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, task_metadata={}, model_turn_state=None,
+                                task_contract={"budget_profile": {"cost_hard_stop_pct": 50}})
     priced = []
 
     def fits(**kwargs):
@@ -332,7 +334,7 @@ def test_the_budget_probe_prices_the_reply_the_window_leaves(monkeypatch, tmp_pa
     messages = [{"role": "system", "content": "policy " * 2_000}, {"role": "user", "content": "wrap up " * 40_000}]
     ctx = _ctx(drive_logs=logs, llm=LLMClient(api_key="unused"), active_model=plan.model, task_type="task",
                tools=SimpleNamespace(_ctx=owner_ctx), messages=[dict(message) for message in messages], tool_schemas=_TOOLS)
-    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile(None), root_cap_usd=50.0)
+    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=50.0)
     with usage_accounting.usage_scope(usage_accounting.UsageScope(
         drive_root=tmp_path, task_id="task1", root_task_id="task1",
     )), pytest.raises(_Captured):

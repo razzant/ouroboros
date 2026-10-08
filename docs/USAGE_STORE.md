@@ -84,7 +84,10 @@ window rows through the `(category, ts_last)` and root indexes. Terminal
 maintenance takes recovery candidates from the open-set index and projection
 candidates from `Txn.dirty_owners()`. After an addressed projection succeeds or
 is equal, `ack_dirty_owner(owner_id, revision)` removes only that revision; a
-new receipt, failure, missing result or live ownership keeps the debt.
+new receipt, failure, missing result or live ownership keeps the debt. A
+missing result is one `stat` before the ownership read: its exact revision
+stays, so a result that lands after the last receipt (child copyback, a body
+restored from quarantine) is projected on a later pass without a new receipt.
 
 ## 5. Lock tiers
 
@@ -186,3 +189,6 @@ orphan accusation.
   name lock is per host).
 - Result-only edits do not dirty money: ordinary receipts maintain projection debt;
   a result-only accounting repair belongs to explicit repair/import.
+- An owner whose result never appears stays in `dirty_owners` and costs one
+  `stat` per maintenance pass; absence is never acknowledged, so only a
+  projection (or that explicit repair) retires it.

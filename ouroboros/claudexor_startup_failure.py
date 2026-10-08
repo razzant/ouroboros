@@ -110,22 +110,24 @@ class ExitFact:
 def classify_startup_failure(log_interval: bytes, exit_status: ExitFact) -> StartupFailureClass:
     """Name the child's terminal refusal from its OWN log interval (diagnostic only).
 
-    A still-running child has no failure to classify. Otherwise the marker that
-    appears LAST in the interval wins: the refusal or crash banner is the last
-    thing the exiting process wrote, so an earlier unrelated line cannot
-    mislabel it. No marker = ``unclassified`` — never a guess.
+    Engine refusals exit with code 1; V8 banners belong to other abnormal exits.
+    Only the last marker in the matching class wins: a shared log may contain
+    later refusals from other starts. No matching marker = ``unclassified``.
     """
-    if not exit_status.exited:
+    if not exit_status.exited or exit_status.exit_code == 0:
         return StartupFailureClass.UNCLASSIFIED
+    engine_refusal = exit_status.exit_code == 1
     best, best_offset = StartupFailureClass.UNCLASSIFIED, -1
     for kind, markers in _MARKERS:
+        if (kind is StartupFailureClass.HEAP_EXHAUSTED) == engine_refusal:
+            continue
         for marker in markers:
             offset = log_interval.rfind(marker)
             if offset > best_offset:
                 best, best_offset = kind, offset
     offset = 0
     for line in log_interval.splitlines(keepends=True):  # the general V8 form, any spelling
-        if offset > best_offset and all(half in line for half in _HEAP_LINE_PAIR):
+        if not engine_refusal and offset > best_offset and all(half in line for half in _HEAP_LINE_PAIR):
             best, best_offset = StartupFailureClass.HEAP_EXHAUSTED, offset
         offset += len(line)
     return best

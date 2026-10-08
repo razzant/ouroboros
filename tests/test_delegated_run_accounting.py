@@ -160,7 +160,7 @@ def test_settlement_reads_the_harnesss_own_spend_field(tmp_path, monkeypatch):
     row = next(r for r in rows if r.get("kind") == "subscription_session")
     assert row["cost_usd"] == 4.10, "the harness's reported spend must reach the ledger"
     assert row["cost_final"] is True
-    assert retired == ["prj-ours"], "a registration we created is retired on settle"
+    assert retired == [], "settlement keeps the registration for the owner's continuation"
 
 
 def test_d29_applied_credential_profile_reaches_the_durable_record(tmp_path, monkeypatch):
@@ -617,6 +617,7 @@ def test_a_failed_ledger_write_leaves_the_session_retryable(tmp_path, monkeypatc
     def _boom(*a, **k):
         raise ua.UsageAccountingError("usage accounting lock unavailable")
 
+    record_session = ua.record_subscription_session
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
     monkeypatch.setattr(ua, "record_subscription_session", _boom)
     delegate._CUSTODY.clear()
@@ -630,8 +631,11 @@ def test_a_failed_ledger_write_leaves_the_session_retryable(tmp_path, monkeypatc
 
     json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
     assert custody.settled is False, "a lost write must stay retryable"
-    # Retirement is INDEPENDENT of the ledger write: the round-2 commit claimed
-    # this while the fixture owned no project, so deleting the call stayed
-    # green — a leak per failed settle, and a halted run never settles again.
-    assert retired == ["prj-ours"], "owned registration retired even on failure"
+    assert retired == [], "failed accounting must preserve the continuation's project"
+    monkeypatch.setattr(ua, "record_subscription_session", record_session)
+    json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    assert custody.settled is True
+    sessions = [row for row in ledger_rows(tmp_path) if row.get("kind") == "subscription_session"]
+    assert len(sessions) == 1 and sessions[0]["cost_final"] is True
+    assert retired == [], "successful retry still defers retirement to the owner-line sweep"
     delegate._CUSTODY.clear()

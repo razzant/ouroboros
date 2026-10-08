@@ -124,10 +124,14 @@ def test_public_api_is_stable():
 def test_budget_profile_frozen_key_set():
     """§11.1 additive ABI pin (v6.56.0): the normalized budget_profile key set.
 
-    ``cost_hard_stop_pct`` is the additive in-task cost hard-stop knob
-    (None -> historical 50%-of-remaining stop; 0 -> no in-task stop, never a
-    $0 ceiling). Removing or renaming any key here is a deliberate ABI break.
+    ``cost_hard_stop_pct`` is the additive in-task cost hard-stop knob of an
+    EXPLICIT experiment profile. The key and its accepted inputs are frozen; the
+    meaning of None changed by owner decision 2026-10-07 (#1128): None is no
+    explicit stop — not the old 50%-of-remaining default — and 0 stays the
+    explicit no-stop bench contract, never a $0 ceiling. Removing or renaming
+    any key here is a deliberate ABI break.
     """
+    from ouroboros import task_pacing
     from ouroboros.contracts.task_contract import normalize_budget_profile
 
     profile = normalize_budget_profile(None)
@@ -141,6 +145,11 @@ def test_budget_profile_frozen_key_set():
     assert profile["cost_hard_stop_pct"] is None
     assert normalize_budget_profile({"cost_hard_stop_pct": 0})["cost_hard_stop_pct"] == 0
     assert normalize_budget_profile({"cost_hard_stop_pct": "37"})["cost_hard_stop_pct"] == 37
+    # The semantic half of the pin: None resolves to no stop, explicit 37 to its authored share.
+    ordinary = task_pacing.resolve_cost_ceiling(100.0, profile, root_cap_usd=400.0)
+    assert (ordinary.state, ordinary.basis) == ("disabled", task_pacing.COST_BASIS_NO_DEFAULT_STOP)
+    authored = task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile({"cost_hard_stop_pct": "37"}))
+    assert (authored.state, authored.ceiling_usd) == ("active", 37.0)
 
 
 def test_task_contract_preserves_protected_artifact_policy():

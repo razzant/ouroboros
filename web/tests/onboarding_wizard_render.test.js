@@ -68,6 +68,12 @@ function inertDocument() {
         if (!byId.has(id)) byId.set(id, inertElement());
         return byId.get(id);
     };
+    const localModes = BOOTSTRAP.contract.localRoutingModes.map(({ value }) => {
+        const button = inertElement();
+        button.getAttribute = (key) => key === 'data-local-mode' ? value : null;
+        return button;
+    });
+    doc.getElementById('root').querySelectorAll = (selector) => selector === '[data-local-mode]' ? localModes : [];
     doc.createElement = () => inertElement();
     doc.createTextNode = (text) => ({ textContent: String(text) });
     doc.createDocumentFragment = () => inertElement();
@@ -447,3 +453,165 @@ test('a staged language the gateway refuses for good does not hold the finished 
         console.warn = warn;
     }
 });
+
+// PR #1560: walk the real wizard from Accounts to the completion POST. A fresh Z.ai-only
+// setup saves the provider's image-capable Vision; an owner's edit and an existing
+// install's saved value, blank included, are what gets saved instead.
+async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, revisit = false,
+    localMode = '', revisitInputs = {}, revisitLocalMode = '', shortcut = false, previews = [] } = {}) {
+    const posted = [];
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    let connected = false;
+    const fetch = async (url, init = {}) => {
+        let body = {};
+        if (String(url) === '/api/onboarding/complete') {
+            posted.push(JSON.parse(init.body));
+            body = { ok: true, runtime_mode: 'advanced', restart_required: false };
+        } else if (String(url) === '/api/onboarding/subagents/preview') {
+            const payload = JSON.parse(init.body);
+            previews.push(payload);
+            // An API-only draft: the server proposes no model settings, only Main's reviewers.
+            const route = { kind: 'api_chat', target_id: JSON.parse(init.body).OUROBOROS_MODEL };
+            body = { ok: true, model_settings: {}, available_subagents: { enabled: true, items: [] },
+                reviewer_slots: JSON.stringify({ triad: [{ slot_id: 'triad_1', route }], scope: [{ slot_id: 'scope_1', route }], advisory: { enabled: true, route } }) };
+            body.model_settings = Object.fromEntries(Object.keys(subscription.preview.model_settings).map((key) => [key, payload[key]]));
+        } else if (String(url) === '/api/claudexor/status') {
+            body = { ...subscription.status, profiles: { ...subscription.status.profiles,
+                profiles: connected ? subscription.status.profiles.profiles : [] } };
+        } else if (String(url) === '/api/model-catalog') {
+            body = subscription.catalog;
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const location = { origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding', replace() {} };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    await withWizard(bootstrap, query, async ({ doc }) => {
+        const type = (values) => Object.entries(values).forEach(([id, value]) => {
+            const input = doc.getElementById(id);
+            input.value = value;
+            input.fire('input');
+        });
+        const click = async (id) => { doc.getElementById(id).fire('click'); await settle(); };
+        const routeLocal = (mode) => {
+            if (mode) doc.getElementById('root').querySelectorAll('[data-local-mode]')
+                .find((button) => button.getAttribute('data-local-mode') === mode).fire('click');
+        };
+        type(inputs);
+        routeLocal(localMode);
+        await click('next-btn');   // Accounts → Models.
+        type(models);
+        if (revisit) {
+            await click('back-btn');
+            if (shortcut) {
+                connected = true;
+                await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
+                await settle();
+                assert.equal(doc.getElementById('quick-start-btn').hidden, false);
+            }
+            type(revisitInputs);
+            routeLocal(revisitLocalMode);
+            await click(shortcut ? 'quick-start-btn' : 'next-btn');
+        }
+        for (let step = 0; step < (shortcut ? 1 : 4); step += 1) await click('next-btn');   // … → Start Ouroboros.
+    }, { fetch, location });
+    assert.equal(posted.length, 1, 'the walk reached the completion POST');
+    return posted[0];
+}
+
+const ZAI_KEY = 'zai-test-key-not-a-secret';
+const FRESH = { ...BOOTSTRAP, freshInstall: true };
+
+for (const plan of ['', 'payg', 'coding']) {
+    test(`a fresh Z.ai-only setup (plan '${plan}') saves the image-capable Vision default`, async () => {
+        const body = await finishFromAccounts(FRESH, `zai-fresh-${plan}`, { inputs: { 'zai-key': ZAI_KEY, 'zai-plan': plan } });
+        assert.deepEqual([body.ZAI_API_KEY, body.ZAI_PLAN, body.OUROBOROS_MODEL, body.OUROBOROS_MODEL_VISION],
+            [ZAI_KEY, plan, 'zai::glm-5.3', BOOTSTRAP.modelDefaults.zai.vision]);
+        assert.equal(BOOTSTRAP.modelDefaults.zai.vision, 'zai::glm-5.3-flash');
+    });
+}
+
+test('an owner who clears or replaces the recommended Vision keeps that choice across Back/Next', async () => {
+    for (const value of ['', 'zai::glm-ocr']) {
+        const body = await finishFromAccounts(FRESH, `zai-owner-${value || 'cleared'}`,
+            { inputs: { 'zai-key': ZAI_KEY }, models: { 'vision-model': value }, revisit: true });
+        assert.equal(body.OUROBOROS_MODEL_VISION, value);
+    }
+});
+
+test('a reopened wizard saves an existing install\'s Vision as it was, blank or custom', async () => {
+    for (const saved of ['', 'zai::glm-ocr']) {
+        const initialState = { ...BOOTSTRAP.initialState, zaiKey: BOOTSTRAP.secretPlaceholder, mainModel: 'zai::glm-5.3',
+            lightModel: 'zai::glm-5.3-flash', fallbackModel: 'zai::glm-5.3-flash', visionModel: saved };
+        const body = await finishFromAccounts({ ...BOOTSTRAP, freshInstall: false, initialState }, `zai-existing-${saved || 'blank'}`);
+        assert.equal(body.OUROBOROS_MODEL_VISION, saved);
+    }
+});
+
+test('the Z.ai Vision default stays inside a Z.ai-only setup', async () => {
+    for (const [query, inputs, models] of [
+        ['openrouter', { 'zai-key': ZAI_KEY, 'openrouter-key': 'sk-or-v1-test-not-a-secret' }, {}],
+        ['direct-multi', { 'zai-key': ZAI_KEY, 'openai-key': 'sk-openai-test-not-a-secret' }, { 'main-model': 'zai::glm-5.3' }],
+        ['local-only', { 'local-source': '/models/local-test.gguf' }, {}],
+    ]) {
+        const body = await finishFromAccounts(FRESH, `zai-boundary-${query}`, { inputs, models });
+        assert.equal(body.OUROBOROS_MODEL_VISION, '', query);
+    }
+});
+
+test('fresh local Main with a Z.ai key has no remote Vision suggestion in either input order', async () => {
+    for (const inputs of [
+        { 'zai-key': ZAI_KEY, 'local-source': '/models/local-test.gguf' },
+        { 'local-source': '/models/local-test.gguf', 'zai-key': ZAI_KEY },
+    ]) {
+        const body = await finishFromAccounts(FRESH, `zai-local-${Object.keys(inputs)[0]}`, { inputs, localMode: 'all' });
+        assert.equal(body.LOCAL_ROUTING_MODE, 'all');
+        assert.equal(body.OUROBOROS_MODEL_VISION, '');
+    }
+});
+
+test('moving Main local withdraws only the generated Vision, including after a Main edit', async () => {
+    for (const [name, models, expected] of [
+        ['untouched', {}, ''],
+        ['main-edit', { 'main-model': 'zai::owner-main' }, ''],
+        ['clear', { 'vision-model': '' }, ''],
+        ['custom', { 'vision-model': 'zai::glm-ocr' }, 'zai::glm-ocr'],
+        ['explicit-default', { 'vision-model': 'zai::glm-5.3-flash' }, 'zai::glm-5.3-flash'],
+    ]) {
+        const body = await finishFromAccounts(FRESH, `zai-remote-local-${name}`, {
+            inputs: { 'zai-key': ZAI_KEY }, models, revisit: true,
+            revisitInputs: { 'local-source': '/models/local-test.gguf' }, revisitLocalMode: 'all',
+        });
+        assert.equal(body.LOCAL_ROUTING_MODE, 'all');
+        assert.equal(body.OUROBOROS_MODEL_VISION, expected, name);
+        if (name === 'main-edit') assert.equal(body.OUROBOROS_MODEL, 'zai::owner-main');
+    }
+});
+
+test('local fallback still permits the remote Main Vision suggestion', async () => {
+    const body = await finishFromAccounts(FRESH, 'zai-local-fallback', {
+        inputs: { 'zai-key': ZAI_KEY, 'local-source': '/models/local-test.gguf' }, localMode: 'fallback',
+    });
+    assert.equal(body.LOCAL_ROUTING_MODE, 'fallback');
+    assert.equal(body.OUROBOROS_MODEL_VISION, 'zai::glm-5.3-flash');
+});
+
+for (const [name, models, expected] of [
+    ['generated', {}, ''],
+    ['main-edited', { 'main-model': 'zai::owner-main' }, ''],
+    ['deliberate-Flash', { 'vision-model': 'zai::glm-5.3-flash' }, 'zai::glm-5.3-flash'],
+]) {
+    test(`Review & start reconciles ${name} Vision before preview when Main moves local`, async () => {
+        const previews = [];
+        const body = await finishFromAccounts(FRESH, `zai-shortcut-${name}`, {
+            inputs: { 'zai-key': ZAI_KEY }, models, revisit: true, shortcut: true, previews,
+            revisitInputs: { 'local-source': '/models/local-test.gguf' }, revisitLocalMode: 'all',
+        });
+        const localPreviews = previews.filter((draft) => draft.LOCAL_ROUTING_MODE === 'all');
+        assert.ok(localPreviews.length > 0, 'the shortcut requested a preview of the local draft');
+        assert.ok(localPreviews.every((draft) => draft.OUROBOROS_MODEL_VISION === expected));
+        assert.equal(body.subscriptionsConnected, true);
+        assert.equal(body.LOCAL_ROUTING_MODE, 'all');
+        assert.equal(body.OUROBOROS_MODEL_VISION, expected);
+        if (name === 'main-edited') assert.equal(body.OUROBOROS_MODEL, 'zai::owner-main');
+    });
+}

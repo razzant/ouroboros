@@ -541,3 +541,226 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     page.unroute('**/api/model-catalog')
     assert page.locator('#next-btn').is_disabled()
     assert page.locator('#quick-start-btn').is_hidden()
+
+
+def _zai_key(page, plan):
+    page.locator('[data-collapse="api-access"] > summary').click()
+    page.locator('[data-collapse="more-providers"] > summary').click()
+    page.locator('#zai-key').fill('zai-fixture-credential')
+    page.locator('#zai-plan').fill(plan)
+
+
+@pytest.mark.parametrize('plan, owner_vision', [('', None), ('coding', None), ('payg', ''), ('payg', 'zai::glm-ocr')])
+def test_fresh_zai_setup_proposes_the_image_capable_vision_the_owner_may_change(subscription_ui, plan, owner_vision):
+    """PR #1560: a fresh Z.ai-only setup shows and saves Flash in Vision; an owner's
+    clear or replacement survives Back/Next and is what gets saved."""
+    ui, page = subscription_ui, subscription_ui['page']
+    ui['fixture']['status']['profiles']['profiles'] = []
+    page.goto(ui['url'] + '/onboarding')
+    _zai_key(page, plan)
+    page.click('#next-btn')
+    vision = page.locator('[data-model-role="vision"] [data-model-role-model]')
+    vision.wait_for()
+    assert vision.input_value().endswith('glm-5.3-flash')
+    capture(page, f'zai-models-{plan or "default"}')
+    if owner_vision is not None:
+        vision.fill(owner_vision)
+        page.click('#back-btn')
+        page.click('#next-btn')
+        assert vision.input_value() == owner_vision.rpartition('::')[2]   # the source picker holds "zai"
+    for _ in range(3):
+        page.click('#next-btn')
+    page.wait_for_selector('.summary-card')
+    capture(page, f'zai-summary-{plan or "default"}-{"owner" if owner_vision is not None else "default"}')
+    page.click('#next-btn')
+    page.wait_for_url(ui['url'] + '/')
+    body = [body for path, body in ui['posts'] if path == '/api/onboarding/complete'][0]
+    assert (body['ZAI_API_KEY'], body['ZAI_PLAN'], body['OUROBOROS_MODEL']) == ('zai-fixture-credential', plan, 'zai::glm-5.3')
+    assert body['OUROBOROS_MODEL_VISION'] == ('zai::glm-5.3-flash' if owner_vision is None else owner_vision)
+
+
+def test_a_connected_subscription_keeps_the_zai_vision_default_out(subscription_ui):
+    """The subscription path owns model selection: a Z.ai key beside it adds no Vision default."""
+    ui, page = subscription_ui, subscription_ui['page']
+    page.goto(ui['url'] + '/onboarding')
+    page.wait_for_selector('#next-btn:not([disabled])')
+    _zai_key(page, '')
+    page.click('#next-btn')
+    page.wait_for_function("() => document.querySelector('[data-model-role=\"main\"] [data-model-role-model]')?.value === 'gpt-test'")
+    assert page.locator('[data-model-role="vision"] [data-model-role-model]').input_value() == ''
+    capture(page, 'zai-with-subscription-models')
+
+
+@pytest.mark.parametrize('scenario, expected_vision', [
+    ('key-first', ''), ('local-first', ''), ('remote-default', ''),
+    ('remote-main-edit', ''), ('remote-clear', ''),
+    ('remote-custom', 'zai::glm-ocr'), ('remote-explicit-default', 'zai::glm-5.3-flash'),
+    ('local-fallback', 'zai::glm-5.3-flash'),
+])
+def test_local_main_with_zai_defaults_only_untouched_vision(subscription_ui, monkeypatch, scenario, expected_vision):
+    ui, page = subscription_ui, subscription_ui['page']
+    ui['fixture']['status']['profiles']['profiles'] = []
+    page.goto(ui['url'] + '/onboarding')
+
+    def disclosure(name):
+        details = page.locator(f'[data-collapse="{name}"]')
+        if not details.evaluate('el => el.open'):
+            details.locator(':scope > summary').click()
+
+    def key():
+        disclosure('api-access')
+        disclosure('more-providers')
+        page.locator('#zai-key').fill('zai-fixture-credential')
+
+    def local():
+        disclosure('api-access')
+        disclosure('local-model')
+        page.locator('#local-source').fill('/models/local-test.gguf')
+        mode = 'fallback' if scenario == 'local-fallback' else 'all'
+        page.locator(f'[data-local-mode="{mode}"]').click()
+
+    vision = page.locator('[data-model-role="vision"] [data-model-role-model]')
+    if scenario == 'local-first':
+        local()
+        key()
+    else:
+        key()
+        if scenario.startswith('remote-'):
+            page.click('#next-btn')
+            assert vision.input_value() == 'glm-5.3-flash'
+            if scenario == 'remote-main-edit':
+                page.locator('[data-model-role="main"] [data-model-role-model]').fill('owner-main')
+            elif scenario in {'remote-clear', 'remote-custom', 'remote-explicit-default'}:
+                # Even an explicit choice equal to the suggestion belongs to the owner.
+                vision.fill(expected_vision.rpartition('::')[2])
+            page.click('#back-btn')
+        local()
+    page.click('#next-btn')
+    capture(page, f'local-zai-models-{scenario}')
+    assert vision.input_value() == expected_vision.rpartition('::')[2]
+    for _ in range(3):
+        page.click('#next-btn')
+    page.wait_for_selector('.summary-card')
+    capture(page, f'local-zai-summary-{scenario}')
+    page.click('#next-btn')
+    page.wait_for_url(ui['url'] + '/')
+    writes = [body for path, body in ui['posts'] if path == '/api/onboarding/complete']
+    assert len(writes) == 1
+    body = writes[0]
+    assert body['OUROBOROS_MODEL_VISION'] == expected_vision
+    assert body['LOCAL_ROUTING_MODE'] == ('fallback' if scenario == 'local-fallback' else 'all')
+    if scenario == 'remote-main-edit':
+        assert body['OUROBOROS_MODEL'] == 'zai::owner-main'
+    if not expected_vision:
+        # Continue the actual browser draft through the validator and caption
+        # consumer: a present Z.ai key must not turn local Main into a paid call.
+        from ouroboros.llm import LLMClient
+        from ouroboros.settings_setup_contract import validate_setup_payload
+        from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+        settings, error = validate_setup_payload(body, {})
+        assert not error
+        assert settings['USE_LOCAL_MAIN'] is True
+        for key, value in settings.items():
+            if isinstance(value, (str, bool, int, float)):
+                monkeypatch.setenv(key, str(value))
+        monkeypatch.setenv('OUROBOROS_IMAGE_INPUT_MODE', 'caption')
+        calls = []
+        monkeypatch.setattr(LLMClient, 'vision_query', lambda *_a, **_k: calls.append(_k))
+        message = [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {
+            'url': 'data:image/png;base64,aW1hZ2U='}}]}]
+        result = prepare_messages_for_send(message, routing=VisionRoutingContext(
+            settings['OUROBOROS_MODEL'], LLMClient(), {}, use_local=settings['USE_LOCAL_MAIN']))
+        assert calls == []
+        assert result[0]['content'][0]['text'] == (
+            '[image omitted: our local llama.cpp transport lane cannot carry images; no caption route is available]')
+
+
+@pytest.mark.parametrize('choice', ['generated', 'main-edited', 'deliberate-Flash'])
+def test_review_shortcut_reconciles_local_vision_before_preview(
+        subscription_ui, onboarding, monkeypatch, record_property, choice):
+    """The shortcut must reconcile the same draft as Next, before preview or save."""
+    import httpx
+    from ouroboros import net_transport
+    from ouroboros.llm import LLMClient
+    from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+    ui, page = subscription_ui, subscription_ui['page']
+    profiles = ui['fixture']['status']['profiles']['profiles']
+    ui['fixture']['status']['profiles']['profiles'] = []
+    ui['backend'].update(preview_client=onboarding.client, client=onboarding.client)
+    page.goto(ui['url'] + '/onboarding')
+    _zai_key(page, 'coding')
+    page.click('#next-btn')
+    vision = page.locator('[data-model-role="vision"] [data-model-role-model]')
+    assert vision.input_value() == 'glm-5.3-flash'
+    if choice == 'deliberate-Flash':
+        vision.fill('glm-5.3-flash')
+    elif choice == 'main-edited':
+        page.locator('[data-model-role="main"] [data-model-role-model]').fill('owner-main')
+    capture(page, f'shortcut-initial-vision-{choice}')
+    page.click('#back-btn')
+    # Observe a newly connected Codex account without a live login or daemon.
+    ui['fixture']['status']['profiles']['profiles'] = profiles
+    onboarding.calls['snapshot_payload'] = {
+        **LIVE_SNAPSHOT, 'harnesses': [LIVE_SNAPSHOT['harnesses'][1]],
+        'profiles': {'harnessAccounts': [_profile_account('codex', 'personal')],
+                     'profiles': [_profile('codex', 'personal')]},
+        'model_catalog': ui['fixture']['catalog']['items'],
+    }
+    page.evaluate("async () => (await import('/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+    page.wait_for_selector('#quick-start-btn:not([hidden])')
+    page.wait_for_selector('#onboarding-access-retry:not([disabled])')
+    page.locator('[data-collapse="local-model"] > summary').click()
+    page.locator('#local-source').fill('/models/local-test.gguf')
+    page.locator('[data-local-mode="all"]').click()
+    capture(page, f'shortcut-local-accounts-{choice}')
+    page.click('#quick-start-btn')
+    page.wait_for_selector('.summary-card')
+    summary = page.locator('.summary-kv').filter(has=page.get_by_text('Vision', exact=True)).inner_text()
+    capture(page, f'shortcut-summary-{choice}')
+    page.click('#next-btn')
+    page.wait_for_url(ui['url'] + '/')
+    writes = [body for path, body in ui['posts'] if path == '/api/onboarding/complete']
+    assert len(writes) == 1
+    saved = onboarding.saved()
+    assert saved['USE_LOCAL_MAIN'] is True
+    for key, value in saved.items():
+        if isinstance(value, (str, bool, int, float)):
+            monkeypatch.setenv(key, str(value))
+    monkeypatch.setenv('OUROBOROS_IMAGE_INPUT_MODE', 'caption')
+    wire = []
+
+    def answer(request):
+        wire.append({'url': str(request.url), 'body': json.loads(request.content)})
+        return httpx.Response(200, json={
+            'id': 'shortcut-test', 'object': 'chat.completion', 'created': 0, 'model': 'glm-5.3-flash',
+            'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'Dark red'}}],
+            'usage': {'prompt_tokens': 9, 'completion_tokens': 2, 'total_tokens': 11},
+        })
+
+    monkeypatch.setattr(net_transport, 'remote_httpx_transport', lambda *_a, **_k: httpx.MockTransport(answer))
+    image = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,aW1hZ2U='}}
+    result = prepare_messages_for_send([{'role': 'user', 'content': [image]}], routing=VisionRoutingContext(
+        saved['OUROBOROS_MODEL'], LLMClient(), {}, use_local=saved['USE_LOCAL_MAIN']))
+    record_property('caption_consumer', json.dumps({'vision': saved['OUROBOROS_MODEL_VISION'], 'wire': wire, 'result': result}))
+    expected = 'zai::glm-5.3-flash' if choice == 'deliberate-Flash' else ''
+    local_previews = [body for path, body in ui['posts']
+                      if path == '/api/onboarding/subagents/preview' and body.get('LOCAL_ROUTING_MODE') == 'all']
+    assert local_previews and all(body['OUROBOROS_MODEL_VISION'] == expected for body in local_previews)
+    assert writes[0]['subscriptionsConnected'] is True
+    assert writes[0]['OUROBOROS_MODEL_VISION'] == saved['OUROBOROS_MODEL_VISION'] == expected
+    if choice == 'main-edited':
+        assert saved['OUROBOROS_MODEL'] == 'zai::owner-main'
+    if expected:
+        assert 'glm-5.3-flash' in summary and 'Uses Main' not in summary
+        assert len(wire) == 1
+        assert wire[0]['url'] == 'https://api.z.ai/api/coding/paas/v4/chat/completions'
+        assert wire[0]['body']['model'] == 'glm-5.3-flash'
+        assert image in wire[0]['body']['messages'][0]['content']
+        assert result[0]['content'][0]['text'] == '[image caption: Dark red]'
+    else:
+        assert 'Uses Main' in summary
+        assert wire == []
+        assert result[0]['content'][0]['text'] == (
+            '[image omitted: our local llama.cpp transport lane cannot carry images; no caption route is available]')

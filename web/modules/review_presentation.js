@@ -112,12 +112,12 @@ function reviewTone(state, verdict, lifecycleStatus = '') {
         : statusTone(state, verdict);
 }
 
-function lifecycleMeta(status) {
+export function lifecycleMeta(status) {
     const token = text(status).toLowerCase();
     return lifecycleFailure(token) ? `lifecycle ${token}` : '';
 }
 
-function hasSemanticVerdict(verdict) {
+export function hasSemanticVerdict(verdict) {
     const token = text(verdict).toLowerCase();
     return Boolean(token)
         && !ACTIVE_STATES.has(token)

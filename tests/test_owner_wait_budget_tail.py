@@ -8,7 +8,7 @@ import pytest
 from ouroboros import budget_pause, loop, owner_wait, pricing, task_pacing, usage_accounting as accounting
 from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.owner_mailbox import write_owner_message
-from tests.test_owner_wait_cold_loop import cold_registry
+from tests.test_owner_wait_cold_loop import EXPLICIT, cold_registry
 from tests.test_loop_transport_wait import _loop_kwargs
 
 
@@ -65,12 +65,15 @@ def test_cold_grant_checks_saved_budget_before_ordinary_dispatch(tmp_path, monke
     monkeypatch.setattr(loop, "_dispatch_round_model", ordinary)
     monkeypatch.setattr(loop, "_call_forced_model_once", forced)
     with accounting.usage_scope(scope):
-        ceiling = task_pacing.resolve_cost_ceiling(200, normalize_budget_profile(None), root_cap_usd=50)
+        # An explicit experiment profile's authored stop ($50 cap minus its margin): the
+        # saved threshold a cold grant must re-check before ordinary dispatch.
+        ceiling = task_pacing.resolve_cost_ceiling(200, normalize_budget_profile(EXPLICIT["budget_profile"]),
+                                                   root_cap_usd=50)
         with accounting.usage_scope(replace(scope, task_id="prior-child", parent_task_id="t-wait")):
             settle(46.9)
 
         def registry():
-            tools = cold_registry(tmp_path, monkeypatch, ceiling)
+            tools = cold_registry(tmp_path, monkeypatch, ceiling, EXPLICIT)
             tools._ctx._owner_wait_requested = ""
             tools._ctx.current_chat_id, tools._ctx.current_task_type = 1, "task"
             tools._ctx.task_model_override = "same-model"

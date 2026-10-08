@@ -712,10 +712,10 @@ def review_wave_budget_block(
         return None
     fence, remedy = review_wave_binding_fence(admission)
     return (
-        "review wave declined before dispatch: estimated reviewer-wave cost "
-        f"~${admission.get('estimated_wave_usd')} exceeds the remaining budget "
-        f"${admission.get('remaining_usd')} ({fence}). No reviewer was called; the skill "
-        f"stays pending. Wait for in-flight attempts to settle, {remedy}, or re-run the review in a fresh task."
+        f"review wave declined before dispatch: known spend has reached the {fence} "
+        f"(remaining ${admission.get('remaining_usd')}; the wave was estimated at "
+        f"~${admission.get('estimated_wave_usd')}). No reviewer was called; the skill "
+        f"stays pending. {remedy[:1].upper() + remedy[1:]}, or re-run the review in a fresh task."
     )
 
 

@@ -370,6 +370,9 @@ def _cleanup_recorded_server_group_for_pid(pid: int, reason: str = "agent_exit")
 def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     """Start server.py as the managed agent subprocess."""
     global _agent_proc, _agent_job
+    # Stdlib-only, so it loads even when the server's own imports are broken; imported
+    # before the spawn, because an undrained pipe would block the server.
+    from ouroboros.process_logging import copy_capped_output
 
     settings = _load_settings()
     _apply_settings_to_env(settings)
@@ -459,52 +462,9 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
         log.info("Agent pid %d assigned to Windows Job Object", proc.pid)
 
     _write_server_process_record(proc, port=port, server_py=server_py, server_host_source=host_source)
-
-    def _stream_output() -> None:
-        # Match server.log rotation; rotation failure leaves streaming alive.
-        max_bytes = 2 * 1024 * 1024
-        backups = 3
-
-        def _rotate(log_path: pathlib.Path) -> None:
-            try:
-                for index in range(backups - 1, 0, -1):
-                    older = log_path.with_name(f"{log_path.name}.{index}")
-                    if older.exists():
-                        os.replace(older, log_path.with_name(f"{log_path.name}.{index + 1}"))
-                if log_path.exists():
-                    os.replace(log_path, log_path.with_name(f"{log_path.name}.1"))
-            except OSError:
-                pass
-
-        log_path = DATA_DIR / "logs" / "agent_stdout.log"
-        try:
-            written = log_path.stat().st_size if log_path.exists() else 0
-        except OSError:
-            written = 0
-        handle = None
-        try:
-            handle = open(log_path, "a", encoding="utf-8")
-            for line in iter(proc.stdout.readline, b""):
-                decoded = line.decode("utf-8", errors="replace")
-                if written + len(decoded) > max_bytes:
-                    handle.close()
-                    handle = None
-                    _rotate(log_path)
-                    handle = open(log_path, "a", encoding="utf-8")
-                    written = 0
-                handle.write(decoded)
-                handle.flush()
-                written += len(decoded)
-        except Exception:
-            pass
-        finally:
-            if handle is not None:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-
-    threading.Thread(target=_stream_output, daemon=True).start()
+    # The server blocks once its output pipe fills, so the copy drains until the pipe ends.
+    threading.Thread(target=copy_capped_output, args=(proc.stdout, DATA_DIR / "logs" / "agent_stdout.log"),
+                     kwargs={"report": log}, name="agent-output-copy", daemon=True).start()
     return proc
 
 

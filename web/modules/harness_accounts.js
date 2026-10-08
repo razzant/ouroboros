@@ -384,6 +384,47 @@ function facetGapNames(reads) {
 }
 
 export function daemonStatusLine(payload, { checking = false, reads = null } = {}) {
+    return withEngineFacts(daemonBaseStatusLine(payload, { checking, reads }), payload);
+}
+
+// The engine's last stop and measured heap ride on whichever line the banner
+// finally shows: a refused facet read must not hide them (it is exactly when
+// the daemon misbehaves that they matter).
+function withEngineFacts(line, payload) {
+    const facts = engineFactsPhrase(payload);
+    if (!line || !facts || line.text.includes(facts)) return line;
+    return { ...line, text: `${line.text} · ${facts}` };
+}
+
+function engineFactsPhrase(payload) {
+    const daemon = payload?.daemon || {};
+    if (daemon.ownership_problem) return '';
+    const facts = [];
+    const exit = daemon.last_exit;
+    if (exit) {
+        const cause = String(exit.classification || 'unclassified').replaceAll('_', ' ');
+        const ending = exit.exit_signal != null ? ` (signal ${exit.exit_signal})`
+            : exit.exit_code != null ? ` (exit code ${exit.exit_code})` : '';
+        const phase = exit.phase === 'startup' ? ' during startup' : exit.phase ? ` while ${exit.phase}` : '';
+        const seen = typeof exit.observed_at === 'string' && exit.observed_at.length >= 16
+            ? `, seen ${exit.observed_at.slice(0, 16).replace('T', ' ')}${/(Z|[+-]00:?00)$/.test(exit.observed_at) ? ' UTC' : ''}` : '';
+        const when = exit.engine_version || seen ? ` · engine ${exit.engine_version || 'unknown'}${seen}` : '';
+        facts.push(`Last stop: ${cause}${phase}${ending}${when}`);
+    }
+    const memory = daemon.memory;
+    const measured = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const gib = (value) => (value / 2 ** 30).toFixed(1);
+    if (memory && measured(memory.heapLimitBytes)) {
+        if (measured(memory.heapUsedBytes)) {
+            facts.push(`Heap ${gib(memory.heapUsedBytes)} of ${gib(memory.heapLimitBytes)} GiB; headroom ${gib(memory.heapLimitBytes - memory.heapUsedBytes)} GiB`);
+        } else {
+            facts.push(`Heap limit ${gib(memory.heapLimitBytes)} GiB; use unknown`);
+        }
+    }
+    return facts.join(' · ');
+}
+
+function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) {
     const daemon = payload?.daemon || {};
     const runtime = daemon.runtime || {};
     const runtimeState = String(runtime.state || '');
@@ -456,18 +497,9 @@ export function daemonStatusLine(payload, { checking = false, reads = null } = {
         return { tone: 'muted', explainsUnread: true, text: 'No accounts connected yet. Connect installs Claudexor and starts Ouroboros’s own agent daemon automatically.' };
     }
     if (status === 'stale') {
-        // NOT a warning: the daemon is LAZY by design (the status read never
-        // spawns it), so "home exists, nothing answering" is the ordinary idle
-        // state, not a fault. Lead with what is true and what happens next; a
-        // genuine RUNTIME fault renders through the `error` branch above.
-        // Disclosed residual (both review lenses, 2026-08-08): `stale` is also
-        // what a CRASHED daemon lands in — the state machine cannot tell the two
-        // apart (the detail lives only in last_error, which the warn-toned line
-        // never showed either), so the only thing a crash loses here is the
-        // alarming tone. The sentence stays true for it: ensure_running restarts
-        // a dead daemon on the next login or delegated run, and a crash mid-run
-        // surfaces through that run's own typed failure, not this panel. Hence
-        // no "yet" — that word would claim it had never started.
+        // An idle owned home and an observed crash share this liveness state.
+        // daemonStatusLine appends any saved exit fact without changing tone;
+        // the next explicit wake or delegated run still owns restart policy.
         const version = runtime.version ? ` ${runtime.version}` : '';
         return { tone: 'muted', explainsUnread: true, text: `Claudexor${version} is installed; the agent daemon is not running. It starts automatically on the next login or delegated run.` };
     }
@@ -839,8 +871,8 @@ export function serviceBannerLine(store, { wakeError = '', wakeBusy = false } = 
     // directly printed "could not be read" and dropped it.
     const states = new Set(bad.map((facet) => reads[facet]));
     if (bad.length === 3 && states.size === 1) {
-        return faultOutranksReassurance(service,
-            store.unavailableNote(bad[0], { subject: 'agents, accounts and limits' }));
+        return withEngineFacts(faultOutranksReassurance(service,
+            store.unavailableNote(bad[0], { subject: 'agents, accounts and limits' })), store.snapshot);
     }
     // A PARTIAL gap: name EVERY facet that could not be read — one sentence per
     // distinct way they failed — and let the closing reassurance cover only the
@@ -870,7 +902,8 @@ export function serviceBannerLine(store, { wakeError = '', wakeBusy = false } = 
     // backend stamps `reads` per facet on every answer, so a mixed verdict is
     // an ordinary state — and a muted "some facets were never asked · the rest
     // read normally" must not swallow a runtime that needs repair.
-    return faultOutranksReassurance(service, { tone, text: `${sentences.join(' ')}${tail}` });
+    return withEngineFacts(faultOutranksReassurance(service,
+        { tone, text: `${sentences.join(' ')}${tail}` }), store.snapshot);
 }
 
 export async function removeAccount(harness, profileId, { fetchImpl = apiFetch } = {}) {

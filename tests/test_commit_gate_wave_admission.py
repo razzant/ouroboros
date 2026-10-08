@@ -1,14 +1,16 @@
-"""Commit-gate wave admission (owner decision 2026-09-05, answer 2 = A).
+"""Commit-gate wave admission (owner decision 2026-09-05, rebased on #1487).
 
 The scope reviewer — the only constitutionally blocking seat — reserves its
-budget FIRST, and the commit-gate wave (scope seats + triad seats) is admitted
-all-or-nothing against every fence the ledger enforces at reservation — the
-global TOTAL_BUDGET remainder, the task's current root and its original billing
-group — BEFORE any paid seat is dispatched. A wave that does not fit is a
-typed $0 pre-dispatch refusal naming the binding axis and the shortfall, never
-a half-dispatched panel (the 4 September paid run: two triad seats held the
-money, the third seat and the scope seat were refused mid-wave, and the commit
-blocked with ~$5 of the $8 fence never spent).
+budget FIRST. The commit-gate wave (scope seats + triad seats) is admitted while
+KNOWN spend is below every fence the ledger enforces at reservation — the global
+TOTAL_BUDGET, the task's current root and its original billing group — the
+reservation's own rule (owner Q4-A, 2026-10-03). The seats' summed reservation
+bounds are disclosed, never an earlier refusal: open holds of other in-flight
+attempts are exposure, not spending. A wave declined at admission (known spend
+already at a fence) is a typed $0 pre-dispatch refusal naming the binding axis.
+A fence reached mid-wave refuses the remaining seats at their own reservation,
+with truthful custody of what was sent (partial dispatch is accepted overshoot
+behaviour, not hidden).
 """
 
 from __future__ import annotations
@@ -64,6 +66,28 @@ class LedgerLLM:
         with self.lock:
             self.calls.append(model)
         return reply, {"prompt_tokens": 4, "completion_tokens": 2, "cost": 0.01}
+
+
+class PricedLedgerLLM(LedgerLLM):
+    """``LedgerLLM`` whose seats settle at chosen real prices."""
+
+    def __init__(self, costs, delays=None):
+        super().__init__(delays)
+        self.costs = dict(costs)
+
+    def chat(self, **kwargs):
+        model = kwargs["model"]
+        time.sleep(self.delays.get(model, 0.0))
+        reply = {"content": _scope_matrix() if model == SCOPE_MODEL else "[]"}
+        price = self.costs.get(model, 0.01)
+        ua.execute_physical_attempt(
+            ua.AttemptRequest(model=model, provider="test", reservation_usd=BOUNDS[model]),
+            lambda: reply,
+            extractor=lambda _r: ({"prompt_tokens": 4, "completion_tokens": 2}, price, True),
+        )
+        with self.lock:
+            self.calls.append(model)
+        return reply, {"prompt_tokens": 4, "completion_tokens": 2, "cost": price}
 
 
 @pytest.fixture
@@ -147,21 +171,36 @@ def test_fence_that_fits_the_whole_wave_dispatches_every_seat(gate, tmp_path, mo
     assert not [e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient"]
 
 
-def test_fence_that_fits_only_the_triad_refuses_the_wave_at_zero_dollars(gate, tmp_path, monkeypatch):
-    """Scope $3 + triad $1 + $1 = $5 against a $4 fence: the triad alone would
-    have fit (the 4 September failure shape), so the WHOLE wave is refused
-    before dispatch — no seat reserved, no ledger row, every seat typed $0."""
+def test_a_wave_larger_than_the_known_remainder_is_admitted_whole(gate, tmp_path, monkeypatch):
+    """Scope $3 + triad $1 + $1 = $5 of worst case against a $4 fence with $0 known:
+    the prospective sum is information, never an earlier refusal (#1487) — every seat
+    is dispatched and each settles at its real price."""
+    llm = LedgerLLM()
+    ctx, (review_err, scope_result, _reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=4.0)
+
+    assert review_err is None, review_err
+    assert scope_result.blocked is False and scope_result.status == "responded"
+    assert sorted(llm.calls) == sorted([SCOPE_MODEL, *TRIAD_MODELS])
+    assert sorted(row["state"] for row in _ledger(gate)) == ["settled"] * 3
+    assert not [e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient"]
+
+
+def test_known_spend_at_the_fence_declines_the_wave_at_zero_dollars(gate, tmp_path, monkeypatch):
+    """Known spend already at the $4 fence: the WHOLE wave is declined before dispatch —
+    no seat reserved, no new ledger row, every seat typed $0."""
+    _seed_settled(gate, fence=4.0, cost=4.0)
+    before = _ledger(gate)
     llm = LedgerLLM()
     ctx, (review_err, scope_result, block_reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=4.0)
 
-    assert llm.calls == [] and _ledger(gate) == []
+    assert llm.calls == [] and _ledger(gate) == before
     assert review_err and "commit-gate review wave declined before dispatch ($0 spent)" in review_err
-    assert "reservation upper bound $5.000000" in review_err
-    assert "per-task budget fence $4.000000" in review_err
-    assert "accounted=$0.000000 (of which $0.000000 is reserved by other in-flight attempts)" in review_err
-    assert "remaining=$4.000000, shortfall=$1.000000" in review_err
+    assert "Known spend has reached the per-task budget fence $4.000000" in review_err
+    assert "known spend=$4.000000 (plus $0.000000 of open holds, not counted)" in review_err
+    assert "remaining=$0.000000" in review_err
+    assert "reservation upper bound would have been $5.000000" in review_err
     # The root axis binds; the global axis is disclosed beside it with its own remainder.
-    assert "the global budget $100.000000 alone would leave $100.000000" in review_err
+    assert "the global budget $100.000000 alone would leave $96.000000" in review_err
     assert "raise the per-task budget (OUROBOROS_PER_TASK_COST_USD)" in review_err
     # Every seat is named with its own bound, scope first.
     assert review_err.index("scope_review:scope_slot_1 scope/model $3.000000") < review_err.index(
@@ -178,31 +217,27 @@ def test_fence_that_fits_only_the_triad_refuses_the_wave_at_zero_dollars(gate, t
     assert events[0]["seats"] == ["scope_review:scope_slot_1", "multi_model_review:slot_1",
                                   "multi_model_review:slot_2"]
     assert events[0]["slot_bounds"] == [3.0, 1.0, 1.0]
-    assert events[0]["binding_axis"] == "root" and events[0]["remaining_usd"] == 4.0
-    assert (events[0]["global_limit_usd"], events[0]["global_remaining_usd"]) == (100.0, 100.0)
+    assert events[0]["binding_axis"] == "root" and events[0]["remaining_usd"] == 0.0
+    assert (events[0]["global_limit_usd"], events[0]["global_remaining_usd"]) == (100.0, 96.0)
 
 
-def test_global_budget_that_does_not_fit_refuses_the_wave_before_any_seat_reserves(gate, tmp_path, monkeypatch):
-    """rc.14 audit point 2 (verified repro): root fence $10 fits the $5 wave, the
-    global TOTAL_BUDGET $100 has $4 left after $96 settled under ANOTHER root.
-    Before the fix admission read only the root axis, two seats reserved and
-    paid, and the ledger's global check — the FIRST one ``reserve_attempt``
-    runs — refused the third mid-wave. Now the wave is refused before any seat
-    reserves, and the refusal names the global axis and its own knob, never the
-    per-task fence the wave would have fit."""
+def test_global_known_spend_at_the_limit_declines_the_wave_before_any_seat_reserves(gate, tmp_path, monkeypatch):
+    """rc.14 audit point 2, on the known-spend rule: the root fence $10 has room, the
+    global TOTAL_BUDGET $100 is fully spent under ANOTHER root. The wave is declined
+    before any seat reserves, and the refusal names the global axis and its own knob,
+    never the per-task fence."""
     with ua.usage_scope(ua.UsageScope(drive_root=gate, task_id="other-root", root_task_id="other-root")):
         other = ua.reserve_attempt(ua.AttemptRequest(model="triad/a", provider="test", source="main"))
         ua.mark_dispatched(other)
-        ua.settle_attempt(other, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=96.0, cost_final=True)
+        ua.settle_attempt(other, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=100.0, cost_final=True)
     llm = LedgerLLM()
     ctx, (review_err, scope_result, block_reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=10.0)
 
     assert llm.calls == [] and len(_ledger(gate)) == 1  # the other root's attempt only (one current row)
     assert review_err and "commit-gate review wave declined before dispatch ($0 spent)" in review_err
-    assert "reservation upper bound $5.000000" in review_err
-    assert "does not fit the global budget TOTAL_BUDGET $100.000000: accounted=$96.000000 across every task" in review_err
-    assert "(of which $0.000000 is reserved by other in-flight attempts)" in review_err
-    assert "remaining=$4.000000, shortfall=$1.000000" in review_err
+    assert "Known spend has reached the global budget TOTAL_BUDGET $100.000000: known spend=$100.000000 across every task" in review_err
+    assert "(plus $0.000000 of open holds, not counted)" in review_err
+    assert "remaining=$0.000000" in review_err
     assert "the per-task budget fence $10.000000 alone would leave $10.000000" in review_err
     assert "raise TOTAL_BUDGET" in review_err and "OUROBOROS_PER_TASK_COST_USD" not in review_err
     assert block_reason == "review_wave_budget_insufficient"
@@ -210,9 +245,26 @@ def test_global_budget_that_does_not_fit_refuses_the_wave_before_any_seat_reserv
     assert scope_result.blocked is True and scope_result.status == "not_dispatched"
     events = [e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient"]
     assert len(events) == 1 and events[0]["binding_axis"] == "global"
-    assert (events[0]["remaining_usd"], events[0]["global_remaining_usd"]) == (4.0, 4.0)
-    assert (events[0]["global_limit_usd"], events[0]["global_accounted_usd"]) == (100.0, 96.0)
-    assert (events[0]["limit_usd"], events[0]["accounted_usd"]) == (10.0, 0.0)
+    assert (events[0]["remaining_usd"], events[0]["global_remaining_usd"]) == (0.0, 0.0)
+    assert (events[0]["global_limit_usd"], events[0]["global_known_usd"]) == (100.0, 100.0)
+    assert (events[0]["limit_usd"], events[0]["known_usd"]) == (10.0, 0.0)
+
+
+def test_a_fence_reached_mid_wave_refuses_the_remaining_seats_with_custody(gate, tmp_path, monkeypatch):
+    """The wave is admitted at $0 known; the scope seat settles at the full $4 fence
+    before the (slower) triad seats reserve, so each triad seat is refused at its OWN
+    reservation: nothing further is sent, and the outcome says what happened."""
+    llm = PricedLedgerLLM(costs={SCOPE_MODEL: 4.0}, delays={"triad/a": 0.3, "triad/b": 0.3})
+    ctx, (review_err, scope_result, _reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=4.0)
+
+    assert llm.calls == [SCOPE_MODEL]
+    assert scope_result.status == "responded"
+    rows = _ledger(gate)
+    assert [(row["model"], row["state"]) for row in rows] == [(SCOPE_MODEL, "settled")]
+    assert ua.usage_projection(gate, root_task_id=ROOT)["settled_usd"] == pytest.approx(4.0)
+    triad = ctx._last_triad_raw_results
+    assert len(triad) == 2 and all(r.get("status") != "ok" for r in triad), triad
+    assert all("budget" in json.dumps(r, default=str).lower() for r in triad), triad
 
 
 def test_review_wave_admission_binds_on_the_tighter_of_root_and_global_axes(gate, monkeypatch):
@@ -223,26 +275,27 @@ def test_review_wave_admission_binds_on_the_tighter_of_root_and_global_axes(gate
     axis, and an internal exception keeps the fail-open skeleton."""
     wave = dict(root_task_id=ROOT, models=[SCOPE_MODEL, *TRIAD_MODELS], prompt_chars=10, task_id=ROOT)
 
+    # The $5 estimate exceeds both remainders, and the wave still fits: known room decides.
     root_bound = ua.review_wave_admission(gate, root_limit_usd=4.0, global_limit_usd=10.0, **wave)
-    assert (root_bound["fits"], root_bound["binding_axis"], root_bound["estimated_wave_usd"]) == (False, "root", 5.0)
+    assert (root_bound["fits"], root_bound["binding_axis"], root_bound["estimated_wave_usd"]) == (True, "root", 5.0)
     assert (root_bound["remaining_usd"], root_bound["global_remaining_usd"]) == (4.0, 10.0)
     global_bound = ua.review_wave_admission(gate, root_limit_usd=10.0, global_limit_usd=4.0, **wave)
-    assert (global_bound["fits"], global_bound["binding_axis"]) == (False, "global")
+    assert (global_bound["fits"], global_bound["binding_axis"]) == (True, "global")
     assert (global_bound["remaining_usd"], global_bound["limit_usd"], global_bound["global_limit_usd"]) == (
         4.0, 10.0, 4.0)
-    assert (global_bound["global_accounted_usd"], global_bound["global_reserved_usd"]) == (0.0, 0.0)
-    admitted = ua.review_wave_admission(gate, root_limit_usd=10.0, global_limit_usd=10.0, **wave)
-    assert admitted["fits"] is True and admitted["remaining_usd"] == 10.0
+    assert (global_bound["global_known_usd"], global_bound["global_reserved_usd"]) == (0.0, 0.0)
+    no_room = ua.review_wave_admission(gate, root_limit_usd=0.0, global_limit_usd=10.0, **wave)
+    assert (no_room["fits"], no_room["binding_axis"], no_room["remaining_usd"]) == (False, "root", 0.0)
 
     monkeypatch.setenv("TOTAL_BUDGET", "0")  # no finite global budget: the root axis alone
     root_only = ua.review_wave_admission(gate, root_limit_usd=4.0, **wave)
-    assert (root_only["fits"], root_only["binding_axis"], root_only["remaining_usd"]) == (False, "root", 4.0)
+    assert (root_only["fits"], root_only["binding_axis"], root_only["remaining_usd"]) == (True, "root", 4.0)
     assert (root_only["global_limit_usd"], root_only["global_remaining_usd"]) == (None, None)
     unfenced_unbounded = ua.review_wave_admission(gate, **wave)  # no fence, no rows, no global budget
     assert unfenced_unbounded["fits"] is True and unfenced_unbounded["binding_axis"] is None
     monkeypatch.setenv("TOTAL_BUDGET", "4")
     unfenced = ua.review_wave_admission(gate, **wave)  # no root fence: the global axis still binds
-    assert (unfenced["fits"], unfenced["binding_axis"], unfenced["limit_usd"]) == (False, "global", None)
+    assert (unfenced["fits"], unfenced["binding_axis"], unfenced["limit_usd"]) == (True, "global", None)
     assert (unfenced["remaining_usd"], unfenced["global_limit_usd"]) == (4.0, 4.0)
 
     monkeypatch.setattr(ua, "usage_projection", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("ledger")))
@@ -251,9 +304,9 @@ def test_review_wave_admission_binds_on_the_tighter_of_root_and_global_axes(gate
     assert skeleton["binding_axis"] is None and skeleton["global_remaining_usd"] is None
 
 
-def test_refusal_names_money_held_by_other_in_flight_attempts(gate, tmp_path, monkeypatch):
-    """The fence compares against settled + reserved holds: a refusal must say
-    how much of `accounted` is a hold, not a bill."""
+def test_open_holds_alone_never_decline_the_wave(gate, tmp_path, monkeypatch):
+    """A $1 in-flight main-loop send and $2.50 known under an $8 fence: the hold is
+    exposure, not a bill, so the wave is admitted and dispatched (#1487)."""
     with ua.usage_scope(ua.UsageScope(drive_root=gate, task_id=ROOT, root_task_id=ROOT, root_limit_usd=8.0)):
         held = ua.reserve_attempt(ua.AttemptRequest(model="triad/a", provider="test", source="main"))
         ua.mark_dispatched(held)  # an in-flight main-loop send: $1 upper bound held
@@ -261,11 +314,27 @@ def test_refusal_names_money_held_by_other_in_flight_attempts(gate, tmp_path, mo
         ua.mark_dispatched(settled)
         ua.settle_attempt(settled, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=2.5, cost_final=True)
     llm = LedgerLLM()
+    _ctx, (review_err, scope_result, _reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=8.0)
+
+    assert review_err is None and scope_result.status == "responded"
+    assert sorted(llm.calls) == sorted([SCOPE_MODEL, *TRIAD_MODELS])
+
+
+def test_refusal_names_open_holds_beside_known_spend(gate, tmp_path, monkeypatch):
+    """Known spend at the $8 fence with a $1 hold still in flight: the refusal says how
+    much is known spend and how much is an uncounted hold, never one blended number."""
+    with ua.usage_scope(ua.UsageScope(drive_root=gate, task_id=ROOT, root_task_id=ROOT, root_limit_usd=8.0)):
+        held = ua.reserve_attempt(ua.AttemptRequest(model="triad/a", provider="test", source="main"))
+        ua.mark_dispatched(held)
+        settled = ua.reserve_attempt(ua.AttemptRequest(model="triad/b", provider="test", source="main"))
+        ua.mark_dispatched(settled)
+        ua.settle_attempt(settled, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=8.0, cost_final=True)
+    llm = LedgerLLM()
     ctx, (review_err, _scope, _reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=8.0)
 
     assert llm.calls == []
-    assert "accounted=$3.500000 (of which $1.000000 is reserved by other in-flight attempts)" in review_err
-    assert "remaining=$4.500000, shortfall=$0.500000" in review_err
+    assert "known spend=$8.000000 (plus $1.000000 of open holds, not counted)" in review_err
+    assert "remaining=$0.000000" in review_err
     assert len(_ledger(gate)) == 2  # the two seeded attempts only (one current row each)
 
 
@@ -331,9 +400,11 @@ def test_review_wave_admission_prices_per_slot_and_discloses_holds(gate, monkeyp
     assert [(r.prompt_tokens_estimate, r.max_completion_tokens, r.task_id) for r in requests] == [
         (100, 1000, "fresh-root"), (400, 2000, "fresh-root"),
     ]
-    # No ledger row yet: the caller's bound fence is the limit, not a fail-open.
-    assert admission["limit_usd"] == 0.75 and admission["accounted_usd"] == 0.0
-    assert admission["estimated_wave_usd"] == 1.0 and admission["fits"] is False
+    # No ledger row yet: the caller's bound fence is the limit, not a fail-open. The
+    # $1.00 estimate above the $0.75 room is disclosed; known room decides (#1487).
+    assert admission["limit_usd"] == 0.75 and admission["known_usd"] == 0.0
+    assert admission["accounted_usd"] == 0.0
+    assert admission["estimated_wave_usd"] == 1.0 and admission["fits"] is True
     assert admission["slot_bounds"] == [0.5, 0.5] and admission["reserved_usd"] == 0.0
     # A scalar still broadcasts (the task-level callers are unchanged), and a
     # root with neither a ledger row nor a bound fence keeps failing open.
@@ -511,10 +582,12 @@ def test_current_root_fence_governs_admission_over_the_ledgers_historical_minimu
     kwargs = dict(root_task_id=ROOT, models=["triad/a"], prompt_chars=10, task_id=ROOT)
 
     raised = ua.review_wave_admission(gate, root_limit_usd=50.0, **kwargs)
-    assert (raised["limit_usd"], raised["accounted_usd"], raised["remaining_usd"]) == (50.0, 3.0, 47.0)
+    assert (raised["limit_usd"], raised["known_usd"], raised["remaining_usd"]) == (50.0, 3.0, 47.0)
     assert raised["fits"] is True
     lowered = ua.review_wave_admission(gate, root_limit_usd=6.0, **kwargs)
-    assert (lowered["limit_usd"], lowered["remaining_usd"], lowered["fits"]) == (6.0, 3.0, False)
+    assert (lowered["limit_usd"], lowered["remaining_usd"], lowered["fits"]) == (6.0, 3.0, True)
+    at_known = ua.review_wave_admission(gate, root_limit_usd=3.0, **kwargs)  # lowered to the known spend
+    assert (at_known["limit_usd"], at_known["remaining_usd"], at_known["fits"]) == (3.0, 0.0, False)
     unfenced = ua.review_wave_admission(gate, **kwargs)  # no fence of its own: the ledger's $8 row
     assert (unfenced["limit_usd"], unfenced["remaining_usd"], unfenced["fits"]) == (8.0, 5.0, True)
 
@@ -549,8 +622,8 @@ def test_scope_first_hold_observes_only_the_scope_seats_own_reservation(gate, tm
     ua.refresh_root_accounting(gate, ROOT)
     with ua.usage_scope(base):
         ua.settle_attempt(earlier, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=0.5, cost_final=True)
-    with ua.usage_scope(ua.UsageScope(drive_root=gate, task_id=ROOT, root_task_id=ROOT, root_limit_usd=0.75)):
-        with pytest.raises(ua.BudgetExceeded):  # refused: pre-fence refresh only, no identity
+    with ua.usage_scope(ua.UsageScope(drive_root=gate, task_id=ROOT, root_task_id=ROOT, root_limit_usd=0.5)):
+        with pytest.raises(ua.BudgetExceeded):  # refused (known $0.50 = fence): pre-fence refresh only
             ua.reserve_attempt(ua.AttemptRequest(model="triad/a", provider="test", source="main"))
     with ua.usage_scope(triad_seat):
         ua.reserve_attempt(ua.AttemptRequest(model="triad/a", provider="test"))
@@ -635,10 +708,10 @@ def test_seats_reserve_against_exactly_the_fence_the_wave_was_admitted_with(gate
 def test_raised_root_without_group_amendment_refuses_the_whole_wave(gate, tmp_path, monkeypatch):
     """#1599: durable group8 beats an in-memory root50, before any seat sends.
 
-    This fails on the old admission reader without relying on settlement order:
-    reservations recover group8, but the old wave precheck admitted against50.
+    Known spend has reached the original group's $8: the wave is declined although
+    the in-memory root fence $50 has room.
     """
-    _seed_settled(gate, fence=8.0, cost=4.0)
+    _seed_settled(gate, fence=8.0, cost=8.0)
     before = _ledger(gate)
     llm = LedgerLLM()
     ctx, (review_err, scope_result, reason, _adv) = _run(
@@ -646,7 +719,7 @@ def test_raised_root_without_group_amendment_refuses_the_whole_wave(gate, tmp_pa
 
     assert llm.calls == [] and _ledger(gate) == before
     assert reason == "review_wave_budget_insufficient" and scope_result.status == "not_dispatched"
-    assert review_err and "remaining=$4.000000, shortfall=$1.000000" in review_err
+    assert review_err and "remaining=$0.000000" in review_err
     event = next(e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient")
     assert event["binding_axis"] == "group" and event["limit_usd"] == 8.0
     assert "whole-work billing-group budget fence" in review_err
@@ -673,22 +746,22 @@ def test_wave_group_resolution_matches_reservation_without_pinning_authority(
             models=[SCOPE_MODEL, *TRIAD_MODELS], prompt_chars=10)
     assert resolved.billing_group_id == "original-root"
     assert resolved.billing_group_limit_usd == group_limit
-    assert admission["fits"] is (group_limit is None or group_limit >= 5.0)
+    assert admission["fits"] is (group_limit is None or group_limit > 0.0)  # known $0 decides
     assert load_task_result(gate, ROOT) == before and _ledger(gate) == []
 
 
 def test_bound_fence_that_does_not_fit_refuses_even_when_the_environment_is_roomier(gate, tmp_path, monkeypatch):
-    """The converse: bound $8 (admission's fence), environment $50, a $4 history
-    row: the $5 wave does not fit the bound fence and nothing is dispatched —
-    the roomier setting never buys a seat the admitting fence refused."""
-    _seed_settled(gate, fence=8.0, cost=4.0)
+    """The converse: bound $8 (admission's fence), environment $50, $8 of known
+    history: the bound fence is reached and nothing is dispatched — the roomier
+    setting never buys a seat the admitting fence refused."""
+    _seed_settled(gate, fence=8.0, cost=8.0)
     llm = LedgerLLM()
     ctx, (review_err, scope_result, block_reason, _adv) = _run(
         gate, tmp_path, monkeypatch, llm, fence=8.0, env_fence=50.0)
 
     assert llm.calls == [] and len(_ledger(gate)) == 1  # the seeded attempt only (one current row)
     assert review_err and "per-task budget fence $8.000000" in review_err
-    assert "remaining=$4.000000, shortfall=$1.000000" in review_err
+    assert "remaining=$0.000000" in review_err
     assert block_reason == "review_wave_budget_insufficient"
     assert scope_result.status == "not_dispatched"
 

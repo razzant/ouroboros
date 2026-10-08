@@ -63,6 +63,16 @@ def _reserve(tmp_path, task_id, *, request=None, **limits):
         return (exc.limit_scope, str(exc))
 
 
+def _settle_known(tmp_path, task_id, cost):
+    """A send of the task's tree settled at a final price: KNOWN spend (#1487)."""
+    from ouroboros import usage_accounting as ua
+
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=task_id, root_task_id=ROOT)):
+        held = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="p", task_id=task_id, reservation_usd=cost))
+        ua.mark_dispatched(held)
+        ua.settle_attempt(held, {}, cost_usd=cost, cost_final=True)
+
+
 def _fixed_price(monkeypatch):
     monkeypatch.setattr("ouroboros.usage_accounting._reservation_cost", lambda _r: 0.01)
 
@@ -167,6 +177,7 @@ def test_the_real_caps_still_bind_a_selected_child_and_its_clocks_carry_the_paus
     meta = workers.RUNNING[CHILD]
     _consume(monkeypatch, child_ctx, child_limit, sent[0]["_budget_pause_resume"])
     grant = budget_pause.budget_pause_row(tmp_path, CHILD)["grant"]
+    _settle_known(tmp_path, CHILD, 0.01)  # the caps below decide on this known spend, not on holds
     root_cap = _reserve(tmp_path, CHILD, root_limit_usd=0.005)
     global_cap = _reserve(tmp_path, CHILD, request={"global_limit_usd": 0.005})
     _record("selected_child_caps", {"root_cap": root_cap, "global_cap": global_cap,

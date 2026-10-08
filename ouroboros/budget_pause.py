@@ -1225,11 +1225,14 @@ def load_budget_pause(ctx: Any, handoff: Optional[Dict[str, Any]] = None) -> Dic
 
 def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
                                 usage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Owner Q10: after an explicit Resume of a GRACEFUL stop, the planning
-    threshold moves forward within the money still authorized, so the task is
-    not paused again on the very number that paused it. The hard tree cap and
-    the global ledger fence are untouched; the planning margin is what the
-    owner's explicit act spends. Returns the disclosure row.
+    """Owner Q10: after an explicit Resume of a GRACEFUL stop, an explicit
+    ``cost_hard_stop_pct`` profile's planning threshold moves forward within
+    the money still authorized, so the task is not paused again on the very
+    number that paused it. The hard tree cap and the global ledger fence are
+    untouched; the planning margin is what the owner's explicit act spends.
+    Only that explicit authority moves: a producer allowance (a wake's daily
+    remainder) is never widened because a cap or the wallet is larger, and a
+    disabled or unknown ceiling is never re-armed. Returns the disclosure row.
 
     Every number is read from the AUTHORITATIVE ledger NOW: the global wallet
     from the usage projection, the tree's cumulative spend and its ACTUAL
@@ -1246,8 +1249,18 @@ def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
     from ouroboros.loop_budget import _loop_tree_accounting, _wrapup_global_remaining
 
     old = getattr(ctx, "_cost_ceiling", None)
-    if not isinstance(old, task_pacing.CostCeiling):
-        return {"refreshed": False, "reason": "no_ceiling"}
+    if not isinstance(old, task_pacing.CostCeiling) or old.state not in {
+            task_pacing.COST_CEILING_ACTIVE, task_pacing.COST_CEILING_EXHAUSTED_SOFT_LAND}:
+        return {"refreshed": False, "reason": "no_ceiling",
+                **({"ceiling_state": old.state, "ceiling_basis": old.basis}
+                   if isinstance(old, task_pacing.CostCeiling) else {})}
+    authority = task_pacing.cost_stop_authority(ctx)
+    if authority != task_pacing.COST_STOP_EXPLICIT:
+        # A producer allowance, or an inherited number whose author is unverified,
+        # keeps its existing bound: Resume never widens it.
+        reason = ("producer_allowance_not_expanded" if authority == task_pacing.COST_STOP_PRODUCER
+                  else "policy_unverified_not_expanded")
+        return {"refreshed": False, "reason": reason, "authority": authority, "ceiling_usd": old.ceiling_usd}
     try:
         fresh = _wrapup_global_remaining()
     except Exception:
@@ -1267,7 +1280,7 @@ def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
             return {"refreshed": False, "reason": "tree_spend_unavailable", "wallet_basis": "ledger_projection"}
         if tree.get("integrity_degraded"):
             return {"refreshed": False, "reason": "tree_accounting_degraded", "wallet_basis": "ledger_projection"}
-        if tree.get("accounted_usd") is None:
+        if tree.get("settled_usd") is None:
             return {"refreshed": False, "reason": "tree_spend_unknown", "wallet_basis": "ledger_projection"}
         if tree_cap is not None:
             root_cap, root_cap_basis = float(tree_cap), "root_accounting"
@@ -1276,7 +1289,7 @@ def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
     usage = usage if isinstance(usage, dict) else (getattr(ctx, "_accumulated_usage", None) or {})
     task_cost = usage.get("cost")
     deciding, basis = task_pacing.resolve_deciding_spend(
-        tree_cost_usd=tree.get("accounted_usd") if tree else None,
+        tree_cost_usd=tree.get("settled_usd") if tree else None,
         task_cost_usd=float(task_cost) if task_cost is not None else None,
         root_cap_usd=root_cap,
     )
@@ -1287,9 +1300,9 @@ def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
     if root_cap is not None:
         components.append(root_cap - spent)
     if float(fresh) > 0:
-        profile = task_pacing.resolve_budget_profile(ctx)
-        pct = profile.get("cost_hard_stop_pct")
-        pct = task_pacing._DEFAULT_COST_HARD_STOP_PCT if pct is None else max(0, min(100, int(pct)))
+        # The authored percentage: the task's own, or the root's it was resolved under.
+        profile = task_pacing.cost_stop_policy(ctx)["profile"]
+        pct = max(0, min(100, int(profile.get("cost_hard_stop_pct") or 0)))
         if pct > 0:
             components.append(float(fresh) * pct / 100.0)
     room = min(components) if components else None
@@ -1438,10 +1451,10 @@ def resume_paused_loop(tools: Any, state: Dict[str, Any], messages: list, trace:
     # that no longer exists, and the resumed attempt registers its own.
     forget_tool_scope(ctx)
     setattr(ctx, "_budget_pausing", False)
-    if state.get("cost_ceiling") is not None:
-        from ouroboros.task_pacing import CostCeiling
+    from ouroboros.task_pacing import restore_cost_ceiling
 
-        ctx._cost_ceiling = CostCeiling(**state["cost_ceiling"])
+    # The start's own authority, never the saved number alone (#1128).
+    ctx._cost_ceiling = restore_cost_ceiling(ctx, state.get("cost_ceiling"))
     refresh: Dict[str, Any] = {"refreshed": False, "reason": "hard_rail"}
     graceful = str(row.get("rail") or "") in GRACEFUL_RAILS
     if graceful:
@@ -1484,6 +1497,12 @@ def resume_paused_loop(tools: Any, state: Dict[str, Any], messages: list, trace:
         return (ctx.active_model, ctx.active_effort, ctx.active_use_local,
                 mode, int(state["round_idx"]), plan)
     kind = "owner Pause" if str(row.get("reason") or "") == REASON_OWNER else "budget pause"
+    held = ""
+    if refresh.get("reason") == "producer_allowance_not_expanded" and refresh.get("ceiling_usd") is not None:
+        # Said, not implied: Resume keeps the allowance the task was launched with.
+        held = (f"; the ${float(refresh['ceiling_usd']):.2f} producer allowance this task was launched with "
+                "still binds, never extended by Resume even if its producer's window has since freed more, "
+                "so known spend still at it pauses the task again before another model call")
     for call_id in pending:
         # Transcript validity for the provider AND the honest fact: unknown, not
         # "did not run" and not "ran". The host never re-executes it.
@@ -1495,7 +1514,8 @@ def resume_paused_loop(tools: Any, state: Dict[str, Any], messages: list, trace:
     messages.append({"role": "user", "content": (
         f"[SYSTEM NOTICE]\nThis task continued from its {kind} after an explicit owner Resume "
         f"(paused {ctx._budget_paused_sec:.0f}s; rail: {row.get('rail')}; planning threshold "
-        f"{'refreshed to $%.2f' % refresh['ceiling_usd'] if refresh.get('refreshed') else 'not refreshed: ' + str(refresh.get('reason'))}). "
+        f"{'refreshed to $%.2f' % refresh['ceiling_usd'] if refresh.get('refreshed') else 'not refreshed: ' + str(refresh.get('reason'))}"
+        f"{' (' + str(refresh['ceiling_basis']) + ')' if refresh.get('ceiling_basis') else ''}{held}). "
         "Cumulative spend, rounds and elapsed execution time were NOT reset. Prior tool results remain "
         "recorded; do not repeat completed effects. The pause ended the previous browser process and "
         "task-local services; their recorded results remain evidence, not proof they are still running. "

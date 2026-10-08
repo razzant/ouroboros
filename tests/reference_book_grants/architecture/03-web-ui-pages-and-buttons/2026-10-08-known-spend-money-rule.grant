@@ -1,0 +1,2 @@
+89
+The Costs page sets known spend (confirmed + estimated, both shown) against the limit, with reserved and unresolved holds beside it and not counted as spending (#1487).

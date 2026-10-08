@@ -647,9 +647,9 @@ def _budget_refusal(ctx: ToolContext, callable_slots: list, delivery: dict) -> s
         return ""
     fence, remedy = review_wave_binding_fence(admission)
     return ("⚠️ PLAN_REVIEW_SKIPPED_BUDGET: the reviewer wave was declined before dispatch — "
-            f"estimated cost ~${admission.get('estimated_wave_usd')} exceeds the remaining budget "
-            f"${admission.get('remaining_usd')} ({fence}). No reviewer was called. Shrink the evidence, "
-            f"split the plan, or {remedy}.")
+            f"known spend has reached the {fence} (remaining ${admission.get('remaining_usd')}; "
+            f"the wave was estimated at ~${admission.get('estimated_wave_usd')}). No reviewer was called. "
+            f"To continue, {remedy}.")
 
 
 def _carried_dispositions(existing: dict, named: list) -> list:

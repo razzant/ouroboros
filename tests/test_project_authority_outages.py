@@ -763,6 +763,7 @@ def test_consciousness_host_producer_reads_its_allowance_off_the_queue_lock(host
     notices = []
     monkeypatch.setattr(queue, "send_with_budget", lambda _chat, text, **_k: notices.append(text))
     window = {"status": STATUS_AVAILABLE if status == "available" else "exhausted", "limit_usd": 5.0,
+              "settled_usd": 0.0 if status == "available" else 5.0,
               "accounted_usd": 0.0 if status == "available" else 5.0, "remaining_usd": 5.0,
               "resets_at": "", "unknown_unmetered": 0}
     tid, free, reads = _consciousness_review(monkeypatch, window)

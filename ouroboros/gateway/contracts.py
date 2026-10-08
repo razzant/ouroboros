@@ -563,7 +563,8 @@ class UpdateApplyErrorResponse(TypedDict):
     merge_plan: NotRequired[UpdateMergePlan]
     smoke: NotRequired[Dict[str, Any]]
     # Stash-first prologue disclosures (additive): how the owner's stashed work
-    # was unwound on an aborted update, and the wave-floor admission numbers.
+    # was unwound on an aborted update. The wave numbers rode the retired
+    # wave-floor refusal (#1487 removed it); the optional keys stay in the shape.
     stash_note: NotRequired[str]
     estimated_wave_usd: NotRequired[Optional[float]]
     remaining_usd: NotRequired[Optional[float]]

@@ -59,6 +59,35 @@ def _billing(binding):
     return {key: value for key, value in (binding or {}).items() if key.startswith("billing_group_")}
 
 
+def _on_the_known_spend_rule(name, result, expected):
+    """The one deliberate change since the journal era (#1487, owner Q4-A): room is
+    the limit minus KNOWN (settled) spend, and a snapshot also reports that spend.
+
+    The fixture's bytes stay the shipped answer; this names the translation instead
+    of re-recording it. A projection's ``remaining_known_usd`` is recomputed from the
+    shipped answer's own ``limit_usd`` and ``settled_usd``; the snapshot's added
+    ``settled_usd`` fields are checked for consistency and then set aside (rooms are
+    unchanged wherever the shipped answer had no open holds)."""
+    def rebase(summary):
+        if isinstance(summary, dict) and summary.get("limit_usd") is not None and "remaining_known_usd" in summary:
+            summary = {**summary, "remaining_known_usd": round(max(
+                0.0, float(summary["limit_usd"]) - float(summary["settled_usd"])), 6)}
+        return summary
+
+    if name == "usage_projection" and isinstance(expected, dict):
+        expected = rebase(expected)
+        if isinstance(expected.get("by_root"), dict):
+            expected = {**expected, "by_root": {key: rebase(value) for key, value in expected["by_root"].items()}}
+    if name == "task_money_snapshot" and isinstance(result, dict):
+        assert result["settled_usd"] <= result["accounted_usd"] + 1e-9
+        result = {key: value for key, value in result.items() if key != "settled_usd"}
+        for axis in ("root_axis", "group_axis"):
+            if isinstance(result.get(axis), dict):
+                assert result[axis]["settled_usd"] <= result[axis]["accounted_usd"] + 1e-9
+                result[axis] = {key: value for key, value in result[axis].items() if key != "settled_usd"}
+    return result, expected
+
+
 def test_the_fixture_covers_every_question_kind():
     assert {checkpoint["function"] for checkpoint in _CHECKPOINTS} == {
         "original_group_limit", "ledger_billing_binding", "task_billing_fields", "task_money_snapshot",
@@ -112,7 +141,7 @@ def test_an_imported_journal_gives_the_shipped_answer(checkpoint, tmp_path, monk
             result = continuation._billing_group(*args, **kwargs)
         else:
             result = getattr(admission, name)(*args, **kwargs)
-        result, expected = _encode(result, root), checkpoint["result"]
+        result, expected = _on_the_known_spend_rule(name, _encode(result, root), checkpoint["result"])
         minted = expected.get("billing_group_limit_revision") if isinstance(expected, dict) else None
         if isinstance(minted, str) and not any(minted in _DOC["blobs"][blob] for blob in checkpoint["files"].values()):
             # A revision the question itself minted (an initial or default pin): a fresh

@@ -718,7 +718,7 @@ def test_deep_review_request_carries_the_origin_to_the_one_door(tmp_path, monkey
     monkeypatch.setattr("supervisor.workers._worker_pool_execution_state",
                         lambda: {"available": True, "disabled_reason": ""})
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window",
-                        lambda root, now=None: {"status": "available", "limit_usd": 20.0, "accounted_usd": 0.0,
+                        lambda root, now=None: {"status": "available", "limit_usd": 20.0, "settled_usd": 0.0, "accounted_usd": 0.0,
                                                 "remaining_usd": 20.0, "unknown_unmetered": 0, "resets_at": ""})
     handed: list = []
     sup = types.SimpleNamespace(queue_deep_self_review_task=lambda **kw: handed.append(kw))
@@ -749,7 +749,7 @@ def test_the_allowance_is_read_before_the_queue_lock(tmp_path, monkeypatch):
 
     def _window(root, now=None):
         seen.append(queue._queue_lock._is_owned())
-        return {"status": "available", "limit_usd": 20.0, "accounted_usd": 0.0, "remaining_usd": 20.0,
+        return {"status": "available", "limit_usd": 20.0, "settled_usd": 0.0, "accounted_usd": 0.0, "remaining_usd": 20.0,
                 "unknown_unmetered": 0, "resets_at": ""}
 
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window", _window)
@@ -796,7 +796,7 @@ def test_campaign_keeps_the_origin_and_its_cycle_tasks_inherit_it(tmp_path, monk
     monkeypatch.setattr(queue, "send_with_budget", lambda *a, **k: None)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window",
-                        lambda root, now=None: {"status": "available", "limit_usd": 20.0, "accounted_usd": 0.0,
+                        lambda root, now=None: {"status": "available", "limit_usd": 20.0, "settled_usd": 0.0, "accounted_usd": 0.0,
                                                 "remaining_usd": 20.0, "unknown_unmetered": 0, "resets_at": ""})
     queue.enqueue_evolution_task_if_needed()
     assert len(pending) == 1
@@ -811,7 +811,7 @@ def test_campaign_keeps_the_origin_and_its_cycle_tasks_inherit_it(tmp_path, monk
     sent: list = []
     monkeypatch.setattr(queue, "send_with_budget", lambda cid, text, **kw: sent.append(text))
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window",
-                        lambda root, now=None: {"status": "exhausted", "limit_usd": 20.0, "accounted_usd": 21.0,
+                        lambda root, now=None: {"status": "exhausted", "limit_usd": 20.0, "settled_usd": 21.0, "accounted_usd": 21.0,
                                                 "remaining_usd": 0.0, "unknown_unmetered": 0, "resets_at": "2027-01-01T00:00:00+00:00"})
     queue.enqueue_evolution_task_if_needed()
     queue.enqueue_evolution_task_if_needed()

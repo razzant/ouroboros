@@ -678,6 +678,8 @@
 
 .settings-effort-card {
     gap: 10px;
+    /* The card's own width, not the viewport, decides when a segmented group wraps. */
+    container: effortcard / inline-size;
 }
 
 .settings-effort-card label {
@@ -689,16 +691,41 @@
     letter-spacing: normal;
 }
 
+/* One equal-width grid for every segmented control. The renderer writes how many
+   choices it drew (`--segment-count`, page_header.js renderSegmentedField): up to
+   four share one row and fill it; a longer scale keeps four equal columns and
+   leaves its last row partly empty rather than stretching a lone choice. Each
+   track is that exact fraction of the row, so no math function sits in the
+   repeat count. */
 .settings-effort-group {
+    --segment-gap: 8px;
+    --segment-columns: min(var(--segment-count, 4), 4);
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(calc((100% - (var(--segment-columns) - 1) * var(--segment-gap)) / var(--segment-columns)), 1fr));
+    gap: var(--segment-gap);
+}
+
+/* A card of 20rem or less stacks two equal columns. Above it today's longest
+   labels ("Development" in three columns, "Advanced" in four) still sit inside
+   their buttons, and the default desktop window keeps its four-column effort
+   scales. */
+@container effortcard (max-width: 20rem) {
+    .settings-effort-group {
+        --segment-columns: min(var(--segment-count, 4), 2);
+    }
+}
+
+/* Max review cycles: five one-glyph values (1 / 2 / 3 / 5 / ∞) keep one compact
+   row at every width. */
+[data-review-cycles-group].settings-effort-group {
+    --segment-columns: var(--segment-count, 5);
 }
 
 /* .ui-segment — SSOT base look for a segmented single-select button (sibling of
-   .app-tab). Settings-specific overrides (column counts, accent colors) stay on
+   .app-tab). Settings-specific overrides (layout, accent colors) stay on
    .settings-effort-*; the resting look + centering live here. The flex centering
-   fixes labels that sat top-left in taller cells (the effort-button bug). */
+   fixes labels that sat top-left in taller cells (the effort-button bug); a word
+   longer than its column (a translated label) breaks rather than overflowing. */
 .ui-segment {
     display: inline-flex;
     align-items: center;
@@ -714,6 +741,13 @@
     cursor: pointer;
     font-size: var(--button-font-size);
     font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+/* Keyboard focus is the one DESIGN ring, apart from the hover and selected paint. */
+.ui-segment:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
 }
 
 .settings-effort-btn.active,
@@ -721,25 +755,6 @@
     color: var(--text-primary);
     border-color: rgba(232, 93, 111, 0.35);
     background: rgba(232, 93, 111, 0.12);
-}
-
-/* Review enforcement toggle: 2 columns. */
-[data-enforcement-group].settings-effort-group {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-[data-update-channel-group].settings-effort-group {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-/* Task-result review keeps its compact 3-column shape. */
-[data-task-review-group].settings-effort-group {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-/* Max review cycles: five short segments (1 / 2 / 3 / 5 / ∞) on one row. */
-[data-review-cycles-group].settings-effort-group {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 /* Shared disabled segmented-button style. */
@@ -871,19 +886,6 @@
 
     .settings-action-row > .btn-default {
         justify-self: end;
-    }
-
-    .settings-effort-group {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    [data-update-channel-group].settings-effort-group,
-    [data-task-review-group].settings-effort-group {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    [data-review-cycles-group].settings-effort-group {
-        grid-template-columns: repeat(5, minmax(0, 1fr));
     }
 }
 

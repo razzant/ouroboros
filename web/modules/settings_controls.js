@@ -20,7 +20,8 @@ export function bindEffortSegments(root) {
 
         buttons.forEach((button) => {
             button.addEventListener('click', () => {
-                input.value = button.dataset.effortValue || input.value;
+                // Presence, not truthiness: '' is a real choice (inherit the Task / Chat effort).
+                input.value = button.dataset.effortValue ?? input.value;
                 input.dataset.effortTouched = '1';
                 sync();
             });

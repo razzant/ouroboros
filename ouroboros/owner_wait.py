@@ -275,10 +275,10 @@ def load_owner_wait(ctx: Any, handoff: dict | None = None) -> dict:
             or state.get("wait_id") != current.get("wait_id")
             or state.get("task_attempt") != int(ctx.task_attempt or 1)):
         raise ValueError("owner wait continuation identity mismatch")
-    if state.get("cost_ceiling") is not None:
-        from ouroboros.task_pacing import CostCeiling
+    from ouroboros.task_pacing import restore_cost_ceiling
 
-        ctx._cost_ceiling = CostCeiling(**state["cost_ceiling"])
+    # The start's own authority, never the saved number alone (#1128).
+    ctx._cost_ceiling = restore_cost_ceiling(ctx, state.get("cost_ceiling"))
     return state
 
 

@@ -54,8 +54,9 @@ def test_actual_host_role_preserves_configured_lifetime_cap(data_root, monkeypat
                      reservation_upper_bound_usd="1.0", pricing_known=True)
     write_compacted_journal(data_root, [{**aggregate, "attempt_id": "old-first", "model": "z", "root_limit_usd": "2.0"},
                                         {**aggregate, "attempt_id": "old-later", "model": "a", "root_limit_usd": "100.0"}])
-    for skill in ("one", "two"):
-        result = _coordinator_reservation(ctx, monkeypatch, skill=skill, amount=.4)
+    # Known spend: the open block's $1.00, then $0.40 and $0.60 reach the configured $2 cap.
+    for skill, amount in (("one", .4), ("two", .6)):
+        result = _coordinator_reservation(ctx, monkeypatch, skill=skill, amount=amount)
         assert "attempt" in result
         scope = result["scope"]
         assert scope.non_task_operation and scope.root_limit_usd == 2.0
@@ -63,13 +64,16 @@ def test_actual_host_role_preserves_configured_lifetime_cap(data_root, monkeypat
         assert scope.root_task_id == ctx.task_id
     exhausted = _coordinator_reservation(ctx, monkeypatch, skill="three", amount=.3)
     assert "root model budget exhausted" in exhausted["refusal"]
-    assert ua.usage_projection(data_root, root_task_id=ctx.task_id)["accounted_usd"] == pytest.approx(1.8)
+    assert ua.usage_projection(data_root, root_task_id=ctx.task_id)["accounted_usd"] == pytest.approx(2.0)
 
 
 @pytest.mark.parametrize("ctx_type", [_ApiReviewCtx, _MarketplaceReviewCtx])
 def test_host_role_keeps_global_exhaustion(data_root, monkeypatch, ctx_type):
     ctx = ctx_type(data_root, data_root.parent / "repo")
     with ua.usage_scope(ua.UsageScope(drive_root=data_root, non_task_operation=True, global_limit_usd=.01)):
+        spent = ua.reserve_attempt(ua.AttemptRequest(model="fixture", provider="fixture", reservation_usd=.01))
+        ua.mark_dispatched(spent)
+        ua.settle_attempt(spent, {}, cost_usd=.01, cost_final=True)  # known spend reaches the $0.01 wallet
         result = _coordinator_reservation(ctx, monkeypatch)
     assert result["scope"].global_limit_usd == .01
     assert "global model budget exhausted" in result["refusal"]
@@ -82,7 +86,7 @@ def test_host_hint_never_overrides_inherited_continue_group(data_root, monkeypat
         parent_task_id="successor", billing_group_id="original", billing_group_limit_usd=1.0,
         billing_group_limit_source="ledger_first_row", root_limit_usd=50.0)
     with ua.usage_scope(inherited):
-        first = _coordinator_reservation(ctx, monkeypatch, amount=.75)
+        first = _coordinator_reservation(ctx, monkeypatch, amount=1.0)  # known spend reaches the group's $1
         second = _coordinator_reservation(ctx, monkeypatch, amount=.3)
     assert "attempt" in first
     scope = first["scope"]

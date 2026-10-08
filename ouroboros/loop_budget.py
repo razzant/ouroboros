@@ -93,7 +93,7 @@ def _check_budget_limits(
     # global-share ceiling is global money.
     pause_scope = "root" if cost_ceiling.root_cap_usd is not None else "global"
     tree_info = _loop()._loop_tree_accounting(refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC)
-    tree_cost = tree_info.get("accounted_usd") if isinstance(tree_info, dict) else None
+    tree_cost = tree_info.get("settled_usd") if isinstance(tree_info, dict) else None
     deciding, spend_basis = task_pacing.resolve_deciding_spend(
         tree_cost_usd=tree_cost,
         task_cost_usd=task_cost,
@@ -110,9 +110,14 @@ def _check_budget_limits(
     # very number that paused the task; the ledger fence at the full cap still
     # arbitrates every send. A stop that needs no wrap-up room at all
     # (``wrapup_fits is False``) is unchanged.
-    last_fit_relaxed = bool(getattr(getattr(getattr(ctx, "tools", None), "_ctx", None),
-                                    "_budget_resume_last_fit_relaxed", False))
-    if prompt_estimate > 0 and (global_remaining is not None or (cost_ceiling.root_cap_usd is not None and deciding is not None)):
+    tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    last_fit_relaxed = bool(getattr(tool_ctx, "_budget_resume_last_fit_relaxed", False))
+    # The prospective wrap-up probes are an explicit profile's authored margin. A
+    # producer allowance stops when known spend reaches it, never one call early.
+    authority = task_pacing.COST_STOP_EXPLICIT if tool_ctx is None else task_pacing.cost_stop_authority(tool_ctx)
+    explicit = authority == task_pacing.COST_STOP_EXPLICIT
+    if explicit and prompt_estimate > 0 and (
+            global_remaining is not None or (cost_ceiling.root_cap_usd is not None and deciding is not None)):
         finish_reason = task_pacing.wrapup_last_fit_text(deciding, cost_ceiling, global_remaining)
         forced_prompt = f"[BUDGET LIMIT] {finish_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}"
         request_args = dict(model=ctx.active_model, prompt_tokens=prompt_estimate,
@@ -187,17 +192,21 @@ def _check_budget_limits(
             # Presence arm the prepared prompt set is withdrawn: it would silence the ordinary reply.
             if tools_ctx is not None:
                 tools_ctx._presence_forced_declaration, tools_ctx._presence_forced_pending = presence_arm
-    if deciding is not None and ceiling_usd is not None and deciding > ceiling_usd:
+    # A producer allowance is spent once known spend REACHES it, like every ledger
+    # limit; an explicit profile keeps its authored edge (strictly over its point).
+    reached = deciding is not None and ceiling_usd is not None and (
+        deciding >= ceiling_usd if authority == task_pacing.COST_STOP_PRODUCER else deciding > ceiling_usd)
+    if reached:
         if spend_basis == task_pacing.SPEND_BASIS_TREE:
             spent_text = (
-                f"Task tree spent ${deciding:.3f} (ledger-accounted incl. in-flight holds, "
-                f"subagents included; own calls ${task_cost:.3f})"
+                f"Task tree spent ${deciding:.3f} (known spend, subagents included; "
+                f"own calls ${task_cost:.3f})"
                 if task_cost is not None
-                else f"Task tree spent ${deciding:.3f} (ledger-accounted incl. in-flight holds)"
+                else f"Task tree spent ${deciding:.3f} (known spend, subagents included)"
             )
         elif spend_basis == task_pacing.SPEND_BASIS_OWN_TREE_UNKNOWN:
             spent_text = (
-                f"Task spent ${deciding:.3f} on its OWN calls (the tree-accounted total "
+                f"Task spent ${deciding:.3f} on its OWN calls (the tree's known total "
                 "is unavailable right now, so subagent spend is not included — this is a "
                 "lower bound)"
             )
@@ -208,12 +217,22 @@ def _check_budget_limits(
             if cost_ceiling.root_cap_usd is not None else ""
         )
         finish_reason = (
-            f"{spent_text}, over the in-task cost ceiling ${ceiling_usd:.2f}{cap_text}. "
-            "Budget exhausted."
+            f"{spent_text}, {'over' if deciding > ceiling_usd else 'at'} the in-task cost ceiling ${ceiling_usd:.2f} "
+            f"({cost_ceiling.basis or 'resolved at task start'}){cap_text}. Budget exhausted."
         )
         accumulated_usage["cost_stop_spend_basis"] = spend_basis
         budget_pause.request_pause(ctx, rail=budget_pause.RAIL_GRACEFUL_CEILING,
                                    scope=pause_scope, reason_text=finish_reason)
+        if not explicit:
+            # Only an explicit profile authored room for a final answer. The fence checks the
+            # wider tree cap and wallet, never a producer allowance (or an inherited number
+            # whose author is unreadable), so a recap here would be paid past it: an actor
+            # without a continuation ends on the host's notice, services finalized first.
+            accumulated_usage.update(execution_status="failed", reason_code="budget_exhausted")
+            trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
+            _loop()._finalize_forced_services(ctx, trace)
+            return _loop()._forced_fallback_result(ctx, trace, finish_reason, "budget_exhausted",
+                                                   source="budget_host_fallback")
         return _loop()._forced_final_answer(
             ctx,
             prompt=f"[BUDGET LIMIT] {finish_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}",
@@ -345,7 +364,7 @@ def _soft_land_exhausted_ceiling(
     )
     tree_info = _loop()._loop_tree_accounting(refresh=True, max_age_sec=0.0)
     deciding, spend_basis = task_pacing.resolve_deciding_spend(
-        tree_cost_usd=tree_info.get("accounted_usd") if isinstance(tree_info, dict) else None,
+        tree_cost_usd=tree_info.get("settled_usd") if isinstance(tree_info, dict) else None,
         task_cost_usd=float(limit_ctx.accumulated_usage.get("cost") or 0.0),
         root_cap_usd=cost_ceiling.root_cap_usd,
     )
@@ -866,7 +885,7 @@ def authored_completion_budget_exhausted(ctx: Any, budget_remaining: float | Non
     if cap is None:
         return False
     tree = _loop()._loop_tree_accounting(refresh=True, max_age_sec=0.0)
-    deciding, basis = task_pacing.resolve_deciding_spend(tree_cost_usd=(tree or {}).get("accounted_usd"),
+    deciding, basis = task_pacing.resolve_deciding_spend(tree_cost_usd=(tree or {}).get("settled_usd"),
         task_cost_usd=ctx.accumulated_usage.get("cost"), root_cap_usd=cap)
     if deciding is not None and deciding >= cap:
         ctx.accumulated_usage["cost_stop_spend_basis"] = basis

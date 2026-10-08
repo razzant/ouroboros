@@ -447,9 +447,10 @@ def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
         )
         if _admission is not None:
             return _refused(
-                "review_wave_budget_insufficient: estimated "
-                f"~${_admission.get('estimated_wave_usd')} > remaining "
-                f"${_admission.get('remaining_usd')} (no reviewer was called)"
+                "review_wave_budget_insufficient: known spend has reached the "
+                f"{_admission.get('binding_axis') or 'budget'} limit (remaining "
+                f"${_admission.get('remaining_usd')}; wave estimated ~${_admission.get('estimated_wave_usd')}; "
+                "no reviewer was called)"
             )
     free_result = _free_dispatch(request, slots, drive_root=drive_root, usage_ctx=ctx.tools._ctx)
     if free_result is not None:

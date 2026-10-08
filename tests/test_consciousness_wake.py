@@ -532,7 +532,7 @@ def test_render_substitutes_every_placeholder_and_keeps_every_event(tmp_path, mo
     assert text.startswith("You are Ouroboros. No one has asked for a task")
     assert "1 h 30 min ago" in text and "autonomy: act — everything your runtime mode allows except" in text
     assert "toggle_evolution, request_restart" in text
-    assert "allowance accounting (last 24 h): 4.00 / 20.00 USD" in text and "tasks running: 1/2" in text
+    assert "allowance known spend (last 24 h): 4.00 / 20.00 USD" in text and "tasks running: 1/2" in text
     assert "next interval: 3300 s" in text
     assert "- wake cause: task t14 finished (completed)" in text
     assert text.count("- task t") == 15 and "more; see" not in text  # the trigger's own terminal stays an event
@@ -541,7 +541,7 @@ def test_render_substitutes_every_placeholder_and_keeps_every_event(tmp_path, mo
         disabled_tools=[], spent_usd=None, daily_usd=0, running=0, max_tasks=0, interval=900,
         events=_observe(tmp_path / "empty", since=T0 + 1).full_text())
     assert "no wake since this process started" in quiet and "wake cause: scheduled heartbeat" in quiet
-    assert "unavailable tools: none" in quiet and "allowance accounting (last 24 h): unknown / 0.00 USD" in quiet
+    assert "unavailable tools: none" in quiet and "allowance known spend (last 24 h): unknown / 0.00 USD" in quiet
     assert "including evolution" in quiet
 
 

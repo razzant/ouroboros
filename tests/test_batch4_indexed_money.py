@@ -112,7 +112,8 @@ def test_pre_send_wait_revalidates_late_charge_on_each_axis(root, monkeypatch, a
             prepared.append(reservation)
             # The same writer receives the original/sibling's delayed receipt after reservation.
             with ua.usage_scope(None):
-                ua.settle_attempt(late, cost_usd=1.5, cost_final=True)
+                # Its known price reaches the $2 cap exactly (#1487: equality refuses).
+                ua.settle_attempt(late, cost_usd=2.0, cost_final=True)
             lock_owner.enter_context(held_lock(root))
         req = request(root, root_task_id="successor", global_limit_usd=2 if axis == "global" else 100)
         async def send():

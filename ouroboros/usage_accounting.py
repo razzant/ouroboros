@@ -90,13 +90,16 @@ _ROOT_ACCOUNTING_TELEMETRY_CAP = 64
 _ROOT_RESERVATIONS_KEPT = 8  # identities of the newest appended reservations per root
 def _stash_root_accounting(
     root_task_id: str,
-    accounted_usd: Optional[float],
+    spend: Any,
     root_limit_usd: Optional[float],
     reservation: Optional[Dict[str, Any]] = None,
     *,
     integrity_degraded: bool = False,
 ) -> None:
-    """Refresh the process-local root snapshot. ``reservation`` is the identity
+    """Refresh the process-local root snapshot. ``spend`` is the rendered
+    bucket: its ``settled_usd`` is the known spend money readers decide on, its
+    ``accounted_usd`` the exposure including holds; a missing field stays
+    unknown (``None``), never borrowed from the other. ``reservation`` is the identity
     of a row this call has just APPENDED (attempt id, task, category, review
     slot): only a successful ``reserve_attempt`` passes one, so a reader that
     finds its own identity here has observed its own reservation — a refresh,
@@ -104,6 +107,9 @@ def _stash_root_accounting(
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id:
         return
+    if not isinstance(spend, dict):
+        raise TypeError("root accounting snapshot needs a rendered money bucket")
+    accounted_usd, settled_usd = _number(spend.get("accounted_usd")), _number(spend.get("settled_usd"))
     with _ROOT_ACCOUNTING_TELEMETRY_LOCK:
         if (
             root_task_id not in _ROOT_ACCOUNTING_TELEMETRY
@@ -119,6 +125,7 @@ def _stash_root_accounting(
         if reservation:
             kept = (kept + [{**reservation, "reserved_monotonic": now}])[-_ROOT_RESERVATIONS_KEPT:]
         _ROOT_ACCOUNTING_TELEMETRY[root_task_id] = {
+            "settled_usd": None if settled_usd is None else float(settled_usd),
             "accounted_usd": None if accounted_usd is None else float(accounted_usd),
             "root_limit_usd": None if root_limit_usd is None else float(root_limit_usd),
             # The projection's own integrity verdict rides the snapshot (#1196): a
@@ -130,9 +137,10 @@ def _stash_root_accounting(
         }
 
 def last_root_accounting(root_task_id: str) -> Optional[Dict[str, Any]]:
-    """Newest process-local root snapshot, including in-flight holds and the
-    identities of the newest appended reservations (each with its own
-    ``age_sec``)."""
+    """Newest process-local root snapshot: the KNOWN spend (``settled_usd``)
+    limits decide on, the exposure including in-flight holds
+    (``accounted_usd``), and the identities of the newest appended
+    reservations (each with its own ``age_sec``)."""
     with _ROOT_ACCOUNTING_TELEMETRY_LOCK:
         entry = _ROOT_ACCOUNTING_TELEMETRY.get(str(root_task_id or "").strip())
         if entry is None:
@@ -175,7 +183,7 @@ def refresh_root_accounting(
         projection = usage_projection(drive_root, root_task_id="" if group else root_task_id, billing_group_id=group)
         _stash_root_accounting(
             root_task_id,
-            _number(projection.get("accounted_usd")),
+            projection,
             _number(projection.get("limit_usd")),
             integrity_degraded=bool(projection.get("integrity_degraded")),
         )
@@ -184,8 +192,15 @@ def refresh_root_accounting(
         log.debug("root accounting refresh failed for %s", root_task_id, exc_info=True)
         return cached
 
+def _known_spend_text(summary: Dict[str, Any]) -> str:
+    """A refusal's money: the known spend that decided it, the open holds beside it."""
+    holds = (_number(summary.get("reserved_usd")) or 0.0) + (_number(summary.get("unresolved_upper_bound_usd")) or 0.0)
+    return (f"known=${float(_number(summary.get('settled_usd')) or 0.0):.6f} "
+            f"(open holds ${holds:.6f} not counted as spending)")
+
+
 class BudgetExceeded(UsageAccountingError):
-    """Raised before dispatch when a known budget would be exceeded."""
+    """Raised before dispatch when known spend has reached an applicable limit."""
 
     def __init__(self, message: str, *, limit_scope: str = "global", root_task_id: str = "") -> None:
         super().__init__(message)
@@ -703,30 +718,29 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
     with acquire(root) as view:
         _check_dispatch_fences(scope, root)
         global_limit = _global_limit(request)
-        accounted = view.summary()["accounted_usd"]
-        if view.exceeds_limit(global_limit, bound):
+        if view.exceeds_limit(global_limit):
             raise BudgetExceeded(
-                f"global model budget exhausted: accounted=${accounted:.6f}, "
-                f"reservation={'unknown' if bound is None else f'${bound:.6f}'}, limit=${global_limit:.6f}",
+                f"global model budget exhausted: {_known_spend_text(view.summary())}, "
+                f"limit=${global_limit:.6f}",
                 limit_scope="global",
                 root_task_id=scope.root_task_id,
             )
         root_limit: Optional[float] = None
         if scope.root_task_id:  # every rooted attempt refreshes the subtree telemetry, cap or not
-            root_accounted = view.summary(scope.root_task_id)["accounted_usd"]
+            root_summary = view.summary(scope.root_task_id)
             root_limit = None if scope.root_limit_usd is None else max(0.0, float(scope.root_limit_usd))
-            _stash_root_accounting(scope.root_task_id, root_accounted, root_limit)  # pre-append subtree sum
+            _stash_root_accounting(scope.root_task_id, root_summary, root_limit)  # pre-append subtree sum
         if root_limit is not None:
-            if view.exceeds_limit(root_limit, bound, root_task_id=scope.root_task_id):
+            if view.exceeds_limit(root_limit, root_task_id=scope.root_task_id):
                 raise BudgetExceeded(
                     f"root model budget exhausted for {scope.root_task_id}: "
-                    f"accounted=${root_accounted:.6f}, limit=${root_limit:.6f}",
+                    f"{_known_spend_text(root_summary)}, limit=${root_limit:.6f}",
                     limit_scope="root",
                     root_task_id=scope.root_task_id,
                 )
         from ouroboros.usage_admission import raise_group_refusal, scope_group
 
-        raise_group_refusal(view, scope, bound)
+        raise_group_refusal(view, scope)
         group_id, group_limit = scope_group(scope)
         view.write(
                 {
@@ -778,11 +792,11 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         )
         if group_id:
             _stash_root_accounting(f"group:{group_id}",
-                                   view.summary(billing_group_id=group_id)["accounted_usd"], group_limit)
+                                   view.summary(billing_group_id=group_id), group_limit)
         if scope.root_task_id:
             _stash_root_accounting(
                 scope.root_task_id,
-                view.summary(scope.root_task_id)["accounted_usd"],
+                view.summary(scope.root_task_id),
                 root_limit,
                 reservation={
                     "attempt_id": attempt_id, "task_id": scope.task_id,
@@ -1017,12 +1031,14 @@ def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> D
                 ("global", _global_limit(limit_request), None),
                 ("root", scope.root_limit_usd, scope.root_task_id),
             ):
-                if limit is not None and view.exceeds_limit(limit, root_task_id=identity, dispatch=True):
+                # The reservation's own predicate: known spend reached the limit
+                # since this attempt was reserved, so nothing is sent.
+                if limit is not None and view.exceeds_limit(limit, root_task_id=identity):
                     raise BudgetExceeded(f"{axis} model budget changed before dispatch", limit_scope=axis,
                                          root_task_id=scope.root_task_id)
             from ouroboros.usage_admission import raise_group_refusal
 
-            raise_group_refusal(view, scope, dispatch=True)
+            raise_group_refusal(view, scope)
         replaced = {"seq", "ts", "revision", "pre_compaction_seq", "settle_reason", "reason"}
         if state == "settled":
             replaced.update(("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_evidence"))
@@ -1050,11 +1066,11 @@ def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> D
         group_id = billing_group_key(current)
         if group_id:
             _stash_root_accounting(f"group:{group_id}",
-                view.summary(billing_group_id=group_id)["accounted_usd"],
+                view.summary(billing_group_id=group_id),
                 _number(current.get("billing_group_limit_usd", current.get("root_limit_usd"))))
         root_task_id = str(current.get("root_task_id") or "")
         if root_task_id:
-            _stash_root_accounting(root_task_id, view.summary(root_task_id)["accounted_usd"],
+            _stash_root_accounting(root_task_id, view.summary(root_task_id),
                                    _number(current.get("root_limit_usd")))
         return copy.deepcopy(appended)
 

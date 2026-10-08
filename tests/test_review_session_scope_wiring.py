@@ -1107,6 +1107,10 @@ def test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured(tmp_path)
     # repository index grew to 56,982 over the review subject / body-fact / operation
     # modules, their tests and chapters, the selected governance inline to 35,084. 894
     # chars under the ceiling: the next index growth must re-read this sum, not round it.
-    assert without_diff < 210_000, without_diff
+    # 210_000 -> 210_161 (engine facts/lifecycle, 2026-10-08): the d00559d7f
+    # membership renders 57,064 index chars; the new module, smoke script and
+    # grant directory add exactly 161 (57,225). The full brief measures 210,080;
+    # retain the base's 81-char slack, without rounding up the measured growth.
+    assert without_diff < 210_161, without_diff
     assert sections["repository_index"] > 20_000          # the index really ran
     assert sections["governance_stable_inline"] > 40_000  # BIBLE really inline

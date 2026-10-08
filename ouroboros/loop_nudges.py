@@ -206,12 +206,14 @@ def _maybe_inject_self_check(
     # ledger number (DEVELOPMENT cache_friendliness item 28). The fence
     # counts the whole tree; own cost alone hid two tree deaths.
     tree_line = ""
+    tree_known: Optional[float] = None
     tree_accounted: Optional[float] = None
     tree_cap: Optional[float] = None
     tree_info = _loop()._loop_tree_accounting(refresh=True, max_age_sec=30.0)
     rendered = task_pacing.tree_spend_line(tree_info, cost_ceiling)
     if rendered:
-        tree_accounted = float(tree_info["accounted_usd"])
+        tree_known = float(tree_info["settled_usd"])
+        tree_accounted = float(tree_info.get("accounted_usd") or tree_known)
         raw_cap = tree_info.get("root_limit_usd")
         tree_cap = float(raw_cap) if raw_cap is not None else None
         tree_line = f"{rendered}\n"
@@ -256,7 +258,8 @@ def _maybe_inject_self_check(
         "context_tokens": ctx_tokens,
         "task_cost": task_cost,
     }
-    if tree_accounted is not None:
+    if tree_known is not None:
+        checkpoint_payload["tree_known_usd"] = round(tree_known, 4)
         checkpoint_payload["tree_accounted_usd"] = round(tree_accounted, 4)
         checkpoint_payload["tree_cap_usd"] = round(tree_cap, 4) if tree_cap is not None else None
     _loop()._emit_checkpoint_event(event_queue, task_id, drive_logs, checkpoint_payload)
@@ -304,9 +307,9 @@ def _maybe_inject_cost_budget_milestone(
 ) -> bool:
     """Thin transport over the task_pacing cost axis (v6.56.0): content,
     thresholds, and latch state live in ouroboros/task_pacing.py. The deciding
-    spend under a root cap is the tree-accounted stash (free read; refreshed by
-    every dispatch) with a bounded staleness cap — never a per-round ledger
-    read, see ``_TREE_ACCOUNTING_MAX_STALE_SEC``."""
+    spend under a root cap is the tree's KNOWN spend from the root stash (free
+    read; refreshed by every dispatch) with a bounded staleness cap — never a
+    per-round ledger read, see ``_TREE_ACCOUNTING_MAX_STALE_SEC``."""
     ceiling_usd = (
         cost_ceiling.ceiling_usd
         if cost_ceiling is not None and cost_ceiling.state == task_pacing.COST_CEILING_ACTIVE
@@ -315,7 +318,7 @@ def _maybe_inject_cost_budget_milestone(
     tree_info = _loop()._loop_tree_accounting(
         refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC,
     )
-    tree_cost = tree_info.get("accounted_usd") if isinstance(tree_info, dict) else None
+    tree_cost = tree_info.get("settled_usd") if isinstance(tree_info, dict) else None
     note = task_pacing.build_cost_budget_note(
         tools._ctx,
         start_remaining_usd=budget_remaining_usd,

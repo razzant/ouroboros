@@ -48,6 +48,7 @@ def test_server_bootstrap_writes_server_log_through_redacting_handlers(tmp_path)
     logs = tmp_path / "logs"
     completed = _run(f"""
         import json, logging, pathlib, threading
+        from ouroboros.observability import SecretRedactingLogFilter
         from ouroboros.process_logging import configure_process_logging
         configure_process_logging(drive_logs=pathlib.Path({str(logs)!r}))
         configure_process_logging(drive_logs=pathlib.Path({str(logs)!r}))  # idempotent
@@ -57,7 +58,7 @@ def test_server_bootstrap_writes_server_log_through_redacting_handlers(tmp_path)
             handler.flush()
         print("STATE", json.dumps({{
             "handlers": sorted(type(h).__name__ for h in root.handlers),
-            "filtered": all(any(type(f).__name__ == "SecretRedactingLogFilter" for f in h.filters)
+            "filtered": all(any(type(f) is SecretRedactingLogFilter for f in h.filters)
                             for h in root.handlers),
             "httpx": logging.getLogger("httpx").level,
             "thread_hook": getattr(threading.excepthook, "_ouroboros_hook", False),
@@ -297,15 +298,32 @@ def test_every_uvicorn_config_in_the_server_leaves_logging_to_the_root_handlers(
 
 
 def test_the_launcher_routes_its_uncaught_exceptions_through_the_shared_hooks():
-    """The frozen launcher keeps its own launcher.log handlers and shares only the
-    uncaught-exception hooks; the call sits after its redaction filter loop."""
+    """The frozen launcher keeps its own launcher.log handlers and shares the
+    uncaught-exception hooks, called after its guarded redaction filter loop, and
+    the output copier, imported unguarded because the module loads only the stdlib."""
     tree = ast.parse((REPO / "launcher.py").read_text(encoding="utf-8"))
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
              and isinstance(node.func, ast.Name) and node.func.id == "install_exception_hooks"]
     assert len(calls) == 1
-    imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
-               and node.module == "ouroboros.process_logging"]
-    assert imports and all(alias.name == "install_exception_hooks" for node in imports for alias in node.names)
+    imports = {alias.name: node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+               and node.module == "ouroboros.process_logging" for alias in node.names}
+    assert set(imports) == {"install_exception_hooks", "copy_capped_output"}
+    start_agent = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "start_agent")
+    assert imports["copy_capped_output"] in start_agent.body  # Unguarded, before the server is spawned.
+
+
+@pytest.mark.serial
+def test_the_module_loads_only_the_standard_library():
+    """The launcher drains and records a server whose own imports are broken (the crash
+    output agent_stdout.log exists for), so nothing project-owned loads with the copier."""
+    tree = ast.parse((REPO / "ouroboros" / "process_logging.py").read_text(encoding="utf-8"))
+    roots = {alias.name.split(".")[0] for node in tree.body if isinstance(node, ast.Import) for alias in node.names}
+    roots |= {node.module.split(".")[0] for node in tree.body if isinstance(node, ast.ImportFrom)}
+    assert roots - {"__future__"} <= set(sys.stdlib_module_names)
+    completed = subprocess.run(
+        [sys.executable, "-c", "import sys, ouroboros.process_logging; print('ouroboros.observability' in sys.modules)"],
+        cwd=REPO, env={**os.environ, "PYTHONPATH": str(REPO)}, capture_output=True, text=True, timeout=120)
+    assert completed.stdout.strip() == "False", completed.stderr[-2000:]
 
 
 @pytest.mark.serial

@@ -13,10 +13,13 @@ read is one pair of small JSON reads.
 Beside id, title, room and queue status a row carries only facts the host
 already recorded, each absent when unrecorded: the suggested name, the start,
 the typed origin (``dialogue_provenance.run_origin``: provenance, never
-authority), the waits the root's durable result names -- owner, review, model,
-budget -- each dated by its OWN start, never the task's -- and the dated
-authored focus of any root that has not settled.  The task result is read per
-row; the direct fragment carries a live turn's facts until that result exists.
+authority), the waits the root's durable result names -- each dated by its OWN
+start, never the task's, and named by what its record says it is (an owner
+answer, a review, model access, the model's own sleep with its recorded mode
+and wake sources, the owner's Pause, a monetary pause; an unrecognized reason
+stays ``unknown`` with that reason) -- and the dated authored focus of any root
+that has not settled.  The task result is read per row; the direct fragment
+carries a live turn's facts until that result exists.
 
 The 40-row cap is presentation only -- the addressability gate consults every
 row -- and the cut is disclosed in the note.  The note is appended to the
@@ -125,27 +128,113 @@ def _same_attempt(recorded: Any, current: Any) -> bool:
         return False
 
 
+def _recorded_reason(record: Dict[str, Any]) -> str:
+    """The ``reason`` a wait record states, as text; ``""`` when it states none."""
+    reason = record.get("reason")
+    return "" if reason is None else str(reason).strip()
+
+
+def _sleep_facts(sleep: Any) -> Dict[str, Any]:
+    """A sleep's recorded mode and wake sources: names and ids only, never pins.
+
+    ``model_sleep.selectors`` already bounds each list, so nothing is cut here.
+    A service is named by its own name; its pinned start (pid, pgid) is
+    execution custody, not a wake condition.
+    """
+    if not isinstance(sleep, dict):
+        return {}
+    facts: Dict[str, Any] = {}
+    if str(sleep.get("mode") or "").strip():
+        facts["mode"] = str(sleep["mode"]).strip()
+    if _iso_text(sleep.get("wake_at")):
+        facts["wake_at"] = _iso_text(sleep.get("wake_at"))
+    for key in ("senders", "tasks", "runs"):
+        ids = [item.strip() for item in sleep.get(key) or [] if isinstance(item, str) and item.strip()]
+        if ids:
+            facts[key] = ids
+    services = [str(pin["name"]) for pin in sleep.get("services") or []
+                if isinstance(pin, dict) and str(pin.get("name") or "").strip()]
+    if services:
+        facts["services"] = services
+    if sleep.get("any_mail") is True:
+        facts["any_mail"] = True
+    return facts
+
+
+def _owner_wait_fact(wait: Dict[str, Any]) -> Dict[str, Any]:
+    """Name an owner-wait record by what it records (``owner_wait.checkpoint_owner_wait``).
+
+    A review binding or ``reason=review`` is a review; ``sleep`` is the model's
+    own sleep; ``owner`` is a question to the owner. A record without a reason
+    predates the field: its quiz id is then the positive evidence of an owner
+    question, and with neither it is ``unknown``. Any other stated reason is
+    ``unknown`` too, keeping the reason -- a quiz id never overrides it.
+    """
+    reason = _recorded_reason(wait)
+    has_quiz = bool(str(wait.get("quiz_id") or "").strip())
+    if str(wait.get("review_binding") or "").strip() or reason == "review":
+        kind = "review"
+    elif reason in ("sleep", "owner"):
+        kind = reason
+    else:
+        kind = "owner" if not reason and has_quiz else "unknown"
+    fact: Dict[str, Any] = {"kind": kind, "since": _iso_text(wait.get("parked_at")) or None}
+    if kind == "sleep":
+        # Its bound IS the wake time the sleep records; nothing waits for an answer.
+        fact.update(_sleep_facts(wait.get("sleep")))
+        return fact
+    if kind == "unknown" and reason:
+        fact["reason"] = reason
+    if kind != "review" and has_quiz:
+        fact["quiz_id"] = str(wait["quiz_id"])
+    if _iso_text(wait.get("wait_deadline_at")):
+        fact["until"] = _iso_text(wait.get("wait_deadline_at"))
+    return fact
+
+
+def _pause_fact(pause: Dict[str, Any]) -> Dict[str, Any]:
+    """Name an exact-pause record by its ``reason`` (``budget_pause._RAIL_REASONS``).
+
+    One carrier parks three different things: the model's cold or retained
+    sleep (``sleep``, whose recorded mode is shown as recorded, never inferred
+    from the carrier), the owner's Pause (``owner``) and a monetary rail
+    (``budget``, also every row written before the field existed). A newer
+    stated reason is ``unknown`` with that reason, never silently money.
+    """
+    reason = _recorded_reason(pause)
+    kind = {"sleep": "sleep", "owner": "owner_pause", "budget": "budget", "": "budget"}.get(reason, "unknown")
+    fact: Dict[str, Any] = {"kind": kind, "state": str(pause["state"])}
+    if kind == "sleep":
+        fact.update(_sleep_facts(pause.get("sleep")))
+        if str(pause.get("retained_owner_wait_id") or "").strip():
+            # A warm sleep a stop saved: its stack ended with that process, and an
+            # explicit Resume precedes any automatic wake (``restart_retention``).
+            fact["retained"] = True
+    elif kind == "owner_pause":
+        if str(pause.get("settlement") or "").strip():
+            fact["settlement"] = str(pause["settlement"])
+    else:
+        if kind == "unknown":
+            fact["reason"] = reason
+        fact["rail"] = str(pause.get("rail") or "")
+    fact["since"] = iso_from_epoch(pause.get("paused_at")) or iso_from_epoch(pause.get("pausing_since")) or None
+    return fact
+
+
 def _waiting_facts(stored: Dict[str, Any], attempt: Any) -> List[Dict[str, Any]]:
     """What the durable result records this root as waiting on, dated by each wait.
 
-    Separate from the queue status: an owner or model wait keeps its row
-    ``running``, a budget pause keeps it ``pending``.  ``since`` is the wait's
-    OWN recorded start and ``None`` when the record has none (a wait written
-    before it was stamped) -- never the task's start.
+    Separate from the queue status: an owner wait, a warm sleep or a model
+    wait keeps its row ``running``, an exact pause keeps it ``pending``.
+    ``since`` is the wait's OWN recorded start and ``None`` when the record has
+    none (a wait written before it was stamped) -- never the task's start.
     """
     from ouroboros.budget_pause import LIVE_PAUSE_STATES
 
     facts: List[Dict[str, Any]] = []
     wait = stored.get("owner_wait")
     if isinstance(wait, dict) and wait.get("state") == "waiting" and _same_attempt(wait.get("task_attempt"), attempt):
-        review = bool(str(wait.get("review_binding") or "").strip()) or wait.get("reason") == "review"
-        fact: Dict[str, Any] = {"kind": "review" if review else "owner",
-                                "since": _iso_text(wait.get("parked_at")) or None}
-        if not review and str(wait.get("quiz_id") or "").strip():
-            fact["quiz_id"] = str(wait["quiz_id"])
-        if _iso_text(wait.get("wait_deadline_at")):
-            fact["until"] = _iso_text(wait.get("wait_deadline_at"))
-        facts.append(fact)
+        facts.append(_owner_wait_fact(wait))
     waits = stored.get("model_waits")
     for wait_id in sorted(waits) if isinstance(waits, dict) else []:
         row = waits[wait_id]
@@ -158,8 +247,7 @@ def _waiting_facts(stored: Dict[str, Any], attempt: Any) -> List[Dict[str, Any]]
     pause = stored.get("budget_pause")
     if (isinstance(pause, dict) and pause.get("state") in LIVE_PAUSE_STATES
             and _same_attempt(pause.get("task_attempt"), attempt)):
-        facts.append({"kind": "budget", "state": str(pause["state"]), "rail": str(pause.get("rail") or ""),
-                      "since": iso_from_epoch(pause.get("paused_at")) or iso_from_epoch(pause.get("pausing_since")) or None})
+        facts.append(_pause_fact(pause))
     return facts
 
 
@@ -345,11 +433,20 @@ def roster_fingerprint(roster: Dict[str, Any], *, exclude: str = "") -> tuple:
     return rows + (("__projection_health__", bool(roster.get("incomplete"))),)
 
 
-_WAIT_LABELS = {"owner": "owner answer", "review": "review", "model": "model access", "budget": "budget pause"}
+_WAIT_LABELS = {"owner": "owner answer", "review": "review", "model": "model access", "budget": "budget pause",
+                "sleep": "sleep", "owner_pause": "owner Pause", "unknown": "unknown wait"}
+_WAIT_DETAILS = ("quiz_id", "reason", "role", "mode", "retained", "state", "settlement", "rail", "until", "reset_at",
+                 "wake_at", "senders", "tasks", "runs", "services", "any_mail")
+
+
+def _detail_text(value: Any) -> str:
+    if isinstance(value, list):
+        return ",".join(value)
+    return ("true" if value else "false") if isinstance(value, bool) else str(value)
 
 
 def _render_wait(wait: Dict[str, Any]) -> str:
-    details = [f"{key}={wait[key]}" for key in ("quiz_id", "reason", "role", "state", "rail", "until", "reset_at") if wait.get(key)]
+    details = [f"{key}={_detail_text(wait[key])}" for key in _WAIT_DETAILS if wait.get(key)]
     details.append(f"since={wait.get('since') or 'unknown'}")
     return f"{_WAIT_LABELS.get(str(wait.get('kind')), str(wait.get('kind')))} ({', '.join(details)})"
 

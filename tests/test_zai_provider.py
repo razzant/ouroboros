@@ -7,6 +7,7 @@ Coding Plan key, glm-5.3) and docs.z.ai: the provider accepts exactly
 thinking cannot be disabled (HTTP 400 code 1210), forced tool_choice works with
 thinking on, and plan exhaustion arrives as HTTP 429 code 1113.
 """
+import json
 import os
 
 import pytest
@@ -83,6 +84,9 @@ class TestRegistry:
         assert DIRECT_PROVIDER_DEFAULTS["zai"] is ZAI_DIRECT_DEFAULTS
         assert ZAI_DIRECT_DEFAULTS["main"] == "zai::glm-5.3"
         assert ZAI_DIRECT_DEFAULTS["light"] == "zai::glm-5.3-flash"
+        # The vision slot defaults to the image-capable -flash variant (probed
+        # live 2026-10-06, Coding Plan endpoint; plain glm-5.3 is text-only).
+        assert ZAI_DIRECT_DEFAULTS["vision"] == "zai::glm-5.3-flash"
         assert DIRECT_PROVIDER_REVIEW_ROLES["zai"] == ("main", "main", "main")
         assert DIRECT_PROVIDER_SCOPE_DEFAULTS["zai"] == "zai::glm-5.3"
 
@@ -319,3 +323,113 @@ class TestProbeBilling:
             type = ""
 
         assert controlled_probe_error(Plain("too many requests"))["error"] == "Rate limited"
+
+
+_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+
+
+class TestVisionSlot:
+    """PR #1560: the Vision default through the real client and SDK to a captured
+    transport, so the wire is exactly what Z.ai would receive and nothing is billed."""
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        import httpx
+
+        from ouroboros import net_transport
+
+        sent = []
+
+        def answer(request):
+            sent.append((str(request.url), json.loads(request.content)))
+            return httpx.Response(200, json={
+                "id": "zai-test", "object": "chat.completion", "created": 0, "model": "glm-5.3-flash",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "Dark red"}}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+            })
+
+        monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *_a, **_k: httpx.MockTransport(answer))
+        _clear_provider_env(monkeypatch)
+        monkeypatch.setenv("ZAI_API_KEY", "sk-zai-test-not-a-key")
+        monkeypatch.setenv("OUROBOROS_MODEL", ZAI_DIRECT_DEFAULTS["main"])
+        monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", ZAI_DIRECT_DEFAULTS["light"])
+        monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", ZAI_DIRECT_DEFAULTS["fallback"])
+        return sent
+
+    @pytest.mark.parametrize("plan", ["", "payg", "coding"])
+    def test_vlm_and_caption_send_the_image_to_flash_on_the_plan_endpoint(self, monkeypatch, wire, plan):
+        from ouroboros.tools.vision import _resolve_vlm_model
+        from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+        monkeypatch.setenv("ZAI_PLAN", plan)
+        monkeypatch.setenv("OUROBOROS_MODEL_VISION", ZAI_DIRECT_DEFAULTS["vision"])
+        endpoint = resolve_zai_base_url(plan).rstrip("/") + "/chat/completions"
+        url = f"data:image/png;base64,{_PNG}"
+        message = [{"role": "user", "content": [{"type": "text", "text": "look"},
+                                                {"type": "image_url", "image_url": {"url": url}}]}]
+        client = LLMClient()
+
+        # The VLM tools call the saved slot before the text-only Main is ever a candidate.
+        model = _resolve_vlm_model(client, "", images=[{"base64": _PNG, "mime": "image/png"}])
+        text, _usage = client.vision_query("What colour?", [{"base64": _PNG, "mime": "image/png"}], model=model)
+        # Main's image policy is unchanged: Auto still gives Main the pixels.
+        monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
+        routing = VisionRoutingContext(ZAI_DIRECT_DEFAULTS["main"], client, {})
+        assert prepare_messages_for_send(message, routing=routing) is message
+        # Where Main gets no pixels, the saved slot writes the caption.
+        monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "caption")
+        captioned = prepare_messages_for_send(message, routing=routing)
+
+        assert (model, text) == ("zai::glm-5.3-flash", "Dark red")
+        assert captioned[0]["content"][1] == {"type": "text", "text": "[image caption: Dark red]"}
+        assert [sent_url for sent_url, _body in wire] == [endpoint, endpoint]
+        for _sent_url, body in wire:
+            assert body["model"] == "glm-5.3-flash"
+            assert {"type": "image_url", "image_url": {"url": url}} in body["messages"][0]["content"]
+
+    def test_a_saved_blank_slot_still_inherits_main(self, monkeypatch, wire):
+        from ouroboros.server_runtime import apply_runtime_provider_defaults
+        from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+        from ouroboros.tools.vision import _resolve_vlm_model
+
+        # An update's provider normalization leaves an existing blank Vision blank...
+        saved = {**SETTINGS_DEFAULTS, "ZAI_API_KEY": "sk-zai-test-not-a-key"}
+        assert apply_runtime_provider_defaults(saved)[0]["OUROBOROS_MODEL_VISION"] == ""
+        # ...and blank keeps meaning "use Main" at the call site.
+        monkeypatch.setenv("OUROBOROS_MODEL_VISION", "")
+        assert _resolve_vlm_model(LLMClient(), "", images=[{"base64": _PNG, "mime": "image/png"}]) == "zai::glm-5.3"
+        assert wire == []
+
+    @pytest.mark.parametrize("mode", ["auto", "caption"])
+    @pytest.mark.parametrize("vision", ["", "zai::glm-5.3-flash"])
+    def test_local_main_captions_remotely_only_with_a_deliberate_vision_slot(self, monkeypatch, wire, mode, vision):
+        from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+        # The Z.ai key and stored remote Main id remain present when the wizard
+        # routes Main locally. An untouched Vision draft must stay blank; an
+        # explicit owner choice remains a permitted remote caption route.
+        monkeypatch.setenv("USE_LOCAL_MAIN", "1")
+        monkeypatch.setenv("OUROBOROS_MODEL_VISION", vision)
+        monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", mode)
+        monkeypatch.setenv("ZAI_PLAN", "coding")
+        url = f"data:image/png;base64,{_PNG}"
+        message = [{"role": "user", "content": [{"type": "text", "text": "look"},
+                                                {"type": "image_url", "image_url": {"url": url}}]}]
+        routing = VisionRoutingContext(ZAI_DIRECT_DEFAULTS["main"], LLMClient(), {}, use_local=True)
+        projected = prepare_messages_for_send(message, routing=routing)
+
+        assert message[0]["content"][1]["type"] == "image_url"
+        if not vision:
+            assert projected[0]["content"][1] == {
+                "type": "text",
+                "text": "[image omitted: our local llama.cpp transport lane cannot carry images; no caption route is available]",
+            }
+            assert wire == []
+        else:
+            assert projected[0]["content"][1] == {"type": "text", "text": "[image caption: Dark red]"}
+            assert len(wire) == 1
+            endpoint, body = wire[0]
+            assert endpoint == ZAI_PLAN_ENDPOINTS["coding"].rstrip("/") + "/chat/completions"
+            assert body["model"] == "glm-5.3-flash"
+            assert {"type": "image_url", "image_url": {"url": url}} in body["messages"][0]["content"]

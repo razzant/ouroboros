@@ -1,0 +1,2 @@
+857
+Money paragraphs restate the known-spend rule in place of the old accounted/wave-fit wording (#1487) and the removal of the default in-task stop (#1128): planning threshold, wake allowance and producer ceiling, commit-gate and acceptance wave admission, forced rails, Resume refresh and pricing.

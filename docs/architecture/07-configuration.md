@@ -116,8 +116,8 @@ A registry of `config.SETTINGS_DEFAULTS` (exact defaults canonical in `settings_
 | OUROBOROS_DELIVERABLES_ROOT | (empty) | Deliverables root (empty derives the `~/Ouroboros/Deliverables` sibling; `tool_access.py`) |
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified GC retention (`retention.py`) |
 | OUROBOROS_RESTART_DRAIN_MAX_SEC | 120 | Restart drain bound |
-| TOTAL_BUDGET | 200.0 | Global budget (USD); an absent key resolves to this product default, a non-positive value means no finite limit; resolved live from the saved document, so a change binds running tasks at their next model call (`resolve_total_budget_usd`) |
-| OUROBOROS_PER_TASK_COST_USD | 50.0 | Per-task cost cap and tree ceiling basis: the root resolves min(global share, cap minus margin), descendants retain it, admission stays independent, and the wrap-up affordability rail soft-lands under it (`task_pacing.py`, §6 Budget tracking) |
+| TOTAL_BUDGET | 200.0 | Global budget (USD), reached by known spend; an absent key resolves to this product default, a non-positive value means no finite limit; resolved live from the saved document, so a change binds running tasks at their next model call (`resolve_total_budget_usd`) |
+| OUROBOROS_PER_TASK_COST_USD | 50.0 | Hard cap over one task's whole tree: new paid calls are refused once its known spend (settled: confirmed + estimated) reaches it; holds are not spending. No default early stop precedes it; only an explicit `cost_hard_stop_pct` profile resolves min(global share, cap minus margin) (`task_pacing.py`, §6 Budget tracking) |
 | OUROBOROS_RUB_USD_RATE | (empty) | Manual RUB→USD rate for RUB-priced providers |
 | OUROBOROS_PRICING_TTL_SEC | 21600 | Provider-catalog pricing cache TTL |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Default tool timeout |
@@ -205,7 +205,7 @@ A registry of `config.SETTINGS_DEFAULTS` (exact defaults canonical in `settings_
 | OUROBOROS_BG_WAKEUP_MIN | 900 | Lower bound (s) of the model-chosen wake interval (`set_next_wakeup`), clamped into [min, max] and re-read at each alarm, so a change needs no restart |
 | OUROBOROS_BG_WAKEUP_MAX | 14400 | Upper bound (s), never below the minimum; with no chosen interval the alarm uses `runtime_limits.WAKE_DEFAULT_SEC` (3300 s, just under the 1 h cache TTL, keeping the shared prefix warm) — a constant rather than a third knob |
 | OUROBOROS_CONSCIOUSNESS_AUTONOMY | act | Closed enum for a wake (else the default): `observe` researches and performs internal work, can start and stop its own read-only children and use owner-governed schedule controls, and cannot write shell/user files/source/skills/settings or publish; `act` adds all the runtime mode allows except own code/prompts, evolution, restart, settings; `full` includes evolution |
-| OUROBOROS_CONSCIOUSNESS_DAILY_USD | 20.0 | Rolling-24h ceiling over consciousness wakes and the tasks they start; exhausted blocks NEW wakes and tasks until spend leaves the window; `0` is a real choice |
+| OUROBOROS_CONSCIOUSNESS_DAILY_USD | 20.0 | Rolling-24h ceiling over consciousness wakes and the tasks they start, on known spend; exhausted blocks NEW wakes and tasks until spend leaves the window; `0` is a real choice |
 | OUROBOROS_CONSCIOUSNESS_MAX_TASKS | 2 | How many consciousness-started tasks may run at once; `0` = it never starts tasks |
 | OUROBOROS_POST_TASK_EVOLUTION | false | Post-task evolution promotion toggle; self-enablement is blocked at the shell/browser/settings/data-write guards, choosing an objective runs on Main because it is a high-leverage decision, execution stays behind review and owner gates |
 | OUROBOROS_POST_TASK_EVOLUTION_CADENCE | llm | Promotion cadence `llm` or `every_n:k` (malformed normalizes to `llm`) |
