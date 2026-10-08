@@ -724,7 +724,9 @@ def _apply_hunks_to_text(
 
     A repeated Update File directive is the explicit way to chain against a
     preceding result. Hunks inside one directive never gain placement from a
-    previous hunk's cursor or mutation.
+    previous hunk's cursor or mutation. After the exact and individual whitespace
+    tiers, combined leading/trailing whitespace still requires a unique placement
+    and one uniform indentation shift; it never changes internal content.
     """
     file_lines = content.split("\n")
     notes: List[str] = []
@@ -755,7 +757,9 @@ def _apply_hunks_to_text(
                 matched = (actual == old if tier == "exact" else
                            [s.rstrip() for s in actual] == [s.rstrip() for s in old]
                            if tier == "trailing" else
-                           [s.lstrip() for s in actual] == [s.lstrip() for s in old])
+                           [s.lstrip() for s in actual] == [s.lstrip() for s in old]
+                           if tier == "indentation" else
+                           [s.strip() for s in actual] == [s.strip() for s in old])
                 if matched and (not hunk.anchor or any(a <= i for a in anchors)):
                     found.append(i)
             return found
@@ -767,6 +771,9 @@ def _apply_hunks_to_text(
             matches = candidates(tier)
         if not matches:
             tier = "indentation"
+            matches = candidates(tier)
+        if not matches:
+            tier = "indentation+trailing"
             matches = candidates(tier)
         if not matches:
             preview = "\n".join("    " + line for line in old[:6])
@@ -785,7 +792,7 @@ def _apply_hunks_to_text(
         actual = file_lines[pos:pos + len(old)]
         shift = ""
         remove_indent = ""
-        if tier == "indentation":
+        if tier in {"indentation", "indentation+trailing"}:
             deltas = set()
             for actual_line, expected_line in zip(actual, old):
                 if not actual_line.strip() and not expected_line.strip():
@@ -829,7 +836,7 @@ def _apply_hunks_to_text(
         changes.append((pos, pos + len(old), replacement, hi))
         if tier != "exact":
             notes.append(f"hunk {hi}: matched ignoring {tier} whitespace; unchanged context bytes preserved")
-            if tier == "indentation":
+            if tier in {"indentation", "indentation+trailing"}:
                 notes.append(f"hunk {hi}: added lines shifted by {len(shift) if shift else -len(remove_indent):+d} leading characters")
     ordered = sorted(changes, key=lambda item: (item[0], item[1]))
     for left, right in zip(ordered, ordered[1:]):

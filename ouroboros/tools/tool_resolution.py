@@ -82,11 +82,12 @@ def system_repo_dir_for(ctx: Any) -> pathlib.Path:
 
 
 _PATH_NORMALIZED_TOOLS = frozenset({"read_file", "write_file", "edit_text", "apply_patch", "edit_batch", "list_files", "search_code", "query_code"})
-_TOP_LEVEL_PATH_WRITE_TOOLS = frozenset({"write_file", "edit_text"})
 _ROOT_SELECTED_READ_TOOLS = frozenset({"read_file", "list_files", "search_code"})
 
 
 _ROOT_ARG_REPO_WRITE_TOOLS = frozenset({"write_file", "edit_text", "apply_patch", "edit_batch"})
+# Every editor retains the same explicit wrong-root redirect before a write.
+_TOP_LEVEL_PATH_WRITE_TOOLS = _ROOT_ARG_REPO_WRITE_TOOLS
 
 
 @dataclass(frozen=True)
@@ -214,7 +215,7 @@ def _normalize_dispatch_path_args_result(
     (read_file/list_files/search_code) are auto-routed to
     ``root='active_workspace'`` with a visible note appended AFTER the result
     (trailing, so first-line failure classification is never masked),
-    and writes (write_file/edit_text) return an actionable
+    and all file editors return an actionable
     ROOT_REQUIRED_ACTIVE_WORKSPACE redirect instead of a generic access denial.
     The destination root still passes every downstream gate (profile access
     decision, protected-path guards, subagent filters) — only the label is
@@ -294,10 +295,14 @@ def _normalize_dispatch_path_args_result(
     for _key in ("path", "dir"):
         if isinstance(args.get(_key), str) and args[_key]:
             candidates.append(args[_key])
-    if isinstance(args.get("files"), list):
-        for _f in args["files"]:
+    for entries in (args.get("files"), args.get("edits")):
+        for _f in entries if isinstance(entries, list) else []:
             if isinstance(_f, dict) and isinstance(_f.get("path"), str) and _f["path"]:
                 candidates.append(_f["path"])
+    if name == "apply_patch" and isinstance(args.get("patch"), str):
+        from ouroboros.tools.edit_ops import patch_target_paths
+
+        candidates.extend(patch_target_paths(args["patch"]))
     hits = [text for text in candidates if _under_workspace(text)]
     if not hits:
         return _DispatchPathNormalization()

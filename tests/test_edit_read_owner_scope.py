@@ -206,6 +206,55 @@ def test_patch_original_spans_overlap_and_uniform_indent_failure():
     assert changed is None and "not uniform" in failure
 
 
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
+                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+def test_patch_combines_uniform_indent_and_trailing_space(file_tools, root):
+    registry, _, *_ = file_tools
+    base = _target(file_tools, root)
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "combined.txt"
+    target.write_text("    anchor   \n    old   \n")
+    result = registry.execute("apply_patch", {"root": root, **_selectors(root), "patch":
+        "*** Update File: combined.txt\n   anchor\n-  old\n+  new\n"})
+    assert result.startswith("✅"), result
+    assert target.read_text() == "    anchor   \n    new\n"
+    assert "indentation+trailing" in result and "shifted by +2" in result
+
+
+def test_combined_whitespace_keeps_ambiguity_and_content_refusals():
+    from ouroboros.tools.edit_ops import _apply_hunks_to_text, _parse_patch
+
+    hunk = _parse_patch("*** Update File: f.txt\n-  old\n+  new\n")[0][0].hunks
+    changed, _, failure = _apply_hunks_to_text("    old   \n      old \n", hunk, "f.txt")
+    assert changed is None and "ambiguous" in failure
+    changed, _, failure = _apply_hunks_to_text("    OLD   \n", hunk, "f.txt")
+    assert changed is None and "context not found" in failure
+    mixed = _parse_patch("*** Update File: f.txt\n   anchor\n-  old\n+  new\n")[0][0].hunks
+    changed, _, failure = _apply_hunks_to_text("    anchor   \n     old   \n", mixed, "f.txt")
+    assert changed is None and "not uniform" in failure
+
+
+@pytest.mark.parametrize("tool", ["write_file", "edit_text", "edit_batch", "apply_patch"])
+def test_explicit_wrong_user_root_redirects_each_editor_without_writes(file_tools, tool):
+    registry, _, _, _, workspace, *_ = file_tools
+    target = workspace / "explicit.txt"
+    target.write_text("old\n")
+    if tool == "write_file":
+        args = {"path": str(target), "content": "new\n"}
+    elif tool == "edit_text":
+        args = {"path": str(target), "old_str": "old", "new_str": "new"}
+    elif tool == "edit_batch":
+        args = {"edits": [{"path": str(target), "old_str": "old", "new_str": "new"}]}
+    else:
+        args = {"patch": f"*** Update File: {target}\n-old\n+new\n"}
+    result = registry.execute(tool, {"root": "user_files", **args})
+    assert "ROOT_REQUIRED_ACTIVE_WORKSPACE" in result, result
+    assert target.read_text() == "old\n"
+    retry = registry.execute(tool, {"root": "active_workspace", **args})
+    assert retry.startswith(("✅", "OK:")), retry
+    assert target.read_text() == "new\n"
+
+
 def test_patch_eof_final_newline_and_internal_spacing_are_exact():
     from ouroboros.tools.edit_ops import _apply_hunks_to_text, _parse_patch
 
