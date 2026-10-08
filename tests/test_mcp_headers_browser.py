@@ -194,3 +194,58 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
             browser.close()
     assert {headers["authorization"] for headers in http_app.seen} == {BEARER}
     assert {headers["x-api-key"] for headers in sse_app.seen} == {CUSTOM}
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('saved_headers', [False, True])
+def test_header_switch_stdio(direct_server_with_data, engine, saved_headers):  # noqa: F811
+    """Retain draft headers on transport change until explicitly removed, then Save.
+
+    Cover both a draft-only row and an edited previously saved map: the latter
+    must not be resurrected from header row state after Remove unsupported.
+    """
+    from playwright.sync_api import sync_playwright
+
+    url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+        page._evidence_engine = engine
+        try:
+            _open_mcp(page, url)
+            page.click('#btn-mcp-add-server')
+            card = page.locator('[data-mcp-card]').last
+            card.locator('[data-mcp-field="id"]').fill('switch_headers')
+            card.locator('[data-mcp-field="url"]').fill('https://example.com/mcp')
+            card.locator('[data-mcp-header-add]').click()
+            card = page.locator('[data-mcp-card]').last
+            card.locator('[data-mcp-header-field="name"]').fill('X-Api-Key')
+            card.locator('[data-mcp-header-field="value"]').fill(CUSTOM)
+            if saved_headers:
+                _save(page)
+                page.reload(wait_until='domcontentloaded')
+                _open_mcp(page, url)
+                card = page.locator('[data-mcp-card]').last
+                assert card.locator('[data-mcp-header-field="value"]').input_value() == '***set***'
+                card.locator('[data-mcp-header-field="value"]').fill('synthetic-edited-key')
+            card.locator('[data-mcp-field="transport"]').select_option('stdio')
+            card = page.locator('[data-mcp-card]').last
+            card.locator('[data-mcp-field="command"]').fill('python3')
+            remove = card.locator('[data-mcp-clear-unsupported]')
+            assert remove.is_visible(), 'Draft-only header must have an explicit removal control'
+            assert 'headers' in card.locator('.form-row:has([data-mcp-clear-unsupported]) .muted').inner_text()
+            assert CUSTOM not in card.inner_text() and 'synthetic-edited-key' not in card.inner_text()
+            _capture(page, f'mcp-stdio-retained-{saved_headers}')
+            remove.click()
+            card = page.locator('[data-mcp-card]').last
+            assert card.locator('[data-mcp-clear-unsupported]').count() == 0
+            _save(page)
+            saved = json.loads((data_dir / 'settings.json').read_text(encoding='utf-8'))
+            server = next(s for s in saved['MCP_SERVERS'] if s['id'] == 'switch_headers')
+            assert server['transport'] == 'stdio' and server['command'] == 'python3'
+            assert 'headers' not in server, 'Removed draft rows must not resurrect at collection'
+            assert server['enabled'] is False
+            card.locator('[data-mcp-field="transport"]').select_option('streamable_http')
+            assert page.locator('[data-mcp-card]').last.locator('[data-mcp-header-row]').count() == 0
+        finally:
+            browser.close()

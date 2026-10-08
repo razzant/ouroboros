@@ -9,7 +9,7 @@ function detail(text) {
     return text ? `<span class="mcp-tool-desc">${escapeHtml(text)}</span>` : '';
 }
 
-/** One previewed entry: names, counts and the masked address only, never a value. */
+/** One previewed entry: names and counts, never credential or address values. */
 function renderEntry(entry) {
     const blocked = !entry.action;
     const chip = blocked ? ['danger', 'Not applied'] : entry.action === 'add' ? ['ok', 'Add (disabled)'] : ['muted', 'Update'];

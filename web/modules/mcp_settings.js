@@ -57,9 +57,11 @@ function toolCountLabel(count) {
 function unsupportedFields(server) {
     const unused = server.transport === 'stdio' ? ['url', 'auth_token', 'headers']
         : ['command', 'args', 'cwd', 'env', 'env_from_settings'];
-    const fields = Object.keys(server).filter((key) => !SERVER_FIELDS.has(key)
-        || (unused.includes(key) && !['', '[]', '{}', 'null'].includes(JSON.stringify(server[key]))
-            && server[key] !== ''));
+    // Edited headers live in the draft even when server.headers is absent.
+    const draft = { ...server, ...headerPayload(server) };
+    const fields = Object.keys(draft).filter((key) => !SERVER_FIELDS.has(key)
+        || (unused.includes(key) && !['', '[]', '{}', 'null'].includes(JSON.stringify(draft[key]))
+            && draft[key] !== ''));
     if (server.transport === 'stdio' && server.auth_header && server.auth_header !== 'Authorization') {
         fields.push('auth_header');
     }
@@ -187,12 +189,12 @@ function renderServerCard(server, index) {
             <div class="form-grid two">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-auth_header">Legacy header name</label>
-                    <input type="text" class="ui-control" id="mcp-${index}-auth_header" aria-label="MCP server ${index + 1}: Auth header" data-mcp-field="auth_header" value="${escapeHtml(authHeader)}" placeholder="Authorization" autocomplete="off" spellcheck="false">
+                    <input type="text" class="ui-control" id="mcp-${index}-auth_header" aria-label="MCP server ${index + 1}: Legacy header name" data-mcp-field="auth_header" value="${escapeHtml(authHeader)}" placeholder="Authorization" autocomplete="off" spellcheck="false">
                 </div>
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-auth_token">Legacy header value (optional)</label>
                     <div class="secret-input-row">
-                        <input type="password" class="ui-control" id="mcp-${index}-auth_token" aria-label="MCP server ${index + 1}: Auth token (optional)" data-mcp-field="auth_token" value="${escapeHtml(authToken)}" placeholder="${escapeHtml(authPlaceholder)}" autocomplete="off" spellcheck="false">
+                        <input type="password" class="ui-control" id="mcp-${index}-auth_token" aria-label="MCP server ${index + 1}: Legacy header value (optional)" data-mcp-field="auth_token" value="${escapeHtml(authToken)}" placeholder="${escapeHtml(authPlaceholder)}" autocomplete="off" spellcheck="false">
                         <button type="button" class="btn btn-default" data-mcp-token-toggle>Show</button>
                         <button type="button" class="btn btn-default" data-mcp-token-clear>Clear</button>
                     </div>
@@ -280,7 +282,10 @@ function bindCardEvents(card) {
     });
 
     card.querySelector('[data-mcp-clear-unsupported]')?.addEventListener('click', () => {
-        for (const key of unsupportedFields(mcpServers[idx])) delete mcpServers[idx][key];
+        const server = mcpServers[idx];
+        const fields = unsupportedFields(server);
+        for (const key of fields) delete server[key];
+        if (fields.includes('headers')) resetHeaderRows(server);
         renderAll();
         notifyChanged();
     });

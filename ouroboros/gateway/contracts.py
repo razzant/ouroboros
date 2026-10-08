@@ -1559,6 +1559,8 @@ __all__ = [
     "MarketplaceInstalledResponse",
     "LocalModelStatusResponse",
     "McpStatusResponse",
+    "MCPImportPreviewRequest",
+    "MCPImportPreviewResponse",
     "ModelCatalogResponse",
     "ProviderTestRequest",
     "ProviderTestResponse",

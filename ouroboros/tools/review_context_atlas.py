@@ -451,9 +451,7 @@ def _render_index_text(
     parts = [
         "## Repository index",
         "",
-        "A deterministic map of this repository: structural facts only, no file "
-        "bodies and no LLM-generated claims. Every path below is on disk in the "
-        "candidate tree — read any of them in full with your own `read_file`.",
+        "Structural facts only; paths exist in the candidate. Read bodies with `read_file`.",
         "",
         "### Coverage index",
         "",

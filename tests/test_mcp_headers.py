@@ -27,7 +27,6 @@ from ouroboros.mcp_headers import (
     MCPHeaderPlaceholderUnmatched,
     mask_headers,
     restore_headers,
-    validate_headers,
 )
 from tests.test_settings_secret_mask import settings_client  # noqa: F401
 from tests.test_settings_secret_reveal import reveal_settings  # noqa: F401
