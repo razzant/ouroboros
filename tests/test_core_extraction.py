@@ -131,8 +131,10 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # for same-tree mail: the forward_to_worker description names its peer addressees
     # as any other task in the caller's tree (parent, sibling, any task sharing the
     # root) and says Presence observation gaps are disclosed inside the tree too.
+    # Rolled for the six owner-approved edit/read changes: numbered read views,
+    # explicit omitted-root semantics and ordered same-file edit_text replacements.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "b3ccbf58d2cb7874b0f30d6c5d136101875b543664cf531f5d8134a50bf731a3"
+        "318f0b52119f3c5e42a91fb6a243cb16764a7c4f3b900f34e3f5627d13138c53"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
