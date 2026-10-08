@@ -712,3 +712,11 @@ def test_owner_continuation_envelopes_are_exported():
     from ouroboros.gateway import contracts
     for cls in (TaskPauseRequest, TaskPauseResponse, TaskContinueRequest, TaskContinueResponse, ContinuationOffer):
         assert cls.__name__ in contracts.__all__
+
+
+def test_mcp_import_preview_contract_matches_browser_and_registered_route():
+    from ouroboros.gateway.contracts import MCPImportPreviewRequest, MCPImportPreviewResponse
+    text = (pathlib.Path(__file__).resolve().parent.parent / 'web/modules/api_types.js').read_text(encoding='utf-8')
+    for cls in (MCPImportPreviewRequest, MCPImportPreviewResponse):
+        assert set(get_type_hints(cls)) == _js_typedef_fields(text, cls.__name__)
+    assert 'POST /api/mcp/import/preview' in HTTP_ENDPOINTS

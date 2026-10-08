@@ -26,6 +26,18 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import Literal, NotRequired, Required, TypedDict  # type: ignore[assignment]
 
 
+class MCPImportPreviewRequest(TypedDict):
+    text: str
+    servers: List[Any]
+
+
+class MCPImportPreviewResponse(TypedDict):
+    ok: bool
+    entries: List[Dict[str, Any]]  # only each entry's patch carries literal values
+    ignored_keys: NotRequired[List[str]]
+    error: NotRequired[str]
+
+
 class ChatInbound(TypedDict):
     """Inbound WS chat message. ``type`` and ``content`` are required."""
 

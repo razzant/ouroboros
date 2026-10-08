@@ -989,3 +989,17 @@
 
 
 /* track-migration:end */
+
+/* Header rows keep long credentials inside their own column, including WebKit. */
+.mcp-headers-fields { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.mcp-headers-fields .settings-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); flex-wrap: wrap; }
+.mcp-headers-fields h4 { margin: 0; font-size: var(--type-body); color: var(--text-primary); }
+.mcp-headers-fields p { margin: 0; }
+.mcp-header-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto; gap: var(--space-2); min-width: 0; }
+.mcp-header-row > button { justify-self: start; align-self: center; }
+.mcp-header-row .form-field, .mcp-header-row .secret-input-row { min-width: 0; }
+.mcp-import-entry { display: flex; flex-direction: column; gap: var(--space-1); overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+    .mcp-header-row { grid-template-columns: minmax(0, 1fr); }
+    .mcp-server-card-head { flex-wrap: wrap; }
+}

@@ -132,6 +132,7 @@ def _build_network_meta(bind_host: str, bind_port: int) -> dict:
 
 
 def _mask_mcp_servers_payload(servers: Any) -> list:
+    from ouroboros.mcp_headers import mask_headers
     if not isinstance(servers, list):
         return []
     try:
@@ -141,12 +142,15 @@ def _mask_mcp_servers_payload(servers: Any) -> list:
     out = []
     for entry in servers:
         if not isinstance(entry, dict):
+            out.append(entry)
             continue
         clone = dict(entry)
         if clone.get("id"):
             clone["id"] = _mcp_canonical_id(clone.get("id"))
         if "url" in clone:
             clone["url"] = mask_mcp_url(clone["url"])
+        if "headers" in clone:
+            clone["headers"] = mask_headers(clone["headers"])
         token = str(clone.get("auth_token") or "")
         if token:
             clone["auth_token"] = mask_prefixed_secret(token, visible_chars=8)
@@ -265,6 +269,7 @@ def _rehydrate_mcp_servers_payload(incoming: Any, current: Any) -> list:
     if not isinstance(incoming, list):
         return []
     from ouroboros.mcp_client import canonical_server_id, raw_server_id
+    from ouroboros.mcp_headers import holds_placeholder, restore_headers
 
     current_by_id: Dict[str, list] = {}
     for entry in current if isinstance(current, list) else []:
@@ -274,13 +279,14 @@ def _rehydrate_mcp_servers_payload(incoming: Any, current: Any) -> list:
     out = []
     for entry in incoming:
         if not isinstance(entry, dict):
+            out.append(entry)
             continue
         clone = {key: value for key, value in entry.items() if key not in MCP_RESPONSE_ONLY_FIELDS}
         if clone.get("id"):
             clone["id"] = canonical_server_id(clone.get("id"))
         server_id = raw_server_id(clone)
         token = str(clone.get("auth_token") or "")
-        masked = looks_masked_mcp_secret(token) or (
+        masked = holds_placeholder(clone.get("headers")) or looks_masked_mcp_secret(token) or (
             "url" in clone and rehydrate_mcp_url(clone["url"], "") != str(clone["url"] or ""))
         matches = current_by_id.get(server_id, []) if server_id else []
         if masked and (len(matches) > 1 or incoming_ids.count(server_id) > 1):
@@ -290,6 +296,8 @@ def _rehydrate_mcp_servers_payload(incoming: Any, current: Any) -> list:
             clone["url"] = rehydrate_mcp_url(clone["url"], existing.get("url"))
         if looks_masked_mcp_secret(token):
             clone["auth_token"] = str(existing.get("auth_token") or "")
+        if "headers" in clone:
+            clone["headers"] = restore_headers(clone["headers"], existing, server_id=server_id)
         out.append(clone)
     return out
 
@@ -1278,14 +1286,18 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         old_effective_settings = dict(old_settings)
         old_effective_settings["OUROBOROS_RUNTIME_MODE"] = current_runtime_mode
         if "MCP_SERVERS" in body:
+            from ouroboros.mcp_headers import MCPHeaderPlaceholderUnmatched, validate_changed_headers
             body = dict(body)
             try:
                 body["MCP_SERVERS"] = _rehydrate_mcp_servers_payload(
                     body.get("MCP_SERVERS"),
                     old_settings.get("MCP_SERVERS"),
                 )
-            except MCPSecretIdentityAmbiguous as exc:
+                validate_changed_headers(body["MCP_SERVERS"], old_settings.get("MCP_SERVERS"))
+            except (MCPSecretIdentityAmbiguous, MCPHeaderPlaceholderUnmatched) as exc:
                 return unsaved_error(str(exc), 409, code=exc.code)
+            except ValueError as exc:
+                return unsaved_error(str(exc), 400, code="MCP_CONFIG_ERROR")
         current = _merge_settings_payload(old_effective_settings, body)
         from ouroboros.runtime_mode_policy import runtime_mode_at_least
 
