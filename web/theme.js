@@ -73,6 +73,34 @@
         syncControls();
     };
 
+    /* The desktop window's ordinary system caption takes the light or dark tint of
+       the painted palette (launcher_appearance.py). Only a top-level document speaks
+       for its window: a framed copy (the onboarding overlay) never drives its
+       parent's frame. pywebview runs each bridge call on its own thread, so calls
+       can arrive out of order, even a replaced page's after its successor's: each
+       carries when this document became the window's page (its time origin on the
+       browser's monotonic clock, renewed when the back-forward cache restores it)
+       and its count there, and the launcher keeps only a request newer by that
+       pair. A browser, or a desktop app built before the bridge, has none. */
+    const ownsWindow = (() => { try { return window.top === window; } catch { return false; } })();
+    const clock = window.performance;
+    let pageSince = clock?.timeOrigin;
+    let nativeSequence = 0;
+    const syncNativeFrame = () => {
+        const api = ownsWindow ? window.pywebview?.api : null;
+        if (typeof api?.set_native_appearance !== 'function') return;
+        nativeSequence += 1;
+        try {
+            Promise.resolve(api.set_native_appearance(resolved, pageSince, nativeSequence)).catch(() => {});
+        } catch { /* the frame keeps its tint; the page is unaffected */ }
+    };
+    // Restored from the back-forward cache after a newer page: this one is the window's again.
+    const onPageShow = (event) => {
+        if (!event.persisted || !clock) return;
+        pageSince = clock.timeOrigin + clock.now();
+        syncNativeFrame();
+    };
+
     // Re-resolve, repaint, and tell mounted views only when the PAINTED theme
     // moved. Switching Dark -> System on a dark OS changes the choice without
     // changing a single colour, and must not churn charts or diagrams.
@@ -82,6 +110,7 @@
         resolved = next;
         paint();
         if (changed) {
+            syncNativeFrame();
             window.dispatchEvent(new CustomEvent('ouro:theme-changed', { detail: { theme: resolved, choice } }));
         }
     };
@@ -95,6 +124,8 @@
     };
 
     paint();
+    // The first paint announces nothing; the bridge, injected after load, hears it then.
+    syncNativeFrame();
 
     const onClick = (event) => {
         const button = event.target.closest?.('[data-theme-choice]');
@@ -142,6 +173,8 @@
         document.removeEventListener('keydown', onKeydown);
         document.removeEventListener('DOMContentLoaded', ready);
         window.removeEventListener('storage', onStorage);
+        window.removeEventListener('pywebviewready', syncNativeFrame);
+        window.removeEventListener('pageshow', onPageShow);
         window.removeEventListener('pagehide', cleanup);
         query?.removeEventListener?.('change', onSystemChange);
     };
@@ -149,6 +182,10 @@
     document.addEventListener('keydown', onKeydown);
     document.addEventListener('DOMContentLoaded', ready, { once: true });
     window.addEventListener('storage', onStorage);
+    if (ownsWindow) {
+        window.addEventListener('pywebviewready', syncNativeFrame);
+        window.addEventListener('pageshow', onPageShow);
+    }
     window.addEventListener('pagehide', cleanup);
     query?.addEventListener?.('change', onSystemChange);
 

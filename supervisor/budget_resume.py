@@ -138,12 +138,13 @@ def _root_money_refusal(result_root: Any, task: Dict[str, Any], root_task_id: st
         if tree.get("integrity_degraded"):
             return {"ok": False, "error": "root_accounting_degraded",
                     "action": "retry_or_cancel"}
-        limit, accounted = tree.get("root_limit_usd"), tree.get("accounted_usd")
+        # Known spend decides, the reservation's own rule (#1487); holds do not.
+        limit, known = tree.get("root_limit_usd"), tree.get("settled_usd")
         if limit is not None:
-            if accounted is None:
+            if known is None:
                 return {"ok": False, "error": "root_accounting_degraded",
                         "action": "retry_or_cancel"}
-            if float(accounted) >= float(limit) - 1e-9:
+            if float(known) >= float(limit) - 1e-9:
                 return {"ok": False, "error": "root_hard_cap_exhausted",
                         "action": "increase_budget_then_resume"}
     return None

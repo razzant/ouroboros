@@ -2,13 +2,18 @@
 
 Recovery custody is separate from money. Dirty owners are acknowledged only
 through the revision whose cost was projected; a later receipt retains debt.
+Each pass observes what stays unresolved, per subject (open attempts, cost
+projections), as one id-to-reason map; only a change of that map is published,
+and only a reason new to the subject logs a representative traceback.
 """
 from __future__ import annotations
 
+import errno
 import logging
 import json
 import os
 import pathlib
+import re
 import threading
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -18,7 +23,13 @@ log = logging.getLogger(__name__)
 _PROBING: set[tuple[str, str]] = set()
 _PROBE_LOCK = threading.Lock()
 _UNRESOLVED_LOCK = threading.Lock()
-_LAST_UNRESOLVED: dict[str, tuple] = {}
+# (root, subject) -> the last observed id->reason map, the last published
+# signature, the last publication failure and (attempts) the last gateway-close
+# failure; current entries only.
+_LAST_UNRESOLVED: dict[tuple[str, str], dict] = {}
+ATTEMPTS, COST_PROJECTIONS = "attempt", "cost_projection"
+_ID_FIELDS = {ATTEMPTS: "attempt_ids", COST_PROJECTIONS: "task_ids"}
+_CODE = re.compile(r"[a-z][a-z0-9_.:-]{0,63}")
 
 
 class _RecoveryGateway:
@@ -69,30 +80,84 @@ def _unresolved(events, row, basis):
     events[str(row['attempt_id'])] = str(basis)
 
 
-def _publish_unresolved(root, observations):
+def _reason(exc):
+    """A stable failure reason: class plus errno or code, never a per-id message or path."""
+    code = getattr(exc, "errno", None)
+    code = errno.errorcode.get(code, code) if isinstance(code, int) else getattr(exc, "code", None)
+    if code is None and _CODE.fullmatch(str(exc)):
+        code = str(exc)  # A typed refusal such as owner_pause_authority_missing.
+    return f"{type(exc).__name__}:{code}" if code not in (None, "") else type(exc).__name__
+
+
+def _subject_state(root, subject):
+    """The subject's diagnostic memory; the caller holds ``_UNRESOLVED_LOCK``."""
+    return _LAST_UNRESOLVED.setdefault((str(root), subject),
+                                       {"observed": {}, "published": None, "fault": None, "close": None})
+
+
+def _close_gateway(root, gateway):
+    """A failed close of the pass's borrowed gateway retains nothing; it is logged once per change."""
+    try:
+        gateway.close()
+        exc = reason = None
+    except Exception as error:
+        exc, reason = error, _reason(error)
+    with _UNRESOLVED_LOCK:
+        state = _subject_state(root, ATTEMPTS)
+        repeated, state["close"] = state["close"] == reason, reason
+    if reason and not repeated:
+        log.debug("Usage recovery gateway close failed (%s)", reason, exc_info=exc)
+
+
+def _publish_unresolved(root, observations, *, subject=ATTEMPTS, faults=None, keep=(), complete=True):
     """Publish one changed summary, without an interprocess lock or polling wait.
 
-    Outstanding custody stays in the store. These log rows are observations,
-    like the generic log appender's unlocked fallback, never authority.
+    ``observations`` maps each id this pass found unresolved to its reason;
+    an id in ``keep`` (still a candidate whose outcome this pass did not prove)
+    keeps its previous reason, so a skipped or partial pass proves no recovery. The
+    observed map is replaced every pass and holds only current ids. A reason
+    absent from the previous map logs one representative traceback from
+    ``faults``; an unchanged pass logs nothing at any level. Publication is
+    separate: an incomplete pass never publishes, and a failed write retries
+    on the next pass with one warning per failure kind, so neither an
+    unwritable log nor a stable error repeats a stack. Outstanding custody
+    stays in the store; these rows are observations, never authority.
     """
     from ouroboros.utils import _write_fd_fully, assert_test_data_path, utc_now_iso
     from supervisor.message_bus import try_get_bridge
 
-    ids = tuple(sorted(observations))
-    by_basis = dict(sorted(Counter(observations.values()).items()))
-    signature = len(ids), tuple(by_basis.items()), ids
-    key = str(root)
+    with _UNRESOLVED_LOCK:
+        state = _subject_state(root, subject)
+        previous = state["observed"]
+        current = {key: previous[key] for key in keep if key in previous}
+        current.update(observations)
+        state["observed"] = current
+        known = set(previous.values())
+        fresh = {}
+        for key, reason in sorted(current.items()):
+            if reason not in known and (faults or {}).get(key) is not None:
+                fresh.setdefault(reason, (key, faults[key]))
+    for reason, (example, exc) in fresh.items():
+        count = sum(1 for value in current.values() if value == reason)
+        log.warning("Terminal maintenance %s: %d unresolved with %s (e.g. %s)", subject, count, reason, example,
+                    exc_info=exc)
+    if not complete:
+        return
+    ids = tuple(sorted(current))
+    by_basis = dict(sorted(Counter(current.values()).items()))
+    signature = tuple(sorted(current.items()))
     path = root / "logs" / "supervisor.jsonl"
     assert_test_data_path(path)
     try:
         with _UNRESOLVED_LOCK:
-            previous = _LAST_UNRESOLVED.get(key)
-            if previous == signature or previous is None and not ids:
+            if state["published"] == signature or state["published"] is None and not ids:
                 return
             # 50 is the hard identifier-list size limit of one log row. Compare
-            # the FULL id set above so changes beyond this display cap still emit.
-            event = {"type": "duty_unresolved", "duty": "terminal-maintenance", "ts": utc_now_iso(),
-                     "count": len(ids), "by_basis": by_basis, "attempt_ids": list(ids[:50])}
+            # the FULL id->reason map above so changes beyond this display cap still emit.
+            shown = ids[:50]
+            event = {"type": "duty_unresolved", "duty": "terminal-maintenance", "subject": subject,
+                     "ts": utc_now_iso(), "count": len(ids), "by_basis": by_basis,
+                     _ID_FIELDS[subject]: list(shown), "reasons": {key: current[key] for key in shown}}
             path.parent.mkdir(parents=True, exist_ok=True)
             data = (json.dumps(event, ensure_ascii=False) + '\n').encode('utf-8')
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
@@ -100,12 +165,15 @@ def _publish_unresolved(root, observations):
                 _write_fd_fully(fd, data, path)
             finally:
                 os.close(fd)
-            _LAST_UNRESOLVED[key] = signature
+            state["published"], state["fault"] = signature, None
         bridge = try_get_bridge()
         if bridge is not None:
             bridge.push_log(event)
-    except Exception:
-        log.warning("Unresolved duty observations could not be published", exc_info=True)
+    except Exception as exc:
+        with _UNRESOLVED_LOCK:
+            repeated, state["fault"] = state["fault"] == _reason(exc), _reason(exc)
+        if not repeated:
+            log.warning("Unresolved %s observations could not be published", subject, exc_info=True)
 
 
 def imported_projection_debt(root, buckets, *, degraded=False):
@@ -144,7 +212,7 @@ def imported_projection_debt(root, buckets, *, degraded=False):
 
 def _refresh_costs(root: pathlib.Path, reads) -> None:
     from ouroboros import usage_store
-    from ouroboros.task_results import validate_task_id
+    from ouroboros.task_results import task_result_path, validate_task_id
     from ouroboros.task_status import SETTLED_STATUSES
     from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
     from supervisor.events_task_done import _refresh_terminal_task_cost
@@ -165,12 +233,23 @@ def _refresh_costs(root: pathlib.Path, reads) -> None:
 
     with usage_store.read(root) as txn:
         owners = txn.dirty_owners()
-    acknowledged = []
+    acknowledged, pending, failures, faults = [], set(), {}, {}
     for owner, revision in owners:
         try:
             task_id = validate_task_id(owner)
         except ValueError:
             continue  # System accounting scopes own no task result.
+        pending.add(task_id)
+        try:
+            # Presence precedes the ownership read: an absent body keeps this
+            # exact revision without the fence's quarantine traversal, and the
+            # next pass projects a body copied back after the last ledger write.
+            task_result_path(root, task_id, create=False).stat()
+        except FileNotFoundError:
+            failures[task_id] = "result_absent"
+            continue
+        except OSError:
+            pass  # Only absence skips the read; the ownership read reports the rest.
         try:
             current = reads.load(task_id)
             if (not current or current.get("status") not in SETTLED_STATUSES
@@ -182,14 +261,16 @@ def _refresh_costs(root: pathlib.Path, reads) -> None:
                    and _refresh_terminal_task_cost(root, tid, current=row)
                    for tid, row in projection_targets):
                 acknowledged.append((owner, revision))
-        except Exception:
-            log.warning("Reconciled task cost refresh failed for %s", task_id, exc_info=True)
+                pending.discard(task_id)
+        except Exception as exc:
+            failures[task_id], faults[task_id] = _reason(exc), exc
     if acknowledged:
         # One short acknowledgement transaction after all result I/O. A crash
         # before it merely repeats successful projections; newer receipts win.
         with usage_store.hold(root) as txn:
             for owner, revision in acknowledged:
                 txn.ack_dirty_owner(owner, revision)
+    _publish_unresolved(root, failures, subject=COST_PROJECTIONS, faults=faults, keep=pending)
 
 
 def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
@@ -211,7 +292,11 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
     root = pathlib.Path(drive_root).resolve()
     with usage_store.read(root) as txn:
         rows = txn.open_attempts()
-    reads, eligible, observations = TaskOwnershipRead(root), {}, {}
+    reads, eligible, observations, faults = TaskOwnershipRead(root), {}, {}, {}
+    # An open attempt keeps its last reason unless this pass observes a new one or
+    # proves an outcome: a recovered receipt, a release, a terminal settlement or
+    # terminal remote custody. Skipped, live or lost-race outcomes prove nothing.
+    unproven = {str(row["attempt_id"]) for row in rows}
     probes_complete = True
     gateway, gateway_unavailable = None, False
 
@@ -274,6 +359,7 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
                     probes_complete = False  # A partial observation cannot declare the set empty.
                     continue
                 _PROBING.add(probe_key)
+            attempt_id = str(row["attempt_id"])
             reservation = usage.AttemptReservation(
                 str(row["attempt_id"]), root, str(row.get("model") or ""),
                 str(row.get("provider") or ""), row.get("reservation_upper_bound_usd"),
@@ -295,14 +381,17 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
                 if disposition == "settled":
                     usage.settle_attempt(reservation, reported, cost_usd=cost, cost_final=final,
                                          expected_revision=row["revision"])
+                    unproven.discard(attempt_id)  # The receipt is the proof, whichever settlement won.
                 elif disposition == "released":
                     if not release_pre_dispatch_attempt(reservation, ProviderNotDispatched("recovered model operation never started"),
                                                         expected_revision=row["revision"]):
                         continue
+                    unproven.discard(attempt_id)
                 elif disposition == "abandoned":
                     if abandoned:
                         if remote and (row.get("recovery") or {}).get("outcome") not in {"terminal", "operation_gone"}:
                             _recovery_fact(root, row, "terminal", "recover_model_attempt:abandoned")
+                        unproven.discard(attempt_id)
                         continue
                     state = usage.terminalize_abandoned_attempt(
                         reservation, reason="owner_task_terminal", expected_revision=row.get("revision"))
@@ -311,10 +400,12 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
                     if remote and recovered is not None:
                         _recovery_fact(root, row, "terminal", "recover_model_attempt:abandoned",
                                        revision=row["revision"] + 1)
+                    unproven.discard(attempt_id)
                 else:
                     continue
             except ClaudexorUnavailable as exc:
                 if exc.code == "recovery_terminal":
+                    unproven.discard(attempt_id)  # Terminal remote custody is already a durable fact.
                     continue
                 if exc.code == "recovery_not_due":
                     basis = (row.get("recovery") or {}).get("basis") or {}
@@ -330,25 +421,22 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
                         _recovery_fact(root, row, "operation_gone", {"operation_get_status": exc.status_code,
                                                                    "code": str(exc)},
                                        revision=row["revision"] + (0 if abandoned else 1))
+                    if state in {"settled", "released"}:
+                        unproven.discard(attempt_id)
                     continue
                 if due := _retry_after(exc.retry_after):
                     _recovery_fact(root, row, "unresolved", {"header": "Retry-After", "value": exc.retry_after,
                                                            "code": exc.code}, due_at=due)
                 gateway_unavailable = gateway_unavailable or exc.code == "daemon_unreachable"
                 _unresolved(observations, row, exc.code)
-                log.debug("Model usage custody deferred for %s: %s", row["attempt_id"], exc.code)
-            except Exception:
-                _unresolved(observations, row, "recovery_failed")
-                log.warning("Usage reconciliation deferred for %s", row["attempt_id"], exc_info=True)
+            except Exception as exc:
+                _unresolved(observations, row, f"recovery_failed:{_reason(exc)}")
+                faults[attempt_id] = exc
             finally:
                 with _PROBE_LOCK:
                     _PROBING.discard(probe_key)
     finally:
         if gateway is not None:
-            try:
-                gateway.close()
-            except Exception:
-                log.debug("Usage recovery gateway close failed", exc_info=True)
-        if probes_complete:
-            _publish_unresolved(root, observations)
+            _close_gateway(root, gateway)
+        _publish_unresolved(root, observations, faults=faults, keep=unproven, complete=probes_complete)
     _refresh_costs(root, reads)

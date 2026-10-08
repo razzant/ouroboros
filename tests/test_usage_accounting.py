@@ -458,12 +458,18 @@ def test_concurrent_writers_keep_monotonic_sequence(data_root):
     assert ua.usage_projection(data_root)["settled_usd"] == 0.16
 
 
-def test_known_reservation_is_checked_before_dispatch(data_root):
+def test_known_spend_not_open_holds_is_checked_before_dispatch(data_root):
+    """#1487: a $0.60 hold is exposure, so a second $0.50 call is admitted under $1;
+    once a price is KNOWN at the limit, the next reservation is refused before dispatch."""
     first = ua.reserve_attempt(_request(data_root, reservation_usd=0.6, global_limit_usd=1.0))
-    with pytest.raises(ua.BudgetExceeded):
-        ua.reserve_attempt(_request(data_root, reservation_usd=0.5, global_limit_usd=1.0))
-    assert [row["state"] for row in _ledger(data_root)] == ["reserved"]
-    ua.release_attempt(first)
+    second = ua.reserve_attempt(_request(data_root, reservation_usd=0.5, global_limit_usd=1.0))
+    assert [row["state"] for row in _ledger(data_root)] == ["reserved", "reserved"]
+    ua.release_attempt(second)
+    ua.mark_dispatched(first)
+    ua.settle_attempt(first, {}, cost_usd=1.0, cost_final=False)  # a disclosed estimate is known
+    with pytest.raises(ua.BudgetExceeded, match=r"known=\$1\.000000"):
+        ua.reserve_attempt(_request(data_root, reservation_usd=0.01, global_limit_usd=1.0))
+    assert sorted(row["state"] for row in _ledger(data_root)) == ["released", "settled"]
 
 
 def test_live_openrouter_catalog_produces_known_reservation(data_root, monkeypatch):
@@ -596,9 +602,10 @@ def test_request_carried_applied_ttl_wins_over_the_global_setting(data_root, mon
 
 
 def test_admission_honors_the_cheaper_owner_tier(data_root, monkeypatch):
-    """G3-5 end-to-end: under a finite root limit sized between the 5m and 1h
-    reservation bounds, the owner's 5m selection must ADMIT the call that the
-    old hardcoded-1h pricing rejected — and 1h must still reject it."""
+    """G3-5 end-to-end: the owner's cache tier prices the recorded reservation bound.
+    Under a finite root limit sized between the 5m and 1h bounds both are ADMITTED
+    (#1487: a call's own bound is exposure, known spend decides), each recording its
+    own tier's worst case."""
     _isolated_anthropic_catalog(monkeypatch)
 
     def _admit(root_id):
@@ -615,8 +622,9 @@ def test_admission_honors_the_cheaper_owner_tier(data_root, monkeypatch):
         ))
 
     monkeypatch.setenv("OUROBOROS_PROMPT_CACHE_TTL", "1h")
-    with pytest.raises(ua.BudgetExceeded):
-        _admit("ttl-root-1h")
+    hour = _admit("ttl-root-1h")
+    assert _ledger(data_root)[-1]["reservation_upper_bound_usd"] > 0.02
+    ua.release_attempt(hour)
     monkeypatch.setenv("OUROBOROS_PROMPT_CACHE_TTL", "5m")
     reservation = _admit("ttl-root-5m")
     assert _ledger(data_root)[-1]["reservation_upper_bound_usd"] == 0.01875
@@ -650,8 +658,12 @@ def test_scope_runtime_limit_is_enforced_without_provider_retry(data_root):
         sends += 1
 
     scope = ua.UsageScope(drive_root=data_root, global_limit_usd=0.5)
-    with ua.usage_scope(scope), pytest.raises(ua.BudgetExceeded):
-        ua.execute_physical_attempt(_request(data_root, reservation_usd=0.6), send)
+    with ua.usage_scope(scope):
+        spent = ua.reserve_attempt(_request(data_root, reservation_usd=0.1))
+        ua.mark_dispatched(spent)
+        ua.settle_attempt(spent, {}, cost_usd=0.5, cost_final=True)  # known spend reaches the limit
+        with pytest.raises(ua.BudgetExceeded):
+            ua.execute_physical_attempt(_request(data_root, reservation_usd=0.01), send)
     assert sends == 0
 
 
@@ -1443,8 +1455,9 @@ def test_a_non_final_projection_names_its_cause(data_root):
 
 def test_review_wave_admission_override_compares_against_the_given_remaining(monkeypatch):
     """The managed-update admission gate runs OUTSIDE any task usage scope: the
-    override branch must estimate with the normal reservation math and compare
-    against the caller's remaining USD, never a task projection."""
+    override branch estimates with the normal reservation math and decides on the
+    caller's known remaining USD, never a task projection. The estimate larger than
+    the remainder is disclosed, not a refusal (#1487); no known room refuses."""
     import ouroboros.usage_accounting as ua
 
     monkeypatch.setattr(ua, "_reservation_cost", lambda _request: 1.25)
@@ -1459,10 +1472,15 @@ def test_review_wave_admission_override_compares_against_the_given_remaining(mon
         prompt_chars=400_000,
         remaining_usd_override=2.0,
     )
-    assert tight["fits"] is False
+    assert tight["fits"] is True
     assert tight["estimated_wave_usd"] == 2.5
     assert tight["remaining_usd"] == 2.0
     assert tight["limit_usd"] is None
+    spent = ua.review_wave_admission(
+        root_task_id="managed-update-admission", models=["prov/a"], prompt_chars=400_000,
+        remaining_usd_override=0.0,
+    )
+    assert spent["fits"] is False and spent["estimated_wave_usd"] == 1.25
 
     roomy = ua.review_wave_admission(
         root_task_id="managed-update-admission",

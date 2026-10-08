@@ -1,0 +1,2 @@
+740
+The release-proof paragraph gains Windows Authenticode signing: the ESIGNER_CERT_SHA1 mode switch, the Environment-bound signer, digest-checked handoffs and the secret-free proof runner whose signing state the release assembly matches (PR #1495).

@@ -202,18 +202,25 @@ def test_two_deaths_then_success_are_three_ledger_lifecycles(data_root, tmp_path
 
 
 def test_budget_refusal_on_the_second_send_propagates_untouched(data_root, tmp_path, no_sleep, monkeypatch):
-    """The unresolved upper bound of the dead send counts against admission: a
-    BudgetExceeded from reserve_attempt on the repeat propagates as-is and no
-    further physical attempt is dispatched (sol s9)."""
+    """A BudgetExceeded from reserve_attempt on the repeat propagates as-is and no
+    further physical attempt is dispatched (sol s9). The dead send's unresolved bound
+    is exposure, not spending (#1487); the repeat is refused because another task's
+    KNOWN charge reached the $1.50 wallet while the first send died."""
     monkeypatch.setenv("TOTAL_BUDGET", "1.5")
-    llm = _LedgerLLM(data_root, lambda: httpx.ReadError("died"), reservation_usd=1.0)
+
+    def death_while_known_spend_lands():
+        ua.record_subscription_session("other-session", drive_root=data_root, route="subscription",
+                                       task_id="other", root_task_id="other", spend_usd=1.5)
+        return httpx.ReadError("died")
+
+    llm = _LedgerLLM(data_root, death_while_known_spend_lands, reservation_usd=1.0)
     usage = {}
     with pytest.raises(ua.BudgetExceeded) as raised:
         _primary_call(llm, tmp_path, usage)
 
     assert raised.value.limit_scope == "global"
     assert llm.calls == 2
-    rows = _ledger(data_root)
+    rows = [row for row in _ledger(data_root) if row.get("task_id") == "t-death"]
     assert [row["state"] for row in rows] == ["unresolved"]
     assert len(_events(tmp_path, "llm_api_error")) == 1  # only the death itself was a provider failure
     assert _events(tmp_path, "llm_non_retryable_same_request") == []

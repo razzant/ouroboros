@@ -669,13 +669,15 @@ def commit_gate_paid_seats(triad_prepared, triad_exited, scope_rows) -> list:
 
 
 def admit_commit_gate_wave(ctx, seats) -> str | None:
-    """All-or-nothing money admission of one commit-gate wave (owner decision
-    2026-09-05): every paid seat's reservation upper bound must fit TOGETHER,
-    against every fence ``reserve_attempt`` enforces (the global TOTAL_BUDGET
-    remainder, root and original group fences), before ANY seat is dispatched. Returns the
-    typed refusal text ($0, nothing dispatched) naming the binding axis, or
-    None; fail-open on unknowns like the task-level surfaces that already ride
-    ``review_wave_budget_gate``."""
+    """Money admission of one commit-gate wave (owner decision 2026-09-05, on
+    the known-spend rule of #1487): before ANY seat is dispatched, KNOWN spend
+    must be below every fence ``reserve_attempt`` enforces (the global
+    TOTAL_BUDGET, root and original group fences). The seats' summed reservation
+    bounds are disclosed, not an earlier refusal; a fence reached mid-wave
+    refuses the remaining seats at their own reservation with truthful custody.
+    Returns the typed refusal text ($0, nothing dispatched) naming the binding
+    axis, or None; fail-open on unknowns like the task-level surfaces that
+    already ride ``review_wave_budget_gate``."""
     if not seats:
         return None
     from ouroboros.review_substrate import review_usage_category
@@ -698,32 +700,30 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     usd = lambda value: "unknown" if value is None else f"${float(value):.6f}"  # noqa: E731
     bounds = list(admission.get("slot_bounds") or []) + [None] * len(seats)
     wave, remaining = admission.get("estimated_wave_usd"), admission.get("remaining_usd")
-    shortfall = None if wave is None or remaining is None else max(0.0, float(wave) - float(remaining))
-    limit, accounted = admission.get("limit_usd"), admission.get("accounted_usd")
-    root_remaining = None if limit is None or accounted is None else max(0.0, float(limit) - float(accounted))
+    limit, known = admission.get("limit_usd"), admission.get("known_usd")
+    root_remaining = None if limit is None or known is None else max(0.0, float(limit) - float(known))
     if admission.get("binding_axis") == "global":
         # The refusal names the fence that binds and the knob that moves it — never
         # a per-task fence the wave would have fit.
         fence = (
             f"the global budget TOTAL_BUDGET {usd(admission.get('global_limit_usd'))}: "
-            f"accounted={usd(admission.get('global_accounted_usd'))} across every task (of which "
-            f"{usd(admission.get('global_reserved_usd'))} is reserved by other in-flight attempts), "
-            f"remaining={usd(remaining)}, shortfall={usd(shortfall)}; the per-task budget fence "
+            f"known spend={usd(admission.get('global_known_usd'))} across every task (plus "
+            f"{usd(admission.get('global_reserved_usd'))} of open holds, not counted), "
+            f"remaining={usd(remaining)}; the per-task budget fence "
             f"{usd(limit)} alone would leave {usd(root_remaining)}"
         )
     else:
         label = "whole-work billing-group budget fence" if admission.get("binding_axis") == "group" else "per-task budget fence"
         fence = (
-            f"the {label} {usd(limit)}: accounted={usd(accounted)} (of which "
-            f"{usd(admission.get('reserved_usd'))} is reserved by other in-flight attempts), "
-            f"remaining={usd(remaining)}, shortfall={usd(shortfall)}; the global budget "
+            f"the {label} {usd(limit)}: known spend={usd(known)} (plus "
+            f"{usd(admission.get('reserved_usd'))} of open holds, not counted), "
+            f"remaining={usd(remaining)}; the global budget "
             f"{usd(admission.get('global_limit_usd'))} alone would leave {usd(admission.get('global_remaining_usd'))}"
         )
     remedy = review_wave_binding_fence(admission)[1]
     return (
         "⚠️ REVIEW_BLOCKED: commit-gate review wave declined before dispatch ($0 spent). "
-        f"The wave's reservation upper bound {usd(wave)} ("
+        f"Known spend has reached {fence}. The wave's reservation upper bound would have been {usd(wave)} ("
         + "; ".join(f"{s['surface']}:{s['slot_id']} {s['model']} {usd(bounds[i])}" for i, s in enumerate(seats))
-        + f") does not fit {fence}. No reviewer seat was dispatched (scope and triad alike): wait for "
-        f"in-flight attempts to settle or {remedy}, then retry the same commit."
+        + f"). No reviewer seat was dispatched (scope and triad alike): {remedy}, then retry the same commit."
     )

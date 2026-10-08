@@ -82,8 +82,8 @@ def test_retry_after_is_a_provider_fact_and_unresolved_without_it_is_retried(env
     for _ in range(2):
         reconcile_abandoned_usage(env.root)
     events = [json.loads(line) for line in (env.root / "logs/supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert [row['by_basis'] for row in events if row.get('type') == 'duty_unresolved'] == [
-        {'limited': 1}, {'receipt_or_terminal_custody_unavailable': 1}]
+    assert [row['by_basis'] for row in events if row.get('type') == 'duty_unresolved'
+            and row['subject'] == 'attempt'] == [{'limited': 1}, {'receipt_or_terminal_custody_unavailable': 1}]
 
 
 def test_metadata_update_preserves_money_and_receipt_race(env):
@@ -116,7 +116,8 @@ def test_unresolved_rows_publish_once_without_an_interprocess_lock(tmp_path, mon
               (tmp_path / 'logs/supervisor.jsonl').read_text(encoding='utf-8').splitlines()]
     assert stored == delivered and len(stored) == 1
     assert stored[0]['count'] == 2 and stored[0]['attempt_ids'] == ['first', 'second']
-    assert stored[0]['by_basis'] == {'custody_unknown': 2}
+    assert stored[0]['by_basis'] == {'custody_unknown': 2} and stored[0]['subject'] == 'attempt'
+    assert stored[0]['reasons'] == {'first': 'custody_unknown', 'second': 'custody_unknown'}
 
 
 def test_unresolved_summary_changes_once_and_caps_one_row_for_300_candidates(env, monkeypatch):
@@ -131,7 +132,7 @@ def test_unresolved_summary_changes_once_and_caps_one_row_for_300_candidates(env
     def observed():
         events = (json.loads(line) for line in
                   (env.root / 'logs/supervisor.jsonl').read_text(encoding='utf-8').splitlines())
-        return [event for event in events if event.get('type') == 'duty_unresolved']
+        return [event for event in events if event.get('type') == 'duty_unresolved' and event['subject'] == 'attempt']
     for _ in range(2):
         reconcile_abandoned_usage(env.root)
     assert [event['count'] for event in observed()] == [2]

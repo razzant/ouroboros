@@ -173,7 +173,9 @@ def test_check_budget_explicit_zero_remains_unconfigured(tmp_path, monkeypatch):
     assert startup_mod.check_budget(env) == ({"status": "unconfigured"}, 0)
 
 
-def test_check_budget_uses_unresolved_ledger_upper_bound(tmp_path, monkeypatch):
+def test_check_budget_decides_on_known_spend_and_discloses_the_unresolved_bound(tmp_path, monkeypatch):
+    """#1487: the startup budget health is the admission rule's own number (room above
+    known spend); the $1 unresolved upper bound is disclosed beside it, not spent."""
     from ouroboros import usage_accounting as ua
 
     (tmp_path / "state").mkdir(parents=True)
@@ -199,9 +201,9 @@ def test_check_budget_uses_unresolved_ledger_upper_bound(tmp_path, monkeypatch):
     result, issues = startup_mod.check_budget(env)
 
     assert issues == 1
-    assert result["status"] == "emergency"
-    assert result["spent_usd"] == 1.0
-    assert result["remaining_usd"] == 0.25
+    assert result["status"] == "critical"  # $1.25 of known room: below $2, above the $0.50 emergency
+    assert result["spent_usd"] == 0.0
+    assert result["remaining_usd"] == 1.25
     assert result["unresolved_upper_bound_usd"] == 1.0
     assert result["accounting_authority"] == "physical_attempt_ledger"
     assert result["cost_final"] is False

@@ -122,6 +122,86 @@ def _task_line(ctx: Any, drive: Any, state: Dict[str, Any], entry: Any) -> str:
     return "owner_continue" if recorded_continuation(drive, entry.root_task_id or entry.task_id, reader) else ""
 
 
+def still_continuable(drive: Any, entry: Any, live_task_ids=None) -> bool:
+    """Retain a registration until its owner line and every root's Continue offer end.
+
+    Each root of the recorded Continue chain (the original root and every
+    successor it admitted) can be offered Continue after a technical break, so
+    the offer is read at every settled member the walk reaches, not only at the
+    run's own root; child tasks never carry an offer.
+
+    The sweep supplies its authoritative live/reserved census. Addressed result
+    reads validate retry and Continue edges; missing/changed evidence keeps the
+    registration. This observation grants no continuation or execution authority.
+    """
+    if entry.review_owned or not entry.run_id:
+        return False
+    if live_task_ids is None or not entry.task_id:
+        return True
+    from types import SimpleNamespace
+    from ouroboros.owner_continue import continuation_offer, recorded_continuation
+    from ouroboros.task_status import SETTLED_STATUSES, load_effective_task_result
+    from supervisor import queue
+    from supervisor.queue_transitions import _live_retry_target_locked
+    from supervisor.task_ownership import TaskOwnershipRead, prepare_retry_chain
+
+    def resolved(row: Any) -> bool:
+        # A timeout-retried task is rewritten `interrupted` naming its retry
+        # (task_reaper); its line continues in that retry, followed below.
+        return bool(row) and (row.get('status') in SETTLED_STATUSES or (
+            row.get('status') == 'interrupted' and bool(row.get('superseded_by'))
+            and row.get('superseded_by') == row.get('retry_task_id')))
+
+    live = set(live_task_ids)
+    reads = TaskOwnershipRead(drive)
+    root = entry.root_task_id or entry.task_id
+    pending, seen = [entry.task_id, root], set()
+    try:
+        local_queue = queue.INITIALIZED and Path(queue.DRIVE_ROOT).resolve() == Path(drive).resolve()
+        if local_queue:
+            with queue._queue_lock:
+                live.update(str(row.get('id') or '') for row in queue.PENDING)
+                live.update(queue.ADMISSION_RESERVATIONS)
+        while pending:
+            task_id = pending.pop()
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            if task_id in live:
+                return True
+            current = reads.load(task_id)
+            if not resolved(current):
+                return True
+            if local_queue and queue.task_has_live_ownership(task_id, ownership=reads):
+                return True
+            prepare_retry_chain(queue, task_id, reads.load)
+            # The supplied census also covers reserved/recoverable tasks absent
+            # from the process's queue maps. Their durable rows bind retry edges.
+            census = SimpleNamespace(PENDING=[dict(row, id=tid) for tid, row in reads.rows.items()
+                                             if tid in live], RUNNING={},
+                                     QUEUE_MAX_RETRIES=queue.QUEUE_MAX_RETRIES)
+            with queue._queue_lock:
+                leaf, _ = _live_retry_target_locked(census, task_id, results=reads)
+            if leaf in live or any(not resolved(row) for row in reads.rows.values()):
+                return True
+            if leaf != task_id:
+                pending.append(leaf)
+            claim = current.get('continued_by')
+            if claim:
+                successor = claim.get('successor_task_id') if isinstance(claim, dict) else ''
+                if (not successor or successor in seen
+                        or not recorded_continuation(drive, task_id, successor)):
+                    return True
+                pending.append(successor)
+            elif continuation_offer(load_effective_task_result(drive, task_id, materialize_artifacts=False)
+                                    or current, task_id)['eligible']:
+                return True  # the offer exactly as the task card reads it (a retry leaf's end)
+        return not reads.unchanged(reads.rows)
+    except Exception:
+        log.debug('Registration continuation authority unavailable for %s', entry.run_id, exc_info=True)
+        return True
+
+
 def bind_continuation(ctx: Any, drive: Any, run_id: str, *, actor: Dict[str, Any], route: Any,
                       authority: Any, target_root: str,
                       canonical_work_order_fingerprint: str = "") -> Tuple[Dict[str, Any], str, str]:

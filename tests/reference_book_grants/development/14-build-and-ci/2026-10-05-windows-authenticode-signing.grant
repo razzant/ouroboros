@@ -1,0 +1,2 @@
+4100
+The Build & CI chapter gains the Windows Authenticode release-signing contract: the ESIGNER_CERT_SHA1 mode switch (unset publishes an explicitly unsigned ZIP, set makes signing mandatory), the one packer, the digest-checked build/sign/proof handoffs, Environment-scoped eSigner secrets and the nonsecret thumbprint variable by role, per-run signing spend and overage billing, the manual verifier and the unverified boundary (PR #1495).

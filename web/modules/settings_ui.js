@@ -468,7 +468,6 @@ export function renderSettingsPage() {
                             <input id="s-task-review-mode" type="hidden" value="auto">
                             ${renderSegmentedField({
                                 target: 's-task-review-mode',
-                                modifier: 'data-task-review-group',
                                 options: [
                                     { value: 'off', label: 'Off' },
                                     { value: 'auto', label: 'Auto' },
@@ -613,7 +612,6 @@ export function renderSettingsPage() {
                             <input id="s-update-channel" type="hidden" value="stable">
                             ${renderSegmentedField({
                                 target: 's-update-channel',
-                                modifier: 'data-update-channel-group',
                                 title: 'Applies immediately; no restart required.',
                                 options: [
                                     { value: 'stable', label: 'Stable' },

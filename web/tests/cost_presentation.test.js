@@ -211,8 +211,10 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
         by_model: {},
         accounting: {
             available: true,
+            settled_usd: 0,
             accounted_usd: 0,
             confirmed_usd: 0,
+            estimated_usd: 0,
             reserved_usd: 0,
             unresolved_upper_bound_usd: 0,
             unknown_unmetered: 0,
@@ -221,7 +223,7 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
         },
     };
     const pending = costDashboardPresentation(base);
-    assert.equal(pending.accountedLimit, '$0.00 / $10.00');
+    assert.equal(pending.knownLimit, '$0.00 / $10.00');
     // An older payload carries no cause. Say only what is known — never invent "0 open".
     assert.equal(pending.final, 'Pending');
     assert.equal(pending.calls, '0');
@@ -258,8 +260,24 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
 
     assert.equal(costDashboardPresentation({
         ...base,
-        accounting: { ...base.accounting, accounted_usd: null },
+        accounting: { ...base.accounting, settled_usd: null },
     }).state, 'unavailable');
+});
+
+test('cost dashboard sets the limit against known spend, open holds beside it (#1487)', () => {
+    const shown = costDashboardPresentation({
+        total_calls: 3,
+        by_model: {},
+        accounting: {
+            available: true, limit_usd: 10, cost_final: false, non_final_rows: 1, unknown_unmetered: 0,
+            settled_usd: 2, confirmed_usd: 1.5, estimated_usd: 0.5,
+            reserved_usd: 4, unresolved_upper_bound_usd: 20, accounted_usd: 26,
+        },
+    });
+    // $2 known of $10: the $24 of holds is shown in its own tiles, never as spending.
+    assert.equal(shown.knownLimit, '$2.00 / $10.00');
+    assert.deepEqual([shown.confirmed, shown.estimated, shown.reserved, shown.unresolved],
+        ['$1.50', '$0.50', '$4.00', '$20.00']);
 });
 
 test('legacy breakdown buckets disclose unknown and pending zero amounts', () => {

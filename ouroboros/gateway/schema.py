@@ -95,30 +95,21 @@ def _qualifier_name(hint: Any) -> str:
 
 
 def _required_keys(typed_dict: Any) -> frozenset:
-    """Requiredness resolved from the hints, not ``__required_keys__``.
+    """Requiredness resolved from the hints, not ``__required_keys__`` alone.
 
     Under PEP 563 (``from __future__ import annotations`` in contracts.py) the
-    class-time ``__required_keys__`` on Python 3.10 sees only STRING
-    annotations, cannot detect ``NotRequired``/``Required`` qualifiers, and
-    therefore lies (every key of a total class reads as required). Walk the
-    resolved hints instead: an explicit qualifier wins; otherwise the key's
-    DECLARING class's totality decides, exactly as PEP 655 specifies."""
+    class-time ``__required_keys__`` sees only STRING annotations and cannot
+    detect ``NotRequired``/``Required`` qualifiers. An explicit qualifier found
+    in the resolved hints wins; an unqualified key keeps the requiredness the
+    runtime computed from its DECLARING class's totality (PEP 655), which
+    ``__required_keys__`` gets right on every version, including inherited keys
+    on 3.11 where ``typing.TypedDict`` keeps no ``__orig_bases__``."""
     hints = get_type_hints(typed_dict, include_extras=True)
-    bases = [b for b in getattr(typed_dict, "__orig_bases__", ())
-             if _is_typed_dict(b)]
+    runtime_required = set(getattr(typed_dict, "__required_keys__", ()))
     required: set = set()
-    inherited: set = set()
-    for base in bases:
-        required |= _required_keys(base)
-        inherited |= set(get_type_hints(base))
-    total = bool(getattr(typed_dict, "__total__", True))
     for key, hint in hints.items():
-        if key in inherited:
-            continue  # the declaring base's totality already decided
         qualifier = _qualifier_name(hint)
-        if qualifier == "NotRequired":
-            required.discard(key)
-        elif qualifier == "Required" or total:
+        if qualifier == "Required" or (qualifier != "NotRequired" and key in runtime_required):
             required.add(key)
     return frozenset(required)
 

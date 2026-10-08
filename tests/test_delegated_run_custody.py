@@ -425,7 +425,7 @@ def test_delegated_spend_settles_into_the_canonical_budget_ledger(tmp_path, monk
     rows = [row for row in ledger_rows(canonical) if row.get("kind") == "subscription_session"]
     assert rows and rows[-1]["cost_usd"] == 1.25 and rows[-1]["cost_final"] is True
     started = [json.loads(line) for line
-               in (canonical / "logs" / "events.jsonl").read_text().splitlines()
+               in (canonical / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
                if '"delegate_run_started"' in line][-1]
     assert started["ledger_root"] == str(dc.custody_root(ctx)), \
         "the durable row must name the canonical root, not the disposable child drive"
@@ -544,7 +544,7 @@ def test_every_pre_custody_exit_names_the_registration_it_created(tmp_path, monk
         delegate._delegate_start(_nanny_ctx(tmp_path), "work")
 
     rows = [json.loads(l) for l in
-            (tmp_path / "logs" / "events.jsonl").read_text().splitlines() if l.strip()]
+            (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     failed = [r for r in rows if r.get("type") == dc.START_FAILED]
     assert [r["project_id"] for r in failed] == ["prj-owned"]
     assert failed[0]["reason"] == "pre_custody_exit_MemoryError"
@@ -650,7 +650,7 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
     assert key == token, "recovery must present the invocation's own wire key"
     assert body == posted[0][1], "recovery must replay the RECORDED canonical body"
     started = [json.loads(line) for line
-               in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()
+               in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
                if '"delegate_run_started"' in line][-1]
     assert started["run_id"] == "run-recovered"
     assert started["recovered_from_pending_invocation"] is True
@@ -676,15 +676,18 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
         def close(self): pass
 
     class _Unreachable:
+        def __init__(self, status): self.status = status
         def handshake(self, **_kw): return {}
         def start_run(self, request, *, idempotency_key=""):
-            raise ClaudexorUnavailable("daemon_unreachable", "down", status_code=0)
+            code = "daemon_busy" if self.status else "daemon_unreachable"
+            raise ClaudexorUnavailable(code, "RPC timeout", status_code=self.status)
         def close(self): pass
 
-    down = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: _Unreachable())
-    assert [o["action"] for o in down] == ["recovery_unreachable"]
-    assert [r["invocation_id"] for r in dc.pending_invocations(tmp_path)] == [token2], \
-        "an unknown outcome never destroys the invocation"
+    for status in (0, 503):  # a dead socket and a busy engine are both unknown outcomes
+        down = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: _Unreachable(status))
+        assert [o["action"] for o in down] == ["recovery_unreachable"]
+        assert [r["invocation_id"] for r in dc.pending_invocations(tmp_path)] == [token2], \
+            "an unknown outcome never destroys the invocation"
     refusing = _Refusing()
     gone = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: refusing)
     assert [o["action"] for o in gone] == ["invocation_retired"]
@@ -748,6 +751,7 @@ def test_a_failed_start_does_not_leave_the_registration_it_created(
     """The project is registered BEFORE `start_run`. A start failure used to leave that
     registration behind with nothing anywhere naming its id — and the id must be durably
     named whether or not the registration can be safely retired."""
+    from ouroboros import delegate_custody as dc
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
 
@@ -762,19 +766,25 @@ def test_a_failed_start_does_not_leave_the_registration_it_created(
                 raise gw.ClaudexorUnavailable("project_not_found", "gone", status_code=404)
             live.discard(pid)
         def start_run(self, request, *, idempotency_key=""):
-            raise gw.ClaudexorUnavailable("run_start_failed", "no run", status_code=status_code)
+            raise gw.ClaudexorUnavailable("daemon_busy" if status_code == 503 else "run_start_failed",
+                                          "start outcome", status_code=status_code)
 
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
     delegate._CUSTODY.clear()
     out = json.loads(delegate._delegate_start(_nanny_ctx(tmp_path), "x").text)
     delegate._CUSTODY.clear()
-    assert out["status"] == "refused" and out["reason"] == "run_start_failed"
+    assert out["status"] == "refused"
+    assert out["reason"] == ("daemon_busy" if status_code == 503 else "run_start_failed")
     assert out["project_retired"] is retired, out
     assert (live == set()) is retired, "only a definite refusal may retire the registration"
     if not retired:
         assert out["project_retention_reason"] == "start_outcome_unknown_run_may_exist"
-    rows = [json.loads(l) for l in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()]
+        assert [r["invocation_id"] for r in dc.pending_invocations(tmp_path)] == [out["pending_invocation_id"]]
+    else:
+        assert "pending_invocation_id" not in out
+        assert dc.pending_invocations(tmp_path) == []
+    rows = [json.loads(l) for l in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     named = [r for r in rows if r.get("type") == "delegate_run_start_failed"]
     assert named and named[0]["project_id"] == "prj-new", "the id must be durably named"
 
@@ -805,7 +815,7 @@ def test_a_queued_handle_with_no_run_id_names_its_registration_like_its_twin(tmp
     assert out["project_retired"] is False and live == {"prj-new"}, (
         "an accepted POST is never grounds to destroy the registration a run may use")
     assert out["project_retention_reason"] == "start_outcome_unknown_run_may_exist"
-    rows = [json.loads(l) for l in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()]
+    rows = [json.loads(l) for l in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     named = [r for r in rows if r.get("type") == "delegate_run_start_failed"]
     assert named and named[0]["project_id"] == "prj-new", "the id must be durably named"
     assert named[0]["reason"] == "queued_without_run_id"
@@ -832,7 +842,7 @@ def test_shared_project_retirement_defers_quietly_for_non_canonical_sharers(tmp_
     gateway = _RefusingGateway()
     for rid, tid in (("run-aa", "t-1"), ("run-bb", "t-2")):
         dc.record_started(tmp_path, dc.RunCustody(
-            run_id=rid, task_id=tid, route_id="r", model="m",
+            run_id=rid, task_id=tid, route_id="r", model="m", source="review_substrate",
             project_id="prj-shared", project_owned=True, ledger_root=str(tmp_path)))
     dc._CUSTODY.clear()
 

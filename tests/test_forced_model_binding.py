@@ -344,7 +344,7 @@ def test_the_budget_soft_landing_wraps_up_with_the_model_not_the_host_text(actin
     acting.ctx.messages = [{"role": "user", "content": "Please finish"}]
     acting.ctx.llm_trace = {}
     acting.tools._ctx.model_turn_state = ModelTurnState(deepcopy(TURN))
-    ceiling = task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile(None), root_cap_usd=0.5)
+    ceiling = task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=0.5)
     text, _usage, _trace = loop_module._soft_land_exhausted_ceiling(acting.ctx, ceiling)
     assert "Ответ 🐍" in text and "no working room" not in text
     assert acting.gateway.uploads[0][0]["nativeContinuation"] == TURN

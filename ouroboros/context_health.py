@@ -254,6 +254,14 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "") 
     checks: List[str] = []
 
     try:
+        from ouroboros.claudexor_exit_facts import health_line
+        engine_exit = health_line(env.drive_path("logs/supervisor.jsonl").parent.parent)
+        if engine_exit:
+            checks.append(engine_exit)
+    except Exception:
+        log.debug("Engine exit observation unavailable", exc_info=True)
+
+    try:
         from ouroboros.tools.release_sync import (
             _normalize_pep440,
             _shields_escape,

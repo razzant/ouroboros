@@ -655,7 +655,7 @@ def test_budget_line_replays_unresolved_attempt_not_stale_state(monkeypatch, tmp
     ua.mark_unresolved(reservation, "timeout")
 
     stale = {
-        "spent_usd": 0,
+        "spent_usd": 5,
         "spent_calls": 0,
         "current_branch": "ouroboros",
         "current_sha": "abcdef123456",
@@ -671,10 +671,12 @@ def test_budget_line_replays_unresolved_attempt_not_stale_state(monkeypatch, tmp
 
     line = message_bus.budget_line(force=True)
 
-    assert "$1.0000 / $10.00" in line
+    # The ledger, not the stale $5 counter: known spend is $0 and the unresolved
+    # attempt's $1 bound is disclosed beside it, not counted as spending (#1487).
+    assert "$0.0000 / $10.00" in line
     assert "unresolved <=$1.0000" in line
     assert "ouroboros@abcdef12" in line
-    assert "$0.0000 / $10.00" not in line
+    assert "$5.0000" not in line and "$1.0000 / $10.00" not in line
 
 
 @pytest.mark.parametrize("damage", ["journal", "store"])

@@ -541,10 +541,14 @@ def _consciousness_admission_block(task: Dict[str, Any], window: Optional[Dict[s
         if not window["limit_usd"]:
             return ("consciousness_allowance_exhausted",
                     "OUROBOROS_CONSCIOUSNESS_DAILY_USD=0: consciousness may not spend")
-        at_least = " (at least)" if window["unknown_unmetered"] else ""
+        at_least = " (at least)" if window.get("unknown_unmetered") else ""
+        known = window.get("settled_usd")
+        open_holds = 0.0 if known is None else max(0.0, float(window.get("accounted_usd") or 0.0) - float(known))
+        holds = f" (plus ${open_holds:.2f} of open holds, not counted)" if open_holds > 0 else ""
+        spent = "unknown" if known is None else f"${float(known):.2f}{at_least}"
         return ("consciousness_allowance_exhausted", (
-            f"${window['accounted_usd']:.2f}{at_least} of ${window['limit_usd']:.2f} "
-            f"spent in the last 24 h; resets at {window['resets_at'] or 'unknown'}"
+            f"{spent} of ${window['limit_usd']:.2f} "
+            f"known spend in the last 24 h{holds}; resets at {window['resets_at'] or 'unknown'}"
         ))
     return None
 

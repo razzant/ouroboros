@@ -51,10 +51,34 @@ from tests.test_acceptance_delivery import (
 )
 
 
-def test_the_floor_priced_wave_that_does_not_fit_is_still_refused(monkeypatch, tmp_path):
-    """The floor is the admission line, not a bypass: when even one send per
-    paid row does not fit the remaining root budget, the panel is refused as
-    before — through the real gate — and no reviewer is called."""
+class _KnownPricedLLM(_EpisodeLLM):
+    """The delivery suite's scripted reviewer whose provider reports a FINAL price
+    for each send: KNOWN spend, the only money a limit decides on (#1487). The
+    suite's own replies carry no usable price, so they stay unresolved exposure."""
+
+    def chat(self, **kwargs):
+        from ouroboros import usage_accounting as ua
+
+        request = ua.AttemptRequest(reservation_usd=self.reservation_usd, drive_root=self.drive_root,
+                                    model="openai/fake-reviewer", provider="openrouter")
+        return ua.execute_physical_attempt(request, lambda: self._reply(kwargs),
+                                           extractor=lambda reply: (reply[1], self.reservation_usd, True))
+
+
+def _known_charge(scope, cost):
+    from ouroboros import usage_accounting as ua
+
+    with ua.usage_scope(scope):
+        held = ua.reserve_attempt(ua.AttemptRequest(model="openai/fake-reviewer", provider="openrouter",
+                                                    reservation_usd=cost))
+        ua.mark_dispatched(held)
+        ua.settle_attempt(held, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=cost, cost_final=True)
+
+
+def test_a_wave_at_the_known_root_limit_is_still_refused(monkeypatch, tmp_path):
+    """The floor is the admission line, not a bypass: once the root's KNOWN spend
+    has reached its limit (#1487: the reservation's own rule), the panel is refused
+    as before — through the real gate — and no reviewer is called."""
     from ouroboros import loop as loop_mod
     from ouroboros import usage_accounting as ua
 
@@ -64,7 +88,8 @@ def test_the_floor_priced_wave_that_does_not_fit_is_still_refused(monkeypatch, t
     llm = _EpisodeLLM(tmp_path, [{"content": json.dumps(_CLEAN_VERDICT)}] * 2, scoped=True)
     _real_panel(monkeypatch, llm, stub_gate=False)
     scope = _root_scope(tmp_path, root_limit_usd=0.5)
-    _seed_root_ledger(scope, cost=0.45)  # $0.05 left: less than one send (~$0.07)
+    _seed_root_ledger(scope)
+    _known_charge(scope, 0.5)  # known spend is at the $0.50 limit
     ctx = _acceptance_ctx(tmp_path, evidence=dict(_ACCEPTANCE_PACKET), repo_dir=str(governance),
                           workspace_root=str(workspace), workspace_mode="project")
     with ua.usage_scope(scope):
@@ -193,11 +218,11 @@ def test_projecting_an_exhausted_cap_emits_no_review_cycles_exhausted_event(monk
 # Required+Blocking count cap is exercised by the `fixed`/`adaptive` policies alone.
 def test_the_per_send_wallet_fence_still_binds_after_an_admitted_dispatch(monkeypatch, tmp_path):
     """The per-send wallet binding at dispatch is what actually protects money,
-    proven with PRICED sends: the wave gate admits on ONE send per paid row, so
-    a nearly spent wallet admits the panel; the native episode's first send is
-    reserved and settled, its second send is refused by the ledger
-    (`budget_exhausted`), and the accounted total never exceeds the root
-    limit. The coarse admission is a filter, never the fence."""
+    proven with PRICED sends: the wave gate admits while known spend is below
+    the limit; the native episode's first send is reserved and settled at a
+    final price that brings known spend to the root limit, so its second send
+    is refused by the ledger (`budget_exhausted`). The coarse admission is a
+    filter, never the fence."""
     from ouroboros import loop as loop_mod
     from ouroboros import usage_accounting as ua
 
@@ -205,13 +230,13 @@ def test_the_per_send_wallet_fence_still_binds_after_an_admitted_dispatch(monkey
     _offline_env(monkeypatch, _ROW_NATIVE)
     _priced_offline_model(monkeypatch)
     governance, workspace = _roots(tmp_path)
-    llm = _EpisodeLLM(
+    llm = _KnownPricedLLM(
         tmp_path, [], scoped=True, reservation_usd=0.06,
         native_script=[{"tool_calls": [_tool_call("read_file", {"path": "greeting.txt"})]},
                        {"content": json.dumps(_CLEAN_VERDICT)}],
     )
     _real_panel(monkeypatch, llm, stub_gate=False)
-    limit = 0.1  # one priced send (0.06) fits; the second (0.12 cumulative) does not
+    limit = 0.06  # the first send's known $0.06 reaches the limit; the second is refused
     scope = _root_scope(tmp_path, root_limit_usd=limit)
     _seed_root_ledger(scope)
     ctx = _acceptance_ctx(tmp_path, evidence=dict(_ACCEPTANCE_PACKET), repo_dir=str(governance),
@@ -224,7 +249,8 @@ def test_the_per_send_wallet_fence_still_binds_after_an_admitted_dispatch(monkey
     assert result.aggregate_signal == "DEGRADED"
     projection = ua.usage_projection(tmp_path, root_task_id="root-delivery")
     spent = float(projection["limit_usd"]) - float(projection["remaining_known_usd"])
-    assert projection["limit_usd"] == limit and 0.06 <= spent <= limit
+    assert projection["limit_usd"] == limit and spent == pytest.approx(0.06)
+    assert projection["settled_usd"] == pytest.approx(0.06)
 
 
 # ---------------------------------------------------------------------------

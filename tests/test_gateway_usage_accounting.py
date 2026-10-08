@@ -124,7 +124,8 @@ def test_cost_breakdown_uses_ledger_not_later_compatibility_events(tmp_path, mon
         "attempt_counts": {"reserved": 1, "settled": 2, "unresolved": 1},
         "authority": "physical_attempt_ledger",
         "limit_usd": 7.5,
-        "remaining_known_usd": 5.75,
+        # Room above KNOWN spend ($0.25): the open $1.50 of holds is exposure (#1487).
+        "remaining_known_usd": 7.25,
     }
 
 
@@ -192,13 +193,13 @@ def test_api_state_money_and_call_count_are_ledger_projections(tmp_path, monkeyp
     payload = json.loads(response.body)
 
     assert response.status_code == 200
-    assert payload["spent_usd"] == 1.75
+    assert payload["spent_usd"] == 0.25  # the header shows known spend; holds ride in accounting
     assert payload["spent_calls"] == 3
     assert payload["budget_limit"] == 7.5
     assert payload["accounting"]["authority"] == "physical_attempt_ledger"
     assert payload["accounting"]["accounted_usd"] == 1.75
     assert payload["accounting"]["unknown_unmetered"] == 1
-    assert payload["accounting"]["remaining_known_usd"] == 5.75
+    assert payload["accounting"]["remaining_known_usd"] == 7.25
 
 
 @pytest.mark.serial
@@ -544,4 +545,4 @@ def test_api_state_reads_the_slim_writer_snapshot_never_the_full_breakdown(tmp_p
     assert call() == with_full_breakdown_available
     assert with_full_breakdown_available["spent_calls"] == 3
     assert with_full_breakdown_available["accounting"]["accounted_usd"] == 1.75
-    assert with_full_breakdown_available["accounting"]["remaining_known_usd"] == (5.75 if limit else None)
+    assert with_full_breakdown_available["accounting"]["remaining_known_usd"] == (7.25 if limit else None)

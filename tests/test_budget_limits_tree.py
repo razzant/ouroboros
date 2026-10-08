@@ -2,19 +2,22 @@
 v6.91 tree-fed deciding value, root-accounting telemetry and the latched
 v6.56.0 cost milestones."""
 from types import SimpleNamespace
+
+import pytest
 from unittest.mock import MagicMock
 
 from ouroboros import task_pacing
-from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.loop_budget import _check_budget_limits
-from tests._budget_limits_helpers import _make_args
+from tests._budget_limits_helpers import EXPLICIT_50, _make_args
 
 
 # --- v6.91 tree-fed deciding value ---
 
 class TestTreeFedDecidingValue:
-    """Under a root cap the deciding spend is the root subtree's ledger-accounted
+    """Under a root cap the deciding spend is the root subtree's KNOWN (settled)
     number from the reserve-time scope telemetry — own cost stays a diagnostic.
+    These run an explicit ``cost_hard_stop_pct=50`` profile, the only ordinary-free
+    source of an in-task ceiling besides a producer allowance.
     The waves died at tree $84-94 while own cost showed $41-49 and no warning
     ever fired; these pin the closed class."""
 
@@ -32,7 +35,7 @@ class TestTreeFedDecidingValue:
         llm = MagicMock()
         llm.chat.return_value = ({"content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1})
         ceiling = task_pacing.resolve_cost_ceiling(
-            1900.0, normalize_budget_profile(None), root_cap_usd=100.0,
+            1900.0, EXPLICIT_50, root_cap_usd=100.0,
         )
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
         args = _make_args(
@@ -43,7 +46,7 @@ class TestTreeFedDecidingValue:
             drive_logs=tmp_path,
         )
         with self._scoped("root-tree-1", 100.0):
-            usage_accounting._stash_root_accounting("root-tree-1", 98.5, 100.0)
+            usage_accounting._stash_root_accounting("root-tree-1", {"settled_usd": 98.5, "accounted_usd": 98.5}, 100.0)
             result = _check_budget_limits(**args)
         assert result is not None
         text, usage, _ = result
@@ -53,7 +56,7 @@ class TestTreeFedDecidingValue:
         from ouroboros import usage_accounting
 
         ceiling = task_pacing.resolve_cost_ceiling(
-            1900.0, normalize_budget_profile(None), root_cap_usd=100.0,
+            1900.0, EXPLICIT_50, root_cap_usd=100.0,
         )
         args = _make_args(
             budget_remaining_usd=1900.0,
@@ -62,7 +65,7 @@ class TestTreeFedDecidingValue:
             drive_logs=tmp_path,
         )
         with self._scoped("root-tree-2", 100.0):
-            usage_accounting._stash_root_accounting("root-tree-2", 60.0, 100.0)
+            usage_accounting._stash_root_accounting("root-tree-2", {"settled_usd": 60.0, "accounted_usd": 60.0}, 100.0)
             result = _check_budget_limits(**args)
         assert result is None
 
@@ -75,7 +78,7 @@ class TestTreeFedDecidingValue:
         llm = MagicMock()
         llm.chat.return_value = ({"content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1})
         ceiling = task_pacing.resolve_cost_ceiling(
-            10.0, normalize_budget_profile(None),
+            10.0, EXPLICIT_50,
         )
         usage = {"cost": 6.0}  # own over the $5 ceiling
         args = _make_args(
@@ -104,7 +107,7 @@ class TestTreeFedDecidingValue:
         llm = MagicMock()
         llm.chat.return_value = ({"content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1})
         ceiling = task_pacing.resolve_cost_ceiling(
-            1900.0, normalize_budget_profile(None), root_cap_usd=10.0,
+            1900.0, EXPLICIT_50, root_cap_usd=10.0,
         )
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
         usage = {"cost": 9.0}  # over the $10 − margin ceiling
@@ -137,7 +140,7 @@ class TestTreeFedDecidingValue:
         llm = MagicMock()
         llm.chat.return_value = ({"content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1})
         ceiling = task_pacing.resolve_cost_ceiling(
-            None, normalize_budget_profile(None), root_cap_usd=100.0,
+            None, EXPLICIT_50, root_cap_usd=100.0,
         )
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
         args = _make_args(
@@ -148,7 +151,7 @@ class TestTreeFedDecidingValue:
             drive_logs=tmp_path,
         )
         with self._scoped("root-tree-noglobal", 100.0):
-            usage_accounting._stash_root_accounting("root-tree-noglobal", 98.5, 100.0)
+            usage_accounting._stash_root_accounting("root-tree-noglobal", {"settled_usd": 98.5, "accounted_usd": 98.5}, 100.0)
             result = _check_budget_limits(**args)
         assert result is not None
         _text, usage, _ = result
@@ -174,12 +177,12 @@ class TestTreeFedDecidingValue:
             budget_remaining_usd=1900.0,
             accumulated_usage={"cost": 1.0},
             cost_ceiling=task_pacing.resolve_cost_ceiling(
-                1900.0, normalize_budget_profile(None), root_cap_usd=100.0,
+                1900.0, EXPLICIT_50, root_cap_usd=100.0,
             ),
             drive_logs=tmp_path,
         )
         with self._scoped("root-tree-fresh", 100.0):
-            usage_accounting._stash_root_accounting("root-tree-fresh", 5.0, 100.0)
+            usage_accounting._stash_root_accounting("root-tree-fresh", {"settled_usd": 5.0, "accounted_usd": 5.0}, 100.0)
             assert _check_budget_limits(**args) is None
         assert calls["n"] == 0
 
@@ -195,21 +198,21 @@ class TestTreeFedDecidingValue:
 
         def _fresh_projection(drive_root, **kwargs):
             reads["n"] += 1
-            return {"accounted_usd": 98.5, "limit_usd": 100.0}
+            return {"settled_usd": 98.5, "accounted_usd": 98.5, "limit_usd": 100.0}
 
         monkeypatch.setattr(usage_accounting, "usage_projection", _fresh_projection)
         args = _make_args(
             budget_remaining_usd=1900.0,
             accumulated_usage={"cost": 41.0},
             cost_ceiling=task_pacing.resolve_cost_ceiling(
-                1900.0, normalize_budget_profile(None), root_cap_usd=100.0,
+                1900.0, EXPLICIT_50, root_cap_usd=100.0,
             ),
             llm=llm,
             drive_logs=tmp_path,
         )
         with self._scoped("root-tree-stale", 100.0):
             # Stash a pre-block number, then age it past the bound.
-            usage_accounting._stash_root_accounting("root-tree-stale", 40.0, 100.0)
+            usage_accounting._stash_root_accounting("root-tree-stale", {"settled_usd": 40.0, "accounted_usd": 40.0}, 100.0)
             with usage_accounting._ROOT_ACCOUNTING_TELEMETRY_LOCK:
                 usage_accounting._ROOT_ACCOUNTING_TELEMETRY["root-tree-stale"][
                     "updated_monotonic"
@@ -221,12 +224,11 @@ class TestTreeFedDecidingValue:
         assert usage["cost_stop_spend_basis"] == task_pacing.SPEND_BASIS_TREE
 
     def test_current_inflight_reservation_participates_in_the_stop(self, tmp_path, monkeypatch):
-        """G3-4 regression: the stash the loop trusts for 120s must include the
-        reservation of the call currently in flight, not the pre-append sum.
-        The pre-fix shape: a tree near its cap reserved+settled one more call,
-        the loop still saw the pre-call number, and the hard ledger fence fired
-        on the next send before the graceful wrap-up ever ran. Here the ceiling
-        check stops on the un-settled hold alone, with zero fresh ledger reads."""
+        """G3-4 + #1487: the stash the loop trusts for 120s follows every transition,
+        and it carries the in-flight hold as disclosed EXPOSURE, not known spend. The
+        hold alone stops nothing (owner Q4-A); the moment the call settles, its price
+        is known and the ceiling check stops on it — still with zero fresh ledger
+        reads, because the settlement refreshed the stash itself."""
         from ouroboros import usage_accounting
         from ouroboros.usage_accounting import AttemptRequest, UsageScope, usage_scope
 
@@ -240,7 +242,7 @@ class TestTreeFedDecidingValue:
             budget_remaining_usd=1900.0,
             accumulated_usage={"cost": 0.5},
             cost_ceiling=task_pacing.resolve_cost_ceiling(
-                1900.0, normalize_budget_profile(None), root_cap_usd=100.0,
+                1900.0, EXPLICIT_50, root_cap_usd=100.0,
             ),
             llm=llm,
             drive_logs=tmp_path,
@@ -250,14 +252,19 @@ class TestTreeFedDecidingValue:
             global_limit_usd=1900.0, root_limit_usd=100.0,
         )
         with usage_scope(scope):
-            usage_accounting.reserve_attempt(AttemptRequest(
+            reservation = usage_accounting.reserve_attempt(AttemptRequest(
                 model="test/model", provider="openrouter",
                 reservation_usd=99.5, drive_root=tmp_path,
             ))
-            # The attempt is still in flight (never settled) — its hold alone
-            # must already be visible to the deciding surface.
+            # The attempt is still in flight (never settled): its hold is visible
+            # exposure, and known spend is still $0 — no stop on a worst case.
             entry = usage_accounting.last_root_accounting("root-inflight")
-            assert entry is not None and entry["accounted_usd"] == 99.5
+            assert entry is not None and entry["accounted_usd"] == 99.5 and entry["settled_usd"] == 0.0
+            assert _check_budget_limits(**args) is None
+            usage_accounting.mark_dispatched(reservation)
+            usage_accounting.settle_attempt(reservation, cost_usd=98.0, cost_final=False)
+            entry = usage_accounting.last_root_accounting("root-inflight")
+            assert entry["settled_usd"] == 98.0 and entry["accounted_usd"] == 98.0  # over the $97 ceiling
             result = _check_budget_limits(**args)
         assert result is not None
         _text, usage, _ = result
@@ -269,7 +276,7 @@ class TestRootAccountingTelemetry:
     def test_stash_roundtrip_and_age(self):
         from ouroboros import usage_accounting
 
-        usage_accounting._stash_root_accounting("root-t-1", 12.5, 100.0)
+        usage_accounting._stash_root_accounting("root-t-1", {"settled_usd": 12.5, "accounted_usd": 12.5}, 100.0)
         entry = usage_accounting.last_root_accounting("root-t-1")
         assert entry is not None
         assert entry["accounted_usd"] == 12.5
@@ -291,12 +298,17 @@ class TestRootAccountingTelemetry:
         )
         entry = usage_accounting.refresh_root_accounting(tmp_path, "root-t-2")
         assert entry is not None and entry["accounted_usd"] == 7.25
+        # A bucket that carries no known figure stays unknown: exposure is never
+        # relabelled as known spend (#1487).
+        assert entry["settled_usd"] is None
         assert usage_accounting.last_root_accounting("root-t-2")["root_limit_usd"] == 25.0
+        with pytest.raises(TypeError):
+            usage_accounting._stash_root_accounting("root-t-2", 7.25, 25.0)
 
     def test_refresh_failure_returns_stale_stash_not_zero(self, tmp_path, monkeypatch):
         from ouroboros import usage_accounting
 
-        usage_accounting._stash_root_accounting("root-t-3", 3.0, 10.0)
+        usage_accounting._stash_root_accounting("root-t-3", {"settled_usd": 3.0, "accounted_usd": 3.0}, 10.0)
 
         def _boom(*a, **k):
             raise RuntimeError("ledger unavailable")
@@ -312,7 +324,7 @@ class TestRootAccountingTelemetry:
         refreshes the display cache; the display reader keeps its fallback."""
         from ouroboros import usage_accounting
 
-        usage_accounting._stash_root_accounting("root-strict", 3.0, 10.0)
+        usage_accounting._stash_root_accounting("root-strict", {"settled_usd": 3.0, "accounted_usd": 3.0}, 10.0)
         assert usage_accounting.last_root_accounting("root-strict")["age_sec"] < 1.0
 
         def _boom(*a, **k):
@@ -364,7 +376,10 @@ class TestRootAccountingTelemetry:
         def _stashed():
             entry = usage_accounting.last_root_accounting("root-transitions")
             assert entry is not None
+            known.append(entry["settled_usd"])
             return entry["accounted_usd"]
+
+        known = []
 
         scope = UsageScope(
             drive_root=tmp_path, task_id="root-transitions", root_task_id="root-transitions",
@@ -387,6 +402,8 @@ class TestRootAccountingTelemetry:
             assert _stashed() == 4.0  # settled + the new hold
             usage_accounting.release_attempt(second, "not_dispatched")
             assert _stashed() == 1.0  # released hold no longer counts
+        # Known spend moves only on the settled price, never on a hold.
+        assert known == [0.0, 0.0, 1.0, 1.0, 1.0]
 
 
 # --- v6.56.0 cost axis: latched milestones + wrap-up (task_pacing content) ---
@@ -443,17 +460,17 @@ class TestCostMilestones:
         assert "Remaining: ~$0.00" in note.text
 
     def test_tree_cost_is_the_deciding_value_and_is_labeled(self):
-        """v6.91: the tree-accounted number decides the crossing and is labeled
-        honestly (incl. in-flight holds); own cost rides as the diagnostic."""
+        """v6.91 + #1487: the tree's known number decides the crossing and is labeled
+        honestly (open holds not counted); own cost rides as the diagnostic."""
         ctx = SimpleNamespace()
         note = task_pacing.build_cost_budget_note(
             ctx, start_remaining_usd=200.0, cost_ceiling_usd=97.0,
             task_cost=41.0, tree_cost_usd=50.0,
         )
         assert note is not None and "50% remaining" in note.text
-        assert "in-flight holds" in note.text
+        assert "known spend" in note.text and "open holds not counted" in note.text
         assert "own calls ~$41.00" in note.text
-        assert note.checkpoint["spend_basis"] == "tree_accounted"
+        assert note.checkpoint["spend_basis"] == "tree_known"
         # The deciding (tree) number and this task's own cost are BOTH recorded,
         # each under the name that means it — see the meaning-stability pin below.
         assert note.checkpoint["deciding_spend_usd"] == 50.0

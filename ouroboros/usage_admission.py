@@ -16,11 +16,13 @@ by the original root without being rewritten. The check is symmetric: the
 original root's own later work (its reviews, its post-work) is a member of the
 same group and sees every successor's spend. Nothing here is a second ledger:
 the group axis is the store's ``group`` summary (``billing_group_key``), kept
-in the same transaction as every attempt row. Unknown-priced admission keeps its
-existing policy (an unknown bound is admitted while the known accounting still
-fits); the projection discloses unknown liabilities and never promises a bound
-on an eventual bill. A late charge that exceeds the cap is recorded and bars
-the next admission; it was not prevented.
+in the same transaction as every attempt row. Every axis admits while its
+KNOWN spend (the settled bucket: confirmed prices and disclosed estimates) is
+below its limit (owner Q4-A, #1487); reservations and unresolved bounds are
+disclosed exposure, never counted as spending, and an unknown price is never a
+zero. The projection never promises a bound on an eventual bill: concurrent,
+in-flight and late charges can exceed the cap. Such a charge is recorded and
+bars the next admission; it was not prevented.
 """
 
 from __future__ import annotations
@@ -234,8 +236,8 @@ def settlement_billing_fields(root: Any, task_id: str, root_task_id: str) -> Dic
     return binding
 
 
-def raise_group_refusal(view: Any, scope: Any, bound: Optional[float] = None, *, dispatch: bool = False) -> None:
-    """The group axis of ONE reservation, inside the caller's store transaction."""
+def raise_group_refusal(view: Any, scope: Any) -> None:
+    """The group axis of ONE reservation or dispatch, inside the caller's store transaction."""
     from ouroboros import usage_accounting as ua
 
     group, limit = scope_group(scope)
@@ -244,10 +246,10 @@ def raise_group_refusal(view: Any, scope: Any, bound: Optional[float] = None, *,
                                 limit_scope="root", root_task_id=str(getattr(scope, "root_task_id", "") or ""))
     if not group or limit is None:
         return
-    accounted = view.summary(billing_group_id=group)["accounted_usd"]
-    if view.exceeds_limit(limit, bound, billing_group_id=group, dispatch=dispatch):
+    if view.exceeds_limit(limit, billing_group_id=group):
         raise ua.BudgetExceeded(
-            f"whole-work budget exhausted for group {group}: accounted=${accounted:.6f}, limit=${limit:.6f}",
+            f"whole-work budget exhausted for group {group}: "
+            f"{ua._known_spend_text(view.summary(billing_group_id=group))}, limit=${limit:.6f}",
             limit_scope="root", root_task_id=str(getattr(scope, "root_task_id", "") or group))
 
 
@@ -304,18 +306,23 @@ def review_wave_admission(
     slot_ids: str | Sequence[str] = "",
     processing_preferences: str | Sequence[str] = "",
 ) -> Dict[str, Any]:
-    """Read-only whole-wave admission through each slot's reservation math.
+    """Read-only wave admission on the reservation's own known-spend rule.
 
-    Standalone callers may supply remaining_usd_override. Otherwise the tighter
-    global/root remainder binds, including every in-flight hold; unknown prices
-    stay unknown. An explicit root_limit_usd is the caller's current fence,
-    otherwise the ledger's historical minimum governs. Global None resolves
-    settings; a non-positive configured limit is unbounded.
+    The wave is admitted while KNOWN spend is below every applicable limit
+    (global, root, original group), exactly what each seat's reservation will
+    check (#1487). The summed seat bounds are information, never an earlier
+    refusal: a wave that crosses the limit mid-dispatch is refused per seat by
+    the reservation and dispatch fences, with truthful custody of what was sent.
+    Standalone callers may supply remaining_usd_override (known room). An
+    explicit root_limit_usd is the caller's current fence, otherwise the
+    ledger's historical minimum governs. Global None resolves settings; a
+    non-positive configured limit is unbounded. Open holds are disclosed beside
+    the known spend; unknown prices stay unknown.
 
     Input sizes, outputs, categories, slots and processing can be scalar or
     aligned per-slot values. Price each seat under its own sending scope, so the
     caller's warm cache split cannot stand in for a reviewer's cold prefix.
-    Returned per-slot bounds and both remainders disclose the binding cause.
+    Returned per-slot bounds and both remainders disclose the binding axis.
     """
     from ouroboros import usage_accounting as ua
 
@@ -326,11 +333,12 @@ def review_wave_admission(
         "limit_usd": None,
         "slots": len(list(models or [])),
         "unpriced_slots": 0,
+        "known_usd": None,
         "accounted_usd": None,
         "reserved_usd": None,
         "slot_bounds": [],
-        **{key: None for key in ("global_limit_usd", "global_accounted_usd", "global_remaining_usd",
-                                 "global_reserved_usd", "binding_axis")},
+        **{key: None for key in ("global_limit_usd", "global_known_usd", "global_accounted_usd",
+                                 "global_remaining_usd", "global_reserved_usd", "binding_axis")},
     }
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id or not models:
@@ -341,8 +349,8 @@ def review_wave_admission(
         if remaining_usd_override is not None:
             remaining = float(remaining_usd_override)
         else:
-            # Every OPEN hold counts as reserved-by-others: a reserved row and a
-            # dispatched (in-flight) row both bind their upper bound on the fence.
+            # Open holds (reserved and in-flight/unresolved bounds) are disclosed
+            # exposure beside the known spend; they do not shrink the room.
             holds = lambda p: round(float(ua._number(p.get("reserved_usd")) or 0.0)  # noqa: E731
                                     + float(ua._number(p.get("unresolved_upper_bound_usd")) or 0.0), 6)
             projection = ua.usage_projection(drive_root, root_task_id=root_task_id)
@@ -350,12 +358,12 @@ def review_wave_admission(
                 max(0.0, float(root_limit_usd)) if root_limit_usd is not None
                 else None if root_limit_source else ua._number(projection.get("limit_usd"))
             )
-            accounted = ua._number(projection.get("accounted_usd"))
+            known = ua._number(projection.get("settled_usd"))
             remaining = None
-            if limit is not None and accounted is not None:
-                remaining = round(max(0.0, limit - accounted), 6)
-                result.update(limit_usd=limit, accounted_usd=accounted, reserved_usd=holds(projection),
-                              binding_axis="root")
+            if limit is not None and known is not None:
+                remaining = round(max(0.0, limit - known), 6)
+                result.update(limit_usd=limit, known_usd=known, accounted_usd=ua._number(projection.get("accounted_usd")),
+                              reserved_usd=holds(projection), binding_axis="root")
             # Resolve the same task-bound durable group and owner amendments
             # as a seat reservation, without reserving money or pinning a binding.
             # A raised in-memory root fence alone cannot raise the original group.
@@ -369,16 +377,19 @@ def review_wave_admission(
                 return {**result, "fits": False, "binding_axis": "group", "reason": "billing_authority_unavailable"}
             if group and group_limit is not None:
                 group_projection = ua.usage_projection(drive_root, billing_group_id=group)
-                group_accounted = ua._number(group_projection.get("accounted_usd"))
-                if group_accounted is not None:
-                    group_remaining = round(max(0.0, group_limit - group_accounted), 6)
+                group_known = ua._number(group_projection.get("settled_usd"))
+                if group_known is not None:
+                    group_remaining = round(max(0.0, group_limit - group_known), 6)
                     if remaining is None or group_remaining < remaining:
                         remaining = group_remaining
-                        result.update(limit_usd=group_limit, accounted_usd=group_accounted,
+                        result.update(limit_usd=group_limit, known_usd=group_known,
+                                      accounted_usd=ua._number(group_projection.get("accounted_usd")),
+                                      reserved_usd=holds(group_projection),
                                       binding_axis="group", billing_group_id=group)
-            # The global axis reserve_attempt checks FIRST (all roots' rows, open holds included).
+            # The global axis reserve_attempt checks FIRST (all roots' rows).
             gp = ua.usage_projection(drive_root, global_limit_usd=global_limit_usd, include_roots=False)
             result.update(global_limit_usd=ua._number(gp.get("limit_usd")),
+                          global_known_usd=ua._number(gp.get("settled_usd")),
                           global_accounted_usd=ua._number(gp.get("accounted_usd")),
                           global_remaining_usd=ua._number(gp.get("remaining_known_usd")), global_reserved_usd=holds(gp))
             global_remaining = result["global_remaining_usd"]
@@ -422,7 +433,8 @@ def review_wave_admission(
                 continue
             total += float(bound)
         result["estimated_wave_usd"] = round(total, 6)
-        result["fits"] = total <= remaining + 1e-9
+        # The reservation's equality: no room once known spend reached the limit.
+        result["fits"] = remaining > 1e-9
         return result
     except Exception:
         log.debug("review_wave_admission failed open", exc_info=True)
@@ -484,14 +496,16 @@ def amended_projection(root, identity, projection, *, group=False):
         limit = 0.0
     result.update({key: value for key, value in fields.items() if key.endswith(("source", "revision"))})
     if limit is not None:
-        result.update(limit_usd=limit, remaining_known_usd=round(max(0., limit - result["accounted_usd"]), 6))
+        result.update(limit_usd=limit, remaining_known_usd=round(max(0., limit - result["settled_usd"]), 6))
     return result
 
 
 def task_money_snapshot(root, task, root_id, *, root_limit=None):
     """One ledger observation of both independent ceilings, on group spend basis.
 
-    root_limit_usd is the effective allowance on that basis; actual authored
+    Rooms are limit minus KNOWN (settled) spend, the reservation's own rule;
+    ``accounted_usd`` is the group's exposure including open holds, disclosed.
+    root_limit_usd is the effective allowance on the known basis; actual authored
     caps and attribution are exposed in root_axis/group_axis. Never cached
     under a shared group key, and never an amendment to a saved cost ceiling.
     """
@@ -508,17 +522,18 @@ def task_money_snapshot(root, task, root_id, *, root_limit=None):
         cap = fields.get("root_limit_usd")
         if cap is None and not fields.get("root_limit_source") and initial.get("root_limit_usd") is not None:
             cap = ua._number(initial["root_limit_usd"])
-        axes = {"root": {"accounted_usd": own["accounted_usd"], "limit_usd": cap,
+        axes = {"root": {"settled_usd": own["settled_usd"], "accounted_usd": own["accounted_usd"], "limit_usd": cap,
                          "source": fields.get("root_limit_source") or initial.get("root_limit_source"),
                          "revision": fields.get("root_limit_revision")},
-                "group": {"accounted_usd": shared["accounted_usd"], "limit_usd": fields.get("billing_group_limit_usd"),
+                "group": {"settled_usd": shared["settled_usd"], "accounted_usd": shared["accounted_usd"],
+                          "limit_usd": fields.get("billing_group_limit_usd"),
                           "source": fields.get("billing_group_limit_source"),
                           "revision": fields.get("billing_group_limit_revision")}}
-        rooms = {key: axis["limit_usd"] - axis["accounted_usd"] for key, axis in axes.items() if axis["limit_usd"] is not None}
+        rooms = {key: axis["limit_usd"] - axis["settled_usd"] for key, axis in axes.items() if axis["limit_usd"] is not None}
         binding = min(rooms, key=rooms.get) if rooms else None
         room = rooms[binding] if binding else None
-        return {"accounted_usd": shared["accounted_usd"],
-                "root_limit_usd": None if room is None else shared["accounted_usd"] + room,
+        return {"settled_usd": shared["settled_usd"], "accounted_usd": shared["accounted_usd"],
+                "root_limit_usd": None if room is None else shared["settled_usd"] + room,
                 "remaining_known_usd": room, "root_axis": axes["root"], "group_axis": axes["group"],
                 "accounting_basis": "billing_group", "binding_axis": binding,
                 "integrity_degraded": usage_store.integrity_degraded(ua._drive_root(root)), "age_sec": 0.0}

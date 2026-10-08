@@ -19,6 +19,9 @@ from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.loop import _check_budget_limits, _RoundLimitContext
 from ouroboros.task_pacing import main_loop_wire_options
 
+# An explicit experiment profile: its authored early-stop math is kept verbatim.
+EXPLICIT_50 = normalize_budget_profile({"cost_hard_stop_pct": 50})
+
 
 @pytest.fixture(autouse=True)
 def _priced_anthropic_route(monkeypatch):
@@ -318,10 +321,11 @@ class TestWrapupAffordability:
             assert task_pacing.wrapup_reservation_fits(
                 request=request, root_cap_usd=cap, deciding_usd=0.0,
             ) is False
-            with pytest.raises(usage_accounting.BudgetExceeded):
-                usage_accounting.reserve_attempt(
-                    replace(request, root_limit_usd=cap)
-                )
+            # #1487: admission decides on KNOWN spend ($0 here). The call's own
+            # larger bound is recorded exposure, never an earlier refusal.
+            reservation = usage_accounting.reserve_attempt(replace(request, root_limit_usd=cap))
+            assert reservation.reservation_upper_bound_usd == pytest.approx(bound)
+            usage_accounting.release_attempt(reservation)
 
     def test_explicit_openrouter_route_matches_cache_aware_admission(self, tmp_path):
         from ouroboros.llm import LLMClient
@@ -638,8 +642,17 @@ class TestGlobalOnlyTreeAccounting:
 
 
 class TestExhaustedCeilingSoftLanding:
+    """An explicit profile's cap at/below its margin; ordinary tasks have no margin."""
+
     def _exhausted(self):
-        return task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile(None), root_cap_usd=0.5)
+        return task_pacing.resolve_cost_ceiling(100.0, EXPLICIT_50, root_cap_usd=0.5)
+
+    def test_an_ordinary_tiny_cap_is_not_soft_landed(self):
+        import ouroboros.loop as loop_module
+
+        ordinary = task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile(None), root_cap_usd=0.5)
+        assert ordinary.state == task_pacing.COST_CEILING_DISABLED
+        assert loop_module._soft_land_exhausted_ceiling(_ctx(), ordinary) is None
 
     def _arm(self, monkeypatch, fits):
         ctx = _ctx()
@@ -823,17 +836,34 @@ class TestForcedCandidatePredicate:
 
 
 class TestWrapupAffordabilityRail:
-    """The loop soft-lands on the rail, and stays silent when it cannot know."""
+    """An explicit profile's rail soft-lands, and stays silent when it cannot know."""
 
     def _ceiling(self, root_cap):
-        return task_pacing.resolve_cost_ceiling(
-            None, normalize_budget_profile(None), root_cap_usd=root_cap,
+        return task_pacing.resolve_cost_ceiling(None, EXPLICIT_50, root_cap_usd=root_cap)
+
+    def test_a_producer_allowance_never_arms_the_one_call_early_probe(self, monkeypatch):
+        """A producer allowance stops when known spend reaches it (owner 2026-10-07):
+        no prospective wrap-up probe pauses it one call early."""
+        tool_ctx = SimpleNamespace()
+        ctx = _ctx()
+        ctx.tools = SimpleNamespace(_ctx=tool_ctx)
+        task_pacing._remember_cost_stop_policy(tool_ctx, {
+            "authority": task_pacing.COST_STOP_PRODUCER, "profile": normalize_budget_profile(None)})
+        monkeypatch.setattr(
+            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 6.0, "accounted_usd": 30.0},
         )
+        monkeypatch.setattr(
+            task_pacing, "wrapup_reservation_fits",
+            lambda **_k: (_ for _ in ()).throw(AssertionError("prospective probe armed for a producer")),
+        )
+        allowance = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile(None),
+                                                     root_cap_usd=50.0, root_ceiling_usd=8.0)
+        assert _check_budget_limits(ctx, None, allowance) is None
 
     def test_the_rail_soft_lands_with_a_typed_stamp(self, monkeypatch):
         ctx = _ctx()
         monkeypatch.setattr(
-            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0},
+            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0},
         )
         # proxy last-fit → exact probe last-fit → prepared candidate last-fit
         answers, calls, builds = iter((True, False, True, False, True, False)), [], []
@@ -876,7 +906,7 @@ class TestWrapupAffordabilityRail:
     def test_repriced_nondecision_does_not_stamp_a_cost_stop(self, monkeypatch):
         ctx = _ctx(messages=[{"role": "user", "content": "work"}])
         monkeypatch.setattr(
-            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0},
+            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0},
         )
         # proxy last-fit → the exact probe disagrees (None): nothing destructive may run
         answers = iter((True, False, None, False))
@@ -908,7 +938,7 @@ class TestWrapupAffordabilityRail:
     def test_native_images_reprice_even_when_the_proxy_says_two_fit(self, monkeypatch):
         ctx = _ctx(messages=self._image_messages())
         monkeypatch.setattr(
-            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0},
+            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0},
         )
         # proxy (1, 2) → non-destructive probe (1, 2) → prepared candidate (1, 2)
         answers, calls = iter((True, True, True, False, True, False)), []
@@ -941,7 +971,7 @@ class TestWrapupAffordabilityRail:
     def test_an_image_probe_with_headroom_never_finalizes_services(self, monkeypatch):
         ctx = _ctx(messages=self._image_messages())
         monkeypatch.setattr(
-            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0},
+            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0},
         )
         answers = iter((True, True, True, True))
         monkeypatch.setattr(task_pacing, "prospective_wrapup_attempt_request", lambda **_k: object())
@@ -961,7 +991,7 @@ class TestWrapupAffordabilityRail:
     def test_a_proxy_stop_is_confirmed_by_the_priced_candidate(self, monkeypatch):
         ctx = _ctx()
         monkeypatch.setattr(
-            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0},
+            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0},
         )
         # proxy no-fit → exact probe no-fit → prepared candidate no-fit
         answers, calls = iter((False, False, False)), []
@@ -999,7 +1029,7 @@ class TestWrapupAffordabilityRail:
         ctx = _ctx()
         monkeypatch.setattr(
             "ouroboros.loop._loop_tree_accounting",
-            lambda **_k: {"accounted_usd": ceiling.ceiling_usd + 1.0},
+            lambda **_k: {"settled_usd": ceiling.ceiling_usd + 1.0},
         )
         answers = iter((True, False, True, True))
         monkeypatch.setattr(
@@ -1040,7 +1070,7 @@ class TestWrapupAffordabilityRail:
         }]
         monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "caption")
         monkeypatch.setattr(
-            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0},
+            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0},
         )
         # proxy, exact probe, prepared; then the fresh request's own admission at its own price.
         answers = iter((True, False, True, False, True, False, True))
@@ -1099,7 +1129,7 @@ class TestWrapupAffordabilityRail:
     def test_a_missing_prompt_estimate_keeps_the_rail_silent(self, monkeypatch):
         ctx = _ctx(accumulated_usage={"cost": 1.0})
         monkeypatch.setattr(
-            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0},
+            "ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0},
         )
         monkeypatch.setattr(
             task_pacing, "wrapup_reservation_fits",
@@ -1131,7 +1161,7 @@ class TestOneCeilingPerTree:
     """Enabled members keep the proved original root's early stop number."""
 
     def _profile(self):
-        return normalize_budget_profile(None)
+        return EXPLICIT_50
 
     def test_a_non_root_member_never_exceeds_the_root_deciding_number(self):
         root = task_pacing.resolve_cost_ceiling(10.0, self._profile(), root_cap_usd=50.0)
@@ -1146,17 +1176,24 @@ class TestOneCeilingPerTree:
         assert "non_root_member" in member.basis
         assert member.ceiling_usd == root.ceiling_usd == 5.0
 
-    def test_a_child_scope_carries_the_root_resolved_ceiling(self):
+    def test_a_child_scope_carries_the_root_resolved_ceiling(self, monkeypatch):
+        """A member whose own contract carries the explicit percentage keeps the
+        inherited number with no root read at all."""
+        from ouroboros import task_results
         from ouroboros.usage_accounting import UsageScope, usage_scope
 
+        monkeypatch.setattr(task_results, "load_task_result",
+                            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("root read")))
         scope = UsageScope(
             task_id="child", root_task_id="root", root_limit_usd=50.0,
             root_cost_ceiling_usd=5.0,
         )
+        ctx = SimpleNamespace(task_contract={"budget_profile": {"cost_hard_stop_pct": 50}})
         with usage_scope(scope):
-            member = task_pacing.resolve_task_cost_ceiling(SimpleNamespace(), 100.0)
+            member = task_pacing.resolve_task_cost_ceiling(ctx, 100.0)
 
         assert member.ceiling_usd == 5.0
+        assert task_pacing.cost_stop_authority(ctx) == task_pacing.COST_STOP_EXPLICIT
 
     def test_the_scheduled_child_payload_carries_the_root_ceiling(self):
         from supervisor.task_dispatch import build_scheduled_task_payload
@@ -1188,21 +1225,28 @@ class TestOneCeilingPerTree:
         assert "global_pct" in member.basis
         assert member.ceiling_usd == 10.0
 
-    def test_the_default_keeps_the_historical_root_semantics(self):
+    def test_an_explicit_profile_keeps_the_historical_root_semantics(self):
         positional = task_pacing.resolve_cost_ceiling(20.0, self._profile(), root_cap_usd=50.0)
 
         assert positional.basis == "min(global_pct, root_cap_minus_margin)"
+        ordinary = task_pacing.resolve_cost_ceiling(20.0, normalize_budget_profile(None), root_cap_usd=50.0)
+        assert ordinary.state == task_pacing.COST_CEILING_DISABLED
+
+    def _explicit_ctx(self):
+        return SimpleNamespace(task_contract={"budget_profile": {"cost_hard_stop_pct": 50}})
 
     def test_a_tree_member_resolves_the_cap_minus_margin_from_its_scope(self):
         with _scoped("child", "root", 50.0):
-            ceiling = task_pacing.resolve_task_cost_ceiling(SimpleNamespace(), 40.0)
+            ceiling = task_pacing.resolve_task_cost_ceiling(self._explicit_ctx(), 40.0)
+            ordinary = task_pacing.resolve_task_cost_ceiling(SimpleNamespace(), 40.0)
 
         assert "non_root_member" in ceiling.basis
         assert ceiling.ceiling_usd == 20.0
+        assert ordinary.state == task_pacing.COST_CEILING_DISABLED
 
     def test_the_root_of_the_tree_keeps_both_components(self):
         with _scoped("root", "root", 50.0):
-            ceiling = task_pacing.resolve_task_cost_ceiling(SimpleNamespace(), 40.0)
+            ceiling = task_pacing.resolve_task_cost_ceiling(self._explicit_ctx(), 40.0)
 
         assert "global_pct" in ceiling.basis
 
@@ -1224,16 +1268,16 @@ class TestOneCeilingPerTree:
         assert "state" in disclosure and "rule" in disclosure
 
     def test_the_checkpoint_and_the_pacing_note_share_one_formatter(self):
-        active = task_pacing.resolve_cost_ceiling(
-            None, normalize_budget_profile(None), root_cap_usd=50.0,
-        )
+        active = task_pacing.resolve_cost_ceiling(None, EXPLICIT_50, root_cap_usd=50.0)
         line = task_pacing.tree_spend_line(
-            {"accounted_usd": 12.0, "root_limit_usd": 50.0}, active,
+            {"settled_usd": 12.0, "accounted_usd": 32.0, "root_limit_usd": 50.0}, active,
         )
 
+        # Known spend is the number; the $20 of open holds rides beside it, uncounted.
         assert line.startswith("Task tree spend: ~$12.00")
+        assert "+$20.00 open holds not counted" in line
         assert "in-task cost ceiling" in line and "$50.00 hard tree cap" in line
-        assert task_pacing.tree_spend_line({"accounted_usd": None}, active) == ""
+        assert task_pacing.tree_spend_line({"settled_usd": None, "accounted_usd": 3.0}, active) == ""
 
     def test_the_rails_line_names_the_binding_bound(self):
         ceiling_binds = task_pacing._headroom_phrase(40.0, 10.0, 2.0)

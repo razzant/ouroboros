@@ -329,8 +329,8 @@ and 20 (`delegated_transport`), both critical. The imperatives:
   children copy current eligible source contents, including uncommitted inputs;
   isolation never identifies a project as Ouroboros's body. Preserve source and
   baseline through capture, cleanup and integration; apply only the child's delta.
-  `external_workspace` verifies shared effects without re-applying; external Git
-  authority and patch-only `self_worktree` stay distinct. A capture base proves
+  `external_workspace` verifies in the assigned folder under current read rights,
+  without transfer (ARCHITECTURE §6). Patch-only `self_worktree` stays distinct. A capture base proves
   no authorship: use `vcs_diff`. Genesis directories are durable deliverables;
   until `.gitignore` exists, small text build outputs ride `workspace.patch`,
   bounded per file and by Git's binary verdict, never by a total source-patch cap.
@@ -742,9 +742,9 @@ and what enforces each.
   facts reuse the note cadence and cached money projections; typed tool results count
   incrementally on the loop usage carrier; durations are overlapping observations, not
   inferred sleep/poll time or a behavior gate (`tests/test_budget_resource_facts.py`).
-- Tree-spend pacing decides on root-subtree spend including in-flight holds,
-  publishes the same `CostCeiling` object the loop decides on, and prices the wrap-up
-  with the fence's own cache-aware reservation (`tests/test_network_budget_wallet.py`).
+- Tree-spend pacing decides on root-subtree known (settled) spend, holds beside it,
+  publishes the same `CostCeiling` object the loop decides on, and prices an explicit
+  profile's wrap-up with the fence's own cache-aware reservation (`tests/test_network_budget_wallet.py`).
   Explicitly disabled profiles and real monetary fences stay independent; the
   configured global budget is read LIVE through the one resolver — never an inline
   default, never a per-task capture (`tests/test_budget_resource_facts.py`).
@@ -1111,8 +1111,8 @@ and what enforces each.
 - Task-acceptance actors are the configured triad rows
   (`reviewer_slot_config.triad_delivery_slots`; malformed config refuses typed), one
   substantive interaction each on its own delivery; the retrieving work order,
-  `evidence_refs` against the FULL packet, the money rule (one work-order send per paid
-  row, no rounds multiplier, no second pricing pass), the once-per-panel launch floor
+  `evidence_refs` against the FULL packet, the money rule (known spend below every limit;
+  one work-order send per paid row disclosed, no rounds multiplier), the once-per-panel launch floor
   (`task_pacing.review_launch_allowed`, `task_acceptance_paid_dispatch_stamp._claim`),
   the clamps on a running panel and the deadline-cut residual are stated once in
   ARCHITECTURE §6 "Task acceptance". Format-repair resends are packet-row only; child

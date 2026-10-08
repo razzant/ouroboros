@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from ouroboros import task_pacing
 from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.loop_budget import _check_budget_limits
-from tests._budget_limits_helpers import _make_args
+from tests._budget_limits_helpers import EXPLICIT_50, _make_args
 
 
 # --- The retired per-task soft reminder (v6.91) ---
@@ -46,7 +46,23 @@ class TestPerTaskSoftNoteRetired:
 # --- Global budget guard ---
 
 class TestGlobalBudgetGuard:
-    """Existing global budget percentage checks."""
+    """Global exhaustion, and an EXPLICIT ``cost_hard_stop_pct=50`` profile's stop
+    (``_make_args``' default ceiling); ordinary tasks have no percentage stop."""
+
+    def test_an_ordinary_task_is_not_stopped_at_half_the_wallet(self, tmp_path):
+        """Owner 2026-10-07 (#1128): no default early stop. 4.5 of 8 remaining is no
+        reason to stop an ordinary task; only real limits on known spend are."""
+        args = _make_args(
+            budget_remaining_usd=8.0, accumulated_usage={"cost": 7.9}, drive_logs=tmp_path,
+            cost_ceiling=task_pacing.resolve_cost_ceiling(8.0, normalize_budget_profile(None)),
+        )
+        assert args["cost_ceiling"].state == task_pacing.COST_CEILING_DISABLED
+        with (
+            patch.dict(os.environ, {"OUROBOROS_PER_TASK_COST_USD": "10.0"}),
+            patch("ouroboros.loop.call_llm_with_retry") as model_call,
+        ):
+            assert _check_budget_limits(**args) is None
+        model_call.assert_not_called()
 
     def test_no_global_budget_and_no_root_cap_is_silent(self, tmp_path):
         """Neither axis finite (GAIA shape, no per-task cap) → the whole cost
@@ -139,9 +155,19 @@ class TestCostCeilingResolution:
     """task_pacing.resolve_cost_ceiling: typed states, global pct component,
     root-cap-minus-margin component."""
 
-    def test_absent_profile_means_historical_50pct(self):
+    def test_absent_profile_has_no_default_stop(self):
+        """Owner 2026-10-07 (#1128): no half-wallet share and no cap-minus-margin for
+        an ordinary task — not at a large wallet, a small one, or under any cap."""
         profile = normalize_budget_profile(None)
-        ceiling = task_pacing.resolve_cost_ceiling(10.0, profile)
+        for wallet, cap in ((10.0, None), (480.0, 400.0), (1900.0, 100.0), (None, 50.0), (100.0, 0.5)):
+            ceiling = task_pacing.resolve_cost_ceiling(wallet, profile, root_cap_usd=cap)
+            assert ceiling.state == task_pacing.COST_CEILING_DISABLED, (wallet, cap)
+            assert ceiling.ceiling_usd is None and ceiling.planning_margin_usd is None
+            assert ceiling.root_cap_usd == cap
+            assert ceiling.basis == task_pacing.COST_BASIS_NO_DEFAULT_STOP
+
+    def test_explicit_50_keeps_the_authored_half_of_the_wallet(self):
+        ceiling = task_pacing.resolve_cost_ceiling(10.0, EXPLICIT_50)
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
         assert ceiling.ceiling_usd == 5.0
         assert ceiling.root_cap_usd is None
@@ -172,9 +198,9 @@ class TestCostCeilingResolution:
         assert task_pacing.resolve_cost_ceiling(0.0, profile).state == task_pacing.COST_CEILING_DISABLED
 
     def test_root_cap_component_binds_when_smaller(self):
-        """min(pct-of-global, cap − margin): the live wave1/2 shape — a huge
-        global remaining must not hide a $100 tree cap."""
-        profile = normalize_budget_profile(None)
+        """Explicit profile: min(pct-of-global, cap − margin): the live wave1/2 shape —
+        a huge global remaining must not hide a $100 tree cap."""
+        profile = EXPLICIT_50
         ceiling = task_pacing.resolve_cost_ceiling(1900.0, profile, root_cap_usd=100.0)
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
         assert ceiling.root_cap_usd == 100.0
@@ -182,14 +208,14 @@ class TestCostCeilingResolution:
         assert ceiling.planning_margin_usd == task_pacing.COST_PLANNING_MARGIN_USD
 
     def test_global_pct_component_binds_when_smaller(self):
-        profile = normalize_budget_profile(None)
+        profile = EXPLICIT_50
         ceiling = task_pacing.resolve_cost_ceiling(10.0, profile, root_cap_usd=100.0)
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
         assert ceiling.ceiling_usd == 5.0
 
     def test_root_cap_only_no_finite_global(self):
-        """A per-task cap with an unbounded global still yields an active stop."""
-        profile = normalize_budget_profile(None)
+        """Explicit profile: a per-task cap with an unbounded global still yields an active stop."""
+        profile = EXPLICIT_50
         ceiling = task_pacing.resolve_cost_ceiling(None, profile, root_cap_usd=50.0)
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
         assert ceiling.ceiling_usd == 50.0 - task_pacing.COST_PLANNING_MARGIN_USD
@@ -197,8 +223,9 @@ class TestCostCeilingResolution:
     def test_cap_at_or_below_margin_soft_lands_never_uncapped(self):
         """A root cap at/below the planning margin must resolve to the typed
         soft-land state — the pre-typed shape returned the same None as
-        'unlimited' (a $0.50 bench cap would have run uncapped)."""
-        profile = normalize_budget_profile(None)
+        'unlimited' (a $0.50 bench cap would have run uncapped). An explicit
+        profile's math; the absent profile has no margin to land under."""
+        profile = EXPLICIT_50
         for cap in (0.5, task_pacing.COST_PLANNING_MARGIN_USD):
             ceiling = task_pacing.resolve_cost_ceiling(100.0, profile, root_cap_usd=cap)
             assert ceiling.state == task_pacing.COST_CEILING_EXHAUSTED_SOFT_LAND, cap
@@ -206,7 +233,7 @@ class TestCostCeilingResolution:
             assert ceiling.root_cap_usd == cap
 
     def test_ceiling_is_never_computed_zero(self):
-        profile = normalize_budget_profile(None)
+        profile = EXPLICIT_50
         just_above = task_pacing.COST_PLANNING_MARGIN_USD + 0.01
         ceiling = task_pacing.resolve_cost_ceiling(1000.0, profile, root_cap_usd=just_above)
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
@@ -225,13 +252,12 @@ class TestCostCeilingResolution:
         )
         assert at_margin.state == task_pacing.COST_CEILING_EXHAUSTED_SOFT_LAND
 
-    def test_per_task_cap_setting_note_states_the_immediate_finalization(self):
-        """The owner-facing note must not promise a wrap-up a small cap cannot get.
-
-        The field still accepts a cap below the wrap-up margin (owner power is
-        preserved), but such a cap resolves to `exhausted_soft_land`, which the
-        loop turns into a forced final answer at the TOP of round 0 — zero work
-        rounds. The note said only "a graceful wrap-up fires just before"."""
+    def test_per_task_cap_setting_note_states_the_known_spend_limit(self):
+        """The owner reads the per-task cap as the task's limit (#1128): the note says
+        the cap itself is where known spend stops new calls, that a resumable task pauses
+        with its work saved (any other run ends budget-exhausted), and that in-flight calls
+        can overshoot — and promises no wrap-up margin, because an ordinary task has none
+        (even at a tiny cap)."""
         from ouroboros.settings_setup_contract import build_setup_contract
 
         fields = {
@@ -239,33 +265,34 @@ class TestCostCeilingResolution:
             for field in build_setup_contract().get("budgetFields", [])
         }
         note = str(fields["OUROBOROS_PER_TASK_COST_USD"]["note"])
-        assert f"${task_pacing.COST_PLANNING_MARGIN_USD:.2f}" in note
-        assert "finalizes the task immediately" in note
-        # A cap at the documented boundary really does behave that way.
+        assert "known spend" in note and "pauses" in note and "budget-exhausted" in note and "in flight" in note
+        assert "Raising the cap does not resume a paused task" in note
+        assert "wrap-up" not in note and "margin" not in note
         assert task_pacing.resolve_cost_ceiling(
             1000.0, normalize_budget_profile(None),
             root_cap_usd=task_pacing.COST_PLANNING_MARGIN_USD,
-        ).state == task_pacing.COST_CEILING_EXHAUSTED_SOFT_LAND
+        ).state == task_pacing.COST_CEILING_DISABLED
 
     def test_planning_margin_is_absolute_not_pct(self):
-        """The margin must not scale with the cap (a pct reserve amputated the
-        tail of long tasks — v6.54.4 r1; the money-axis analogue is pinned)."""
-        profile = normalize_budget_profile(None)
+        """An explicit profile's margin must not scale with the cap (a pct reserve
+        amputated the tail of long tasks — v6.54.4 r1; the money-axis analogue)."""
+        profile = EXPLICIT_50
         small = task_pacing.resolve_cost_ceiling(None, profile, root_cap_usd=10.0)
         large = task_pacing.resolve_cost_ceiling(None, profile, root_cap_usd=1000.0)
         assert small.ceiling_usd == 10.0 - task_pacing.COST_PLANNING_MARGIN_USD
         assert large.ceiling_usd == 1000.0 - task_pacing.COST_PLANNING_MARGIN_USD
 
-    def test_malformed_pct_fails_safe_to_default_not_zero(self):
-        """A garbage cost_hard_stop_pct must NOT silently become 0 (= no in-task
-        stop, the most permissive setting): negative / non-numeric / a 0<v<1
-        fraction map to None (the 50% default), while an explicit 0 is honored."""
+    def test_malformed_pct_keeps_its_input_contract_and_reads_as_absent(self):
+        """The accepted-input contract is unchanged: negative / non-numeric / a 0<v<1
+        fraction map to None, never to an explicit 0. None now means what an absent
+        profile means — no default stop — and is disclosed as that, never as the
+        explicit-zero bench contract."""
         for bad in (-5, -0.1, 0.5, "0.5", "abc", [1]):
             profile = normalize_budget_profile({"cost_hard_stop_pct": bad})
             assert profile["cost_hard_stop_pct"] is None, bad
             ceiling = task_pacing.resolve_cost_ceiling(10.0, profile)
-            assert ceiling.state == task_pacing.COST_CEILING_ACTIVE, bad
-            assert ceiling.ceiling_usd == 5.0, bad
+            assert ceiling.state == task_pacing.COST_CEILING_DISABLED, bad
+            assert ceiling.basis == task_pacing.COST_BASIS_NO_DEFAULT_STOP, bad
         # explicit 0 (and "0") stays a deliberate no-stop; whole percents clamp.
         assert normalize_budget_profile({"cost_hard_stop_pct": 0})["cost_hard_stop_pct"] == 0
         assert normalize_budget_profile({"cost_hard_stop_pct": "0"})["cost_hard_stop_pct"] == 0
@@ -316,15 +343,27 @@ class TestWakeRootCeiling:
         assert self._scope(tmp_path, monkeypatch, metadata={"root_limit_usd": 0.66}).root_limit_usd == 50.0
         assert self._scope(tmp_path, monkeypatch, metadata={"root_limit_usd": 0.66}, per_task_cap="0").root_limit_usd is None
 
-    def test_a_thin_root_ceiling_soft_lands_the_root_immediately(self, tmp_path, monkeypatch):
-        """$0.66 left of the allowance is below the planning margin, so the wake gets its
-        one best-effort final answer — which the fence at the full cap still admits."""
+    def test_a_thin_producer_allowance_is_the_working_ceiling_without_a_margin(self, tmp_path, monkeypatch):
+        """Owner 2026-10-07: $0.66 left of the allowance is $0.66 of work, not an
+        immediate landing under a $3 margin. The allowance stays a real restriction."""
         from ouroboros.usage_accounting import usage_scope
 
+        ctx = SimpleNamespace()
         with usage_scope(self._scope(tmp_path, monkeypatch, metadata={"root_cost_ceiling_usd": 0.66})):
-            ceiling = task_pacing.resolve_task_cost_ceiling(SimpleNamespace(), 1000.0)
-        assert ceiling.state == task_pacing.COST_CEILING_EXHAUSTED_SOFT_LAND
-        assert ceiling.root_cap_usd == 50.0 and ceiling.basis == "root_ceiling_at_or_below_planning_margin"
+            ceiling = task_pacing.resolve_task_cost_ceiling(ctx, 1000.0)
+        assert ceiling.state == task_pacing.COST_CEILING_ACTIVE and ceiling.ceiling_usd == 0.66
+        assert ceiling.root_cap_usd == 50.0 and ceiling.basis == "producer_allowance"
+        assert ceiling.planning_margin_usd is None
+        assert task_pacing.cost_stop_authority(ctx) == task_pacing.COST_STOP_PRODUCER
+
+    def test_an_explicit_profile_keeps_its_margin_under_a_producer(self):
+        """Explicit experiment math is kept verbatim, including its producer margin."""
+        thin = task_pacing.resolve_cost_ceiling(1000.0, EXPLICIT_50, root_cap_usd=50.0, root_ceiling_usd=0.66)
+        assert thin.state == task_pacing.COST_CEILING_EXHAUSTED_SOFT_LAND
+        assert thin.basis == "root_ceiling_at_or_below_planning_margin"
+        wide = task_pacing.resolve_cost_ceiling(1000.0, EXPLICIT_50, root_cap_usd=50.0, root_ceiling_usd=9.0)
+        assert wide.ceiling_usd == 9.0 - task_pacing.COST_PLANNING_MARGIN_USD
+        assert "root_ceiling_minus_margin" in wide.basis
 
     def test_a_root_ceiling_above_the_margin_is_the_working_ceiling(self, tmp_path, monkeypatch):
         from ouroboros.usage_accounting import usage_scope
@@ -333,8 +372,7 @@ class TestWakeRootCeiling:
             ceiling = task_pacing.resolve_task_cost_ceiling(SimpleNamespace(), 1000.0)
         assert ceiling.state == task_pacing.COST_CEILING_ACTIVE
         assert ceiling.root_cap_usd == 50.0
-        assert ceiling.ceiling_usd == 9.0 - task_pacing.COST_PLANNING_MARGIN_USD
-        assert "root_ceiling_minus_margin" in ceiling.basis
+        assert ceiling.ceiling_usd == 9.0 and ceiling.basis == "producer_allowance"
 
     def test_a_member_still_inherits_the_resolved_ceiling(self):
         """The root's number reaches its members as before; a member's own carrier is the
@@ -381,9 +419,7 @@ class TestCostCeilingStop:
         args = _make_args(
             budget_remaining_usd=100.0,
             accumulated_usage={"cost": 26.0},
-            cost_ceiling=task_pacing.resolve_cost_ceiling(
-                50.0, normalize_budget_profile(None),
-            ),
+            cost_ceiling=task_pacing.resolve_cost_ceiling(50.0, EXPLICIT_50),
             llm=llm,
             drive_logs=tmp_path,
         )
@@ -392,13 +428,11 @@ class TestCostCeilingStop:
         assert result is not None
 
     def test_cost_equal_to_ceiling_does_not_stop(self, tmp_path):
-        """Strict > preserves the historical edge (budget_pct > 0.5)."""
+        """Strict > preserves the explicit profile's historical edge (budget_pct > 0.5)."""
         args = _make_args(
             budget_remaining_usd=100.0,
             accumulated_usage={"cost": 25.0},
-            cost_ceiling=task_pacing.resolve_cost_ceiling(
-                50.0, normalize_budget_profile(None),
-            ),
+            cost_ceiling=task_pacing.resolve_cost_ceiling(50.0, EXPLICIT_50),
             drive_logs=tmp_path,
         )
         with patch.dict(os.environ, {"OUROBOROS_PER_TASK_COST_USD": "999"}):

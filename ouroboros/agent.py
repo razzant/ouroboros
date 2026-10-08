@@ -783,8 +783,8 @@ class OuroborosAgent:
             budget_root = pathlib.Path(budget_root_text) if budget_root_text else self.env.drive_root
             total_budget = resolve_total_budget_usd()
             projection = usage_projection(budget_root, global_limit_usd=total_budget)
-            if total_budget is not None:
-                budget_remaining = max(0.0, total_budget - float(projection.get("accounted_usd") or 0.0))
+            if total_budget is not None:  # room above KNOWN spend, the admission rule's own number (#1487)
+                budget_remaining = max(0.0, total_budget - float(projection.get("settled_usd") or 0.0))
         except Exception:
             budget_accounting_status = "unavailable"
             log.error("Budget authority unavailable while building task context", exc_info=True)

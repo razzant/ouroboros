@@ -143,6 +143,36 @@ def test_consciousness_off_or_unknown_makes_exactly_one_light_call(tmp_path, mon
     assert {entry["task_id"] for entry in draft["host_stamp"]["tasks"]} == {"bound", "kid"}
 
 
+@pytest.mark.parametrize("carrier", ["prefatory_prose", "separate_reasoning"])
+def test_only_the_structured_account_reaches_the_chronicle_view(tmp_path, monkeypatch, light, carrier):
+    """Transport commentary is not the account; literal examples inside it are not a filter target."""
+    from ouroboros import memory_view as mv
+
+    shared.world(tmp_path)
+    _consciousness(monkeypatch, False)
+    account = "The owner discussed the literal example <think>keep this</think>."
+    commentary = "PRIVATE_REASONING_SENTINEL"
+    answer = json.dumps({"text": account, "quotes": []})
+
+    class Reply(_Light):
+        def chat(self, **kwargs):
+            msg, usage = super().chat(**kwargs)
+            if carrier == "prefatory_prose":
+                msg["content"] = f"<think>{commentary}</think>\n" + msg["content"]
+            else:
+                msg["reasoning_content"] = commentary
+            return msg, usage
+
+    run = _run(tmp_path, Reply(answer))
+    assert run.outcome == "published", run
+    [draft] = _drafts(tmp_path)
+    assert draft["text"] == account
+    task = {"id": "turn0001", "chat_id": 1}
+    story = mv.render_story(mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path)))
+    assert account in story and commentary not in story
+    assert draft["author"]["kind"] == "helper" and len(draft["covers"]["rows"]) == 2
+
+
 def test_before_activation_no_call_and_no_new_file(tmp_path, monkeypatch, light):
     shared.world(tmp_path, activate=False)
     _consciousness(monkeypatch, False)

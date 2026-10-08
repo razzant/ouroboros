@@ -273,12 +273,13 @@ def test_display_reads_are_exact_while_the_monetary_gate_waits(data_root):
 
 
 def test_a_pre_check_under_a_held_writer_is_exact_both_ways(data_root, supervisor_state, monkeypatch):
-    """The loop's pre-check reads exactly under a held write lock: it neither
-    refuses on a stale open reservation nor admits on stale money."""
+    """The loop's pre-check reads exactly under a held write lock: it never admits on
+    stale money. An open hold is exposure, not spending (#1487), so the warmed snapshot
+    reads the whole $1; the exact read after settlement reads the known $0.90."""
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 1.0)
     reservation = ua.reserve_attempt(_request(data_root, reservation_usd=1.0, limit=1.0))
     ua.mark_dispatched(reservation)
-    assert supervisor_state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(0.0)
+    assert supervisor_state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(1.0)
     ua.settle_attempt(reservation, {"prompt_tokens": 5, "completion_tokens": 2}, cost_usd=0.10, cost_final=True)
     with _held_ledger_lock(data_root):
         remaining, elapsed = _timed(
@@ -290,8 +291,9 @@ def test_a_pre_check_under_a_held_writer_is_exact_both_ways(data_root, superviso
 
 
 def _assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):
-    """The real ``assign_tasks`` over a real ledger: a $5 limit, one lane that reserved $4
-    (the snapshot says $1 left, under the $2 evolution reserve) and then settled."""
+    """The real ``assign_tasks`` over a real ledger: a $5 limit, one lane whose $4 hold is
+    in flight (the warmed snapshot still says $5: a hold is not spending, #1487) and then
+    settles at ``settle_at`` — the exact read must see that known charge."""
     from types import SimpleNamespace
 
     from supervisor import queue, state, workers
@@ -310,7 +312,7 @@ def _assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):
     queue.init_queue_refs(pending, running, workers.QUEUE_SEQ_COUNTER_REF)
     reservation = ua.reserve_attempt(_request(data_root, reservation_usd=4.0, limit=5.0))
     ua.mark_dispatched(reservation)
-    assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(1.0)  # warms the memo
+    assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(5.0)  # warms the memo
     ua.settle_attempt(reservation, {"prompt_tokens": 5, "completion_tokens": 2}, cost_usd=settle_at, cost_final=True)
     sent: list = []
     pool[0] = SimpleNamespace(wid=0, busy_task_id=None, reaping=False,

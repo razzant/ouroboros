@@ -977,9 +977,11 @@ def test_production_budget_wrapup_propagates_budget_exceeded(tmp_path, monkeypat
     import ouroboros.usage_accounting as accounting
     from ouroboros import task_pacing
 
-    loop, _registry, ctx, trace = _forced_test_context(
+    loop, registry, ctx, trace = _forced_test_context(
         tmp_path, usage={"cost": 5.0},
     )
+    # The paid wrap-up at a reached ceiling is an explicit experiment profile's authored rail.
+    registry._ctx.task_contract = {**registry._ctx.task_contract, "budget_profile": {"cost_hard_stop_pct": 50}}
 
     def reject_dispatch(*_args, **_kwargs):
         raise accounting.BudgetExceeded(
@@ -1003,9 +1005,11 @@ def test_wrapup_is_forced_while_real_ledger_admission_still_fits(tmp_path, monke
     from ouroboros import task_pacing
     import ouroboros.usage_accounting as accounting
 
-    loop, _registry, ctx, _trace = _forced_test_context(
+    loop, registry, ctx, _trace = _forced_test_context(
         tmp_path, usage={"cost": 1.0, "_context_prompt_estimate": 1000},
     )
+    # The last-fit rail is an explicit experiment profile's authored rail (#1128).
+    registry._ctx.task_contract = {**registry._ctx.task_contract, "budget_profile": {"cost_hard_stop_pct": 50}}
     scope = accounting.UsageScope(
         drive_root=tmp_path, task_id="parent1", root_task_id="parent1",
         global_limit_usd=1000.0, root_limit_usd=100.0,

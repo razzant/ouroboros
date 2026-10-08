@@ -7,14 +7,18 @@ from ouroboros import task_pacing
 from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.loop_round_limits import _RoundLimitContext
 
+# An explicit experiment profile: its authored stop math is kept verbatim.
+EXPLICIT_50 = normalize_budget_profile({"cost_hard_stop_pct": 50})
+
 
 def _make_args(**overrides):
     """Build default kwargs for _check_budget_limits.
 
-    ``cost_ceiling`` defaults to the typed resolution with no root cap, so the
-    legacy guard tests keep exercising the historical 50%-of-global semantics
-    the runtime gets from ``task_pacing.resolve_cost_ceiling`` with an absent
-    profile.
+    ``cost_ceiling`` defaults to the typed resolution of an EXPLICIT
+    ``cost_hard_stop_pct=50`` experiment profile with no root cap, so the guard
+    tests keep exercising that authored 50%-of-global stop. An ordinary task has
+    no such stop (owner 2026-10-07): pass the absent profile's resolution to
+    test that.
     """
     llm = MagicMock()
     llm.chat.return_value = (
@@ -40,7 +44,7 @@ def _make_args(**overrides):
     defaults.update(overrides)
     if "cost_ceiling" not in defaults:
         defaults["cost_ceiling"] = task_pacing.resolve_cost_ceiling(
-            defaults["budget_remaining_usd"], normalize_budget_profile(None),
+            defaults["budget_remaining_usd"], EXPLICIT_50,
         )
     budget_remaining_usd = defaults.pop("budget_remaining_usd")
     cost_ceiling = defaults.pop("cost_ceiling")

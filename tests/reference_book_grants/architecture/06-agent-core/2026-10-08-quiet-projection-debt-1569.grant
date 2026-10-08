@@ -1,0 +1,8 @@
+583
+#1569: the terminal-maintenance paragraph replaces its one-clause `duty_unresolved` mention with
+what the duty now does: Phase B stats the canonical result before the ownership read and keeps an
+absent owner's exact revision (so a later copyback or quarantine restore is projected without a
+receipt, at one stat per such owner per pass), and diagnostics publish a per-subject id->reason map
+only on change, with one representative traceback per new reason, an id whose outcome the pass did
+not prove keeping its last reason, and a failed publish or gateway close logged once per change.
+No older text describes either rule.

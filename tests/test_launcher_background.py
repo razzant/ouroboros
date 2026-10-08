@@ -43,7 +43,7 @@ class Hook:
 
 class Window:
     def __init__(self, answer=None):
-        self.events = SimpleNamespace(closing=Hook(), before_show=Hook(), shown=Hook())
+        self.events = SimpleNamespace(closing=Hook(), before_show=Hook(), shown=Hook(), closed=Hook())
         self.localization = {"global.ok": "OK", "global.cancel": "Cancel"}
         self.visible, self.calls, self.answer = True, [], answer
 

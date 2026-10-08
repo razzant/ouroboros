@@ -723,15 +723,16 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
              **({"stash_note": note} if note else {})},
             status_code=409,
         )
-    # Affordability floor: a resolution that cannot buy even ONE full triad+scope
-    # review wave would mutate the live tree into a conflicted merge and then
-    # stall mid-review. "One full wave" is priced HONESTLY at the review packs'
-    # own worst-case caps — the shared 920K-token input SSOT per API row, the
-    # triad's default output reserve, and the scope reviewer's 100K output
-    # reserve — with the shared reservation math (agent-session rows ride
-    # subscriptions, not USD budget); fail-open on estimator errors, mirroring
-    # review_wave_admission's own contract.
-    admission = {"fits": True}
+    # Money admission is the known-spend rule every reviewer seat's reservation
+    # applies (#1487), checked just above: known spend below TOTAL_BUDGET admits
+    # the update, and a review that later reaches the limit pauses on its own
+    # fences. One full triad+scope wave is still priced at the review packs' own
+    # worst-case caps — the shared 920K-token input SSOT per API row, the triad's
+    # default output reserve, and the scope reviewer's 100K output reserve — but
+    # as DISCLOSURE, never a second, earlier refusal: a prospective wave larger
+    # than the remainder used to refuse an update the owner's limit still
+    # allowed. Agent-session rows ride subscriptions, not USD budget; an
+    # estimator error is recorded, never a zero.
     try:
         from ouroboros.reviewer_slot_config import commit_scope_rows, commit_triad_rows
         from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
@@ -740,10 +741,7 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
         # Native-retrieving actor rows (subagent_id + api route) are priced at
         # the SAME one-pack-call convention as packet rows: their true worst
         # case is bounded by the episode's own rails (round cap x transcript
-        # cap) and can exceed this estimate, but the typical episode is
-        # pack-sized or smaller, and this floor is an explicitly fail-open
-        # affordability heuristic — over-refusing assisted updates on a
-        # theoretical ceiling would cost more than it protects.
+        # cap) and can exceed this estimate.
         triad_models = [
             row.target_id for row in commit_triad_rows()
             if not row.is_session and row.target_id
@@ -778,70 +776,33 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
         session_slots = sum(
             1 for row in (*commit_triad_rows(), *commit_scope_rows()) if row.is_session
         )
-        if any_estimate:
-            admission = {
-                "fits": estimated_total <= float(remaining) + 1e-9,
-                "estimated_wave_usd": round(estimated_total, 6),
-                "remaining_usd": float(remaining),
-                "unpriced_slots": unpriced_total,
-                "session_slots": session_slots,
-            }
-        if admission.get("fits", True) and (unpriced_total or (session_slots and not any_estimate)):
-            # An ADMITTED wave with unknowable parts must not read as a fully
-            # priced estimate later (P1: represent the gap) — one durable line.
-            try:
-                from supervisor.git_ops import DRIVE_ROOT as _dr
-                from ouroboros.utils import append_jsonl as _aj, utc_now_iso as _n
+        try:
+            from supervisor.git_ops import DRIVE_ROOT as _dr
+            from ouroboros.utils import append_jsonl as _aj, utc_now_iso as _n
 
-                _aj(_dr / "logs" / "supervisor.jsonl", {
-                    "ts": _n(), "type": "managed_update_wave_floor_partial_unknown",
-                    "estimated_wave_usd": admission.get("estimated_wave_usd"),
-                    "unpriced_slots": unpriced_total, "session_slots": session_slots,
-                    "remaining_usd": float(remaining),
-                })
-            except Exception:
-                log.debug("wave-floor partial-unknown event write failed", exc_info=True)
+            # One durable disclosure of the wave estimate beside the known room;
+            # unknowable parts are counted, never filled in (P1).
+            _aj(_dr / "logs" / "supervisor.jsonl", {
+                "ts": _n(), "type": "managed_update_wave_estimate",
+                "estimated_wave_usd": round(estimated_total, 6) if any_estimate else None,
+                "exceeds_known_remaining": bool(any_estimate and estimated_total > float(remaining) + 1e-9),
+                "unpriced_slots": unpriced_total, "session_slots": session_slots,
+                "remaining_usd": float(remaining),
+            })
+        except Exception:
+            log.debug("wave estimate event write failed", exc_info=True)
     except Exception:
-        log.debug("assisted admission wave estimate failed open", exc_info=True)
-        admission = {"fits": True}
+        log.debug("assisted admission wave estimate failed", exc_info=True)
         try:
             from supervisor.git_ops import DRIVE_ROOT as _dr2
             from ouroboros.utils import append_jsonl as _aj2, utc_now_iso as _n2
 
             _aj2(_dr2 / "logs" / "supervisor.jsonl", {
-                "ts": _n2(), "type": "managed_update_wave_floor_estimator_failed",
+                "ts": _n2(), "type": "managed_update_wave_estimate_failed",
                 "remaining_usd": float(remaining),
             })
         except Exception:
             log.debug("estimator-failure event write failed", exc_info=True)
-    if not admission.get("fits", True):
-        note = _unwind_stashed_update(tx, "assisted_admission_failed")
-        _respawn_workers_after_failed_update()
-        estimated = admission.get("estimated_wave_usd")
-        try:
-            from supervisor.git_ops import DRIVE_ROOT
-            from ouroboros.utils import append_jsonl, utc_now_iso as _now
-
-            append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
-                "ts": _now(), "type": "managed_update_wave_floor_refused",
-                "estimated_wave_usd": estimated, "remaining_usd": admission.get("remaining_usd"),
-            })
-        except Exception:
-            log.debug("wave-floor refusal event write failed", exc_info=True)
-        return JSONResponse(
-            {"error": (
-                "Assisted update needs enough model budget for at least one full "
-                f"review wave ({'at least ' if admission.get('unpriced_slots') else ''}≈${estimated} "
-                "estimated at the review packs' worst-case caps for the configured reviewer panel"
-                + (f"; {admission['unpriced_slots']} slot(s) unpriced" if admission.get("unpriced_slots") else "")
-                + f", ${round(float(remaining), 2)} remaining); nothing was changed."
-            ),
-             "estimated_wave_usd": estimated,
-             "remaining_usd": admission.get("remaining_usd"),
-             "unpriced_slots": admission.get("unpriced_slots", 0),
-             **({"stash_note": note} if note else {})},
-            status_code=409,
-        )
 
     _create_rescue_snapshot(
         branch, "ui_update_assisted_merge", _collect_repo_sync_state(),

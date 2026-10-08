@@ -332,7 +332,7 @@ def test_start_agent_exports_presentation_posture(monkeypatch, tmp_path):
     captured = {}
 
     class FakeStdout:
-        def readline(self):
+        def readline(self, _limit=-1):
             return b""
 
     class FakeProcess:
@@ -382,7 +382,7 @@ def test_start_agent_unix_uses_process_group_and_writes_server_record(monkeypatc
     captured = {}
 
     class FakeStdout:
-        def readline(self):
+        def readline(self, _limit=-1):
             return b""
 
     class FakeProcess:
@@ -582,7 +582,7 @@ def test_start_agent_windows_assigns_job_before_resume_and_records(monkeypatch, 
     calls: list[tuple[str, object]] = []
 
     class FakeStdout:
-        def readline(self):
+        def readline(self, _limit=-1):
             return b""
 
     class FakeProcess:

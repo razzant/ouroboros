@@ -246,9 +246,11 @@ def review_wave_budget_gate(
     reads the seat's own observed cache split rather than the caller's), against
     every fence ``reserve_attempt`` enforces — global TOTAL_BUDGET, the task's
     current root and its original billing group — with the binding axis and
-    remainders named in the event. A wave that fits at admission time is
-    dispatched whole; one that does not is refused before any seat spends.
-    Fail-open on any error/unknown."""
+    remainders named in the event. The wave is admitted while KNOWN spend is
+    below every limit (#1487): its summed seat bounds are disclosed, never an
+    earlier refusal. A limit reached mid-wave refuses the remaining seats at
+    their own reservation and dispatch fences, with custody of what was sent.
+    A wave declined here spent nothing. Fail-open on any error/unknown."""
     try:
         from ouroboros.usage_accounting import current_usage_scope
         from ouroboros.usage_admission import review_wave_admission
@@ -278,10 +280,12 @@ def review_wave_budget_gate(
             "estimated_wave_usd": admission.get("estimated_wave_usd"),
             "remaining_usd": admission.get("remaining_usd"),
             "limit_usd": admission.get("limit_usd"),
+            "known_usd": admission.get("known_usd"),
             "accounted_usd": admission.get("accounted_usd"),
             "reserved_usd": admission.get("reserved_usd"),
             **{key: admission.get(key) for key in (
-                "binding_axis", "global_limit_usd", "global_accounted_usd", "global_reserved_usd", "global_remaining_usd")},
+                "binding_axis", "global_limit_usd", "global_known_usd", "global_accounted_usd",
+                "global_reserved_usd", "global_remaining_usd")},
             "slots": admission.get("slots"),
             "slot_bounds": admission.get("slot_bounds"),
             "unpriced_slots": unpriced,
@@ -311,12 +315,12 @@ def review_wave_binding_fence(admission: dict) -> tuple[str, str]:
     """Name the binding global/root/group fence and its actual remedy."""
     usd = lambda key: "unknown" if admission.get(key) is None else f"${float(admission[key]):.6f}"  # noqa: E731
     if admission.get("binding_axis") == "global":
-        return (f"global budget TOTAL_BUDGET {usd('global_limit_usd')}, accounted {usd('global_accounted_usd')} "
+        return (f"global budget TOTAL_BUDGET {usd('global_limit_usd')}, known spend {usd('global_known_usd')} "
                 "across every task", "raise TOTAL_BUDGET")
     if admission.get("binding_axis") == "group":
-        return (f"whole-work billing-group budget fence {usd('limit_usd')}, accounted {usd('accounted_usd')}",
+        return (f"whole-work billing-group budget fence {usd('limit_usd')}, known spend {usd('known_usd')}",
                 "amend the original billing-group owner's cap explicitly; changing the per-task setting does not amend it")
-    return f"per-task budget fence {usd('limit_usd')}, accounted {usd('accounted_usd')}", (
+    return f"per-task budget fence {usd('limit_usd')}, known spend {usd('known_usd')}", (
         "raise the per-task budget (OUROBOROS_PER_TASK_COST_USD)")
 
 

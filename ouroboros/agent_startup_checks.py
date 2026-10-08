@@ -495,7 +495,7 @@ def check_budget(env: Any) -> Tuple[dict, int]:
             from ouroboros.usage_accounting import usage_projection
 
             accounting = usage_projection(accounting_root, global_limit_usd=total_budget)
-            spent = float(accounting.get("accounted_usd") or 0.0)
+            spent = float(accounting.get("settled_usd") or 0.0)
             remaining = float(accounting.get("remaining_known_usd") or 0.0)
             integrity_degraded = bool(accounting.get("integrity_degraded"))
 

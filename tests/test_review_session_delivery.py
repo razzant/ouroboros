@@ -272,7 +272,7 @@ def _seed_started_review_invocation(
     )
     entry = custody.RunCustody(
         run_id=run_id, task_id=custody_task_id, route_id=route_id,
-        model="stored-model", project_id="proj-owned", project_owned=True,
+        model="stored-model", project_id="proj-owned", project_owned=True, source="review_substrate",
         root_task_id="stored-root", parent_task_id="stored-parent",
         ledger_root=str(drive_root), idempotency_key="stored-logical-key",
         invocation_id=invocation_id,
@@ -601,21 +601,23 @@ def test_definite_refusal_retires_the_registration_it_orphaned(tmp_path, fake_ro
     assert "pending_invocation_id" not in state
 
 
-def test_unknown_outcome_retains_the_registration_and_says_why(tmp_path, fake_route):
+@pytest.mark.parametrize("code,status", [("daemon_unreachable", 0), ("daemon_busy", 503),
+                                       ("daemon_unavailable", 503)])
+def test_unknown_outcome_retains_the_registration_and_says_why(tmp_path, fake_route, code, status):
     """A transport error leaves the POST's fate UNKNOWN: a run may be live against
     this registration, so it is RETAINED and the durable row names the reason."""
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     fake_route.project_unregistered = True
-    fake_route.start_error = ClaudexorUnavailable("daemon_unreachable", "boom", status_code=0)
+    fake_route.start_error = ClaudexorUnavailable(code, "RPC unavailable", status_code=status)
     state: dict = {}
     with pytest.raises(ClaudexorUnavailable):
         _run_session_directly(tmp_path, retry_state=state)
 
     assert fake_route.instances[-1].removals == []
-    assert state["pending_invocation_id"]
+    assert [row["invocation_id"] for row in custody.pending_invocations(tmp_path)] == [state["pending_invocation_id"]]
     rows = [json.loads(ln) for ln in
-            custody.event_log_path(tmp_path).read_text().splitlines() if ln.strip()]
+            custody.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines() if ln.strip()]
     failed = [r for r in rows if r.get("type") == custody.START_FAILED]
     assert failed and failed[-1]["project_retention_reason"] == (
         "start_outcome_unknown_run_may_exist"), failed[-1]
@@ -822,30 +824,53 @@ class _DeadlineWitnessLLM(FakeLLM):
     """Records what the stop axes say at the moment the extraction call is made."""
 
     def chat(self, **kwargs):
+        import time
+
         from ouroboros.model_wait import dispatch_deadline_remaining_sec
 
         self.remaining_at_send = dispatch_deadline_remaining_sec()
+        self.sent_at = time.monotonic()
         return super().chat(**kwargs)
 
 
 def _late_success_executor(tmp_path, fake_route, monkeypatch, *, llm, seen_by, window=1.0):
     """A run still `running` through the whole slot budget whose natural
     `succeeded` is first seen either by the spent window's last read or by the
-    verify read of the slot-deadline cancel (completion wins)."""
-    import time
+    verify read of the slot-deadline cancel (completion wins).
 
+    The runtime's poll clock is test-local: it moves only by the runtime's own sleeps,
+    each really slept so the slot's execution deadline does expire, and the run turns
+    `succeeded` on the read the runtime itself makes with its window spent. No setup,
+    custody or host stall can then move the success relative to the window. Returns the
+    executor and the slot budget each of the runtime's reads was made with."""
+    import time
+    from types import SimpleNamespace
+
+    from ouroboros import review_execution as rx
     from ouroboros.review_execution import AgentSessionReviewExecutor, ReviewAssignment
 
     fake_route.nonterminal = True
     fake_route.manifest_capabilities = {}
     fake_route.detail = _terminal_detail("narrative first\n[]\nNO_FINDINGS")
-    flip_at, original = time.monotonic() + window, FakeGateway.get_run
+    clock, reads, observe, original = [0.0], [], rx._observe_session, FakeGateway.get_run
+
+    def sleep(seconds):
+        time.sleep(seconds)
+        clock[0] += seconds
+
+    def observe_session(gateway, run_id, remaining, streak):
+        reads.append(remaining)
+        if seen_by == "spent_read" and remaining <= 0:
+            FakeGateway.nonterminal = False  # it finished during the window's last sleep
+        return observe(gateway, run_id, remaining, streak)
 
     def get_run(self, run_id, **kw):
-        if (time.monotonic() >= flip_at) if seen_by == "spent_read" else bool(self.cancels):
+        if seen_by == "verify_read" and self.cancels:
             FakeGateway.nonterminal = False
         return original(self, run_id, **kw)
 
+    monkeypatch.setattr(rx, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    monkeypatch.setattr(rx, "_observe_session", observe_session)
     monkeypatch.setattr(FakeGateway, "get_run", get_run)
     if seen_by == "spent_read":
         # The subject is what the deadline read DOES with a `succeeded` it sees, not whether a
@@ -858,7 +883,7 @@ def _late_success_executor(tmp_path, fake_route, monkeypatch, *, llm, seen_by, w
     return AgentSessionReviewExecutor(
         ReviewAssignment(request=_agent_request(), slot=_agent_slot(timeout_sec=window),
                          call_id="c-late", call_type="scope_review", custody_root=tmp_path),
-        llm=llm)
+        llm=llm), reads
 
 
 @pytest.mark.parametrize("seen_by, cancels", [("spent_read", []), ("verify_read", ["review_slot_timeout"])])
@@ -874,10 +899,14 @@ def test_a_success_first_seen_at_the_slot_deadline_is_accepted_and_extracted_pas
     from ouroboros.model_wait import execution_deadline_scope
 
     llm = _DeadlineWitnessLLM()
-    executor = _late_success_executor(tmp_path, fake_route, monkeypatch, llm=llm, seen_by=seen_by)
-    with execution_deadline_scope(time.monotonic() + 1.0, review_slot_id="scope_slot_1"):
+    executor, reads = _late_success_executor(tmp_path, fake_route, monkeypatch, llm=llm, seen_by=seen_by)
+    slot_deadline = time.monotonic() + 1.0
+    with execution_deadline_scope(slot_deadline, review_slot_id="scope_slot_1"):
         result = executor.execute()
+    assert reads[-1] == 0 and all(budget > 0 for budget in reads[:-1]), \
+        "the run read `running` inside its window; the runtime's last read was its spent one"
     assert llm.calls, "the late verdict was extracted, not dropped"
+    assert llm.sent_at >= slot_deadline, "the slot deadline had really expired by the extraction send"
     assert llm.remaining_at_send is None, "the expired SLOT deadline must not reach the paid verdict's extraction"
     assert result.usage["late_success_accepted"] is True and result.usage["extraction"]
     assert empty_array_is_verified_clean(result.raw_text)
@@ -892,12 +921,13 @@ def test_the_calendar_deadline_still_interrupts_the_late_verdict_phase(tmp_path,
     from ouroboros.model_wait import calendar_scope, execution_deadline_scope
 
     llm = _DeadlineWitnessLLM()
-    executor = _late_success_executor(tmp_path, fake_route, monkeypatch, llm=llm, seen_by="verify_read")
+    executor, _reads = _late_success_executor(tmp_path, fake_route, monkeypatch, llm=llm, seen_by="verify_read")
     with calendar_scope("2000-01-01T00:00:00+00:00"), \
             execution_deadline_scope(time.monotonic() + 1.0, review_slot_id="scope_slot_1"):
         result = executor.execute()
     assert llm.remaining_at_send == 0.0, "a spent calendar deadline is still visible to the send"
     assert result.usage["late_success_accepted"] is True
+    assert [reason for _rid, reason in fake_route.instances[0].cancels] == ["review_slot_timeout"]
 
 
 def test_a_success_read_inside_the_slot_budget_is_not_marked_late(tmp_path, fake_route):

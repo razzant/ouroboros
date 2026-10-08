@@ -107,6 +107,13 @@ REQUIRED_SMOKE_CHECKS = {
     }),
     "android-apk": frozenset({"apk_signature", "apk_package_version"}),
 }
+# Windows signing is selected by configuration: without a signer thumbprint the
+# ZIP ships explicitly unsigned; with one, the receipt must name that verified
+# signer and carry these checks, or the whole release stops.
+AUTHENTICODE_PROOF_ID = "windows-x64"
+AUTHENTICODE_SMOKE_CHECKS = frozenset(
+    {"authenticode_signer", "timestamp", "signed_payload_archive_match"}
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -158,6 +165,13 @@ def command_locate(args: argparse.Namespace) -> None:
         "name": artifact.name,
         "sha256": sha256_file(artifact),
     }
+    # A handed-over archive is checked against its producer job's output
+    # before anything extracts or executes it.
+    if args.expect_sha256 is not None and values["sha256"] != args.expect_sha256:
+        raise ValueError(
+            f"{artifact.name} has SHA-256 {values['sha256']}, not the "
+            f"{args.expect_sha256 or '(missing)'} digest its producer job recorded"
+        )
     if args.github_output:
         _append_github_output(args.github_output, values)
     print(json.dumps(values, sort_keys=True))
@@ -181,6 +195,14 @@ def command_record_smoke(args: argparse.Namespace) -> None:
         "releaseTag": args.tag,
         "checks": sorted(set(args.check)),
     }
+    if args.proof_id == AUTHENTICODE_PROOF_ID:
+        receipt["authenticode"] = {"status": "unsigned"}
+        if args.authenticode_thumbprint:
+            receipt["authenticode"] = {
+                "status": "signed",
+                "signerThumbprint": args.authenticode_thumbprint.upper(),
+                "publisher": args.authenticode_publisher,
+            }
     _write_json(args.output, receipt)
 
 
@@ -204,6 +226,34 @@ def _load_json(path: Path) -> dict:
     return value
 
 
+def _authenticode_state(smoke: dict, checks: list, signer_thumbprint: str) -> dict:
+    state = smoke.get("authenticode")
+    claimed = AUTHENTICODE_SMOKE_CHECKS & set(checks)
+    if not signer_thumbprint:
+        if state != {"status": "unsigned"} or claimed:
+            raise ValueError(
+                "Windows signing is not configured, but the windows-x64 receipt "
+                "does not record an unsigned archive"
+            )
+        return state
+    expected = signer_thumbprint.upper()
+    state = state if isinstance(state, dict) else {}
+    publisher = state.get("publisher")
+    if (
+        state.get("status") != "signed"
+        or state.get("signerThumbprint") != expected
+        or not isinstance(publisher, str)
+        or not publisher.strip()
+    ):
+        raise ValueError(
+            f"windows-x64 receipt does not record a signature by the configured certificate {expected}"
+        )
+    missing = AUTHENTICODE_SMOKE_CHECKS - claimed
+    if missing:
+        raise ValueError(f"windows-x64 receipt is missing signing checks: {sorted(missing)}")
+    return {"status": "signed", "signerThumbprint": expected, "publisher": publisher}
+
+
 def _proof_files(
     directory: Path,
     version: str,
@@ -212,6 +262,7 @@ def _proof_files(
     tag: str,
     android_build_result: str,
     android_attestation_result: str,
+    windows_signer_thumbprint: str,
 ) -> tuple[list[dict], dict]:
     archives = {
         path.name: path for path in _release_assets(directory, RELEASE_ASSET_SUFFIXES)
@@ -278,16 +329,19 @@ def _proof_files(
                 or not isinstance(sbom.get("serialNumber"), str)
             ):
                 raise ValueError(f"SBOM is not CycloneDX JSON: {sbom_path}")
-            records.append(
-                {
-                    "proofId": proof_id,
-                    "name": artifact.name,
-                    "size": artifact.stat().st_size,
-                    "sha256": digest,
-                    "smokeReceipt": smoke_path.name,
-                    "sbom": sbom_path.name,
-                }
-            )
+            record = {
+                "proofId": proof_id,
+                "name": artifact.name,
+                "size": artifact.stat().st_size,
+                "sha256": digest,
+                "smokeReceipt": smoke_path.name,
+                "sbom": sbom_path.name,
+            }
+            if proof_id == AUTHENTICODE_PROOF_ID:
+                record["authenticode"] = _authenticode_state(
+                    smoke, checks, windows_signer_thumbprint
+                )
+            records.append(record)
         except (OSError, ValueError) as exc:
             if proof_id not in ANDROID_DOWNLOAD_IDS:
                 raise
@@ -359,6 +413,23 @@ def _release_notes(
             repository=repository,
         )
         lines.append(f"- **{label}:** [{name}]({url})")
+    authenticode = records_by_id[AUTHENTICODE_PROOF_ID]["authenticode"]
+    if authenticode["status"] == "signed":
+        lines.extend([
+            "",
+            "Windows: `Ouroboros.exe` in the ZIP carries a timestamped Authenticode signature "
+            f"from **{authenticode['publisher']}** (certificate SHA-1 "
+            f"`{authenticode['signerThumbprint']}`). The other files in the ZIP are not "
+            "signed individually, and SmartScreen may still warn while the publisher's "
+            "reputation builds.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Windows: this ZIP is unsigned. The release was built without a configured "
+            "code-signing certificate, so Windows reports an unknown publisher; check the "
+            "download against `SHA256SUMS` and its attestations below.",
+        ])
     if android["status"] != "verified":
         lines.extend([
             "",
@@ -409,6 +480,11 @@ def command_assemble(args: argparse.Namespace) -> None:
     release_date, description = _read_release_description(args.readme, version)
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         raise ValueError("commit must be a full lowercase Git SHA")
+    # Set but malformed is a broken configuration, never an unsigned release.
+    if args.windows_signer_thumbprint and not re.fullmatch(
+        r"[0-9A-Fa-f]{40}", args.windows_signer_thumbprint
+    ):
+        raise ValueError("ESIGNER_CERT_SHA1 is set but is not a 40-hex SHA-1 thumbprint")
     records, android = _proof_files(
         args.directory,
         version,
@@ -416,6 +492,7 @@ def command_assemble(args: argparse.Namespace) -> None:
         tag=args.tag,
         android_build_result=args.android_build_result,
         android_attestation_result=args.android_attestation_result,
+        windows_signer_thumbprint=args.windows_signer_thumbprint,
     )
     checksum_targets = _checksum_targets(args.directory, records)
     checksums = "".join(
@@ -520,6 +597,7 @@ def build_parser() -> argparse.ArgumentParser:
     locate = commands.add_parser("locate", help="locate and hash one built archive")
     locate.add_argument("--directory", type=Path, default=Path("dist"))
     locate.add_argument("--github-output", type=Path)
+    locate.add_argument("--expect-sha256", help="fail unless the archive has this digest")
     locate.set_defaults(func=command_locate)
 
     smoke = commands.add_parser("record-smoke", help="write a passed smoke receipt")
@@ -529,6 +607,8 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--commit", required=True)
     smoke.add_argument("--tag", required=True)
     smoke.add_argument("--check", action="append", default=[])
+    smoke.add_argument("--authenticode-thumbprint", default="")
+    smoke.add_argument("--authenticode-publisher", default="")
     smoke.set_defaults(func=command_record_smoke)
 
     assemble = commands.add_parser("assemble", help="assemble the release proof capsule")
@@ -544,6 +624,8 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--notes-output", type=Path, required=True)
     assemble.add_argument("--android-build-result", choices=("success", "failure", "cancelled", "skipped", "not_run"), default="not_run")
     assemble.add_argument("--android-attestation-result", choices=("success", "failure", "not_run"), default="not_run")
+    # Required, possibly empty: the release states which Windows mode it expects.
+    assemble.add_argument("--windows-signer-thumbprint", required=True)
     assemble.add_argument("--github-output", type=Path)
     assemble.set_defaults(func=command_assemble)
 

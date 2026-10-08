@@ -158,7 +158,7 @@ def test_intrinsic_checkpoint_discloses_the_same_binding_ceiling_as_text(monkeyp
     now = datetime.now(timezone.utc)
     note = pacing.build_intrinsic_pacing_note(SimpleNamespace(_cost_ceiling=ceiling),
         created=now - timedelta(seconds=60), now=now, round_idx=4, accumulated_usage={"cost": 10},
-        tree_cost_provider=lambda: {"accounted_usd": 20, "root_limit_usd": 100})
+        tree_cost_provider=lambda: {"settled_usd": 20, "accounted_usd": 20, "root_limit_usd": 100})
     assert note.checkpoint["cost_ceiling"] == pacing.cost_ceiling_disclosure(ceiling)
     assert note.checkpoint["tree_cap_usd"] == 100
     assert "$80.00 in-task cost ceiling" in note.text

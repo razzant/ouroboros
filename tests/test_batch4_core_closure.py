@@ -62,14 +62,11 @@ def test_retired_local_answer_owner_releases_same_continue_without_settling_mone
     assert len(workers.PENDING) == 1
     assert ledger_rows(tmp_path) == before, "writer classification must not mutate money"
     projection = ua.usage_projection(tmp_path, billing_group_id="pred-1")
+    # Releasing a local-writer hold neither settles nor forgets its liability: the
+    # bound stays disclosed exposure, and (#1487) it is never counted as spending.
     assert projection["unresolved_upper_bound_usd"] == 0.5
-    # Releasing a local-writer hold does not restore its monetary room.
-    sent = []
-    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=successor, root_task_id=successor)):
-        with pytest.raises(ua.BudgetExceeded):
-            ua.execute_physical_attempt(ua.AttemptRequest(
-                model="m", provider="test", reservation_usd=20.0), lambda: sent.append(True))
-    assert sent == [] and ledger_rows(tmp_path) == before
+    assert projection["settled_usd"] == 0.0 and projection["accounted_usd"] == 0.5
+    assert ledger_rows(tmp_path) == before
     # An actual late receipt still settles the same liability.
     reservation = ua.AttemptReservation(final["attempt_id"], tmp_path, "m", "test", 0.5)
     ua.settle_attempt(reservation, {}, cost_usd=0.7, cost_final=True)
@@ -401,7 +398,7 @@ root = Path({str(tmp_path)!r})
 ua._reservation_cost = lambda request: 0.25
 scope = ua.UsageScope(drive_root=root, task_id="successor", root_task_id="successor",
     root_limit_usd=10, global_limit_usd=100, billing_group_id="original",
-    billing_group_limit_usd=0.1, billing_group_limit_source="initial_task_admission")
+    billing_group_limit_usd=0.0, billing_group_limit_source="initial_task_admission")
 with ua.usage_scope(scope):
     verdict = review_wave_budget_gate(SimpleNamespace(task_id="successor", pending_events=[]),
         surface="test", models=["test/model"], prompt_chars=100)

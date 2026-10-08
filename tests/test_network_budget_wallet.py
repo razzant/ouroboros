@@ -13,29 +13,40 @@ def _request(amount, task="other"):
         reservation_usd=amount, task_id=task, root_task_id=task)
 
 
+def _spend(amount, task="other"):
+    """KNOWN spend: the only money the wallet and its fence decide on (#1487)."""
+    held = accounting.reserve_attempt(_request(amount, task))
+    accounting.mark_dispatched(held)
+    accounting.settle_attempt(held, {}, cost_usd=amount, cost_final=True)
+    return held
+
+
 @pytest.mark.parametrize("root_cap", [None, 50.0])
-def test_actual_global_holds_leave_one_same_route_final_then_the_atomic_fence_binds(tmp_path, root_cap):
+def test_known_global_spend_leaves_one_same_route_final_then_the_atomic_fence_binds(tmp_path, root_cap):
     scope = accounting.UsageScope(drive_root=tmp_path, task_id="main", root_task_id="main",
                                   global_limit_usd=10.0, root_limit_usd=root_cap)
     with accounting.usage_scope(scope):
-        other = accounting.reserve_attempt(_request(8.0))
+        _spend(8.0)
         request = _request(1.5, "main")
         remaining = _wrapup_global_remaining()
         assert remaining == 2.0
         args = dict(request=request, root_cap_usd=root_cap, deciding_usd=0.0,
                     global_remaining_usd=remaining)
+        # An explicit profile's probe math is unchanged: one final fits, two do not.
         assert task_pacing.wrapup_reservation_fits(**args) is True
         assert task_pacing.wrapup_reservation_fits(**args, reservation_count=2) is False
         final = accounting.reserve_attempt(request)
+        assert _wrapup_global_remaining() == 2.0  # the final's own hold is exposure, not spending
+        unknown = accounting.reserve_attempt(_request(1.0))
+        accounting.mark_dispatched(unknown)
+        accounting.mark_unresolved(unknown, "provider outcome unknown")
+        assert _wrapup_global_remaining() == 2.0  # an unknown outcome is neither spending nor a refund
+        accounting.mark_dispatched(final)
+        accounting.settle_attempt(final, {}, cost_usd=2.0, cost_final=False)  # an estimate is known
+        assert _wrapup_global_remaining() == 0.0
         with pytest.raises(accounting.BudgetExceeded) as refused:
             accounting.reserve_attempt(request)
         assert refused.value.limit_scope == "global"
-        assert _wrapup_global_remaining() == 0.5
-        accounting.mark_dispatched(other)
-        accounting.mark_unresolved(other, "provider outcome unknown")
-        assert _wrapup_global_remaining() == 0.5  # a dead/unknown call is not a refund
-        accounting.release_attempt(final, "controlled test did not send")
-        assert _wrapup_global_remaining() == 2.0
 
 
 @pytest.mark.parametrize("global_remaining,root_cap,deciding,expected", [
@@ -56,7 +67,7 @@ def test_a_concurrent_reservation_after_the_check_can_still_refuse_the_final(tmp
         request = _request(1.5, "main")
         assert task_pacing.wrapup_reservation_fits(request=request, root_cap_usd=None, deciding_usd=0,
                                                   global_remaining_usd=_wrapup_global_remaining()) is True
-        accounting.reserve_attempt(_request(1.0))
+        _spend(2.0)  # another task's known spend lands after the observation
         with pytest.raises(accounting.BudgetExceeded):
             accounting.reserve_attempt(request)  # observation did not reserve a share
 
@@ -64,7 +75,7 @@ def test_a_concurrent_reservation_after_the_check_can_still_refuse_the_final(tmp
 def test_explicit_scope_limit_and_canonical_root_own_the_wallet_read(tmp_path):
     scope = accounting.UsageScope(drive_root=tmp_path, task_id="main", root_task_id="main", global_limit_usd=10.0)
     with accounting.usage_scope(scope):
-        accounting.reserve_attempt(_request(3.0))
+        _spend(3.0)
         assert _wrapup_global_remaining() == 7.0
     with accounting.usage_scope(replace(scope, global_limit_usd=20.0)):
         assert _wrapup_global_remaining() == 17.0
@@ -110,7 +121,7 @@ def test_local_final_call_path_does_not_request_an_unneeded_wallet_projection(tm
     monkeypatch.setattr(accounting, "_ROOT_ACCOUNTING_TELEMETRY", {})
     scope = accounting.UsageScope(drive_root=tmp_path, task_id="local", root_task_id="local", global_limit_usd=10.0)
     with accounting.usage_scope(scope):
-        accounting._stash_root_accounting("local", 0.0, None)
+        accounting._stash_root_accounting("local", {"settled_usd": 0.0, "accounted_usd": 0.0}, None)
         assert loop._check_budget_limits(_ctx(active_use_local=True), 10.0,
             task_pacing.CostCeiling(state="active", ceiling_usd=5.0)) is None
     assert reads == []
@@ -186,13 +197,13 @@ def test_live_wallet_triggers_the_existing_final_call_path_without_a_root_cap(tm
         return "verified final", actual_ctx.accumulated_usage, actual_ctx.llm_trace
     monkeypatch.setattr(loop, "_forced_final_answer", finish)
     with accounting.usage_scope(scope):
-        accounting.reserve_attempt(_request(6.0))
+        _spend(6.0)
         assert loop._check_budget_limits(ctx, 10.0, ceiling) is None
         assert prepared == [] and admitted == []
-        accounting.reserve_attempt(_request(2.0, "another-root"))
+        _spend(2.0, "another-root")
         result = loop._check_budget_limits(ctx, 10.0, ceiling)
         assert result[0] == "verified final" and len(admitted) == 1 and len(prepared) == 1
         assert "$2.00 left across all tasks" in prepared[0]
         assert ctx.accumulated_usage["cost_stop_rail"] == "wrapup_reservation_last_fit"
-        assert _wrapup_global_remaining() == 0.5
+        assert _wrapup_global_remaining() == 2.0  # the admitted final's hold is not known spend
         accounting.release_attempt(admitted[0], "controlled final callback did not send")

@@ -196,7 +196,7 @@ def test_cancelling_a_run_this_module_already_settled_is_not_an_incident(tmp_pat
 
 
 def test_a_retirement_that_landed_is_not_replayed_as_still_owned(tmp_path, monkeypatch):
-    """Settlement's two obligations can fail independently. When the RETIREMENT landed
+    """Review settlement's two obligations can fail independently. When the RETIREMENT landed
     and the ledger write did not, the durable replay must know the registration is gone
     — otherwise a restart retries `remove_project` on an already-removed project and the
     settlement can never complete."""
@@ -219,9 +219,9 @@ def test_a_retirement_that_landed_is_not_replayed_as_still_owned(tmp_path, monke
     monkeypatch.setattr(ua, "record_subscription_session", _boom)
     delegate._CUSTODY.clear()
     dc.record_started(tmp_path, delegate._RunCustody(
-        run_id="run-1", task_id="t-a", route_id="r", model="m",
+        run_id="run-1", task_id="t-a", route_id="r", model="m", source="review_substrate",
         project_id="prj-ours", project_owned=True, root_task_id="t-a", ledger_root=str(tmp_path)))
-    json.loads(delegate._delegate_wait(_nanny_ctx(tmp_path), "run-1", wait_sec=1))
+    dc.settle_run(tmp_path, _Stub(), dc.replay(tmp_path)["run-1"], _Stub().get_run("run-1"))
     delegate._CUSTODY.clear()          # the worker restarts
 
     replayed = dc.replay(tmp_path)["run-1"]

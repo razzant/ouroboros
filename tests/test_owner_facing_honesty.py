@@ -557,10 +557,12 @@ def test_degraded_owner_line_bounds_each_reason():
 
 
 def test_redaction_filter_ssot_is_observability():
+    """process_logging defines no filter of its own; the bootstrap attaches observability's
+    (tests/test_process_logging.py checks the attached class in a fresh interpreter)."""
     from ouroboros import process_logging
-    from ouroboros.observability import SecretRedactingLogFilter
 
-    assert process_logging.SecretRedactingLogFilter is SecretRedactingLogFilter
+    assert not [value for value in vars(process_logging).values()
+                if isinstance(value, type) and issubclass(value, logging.Filter)]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pgrep/getuid semantics")

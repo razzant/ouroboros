@@ -235,9 +235,29 @@ def test_a_known_reservation_bound_stays_accounted_while_the_price_is_unknown(da
     ua.mark_dispatched(reservation)
     ua.mark_unresolved(reservation, "the provider went dark")
     window = allowance.allowance_window(data_root, now=T0)
-    assert window["accounted_usd"] == pytest.approx(5.0)  # 1.0 settled + the 4.0 bound
-    assert window["remaining_usd"] == pytest.approx(15.0)
+    assert window["accounted_usd"] == pytest.approx(5.0)  # 1.0 settled + the 4.0 bound, disclosed
+    assert window["settled_usd"] == pytest.approx(1.0)
+    assert window["remaining_usd"] == pytest.approx(19.0)  # known spend decides (#1487)
     assert window["non_final_rows"] == 1
+
+
+def test_a_refused_oversized_request_never_closes_the_allowance_for_a_day(data_root, monkeypatch):
+    """The 2026-10-05 incident (#1487 comment): $31.68 known of a $50 allowance, then a
+    provider-refused fallback recorded `unresolved` at its $41.27 bound. Its worst case is
+    exposure beside the known spend, never spending: the next wake is admitted with the
+    known $18.32 left, instead of 21 hours of `allowance_exhausted`."""
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "50")
+    _wake(data_root, monkeypatch, T0 - 2 * HOUR, 31.68)
+    _at(monkeypatch, T0 - HOUR)
+    refused = ua.reserve_attempt(_request(data_root, reservation_usd=41.27, task_id="wake-1",
+                                          root_task_id="wake-1", category="consciousness"))
+    ua.mark_dispatched(refused)
+    ua.mark_unresolved(refused, "HTTP 400 total text input size exceeds 8 MB")
+    window = allowance.allowance_window(data_root, now=T0)
+    assert window["status"] == allowance.STATUS_AVAILABLE
+    assert window["settled_usd"] == pytest.approx(31.68)
+    assert window["remaining_usd"] == pytest.approx(18.32)
+    assert window["accounted_usd"] == pytest.approx(72.95)  # the open bound stays disclosed
 
 
 def test_a_positive_charge_and_a_descendants_charge_both_land_on_the_one_allowance(data_root, monkeypatch):
@@ -323,3 +343,27 @@ def test_the_wake_prompt_money_framing_matches_what_the_ledger_actually_records(
     assert session["subscription_sessions"] == 1
     assert session["subscription_windows"] == {"r": "2026-09-17T00:00:00Z"}
     assert "limit_usd" not in session
+
+
+@pytest.mark.parametrize(("settled", "unresolved", "status", "remaining"), [
+    ((2.0, True), 20.0, allowance.STATUS_AVAILABLE, 8.0),    # $2 known beside a $20 unknown
+    ((9.0, False), None, allowance.STATUS_AVAILABLE, 1.0),   # a $9 estimate is known spend
+    ((10.0, False), None, allowance.STATUS_EXHAUSTED, 0.0),  # equality: the allowance is reached
+])
+def test_the_daily_allowance_decides_on_known_spend(data_root, monkeypatch, settled, unresolved, status, remaining):
+    """The same rule as every money limit (#1487): known spend (estimates included)
+    decides; an unresolved bound is disclosed exposure."""
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "10")
+    cost, final = settled
+    _at(monkeypatch, T0 - 2 * HOUR)
+    _settle(data_root, cost=cost, cost_final=final, task_id="wake-1", root_task_id="wake-1", category="consciousness")
+    if unresolved is not None:
+        _at(monkeypatch, T0 - HOUR)
+        held = ua.reserve_attempt(_request(data_root, reservation_usd=unresolved, task_id="wake-1",
+                                           root_task_id="wake-1", category="consciousness"))
+        ua.mark_dispatched(held)
+        ua.mark_unresolved(held, "provider outcome unknown")
+    window = allowance.allowance_window(data_root, now=T0)
+    assert window["status"] == status and window["remaining_usd"] == pytest.approx(remaining)
+    assert window["settled_usd"] == pytest.approx(cost)
+    assert window["accounted_usd"] == pytest.approx(cost + (unresolved or 0.0))

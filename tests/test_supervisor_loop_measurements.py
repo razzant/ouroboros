@@ -12,7 +12,7 @@ is invented for an event a worker never stamped.
 from __future__ import annotations
 
 import inspect
-from pathlib import PurePath
+from pathlib import Path, PurePath
 import logging
 import re
 import threading
@@ -581,8 +581,11 @@ def test_stall_end_carries_samples_top_frames_and_the_last_stack(monkeypatch, jo
     closing row says how many samples it took, which repository frames they fold into (at
     most five) and the last stack - where the thread SPENT the stall, not only where it began."""
     import server
-    from ouroboros import server_liveness
+    from ouroboros import config, server_liveness
 
+    # Shared isolation uses an empty disposable repo. This read-only stack test
+    # needs its actual source root to exercise repository-frame attribution.
+    monkeypatch.setattr(config, "REPO_DIR", Path(__file__).resolve().parents[1])
     monkeypatch.setenv("OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC", "1")
     liveness = _live_liveness("maintenance")
     clock = _Clock(mono=liveness[0] + 100.0)
@@ -611,7 +614,7 @@ def test_stall_end_carries_samples_top_frames_and_the_last_stack(monkeypatch, jo
     assert end["samples"] >= 3 and 1 <= len(end["top_frames"]) <= 5
     assert sum(item["samples"] for item in end["top_frames"]) == end["samples"]
     hot = end["top_frames"][0]["frame"]
-    assert "test_supervisor_loop_measurements.py:_pretend_stalled_maintenance_step" in hot, hot
+    assert hot == "tests/test_supervisor_loop_measurements.py:_pretend_stalled_maintenance_step", hot
     assert any("_pretend_stalled_maintenance_step" in frame for frame in end["last_stack"])
     import sys
     runtime_only = [f"{sys.prefix}/lib/python3/threading.py:1 in wait".replace("\\", "/")]

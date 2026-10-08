@@ -226,14 +226,26 @@ def test_exact_money_beyond_the_default_decimal_precision(root):
 
 def test_dispatch_rechecks_a_limit_reached_after_the_reservation(root):
     held = ua.reserve_attempt(request(root, reservation_usd=.4, global_limit_usd=1.0))
-    # Spend lands between the reservation and the dispatch.
+    # Known spend reaches the limit exactly between the reservation and the dispatch:
+    # the reservation's own predicate (#1487, equality refuses) never sends.
     ua.record_subscription_session("late-spend", drive_root=root, route="subscription", task_id="other",
-                                   root_task_id="other", spend_usd=.7)
+                                   root_task_id="other", spend_usd=1.0)
     with pytest.raises(ua.BudgetExceeded, match="changed before dispatch"):
         ua.mark_dispatched(held)
     [row] = [row for row in ledger_rows(root) if row["attempt_id"] == held.attempt_id]
     assert (row["state"], row["revision"]) == ("reserved", 1)
     ua.release_attempt(held, "before_dispatch_failed:limit")
+
+
+def test_dispatch_never_counts_its_own_hold_as_spending(root):
+    """Known $0.70 + this attempt's own $0.40 hold exceeds $1.00 only as exposure:
+    known spend is below the limit, so the reserved call is sent (overshoot accepted)."""
+    held = ua.reserve_attempt(request(root, reservation_usd=.4, global_limit_usd=1.0))
+    ua.record_subscription_session("late-spend", drive_root=root, route="subscription", task_id="other",
+                                   root_task_id="other", spend_usd=.7)
+    ua.mark_dispatched(held)
+    [row] = [row for row in ledger_rows(root) if row["attempt_id"] == held.attempt_id]
+    assert row["state"] == "dispatched"
 
 
 def test_the_owner_pause_fence_holds_at_dispatch(root):

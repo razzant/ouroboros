@@ -3095,6 +3095,10 @@
    "is_error": true,
    "status": "workspace_blocked"
   },
+  "shape:shared_result_refused": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
   "shape:binding_arg_error": {
    "is_error": true,
    "status": "error"
