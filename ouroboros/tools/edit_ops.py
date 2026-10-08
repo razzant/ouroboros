@@ -718,7 +718,7 @@ def normalize_patch_paths(patch: str, normalize) -> str:
 
 
 def _apply_hunks_to_text(
-    content: str, hunks: List[_Hunk], path: str
+    content: str, hunks: List[_Hunk], path: str, *, _sites: Optional[List[int]] = None,
 ) -> Tuple[Optional[str], List[str], str]:
     """Validate every hunk against the original file, then apply disjoint spans.
 
@@ -732,6 +732,7 @@ def _apply_hunks_to_text(
     notes: List[str] = []
     errors: List[str] = []
     changes: List[Tuple[int, int, List[str], int]] = []
+    hunk_sites: Dict[int, List[int]] = {}
     for hi, hunk in enumerate(hunks, 1):
         old = [t for p, t in hunk.lines if p in (" ", "-")]
         anchors = [i for i, line in enumerate(file_lines) if hunk.anchor in line] if hunk.anchor else []
@@ -748,6 +749,7 @@ def _apply_hunks_to_text(
                 continue
             pos = anchors[0] + 1
             changes.append((pos, pos, [t for p, t in hunk.lines if p == "+"], hi))
+            hunk_sites[hi] = [0]
             continue
 
         def candidates(tier: str) -> List[int]:
@@ -814,14 +816,17 @@ def _apply_hunks_to_text(
             else:
                 remove_indent = delta
         replacement: List[str] = []
+        local_sites: List[int] = []
         old_index = 0
         for prefix, line in hunk.lines:
             if prefix == " ":
                 replacement.append(actual[old_index])
                 old_index += 1
             elif prefix == "-":
+                local_sites.append(len(replacement))
                 old_index += 1
             else:
+                local_sites.append(len(replacement))
                 if line.strip():
                     if shift:
                         line = shift + line
@@ -834,6 +839,7 @@ def _apply_hunks_to_text(
         if errors and errors[-1].startswith(f"hunk {hi}: added line cannot"):
             continue
         changes.append((pos, pos + len(old), replacement, hi))
+        hunk_sites[hi] = local_sites
         if tier != "exact":
             notes.append(f"hunk {hi}: matched ignoring {tier} whitespace; unchanged context bytes preserved")
             if tier in {"indentation", "indentation+trailing"}:
@@ -844,8 +850,33 @@ def _apply_hunks_to_text(
             errors.append(f"hunks {left[3]} and {right[3]} overlap in {path}")
     if errors:
         return None, notes, "\n".join(errors)
+    # These are placement coordinates, not a second diff alignment. Keep earlier
+    # directive sites attached to their surviving lines across explicit chaining.
+    points: List[int] = []
+    if _sites is not None:
+        for site in _sites:
+            line, shift = content.count("\n", 0, site), 0
+            for start, end, replacement, _ in ordered:
+                if start <= line < end:
+                    line = start + shift
+                    break
+                if end <= line:
+                    shift += len(replacement) - (end - start)
+            else:
+                line += shift
+            points.append(line)
+        shift = 0
+        for start, end, replacement, hi in ordered:
+            points.extend(start + shift + local for local in hunk_sites[hi])
+            shift += len(replacement) - (end - start)
     for start, end, replacement, _ in reversed(ordered):
         file_lines[start:end] = replacement
+    if _sites is not None:
+        starts, offset = [], 0
+        for line in file_lines:
+            starts.append(offset)
+            offset += len(line) + 1
+        _sites[:] = [starts[min(point, len(starts) - 1)] if starts else 0 for point in points]
     return "\n".join(file_lines), notes, ""
 
 
@@ -885,7 +916,7 @@ def _apply_patch(
     errors: List[str] = []
     seen: Dict[str, str] = {}  # rel path -> pending content (chained updates)
     deleted: set[str] = set()
-    original: Dict[str, str] = {}
+    sites: Dict[str, List[int]] = {}
     bindings: Dict[str, ResolvedResourceBinding] = {}
     supplied_bindings = (
         tuple(_resolved_binding)
@@ -926,7 +957,7 @@ def _apply_patch(
                 content += "\n"
             planned_writes.append((target, rel, content))
             seen[rel] = content
-            original[rel] = ""
+            sites[rel] = [0]
             summaries.append(f"✅ Added {rel} ({len(op.add_lines)} lines)")
             continue
         if op.kind == "delete":
@@ -970,8 +1001,7 @@ def _apply_patch(
             except Exception as e:  # noqa: BLE001 - report unreadable target
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: cannot read {op.path}: {e}")
                 continue
-            original.setdefault(rel, content)
-        new_content, notes, herr = _apply_hunks_to_text(content, op.hunks, rel)
+        new_content, notes, herr = _apply_hunks_to_text(content, op.hunks, rel, _sites=sites.setdefault(rel, []))
         if herr:
             errors.append(f"{op.path}: {herr}")
             continue
@@ -1071,17 +1101,7 @@ def _apply_patch(
         body += "\n" + "\n".join(registered_outputs)
     previews = []
     for rel, (_, content) in final_content.items():
-        before = original.get(rel, "")
-        # Match source lines, not repeated individual characters of whole modules.
-        # Prefix sums turn changed line positions into final source-character sites.
-        lines = content.splitlines(keepends=True)
-        starts = [0]
-        for line in lines:
-            starts.append(starts[-1] + len(line))
-        points = [starts[after] for tag, _, _, after, _ in difflib.SequenceMatcher(
-            a=before.splitlines(keepends=True), b=lines, autojunk=False).get_opcodes()
-                  if tag != "equal"]
-        previews.append(f"Context after {rel}:\n{numbered_edit_preview(content, points or [0])}")
+        previews.append(f"Context after {rel}:\n{numbered_edit_preview(content, sites[rel] or [0])}")
     if previews:
         body += "\n" + "\n".join(previews)
     return f"{body}\n{footer}"

@@ -102,6 +102,70 @@ def test_omitted_root_uses_absolute_home_target_without_widening_explicit_root(f
     assert not (workspace / target.relative_to(home)).exists()
 
 
+@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
+                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
+def test_patch_preview_tracks_placed_change_with_repeated_lines(file_tools, root):
+    registry, _, *_ = file_tools
+    base = _target(file_tools, root)
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "repeated.txt"
+    target.write_text("c\nc\na\nc\na\na\nc\na\nc\nb\n")
+    result = registry.execute("apply_patch", {"root": root, **_selectors(root), "patch":
+        "*** Update File: repeated.txt\n c\n-a\n+c\n a\n"})
+    assert result.startswith("✅"), result
+    assert target.read_text().splitlines()[4] == "c"
+    assert "     5| c" in result, result
+
+
+@pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
+def test_light_runtime_payload_editor_parity(file_tools, monkeypatch, tool):
+    registry, _, _, _, _, _, payload = file_tools
+    target = payload / "notes.txt"
+    target.write_text("old\n")
+    path = "skills/external/demo/notes.txt"
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    args = {"root": "runtime_data"}
+    if tool == "edit_text":
+        args.update(path=path, old_str="old", new_str="new")
+    elif tool == "edit_batch":
+        args["edits"] = [{"path": path, "old_str": "old", "new_str": "new"}]
+    else:
+        args["patch"] = f"*** Update File: {path}\n-old\n+new\n"
+    result = registry.execute(tool, args)
+    assert result.startswith(("✅", "OK:")), result
+    assert target.read_text() == "new\n"
+
+
+def test_patch_previews_remap_chained_sites_and_long_context(file_tools):
+    registry, _, _, _, workspace, *_ = file_tools
+    target = workspace / "long.txt"
+    before = "\n".join(f"line-{i}" for i in range(30)) + "\n"
+    target.write_text(before)
+    context = "".join(f" line-{i}\n" for i in range(20))
+    result = registry.execute("apply_patch", {"patch":
+        f"*** Update File: long.txt\n{context}-line-20\n+changed\n"
+        "*** Update File: long.txt\n@@ line-0\n+inserted\n"})
+    assert result.startswith("✅"), result
+    assert target.read_text().splitlines()[21] == "changed"
+    assert "    22| changed" in result and "     2| inserted" in result, result
+    deleted = registry.execute("apply_patch", {"patch":
+        "*** Update File: long.txt\n-changed\n-line-21\n"})
+    assert deleted.startswith("✅"), deleted
+    assert "    22| line-22" in deleted, deleted
+
+
+def test_light_payload_and_control_data_mix_does_not_widen_authority(file_tools, monkeypatch):
+    registry, _, _, _, _, data, payload = file_tools
+    (payload / "notes.txt").write_text("old\n")
+    (data / "ordinary.txt").write_text("old\n")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    result = registry.execute("edit_batch", {"root": "runtime_data", "edits": [
+        {"path": "skills/external/demo/notes.txt", "old_str": "old", "new_str": "new"},
+        {"path": "ordinary.txt", "old_str": "old", "new_str": "new"}]})
+    assert not result.startswith("✅"), result
+    assert (payload / "notes.txt").read_text() == (data / "ordinary.txt").read_text() == "old\n"
+
+
 def test_patch_collects_bad_hunks_and_avoids_all_writes(file_tools):
     registry, _, _, _, workspace, *_ = file_tools
     (workspace / "a.txt").write_text("first\nsecond\n")
@@ -381,27 +445,21 @@ def test_shared_skill_revision_and_user_artifact_namespace_serialize(file_tools)
     assert not tool_calls_can_run_parallel(user_calls, ctx)
 
 
-def test_module_preview_matches_lines_not_whole_file_characters(file_tools, monkeypatch):
+def test_module_preview_uses_placed_sites_without_diff_matching(file_tools, monkeypatch):
     from ouroboros.tools import edit_ops
 
     registry, _, _, _, workspace, *_ = file_tools
     source = ''.join(f'def function_{i}(value):\n    return value + {i}\n\n' for i in range(1400))
     target = workspace / 'module.txt'
     target.write_text(source)
-    original_matcher = edit_ops.difflib.SequenceMatcher
-    matched_sizes = []
+    def no_matcher(*args, **kwargs):
+        raise AssertionError('a placed edit needs no diff alignment for its preview')
 
-    def line_matcher(*args, **kwargs):
-        assert isinstance(kwargs['a'], list) and isinstance(kwargs['b'], list)
-        matched_sizes.append((len(kwargs['a']), len(kwargs['b'])))
-        return original_matcher(*args, **kwargs)
-
-    monkeypatch.setattr(edit_ops.difflib, 'SequenceMatcher', line_matcher)
+    monkeypatch.setattr(edit_ops.difflib, 'SequenceMatcher', no_matcher)
     result = registry.execute('apply_patch', {'patch':
         '*** Update File: module.txt\n-    return value + 700\n+    return value + 7010\n'})
     assert result.startswith('✅'), result
     assert target.read_text() == source.replace('    return value + 700\n', '    return value + 7010\n')
-    assert matched_sizes == [(4200, 4200)]
     assert '2102|     return value + 7010' in result
 
 
