@@ -661,7 +661,7 @@ def test_veto_activates_only_for_literal_skill_publish_type(task_type):
 def test_foreground_publish_timeout_waits_until_fake_mutator_terminalizes(tmp_path):
     from ouroboros.loop_tool_execution import _execute_with_timeout
 
-    assert FOREGROUND_MUTATIVE_TOOLS == frozenset({"submit_skill_to_hub"})
+    assert FOREGROUND_MUTATIVE_TOOLS == frozenset({"submit_skill_to_hub", "write_file", "edit_text", "edit_batch", "apply_patch"})
     lifecycle: list[str] = []
     live_events: list = []
 

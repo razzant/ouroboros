@@ -235,8 +235,8 @@ def test_write_file_batch_item_key_refusal_aborts_the_whole_batch(tmp_path):
 @pytest.mark.serial
 def test_edit_batch_refuses_a_per_item_root_it_cannot_honor(tmp_path):
     """The sibling surface shares the class: edit items declare
-    {path, old_str, new_str, count} and the tool's root enum is repo-only, so a
-    per-item root would silently edit the repo instead of the named target."""
+    {path, old_str, new_str, count} and one root per call, so a per-item root
+    would silently edit the call's root instead of the named target."""
     ctx = _ctx(tmp_path)
     target = ctx.repo_dir / "mod.txt"
     target.write_text("alpha\n", encoding="utf-8")

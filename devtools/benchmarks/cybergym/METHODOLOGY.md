@@ -396,7 +396,8 @@ agent-attributable tool errors also counts as a fair completion for this
 purpose.  Agent-attributable means the tool result reported the model's own
 mistake back to it and the runtime behaved exactly as its contract says:
 arguments the runtime could not parse or does not accept (`TOOL_ARG_ERROR`),
-a replace anchor absent from the file (`STR_REPLACE_ERROR`), a directory that
+a replace anchor absent from the file (`EDIT_TEXT_ERROR`, or `STR_REPLACE_ERROR`
+in retained historical records), a directory that
 does not exist (`LIST_FILES_ERROR`), or a command stopped at the documented
 per-command cap (`TOOL_TIMEOUT`).  The row records the verdict's basis in
 `fair_completion_basis` (`execution_ok` or

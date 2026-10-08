@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import pathlib
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
@@ -108,10 +108,9 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
     stamped AFTER the ``start_char`` cut: ``first_line`` (the first COMPLETE line
     in the body — a cursor that skips whole lines advances it, and a cursor that
     lands mid-line makes that line partial, so it is not counted), ``end_line``,
-    ``total_lines``, ``body_start`` (where the body begins in the returned text,
-    right after the one header line), ``body_chars``, ``partial_head`` (the body
-    opens with a partial line), ``line_ends`` (the end offsets, within the body,
-    of its COMPLETE lines — the partial head excluded — on the very line
+    ``total_lines``, ``body_start`` (where the numbered display begins),
+    ``body_chars`` (source characters), ``partial_head`` (the body opens with
+    a partial line), ``line_ends`` (display offsets of COMPLETE lines — the partial head excluded — on the very line
     definition the renderer cut by, so a consumer that cuts the body further
     counts complete lines from them and never recounts newlines), plus the
     requested ``start_line``/``start_char``.
@@ -152,23 +151,82 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
         whole = bisect.bisect_right(ends, offset)  # lines ending at or before the cursor: skipped whole
         partial_head = bool(body) and not (whole and ends[whole - 1] == offset)  # landed mid-line: that line is partial
         first_line = start + whole + (1 if partial_head else 0)
-        line_ends = tuple(e - offset for e in ends[whole + (1 if partial_head else 0):])
     else:
         body, header, partial_head, first_line = window, f"# {path} — lines {start}\u2013{end} of {total}\n", False, start
-        line_ends = tuple(ends)
     if not body:
-        first_line, line_ends = end + 1, ()  # nothing complete was delivered: an EMPTY range, never an inverted one
+        first_line = end + 1  # nothing complete was delivered: an EMPTY range, never an inverted one
+    # Display offsets are deliberately separate from source offsets.  A number
+    # prefix can be delivered without delivering any character of the file.
+    display_parts: List[str] = []
+    display_segments: List[Tuple[int, int, int]] = []
+    display_line_ends: List[int] = []
+    display_pos = 0
+    source_pos = 0
+    visible_line = start + whole if offset else start
+    for number, line in enumerate(body.splitlines(keepends=True), visible_line):
+        prefix = f"{number:>6}\t"
+        display_parts.extend((prefix, line))
+        display_segments.append((display_pos + len(prefix), display_pos + len(prefix) + len(line), source_pos))
+        display_pos += len(prefix) + len(line)
+        source_pos += len(line)
+        if not partial_head or number != visible_line:
+            display_line_ends.append(display_pos)
+    displayed = "".join(display_parts)
     if extent is not None:
         source_start = sum(len(line) for line in lines[:start - 1]) + min(offset, len(window))
         extent.update({"start_line": start, "end_line": end, "total_lines": total, "start_char": offset,
                        "first_line": first_line, "body_start": len(header), "body_chars": len(body),
-                       "partial_head": partial_head, "line_ends": line_ends,
+                       "partial_head": partial_head, "line_ends": tuple(display_line_ends),
+                       "display_segments": tuple(display_segments),
                        "complete_chars": len(content),
                        "complete_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                        "source_start_char": source_start, "source_end_char": source_start + len(body),
                        "range_basis": "unicode_text_universal_newlines", "source_masked": False})
-    rendered = header + body
+    rendered = header + displayed
     return rendered
+
+
+def display_source_map_valid(view: Dict[str, Any]) -> bool:
+    """Validate the renderer's compact display to source segment map."""
+    body_start = view.get("body_start")
+    segments = view.get("display_segments")
+    if type(body_start) is not int or body_start < 0 or not isinstance(segments, (list, tuple)):
+        return False
+    previous_end = 0
+    source_total = 0
+    for segment in segments:
+        if (not isinstance(segment, (tuple, list)) or len(segment) != 3
+                or any(type(value) is not int for value in segment)):
+            return False
+        begin, end, source_at = segment
+        if begin < previous_end or end < begin or source_at != source_total:
+            return False
+        previous_end = end
+        source_total += end - begin
+    if source_total != view.get("body_chars"):
+        return False
+    return True
+
+
+def delivered_source_prefix(view: Dict[str, Any], rendered: str, shown: int) -> str:
+    """Source characters in a delivered read_file display prefix.
+
+    The renderer owns this mapping; consumers must not strip number prefixes
+    with independent parsers. A cut within a prefix contributes zero chars.
+    """
+    if not display_source_map_valid(view):
+        return ""
+    body_start = view["body_start"]
+    segments = view["display_segments"]
+    limit = max(0, min(len(rendered), shown) - body_start)
+    pieces = []
+    for begin, end, _ in segments:
+        if limit <= begin:
+            break
+        if body_start + min(end, limit) > len(rendered):
+            return ""
+        pieces.append(rendered[body_start + begin:body_start + min(end, limit)])
+    return "".join(pieces)
 
 
 def _read_source_text(target: pathlib.Path, extent: Optional[Dict[str, Any]]) -> str:
@@ -588,7 +646,7 @@ def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: st
 def _read_file(
     ctx: ToolContext,
     path: str,
-    root: str = "active_workspace",
+    root: str | None = None,
     max_lines: int = 2000,
     start_line: int = 1,
     start_char: int = 0,
@@ -600,6 +658,10 @@ def _read_file(
     # read's extent (the renderer fills `extent` only when it rendered).
     ctx.last_read_view = None
     extent: Dict[str, Any] = {}
+    if not root:
+        from ouroboros.tools.tool_resolution import _root_containing_absolute_path
+
+        root = _root_containing_absolute_path(ctx, "read_file", path) or "active_workspace"
     normalized, block = _access_or_block(ctx, root, "read")
     if block:
         return block
@@ -672,7 +734,8 @@ def _read_file(
                 from ouroboros.tools.delegate import acknowledge_staged_output_read
 
                 acknowledge_staged_output_read(ctx, target, content, start_line, max_lines,
-                                               start_char=start_char, rendered=rendered)
+                                               start_char=start_char, rendered=rendered,
+                                               extent=extent)
             except Exception:
                 log.warning("staged-output coverage acknowledgement hook failed", exc_info=True)
         return _stamp_read_view(ctx, target, opened, opened_root, extent,

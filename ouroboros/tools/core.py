@@ -205,7 +205,7 @@ def _str_match_replace(
     ``(new_text, None)`` on a unique match, else ``(None, error_message)``: a miss
     carries the bounded edit-miss locator (plus the whole file when it is small),
     duplicates name positions. ``error_tag`` is the caller's error prefix (e.g.
-    ``STR_REPLACE_ERROR`` / ``EDIT_TEXT_ERROR``)."""
+    ``EDIT_TEXT_ERROR``)."""
     count = text.count(old_str)
     if count == 0:
         from ouroboros.tools.edit_ops import locate_edit_miss, whole_file_preview
@@ -214,11 +214,13 @@ def _str_match_replace(
             f"{locate_edit_miss(text, old_str)}{whole_file_preview(text)}"
         )
     if count > 1:
+        from ouroboros.tools.edit_ops import edit_source_line
+
         positions = []
         start = 0
         for _ in range(min(count, 5)):
             idx = text.index(old_str, start)
-            positions.append(f"line {text[:idx].count(chr(10)) + 1}")
+            positions.append(f"line {edit_source_line(text, idx)}")
             start = idx + 1
         return None, (
             f"⚠️ {error_tag}: old_str found {count} times in {display_path} "
@@ -545,13 +547,19 @@ def _write_file(
     path: str = "",
     content: str = "",
     files: List[Dict[str, str]] | None = None,
-    root: str = "active_workspace",
+    root: str | None = None,
     mode: str = "overwrite",
     force: bool = False,
     bucket: str = "",
     skill_name: str = "",
     _resolved_binding: ResolvedResourceBinding | tuple[ResolvedResourceBinding, ...] | None = None,
 ) -> str:
+    from ouroboros.tools.tool_resolution import inferred_file_root
+
+    paths = [str(item.get("path") or "") for item in files if isinstance(item, dict)] if files else [path]
+    root, root_error = inferred_file_root(ctx, "write_file", root, paths)
+    if root_error:
+        return root_error
     normalized, block = _access_or_block(ctx, root, "write")
     if block:
         return publish_no_effect(ctx, block, tool_name="write_file")
@@ -695,18 +703,38 @@ def _write_file(
 def _edit_text(
     ctx: ToolContext,
     path: str,
-    old_str: str,
-    new_str: str,
-    root: str = "active_workspace",
+    old_str: str | None = None,
+    new_str: str | None = None,
+    root: str | None = None,
     bucket: str = "",
     skill_name: str = "",
     force: bool = False,
+    edits: List[Dict[str, str]] | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
 ) -> str:
-    from ouroboros.config import get_runtime_mode
-    from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
+    from ouroboros.tools.tool_resolution import inferred_file_root
 
-    cyber = mode_has_unrestricted_agency(get_runtime_mode())
+    root, root_error = inferred_file_root(ctx, "edit_text", root, [path])
+    if root_error:
+        return publish_no_effect(ctx, root_error, tool_name="edit_text")
+    if edits is not None:
+        if old_str is not None or new_str is not None:
+            return publish_no_effect(ctx, "⚠️ EDIT_TEXT_ERROR: use either edits or old_str/new_str, not both.", tool_name="edit_text")
+        if not isinstance(edits, list) or not edits:
+            return publish_no_effect(ctx, "⚠️ EDIT_TEXT_ERROR: edits must be a non-empty array.", tool_name="edit_text")
+        from ouroboros.tools.edit_ops import _edit_batch
+
+        if any(not isinstance(item, dict) or "path" in item for item in edits):
+            return publish_no_effect(ctx, "⚠️ EDIT_TEXT_ERROR: each edit must contain old_str/new_str/count only; path belongs to the call.", tool_name="edit_text")
+        return _edit_batch(
+            ctx, [{"path": path, **item} for item in edits], root=root,
+            bucket=bucket, skill_name=skill_name, force=force,
+            _resolved_binding=tuple(_resolved_binding for _ in edits) if _resolved_binding else None,
+            source_tool="edit_text",
+        )
+    if not isinstance(old_str, str) or not old_str or not isinstance(new_str, str):
+        return publish_no_effect(ctx, "⚠️ EDIT_TEXT_ERROR: old_str must be non-empty and new_str must be a string.", tool_name="edit_text")
+
     normalized, block = _access_or_block(ctx, root, "edit")
     if block:
         return publish_no_effect(ctx, block, tool_name="edit_text")
@@ -718,20 +746,16 @@ def _edit_text(
     except Exception as exc:
         prefix = "SKILL_PAYLOAD_ARG_ERROR" if normalized == "skill_payload" else "EDIT_TEXT_ERROR"
         return publish_no_effect(ctx, f"⚠️ {prefix}: {exc}", tool_name="edit_text")
-    reason = block_reason_for_path(ctx, binding.target_path, "write", binding)
-    protected_block = (
-        f"⚠️ EDIT_TEXT_BLOCKED: protected artifact path blocked: {reason}" if reason else ""
-    )
-    if protected_block:
-        return protected_block
+    from ouroboros.tools.edit_ops import _edit_mutation_block
+
+    if mutation_block := _edit_mutation_block(ctx, binding, path):
+        if mutation_block.startswith("skill provenance") and (normalized == "skill_payload" or binding.skill_name):
+            return publish_no_effect(ctx, f"⚠️ STR_REPLACE_BLOCKED: {mutation_block}", tool_name="edit_text")
+        return publish_no_effect(ctx, f"⚠️ EDIT_TEXT_BLOCKED: {mutation_block}", tool_name="edit_text")
     bound_skill_payload = bool(
         binding.skill_name
         and binding.source in {"external", "clawhub", "ouroboroshub", "native", "user_repo"}
     )
-    if native_block := _native_payload_mutation_block_reason(
-        binding.target_path, binding.state_drive_root,
-    ):
-        return f"⚠️ EDIT_TEXT_BLOCKED: {native_block}."
     if normalized in {"active_workspace", "system_repo"} and not bound_skill_payload:
         from ouroboros.tools.git import _str_replace_editor
 
@@ -752,37 +776,6 @@ def _edit_text(
     selected_payload = normalized == "skill_payload" or bound_skill_payload
     try:
         target = binding.target_path
-        if not cyber and selected_payload and (
-            _binding_skill_control_plane_path(binding)
-            or is_skill_control_plane_path(target, binding.state_drive_root)
-        ):
-            return (
-                "⚠️ STR_REPLACE_BLOCKED: skill provenance, launcher seed, "
-                "marketplace, dependency, and self-authored markers are "
-                "control-plane state. Edit user-authored payload files instead."
-            )
-        if normalized == "runtime_data" and not cyber:
-            if is_skill_control_plane_path(target, binding.state_drive_root):
-                return (
-                    "⚠️ EDIT_TEXT_BLOCKED: skill provenance, launcher seed, "
-                    "marketplace, dependency, and self-authored markers are "
-                    "control-plane state. Edit user-authored payload files instead."
-                )
-            if (b := _project_store_access_block(_normalize_data_read_path(ctx, path))):
-                return b
-            if (
-                _is_workspace_executor_control_state_path(target, binding.base_path)
-                or _is_workspace_executor_control_state_path(target, binding.state_drive_root)
-            ):
-                return (
-                    "⚠️ EDIT_TEXT_BLOCKED: workspace executor process records are "
-                    "owner/runtime control-plane state. Use process/service lifecycle "
-                    "tools instead of editing state/workspace_executor_processes directly."
-                )
-        if normalized == "artifact_store":
-            block_reason = artifact_store_path_block_reason(target, base_path=binding.base_path)
-            if block_reason:
-                return f"⚠️ EDIT_TEXT_BLOCKED: artifact_store path blocked: {block_reason}"
         try:
             text = target.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -794,9 +787,11 @@ def _edit_text(
         )
         if match_error:
             return publish_no_effect(ctx, match_error, tool_name="edit_text")
-        # Exact replace and full overwrite share the intentional-shrink contract.
-        if (shrink := _check_data_shrink_guard(target, new_text, force)):
-            return publish_no_effect(ctx, shrink, tool_name="edit_text")
+        from ouroboros.tools.edit_ops import _edit_content_block, newline_normalization_note
+
+        newline_note = newline_normalization_note(target)
+        if content_block := _edit_content_block(binding, new_text, force):
+            return publish_no_effect(ctx, content_block, tool_name="edit_text")
         constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
         repair = selected_payload and constraint and constraint.has_selected_skill
         if repair:
@@ -807,36 +802,38 @@ def _edit_text(
             )
             if refusal:
                 return refusal
+        from ouroboros.tools.edit_ops import edit_source_line, numbered_edit_preview
+
+        replacement_offset = text.index(old_str)
+        replacement_line = edit_source_line(text, replacement_offset)
         write_text_atomic(target, new_text)
         if repair:
             from ouroboros.skill_repair_admission import advance_repair_expected_hash
 
             advance_repair_expected_hash(binding.state_drive_root, constraint, task_id=ctx.task_id)
         if selected_payload:
-            replacement_line = new_text[:new_text.index(new_str)].count("\n") + 1
-            context_start = max(0, replacement_line - 3)
-            context_lines = new_text.splitlines()[
-                context_start:replacement_line + len(new_str.splitlines()) + 2
-            ]
-            context_preview = "\n".join(
-                f"{context_start + index + 1:>4}| {line}"
-                for index, line in enumerate(context_lines)
-            )
-            return (
+            context_preview = numbered_edit_preview(new_text, [replacement_offset])
+            result = (
                 f"✅ Replaced in {_root_display_path(normalized, path)} "
                 f"(line {replacement_line}; resolved_root={binding.base_path}; "
                 f"source={binding.source}).\nContext:\n{context_preview}\n\n"
                 "File is on disk but NOT committed.\n"
                 "Run skill_review for this skill before enabling or declaring it ready."
             )
+            return result + (f"\n{newline_note}" if newline_note else "")
         result = (
             f"OK: edited {_root_display_path(normalized, path)} "
-            f"(resolved_root={binding.base_path}; source={binding.source})"
+            f"(line {replacement_line}; resolved_root={binding.base_path}; source={binding.source})"
         )
+        from ouroboros.tools.edit_ops import numbered_edit_preview
+
+        result += f"\nContext:\n{numbered_edit_preview(new_text, [replacement_offset])}"
         if normalized == "user_files":
             record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
             if record:
                 result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
+        if newline_note:
+            result += f"\n{newline_note}"
         return result
     except FileNotFoundError:
         return f"⚠️ EDIT_TEXT_ERROR: file not found: {_root_display_path(normalized, path)}"
@@ -1269,27 +1266,29 @@ def _forward_to_worker(
 
 
 def get_tools() -> List[ToolEntry]:
+    from ouroboros.tools.edit_ops import _EDIT_BATCH_ITEM_PROPERTIES, _EDIT_BATCH_ITEM_REQUIRED, _FILE_ROOT_DESCRIPTION
     return [
         ToolEntry("read_file", {
             "name": "read_file",
             "description": (
                 "Read a UTF-8 text file from a declared resource root. "
-                "Default root=active_workspace; an absolute path with no root selects the permitted root holding it. "
+                "With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. "
                 "Use max_lines (default 2000) and start_line (default 1) to read large files in chunks. "
-                "The result header shows root:path and 'lines X\u2013Y of Z' so you know where and how much you read. "
+                "The result header shows root:path and 'lines X\u2013Y of Z'; each displayed source line has a cat -n style number and tab. "
+                "Line numbers are display guides, not file content: exclude them when copying edit context. "
                 "Prefer this over cat/head/sed-as-reader in run_command; to locate code first use query_code "
                 "(symbols/definitions/callers) or search_code (text/regex), then read_file the hit."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "description": _FILE_ROOT_DESCRIPTION},
                 "max_lines": {"type": "integer", "default": 2000,
                               "description": "Maximum number of lines to return (default 2000)."},
                 "start_line": {"type": "integer", "default": 1,
                                "description": "1-indexed line to start reading from (default 1 = beginning)."},
                 "start_char": {"type": "integer", "default": 0,
-                               "description": "Sub-line cursor: skip this many characters of the selected "
-                                              "window before rendering. Use it to advance WITHIN a single "
+                               "description": "Source-character cursor: skip this many characters of the selected "
+                                              "source window before adding display line numbers. Use it to advance WITHIN a single "
                                               "line longer than the delivery limit (the result would "
                                               "otherwise be cut at the tool-result budget)."},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
@@ -1301,7 +1300,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "List files under a resource root directory.",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "default": "."},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "description": _FILE_ROOT_DESCRIPTION},
                 "max_entries": {"type": "integer", "default": 500},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
@@ -1312,7 +1311,7 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 "For canonical output use root=artifact_store (created lazily), e.g. path=report.txt. Do not assume its physical directory already exists. "
                 "Write UTF-8 file(s) to a declared resource root. "
-                "Default root=active_workspace. "
+                "With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. "
                 "OK messages show root:path. "
                 "Overwriting an existing repo file returns the unified diff vs the "
                 "previous version — CHECK IT; invalid .py/.json content is blocked "
@@ -1327,7 +1326,7 @@ def get_tools() -> List[ToolEntry]:
                 "files": {"type": "array", "items": {"type": "object",
                     "properties": {k: dict(v) for k, v in _WRITE_FILE_ITEM_PROPERTIES.items()},
                     "required": list(_WRITE_FILE_ITEM_KEYS)}},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "description": _FILE_ROOT_DESCRIPTION},
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
                 "force": {"type": "boolean", "default": False, "description": "Bypass the shrink guard for an intentional full rewrite on any root where it applies (active_workspace via the repo guard; runtime_data/task_drive/skill_payload/artifact_store/user_files via the data-plane guard)."},
                 "bucket": {
@@ -1343,21 +1342,26 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("edit_text", {
             "name": "edit_text",
             "description": (
-                "Replace exactly one occurrence of old_str with new_str in a file. "
-                "Default root=active_workspace. Result messages show root:path. "
-                "For several edits at once, repeated identical replacements, or "
-                "counted replace-all, prefer edit_batch (one atomic call). "
+                "Replace exactly one occurrence of old_str with new_str in a file, "
+                "or pass edits=[{old_str,new_str,count?}, ...] for ordered atomic "
+                "replacements in that SAME file. Do not mix the forms. "
+                "With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. Result messages show root:path. "
+                "For different files, issue separate edit calls in parallel in ONE round; "
+                "disjoint targets can run together. edit_batch also handles several files. "
                 "Set bucket/skill_name ONLY for root=skill_payload (skill authoring); leave empty for normal edits."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
                 "old_str": {"type": "string"},
                 "new_str": {"type": "string"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
+                "edits": {"type": "array", "minItems": 1, "items": {"type": "object",
+                          "properties": {k: dict(v) for k, v in _EDIT_BATCH_ITEM_PROPERTIES.items() if k != "path"},
+                          "required": [k for k in _EDIT_BATCH_ITEM_REQUIRED if k != "path"]}},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Skill payload bucket — set ONLY when root=skill_payload; leave empty otherwise."},
                 "skill_name": {"type": "string", "description": "Skill slug — set ONLY when root=skill_payload; leave empty otherwise."},
-                "force": {"type": "boolean", "default": False, "description": "Bypass the shrink guard for a deliberate large data-plane deletion (>30% smaller)."},
-            }, "required": ["path", "old_str", "new_str"]},
+                "force": {"type": "boolean", "default": False, "description": "Confirm an intentional shrink or repo-lane syntax guard bypass; the bypass is disclosed."},
+            }, "required": ["path"]},
         }, _edit_text, is_code_tool=True),
         ToolEntry("send_photo", {
             "name": "send_photo",
@@ -1420,7 +1424,7 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search pattern (literal or regex)"},
                 "path": {"type": "string", "default": ".", "description": "Subdirectory to search (relative to repo root)"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
                 "regex": {"type": "boolean", "default": False, "description": "Treat query as a regular expression"},

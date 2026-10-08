@@ -138,18 +138,10 @@ def test_the_coverage_ack_binds_to_what_delivery_actually_hands_the_model(
     long_no, long_line = max(enumerate(lines, start=1), key=lambda p: len(p[1]))
     assert len(long_line) > budget + 1000
 
-    def delivered_body(delivered, window_body, hdr):
-        if hdr not in delivered:
-            return 0
-        after = delivered.split(hdr, 1)[1]
-        lo, hi, best = 0, min(len(after), len(window_body)), 0
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            if after.startswith(window_body[:mid]):
-                best, lo = mid, mid + 1
-            else:
-                hi = mid - 1
-        return best
+    def delivered_body(delivered, view):
+        from ouroboros.tools.core_file_tools import delivered_source_prefix
+
+        return len(delivered_source_prefix(view, delivered, min(len(delivered), budget)))
 
     def call(start_char):
         before = sum(b - a for a, b in delegate._READ_COVERAGE.get(identity, []))
@@ -158,8 +150,7 @@ def test_the_coverage_ack_binds_to_what_delivery_actually_hands_the_model(
         delivered = _truncate_tool_result(result, "read_file",
                                           {"path": artifact["path"], "root": "task_drive"})
         after = sum(b - a for a, b in delegate._READ_COVERAGE.get(identity, []))
-        hdr = result.split("\n", 1)[0] + "\n"
-        return result, delivered_body(delivered, long_line[start_char:], hdr), after - before
+        return result, delivered_body(delivered, ctx.last_read_view), after - before
 
     # Shape A: rendering just under the budget; the repeat's appended note pushes the
     # annotated result over it — the rejected finding's exact scenario.

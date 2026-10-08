@@ -2,7 +2,7 @@
 
 import hashlib
 
-from ouroboros.tools.core_file_tools import _read_file
+from ouroboros.tools.core_file_tools import _read_file, delivered_source_prefix
 from ouroboros.tools.registry import ToolContext
 
 
@@ -18,7 +18,7 @@ def test_raw_revision_and_subline_range_survive_newline_normalization(tmp_path):
     assert view["source_bytes"] == len(raw)
     assert view["complete_sha256"] == hashlib.sha256(normalized.encode()).hexdigest()
     assert view["range_basis"] == "unicode_text_universal_newlines"
-    body = result[view["body_start"]:view["body_start"] + view["body_chars"]]
+    body = delivered_source_prefix(view, result, len(result))
     assert body == normalized[view["source_start_char"]:view["source_end_char"]]
     assert body == "γ second\n"
     # A source rewrite cannot retroactively change the previous read's revision.

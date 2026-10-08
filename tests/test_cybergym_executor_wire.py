@@ -1028,7 +1028,8 @@ def _tool_error(tool: str, text: str, status: str = "error") -> dict:
     return {"tool": tool, "status": status, "exit_code": None, "signal": None, "result": text}
 
 
-def test_fair_completion_execution_ok_and_agent_attributable_tool_errors():
+@pytest.mark.parametrize("edit_prefix", ["STR_REPLACE_ERROR", "EDIT_TEXT_ERROR"])
+def test_fair_completion_execution_ok_and_agent_attributable_tool_errors(edit_prefix):
     from devtools.benchmarks.cybergym.cybergym_wire import _gateway_fair_completion
 
     assert _gateway_fair_completion(_envelope({"status": "ok"})) == (True, "execution_ok")
@@ -1037,7 +1038,7 @@ def test_fair_completion_execution_ok_and_agent_attributable_tool_errors():
         "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": [
             _tool_error("run_command", "⚠️ TOOL_ARG_ERROR: Could not parse arguments for 'run_command': Expecting ',' delimiter: line 1 column 257 (char 256)"),
             _tool_error("search_code", "⚠️ TOOL_ARG_ERROR (search_code): invalid arguments for search_code. Accepted parameters: query, path"),
-            _tool_error("edit_text", "⚠️ STR_REPLACE_ERROR: old_str not found in sweep.py."),
+            _tool_error("edit_text", f"⚠️ {edit_prefix}: old_str not found in sweep.py."),
             _tool_error("list_files", "⚠️ LIST_FILES_ERROR: Directory not found: tmp"),
             _tool_error("run_command", "⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of 900s", status="timeout"),
             # full1507 arvo:1461 (2026-09-08): the model hallucinated a `bash`

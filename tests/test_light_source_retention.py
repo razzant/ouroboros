@@ -53,8 +53,14 @@ class SourceReader:
             assert kwargs["model_turn_state"] is self.operation_turns[-1]
             if self.stage == "read":
                 result = kwargs["messages"][-1]["content"]
-                body = result.split("\n[Tool result source view]\n", 1)[0].split("\n", 1)[1]
                 source = (self.root / self.ref["read"]["arguments"]["path"]).read_text(encoding="utf-8")
+                from ouroboros.tools.core_file_tools import _render_line_slice, delivered_source_prefix
+
+                view = {}
+                _render_line_slice("source", source, start_char=self.position, extent=view)
+                view["body_start"] = result.find("\n") + 1
+                visible = result.split("\n[Tool result source view]\n", 1)[0]
+                body = delivered_source_prefix(view, visible, len(visible))
                 assert body == source[self.position:self.position + len(body)]
                 assert body
                 self.position += len(body)

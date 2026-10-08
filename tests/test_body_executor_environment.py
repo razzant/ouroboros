@@ -24,11 +24,15 @@ def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, c
     ctx = make_ctx(serving, data, 'docker-env')
     body_candidate.prepare(ctx)
     candidate = pathlib.Path(ctx.repo_dir)
-    mount = tmp_path / 'mount'
-    mount.symlink_to(candidate.parent, target_is_directory=True)
+    # A Docker workspace is POSIX even when its host fixture runs on Windows.
+    mount = pathlib.PurePosixPath('/workspace')
     ctx.executor_ref = {'type': 'docker_exec', 'container_name': 'fixture',
         'workspace_host_path': str(candidate.parent), 'workspace_backend_path': str(mount)}
     expected = str(mount / (candidate.name + '.env') / 'data')
+
+    def host_cwd(backend_cwd):
+        relative = pathlib.PurePosixPath(backend_cwd).relative_to(mount)
+        return candidate.parent.joinpath(*relative.parts)
     script = 'import os,json; print(json.dumps(dict(os.environ)), flush=True)'
     real_popen, real_run = subprocess.Popen, subprocess.run
     commands = []
@@ -45,7 +49,7 @@ def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, c
                 backend_env[cmd[index + 1]] = host_env[cmd[index + 1]]
         kwargs['env'] = backend_env
         if '--workdir' in cmd:
-            kwargs['cwd'] = cmd[cmd.index('--workdir') + 1]
+            kwargs['cwd'] = str(host_cwd(cmd[cmd.index('--workdir') + 1]))
         commands.append((cmd, kwargs))
         return real_popen(['sh', '-c', cmd[-1]], **kwargs)
 
@@ -64,7 +68,7 @@ def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, c
             # The same generated exec payload is inside the detached launch shell.
             import shlex
             payload = shlex.split(shell)[shlex.split(shell).index('-c') + 1]
-            return f'cd {__import__("shlex").quote(record.backend_cwd)} && {payload}'
+            return f'cd {__import__("shlex").quote(str(host_cwd(record.backend_cwd)))} && {payload}'
         def submit(cmd, **kwargs):
             result = real_run(cmd, **kwargs)
             assert result.returncode == 0, result.stderr

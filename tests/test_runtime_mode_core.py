@@ -611,7 +611,7 @@ def test_light_mode_redirects_absolute_home_path_to_user_files(tmp_path, monkeyp
     reg = _registry(tmp_path)
     home_path = str(pathlib.Path.home() / "Desktop" / "ouro_root_required_test.html")
     result = reg.execute("write_file", {"path": home_path, "content": "<html></html>"})
-    assert "ROOT_REQUIRED_USER_FILES" in result, result[:200]
+    assert result.startswith("OK: wrote user_files:"), result[:200]
     assert "user_files" in result
 
 

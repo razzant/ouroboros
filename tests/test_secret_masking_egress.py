@@ -46,8 +46,10 @@ def test_file_reads_preserve_source_and_exact_receipt(reader, monkeypatch, mode,
     raw = source.replace("\n", "\r\n").encode("utf-8")
     (repo / "source.txt").write_bytes(raw)
     result = registry.execute("read_file", {"path": "source.txt"})
-    assert source in result and "SECRET_BYTES_MASKED" not in result
+    assert "SECRET_BYTES_MASKED" not in result
     view = registry._ctx.last_read_view
+    from ouroboros.tools.core_file_tools import delivered_source_prefix
+    assert delivered_source_prefix(view, result, len(result)) == source
     assert view["source_masked"] is False
     assert view["source_revision"] == hashlib.sha256(raw).hexdigest()
     assert view["complete_sha256"] == hashlib.sha256(source.encode()).hexdigest()

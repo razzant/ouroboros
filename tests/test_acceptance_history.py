@@ -533,6 +533,7 @@ def test_restricted_actor_cannot_reuse_real_owner_source(tmp_path, actor):
 def test_huge_history_returns_compact_refs_and_real_bounded_reader_recovers_all_bytes(tmp_path):
     from ouroboros.acceptance_history import historical_source_reference
     from ouroboros.tools.core_file_tools import _read_file
+    from ouroboros.tools.core_file_tools import delivered_source_prefix
     from ouroboros.tools.control_task_results import _get_task_result
 
     f = _fixture(tmp_path, split=True)
@@ -571,7 +572,7 @@ def test_huge_history_returns_compact_refs_and_real_bounded_reader_recovers_all_
             rendered = _read_file(ctx, **{**arguments, "start_line": start, "max_lines": 40})
             extent = ctx.last_read_view
             assert extent and extent["body_chars"] < 20_000
-            chunks.append(rendered[extent["body_start"]:extent["body_start"] + extent["body_chars"]])
+            chunks.append(delivered_source_prefix(extent, rendered, len(rendered)))
             if extent["end_line"] == extent["total_lines"]:
                 break
             start = extent["end_line"] + 1

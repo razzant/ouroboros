@@ -278,7 +278,7 @@ def test_registry_filters_schema_dispatch_and_resolved_targets(tmp_path):
     )
     assert registry.execute(
         "read_file", {"root": "active_workspace", "path": "shared/allowed.txt"}
-    ).endswith("\nok")
+    ).endswith("\tok")
 
 
 def test_presence_argument_bindings_override_model_supplied_values(tmp_path):

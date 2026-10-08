@@ -41,7 +41,14 @@ class ContractReviewer:
         tools = [m for m in messages if m.get("role") == "tool"]
         response = tools[-1]["content"] if tools else None
         if self.stage in {"writer", "reader"} and response is not None and self.cursor:
-            body = response.partition("\n")[2].partition("\n⚠️ RESULT TRUNCATED:")[0]
+            from ouroboros.tools.core_file_tools import _render_line_slice, delivered_source_prefix
+
+            view = {}
+            _render_line_slice("source", (self.repo / f"{self.stage}.py").read_text(),
+                               start_line=1, max_lines=3, start_char=len(self.buffer), extent=view)
+            view["body_start"] = response.find("\n") + 1
+            visible = response.partition("\n⚠️ RESULT TRUNCATED:")[0]
+            body = delivered_source_prefix(view, visible, len(visible))
             assert body
             self.buffer += body
             if "RESULT TRUNCATED:" not in response:
@@ -107,6 +114,7 @@ def test_native_review_reads_beyond_one_window_and_computes_cross_file_finding(t
     monkeypatch.setattr(native, "review_native_transcript_bound", lambda *a, **k: bound)
     monkeypatch.setattr(native, "_EPISODE_TOOL_RESULT_CHAR_CAP", 8000)
     llm = ContractReviewer()
+    llm.repo = repo
     executor = _native(repo, data, llm, [_source(repo / "writer.py"), _source(repo / "reader.py")])
     result = executor.execute()
     findings = json.loads(result.raw_text)

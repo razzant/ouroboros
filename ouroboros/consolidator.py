@@ -182,7 +182,12 @@ class KnowledgeReadContext:
                          if row.get("result_partial") else len(row["result"]))
                 if shown < header:
                     continue
-                delivered_end = start + min(body, shown - header)
+                if file:
+                    from ouroboros.tools.core_file_tools import delivered_source_prefix
+
+                    delivered_end = start + len(delivered_source_prefix(file, row["result"], shown))
+                else:
+                    delivered_end = start + min(body, shown - header)
                 key = (scope, topic, revision)
                 old_total, ranges = self.read_ranges.get(key, (total, []))
                 self.reads.pop((scope, topic), None)

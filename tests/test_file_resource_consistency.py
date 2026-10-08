@@ -107,8 +107,7 @@ def test_foreign_absolute_address_does_not_acquire_the_process_cwd(environment, 
 
 
 @pytest.mark.parametrize('tool', ['edit_batch', 'apply_patch'])
-def test_repo_only_edit_refuses_unsupported_root_before_payload_resolution(environment, tool):
-    from ouroboros.loop_tool_execution import _extract_result_metadata
+def test_payload_edit_requires_a_skill_selector(environment, tool):
     reg, _ctx, _home, work, data = environment
     payload = {'root': 'skill_payload'}
     if tool == 'edit_batch':
@@ -116,10 +115,7 @@ def test_repo_only_edit_refuses_unsupported_root_before_payload_resolution(envir
     else:
         payload['patch'] = '*** Update File: mod.py\n-one\n+two\n'
     result = reg.execute(tool, payload)
-    expected = 'EDIT_BATCH_ERROR' if tool == 'edit_batch' else 'APPLY_PATCH_BLOCKED'
-    assert expected in result
-    assert 'write_file/edit_text' in result and 'TOOL_ERROR' not in result
-    assert _extract_result_metadata(tool, result, False)['status'] == 'edit_ops_blocked'
+    assert 'SKILL_PAYLOAD_ARG_ERROR' in result and 'TOOL_ERROR' not in result
     assert not (data / 'skills').exists() and not (work / 'mod.py').exists()
 
 
@@ -306,7 +302,10 @@ def test_child_source_names_and_certificates_do_not_confer_credential_authority(
     certificate = '-----BEGIN CERTIFICATE-----\n' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' * 2 + '\n-----END CERTIFICATE-----\n'
     public = source.parent / 'public.pem'
     public.write_text(certificate, encoding='utf-8')
-    assert certificate in reg.execute('read_file', {'root': root, 'path': public.relative_to(base).as_posix()})
+    from ouroboros.tools.core_file_tools import delivered_source_prefix
+
+    public_result = reg.execute('read_file', {'root': root, 'path': public.relative_to(base).as_posix()})
+    assert delivered_source_prefix(ctx.last_read_view, public_result, len(public_result)) == certificate
     private = source.parent / 'fixture.pem'
     material = 'fixture-private-material-0123456789'
     private.write_text('-----BEGIN PRIVATE KEY-----\n' + material + '\n-----END PRIVATE KEY-----\n', encoding='utf-8')

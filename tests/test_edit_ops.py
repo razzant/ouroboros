@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from ouroboros.tools import edit_ops
 from ouroboros.tools.edit_ops import (
     _apply_hunks_to_text,
-    _find_sequence,
     _parse_patch,
     _syntax_check,
 )
@@ -163,7 +163,7 @@ def test_pure_insertion_with_anchor():
     assert "def other(x):\n    # inserted\n    return ddd(x)" in new
 
 
-def test_sequential_hunks_advance_cursor():
+def test_nonoverlapping_hunks_use_whole_file_coordinates():
     ops, _ = _parse_patch(
         "*** Update File: s.py\n"
         "-    return ddd(x)\n"
@@ -179,9 +179,10 @@ def test_sequential_hunks_advance_cursor():
     assert "def ddd(x):" in new  # the def line was not part of either hunk
 
 
-def test_find_sequence_caps_matches():
-    lines = ["x"] * 20
-    assert len(_find_sequence(lines, ["x"], 0, fuzzy=False)) == 5
+def test_repeated_context_is_ambiguous_beyond_five_matches():
+    ops, _ = _parse_patch("*** Update File: s.py\n-x\n+y\n")
+    new, _, error = _apply_hunks_to_text("x\n" * 20, ops[0].hunks, "s.py")
+    assert new is None and "ambiguous" in error
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +230,7 @@ def ws(tmp_path, monkeypatch):
     # Route guard helpers around ToolContext specifics: keep the real access
     # logic out of scope — these tests exercise edit mechanics.
     monkeypatch.setattr(edit_ops, "_resolve_edit_target", _fake_resolver(ctx))
+    monkeypatch.setattr(edit_ops, "_edit_content_block", lambda *_args: "")
     monkeypatch.setattr(
         edit_ops,
         "_finish_mutation",
@@ -240,11 +242,14 @@ def ws(tmp_path, monkeypatch):
 def _fake_resolver(ctx):
     from ouroboros.utils import safe_relpath
 
-    def resolver(_ctx, path, _root, *, error_tag, _resolved_binding=None):
+    def resolver(_ctx, path, _root, *, error_tag, _resolved_binding=None, **_kwargs):
         if not path:
             return None, "", None, f"⚠️ {error_tag}: path is required."
         try:
-            return ctx.repo_path(path), safe_relpath(path), _resolved_binding, ""
+            target = ctx.repo_path(path)
+            binding = SimpleNamespace(target_path=target, base_path=ctx.repo_dir,
+                                      root="active_workspace", source="active_workspace", skill_name="")
+            return target, safe_relpath(path), binding, ""
         except ValueError as e:
             return None, "", None, f"⚠️ PATH_ERROR: {e}"
     return resolver

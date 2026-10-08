@@ -8,7 +8,7 @@ import pytest
 from ouroboros.review_execution import ReviewAssignment, ReviewRouteKind
 from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot
-from ouroboros.tools.core_file_tools import _read_file
+from ouroboros.tools.core_file_tools import _read_file, delivered_source_prefix
 from ouroboros.tools.registry import ToolContext
 
 
@@ -43,16 +43,16 @@ def test_partial_long_line_receipts_cover_only_the_delivered_normalized_source(t
     assert first["complete_chars"] == len(normalized)
     assert first["range_basis"] == "unicode_text_universal_newlines"
     assert first["source_masked"] is False
-    assert (first["source_start_char"], first["source_end_char"]) == (14, 151)
-    assert first["text_chars"] == 137
-    assert first["text_sha256"] == _sha(normalized[14:151].encode())
+    assert (first["source_start_char"], first["source_end_char"]) == (14, 144)
+    assert first["text_chars"] == 130
+    assert first["text_sha256"] == _sha(normalized[14:144].encode())
     assert first["end_line"] < first["start_line"]  # neither chunk delivered a complete line
-    second_full = _read_file(ctx, "source.md", root="system_repo", start_line=2, max_lines=1, start_char=144)
+    second_full = _read_file(ctx, "source.md", root="system_repo", start_line=2, max_lines=1, start_char=137)
     second = executor._read_extent(second_full, ctx.last_read_view["body_start"] + 137)
     assert second["source_start_char"] == first["source_end_char"]
-    assert second["source_end_char"] == 288
+    assert second["source_end_char"] == 274
     assert second["source_revision"] == first["source_revision"]
-    assert second["text_sha256"] == _sha(normalized[151:288].encode())
+    assert second["text_sha256"] == _sha(normalized[144:274].encode())
     assert second["end_line"] < second["start_line"]
 
 
@@ -116,7 +116,7 @@ def test_readonly_reader_proves_original_source_with_private_key_fixture(tmp_pat
                       task_constraint={"mode": "local_readonly_subagent"})
     full = _read_file(ctx, "source.md", root="system_repo")
     assert ctx.last_read_view["source_masked"] is False
-    assert raw.decode() in full
+    assert delivered_source_prefix(ctx.last_read_view, full, len(full)) == raw.decode()
     executor = _executor(tmp_path)
     executor._inspection_ctx = ctx
     extent = executor._read_extent(full, len(full))
@@ -133,13 +133,13 @@ def test_result_fitting_receipt_matches_exact_text_returned_to_the_reviewer(tmp_
         "id": "read-1", "function": {"name": "read_file", "arguments": json.dumps({"path": "source.md"})},
     }, {}, round_idx=1, room=1500)
     receipt = executor._tool_receipts[0]
-    body_start = executor._inspection_ctx.last_read_view["body_start"]
-    delivered = message["content"][body_start:body_start + receipt["text_chars"]]
+    shown = message["content"].index("\n⚠️ RESULT TRUNCATED:")
+    delivered = delivered_source_prefix(executor._inspection_ctx.last_read_view, message["content"], shown)
     assert 0 < receipt["text_chars"] < len(raw.decode())
     assert receipt["source_end_char"] == receipt["text_chars"]
     assert receipt["text_sha256"] == _sha(delivered.encode())
     assert delivered == raw.decode()[:receipt["text_chars"]]
-    assert message["content"][body_start + receipt["text_chars"]:].startswith("\n⚠️ RESULT TRUNCATED:")
+    assert message["content"][shown:].startswith("\n⚠️ RESULT TRUNCATED:")
     assert len(json.dumps(message, ensure_ascii=False)) + 2 <= 1500
 
 

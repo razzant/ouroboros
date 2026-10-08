@@ -20,7 +20,9 @@ def project(tmp_path):
 def write(repo, path, text):
     target = repo / path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+    # Separator regressions supply exact bytes, including literal CRLF. Text-mode
+    # writes on Windows would otherwise turn CRLF into CRCRLF before the parser.
+    target.write_bytes(text.encode("utf-8"))
 
 
 def body(result):

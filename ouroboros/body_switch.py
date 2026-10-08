@@ -485,7 +485,7 @@ def _attest_loaded(root, handoff):
 def _refuse_boot(root, helper_dir, message):
     """Stop this process before any body import; name the record and the one file that ends the hold."""
     try:
-        pointer = pointer_path(root)
+        pointer = os.path.normpath(pointer_path(root))
     except Exception:
         pointer = "%s in this checkout's Git dir" % POINTER_NAME
     sys.stderr.write("[body_switch] %s. Record: %s. After deciding what the tree should be, removing %s "

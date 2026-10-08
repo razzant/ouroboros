@@ -273,7 +273,9 @@ def test_real_truncated_tool_source_envelope_remains_actor_readable_after_gc(tmp
     read_args = dict(promoted_ref["read"]["arguments"])
     read_args["start_char"] = 95_000
     canonical_ctx = ToolContext(repo_dir=repo, drive_root=parent, task_id=task_id)
-    assert exact_tail in _read_file(canonical_ctx, **read_args)
+    from ouroboros.tools.core_file_tools import delivered_source_prefix
+    displayed = _read_file(canonical_ctx, **read_args)
+    assert exact_tail in delivered_source_prefix(canonical_ctx.last_read_view, displayed, len(displayed))
 
 
 @pytest.mark.parametrize("mismatch", ["tool", "root", "path"])
