@@ -304,10 +304,14 @@ def test_chat_remote_passes_no_proxy_to_anthropic():
     assert captured_timeout[0] == 88.0
 
 
-def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection():
+def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection(tmp_path, monkeypatch):
     """Public no_proxy calls preserve optional-parameter recovery assertions."""
     from ouroboros.llm import LLMClient
+    from ouroboros import request_wire_contract
 
+    # The fixture starts cold; another test's successful wire evidence is not
+    # a response from this synthetic provider. Keep real persistence isolated.
+    monkeypatch.setattr(request_wire_contract, "canonical_wire_evidence_root", lambda: tmp_path)
     LLMClient._REJECTED_PARAMS_CACHE.clear()
     client = LLMClient(api_key="test-or-key")
     messages = [{"role": "user", "content": "hello"}]
