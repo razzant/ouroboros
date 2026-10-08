@@ -154,6 +154,19 @@ def test_patch_previews_remap_chained_sites_and_long_context(file_tools):
     assert "    22| line-22" in deleted, deleted
 
 
+def test_patch_chaining_preserves_earlier_site_inside_unchanged_context(file_tools):
+    registry, _, _, _, workspace, *_ = file_tools
+    target = workspace / "context.txt"
+    target.write_text("".join(f"line-{i}\n" for i in range(30)))
+    context = "".join(" " + ("changed" if i == 20 else f"line-{i}") + "\n" for i in range(25))
+    result = registry.execute("apply_patch", {"patch":
+        "*** Update File: context.txt\n-line-20\n+changed\n"
+        f"*** Update File: context.txt\n{context}-line-25\n+second\n"})
+    assert result.startswith("✅"), result
+    assert target.read_text().splitlines()[20] == "changed"
+    assert "    21| changed" in result and "    26| second" in result, result
+
+
 def test_light_payload_and_control_data_mix_does_not_widen_authority(file_tools, monkeypatch):
     registry, _, _, _, _, data, payload = file_tools
     (payload / "notes.txt").write_text("old\n")

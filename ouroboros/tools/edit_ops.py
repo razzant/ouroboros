@@ -733,6 +733,7 @@ def _apply_hunks_to_text(
     errors: List[str] = []
     changes: List[Tuple[int, int, List[str], int]] = []
     hunk_sites: Dict[int, List[int]] = {}
+    old_line_sites: Dict[int, List[int]] = {}
     for hi, hunk in enumerate(hunks, 1):
         old = [t for p, t in hunk.lines if p in (" ", "-")]
         anchors = [i for i, line in enumerate(file_lines) if hunk.anchor in line] if hunk.anchor else []
@@ -817,8 +818,11 @@ def _apply_hunks_to_text(
                 remove_indent = delta
         replacement: List[str] = []
         local_sites: List[int] = []
+        old_sites: List[int] = []
         old_index = 0
         for prefix, line in hunk.lines:
+            if prefix in {" ", "-"}:
+                old_sites.append(len(replacement))
             if prefix == " ":
                 replacement.append(actual[old_index])
                 old_index += 1
@@ -840,6 +844,7 @@ def _apply_hunks_to_text(
             continue
         changes.append((pos, pos + len(old), replacement, hi))
         hunk_sites[hi] = local_sites
+        old_line_sites[hi] = old_sites
         if tier != "exact":
             notes.append(f"hunk {hi}: matched ignoring {tier} whitespace; unchanged context bytes preserved")
             if tier in {"indentation", "indentation+trailing"}:
@@ -856,9 +861,9 @@ def _apply_hunks_to_text(
     if _sites is not None:
         for site in _sites:
             line, shift = content.count("\n", 0, site), 0
-            for start, end, replacement, _ in ordered:
+            for start, end, replacement, hi in ordered:
                 if start <= line < end:
-                    line = start + shift
+                    line = start + shift + old_line_sites[hi][line - start]
                     break
                 if end <= line:
                     shift += len(replacement) - (end - start)
