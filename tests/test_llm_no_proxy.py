@@ -319,12 +319,11 @@ def test_chat_remote_passes_no_proxy_to_anthropic():
     assert captured_timeout[0] == 88.0
 
 
-def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection(monkeypatch):
-    """OpenRouter no_proxy path retries once without optional sampling params."""
+def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection():
+    """Public no_proxy calls retain wire binding for optional-parameter recovery."""
     from ouroboros.llm import LLMClient
 
     client = LLMClient(api_key="test-or-key")
-    target = client._resolve_remote_target("anthropic/claude-opus-4.8")
     messages = [{"role": "user", "content": "hello"}]
     captured_kwargs = []
 
@@ -338,6 +337,7 @@ def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection(monkeypatch
         def create(self, **kwargs):
             captured_kwargs.append(kwargs)
             if len(captured_kwargs) == 1:
+                assert kwargs.get("temperature") == 0.2
                 raise ParameterRejection(
                     "404 No endpoints found for requested parameter temperature"
                 )
@@ -354,14 +354,14 @@ def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection(monkeypatch
 
     with patch.object(client, "_make_no_proxy_client", return_value=(fake_oa_client, fake_http_client)), \
          patch("requests.get", side_effect=AssertionError("no_proxy must not fetch capabilities")):
-        msg, usage = client._chat_remote(
-            target,
-            messages,
-            None,
-            "medium",
-            1024,
-            "auto",
-            0.2,
+        # Exercise recovery through the public client entry used by consumers.
+        msg, usage = client.chat(
+            messages=messages,
+            model="anthropic/claude-opus-4.8",
+            reasoning_effort="medium",
+            max_tokens=1024,
+            tool_choice="auto",
+            temperature=0.2,
             no_proxy=True,
         )
 

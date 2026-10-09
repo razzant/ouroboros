@@ -97,6 +97,10 @@ def make_serving(root: pathlib.Path) -> pathlib.Path:
     (repo / "requirements-runtime.lock").write_text("toydep==1.0\n", encoding="utf-8")
     (repo / ".gitignore").write_text("__pycache__/\n*.pyc\nlocal-notes/\n", encoding="utf-8")
     git(repo, "init", "-q", "-b", "ouroboros")
+    # Real consumer tools do not inherit git()'s per-command identity overrides.
+    # Worktrees share this local config; no operator/global Git identity is needed.
+    git(repo, "config", "user.name", "t")
+    git(repo, "config", "user.email", "t@example.invalid")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "base")
     return repo

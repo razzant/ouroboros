@@ -136,6 +136,7 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | GET | `/api/mcp/status` | `gateway.mcp.api_mcp_status` |
 | POST | `/api/mcp/refresh` | `gateway.mcp.api_mcp_refresh` |
 | POST | `/api/mcp/test` | `gateway.mcp.api_mcp_test` |
+| POST | `/api/mcp/import/preview` | `gateway.mcp.api_mcp_import_preview` (pure draft translation, no-store; no save, process or connection) |
 | WS | `/ws` | `gateway.ws.ws_endpoint` |
 | STATIC | `/static/*` | `server.NoCacheStaticFiles` |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/identity` | `gateway.host_service._api_identity` |

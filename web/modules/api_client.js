@@ -384,3 +384,15 @@ export const apiClient = {
         ...(confirmRecovery ? { confirm_recovery: true } : {}),
     }),
 };
+
+/** Read-only import preview. Values return only to this Settings draft; this never saves or connects.
+ * @param {import('./api_types.js').MCPImportPreviewRequest} payload
+ * @param {AbortSignal=} signal
+ * @returns {Promise<import('./api_types.js').MCPImportPreviewResponse>}
+ */
+export function previewMcpImport(payload, signal) {
+    return fetchJson('/api/mcp/import/preview', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload), signal,
+    });
+}

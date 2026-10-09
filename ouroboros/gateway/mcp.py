@@ -17,7 +17,7 @@ from ouroboros.mcp_client import (
     raw_server_id,
     reconfigure_from_settings,
 )
-from ouroboros.secret_masking import looks_masked_mcp_secret, rehydrate_mcp_url
+from ouroboros.mcp_headers import MCPHeaderPlaceholderUnmatched
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +60,8 @@ async def api_mcp_refresh(request: Request) -> JSONResponse:
 
 async def api_mcp_test(request: Request) -> JSONResponse:
     """Probe the edited candidate with the same URL rehydration as Settings."""
+    from ouroboros.gateway.settings import MCPSecretIdentityAmbiguous, _rehydrate_mcp_servers_payload
+
     try:
         body: Dict[str, Any] = await request_json_or(request, {})
         await asyncio.to_thread(_ensure_configured)
@@ -88,11 +90,7 @@ async def api_mcp_test(request: Request) -> JSONResponse:
                 # Use the edited candidate, but rehydrate masked token
                 # values from the saved config. The caller can also omit
                 # auth_token entirely to intentionally test without auth.
-                from ouroboros.gateway.settings import _rehydrate_mcp_servers_payload
-
                 probe = _rehydrate_mcp_servers_payload([candidate], [target])[0]
-                if looks_masked_mcp_secret(candidate.get("auth_token")):
-                    probe["auth_token"] = str(target.get("auth_token") or "")
                 target = probe
             outcome = await asyncio.to_thread(manager.test_server, target, settings=settings)
             return JSONResponse(outcome)
@@ -103,11 +101,23 @@ async def api_mcp_test(request: Request) -> JSONResponse:
                 status_code=400,
             )
         # Without a selected saved server, URL masks cannot identify credentials.
-        candidate = dict(candidate)
-        if "url" in candidate:
-            candidate["url"] = rehydrate_mcp_url(candidate["url"], "")
+        candidate = _rehydrate_mcp_servers_payload([candidate], [])[0]
         outcome = await asyncio.to_thread(manager.test_server, candidate, settings=settings)
         return JSONResponse(outcome)
+    except (MCPHeaderPlaceholderUnmatched, MCPSecretIdentityAmbiguous) as exc:
+        return JSONResponse({"ok": False, "code": exc.code, "error": str(exc)}, status_code=409)
     except Exception as exc:
         log.exception("api_mcp_test failed")
         return json_error(f"{type(exc).__name__}: MCP test failed")
+
+
+async def api_mcp_import_preview(request: Request) -> JSONResponse:
+    """Translate pasted client JSON into draft patches; no settings or transport I/O."""
+    from ouroboros.mcp_import import preview_import
+
+    headers = {"Cache-Control": "no-store"}
+    body = await request_json_or(request, None)
+    if not isinstance(body, dict) or not isinstance(body.get("text"), str) or not isinstance(body.get("servers"), list):
+        return JSONResponse({"ok": False, "error": "Supply text and a servers list.", "entries": []},
+                            status_code=400, headers=headers)
+    return JSONResponse(preview_import(body["text"], body["servers"]), headers=headers)

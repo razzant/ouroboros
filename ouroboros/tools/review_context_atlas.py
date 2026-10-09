@@ -451,33 +451,28 @@ def _render_index_text(
     parts = [
         "## Repository index",
         "",
-        "A deterministic map of this repository: structural facts only, no file "
-        "bodies and no LLM-generated claims. Every path below is on disk in the "
-        "candidate tree — read any of them in full with your own `read_file`.",
+        "Candidate facts; bodies via `read_file`.",
         "",
         "### Coverage index",
         "",
-        f"All {len(facts_by_path):,} tracked path(s): a bare path is "
-        "`indexed` (readable in full); every other class is `disposition<TAB>path`. "
-        "The policy-excluded classes (excluded_test, excluded_dir, binary_media, "
-        "vendored_minified) are collapsed to one `disposition<TAB>directory/ (N "
-        "files)` row per directory; a touched path and a listed importer always "
-        "keep their own row.",
+        f"{len(facts_by_path):,} paths: bare = readable `indexed`; else "
+        "`disposition<TAB>path`. excluded_test/excluded_dir/binary_media/"
+        "vendored_minified collapse to directory/count rows, except touched "
+        "paths and listed importers.",
         "",
         format_prompt_code_block("\n".join(index_lines), "text"),
         "",
         "### Touched paths",
         "",
-        "Size, digest, language, top-level symbols, imported modules, and the "
-        f"tracked files that import each path (at most {INDEX_MAX_TOUCHED_IMPORTERS} "
-        "listed, with the total disclosed).",
+        "Size/SHA/language, top-level symbols, imports, tracked importers "
+        f"(limit {INDEX_MAX_TOUCHED_IMPORTERS}; totals disclosed).",
         "",
         "\n".join(_render_row(row) for row in touched_rows) or "(no touched paths)",
         "",
-        "### Direct importers of the touched paths",
+        "### Direct importers",
         "",
         "\n".join(_render_row(row) for row in importer_rows)
-        or "(no tracked file imports a touched path)",
+        or "(no tracked importers)",
         "",
     ]
     return "\n".join(parts)

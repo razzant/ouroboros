@@ -35,6 +35,7 @@ from ouroboros.secret_masking import (
     mask_prefixed_secret,
     redact_known_values,
 )
+from ouroboros.mcp_headers import mask_headers, validate_headers
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.platform_layer import IS_WINDOWS
 from ouroboros.config import get_runtime_mode
@@ -97,16 +98,24 @@ class MCPServerConfig:
     command: str
     args: List[str]
     auth_header: str
-    auth_token: str
+    auth_token: str = field(repr=False)
     allowed_tools: List[str]
     cwd: str = ""
     env_from_settings: Dict[str, str] = field(default_factory=dict)
     env: Dict[str, str] = field(default_factory=dict, repr=False)
     secret_values: tuple[str, ...] = field(default=(), repr=False)
     configuration_warnings: tuple[str, ...] = ()
+    headers: Dict[str, str] = field(default_factory=dict, repr=False)
 
     def has_auth(self) -> bool:
         return bool(self.auth_token.strip())
+
+    def wire_headers(self) -> Dict[str, str]:
+        """Literal nonempty values, with the non-colliding legacy pair."""
+        result = {name: value for name, value in self.headers.items() if value}
+        if self.has_auth():
+            result[self.auth_header] = self.auth_token
+        return result
 
 
 @dataclass
@@ -395,6 +404,9 @@ def normalize_server_config(
 ) -> Optional[MCPServerConfig]:
     """Validate one ``MCP_SERVERS`` entry; return ``None`` if unsalvageable."""
     def invalid(message: str) -> None:
+        headers = raw.get("headers") if isinstance(raw, dict) else None
+        if isinstance(headers, dict):
+            message = redact_known_values(message, tuple(value for value in headers.values() if isinstance(value, str)))
         if errors is not None:
             errors.append(f"MCP_CONFIG_ERROR: {message}")
         log.warning("Invalid MCP server config: %s", message)
@@ -413,7 +425,7 @@ def normalize_server_config(
 
     try:
         known = {"id", "slug", "name", "label", "enabled", "transport", "url", "command",
-                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings"}
+                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings", "headers"}
         unknown = set(raw) - known
         warnings = ("Fields retained but not applied: " + ", ".join(sorted(map(str, unknown))),) if unknown else ()
         cwd = raw.get("cwd", "")
@@ -421,7 +433,7 @@ def normalize_server_config(
             raise ValueError("cwd must be a string without NUL")
         refs = validate_process_env(raw.get("env_from_settings"))
         env, secret_values = resolve_process_env(raw.get("env"), refs, settings=settings)
-        unused = ("url", "auth_token") if transport == "stdio" else ("command", "args", "cwd", "env", "env_from_settings")
+        unused = ("url", "auth_token", "headers") if transport == "stdio" else ("command", "args", "cwd", "env", "env_from_settings")
         if any(raw.get(key) for key in unused):
             raise ValueError("fields unsupported by this transport: " + ", ".join(key for key in unused if raw.get(key)))
         if transport == "stdio" and raw.get("auth_header", "Authorization") not in (None, "", "Authorization"):
@@ -441,6 +453,8 @@ def normalize_server_config(
             args = []
             auth_header = _validate_auth_header(raw.get("auth_header") or "Authorization")
             auth_token = _validate_auth_token(raw.get("auth_token") or "")
+        headers = validate_headers(raw.get("headers"), legacy_header=auth_header, legacy_token=auth_token)
+        secret_values = (*secret_values, *headers.values())
     except ValueError as exc:
         return invalid(str(exc))
 
@@ -469,6 +483,7 @@ def normalize_server_config(
         env=env,
         secret_values=secret_values,
         configuration_warnings=warnings,
+        headers=headers,
     )
 
 
@@ -530,6 +545,7 @@ def redact_servers_for_status(configs: List[MCPServerConfig]) -> List[Dict[str, 
                 "auth_header": cfg.auth_header,
                 "auth_token": mask_prefixed_secret(cfg.auth_token, visible_chars=4),
                 "auth_configured": cfg.has_auth(),
+                "headers": mask_headers(cfg.headers),
                 "allowed_tools": list(cfg.allowed_tools),
                 "cwd": cfg.cwd,
                 "env_from_settings": dict(cfg.env_from_settings),
@@ -630,11 +646,9 @@ async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig):
 
 def _transport_factory(cfg: MCPServerConfig):
     if cfg.transport == "streamable_http":
-        headers = {cfg.auth_header: cfg.auth_token} if cfg.has_auth() else {}
-        return streamablehttp_client(cfg.url, headers=headers)
+        return streamablehttp_client(cfg.url, headers=cfg.wire_headers())
     if cfg.transport == "sse":
-        headers = {cfg.auth_header: cfg.auth_token} if cfg.has_auth() else {}
-        return sse_client(cfg.url, headers=headers)
+        return sse_client(cfg.url, headers=cfg.wire_headers())
     if cfg.transport == "stdio":
         # Leaving env/cwd unset uses the SDK's small cross-platform default
         # environment and its context-managed process shutdown sequence.
@@ -1020,6 +1034,7 @@ class MCPManager:
                         "url": _redact_error_text(cfg.url, cfg),
                         "auth_header": cfg.auth_header,
                         "auth_configured": cfg.has_auth(),
+                        "header_names": list(cfg.headers),
                         "allowed_tools": list(cfg.allowed_tools),
                         "cwd": cfg.cwd,
                         "env_from_settings": dict(cfg.env_from_settings),

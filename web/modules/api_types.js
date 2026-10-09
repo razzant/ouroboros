@@ -1471,16 +1471,13 @@
  * @property {string[]=} hot_code_paths
  * @property {'auto_merge'|'assisted'=} recommended_strategy
  */
-
 /**
  * @typedef {Object} UpdatePreflightRequest
  */
-
 /**
  * @typedef {Object} UpdatePreflightResponse
  * @property {UpdateMergePlan} merge_plan
  */
-
 /**
  * @typedef {Object} UpdateApplyRequest
  * @property {'auto_merge'|'assisted'|'manual'|'replace'} strategy
@@ -1488,7 +1485,6 @@
  * @property {string=} expected_target_sha
  * @property {boolean=} confirm_recovery
  */
-
 /**
  * @typedef {Object} UpdateApplySuccessResponse
  * @property {'ok'|'restart_required'|'assisted_started'|'manual'} status
@@ -1498,7 +1494,6 @@
  * @property {UpdateMergePlan=} merge_plan
  * @property {string=} error
  */
-
 /**
  * @typedef {Object} UpdateApplyErrorResponse
  * @property {string} error
@@ -1513,7 +1508,6 @@
  * @property {?number=} estimated_wave_usd Wave-floor admission estimate (worst-case review-pack caps).
  * @property {?number=} remaining_usd Remaining model budget the floor compared against.
  */
-
 /**
  * Process-local execution observation on /api/update/status; not recovery authority.
  * @typedef {Object} UpdateProgress
@@ -1527,19 +1521,16 @@
  * @property {string} error
  * @property {boolean} restart_required
  */
-
 /**
  * @typedef {Object} UpdateProgressChangedOutbound
  * @property {'update_progress_changed'} type
  */
-
 /**
  * @typedef {Object} UpdateStatusReadyOutbound
  * @property {'update_status_ready'} type
  * @property {boolean} available
  * @property {?boolean} check_ok
  */
-
 /**
  * LLM-written update letter in `/api/update/status` and `/api/update/check`.
  * The additive `letter` is absent/null without a stored letter. It outlives its update;
@@ -1560,7 +1551,6 @@
  * @property {string} failed_at  ISO 8601 time of the failed attempt, independent of the shown text's written_at
  * @property {({base_sha: string, target_sha: string, update_channel: string, target_ref: string}|null)} latest_failed_key  the failed attempt's range, never the provenance of retained text
  */
-
 export const MAX_LINK_ACTIONS = 12;
 export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
@@ -1596,4 +1586,15 @@ export const GATEWAY_CONTRACT_VERSION = '7.6.0';
  * Physical messages and folded review attempts may additionally carry
  * history_id:string and history_position:ChatHistoryPosition. They identify
  * stored source records, never current task or review authority.
+ */
+
+/** @typedef {Object} MCPImportPreviewRequest
+ * @property {string} text
+ * @property {Array<*>} servers
+ */
+/** @typedef {Object} MCPImportPreviewResponse
+ * @property {boolean} ok
+ * @property {Array<Object>} entries Only patch carries literals; display facts contain no credentials.
+ * @property {string[]=} ignored_keys
+ * @property {string=} error
  */

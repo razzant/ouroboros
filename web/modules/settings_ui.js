@@ -847,6 +847,7 @@ export function renderSettingsPage() {
                             </div>
                             <div class="settings-toolbar">
                                 <button type="button" class="btn btn-default btn-sm" id="btn-mcp-add-server">Add server</button>
+                                <button type="button" class="btn btn-default btn-sm" id="btn-mcp-import">Import mcp.json</button>
                                 <button type="button" class="btn btn-default btn-sm" id="btn-mcp-refresh-all">Refresh all</button>
                             </div>
                         </div>

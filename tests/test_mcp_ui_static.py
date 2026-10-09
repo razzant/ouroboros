@@ -88,7 +88,7 @@ def test_mcp_module_drops_masked_token_in_test_payload(mcp_source: str) -> None:
     so the backend can rehydrate the persisted token."""
     assert "looksMasked" in mcp_source
     assert "out.auth_token = ''" in mcp_source
-    assert "server_id: sid, server: { ...server }" in mcp_source
+    assert "server_id: sid, server: { ...server, ...headerPayload(server) }" in mcp_source
 
 
 def test_mcp_module_supports_http_sse_and_stdio(mcp_source: str) -> None:
@@ -182,7 +182,7 @@ const message = { hidden: true, dataset: {} };
 const button = { disabled: false, addEventListener: (_kind, handler) => { click = handler; } };
 const card = { dataset: { mcpIndex: '0' }, querySelectorAll: () => [], querySelector: (selector) =>
     selector === '[data-mcp-test]' ? button : selector === '[data-mcp-message]' ? message : null };
-const host = { innerHTML: '', querySelectorAll: () => [card] };
+const host = { innerHTML: '', querySelectorAll: (selector) => selector === '[data-mcp-card]' ? [card] : [] };
 globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null };
 globalThis.fetch = async (url, options) => {
     if (url === '/api/mcp/status') return { ok: false };
@@ -201,10 +201,34 @@ for (const server of [
     const body = requests.at(-1);
     assert.equal(body.server.url, server.url);
     assert.equal(body.server_id, requests.length <= 2 ? 'saved' : undefined);
-    assert.match(message.textContent, /Test OK/);
+    assert.match(message.textContent, /Draft connection OK/);
     assert.equal(button.disabled, false);
 }
 '''
     result = subprocess.run([node, "--input-type=module", "-e", script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_mcp_headers_ui_preserves_malformed_rows_and_literal_values():
+    """Execute the actual draft projection, including entries hidden from the editor."""
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
+const host = {innerHTML:'', querySelectorAll:()=>[]};
+globalThis.document = {getElementById:(id)=> id==='mcp-servers-list'?host:null};
+globalThis.fetch = async()=>({ok:false});
+const entries = [null, 'malformed legacy row', {id:'old', headers:'***set***'},
+ {id:'multi', headers:{Authorization:'***set***','X-Key':'literal...','X-Empty':''}, future_field:{kept:true}}];
+applyMcpSettings({MCP_SERVERS: entries});
+const out = collectMcpSettings().MCP_SERVERS;
+assert.deepEqual(out.slice(0,2), entries.slice(0,2));
+assert.equal(out[2].headers, entries[2].headers);
+assert.deepEqual(out[3].headers, entries[3].headers);
+assert.deepEqual(out[3].future_field, entries[3].future_field);
+assert.match(host.innerHTML, /malformed and retained unchanged/);
+assert.match(host.innerHTML, /Saved headers are malformed/);
+'''
+    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
