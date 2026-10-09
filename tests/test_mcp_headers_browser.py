@@ -35,13 +35,24 @@ def _open_mcp(page, url):
     page.click('[data-nav-page="settings"]')
     page.locator('[data-settings-tab="advanced"]').click()
     page.locator("#btn-mcp-import").wait_for(state="visible", timeout=15_000)
+    page.locator("#btn-save-settings").wait_for(state="visible", timeout=15_000)
+    page.wait_for_function("() => !document.getElementById('btn-save-settings').disabled", timeout=20_000)
 
 
 def _save(page):
-    page.click("#btn-save-settings")
+    expected_ids = page.locator('[data-mcp-field="id"]').evaluate_all('els => els.map(e => e.value)')
+    with page.expect_response(lambda response: response.url.endswith('/api/settings')
+                              and response.request.method == 'POST', timeout=20_000) as saved:
+        page.click("#btn-save-settings")
+    response = saved.value
+    assert response.ok and response.json().get('status') == 'saved'
+    posted_ids = [s.get('id') for s in response.request.post_data_json['MCP_SERVERS']]
+    assert posted_ids == expected_ids, ('save omitted visible draft rows', expected_ids, posted_ids)
     page.wait_for_function(
         "() => (document.getElementById('settings-status')?.textContent || '').startsWith('Settings saved')",
         timeout=20_000)
+    loaded = page.evaluate("async () => (await fetch('/api/settings', {cache: 'no-store'})).json()")
+    assert [s.get('id') for s in loaded['MCP_SERVERS']] == expected_ids
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
@@ -198,7 +209,8 @@ def test_mcp_import_ui(direct_server_with_data, loopback, engine):  # noqa: F811
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 @pytest.mark.parametrize('saved_headers', [False, True])
-def test_header_switch_stdio(direct_server_with_data, engine, saved_headers):  # noqa: F811
+@pytest.mark.parametrize('reload_pending', [False, True])
+def test_header_switch_stdio(direct_server_with_data, engine, saved_headers, reload_pending):  # noqa: F811
     """Retain draft headers on transport change until explicitly removed, then Save.
 
     Cover both a draft-only row and an edited previously saved map: the latter
@@ -213,6 +225,20 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers):  #
         page._evidence_engine = engine
         try:
             _open_mcp(page, url)
+            pending = []
+            def hold_reload(route):
+                if route.request.method == 'GET' and not pending:
+                    pending.append(route)
+                else:
+                    route.continue_()
+            def start_reload():
+                page.route('**/api/settings', hold_reload)
+                with page.expect_request(lambda request: request.url.endswith('/api/settings')
+                                         and request.method == 'GET'):
+                    page.click('#btn-reload-settings')
+                assert len(pending) == 1
+            if reload_pending and not saved_headers:
+                start_reload()
             page.click('#btn-mcp-add-server')
             card = page.locator('[data-mcp-card]').last
             card.locator('[data-mcp-field="id"]').fill('switch_headers')
@@ -225,6 +251,8 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers):  #
                 _save(page)
                 page.reload(wait_until='domcontentloaded')
                 _open_mcp(page, url)
+                if reload_pending:
+                    start_reload()
                 card = page.locator('[data-mcp-card]').last
                 assert card.locator('[data-mcp-header-field="value"]').input_value() == '***set***'
                 card.locator('[data-mcp-header-field="value"]').fill('synthetic-edited-key')
@@ -239,6 +267,11 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers):  #
             remove.click()
             card = page.locator('[data-mcp-card]').last
             assert card.locator('[data-mcp-clear-unsupported]').count() == 0
+            if reload_pending:
+                pending[0].fulfill(response=pending[0].fetch())
+                page.unroute('**/api/settings', hold_reload)
+                page.wait_for_function("() => (document.getElementById('settings-status')?.textContent || '').includes('Your edits are kept')")
+                assert page.locator('[data-mcp-card]').last.locator('[data-mcp-field="id"]').input_value() == 'switch_headers'
             _save(page)
             saved = json.loads((data_dir / 'settings.json').read_text(encoding='utf-8'))
             server = next(s for s in saved['MCP_SERVERS'] if s['id'] == 'switch_headers')
