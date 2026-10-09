@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import json
 import pathlib
@@ -9,6 +10,10 @@ import sys
 from typing import Any
 
 from ouroboros.platform_layer import IS_WINDOWS
+
+# The successor this generation spawned, published before custody I/O so Panic can stop it.
+_restart_successors: list = []
+_restart_stop_requested = False
 
 
 def external_owner_binding(state: dict) -> tuple[bool, Any, tuple[int, int]]:
@@ -91,6 +96,10 @@ class PanicIngress:
         pair = self._owner[1]
         if source != "web" and (pair is None or pair != (user_id, chat_id)):
             return False
+        global _restart_stop_requested
+        # Claim termination before the callback is scheduled: the restart
+        # watcher must leave Panic time to persist its stop even if it runs first.
+        _restart_stop_requested = True
         import threading
 
         # Do not wait for the supervisor, the chat ingress lock, a fresh state
@@ -150,14 +159,29 @@ def restart_current_process(
     except Exception:
         raw_argv = sys.argv
     argv = [sys.executable, *raw_argv]
+    transaction_id = ""
+    handoff_context = contextlib.nullcontext((None, {}))
     if IS_WINDOWS:
         # Windows has no process-image replacement. Its C runtime emulates exec by
         # starting an UNQUOTED command line and exiting the caller, so a spaced or
         # empty argument (a Python under "Program Files") reaches the successor
         # broken. The supervised spawn below quotes argv and IS the transfer here.
         log.info("Starting the replacement direct server on %s:%d", desired_host, port)
+        from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
+
+        # A venv redirector's PID is not the server. Panic must own the server
+        # even when this restart carries no planned continuation transaction.
+        base = getattr(sys, "_base_executable", None) or sys.executable
+        if base != sys.executable:
+            argv[0], env["__PYVENV_LAUNCHER__"] = base, sys.executable
+        transaction_id = env.get(PLANNED_RESTART_TRANSACTION_ENV, "")
+        # Parent exit observation also stops a cold-bootstrap descendant on Panic
+        # when there are no prepared continuations to bind.
+        handoff_context = _windows_restart_handoff(argv, env, log)
     else:
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
+        if _restart_stop_requested:
+            return  # the watcher parks in exit_after_restart; Panic keeps its thread and writes
         try:
             os.execvpe(sys.executable, argv, env)
             return  # exec does not return; only a test double of it reaches this line
@@ -167,29 +191,93 @@ def restart_current_process(
         from ouroboros.config import DATA_DIR
         from ouroboros.process_custody import spawn_supervised
 
-        spawn_supervised(
-            argv,
-            drive_root=pathlib.Path(DATA_DIR),
-            # daemon, NOT session: the replacement IS the next server
-            # generation. A session-scoped entry carries this dying
-            # generation's session id, so the new server's startup reap
-            # would see it as a foreign-session process and SIGKILL itself.
-            # daemon scope is always a reaper survivor (launcher-managed
-            # lifecycle), which is correct for a long-lived top-level server.
-            purpose="server_restart_fallback",
-            scope="daemon",
-            # Windows: the successor keeps the caller's console group, as exec
-            # would (a new group ignores CTRL+C). POSIX fallback: a new session,
-            # so a failed custody write kills only the successor and the
-            # caller's terminal hangup does not reach it.
-            new_process_group=not IS_WINDOWS,
-            cwd=str(repo_dir),
-            env=env,
-        )
+        with handoff_context as (parent, handoff):
+            successor = spawn_supervised(
+                argv,
+                drive_root=pathlib.Path(DATA_DIR),
+                # daemon, NOT session: the replacement IS the next server
+                # generation. A session-scoped entry carries this dying
+                # generation's session id, so the new server's startup reap
+                # would see it as a foreign-session process and SIGKILL itself.
+                # daemon scope is always a reaper survivor (launcher-managed
+                # lifecycle), which is correct for a long-lived top-level server.
+                purpose="server_restart_fallback",
+                scope="daemon",
+                # Windows: the successor keeps the caller's console group, as exec
+                # would (a new group ignores CTRL+C). POSIX fallback: a new session,
+                # so a failed custody write kills only the successor and the
+                # caller's terminal hangup does not reach it.
+                new_process_group=not IS_WINDOWS,
+                on_spawn=_hold_restart_successor,
+                cwd=str(repo_dir),
+                env=env,
+                **handoff,
+            )
         log.info("Spawned the replacement server process.")
     except Exception:
         log.exception("Spawned restart fallback failed; no successor was started.")
         raise
+    if parent is not None and transaction_id:
+        from ouroboros.delegate_recovery import bind_restart_successor
+
+        try:
+            bind_restart_successor(DATA_DIR, transaction_id, successor.pid)
+        except Exception:
+            # A custodied successor stays available; it only cannot prove the continuation.
+            log.exception("Restart binding for successor %s failed: it is not stopped, "
+                          "but prepared handoffs stay unresumed", successor.pid)
+
+
+@contextlib.contextmanager
+def _windows_restart_handoff(argv: list, env: dict, log: Any):
+    """Let a Windows successor prove this generation's exit 42 for the planned transaction.
+
+    It inherits a handle to this process. The platform context owns the parent and stdio handles
+    until Popen has inherited them, retaining absent streams as absent.
+    """
+    from ouroboros.delegate_recovery import PLANNED_RESTART_PARENT_ENV
+    from ouroboros.platform_layer import inheritable_self_handle
+
+    with contextlib.ExitStack() as resources:
+        try:
+            parent, handoff = resources.enter_context(inheritable_self_handle())
+        except Exception:
+            log.exception("Restart parent handle unavailable; the successor cannot prove its continuation")
+            parent, handoff = None, {}
+        if parent is not None:
+            env[PLANNED_RESTART_PARENT_ENV] = str(int(parent))
+        yield parent, handoff
+
+
+def _hold_restart_successor(proc: Any) -> None:
+    from ouroboros.platform_layer import request_process_tree_kill
+
+    _restart_successors.append(proc)
+    if _restart_stop_requested:  # Panic began first and found no successor to stop
+        request_process_tree_kill(proc)
+
+
+def stop_restart_successor() -> list[dict]:
+    """Panic's request to stop a successor this generation spawned; never waits, locks or writes."""
+    global _restart_stop_requested
+    from ouroboros.platform_layer import request_process_tree_kill
+
+    _restart_stop_requested = True
+    return [request_process_tree_kill(proc) for proc in list(_restart_successors)]
+
+
+def exit_after_restart(exit_code: int) -> None:
+    """Finish the watcher unless Panic owns termination, including its writes.
+
+    Only the watcher parks: main already joins it, so neither can exit before
+    Panic's flag/control writes and exit. Panic never waits for this thread.
+    """
+    if _restart_stop_requested:
+        import threading
+
+        threading.Event().wait()
+    else:
+        os._exit(exit_code)
 
 
 def execute_panic_stop(
@@ -216,6 +304,8 @@ def execute_panic_stop(
     Unconfirmed shutdown remains disclosed with custody retained; names or
     recycled descriptor ports never authorize signalling an unrelated process.
     """
+    global _restart_stop_requested
+    _restart_stop_requested = True  # claim termination before any import, stop callback or I/O
     import threading
     import time
     from ouroboros.startup_historical_audit import audit
@@ -275,6 +365,7 @@ def execute_panic_stop(
     attempt("executors", lambda: kill_all_foreground(data_dir, request_only=True))
     attempt("services", lambda: kill_all_services(data_dir, request_only=True))
     attempt("companions", lambda: panic_kill_all(request_only=True))
+    attempt("restart-successor", stop_restart_successor)
     children = multiprocessing.active_children()
     for child in children:
         attempt(f"child-{child.pid}", lambda child=child: kill_worker_tree(

@@ -671,6 +671,16 @@ def _rebind_runtime_roots_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_restart_generation(monkeypatch):
+    """Panic and parent observation belong to one process generation, not later tests."""
+    from ouroboros import delegate_recovery, server_control
+
+    monkeypatch.setattr(server_control, "_restart_successors", [])
+    monkeypatch.setattr(server_control, "_restart_stop_requested", False)
+    monkeypatch.setattr(delegate_recovery, "_restart_parent", None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_custody_memo_between_tests():
     """Isolate both custody caches: the row memo is keyed by events-log path,
     while active custody is keyed only by run ID. Tests reuse both identities (and so the

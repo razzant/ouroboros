@@ -85,6 +85,7 @@ def direct_exec_environment(monkeypatch, root):
     import ouroboros.server_control as control
 
     captured = {}
+    monkeypatch.setattr(control, "IS_WINDOWS", False)  # this transport is the POSIX same-PID exec
     monkeypatch.setattr(server, "DATA_DIR", root)
     monkeypatch.setattr(server, "_owner_restart_requested", threading.Event())
     monkeypatch.setenv("OUROBOROS_SERVER_HOST", "127.0.0.1")
@@ -129,6 +130,7 @@ def test_assisted_update_carries_the_already_parked_wait_to_direct_successor(res
     assert server._planned_delegate_restart_transaction_id == ""
     env = direct_exec_environment(monkeypatch, case.root)
     assert env[delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV] == transaction_id
+    monkeypatch.setattr(delegate_recovery, "IS_WINDOWS", False)  # the same PID proves only an exec
     monkeypatch.setenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, env[delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV])
     assert restore_stale_snapshot(case) == 1
     assert workers.PENDING[0]["_owner_wait_resume"]["wait_id"] == case.wait["wait_id"]

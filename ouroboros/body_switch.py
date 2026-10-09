@@ -47,6 +47,10 @@ STUCK_EXIT_CODE = 3
 _TMP_PREFIX = ".body-switch-"
 _CHUNK = 200
 _DEPS_TIMEOUT_SEC = 900
+# Wire names shared with delegate_recovery; the captured helper cannot import the body.
+_RESTART_PARENT = "OUROBOROS_PLANNED_RESTART_PARENT_HANDLE"
+_RESTART_TRANSACTION = "OUROBOROS_PLANNED_RESTART_TRANSACTION_ID"
+_RESTART_BINDING = "OUROBOROS_PLANNED_RESTART_BINDING_HANDLE"
 # Test seam only (fault injection at a named boundary); production never sets it.
 _FAIL_AT = os.environ.get("OUROBOROS_BODY_SWITCH_FAIL_AT", "")
 
@@ -69,13 +73,20 @@ def read_handoff(helper_dir):
 
 
 def write_handoff(helper_dir, handoff):
-    path = os.path.join(helper_dir, HANDOFF_NAME)
-    fd, tmp = tempfile.mkstemp(prefix=HANDOFF_NAME + ".", dir=helper_dir)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(handoff, fh, indent=1, sort_keys=True)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    _write_json(os.path.join(helper_dir, HANDOFF_NAME), handoff)
+
+
+def _write_json(path, value):
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(value, fh, indent=1, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
 
 
 def record(helper_dir, handoff, phase, detail=""):
@@ -376,6 +387,102 @@ def _locked(helper_dir):
         fh.close()
 
 
+def _windows_identity(handle):
+    """PID and creation FILETIME from an owned HANDLE, matching the runtime's birth token."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetProcessId.argtypes, kernel.GetProcessId.restype = (wintypes.HANDLE,), wintypes.DWORD
+    kernel.GetProcessTimes.argtypes = (wintypes.HANDLE, *(ctypes.POINTER(wintypes.FILETIME),) * 4)
+    kernel.GetProcessTimes.restype = wintypes.BOOL
+    created, exited, system, user = (wintypes.FILETIME() for _ in range(4))
+    pid = kernel.GetProcessId(handle)
+    if not pid or not kernel.GetProcessTimes(
+        handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(system), ctypes.byref(user),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return {"pid": int(pid), "birth": "win-filetime:%d" % ((created.dwHighDateTime << 32) | created.dwLowDateTime)}
+
+
+def _bind_windows_successor(parent, proc):
+    """Transfer only this helper's exact binding, after the original writer has exited."""
+    import _winapi
+
+    if _winapi.WaitForSingleObject(parent, _winapi.INFINITE) != _winapi.WAIT_OBJECT_0:
+        raise OSError("restart parent did not signal")
+    if _winapi.GetExitCodeProcess(parent) != RESTART_EXIT_CODE:
+        return  # final main still observes the original handle, including Panic's exit 99
+    original, current = _windows_identity(parent), _windows_identity(_winapi.GetCurrentProcess())
+    transaction = os.environ.get(_RESTART_TRANSACTION, "")
+    if not transaction:
+        return
+    data_dir = read_handoff(os.path.dirname(os.path.abspath(__file__)))["data_dir"]
+    path = os.path.join(data_dir, "state", "delegate_recovery_transactions", transaction + ".json")
+    with open(path, encoding="utf-8") as fh:
+        row = json.load(fh)
+    if (row.get("status") != "prepared" or row.get("transaction_id") != transaction
+            or (row.get("supervisor_pid"), row.get("supervisor_birth")) != (original["pid"], original["birth"])
+            or (row.get("successor_pid"), row.get("successor_birth")) != (current["pid"], current["birth"])):
+        raise ValueError("restart transaction does not bind this bootstrap generation")
+    child = _windows_identity(proc._handle)
+    row.update(successor_pid=child["pid"], successor_birth=child["birth"], updated_at=_now())
+    _write_json(path, row)
+
+
+def _windows_handoff(argv):
+    """Forward original-parent proof and release final main only after rebinding.
+
+    EOF is a gate, never proof: even a failed write or this helper's death releases
+    the child, whose normal consumer still checks the exact transaction. Only the
+    read end is inherited, so our death cannot leave a writer keeping it blocked.
+    """
+    import _winapi
+    import msvcrt
+
+    env = dict(os.environ)
+    argv = list(argv)
+    base = getattr(sys, "_base_executable", None) or sys.executable
+    if base != sys.executable:
+        argv[0], env["__PYVENV_LAUNCHER__"] = base, sys.executable
+    if not env.get(_RESTART_PARENT):
+        return subprocess.Popen(argv, env=env)
+    with contextlib.ExitStack() as resources:
+        parent = int(env[_RESTART_PARENT])
+        resources.callback(_winapi.CloseHandle, parent)
+        reader, writer = os.pipe()
+        resources.callback(os.close, reader)
+        resources.callback(os.close, writer)
+        os.set_inheritable(reader, True)
+        gate = msvcrt.get_osfhandle(reader)
+        env[_RESTART_BINDING] = str(gate)
+        startup = subprocess.STARTUPINFO(dwFlags=subprocess.STARTF_USESTDHANDLES,
+                                        lpAttributeList={"handle_list": [parent, gate]})
+        current = _winapi.GetCurrentProcess()
+        # Same STARTUPINFO contract as platform_layer.inheritable_self_handle:
+        # duplicate present streams; preserve absent ones; never synthesize pipes.
+        for name, field in (("stdin", "hStdInput"), ("stdout", "hStdOutput"), ("stderr", "hStdError")):
+            try:
+                raw = msvcrt.get_osfhandle(getattr(sys, "__%s__" % name).fileno())
+            except (AttributeError, OSError, ValueError):
+                raw = 0
+            duplicate = 0
+            if raw not in (0, -1, -2):
+                duplicate = subprocess.Handle(_winapi.DuplicateHandle(
+                    current, raw, current, 0, True, _winapi.DUPLICATE_SAME_ACCESS))
+                resources.callback(duplicate.Close)
+                startup.lpAttributeList["handle_list"].append(duplicate)
+            setattr(startup, field, duplicate)
+        proc = subprocess.Popen(argv, env=env, startupinfo=startup, close_fds=True)
+        try:
+            _bind_windows_successor(parent, proc)
+        except (Exception, KeyboardInterrupt) as exc:
+            # The waited-on child stays available. An unproved continuation stays held.
+            with contextlib.suppress(AttributeError, OSError, ValueError):
+                sys.stderr.write("[body_switch] restart binding unproven; successor remains available: %s\n" % exc)
+        return proc  # close the gate BEFORE waiting for the final process
+
+
 def _wait_as_parent(argv):
     """Windows has no process-image replacement: run the fresh entry and stay its waited-on parent.
 
@@ -385,7 +492,7 @@ def _wait_as_parent(argv):
     status (a Panic, a stop, the restart code of a supervising launcher) is
     returned unchanged.
     """
-    proc = subprocess.Popen(argv)
+    proc = _windows_handoff(argv)
     while True:
         try:
             return proc.wait()
@@ -395,8 +502,9 @@ def _wait_as_parent(argv):
 
 def _handover():
     """Give the switched tree to a FRESH process through the owning lifecycle."""
-    sys.stdout.flush()
-    sys.stderr.flush()
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            stream.flush()
     if os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER") == "1":
         os._exit(RESTART_EXIT_CODE)  # the launcher's own cycle: dependencies, native host, relaunch
     argv = [sys.executable, *sys.orig_argv[1:]]

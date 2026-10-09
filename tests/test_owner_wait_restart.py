@@ -115,14 +115,47 @@ def first_cleanup(case):
     return successor
 
 
-def acknowledge(case, monkeypatch, transport):
+ACK_SOURCES = {"launcher": "launcher_waitpid", "direct_exec": "direct_exec_successor",
+               "windows_spawn": "windows_direct_parent_handle"}
+
+
+def acknowledge(case, monkeypatch, transport, parent=None, binding=None):
+    """Leave the transaction prepared for the successor's reader, except the launcher's own wait."""
     if transport == "launcher":
         assert delegate_recovery.acknowledge_observed_restart_exit(
             case.root, supervisor_pid=os.getpid(), exit_code=42,
         )
-    else:
-        # The production restore predicate consumes this one-shot exec token.
-        monkeypatch.setenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, case.transaction_id)
+        return
+    # The production restore predicate consumes this one-shot token.
+    monkeypatch.setenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, case.transaction_id)
+    monkeypatch.setattr(delegate_recovery, "IS_WINDOWS", transport == "windows_spawn")
+    if transport == "windows_spawn":
+        windows_successor(monkeypatch, case.root, case.transaction_id, parent, binding)
+
+
+def windows_successor(monkeypatch, root, transaction_id, parent=None, binding=None):
+    """This process as a Windows successor of the row's supervisor, which binds the row while the successor waits."""
+    from ouroboros import platform_layer
+
+    real_birth = platform_layer.process_start_time
+    births = {os.getpid(): "win-filetime:2"}
+    monkeypatch.setattr(platform_layer, "process_start_time", lambda pid: births.get(pid) or real_birth(pid))
+    monkeypatch.setattr(delegate_recovery, "_restart_parent", None)
+    monkeypatch.setenv(delegate_recovery.PLANNED_RESTART_PARENT_ENV, "77")
+
+    def await_parent(handle):
+        assert handle == 77
+        row = delegate_recovery._read_restart_transaction(root, transaction_id)
+        assert row["status"] == "prepared" and "successor_pid" not in row  # bound only after the spawn
+        row.update(binding if binding is not None else {
+            "supervisor_birth": "win-filetime:1", "successor_pid": os.getpid(), "successor_birth": "win-filetime:2"})
+        delegate_recovery._write_restart_transaction(root, row)
+        if isinstance(parent, Exception):
+            raise parent
+        return dict(parent) if parent is not None else {
+            "pid": int(row["supervisor_pid"]), "birth": "win-filetime:1", "exit_code": 42}
+
+    monkeypatch.setattr(platform_layer, "await_process_handle", await_parent)
 
 
 def restore_stale_snapshot(case):
@@ -141,7 +174,7 @@ def test_native_handoff_is_visible_to_subsequent_cleanup(restart_case):
     assert server_restart._managed_update_pending_kwargs() == {"preserve_pending": True}
 
 
-@pytest.mark.parametrize("transport", ["launcher", "direct_exec"])
+@pytest.mark.parametrize("transport", ACK_SOURCES)
 def test_native_wait_survives_second_cleanup_and_old_snapshot(restart_case, monkeypatch, transport):
     case = restart_case
     first_cleanup(case)
@@ -164,7 +197,7 @@ def test_native_wait_survives_second_cleanup_and_old_snapshot(restart_case, monk
     assert load_task_result(case.root, case.task_id)["total_rounds"] == 7
 
 
-@pytest.mark.parametrize("transport", ["launcher", "direct_exec"])
+@pytest.mark.parametrize("transport", ACK_SOURCES)
 def test_observed_restart_restores_real_native_source_past_snapshot_age(restart_case, monkeypatch, transport):
     case = restart_case
     first_cleanup(case)
@@ -174,7 +207,36 @@ def test_observed_restart_restores_real_native_source_past_snapshot_age(restart_
     assert owner_wait.load_owner_wait(case.ctx, handoff)["trace"]["tool_calls"][0]["result"] == "object 42"
     transaction = delegate_recovery._read_restart_transaction(case.root, case.transaction_id)
     assert transaction["status"] == "normal_exit_acknowledged"
-    assert transaction["ack_source"] == ("launcher_waitpid" if transport == "launcher" else "direct_exec_successor")
+    assert transaction["ack_source"] == ACK_SOURCES[transport]
+
+
+@pytest.mark.parametrize("fault", ["token_only", "observation_failed", "exit_1", "panic_99", "other_parent_pid",
+                                   "other_parent_birth", "binding_failed", "other_successor"])
+def test_windows_successor_without_exact_parent_proof_resumes_nothing(restart_case, monkeypatch, caplog, fault):
+    """Only the inherited parent's own exit 42 and the bound identities authorize the wait."""
+    case = restart_case
+    first_cleanup(case)
+    parent = {"pid": os.getpid(), "birth": "win-filetime:1", "exit_code": 42}
+    binding = None
+    if fault == "observation_failed":
+        parent = OSError("the process handle is invalid")
+    elif fault in {"exit_1", "panic_99"}:
+        parent["exit_code"] = 1 if fault == "exit_1" else 99
+    elif fault == "other_parent_pid":
+        parent["pid"] = os.getpid() + 1
+    elif fault == "other_parent_birth":
+        parent["birth"] = "win-filetime:9"
+    elif fault == "binding_failed":
+        binding = {}  # the parent exited 42 but never recorded the successor
+    elif fault == "other_successor":
+        binding = {"supervisor_birth": "win-filetime:1", "successor_pid": os.getpid(), "successor_birth": "win-filetime:9"}
+    acknowledge(case, monkeypatch, "windows_spawn", parent, binding)
+    if fault == "token_only":  # the same PID and the token, but no inherited parent
+        monkeypatch.delenv(delegate_recovery.PLANNED_RESTART_PARENT_ENV)
+    assert restore_stale_snapshot(case) == 0
+    assert not workers.PENDING
+    assert delegate_recovery._read_restart_transaction(case.root, case.transaction_id)["status"] == "prepared"
+    assert "continuation unproven, its handoffs are not resumed" in caplog.text
 
 
 @pytest.mark.parametrize("refusal", ["unacknowledged", "spent_wait", "panic", "owner_restart", "bad_source"])

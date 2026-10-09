@@ -119,3 +119,18 @@ def test_panic_requests_daemon_before_worker_owned_requests(monkeypatch, tmp_pat
                daemon_stop=lambda: order.append("daemon_settlement") or True,
                children=(child,))
     assert order == ["daemon_request", "worker_request", "daemon_settlement"]
+
+
+def test_panic_requests_the_held_restart_successor_in_its_request_phase(monkeypatch, tmp_path):
+    """A successor this generation spawned is stopped by Panic, never waited for or left serving."""
+    from ouroboros import platform_layer, server_control
+
+    successor = SimpleNamespace(pid=4242)
+    monkeypatch.setattr(server_control, "_restart_successors", [successor])
+    monkeypatch.setattr(server_control, "_restart_stop_requested", False)
+    monkeypatch.setattr(platform_layer, "request_process_tree_kill",
+                        lambda proc: {"pid": proc.pid, "requested": True, "scope": "process"})
+    diagnostics = []
+    _run_panic(monkeypatch, tmp_path, daemon_stop=lambda: True, diagnostics=diagnostics)
+    assert diagnostics[0]["requests"]["restart-successor"] == [{"pid": 4242, "requested": True, "scope": "process"}]
+    assert server_control._restart_stop_requested is True  # a spawn still publishing meets this intent
