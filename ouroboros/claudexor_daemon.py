@@ -481,7 +481,8 @@ class OwnedClaudexorDaemon:
         return endpoint
 
     def status_dict(self) -> Dict[str, Any]:
-        """UI status projection. Read-only: never spawns."""
+        """UI status projection; observes capacity without starting the daemon."""
+        from ouroboros.claudexor_exit_facts import engine_status_facts
         endpoint, state, detail = self._classify_liveness()
         if detail:
             self._last_error = detail
@@ -505,6 +506,7 @@ class OwnedClaudexorDaemon:
             # Typed foreign-home disclosure ('' = ours): a marker naming another
             # data plane means we display, and manage, NOTHING here.
             "ownership_problem": ownership_problem or None,
+            **engine_status_facts(endpoint if state == "running" and not ownership_problem else None, self._engine_version, self._engine_build_sha),
         }
 
     # -- lifecycle ----------------------------------------------------------

@@ -63,9 +63,12 @@ export function renderPageHeader({
 // one generator owns the markup so every group renders identically — the sibling
 // of renderTabStrip/.app-tab, but for in-card segmented choices (.ui-segment).
 // Buttons keep the data-effort-* hooks the controls layer binds on, plus the
-// legacy .settings-effort-* classes that carry settings-specific overrides
-// (per-group column counts and accent colors). `modifier` is a bare boolean
-// data-attribute (e.g. 'data-enforcement-group') that selects a column override.
+// legacy .settings-effort-* classes that carry the settings layout and accents.
+// The columns come from the choices actually rendered: the generator writes their
+// number once as `--segment-count`, a fact of this rendering rather than a
+// per-control setting, and settings.css derives equal columns from it. `modifier`
+// is a bare boolean data-attribute (e.g. 'data-enforcement-group') for a per-group
+// override such as accent colors.
 export function renderSegmentedField({
     target,
     options = [],
@@ -84,7 +87,7 @@ export function renderSegmentedField({
     const modAttr = mod ? ` ${mod}` : '';
     const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
     return `
-        <div class="ui-segment-group settings-effort-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}"${titleAttr}>
+        <div class="ui-segment-group settings-effort-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}" style="--segment-count: ${options.length}"${titleAttr}>
             ${buttons}
         </div>
     `;

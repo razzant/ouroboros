@@ -14,4 +14,4 @@ Wake facts (context only):
 - reason: {reason}; last wake: {last_wake_ago}
 - recent facts: {events}
 - autonomy: {level} — {level_line}; unavailable tools: {withheld_tools}
-- allowance accounting (last 24 h): {spent_usd} / {daily_usd} USD; tasks running: {running}/{max_tasks}; next interval: {interval} s
+- allowance known spend (last 24 h): {spent_usd} / {daily_usd} USD; tasks running: {running}/{max_tasks}; next interval: {interval} s

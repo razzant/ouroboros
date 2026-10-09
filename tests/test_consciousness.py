@@ -28,8 +28,8 @@ T0 = 1_800_000_000.0
 def _iso(ts):
     return clock_module._iso(ts)
 FLOOR, CEILING, DEFAULT = 900, 14400, 3300
-AVAILABLE = {"status": "available", "limit_usd": 20.0, "accounted_usd": 2.5, "remaining_usd": 17.5,
-             "resets_at": "", "unknown_unmetered": 0}
+AVAILABLE = {"status": "available", "limit_usd": 20.0, "settled_usd": 2.5, "accounted_usd": 2.5,
+             "remaining_usd": 17.5, "resets_at": "", "unknown_unmetered": 0}
 
 
 @pytest.fixture
@@ -494,13 +494,18 @@ def test_launch_cap_is_the_remaining_allowance_when_no_per_task_cap(clock, monke
     assert clock.launches[0]["metadata"]["root_cost_ceiling_usd"] == 17.5
 
 
-def test_less_than_one_planned_turn_left_is_exhausted(clock, monkeypatch):
-    """A remainder at or below the graceful stop's planning margin would only wake the
-    mind to be told to land at once: the tick skips it as exhausted instead."""
-    from ouroboros.task_pacing import COST_PLANNING_MARGIN_USD
-
-    thin = dict(AVAILABLE, remaining_usd=COST_PLANNING_MARGIN_USD, accounted_usd=20.0 - COST_PLANNING_MARGIN_USD)
+def test_a_thin_allowance_still_wakes_and_only_known_exhaustion_skips(clock, monkeypatch):
+    """Owner 2026-10-07: no extra $3 margin skip. $0.50 of known allowance left is a
+    wake under a $0.50 producer ceiling; only known spend at the limit skips."""
+    thin = dict(AVAILABLE, remaining_usd=0.5, settled_usd=19.5, accounted_usd=60.0)
     monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: dict(thin))
+    assert clock.clock.tick(T0 + FLOOR + 1) == "launched"
+    assert clock.launches[-1]["metadata"]["root_cost_ceiling_usd"] == 0.5
+    clock.launches.clear()
+    clock.clock._last_wake_task_id, clock.clock._next_wake_at = "", 0.0
+    clock.live = None
+    spent = dict(AVAILABLE, status="exhausted", remaining_usd=0.0, settled_usd=20.0, accounted_usd=20.0)
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: dict(spent))
     assert clock.clock.tick(T0 + FLOOR + 1) == "skipped:allowance_exhausted"
     assert clock.launches == []
     # On an exhausted day every root completion would otherwise pull the clock to "now" and cost a

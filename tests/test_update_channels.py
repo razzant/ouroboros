@@ -57,7 +57,10 @@ def test_update_channel_setting_is_exposed_and_round_trips_in_ui():
     assert "{ value: 'stable', label: 'Stable' }" in settings_ui
     assert "{ value: 'qa', label: 'QA' }" in settings_ui
     assert "{ value: 'development', label: 'Development' }" in settings_ui
-    assert "[data-update-channel-group].settings-effort-group" in settings_css
+    # Three choices take three equal columns from the shared count-derived grid,
+    # not from a per-control override (tests/test_segmented_layout_browser.py).
+    assert "[data-update-channel-group]" not in settings_css
+    assert "--segment-columns: min(var(--segment-count, 4), 4)" in settings_css
 
 
 def test_update_source_can_be_imported_first_in_a_clean_process():

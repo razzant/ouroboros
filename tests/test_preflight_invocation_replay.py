@@ -339,7 +339,10 @@ def test_native_preflight_uses_existing_episode_and_monetary_custody(preflight, 
         assert skipped["status"] == "bypassed"
     if end != "success":
         projection = usage.usage_projection(preflight.drive_root, global_limit_usd=10.0)
-        assert projection["accounted_usd"] == 1.0 and projection["remaining_known_usd"] == 9.0
+        # The unknown outcome keeps its $1 bound as disclosed exposure; it is not
+        # known spend, so the room the limit decides on is untouched (#1487).
+        assert projection["accounted_usd"] == 1.0 and projection["unresolved_upper_bound_usd"] == 1.0
+        assert projection["settled_usd"] == 0.0 and projection["remaining_known_usd"] == 10.0
         if rows:
             retained = load_state(preflight.drive_root).advisory_runs[0]
             assert retained.execution["operation_state"] == "custody_lost"

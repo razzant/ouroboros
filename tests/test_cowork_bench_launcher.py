@@ -403,7 +403,8 @@ def test_stop_process_group_terminates_its_child_without_touching_peer(tmp_path)
     child_file = tmp_path / "child.pid"
     shell = shutil.which("sh")
     owned = subprocess.Popen([shell, "-c", 'trap \'kill "$child" 2>/dev/null; wait "$child"; exit 0\' TERM; '
-                              'sleep 60 & child=$!; printf "%s" "$child" > "$1"; wait "$child"',
+                              'sleep 60 & child=$!; printf "%s" "$child" > "$1.tmp"; '
+                              'mv "$1.tmp" "$1"; wait "$child"',
                               "cowork-test", str(child_file)], start_new_session=True)
     peer = subprocess.Popen([shell, "-c", "sleep 60"], start_new_session=True)
     try:

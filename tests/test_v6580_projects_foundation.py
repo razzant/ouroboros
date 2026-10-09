@@ -447,39 +447,31 @@ def test_checkpoint_never_touches_attached_folders(tmp_path, monkeypatch):
 
 
 def test_coop_noop_verdict_for_non_workspace_parent(tmp_path, monkeypatch):
-    """2.4A: a NON-workspace parent integrating a coop child gets a SUCCESSFUL no-op
-    (work already in the host-minted tree), not a parent-missing error."""
-    from types import SimpleNamespace
-
-    from ouroboros.tools.subagent_integration import _maybe_coop_noop_verdict
+    """Coop success now uses the same target/read admission as ordinary B."""
+    from hashlib import sha256
+    import json
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
 
     projects_root = tmp_path / "projects"
     projects_root.mkdir()
     monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(projects_root))
     tree, patch_path = _coop_tree_with_child_work(projects_root)
-
-    drive = tmp_path / "data"
-    drive.mkdir()
-    ctx = SimpleNamespace(
-        repo_dir=str(tmp_path / "sys"), drive_root=drive, task_id="parent1",
-        workspace_mode="", workspace_root=None, task_metadata={},
-    )
-    result = _maybe_coop_noop_verdict(
-        ctx,
-        child_task_id="childX",
-        reason="",
-        patch_path=patch_path,
-        manifest={"sha256": "abc"},
-        child_result={"task_constraint": {"write_root": str(tree)}},
-        touched=["app.py"],
-    )
-    assert result.startswith("OK: cooperative no-op")
+    drive = tmp_path / "state"; drive.mkdir()
+    ctx = ToolContext(repo_dir=tmp_path / "sys", drive_root=drive, task_id="parent1")
+    art = task_artifact_dir_path(drive, "childX", create=True)
+    patch = patch_path.read_bytes()
+    (art / "workspace.patch").write_bytes(patch)
+    (art / "workspace_patch.json").write_text(json.dumps({
+        "status": "ready_with_changes", "workspace_root": str(tree),
+        "sha256": sha256(patch).hexdigest(), "tracked_changed": ["app.py"]}))
+    write_task_result(drive, "childX", "completed", parent_task_id="parent1", root_task_id="parent1",
+                      delegation_role="subagent", workspace_root=str(tree),
+                      task_constraint={"mode": "acting_subagent", "surface": "external_workspace", "write_root": str(tree)})
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=drive); registry.set_context(ctx)
+    result = registry.execute_result("integrate_subagent_patch", {"task_id": "childX"}).text
+    assert result.startswith("OK: cooperative no-op"), result
     assert "ALREADY in" in result
-    # Not the coop case (a path outside the projects root) -> empty (falls through).
-    outside = tmp_path / "outside"
-    _init_git_repo(outside)
-    assert _maybe_coop_noop_verdict(
-        ctx, child_task_id="childY", reason="", patch_path=patch_path,
-        manifest={}, child_result={"task_constraint": {"write_root": str(outside)}},
-        touched=["app.py"],
-    ) == ""
+    assert "TARGET_MISMATCH" in registry.execute_result(
+        "integrate_subagent_patch", {"task_id": "childX", "target_root": str(tmp_path / "outside")}).text

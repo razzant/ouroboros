@@ -603,6 +603,8 @@ def test_real_budget_pause_cap_amendment_preserves_all_controls_and_ledger(tmp_p
     settle_attempt(spent, cost_usd=2, cost_final=True)
     hold = reserve_attempt(AttemptRequest(model="synthetic", provider="test", drive_root=f.root,
         task_id=f.accounting, root_task_id=f.accounting, reservation_usd=2, global_limit_usd=100, root_limit_usd=4))
+    mark_dispatched(hold)
+    settle_attempt(hold, cost_usd=2, cost_final=True)  # known spend reaches the $4 cap (#1487)
     with pytest.raises(BudgetExceeded) as exhausted:
         reserve_attempt(AttemptRequest(model="synthetic", provider="test", drive_root=f.root,
             task_id=f.accounting, root_task_id=f.accounting, reservation_usd=0.1, global_limit_usd=100, root_limit_usd=4))

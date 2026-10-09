@@ -289,6 +289,9 @@ _STRUCTURED_TOOLS = ("read_file", "ext_1_demo_screenshot", "mcp_demo__ping", "ru
 # fails if a producer publishes a code no shape below (and no harvested pair)
 # exercises, which is the assertion that closes that blind spot.
 _PRODUCER_SHAPES = (
+    # Shared-result refusal text is dynamic; its native sidecar keeps the existing
+    # INTEGRATE_* classification, including under route/Safety decoration.
+    ("shared_result_refused", "integrate_subagent_patch", "⚠️ INTEGRATE_TARGET_FORBIDDEN: current read authority refuses B. Verdict: /art/verdict.json. Captured result retained; nothing was transferred or marked integrated.", "INTEGRATION_BLOCKED", (("identifier", "INTEGRATE_TARGET_FORBIDDEN"),)),
     ("safety_violation", "run_command", "⚠️ SAFETY_VIOLATION: independent assessment refused", "SAFETY_VIOLATION", ()),
     ("shell_ok", "run_command", "exit_code=0\nSTDOUT:\nfine", "OK", (("exit_code", 0),)),
     ("shell_autocorrected", "run_command", "⚠️ SHELL_REGEX_AUTO_CORRECTED: corrected\nexit_code=0\nSTDOUT:\nfine", "SHELL_REGEX_AUTO_CORRECTED", (("exit_code", 0), ("shell_regex_auto_corrected", True))),

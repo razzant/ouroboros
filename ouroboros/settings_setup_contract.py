@@ -21,7 +21,6 @@ from ouroboros.secret_masking import (
     CONFIGURED_SECRET_PLACEHOLDER,
     MASKED_SECRET_SETTING_KEYS as SECRET_SETTING_KEYS,
 )
-from ouroboros.task_pacing import COST_PLANNING_MARGIN_USD
 from ouroboros.model_slots import (
     MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY,
     PROCESSING_PREFERENCE_KEY, normalize_model_role_options, normalize_processing_preference,
@@ -235,17 +234,15 @@ _BUDGET_FIELDS = [
         "settingsInputId": "s-settings-per-task-cost",
         "title": "Per-task cost cap",
         "label": "Per-task Cost Cap (USD)",
-        # The wrap-up sentence is only true above the planning margin: a cap at
-        # or below it resolves to `exhausted_soft_land`, which force-finalizes at
-        # the TOP of round 0 — no work rounds at all. The field still accepts
-        # such a cap (owner power stays), so the note states the consequence
-        # instead of the setting silently meaning something else.
+        # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself, decided
+        # on known spend; no default share of the wallet or margin before it.
         "note": (
-            "Hard cap over one task's WHOLE tree, subagents included: further model calls are "
-            "refused and the task is force-stopped once the tree's accounted spend reaches this "
-            "(a graceful wrap-up fires just before). The wrap-up itself needs about "
-            f"${COST_PLANNING_MARGIN_USD:.2f} of room, so a cap at or below that finalizes the "
-            "task immediately instead of running any work rounds."
+            "Hard cap over one task's WHOLE tree, subagents included: new model calls are "
+            "refused once the tree's known spend (confirmed and estimated) reaches it. A resumable "
+            "task then pauses with its work saved; a run that cannot be resumed ends as "
+            "budget-exhausted instead. Calls already in flight settle normally and can take the "
+            "total past the cap. Reservations and unresolved charges are shown separately, not "
+            "counted as spending. Raising the cap does not resume a paused task."
         ),
         "default": float(SETTINGS_DEFAULTS.get("OUROBOROS_PER_TASK_COST_USD", 50.0)),
         "min": "0.01",
@@ -472,7 +469,11 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
     state["modelContextWindows"] = normalize_model_role_options(MODEL_CONTEXT_WINDOWS_KEY, settings.get(MODEL_CONTEXT_WINDOWS_KEY))[0]
     state["processingPreference"] = normalize_processing_preference(settings.get(PROCESSING_PREFERENCE_KEY))
     state["modelProcessingPreferences"] = normalize_model_role_options(MODEL_PROCESSING_PREFERENCES_KEY, settings.get(MODEL_PROCESSING_PREFERENCES_KEY))[0]
-    state.update({slot["stateKey"]: _string(settings.get(slot["settingKey"])) or defaults[slot["slot"]] for slot in _MODEL_SLOTS})
+    # A loaded settings document carries every slot (defaults-merged), so a blank one
+    # is a saved "inherit Main" and shows as saved; only a slot the document lacks
+    # takes the profile default. A fresh install's wizard proposes its defaults itself.
+    state.update({slot["stateKey"]: _string(settings[slot["settingKey"]]) if slot["settingKey"] in settings
+                  else defaults[slot["slot"]] for slot in _MODEL_SLOTS})
     return state
 
 

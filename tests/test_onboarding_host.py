@@ -39,9 +39,21 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # --------------------------------------------------------------------------
 
 
+class _FakeHook:
+    def __init__(self) -> None:
+        self.handlers: list = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+
 class _FakeWindow:
+    """pywebview 5.4's window surface the setup host touches (the caption tint hooks included)."""
+
     def __init__(self) -> None:
         self.destroyed = False
+        self.events = types.SimpleNamespace(before_show=_FakeHook(), closed=_FakeHook())
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -288,7 +300,8 @@ def test_the_desktop_setup_window_cannot_write_settings_at_all(monkeypatch, tmp_
         {}, 8765, open_external_url=lambda url: {"ok": False},
     )
 
-    assert seen["methods"] == ["onboarding_finished", "open_external_url"]
+    # Completion, the external opener and the caption tint: none of them writes settings.
+    assert seen["methods"] == ["onboarding_finished", "open_external_url", "set_native_appearance"]
     assert outcome == {"saved": True, "restart_required": True}
     # The window reported completion, and the LAUNCHER still wrote nothing: the
     # bytes on disk (if any) came from the endpoint the page posted to.

@@ -13,6 +13,21 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_request_capabilities(monkeypatch, tmp_path):
+    """Each fake provider starts without another test's learned wire policy."""
+    from ouroboros import request_wire_contract
+    from ouroboros.llm import LLMClient
+
+    # A successful retry persists a drop-field action. Clearing the legacy
+    # rejected-params cache cannot reset that evidence, and a warm /models
+    # cache can also strip temperature before the fake's first rejection.
+    monkeypatch.setattr(request_wire_contract, "canonical_wire_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_CACHE", {})
+    monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", False)
 
 
 # ---------------------------------------------------------------------------
@@ -304,11 +319,10 @@ def test_chat_remote_passes_no_proxy_to_anthropic():
     assert captured_timeout[0] == 88.0
 
 
-def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection():
+def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection(monkeypatch):
     """OpenRouter no_proxy path retries once without optional sampling params."""
     from ouroboros.llm import LLMClient
 
-    LLMClient._REJECTED_PARAMS_CACHE.clear()
     client = LLMClient(api_key="test-or-key")
     target = client._resolve_remote_target("anthropic/claude-opus-4.8")
     messages = [{"role": "user", "content": "hello"}]

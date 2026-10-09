@@ -60,7 +60,7 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | POST | `/api/settings` | `gateway.settings.api_settings_post` |
 | POST | `/api/settings/secret` | `gateway.settings_secrets.api_settings_secret` |
 | GET | `/api/reviewer-slots` | `gateway.settings.api_reviewer_slots` |
-| GET | `/api/claudexor/status` | `gateway.claudexor_accounts.api_claudexor_status` |
+| GET | `/api/claudexor/status` | `gateway.claudexor_accounts.api_claudexor_status` (daemon adds nullable `last_exit` and `memory`; saved host exit observation plus a read of the already-running engine, never a wake) |
 | POST | `/api/claudexor/quota/refresh` | `gateway.claudexor_quota.api_claudexor_quota_refresh` |
 | POST | `/api/claudexor/wake` | `gateway.claudexor_accounts.api_claudexor_wake` |
 | POST | `/api/claudexor/login` | `gateway.claudexor_accounts.api_claudexor_login` |

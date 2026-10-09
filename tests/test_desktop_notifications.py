@@ -75,7 +75,7 @@ def pywebview_exposed(api):
 def test_the_bridge_exposes_the_alert_methods_and_hides_its_background():
     api = bridge(Recorder())
     assert pywebview_exposed(api) == ["notify_owner", "request_attention", "request_native_notifications",
-                                      "shell_info", "show_native_notification"]
+                                      "set_native_appearance", "shell_info", "show_native_notification"]
     assert api.notify_owner(True, "Task finished", "", False) == {"ok": True, "args": (True, "Task finished", "", False)}
 
 

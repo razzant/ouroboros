@@ -40,7 +40,7 @@ def _ctx(**overrides):
 
 def _ceiling(root_cap):
     return task_pacing.resolve_cost_ceiling(
-        None, normalize_budget_profile(None), root_cap_usd=root_cap,
+        None, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=root_cap,
     )
 
 
@@ -49,7 +49,7 @@ def test_an_unfinished_no_tool_round_takes_the_same_over_ceiling_exit(monkeypatc
     from ouroboros import loop as loop_mod
 
     ctx = _ctx()
-    monkeypatch.setattr(loop_mod, "_loop_tree_accounting", lambda **_k: {"accounted_usd": 99.0})
+    monkeypatch.setattr(loop_mod, "_loop_tree_accounting", lambda **_k: {"settled_usd": 99.0, "accounted_usd": 99.0})
     monkeypatch.setattr(
         loop_mod, "_forced_final_answer",
         lambda ctx_, **kwargs: ("wrapped up", ctx_.accumulated_usage, {"kwargs": kwargs}),
@@ -68,7 +68,7 @@ def test_it_never_reaches_for_the_tool_only_bookkeeping_or_delivery_arming(monke
     from ouroboros import loop as loop_mod
 
     touched = []
-    monkeypatch.setattr(loop_mod, "_loop_tree_accounting", lambda **_k: {"accounted_usd": 99.0})
+    monkeypatch.setattr(loop_mod, "_loop_tree_accounting", lambda **_k: {"settled_usd": 99.0, "accounted_usd": 99.0})
     monkeypatch.setattr(loop_mod, "_prepare_post_tool_budget_context",
                         lambda *a, **k: touched.append("prepare"))
     monkeypatch.setattr(loop_mod, "_note_nanny_delegate_activity",
@@ -85,7 +85,7 @@ def test_it_never_reaches_for_the_tool_only_bookkeeping_or_delivery_arming(monke
 def test_below_the_ceiling_and_a_disabled_ceiling_both_continue_unchanged(monkeypatch):
     from ouroboros import loop as loop_mod
 
-    monkeypatch.setattr(loop_mod, "_loop_tree_accounting", lambda **_k: {"accounted_usd": 1.0})
+    monkeypatch.setattr(loop_mod, "_loop_tree_accounting", lambda **_k: {"settled_usd": 1.0, "accounted_usd": 1.0})
     assert _finish_no_tool_round_budget(_ctx(), None, _ceiling(50.0)) is None
     # An explicitly disabled ceiling is untouched by this unification.
     disabled = task_pacing.resolve_cost_ceiling(
@@ -105,7 +105,7 @@ def test_the_current_candidate_survives_the_budget_exit(monkeypatch):
 
     candidate = SimpleNamespace(full_text="the answer so far")
     ctx = _ctx(delivery_candidate=candidate)
-    monkeypatch.setattr(loop_mod, "_loop_tree_accounting", lambda **_k: {"accounted_usd": 99.0})
+    monkeypatch.setattr(loop_mod, "_loop_tree_accounting", lambda **_k: {"settled_usd": 99.0, "accounted_usd": 99.0})
     monkeypatch.setattr(
         loop_mod, "_forced_final_answer",
         lambda ctx_, **kwargs: ("wrapped up", ctx_.accumulated_usage, {}),
@@ -166,7 +166,7 @@ def test_preparation_failure_pauses_and_resumes_the_no_tool_tail(full_loop, monk
     # route rebuilding is exercised by the owner-wait/ContextFit suites.
     monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *_a, **_k: (None, "max"))
     f.ctx._cost_ceiling = _ceiling(50.0)
-    tree = {"accounted_usd": 49.0, "root_limit_usd": 50.0, "age_sec": 0.0}
+    tree = {"settled_usd": 49.0, "accounted_usd": 49.0, "root_limit_usd": 50.0, "age_sec": 0.0}
     monkeypatch.setattr(loop, "_loop_tree_accounting", lambda **_k: dict(tree))
     monkeypatch.setattr(loop_budget, "_loop_tree_accounting", lambda **_k: dict(tree))
     monkeypatch.setattr(loop_budget, "_wrapup_global_remaining", lambda: 100.0)

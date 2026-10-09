@@ -4821,6 +4821,14 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     margin-bottom: 8px;
 }
 
+/* A failed review run's recorded reason: meta under its outcome line. */
+.skills-review-reason {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
 .skills-badge {
     padding: 2px 8px;
     border-radius: var(--radius-xs);

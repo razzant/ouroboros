@@ -127,10 +127,15 @@ def render_cash(total: tuple) -> dict:
     return dict(zip((*CASH_KEYS, "accounted_usd"), map(float, rounded_cash(total))))
 
 
-def exceeds_limit(total: tuple, limit, bound=None, *, dispatch=False) -> bool:
-    """Admission uses rounded buckets and the existing nanodollar allowance."""
+def exceeds_limit(total: tuple, limit) -> bool:
+    """Whether KNOWN spend has reached ``limit`` (owner Q4-A, #1487).
+
+    Known is the settled bucket: confirmed prices plus disclosed estimates.
+    Reservations and unresolved bounds stay in the accounted exposure for
+    display; they are not counted as spending and refuse nothing here. The
+    same predicate guards reservation and dispatch, so a crossing in between
+    refuses without sending. Concurrent and late charges can still overshoot.
+    """
     with exact_money():
-        cap, spent, allowance = decimal_of(limit), rounded_cash(total)[-1], Decimal("1e-9")
-        return cap <= 0 or (spent > cap + allowance if dispatch else
-                            spent >= cap - allowance or
-                            bound is not None and spent + decimal_of(bound) > cap + allowance)
+        cap, known, allowance = decimal_of(limit), rounded_cash(total)[0], Decimal("1e-9")
+        return cap <= 0 or known >= cap - allowance

@@ -208,7 +208,8 @@ def test_api_state_warm_path_replays_ledger_zero_times_and_projects_once(
     # be the de-triplication regression this test exists to catch).
     assert len(counters["projections"]) == 1
     assert "budget_reserve_usd" in payload["evolution_state"]  # real snapshot ran
-    assert payload["spent_usd"] == 1.25  # settled 0.25 + reserved bound 1.0
+    assert payload["spent_usd"] == 0.25  # known (settled) spend; the $1.00 hold rides in accounting
+    assert payload["accounting"]["accounted_usd"] == 1.25
     assert payload["accounting"]["authority"] == "physical_attempt_ledger"
 
 

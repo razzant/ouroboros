@@ -111,7 +111,9 @@ import { accountRowFacts } from './harness_accounts.js';
     let disposeLanguage = null;
     let catalogGeneration = 0;
     const stepScrollPositions = new Map();
-    const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings) => {
+    let suggestedVisionModel = null;
+    const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings, { slot } = {}) => {
+        if (slot === 'vision') suggestedVisionModel = null;
         adoptModelSettings(settings);
         state.modelsDirty = true;
         markStepEdited();
@@ -389,13 +391,21 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function applyModelDefaults(force) {
+        const localMain = hasLocalModel() && LOCAL_ROUTING_MODES.find((mode) => mode.value === state.localRoutingMode)?.flags?.[0];
+        // Withdraw only our suggestion when Main moves local, even if another
+        // model was edited. A deliberate Vision choice remains the owner's.
+        if (localMain && suggestedVisionModel !== null && state.visionModel === suggestedVisionModel) {
+            state.visionModel = '';
+            suggestedVisionModel = null;
+        }
         if (state.modelsDirty && !force) return;
         if (!force && bootstrap.freshInstall !== true && MODEL_SLOTS.some((slot) => trim(INITIAL_STATE[slot.stateKey]))) return;
         if (hasModelSubscription()) return;
         const defaults = MODEL_DEFAULTS[activeProviderProfile()] || MODEL_DEFAULTS.openrouter || {};
-        state.mainModel = defaults.main || '';
-        state.lightModel = defaults.light || '';
-        state.fallbackModel = defaults.fallback || '';
+        for (const [key, name] of [['mainModel', 'main'], ['lightModel', 'light'], ['visionModel', 'vision'], ['fallbackModel', 'fallback']]) {
+            state[key] = name === 'vision' && localMain ? '' : defaults[name] || '';
+        }
+        suggestedVisionModel = state.visionModel;
         state.modelsDirty = false;
     }
 
@@ -666,7 +676,7 @@ import { accountRowFacts } from './harness_accounts.js';
     }
     function mainBinding() { return JSON.stringify([state.mainModel, state.modelAccounts.main || '', state.modelProcessingPreferences?.main || state.processingPreference || '']); }
 
-        function providerKeyField({ id, label, placeholder, value, note, inputType }) {
+        function providerKeyField({ id, label, placeholder, stateKey, note, inputType }) {
             const type = inputType || 'password';
             return `
                 <div class="field ui-field">
@@ -674,7 +684,7 @@ import { accountRowFacts } from './harness_accounts.js';
                     <label for="${escapeHtml(id)}">${escapeHtml(label)}</label>
                     <button class="field-clear" data-clear="${escapeHtml(id)}" type="button" aria-label="Clear ${escapeHtml(label)}">Clear</button>
                 </div>
-                <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}" aria-describedby="${escapeHtml(id)}-help" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value)}">
+                <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}" aria-describedby="${escapeHtml(id)}-help" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state[stateKey])}">
                 <div id="${escapeHtml(id)}-help" class="field-note ui-field-help">${escapeHtml(note)}</div>
             </div>
             `;
@@ -710,10 +720,7 @@ import { accountRowFacts } from './harness_accounts.js';
                     <p>${escapeHtml(PROVIDER_PROFILES[selectedProfile]?.providerCopy || '')}</p>
                 </div>`}
                 <div class="field-grid">
-                    ${primaryProviderFields().map((field) => providerKeyField({
-                        ...field,
-                        value: state[field.stateKey],
-                    })).join('')}
+                    ${primaryProviderFields().map(providerKeyField).join('')}
                 </div>
             <details class="wizard-collapse" data-collapse="more-providers" ${moreProvidersOpen ? 'open' : ''}>
                 <summary>
@@ -722,10 +729,7 @@ import { accountRowFacts } from './harness_accounts.js';
                 </summary>
                 <div class="wizard-collapse-body">
                     <div class="field-grid">
-                        ${moreProviderFields().map((field) => providerKeyField({
-                            ...field,
-                            value: state[field.stateKey],
-                        })).join('')}
+                        ${moreProviderFields().map(providerKeyField).join('')}
                     </div>
                 </div>
             </details>
@@ -825,6 +829,7 @@ import { accountRowFacts } from './harness_accounts.js';
     async function reviewAndStart() {
         if (validateProvidersStep()) return;
         state.error = '';
+        applyModelDefaults(false);
         const originStep = state.currentStep;
         const ready = await agentsStep.refreshSubagentsPreview({ force: true });
         if (state.currentStep !== originStep) return;
@@ -1134,9 +1139,7 @@ import { accountRowFacts } from './harness_accounts.js';
             });
         }
 
-            PROVIDER_FIELDS.forEach((field) => {
-                bindStateInput(document.getElementById(field.id), field.stateKey);
-            });
+        PROVIDER_FIELDS.forEach((field) => bindStateInput(document.getElementById(field.id), field.stateKey));
         if (localPreset) localPreset.addEventListener('change', () => {
             applyPresetSelection(localPreset.value);
             state.error = '';
@@ -1565,12 +1568,8 @@ import { accountRowFacts } from './harness_accounts.js';
             if (state.currentStep === 'summary') saveWizard();
             else nextStep();
         });
-        document.getElementById('skip-presets-btn')?.addEventListener('click', () => {
-            void prepareMainReviewers();
-        });
-        document.getElementById('check-save-btn')?.addEventListener('click', () => {
-            checkSaveStatus();
-        });
+        document.getElementById('skip-presets-btn')?.addEventListener('click', prepareMainReviewers);
+        document.getElementById('check-save-btn')?.addEventListener('click', checkSaveStatus);
         document.getElementById('quick-start-btn')?.addEventListener('click', reviewAndStart);
         document.getElementById('onboarding-access-retry')?.addEventListener('click', async () => {
             await Promise.allSettled([agentsStep?.refreshStatus(), refreshModelSources(),

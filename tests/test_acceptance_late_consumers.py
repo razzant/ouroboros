@@ -398,33 +398,53 @@ def test_explicit_receipt_requires_id_routed_chat_and_exact_bytes(late, tmp_path
     assert not late.calls and not load_task_result(f.root, f.accounting).get('task_acceptance_review_accounting')
 
 
-@pytest.mark.parametrize('cap', ['unlimited', 'unknown', 'prior_hold', 'prior_spend', 'live_global'])
+@pytest.mark.parametrize('cap', ['unlimited', 'unknown', 'prior_hold', 'prior_spend', 'spent_at_cap',
+                                 'spent_over_cap', 'live_global', 'live_global_spent'])
 def test_original_cap_and_live_money_fences_use_original_wallet(late, tmp_path, monkeypatch, cap):
     import time
-    from ouroboros import pricing
-    from ouroboros.usage_accounting import AttemptRequest, reserve_attempt
+    from ouroboros import pricing, review_operation
+    from ouroboros.usage_accounting import AttemptRequest, execute_physical_attempt, reserve_attempt, usage_projection
     # The wave fence needs a priced reviewer seat: an unpriced one adds nothing and fits. Pin the
     # catalog row; a live fetch that times out, or a test's leftover 30 s retry_after, leaves none.
     monkeypatch.setitem(pricing._cached_pricing, 'openrouter', {'openai/gpt-4.1-nano': (0.1, 0.025, None, 0.4)})
     monkeypatch.setitem(pricing._pricing_fetched_at, 'openrouter', time.time())
-    f = delivered(tmp_path, monkeypatch, retry=True, cap='unlimited' if cap in {'unlimited', 'live_global'} else 'unknown' if cap == 'unknown' else 'finite')
+    live = cap.startswith('live_global')
+    f = delivered(tmp_path, monkeypatch, retry=True,
+                  cap='unlimited' if cap == 'unlimited' or live else 'unknown' if cap == 'unknown' else 'finite')
     monkeypatch.setenv('OUROBOROS_PER_TASK_COST_USD', '0.00001')
+
+    def paid(usd, root):
+        # A settled actual price is KNOWN spend: admitted while known is below the
+        # cap, and recorded whole even where it lands beyond it (#1487).
+        execute_physical_attempt(AttemptRequest(model='openai/gpt-4.1-nano', provider='openai', drive_root=f.root,
+            task_id=root, root_task_id=root, root_limit_usd=4, reservation_usd=usd),
+            lambda: 'original paid work', extractor=lambda _response: ({}, usd, True))
     if cap == 'prior_hold':
+        # An open hold is disclosed exposure, never spending: it refuses nothing.
         reserve_attempt(AttemptRequest(model='openai/gpt-4.1-nano', provider='openai', drive_root=f.root,
             task_id=f.accounting, root_task_id=f.accounting, root_limit_usd=4, reservation_usd=3.9999))
-    if cap == 'prior_spend':
-        from ouroboros.usage_accounting import execute_physical_attempt
-        execute_physical_attempt(AttemptRequest(model='openai/gpt-4.1-nano', provider='openai', drive_root=f.root,
-            task_id=f.accounting, root_task_id=f.accounting, root_limit_usd=4, reservation_usd=3.9999),
-            lambda: 'original paid work', extractor=lambda _response: ({}, 3.9999, True))
-    if cap == 'live_global':
+    if cap in {'prior_spend', 'spent_at_cap', 'spent_over_cap'}:
+        paid({'prior_spend': 3.9999, 'spent_at_cap': 4, 'spent_over_cap': 4.5}[cap], f.accounting)
+    if cap == 'live_global_spent':
+        paid(0.00001, 'unrelated-root')  # another root's known spend reaches the live global cap exactly
+    if live:
         monkeypatch.setattr('ouroboros.settings_setup_contract.resolve_total_budget_usd', lambda: 0.00001)
     ctx = _caller(f)
+    gate = threading.Event()
+    late.gates.append(gate)
     result = _request(f, ctx, _source(ctx))
-    if cap == 'unlimited':
+    if cap in {'unlimited', 'prior_hold', 'prior_spend', 'live_global'}:
         assert result['status'] in {'pending', 'announced', 'published', 'settled'}, result
+        # The gate holds every settlement: all three seats pass reserve and dispatch
+        # on the same known spend, whatever the prior and sibling holds add up to.
         until(lambda: len(late.calls) == 3)
-        assert all(scope.root_limit_usd is None and scope.root_limit_source for scope, _ in late.calls)
+        gate.set()
+        until(lambda: not review_operation._LIVE)
+        assert all(scope.root_limit_usd == (4 if cap.startswith('prior') else None) and scope.root_limit_source
+                   for scope, _ in late.calls)
+        if cap == 'prior_spend':
+            # Seats sent in parallel on known $3.9999 overshoot the $4 cap: recorded, not prevented.
+            assert usage_projection(f.root, root_task_id=f.accounting)['settled_usd'] == pytest.approx(4.0299)
     else:
         assert result['status'] == 'owed', result
         assert result['reason'] == ('original_root_cap_unknown' if cap == 'unknown' else 'review_wave_budget_insufficient')

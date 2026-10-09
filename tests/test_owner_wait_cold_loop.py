@@ -46,10 +46,23 @@ def test_provider_isolation_preserves_event_loop_self_pipe(monkeypatch):
     event_loop.close()
 
 
-def cold_registry(tmp_path, monkeypatch, ceiling=None):
+EXPLICIT = {"budget_profile": {"cost_hard_stop_pct": 50}}  # an authored experiment profile
+
+
+def _settle(amount, *, provider="openai"):
+    """KNOWN spend under the bound scope: the only money a limit decides on (#1487)."""
+    held = accounting.reserve_attempt(accounting.AttemptRequest(
+        model="fixture", provider=provider, reservation_usd=amount))
+    accounting.mark_dispatched(held)
+    accounting.settle_attempt(held, {}, cost_usd=amount, cost_final=True)
+
+
+def cold_registry(tmp_path, monkeypatch, ceiling=None, contract=None):
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     ctx = registry._ctx
     ctx.task_id, ctx.task_attempt = "t-wait", 1
+    if contract is not None:
+        ctx.task_contract = dict(contract)
     ctx.active_model, ctx.active_effort = "same-model", "high"
     ctx.active_use_local, ctx.active_context_mode = False, "max"
     ctx._owner_wait_requested = "quiz"
@@ -113,20 +126,19 @@ def test_cold_switched_model_keeps_actual_overflow_reclaim_and_retry(tmp_path, m
 def test_cold_loop_keeps_original_ceiling_while_live_wallet_still_binds(tmp_path, monkeypatch):
     scope = accounting.UsageScope(drive_root=tmp_path, task_id="t-wait", root_task_id="t-wait",
                                   global_limit_usd=200.0, root_limit_usd=50.0)
+    explicit = normalize_budget_profile(EXPLICIT["budget_profile"])
     with accounting.usage_scope(scope):
-        original = task_pacing.resolve_cost_ceiling(200.0, normalize_budget_profile(None), root_cap_usd=50.0)
+        original = task_pacing.resolve_cost_ceiling(200.0, explicit, root_cap_usd=50.0)
         assert original.ceiling_usd == 47.0
-        accounting.reserve_attempt(accounting.AttemptRequest(model="fixture", provider="openai", reservation_usd=10.0))
-        registry = cold_registry(tmp_path, monkeypatch, original)
-        others = []
+        _settle(10.0)
+        registry = cold_registry(tmp_path, monkeypatch, original, EXPLICIT)
         for index in range(4):
             with accounting.usage_scope(replace(scope, task_id=f"other-{index}", root_task_id=f"other-{index}")):
-                others.append(accounting.reserve_attempt(accounting.AttemptRequest(
-                    model="fixture", provider="openai", reservation_usd=40.0)))
-        fresh = task_pacing.resolve_cost_ceiling(30.0, normalize_budget_profile(None), root_cap_usd=50.0)
+                _settle(40.0)
+        fresh = task_pacing.resolve_cost_ceiling(30.0, explicit, root_cap_usd=50.0)
         assert fresh.ceiling_usd == 15.0
         registry._ctx._cost_ceiling = fresh  # new context-builder disclosure before loading saved messages
-        accounting.reserve_attempt(accounting.AttemptRequest(model="fixture", provider="openai", reservation_usd=6.0))
+        _settle(6.0)
         captured = []
         soft_land = loop._soft_land_exhausted_ceiling
         forced = []
@@ -155,16 +167,33 @@ def test_cold_loop_keeps_original_ceiling_while_live_wallet_still_binds(tmp_path
         monkeypatch.setattr(loop, "_soft_land_exhausted_ceiling", inspect_ceiling)
         result, _, _ = loop.run_llm_loop(**{**_loop_kwargs(tmp_path, registry, []), "budget_remaining_usd": 30.0})
         assert result == "ceiling retained" and captured == [original]
-        permitted = accounting.reserve_attempt(accounting.AttemptRequest(model="fixture", provider="openai", reservation_usd=1.0))
+        _settle(24.0)  # the live wallet's known spend reaches its $200
         with pytest.raises(accounting.BudgetExceeded) as global_refusal:
-            accounting.reserve_attempt(accounting.AttemptRequest(model="fixture", provider="openai", reservation_usd=25.0))
+            accounting.reserve_attempt(accounting.AttemptRequest(model="fixture", provider="openai", reservation_usd=0.01))
         assert global_refusal.value.limit_scope == "global"
-        accounting.release_attempt(permitted, "test did not send")
-        for held in others:
-            accounting.release_attempt(held, "test did not send")
+    with accounting.usage_scope(replace(scope, global_limit_usd=1000.0)):
+        _settle(10.0)  # the tree's known spend reaches its $50 cap ($10 + $6 + $24 + $10)
         with pytest.raises(accounting.BudgetExceeded) as root_refusal:
-            accounting.reserve_attempt(accounting.AttemptRequest(model="fixture", provider="openai", reservation_usd=35.0))
+            accounting.reserve_attempt(accounting.AttemptRequest(model="fixture", provider="openai", reservation_usd=0.01))
         assert root_refusal.value.limit_scope == "root"
+
+
+def test_an_ordinary_cold_restore_drops_a_saved_default_ceiling(tmp_path, monkeypatch):
+    """Owner 2026-10-07 for existing installs: an owner wait saved before the upgrade
+    carries the removed default ($47 = cap minus margin). With no explicit profile and no
+    producer, the planned-restart restore resumes without it and says so."""
+    from ouroboros.owner_wait import load_owner_wait
+
+    scope = accounting.UsageScope(drive_root=tmp_path, task_id="t-wait", root_task_id="t-wait",
+                                  global_limit_usd=200.0, root_limit_usd=50.0)
+    legacy = task_pacing.CostCeiling(state="active", ceiling_usd=47.0, root_cap_usd=50.0,
+                                     planning_margin_usd=3.0, basis="min(global_pct, root_cap_minus_margin)")
+    with accounting.usage_scope(scope):
+        registry = cold_registry(tmp_path, monkeypatch, legacy)
+        load_owner_wait(registry._ctx)
+    restored = registry._ctx._cost_ceiling
+    assert restored.state == task_pacing.COST_CEILING_DISABLED and restored.ceiling_usd is None
+    assert restored.basis == "no_default_cost_stop(saved default stop $47.00 removed)"
 
 
 def test_agent_cold_context_shows_saved_ceiling_and_current_wallet(tmp_path, monkeypatch):
@@ -176,16 +205,14 @@ def test_agent_cold_context_shows_saved_ceiling_and_current_wallet(tmp_path, mon
     scope = accounting.UsageScope(drive_root=tmp_path, task_id="t-wait", root_task_id="t-wait",
                                   global_limit_usd=200.0, root_limit_usd=50.0)
     with accounting.usage_scope(scope):
-        original = task_pacing.resolve_task_cost_ceiling(None, 200.0)
+        original = task_pacing.resolve_task_cost_ceiling(SimpleNamespace(task_contract=EXPLICIT), 200.0)
         assert original.ceiling_usd == 47.0
-        registry = cold_registry(tmp_path, monkeypatch, original)
+        registry = cold_registry(tmp_path, monkeypatch, original, EXPLICIT)
         handoff = registry._ctx.owner_wait_resume
-        accounting.reserve_attempt(accounting.AttemptRequest(
-            model="fixture", provider="openai", reservation_usd=10.0))
+        _settle(10.0)
         for index in range(4):
             with accounting.usage_scope(replace(scope, task_id=f"other-{index}", root_task_id=f"other-{index}")):
-                accounting.reserve_attempt(accounting.AttemptRequest(
-                    model="fixture", provider="openai", reservation_usd=40.0))
+                _settle(40.0)
 
         env = _make_health_env(tmp_path)
         env.branch_dev, env.budget_drive_root = "ouroboros", tmp_path
@@ -212,6 +239,7 @@ def test_agent_cold_context_shows_saved_ceiling_and_current_wallet(tmp_path, mon
         monkeypatch.setattr(agent_module, "build_llm_messages", runtime_messages)
         task = {"id": "t-wait", "root_task_id": "t-wait", "delegation_role": "root",
                 "type": "task", "text": "Continue saved work", "_attempt": 1,
+                "budget_profile": dict(EXPLICIT["budget_profile"]),
                 "_owner_wait_resume": handoff, "budget_drive_root": str(tmp_path)}
         ctx, messages, caps = agent._prepare_task_context(task)
         assert caps["budget_remaining"] == 30.0
@@ -232,7 +260,8 @@ def test_agent_cold_context_shows_saved_ceiling_and_current_wallet(tmp_path, mon
             "budget_remaining_usd": caps["budget_remaining"],
         })
         assert result == "Continued saved work" and len(captured) == 1
+        _settle(30.0)  # known spend reaches the $200 wallet
         with pytest.raises(accounting.BudgetExceeded) as refused:
             accounting.reserve_attempt(accounting.AttemptRequest(
-                model="fixture", provider="openai", reservation_usd=31.0))
+                model="fixture", provider="openai", reservation_usd=0.01))
         assert refused.value.limit_scope == "global"

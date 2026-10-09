@@ -1,0 +1,4 @@
+113
+#1569: the process_logging.py module row names its new second job, the launcher's byte-capped,
+storage-error-resilient copy of the server pipe into agent_stdout.log, and that the module imports only
+the standard library so the launcher can rely on it. The row's older description is kept whole.

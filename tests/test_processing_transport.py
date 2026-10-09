@@ -278,13 +278,33 @@ def test_anthropic_fast_rate_refusal_releases_then_sends_standard(transport, mon
     assert [row["state"] for row in {r["attempt_id"]: r for r in rows}.values()] == ["released", "settled"]
 
 
-def test_standard_retry_is_refused_when_its_own_reservation_exceeds_budget(transport, monkeypatch):
+def _known_sibling_charge_before_the_retry(monkeypatch, root, task_id, first_mode):
+    """Price the first mode at $0.01; before the standard retry is priced, a sibling's
+    $0.02 lands at a final price: the tree's KNOWN spend reaches the $0.02 cap (#1487)."""
+    landed = []
+
+    def price(request):
+        if request.submitted_processing_mode == first_mode:
+            return 0.01
+        if not landed:
+            landed.append(True)
+            with ua.usage_scope(ua.UsageScope(drive_root=root, task_id="sibling", root_task_id=task_id)):
+                held = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="p", reservation_usd=0.02))
+                ua.mark_dispatched(held)
+                ua.settle_attempt(held, {}, cost_usd=0.02, cost_final=True)
+        return 0.04
+
+    monkeypatch.setattr(ua, "_reservation_cost", price)
+
+
+def test_standard_retry_is_refused_when_known_spend_reached_the_budget(transport, monkeypatch):
+    """The retry gets its own admission: known spend that reached the cap after the
+    first attempt was admitted refuses the retry's reservation; nothing is sent."""
     from ouroboros.llm_attempt import ProcessingNotStarted
 
     root, client, _sent = transport
     calls = []
-    monkeypatch.setattr(ua, "_reservation_cost", lambda request:
-                        0.01 if request.submitted_processing_mode == "flex" else 0.04)
+    _known_sibling_charge_before_the_retry(monkeypatch, root, "processing", "flex")
     target = {**client._resolve_remote_target("openai::same-model"), "processing_preference": "economy"}
     payload = client._build_remote_kwargs(target, [{"role": "user", "content": "input"}],
         "high", 123, "auto", None, None)
@@ -297,8 +317,8 @@ def test_standard_retry_is_refused_when_its_own_reservation_exceeds_budget(trans
         with pytest.raises(ua.BudgetExceeded):
             client._create_chat_completion_with_retries(create, payload, target)
     assert len(calls) == 1
-    rows = ledger_rows(root)
-    assert rows[-1]["state"] == "released"
+    finals = {row["attempt_id"]: row for row in ledger_rows(root)}.values()
+    assert [(row["task_id"], row["state"]) for row in finals] == [("processing", "released"), ("sibling", "settled")]
 
 
 @pytest.mark.parametrize("provider,expected", [("openrouter", "default"), ("anthropic", "standard")])

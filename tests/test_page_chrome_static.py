@@ -30,7 +30,11 @@ def test_shared_page_header_helper_has_no_inline_styles():
 
     assert "export function renderPageHeader" in source
     assert "export function renderTabStrip" in source
-    assert "style=" not in source
+    # The one inline value is the segmented generator's own count of the choices it
+    # rendered, a narrowly named custom property the shared grid reads (DEVELOPMENT
+    # "Design System"); no visual property is ever written inline.
+    assert re.findall(r'style="([^"]*)"', source) == ["--segment-count: ${options.length}"]
+    assert ".style." not in source
     assert "app-page-header" in source
     assert "app-tab-strip" in source
 

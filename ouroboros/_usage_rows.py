@@ -455,11 +455,12 @@ def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _with_limit(summary: Dict[str, Any], limit: Optional[float]) -> Dict[str, Any]:
-    """Decorate a summary with its configured limit and remaining headroom."""
+    """Decorate a summary with its configured limit and the room left above KNOWN
+    (settled) spend — the admission rule's own number; open holds stay beside it."""
     if limit is None:
         return summary
     summary["limit_usd"] = round(max(0.0, float(limit)), 6)
-    summary["remaining_known_usd"] = round(max(0.0, summary["limit_usd"] - float(summary["accounted_usd"])), 6)
+    summary["remaining_known_usd"] = round(max(0.0, summary["limit_usd"] - float(summary["settled_usd"])), 6)
     return summary
 
 

@@ -35,22 +35,22 @@ def test_owner_cap_is_total_group_allowance_with_successor_and_late_charge(late,
     assert ledger_rows(f.root) == before
     assert load_task_result(f.root, f.accounting)["billing_group"] == binding
     with ua.usage_scope(_scope(f.root, "successor", "successor", group=f.accounting, group_limit=4)):
-        paid = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", reservation_usd=5.8))
+        paid = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", reservation_usd=6.0))
         assert paid.scope.billing_group_limit_usd == 9
         assert paid.scope.billing_group_limit_source == "owner_amendment"
         ua.mark_dispatched(paid)
-        ua.settle_attempt(paid, {}, cost_usd=5.8, cost_final=True)
+        ua.settle_attempt(paid, {}, cost_usd=6.0, cost_final=True)  # known spend reaches the amended $9
     with pytest.raises(ua.BudgetExceeded):
         _spend(f.root, _scope(f.root, f.accounting, f.accounting, group=f.accounting, group_limit=4), .3)
     projection = ua.usage_projection(f.root, billing_group_id=f.accounting)
-    assert projection["accounted_usd"] == pytest.approx(8.8) and projection["limit_usd"] == 9
+    assert projection["accounted_usd"] == pytest.approx(9.0) and projection["limit_usd"] == 9
     from ouroboros.usage_admission import task_money_snapshot
     snapshot = task_money_snapshot(f.root, {"id": f.accounting}, f.accounting)
-    assert snapshot["remaining_known_usd"] == pytest.approx(.2)
+    assert snapshot["remaining_known_usd"] == pytest.approx(0.0)
     assert snapshot["group_axis"]["source"] == "owner_amendment"
     with ua.usage_scope(_scope(f.root, f.accounting, f.accounting, group=f.accounting, group_limit=4)):
         from ouroboros.loop_budget import _loop_tree_accounting
-        assert _loop_tree_accounting(refresh=True, strict=True)["accounted_usd"] == pytest.approx(8.8)
+        assert _loop_tree_accounting(refresh=True, strict=True)["settled_usd"] == pytest.approx(9.0)
     monkeypatch.setattr(ua, "_reservation_cost", lambda _request: .1)
     requested = _request(f, ctx, _source(ctx, text="Now review the historical answer"), action="review")
     assert requested["reason"] == "review_wave_budget_insufficient", requested
@@ -60,7 +60,7 @@ def test_owner_cap_is_total_group_allowance_with_successor_and_late_charge(late,
 def test_successor_cap_amendment_cannot_widen_original_group(late, tmp_path, monkeypatch):  # noqa: F811
     f = delivered(tmp_path, monkeypatch)
     bind_group(f, "original")
-    _spend(f.root, _scope(f.root, "original", "original", group="original", group_limit=4), 3.8)
+    _spend(f.root, _scope(f.root, "original", "original", group="original", group_limit=4), 4.0)
     ctx = _caller(f)
     assert _request(f, ctx, _source(ctx), action="amend_cap", new_original_root_cap_usd=9)["status"] == "amended"
     with pytest.raises(ua.BudgetExceeded):

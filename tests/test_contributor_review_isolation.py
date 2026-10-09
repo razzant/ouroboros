@@ -223,15 +223,24 @@ def run_review_change(ctx, **arguments):
         return reserve_attempt(AttemptRequest(model="synthetic", provider="test", task_id="probe",
                                               root_task_id="probe", reservation_usd=usd))
 
-    spent = admit(1.0)
-    mark_dispatched(spent)
-    settle_attempt(spent, cost_usd=1.0, cost_final=True)
-    for label, usd in (("hold_2_5", 2.5), ("over_cap", 10.0)):
+    def spend(usd):
+        held = admit(usd)
+        mark_dispatched(held)
+        settle_attempt(held, cost_usd=usd, cost_final=True)
+
+    def probe(label, step):
         try:
-            release_attempt(admit(usd))
+            step()
             report[label] = "admitted"
         except BudgetExceeded as exc:
             report[label] = "refused: " + str(exc)
+
+    probe("spend_1", lambda: spend(1.0))
+    # Known spend decides (#1487): a hold above the remainder is exposure, not spending.
+    probe("hold_10", lambda: release_attempt(admit(10.0)))
+    if report["spend_1"] == "admitted":
+        spend(3.0)  # known spend reaches the explicit cap
+    probe("at_cap", lambda: release_attempt(admit(0.01)))
     slots = {row.slot_id: row for row in load_reviewer_slot_config().triad}
     report["configured_triad"] = sorted(slots)
     record_reviewer_slot_executions(
@@ -346,8 +355,9 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
     assert report["saved_total_budget"] == 500.0
     assert report["global_limit_usd"] == 4.0
     assert (report["ledger_at_start"]["accounted_usd"], report["ledger_at_start"]["limit_usd"]) == (0.0, 4.0)
-    assert report["hold_2_5"] == "admitted"  # $1 spent + $2.50 held fits $4
-    assert report["over_cap"].startswith("refused")
+    assert report["spend_1"] == "admitted"
+    assert report["hold_10"] == "admitted"  # $1 known: a $10 hold is exposure, not spending
+    assert report["at_cap"].startswith("refused")  # known $4 reached the $4 cap, not the saved $500
     assert (drive / "state" / "usage.sqlite").is_file()
     sys.path.insert(0, str(REPO))
     from ouroboros import usage_store
@@ -356,8 +366,8 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
         return [row for row in usage_store.read_usage_records(drive)
                 if row.get("task_id") == "probe" and row.get("state") == state]
 
-    assert [float(row["cost_usd"]) for row in probe_rows("settled")] == [1.0]
-    assert len(probe_rows("released")) == 1  # the $2.50 hold, admitted then let go
+    assert [float(row["cost_usd"]) for row in probe_rows("settled")] == [1.0, 3.0]
+    assert len(probe_rows("released")) == 1  # the $10 hold, admitted then let go
     # The configured rows came from the host settings; the marker landed in the drive.
     assert report["configured_triad"] == ["t1"]
     marker = json.loads((drive / "state" / "reviewer_slot_last_execution.json").read_text(encoding="utf-8"))
@@ -400,14 +410,14 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
     host_values = (_HOST_PROVIDER_VALUE.encode(), _TOKEN.encode())
     assert len(outputs) > 3 and not [blob for blob in outputs if any(value in blob for value in host_values)]
 
-    # Continuation with the SAME cap on the same drive: the spend already
-    # recorded counts, so the hold that fit before no longer does.
+    # Continuation with the SAME cap on the same drive: the known spend already
+    # recorded counts, so the spend that fit before no longer does.
     again = _review(repo, host, out, "--run-cap-usd=4", "--attach-host-engine")
     assert again.returncode == 3, again.stderr[-4000:]
     second = json.loads((out / "probe.json").read_text(encoding="utf-8"))
-    assert (second["ledger_at_start"]["accounted_usd"], second["global_limit_usd"]) == (1.0, 4.0)
-    assert second["hold_2_5"].startswith("refused")  # $2 spent + $2.50 > $4
-    assert [float(row["cost_usd"]) for row in probe_rows("settled")] == [1.0, 1.0]
+    assert (second["ledger_at_start"]["settled_usd"], second["global_limit_usd"]) == (4.0, 4.0)
+    assert second["spend_1"].startswith("refused") and second["hold_10"].startswith("refused")
+    assert [float(row["cost_usd"]) for row in probe_rows("settled")] == [1.0, 3.0]
     # A continuation never changes the cap it was opened with.
     changed = _review(repo, host, out, "--run-cap-usd=9", "--attach-host-engine")
     assert changed.returncode == 3 and "keeps that cap" in changed.stderr

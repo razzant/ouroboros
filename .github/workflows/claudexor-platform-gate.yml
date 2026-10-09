@@ -47,7 +47,13 @@
 #             `skill-smoke` in ci.yml. So it runs where that paid lane runs:
 #             ouroboros-stable, manual dispatch, and tags.
 #
-# A THIRD, NARROWER JOB: toolchain. The fixture lane installs the runtime for the daemon
+# lifecycle — production exact_start/delegate_wait/custody against the pinned
+# engine: cancel and crash recovery, continuation, then retirement by owner
+# lifetime. Fake manifests alone are projected into the host capability catalog
+# (the engine deliberately excludes fakes there); no run response is substituted.
+# Readonly fake runs prove no vendor session or child-process containment.
+#
+# A NARROWER JOB: toolchain. The fixture lane installs the runtime for the daemon
 # but never runs npm, and the live lane pre-installs its harness with setup-node's npm.
 # Neither proves the managed Node/npm toolchain that `install_missing_harness_cli` hands
 # to the engine. The toolchain job does, credential-free and on pushes/PRs: with no
@@ -58,7 +64,7 @@
 # (scripts/claudexor_toolchain_smoke.py). It never runs `harness install`, so no harness
 # install is claimed by it.
 #
-# A FOURTH, WINDOWS-ONLY JOB: consumer. The same witness, same isolation, then
+# A WINDOWS-ONLY JOB: consumer. The same witness, same isolation, then
 # `--harness-install codex`: the production `install_missing_harness_cli` performs a
 # REAL local install of the engine-pinned Codex from the npm registry into the
 # disposable home, and the receipt must name the release-verified package-native
@@ -101,11 +107,12 @@ on:
       - 'ouroboros/tools/delegate_integration.py'
       - 'ouroboros/tools/subagent_integration.py'
       - 'ouroboros/subagent_worktrees.py'
-      - 'ouroboros/delegate_custody.py'
+      - 'ouroboros/delegate_*.py'
       - 'ouroboros/review_execution.py'
       - 'ouroboros/subagents.py'
       - 'ouroboros/config.py'
       - 'scripts/claudexor_platform_smoke.py'
+      - 'scripts/claudexor_lifecycle_smoke.py'
       - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
       - 'Ouroboros.spec'
@@ -131,11 +138,12 @@ on:
       - 'ouroboros/tools/delegate_integration.py'
       - 'ouroboros/tools/subagent_integration.py'
       - 'ouroboros/subagent_worktrees.py'
-      - 'ouroboros/delegate_custody.py'
+      - 'ouroboros/delegate_*.py'
       - 'ouroboros/review_execution.py'
       - 'ouroboros/subagents.py'
       - 'ouroboros/config.py'
       - 'scripts/claudexor_platform_smoke.py'
+      - 'scripts/claudexor_lifecycle_smoke.py'
       - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
       - 'Ouroboros.spec'
@@ -209,6 +217,23 @@ jobs:
           path = pathlib.Path(os.environ["OUROBOROS_DATA_DIR"]) / "claudexor" / "daemon.log"
           if path.is_file(): print(path.read_text(encoding="utf-8", errors="replace")[-20000:])
           PY
+
+  # Production custody and real-engine continuation, without vendor credentials.
+  lifecycle:
+    name: lifecycle · ${{ matrix.os }} · custody, cancel, crash, continue, retire
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Exercise production custody with the pinned engine and fake harnesses
+        run: python -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- python scripts/claudexor_lifecycle_smoke.py
 
   # ────────────────────────────────────────────────────────────────────────────
   # Toolchain lane — free, credential-free. Real managed Node/npm for the CLI.

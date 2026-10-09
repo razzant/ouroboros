@@ -99,7 +99,7 @@ def test_older_budget_snapshot_cannot_regress_state(tmp_path, monkeypatch):
             value = 2.0
         snapshot = _breakdown(value, int(value))
         snapshot["_usage_projection"] = {
-            "accounted_usd": value, "integrity_degraded": False, "cost_final": True,
+            "settled_usd": value, "accounted_usd": value, "integrity_degraded": False, "cost_final": True,
         }
         return snapshot
 
@@ -126,7 +126,7 @@ def test_limited_projection_uses_breakdown_snapshot(tmp_path, monkeypatch):
     state.save_state({})  # an initialized install: only explicit init creates state (#1307)
     snapshot = _breakdown(1.0, 1)
     snapshot["_usage_projection"] = {
-        "accounted_usd": 1.0, "integrity_degraded": False, "cost_final": True,
+        "settled_usd": 1.0, "accounted_usd": 1.0, "integrity_degraded": False, "cost_final": True,
     }
     monkeypatch.setattr(accounting, "usage_writer_snapshot", lambda *_a, **_k: dict(snapshot))
     monkeypatch.setattr(
