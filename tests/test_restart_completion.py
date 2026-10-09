@@ -14,6 +14,175 @@ import pytest
 pytestmark = pytest.mark.serial
 
 
+@pytest.mark.parametrize("phase", ["publication", "custody", "success", "early-cleanup"])
+@pytest.mark.parametrize("uvicorn_returns", [True, False], ids=["returned", "held"])
+def test_actual_restart_watcher_leaves_termination_to_panic(tmp_path, phase, uvicorn_returns):
+    """Panic persists before physical exit 99, including when the watcher raises.
+
+    Run the real main/watcher, spawn consumer and Panic owner in a disposable
+    interpreter. Native child handles and unrelated stop owners are doubles;
+    the process exit, Panic flag and disabled state are real.
+    """
+    script = tmp_path / "watcher_panic.py"
+    ready, release = tmp_path / "watcher-ready", tmp_path / "release-panic"
+    script.write_text('''
+from contextlib import contextmanager
+import os, pathlib, sys, threading, time
+from types import SimpleNamespace
+import server
+import supervisor.workers  # normal server startup establishes the worker import graph
+from ouroboros import platform_layer, process_custody, server_control
+from ouroboros.startup_historical_audit import audit
+from supervisor import state
+
+phase, uvicorn_returns = sys.argv[1], sys.argv[2] == "returned"
+ready, release = map(pathlib.Path, sys.argv[3:])
+panic_paused = threading.Event()
+
+def pause_panic():
+    panic_paused.set()
+    deadline = time.monotonic() + 10
+    while not release.exists():
+        if time.monotonic() > deadline:
+            raise AssertionError("test did not release Panic")
+        time.sleep(.01)
+
+write_flag = server_control._write_panic_flag
+def paused_flag(root):
+    pause_panic()
+    write_flag(root)
+
+def start_panic():
+    # Match live ingress: the caller is a daemon, so returning main could exit 0.
+    threading.Thread(target=server_control.execute_panic_stop, kwargs={
+        "consciousness": None, "kill_workers_fn": lambda: None,
+        "data_dir": server.DATA_DIR, "panic_exit_code": 99, "log": server.log,
+    }, daemon=True).start()
+    assert panic_paused.wait(10)
+
+audit.stop = pause_panic if phase == "early-cleanup" else lambda: None
+server_control._write_panic_flag = write_flag if phase == "early-cleanup" else paused_flag
+import multiprocessing
+import ouroboros.claudexor_daemon, ouroboros.extension_companion
+import ouroboros.local_model, ouroboros.tools.shell, ouroboros.tools.services
+import ouroboros.workspace_executor, supervisor.update_merge
+multiprocessing.active_children = lambda: []
+ouroboros.claudexor_daemon.get_owned_daemon = lambda **kw: SimpleNamespace(stop_outcome=lambda: True)
+ouroboros.local_model.get_manager = lambda **kw: None
+ouroboros.tools.shell.kill_all_tracked_subprocesses = lambda **kw: []
+ouroboros.tools.services.kill_all_services = lambda *a, **kw: []
+ouroboros.workspace_executor.kill_all_foreground = lambda *a, **kw: []
+ouroboros.extension_companion.panic_kill_all = lambda **kw: []
+platform_layer.kill_process_on_port = lambda port: None
+platform_layer.request_process_tree_kill = lambda proc: {"requested": True, "pid": proc.pid}
+process_custody.kill_process_tree = lambda proc: None
+
+class Successor:
+    pid = 4242
+    def __init__(self, *a, **kw):
+        if phase == "publication":
+            start_panic()
+    def wait(self, **kw):
+        return 0
+process_custody.subprocess = SimpleNamespace(Popen=Successor)
+def record(*a, **kw):
+    if phase in {"custody", "success"}:
+        start_panic()
+    if phase == "custody":
+        raise OSError("test custody write failed during Panic")
+process_custody.record_process = record
+server_control.IS_WINDOWS = True  # portable spawn path; no native Win32 claim
+
+transfer = server._restart_current_process_impl
+def restart(*a, **kw):
+    try:
+        return transfer(*a, **kw)
+    finally:
+        ready.write_text("watcher reached final exit")
+server._restart_current_process_impl = restart
+def cleanup(**kw):
+    if phase == "early-cleanup":
+        start_panic()
+        ready.write_text("watcher reached cleanup failure")
+        raise OSError("test cleanup failed as Panic began")
+
+class DrainEvent(threading.Event):
+    def wait(self, timeout=None):
+        return super().wait(.02 if timeout == 30 else timeout)
+class TestServer:
+    def __init__(self, config):
+        self.should_exit = False
+    def watch_launcher_stop(self):
+        pass
+    def run(self, **kw):
+        server._restart_requested.set()
+        if not uvicorn_returns:
+            threading.Event().wait(20)
+            raise AssertionError("neither Panic nor watcher exited")
+@contextmanager
+def listener(*a, **kw):
+    yield SimpleNamespace(getsockname=lambda: ("127.0.0.1", 9123))
+
+state.init_state()
+assert state.update_state(lambda st: st.update(evolution_mode_enabled=True, bg_consciousness_enabled=True),
+                          confirm=("evolution_mode_enabled", "bg_consciousness_enabled")) is not False
+server.threading = SimpleNamespace(Event=DrainEvent, Thread=threading.Thread)
+server._restart_requested = threading.Event()
+server._event_loop = None
+server._LAUNCHER_MANAGED = False
+server._planned_delegate_restart_transaction_id = ""
+server.verify_settings_integrity = lambda: None
+server.load_settings = lambda: {}
+server.parse_server_args = lambda *a: SimpleNamespace(host="127.0.0.1", port=9123, host_explicit=False)
+server.find_free_port = lambda host, port: port
+server.get_network_auth_startup_warning = lambda host: ""
+server.validate_network_auth_configuration = lambda host: ""
+server.bound_service_socket = listener
+server.write_port_file = lambda *a: None
+server.uvicorn.Config = lambda *a, **kw: None
+server._SignalStopServer = TestServer
+server._emergency_process_cleanup = cleanup
+supervisor.update_merge.read_update_tx_strict = lambda: ("absent", {})
+sys.exit(server.main())
+''', encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    env["OUROBOROS_DATA_DIR"] = str(tmp_path / "data")
+    env["OUROBOROS_SETTINGS_PATH"] = str(tmp_path / "data" / "settings.json")
+    env.pop("OUROBOROS_PLANNED_RESTART_TRANSACTION_ID", None)
+    with subprocess.Popen([sys.executable, str(script), phase, "returned" if uvicorn_returns else "held",
+                           str(ready), str(release)], env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True) as proc:
+        try:
+            deadline = time.monotonic() + 15
+            while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert ready.exists(), proc.communicate(timeout=5)[0]
+            # Panic is held before persistence. Neither explicit watcher exits nor
+            # main's implicit exit 0 may terminate this interpreter in that window.
+            assert not (tmp_path / "data/state/panic_stop.flag").exists()
+            try:
+                proc.wait(timeout=.15)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                pytest.fail(f"watcher exited {proc.returncode} before Panic persistence:\n"
+                            + proc.communicate(timeout=5)[0])
+            release.write_text("continue", encoding="utf-8")
+            output, _ = proc.communicate(timeout=10)
+            assert proc.returncode == 99, output
+        finally:
+            release.touch()
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=5)
+    assert (tmp_path / "data/state/panic_stop.flag").read_text(encoding="utf-8") == "panic"
+    persisted = json.loads((tmp_path / "data/state/state.json").read_text(encoding="utf-8"))
+    assert persisted["evolution_mode_enabled"] is False
+    assert persisted["bg_consciousness_enabled"] is False
+    assert persisted["evolution_owner_stopped"] is True
+
+
 @pytest.mark.parametrize("managed", [True, False], ids=["launcher", "direct"])
 @pytest.mark.parametrize("uvicorn_returns", [True, False], ids=["returned", "held"])
 def test_restart_waits_for_cleanup_and_transfers_once(monkeypatch, tmp_path, managed, uvicorn_returns):
@@ -145,7 +314,9 @@ from types import SimpleNamespace
 receipt = pathlib.Path(sys.argv[1])
 failure, uvicorn_returns = sys.argv[2], sys.argv[3] == "returned"
 if os.environ.get("OURO_TEST_SUCCESSOR"):
-    from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
+    from ouroboros.config import DATA_DIR
+    from ouroboros.delegate_recovery import (PLANNED_RESTART_TRANSACTION_ENV, _ack_direct_exec_successor,
+                                             _read_restart_transaction, observe_restart_parent)
     if os.getpid() != int(os.environ["OURO_TEST_SUCCESSOR"]):
         # A spawned successor reports only after the test saw its caller exit:
         # one that dies with the caller leaves no receipt.
@@ -155,10 +326,14 @@ if os.environ.get("OURO_TEST_SUCCESSOR"):
             if time.monotonic() > deadline:
                 sys.exit(3)
             time.sleep(0.05)
+    token, parent = os.environ.get(PLANNED_RESTART_TRANSACTION_ENV), observe_restart_parent()
+    _ack_direct_exec_successor(DATA_DIR)  # the successor's own proof of the prepared transaction
+    proof = _read_restart_transaction(DATA_DIR, "physical-handoff")
     staged = receipt.with_name(receipt.name + ".tmp")
     staged.write_text(json.dumps({
         "pid": os.getpid(), "previous_pid": int(os.environ["OURO_TEST_SUCCESSOR"]),
-        "transaction": os.environ.get(PLANNED_RESTART_TRANSACTION_ENV),
+        "transaction": token, "parent": parent,
+        "proof": {key: proof.get(key) for key in ("status", "ack_source", "successor_pid")},
         "port": os.environ.get("OUROBOROS_SERVER_PORT"),
         "cleanup": os.environ.get("OURO_TEST_CLEANUP"),
         "argv": sys.argv[1:],
@@ -168,6 +343,9 @@ if os.environ.get("OURO_TEST_SUCCESSOR"):
 
 import server
 import supervisor.update_merge
+from ouroboros import delegate_recovery
+delegate_recovery._write_restart_transaction(server.DATA_DIR, {
+    "transaction_id": "physical-handoff", "status": "prepared", "supervisor_pid": os.getpid(), "task_ids": []})
 class DrainEvent(threading.Event):
     def wait(self, timeout=None):
         return super().wait(0.02 if timeout == 30 else timeout)
@@ -230,6 +408,7 @@ sys.exit(server.main())
     env.pop("OUROBOROS_SERVER_REEXEC_ARGV_JSON", None)
     env.pop("OURO_TEST_SUCCESSOR", None)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    env["OUROBOROS_DATA_DIR"] = str(tmp_path / "data")  # this case's own transaction
     arguments = [str(receipt), failure, "returned" if uvicorn_returns else "held",
                  'argument with "quotes" and a trailing\\']
     result = subprocess.run([sys.executable, str(script), *arguments], env=env,
@@ -255,6 +434,15 @@ sys.exit(server.main())
     assert observed["port"] == "9123" and observed["cleanup"] == "completed"
     assert observed["argv"] == arguments
     assert (observed["pid"] == observed["previous_pid"]) is (not spawned)
+    if os.name == "nt":  # native only: the inherited handle observed this exact caller's exit 42
+        assert observed["parent"]["pid"] == observed["previous_pid"] and observed["parent"]["exit_code"] == 42
+        assert observed["proof"] == {"status": "normal_exit_acknowledged",
+                                     "ack_source": "windows_direct_parent_handle", "successor_pid": observed["pid"]}
+    elif spawned:  # a POSIX fallback spawn has a new PID and no inherited parent: nothing is proven
+        assert observed["parent"] == {} and observed["proof"]["status"] == "prepared"
+    else:
+        assert observed["proof"] == {"status": "normal_exit_acknowledged",
+                                     "ack_source": "direct_exec_successor", "successor_pid": None}
 
 
 @pytest.mark.parametrize("platform,failure", [

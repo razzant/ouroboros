@@ -1,5 +1,6 @@
 """
-AST-based guard: platform-specific APIs must live in platform_layer.py only.
+AST-based guard: platform operations live in platform_layer.py; its private
+platform_win32_abi.py owns guarded native declarations.
 
 Scans all .py files under ouroboros/ and supervisor/ (plus server.py)
 for direct use of the following forbidden patterns:
@@ -27,7 +28,8 @@ IS_WINDOWS_PLATFORM = sys.platform == "win32"
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# The ONE file allowed to contain platform-specific code
+# The only file exempt from operational API scanning. The declaration-only
+# Win32 substrate remains scanned and must not acquire process/lock operations.
 ALLOWED_FILE = REPO_ROOT / "ouroboros" / "platform_layer.py"
 
 # Directories to scan
@@ -185,6 +187,16 @@ def test_platform_layer_exports_core_symbols():
     assert sum([IS_WINDOWS, IS_MACOS, IS_LINUX]) <= 1
 
 
+def test_win32_declarations_are_private_to_the_platform_layer():
+    for path in _collect_python_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            modules = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                       else [node.module or "", *(alias.name for alias in node.names)]
+                       if isinstance(node, ast.ImportFrom) else [])
+            assert all(name.split(".")[-1] != "platform_win32_abi" for name in modules), str(path)
+
+
 def test_normalize_repo_path_handles_windows_style_paths():
     """normalize_repo_path must handle Windows-style backslash paths on any OS.
 
@@ -218,6 +230,9 @@ def test_win32_lock_and_unlock_share_the_same_overlapped_abi():
     The platform's one Windows ABI declaration owns both native signatures.
     """
     from ouroboros.platform_layer import _OVERLAPPED, _kernel32
+    from ouroboros import platform_win32_abi
 
+    assert _OVERLAPPED is platform_win32_abi._OVERLAPPED
+    assert _kernel32 is platform_win32_abi._kernel32
     assert _kernel32.LockFileEx.argtypes[-1]._type_ is _OVERLAPPED
     assert _kernel32.UnlockFileEx.argtypes[-1]._type_ is _OVERLAPPED
