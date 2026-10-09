@@ -6742,7 +6742,8 @@ def test_run_tb_manifest_records_the_model_the_run_actually_resolved(tmp_path, m
     settings = tmp_path / "settings.json"
     settings.write_text(
         json.dumps({"OUROBOROS_MODEL": "decoy/template-main",
-                    "OUROBOROS_MODEL_LIGHT": "decoy/template-light"}),
+                    "OUROBOROS_MODEL_LIGHT": "decoy/template-light",
+                    "OUROBOROS_MODEL_IMAGE": "gpt-image-2"}),
         encoding="utf-8",
     )
     monkeypatch.setenv("OUROBOROS_MODEL", "decoy/ambient-main")
@@ -6760,7 +6761,7 @@ def test_run_tb_manifest_records_the_model_the_run_actually_resolved(tmp_path, m
     ]) == 0
     manifest = _manifest(measured)
     slots = manifest["model_slots"]
-    # The measured model, NOT the ambient env decoy and NOT the settings-template decoy.
+    # Measured model, not ambient or template decoys.
     assert slots["OUROBOROS_MODEL"] == "anthropic/claude-fable-5"
     assert slots["OUROBOROS_MODEL_LIGHT"] == "google/gemini-3.5-flash"
     # New manifests keep legacy Heavy absent.
@@ -6770,7 +6771,7 @@ def test_run_tb_manifest_records_the_model_the_run_actually_resolved(tmp_path, m
     assert "decoy/template-main" not in slots.values()
     # `model_slots` means the same thing here as in GAIA's manifest: MODEL_SLOT_KEYS only.
     assert set(slots).issubset(set(MODEL_SLOT_KEYS))
-    # ...and the same fact is on disk from admission onward, in TB's established `extra` shape.
+    # Admission also records this under `extra`.
     assert manifest["extra"]["model"] == "anthropic/claude-fable-5"
     assert manifest["extra"]["light_model"] == "google/gemini-3.5-flash"
 

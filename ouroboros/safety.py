@@ -58,6 +58,7 @@ TOOL_POLICY: Dict[str, str] = {
     "memory_map": POLICY_SKIP,
     "analyze_screenshot": POLICY_SKIP,
     "vlm_query": POLICY_SKIP,
+    "generate_image": POLICY_SKIP,
     "view_image": POLICY_SKIP,
     "ocr_pdf": POLICY_SKIP,
     "youtube_transcript": POLICY_SKIP,

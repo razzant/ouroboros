@@ -94,6 +94,16 @@
         "stateKey": "visionModel"
       },
       {
+        "inputId": "image-model",
+        "label": "Image Model",
+        "note": "Bare Claudexor image model id (e.g. gpt-image-2); empty uses gpt-image-2. No chat-model source or window.",
+        "settingKey": "OUROBOROS_MODEL_IMAGE",
+        "settingsInputId": "s-model-image",
+        "settingsToggleId": "",
+        "slot": "image",
+        "stateKey": "imageModel"
+      },
+      {
         "inputId": "consciousness-model",
         "label": "Consciousness Model",
         "note": "High-horizon background consciousness. Empty uses Main.",
@@ -398,6 +408,7 @@
     "consciousnessModel": "",
     "deepseekKey": "",
     "fallbackModel": "openai/gpt-5.6-luna",
+    "imageModel": "",
     "lightModel": "openai/gpt-5.6-luna",
     "localChatFormat": "",
     "localContextLength": 16384,
@@ -453,6 +464,7 @@
       "consciousness": "",
       "deep_self_review": "anthropic::claude-opus-5",
       "fallback": "anthropic::claude-sonnet-5",
+      "image": "",
       "light": "anthropic::claude-sonnet-5",
       "main": "anthropic::claude-opus-5",
       "vision": ""
@@ -460,6 +472,7 @@
     "cloudru": {
       "consciousness": "",
       "fallback": "cloudru::zai-org/GLM-4.7",
+      "image": "",
       "light": "cloudru::zai-org/GLM-4.7",
       "main": "cloudru::zai-org/GLM-4.7",
       "vision": ""
@@ -468,6 +481,7 @@
       "consciousness": "",
       "deep_self_review": "deepseek::deepseek-v4-pro",
       "fallback": "deepseek::deepseek-v4-flash",
+      "image": "",
       "light": "deepseek::deepseek-v4-flash",
       "main": "deepseek::deepseek-v4-pro",
       "vision": ""
@@ -475,6 +489,7 @@
     "local": {
       "consciousness": "",
       "fallback": "openai/gpt-5.6-luna",
+      "image": "",
       "light": "openai/gpt-5.6-luna",
       "main": "google/gemini-3.8-flash",
       "vision": ""
@@ -482,6 +497,7 @@
     "minimax": {
       "consciousness": "",
       "fallback": "minimax::MiniMax-M2.7",
+      "image": "",
       "light": "minimax::MiniMax-M2.7",
       "main": "minimax::MiniMax-M3",
       "vision": ""
@@ -490,6 +506,7 @@
       "consciousness": "",
       "deep_self_review": "openai::gpt-5.6-sol",
       "fallback": "openai::gpt-5.6-sol",
+      "image": "",
       "light": "openai::gpt-5.6-luna",
       "main": "openai::gpt-5.6-terra",
       "vision": ""
@@ -497,6 +514,7 @@
     "openai-compatible": {
       "consciousness": "",
       "fallback": "",
+      "image": "",
       "light": "",
       "main": "",
       "vision": ""
@@ -504,6 +522,7 @@
     "openrouter": {
       "consciousness": "",
       "fallback": "openai/gpt-5.6-luna",
+      "image": "",
       "light": "openai/gpt-5.6-luna",
       "main": "google/gemini-3.8-flash",
       "vision": ""
@@ -511,6 +530,7 @@
     "zai": {
       "consciousness": "",
       "fallback": "zai::glm-5.3-flash",
+      "image": "",
       "light": "zai::glm-5.3-flash",
       "main": "zai::glm-5.3",
       "vision": "zai::glm-5.3-flash"

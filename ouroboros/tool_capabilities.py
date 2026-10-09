@@ -67,6 +67,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
     "ocr_pdf", "youtube_transcript", "extract_video_frames",
+    "generate_image",
     *OWNER_DELIVERY_TOOL_NAMES,
     "escalate",
     "switch_model",

@@ -96,6 +96,20 @@ test('role pins and context survive a no-edit save, including identical model na
     editor.destroy();
 });
 
+test('image-operation model saves as a bare engine id, without unsupported chat-role options', () => {
+    const editor = createModelRolesEditor({ hostId: 'test', doc: () => null });
+    editor.load({ OUROBOROS_MODEL: 'openai::model', OUROBOROS_MODEL_IMAGE: 'gpt-image-2' }, contract);
+    const saved = editor.collect();
+    assert.equal(saved.OUROBOROS_MODEL_IMAGE, 'gpt-image-2');
+    assert.ok(!('image' in (saved.OUROBOROS_MODEL_ACCOUNTS || {})));
+    assert.ok(!('image' in (saved.OUROBOROS_MODEL_CONTEXT_WINDOWS || {})));
+    assert.ok(!('image' in (saved.OUROBOROS_MODEL_PROCESSING_PREFERENCES || {})));
+    assert.equal(editor.validate(), '');
+    editor.load({ OUROBOROS_MODEL: 'openai::model', OUROBOROS_MODEL_IMAGE: 'claudexor::codex=gpt-image-2' }, contract);
+    assert.match(editor.validate(), /bare engine model id/);
+    editor.destroy();
+});
+
 test('an unloaded editor authors nothing and an API-only save does not create role maps', () => {
     const editor = createModelRolesEditor({ hostId: 'test', doc: () => null });
     assert.deepEqual(editor.collect(), {});

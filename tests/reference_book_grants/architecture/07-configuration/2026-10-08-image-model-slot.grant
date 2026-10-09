@@ -1,0 +1,2 @@
+188
+2026-10-08: one settings-table row for the new OUROBOROS_MODEL_IMAGE key (image generation model, empty = gpt-image-2 default, Settings -> Models slot). The table mirror test requires every SETTINGS_DEFAULTS key to be documented; appending the row is the minimal fix.

@@ -373,6 +373,12 @@ CURRENT_PRODUCER_CONTRACTS = {
     # tools/vision.py `_no_image_route`: no configured model could take the image at all,
     # told apart from VLM_NO_VISION_MODEL (every candidate confirmed unable); same VLM family answer.
     "VLM_NO_MODEL": (True, "vlm_error"),
+    # imagegen.py adds its three typed markers after the retired golden source.
+    # Same contract shape as the VLM family: rate limit is a soft window
+    # (text lane unaffected), unknown outcome and provider failure are errors.
+    "IMAGE_RATE_LIMITED": (True, "unavailable"),
+    "IMAGE_OUTCOME_UNKNOWN": (True, "error"),
+    "IMAGE_ERROR": (True, "error"),
     # The actual skill-metadata target refusal publishes its specific native
     # code; standalone historical-style text retains the generic blocked code.
     "SKILL_PAYLOAD_BLOCKED": (True, "blocked"),

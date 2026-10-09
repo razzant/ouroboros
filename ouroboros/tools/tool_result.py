@@ -382,6 +382,24 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "enable or configure the capability",
         ),
+        "IMAGE_RATE_LIMITED": _code_spec(
+            "unavailable",
+            "unavailable",
+            "warning",
+            "retry after the image window resets; the text lane is unaffected",
+        ),
+        "IMAGE_OUTCOME_UNKNOWN": _code_spec(
+            "error",
+            "error",
+            "error",
+            "re-read the engine operation or start a NEW generation deliberately; never blind-retry",
+        ),
+        "IMAGE_ERROR": _code_spec(
+            "error",
+            "error",
+            "error",
+            "inspect the engine operation state for the failure reason",
+        ),
         "MCP_UNAVAILABLE": _code_spec(
             "unavailable",
             "unavailable",
@@ -841,6 +859,11 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "BROWSER_SESSION_RETIRED": "TOOL_TIMEOUT",
         "BROWSER_ACTION_OUTCOME_UNKNOWN": "TOOL_ERROR",
         "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE",
+        # imagegen typed markers: the same no-blind-retry contract as the
+        # browser unknown-outcome marker, with the rate window its own lane.
+        "IMAGE_RATE_LIMITED": "IMAGE_RATE_LIMITED",
+        "IMAGE_OUTCOME_UNKNOWN": "IMAGE_OUTCOME_UNKNOWN",
+        "IMAGE_ERROR": "IMAGE_ERROR",
         "TOOL_ARG_ERROR": "TOOL_ARG_ERROR",
         "INVALID_ARG": "TOOL_ARG_ERROR",
         "CHILD_RESULT_DISPOSITION_INVALID": "TOOL_ARG_ERROR",

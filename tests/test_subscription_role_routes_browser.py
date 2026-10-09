@@ -323,3 +323,39 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
         route = (slots["triad"][0] if consumer == "Triad" else slots["advisory"])["route"]
         assert route["target_id"] == "claudexor::opaque-source=gpt-owner-unsaved"
         assert route["profile_id"] == "personal"
+
+
+def test_image_model_uses_bare_engine_id_and_saves_without_chat_role_options(role_ui):
+    """Real Settings module, rendered input and POST, not a mocked role collector."""
+    ui = role_ui
+    configure_mixed(ui)
+    ui["settings"]["OUROBOROS_MODEL_IMAGE"] = "gpt-image-2"
+    page = open_agents(ui)
+    page.locator('[data-settings-tab="models"]').click()
+    group = page.locator('[data-model-role-group="image"]')
+    field = group.locator('[data-model-role-model]')
+    assert field.input_value() == "gpt-image-2"
+    for selector in ('[data-model-role-source]', '[data-model-role-account]',
+                     '[data-model-role-context]', '[data-model-role-processing]'):
+        assert group.locator(selector).count() == 0
+    group.scroll_into_view_if_needed()
+    capture(page, "image-model-bare-desktop")
+    page.set_viewport_size({"width": 390, "height": 844})
+    group.scroll_into_view_if_needed()
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    capture(page, "image-model-bare-narrow")
+
+    field.fill('claudexor::codex=gpt-image-2')
+    page.locator('#btn-save-settings').click()
+    assert not [body for path, body in ui['posts'] if path == '/api/settings']
+    assert field.get_attribute('aria-invalid') == 'true'
+    assert 'bare engine model id' in group.locator('[data-model-role-error]').inner_text()
+
+    field.fill('gpt-image-3')
+    with page.expect_response('**/api/settings'):
+        page.locator('#btn-save-settings').click()
+    saved = [body for path, body in ui['posts'] if path == '/api/settings'][-1]
+    assert saved['OUROBOROS_MODEL_IMAGE'] == 'gpt-image-3'
+    for key in ('OUROBOROS_MODEL_ACCOUNTS', 'OUROBOROS_MODEL_CONTEXT_WINDOWS',
+                'OUROBOROS_MODEL_PROCESSING_PREFERENCES'):
+        assert 'image' not in (saved.get(key) or {})

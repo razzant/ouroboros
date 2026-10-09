@@ -119,7 +119,7 @@ EXPECTED_TOOLS = [
     "apply_patch", "edit_batch",
     "send_photo", "send_video", "send_file", "send_links", "search_code", "query_code", "escalate",
         "forward_to_worker",
-    "generate_evolution_stats",
+    "generate_image", "generate_evolution_stats",
     "commit_reviewed", "vcs_commit_reviewed", "vcs_status", "vcs_diff",
     "vcs_pull_ff", "vcs_restore", "vcs_revert",
     "fetch_pr_ref", "create_integration_branch", "cherry_pick_pr_commits",

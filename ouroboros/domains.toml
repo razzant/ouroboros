@@ -263,6 +263,7 @@ D20 = "Presence"
 "ouroboros/gateway/ws.py" = "D11"
 "ouroboros/gateways/__init__.py" = "D07"
 "ouroboros/gateways/claudexor.py" = "D07"
+"ouroboros/gateways/claudexor_images.py" = "D07"
 "ouroboros/gateways/claudexor_run_events.py" = "D07"
 "ouroboros/llm_claudexor.py" = "D02"
 "ouroboros/git_shell_policy.py" = "D13"
@@ -615,6 +616,7 @@ D20 = "Presence"
 "ouroboros/tools/task_tree.py" = "D07"
 "ouroboros/tools/tool_discovery.py" = "D04"
 "ouroboros/tools/verify.py" = "D05"
+"ouroboros/tools/imagegen.py" = "D05"
 "ouroboros/tools/vision.py" = "D05"
 "ouroboros/tools/vision_process.py" = "D05"
 "ouroboros/tools/write_shape.py" = "D13"
@@ -790,6 +792,7 @@ allowed = [
   "D05->D01",
   "D05->D02",
   "D05->D04",
+  "D05->D07",
   "D05->D09",
   "D05->D10",
   "D05->D11",
@@ -959,7 +962,6 @@ lazy_only = [
   "D04->D16",
   "D04->D20",
   "D05->D06",
-  "D05->D07",
   "D05->D08",
   "D05->D14",
   "D06->D03",

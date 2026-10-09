@@ -425,6 +425,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── record_contract.py ← Record passport: the local ledger rows external observers may rely on (§11.1)
       │   └── plugin_api.py    ← PluginAPI, ExtensionRegistrationError, FORBIDDEN_SKILL_SETTINGS, VALID_EXTENSION_PERMISSIONS, VALID_EXTENSION_ROUTE_METHODS
       ├── gateways/            ← Thin outbound transport adapters; no business logic
+      │   ├── claudexor_images.py  ← Image-operation client family (create/get/result/ack over /v2/image-operations, structural capability negotiation; companion engine PR)
       │   ├── claudexor.py ← Loopback descriptor/handshake/runs/quota transport; token stays private, prefers owned daemon, discover_daemon_at reads daemon/control-api.json (§6 Delegated subagents)
       │   └── claudexor_run_events.py ← Catalog-negotiated, bounded run-journal SSE frames and durable seq cursors; no polling owner (§6 Delegated activity)
       ├── claudexor_runtime.py ← Reviewed engine pin (version/SHA/URL/SHA-256/size/protocol/Node/entrypoints, nullable CLI): seed-or-download, verify + staged extract + probe + atomic promote under `data/state/cx`; the reviewed pin IS the next-spawn selection — no mutable `current` pointer or background updater; `OUROBOROS_CLAUDEXOR_BIN` stays an explicit operator override (§6 Delegated subagents)
@@ -494,6 +495,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── git_plumbing.py, git_repo_edit.py, git_vcs_ops.py, git_review_cycle.py, git_evolution.py ← The git tool's leaves, re-exported by the facade: shared low-level plumbing; the uncommitted repo write and exact-match edit surface; generic VCS inspection and rollback; staging plus the advisory/triad/scope review and reviewed-material binding; evolution-campaign authority at the reviewed-commit and publication boundaries
       │   ├── search.py        ← Web search tool (OpenAI Responses API, LLM-first overridable defaults)
       │   ├── browser.py       ← Playwright browser tools with per-ToolContext lifecycle and thread affinity (§6 MCP and browser-facing external tools)
+      │   ├── imagegen.py      ← `generate_image` tool: one-attempt image generation through the engine's negotiated image operations (typed CAPABILITY_UNAVAILABLE until the engine ships the routes); result bytes go straight to content-addressed artifacts, never into model context
       │   ├── vision.py        ← Vision LLM tools for browser screenshots and uploaded images
       │   ├── vision_process.py ← Tracked vision-child IPC: validated model/physical-attempt receipts, result recovery and parent-owned cancellation
       │   ├── knowledge.py     ← Persistent topic-based knowledge files with an auto-maintained index

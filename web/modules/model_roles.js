@@ -95,8 +95,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const account = modelRoleMap(settings[MODEL_ACCOUNTS_KEY])[slot.slot];
         const context = modelRoleMap(settings[MODEL_CONTEXT_KEY])[slot.slot];
         const processing = modelRoleMap(settings[MODEL_PROCESSING_PREFERENCES_KEY])[slot.slot];
-        const parsed = parseModelSource(value);
-        if (!parsed.model && !['main', 'fallback'].includes(slot.slot)) parsed.source = 'inherit';
+        // Image operations take a bare engine model id, not a chat route. They
+        // have no context-window, processing or account controls in this editor.
+        const parsed = slot.slot === 'image' ? { source: '', model: String(value || '') } : parseModelSource(value);
+        if (slot.slot !== 'image' && !parsed.model && !['main', 'fallback'].includes(slot.slot)) parsed.source = 'inherit';
         return { id: index < 0 ? slot.slot : mintStableId('fallback', rows.map((row) => row.id)), slot,
             ...parsed, account: String(index < 0 ? account || '' : account?.[index] || ''),
             context: index < 0 ? context || 0 : context?.[index] || 0,
@@ -115,7 +117,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
             const fallback = slot.slot === 'fallback';
             const values = matching.map((row) => composeModelSource(row.source, row.model));
-            result[slot.settingKey] = fallback ? values.join(', ') : values[0] || '';
+            result[slot.settingKey] = slot.slot === 'image' ? matching[0]?.model || ''
+                : fallback ? values.join(', ') : values[0] || '';
+            if (slot.slot === 'image') continue; // no chat-role metadata for an image operation
             const pins = matching.map((row) => sourceId(row) ? row.account : '');
             const contexts = matching.map((row) => Number(row.context || 0));
             const preferences = matching.map((row) => row.processing_preference);
@@ -135,6 +139,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function changed(slot = '') { onChange(collect(), { slot }); }
     function rowErrors(row) {
         const errors = [];
+        if (row.slot.slot === 'image') {
+            if (row.model.includes('::')) errors.push({ field: '[data-model-role-model]', message: 'Image Model: enter a bare engine model id, not a chat-provider route.' });
+            return errors;
+        }
         if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Economy or inherited processing.` });
         if (['main', 'fallback'].includes(row.slot.slot) && !row.model.trim()) {
             errors.push({ field: '[data-model-role-model]', message: `${row.slot.label}: choose a model${row.slot.slot === 'fallback' ? ' or remove this fallback' : ''}.` });
@@ -190,6 +198,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function rowHtml(row, index, total) {
         const isFallback = row.slot.slot === 'fallback';
         const inputId = inputIdFor(row);
+        if (row.slot.slot === 'image') return `<div class="model-role-row" data-model-role="${escapeHtml(row.id)}">
+            <label class="ui-field">Engine image model id <input id="${escapeHtml(inputId)}" class="ui-control" data-model-role-model
+                value="${escapeHtml(row.model)}" placeholder="gpt-image-2" aria-label="Image model id"></label>
+            <div class="model-role-notes"><span id="${escapeHtml(hostId)}-${escapeHtml(row.id)}-status" class="model-role-meta ui-field-help" data-model-role-status></span></div>
+            <div class="ui-status ui-field-help" id="${escapeHtml(hostId)}-${escapeHtml(row.id)}-error" data-model-role-error data-tone="error" hidden></div>
+        </div>`;
         return `<div class="model-role-row" data-model-role="${escapeHtml(row.id)}">
             <div class="model-role-controls">
                 ${selectHtml(`data-model-role-source aria-label="${escapeHtml(row.slot.label)} source"`, sourceGroupsFor(row), sourceChoice(row.source))}
@@ -237,6 +251,17 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         for (const row of rows) {
             const node = element.querySelector(`[data-model-role="${row.id}"]`);
             if (!node) continue;
+            if (row.slot.slot === 'image') {
+                const status = node.querySelector('[data-model-role-status]');
+                status.textContent = row.model ? 'Sent as a bare model id to the Claudexor image operation.' : 'Empty uses gpt-image-2 in the engine.';
+                const errors = validationAttempted ? rowErrors(row) : [];
+                const message = node.querySelector('[data-model-role-error]');
+                Object.assign(message, { textContent: errors.map(({ message }) => message).join(' '), hidden: !errors.length });
+                const field = node.querySelector('[data-model-role-model]');
+                field.setAttribute('aria-describedby', `${status.id} ${message.id}`);
+                field.setAttribute('aria-invalid', String(Boolean(errors.length)));
+                continue;
+            }
             const source = node.querySelector('[data-model-role-source]');
         const sourceHtml = selectHtml('', sourceGroupsFor(row, {
                 catalogKnown: catalog.sources_read_state === 'ok', accountsKnown: store.accountsKnown,
@@ -304,7 +329,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function bindRows(element) {
         for (const row of rows) {
             const node = element.querySelector(`[data-model-role="${row.id}"]`);
-            node.querySelector('[data-model-role-source]').addEventListener('change', (event) => {
+            node.querySelector('[data-model-role-source]')?.addEventListener('change', (event) => {
                 row.source = sourceFromChoice(event.target.value); row.model = ''; row.account = ''; row.context = 0;
                 changed(row.slot.slot); render();
                 host()?.querySelector(`[data-model-role="${row.id}"] [data-model-role-model]`)?.focus();
@@ -312,13 +337,15 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const input = getDoc().getElementById(inputIdFor(row));
             input.addEventListener('input', () => {
                 row.model = input.value;
-                if (row.source === 'inherit' && row.model) row.source = effectiveSource(row);
-                if (!row.model && !['main', 'fallback'].includes(row.slot.slot)) row.source = 'inherit';
-                if (row.model.includes('::')) Object.assign(row, parseModelSource(row.model));
+                if (row.slot.slot !== 'image') {
+                    if (row.source === 'inherit' && row.model) row.source = effectiveSource(row);
+                    if (!row.model && !['main', 'fallback'].includes(row.slot.slot)) row.source = 'inherit';
+                    if (row.model.includes('::')) Object.assign(row, parseModelSource(row.model));
+                }
                 changed(row.slot.slot); updateCatalogViews();
                 for (const item of rows) void refreshRow(item);
             });
-            node.querySelector('[data-model-role-account]').addEventListener('change', (event) => {
+            node.querySelector('[data-model-role-account]')?.addEventListener('change', (event) => {
                 row.account = event.target.value; changed(row.slot.slot); updateCatalogViews(); void refreshRow(row);
             });
             node.querySelector('[data-model-role-context]')?.addEventListener('input', (event) => {
