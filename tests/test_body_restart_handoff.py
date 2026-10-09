@@ -28,7 +28,7 @@ class _BootstrapExit(BaseException):
         self.code = code
 
 
-def _cold_boot(tmp_path, monkeypatch, *, fault="", absent_streams=False):
+def _cold_boot(tmp_path, monkeypatch, *, fault="", absent_streams=False, with_transaction=True):
     """Run __init__ -> captured main -> switch -> handover -> final recovery.
 
     Three identities are deliberately distinct: the original server (101), the
@@ -56,11 +56,11 @@ def _cold_boot(tmp_path, monkeypatch, *, fault="", absent_streams=False):
     }
     if fault == "helper_birth":
         transaction["successor_birth"] = "win-filetime:999"
-    recovery._write_restart_transaction(data, transaction)
-    env = {
-        recovery.PLANNED_RESTART_PARENT_ENV: "77",
-        recovery.PLANNED_RESTART_TRANSACTION_ENV: "cold-restart",
-    }
+    if with_transaction:
+        recovery._write_restart_transaction(data, transaction)
+    env = {recovery.PLANNED_RESTART_PARENT_ENV: "77"}
+    if with_transaction:
+        env[recovery.PLANNED_RESTART_TRANSACTION_ENV] = "cold-restart"
     calls, launches, final, trace = [], [], {}, []
     state = SimpleNamespace(head=old, inherited=set())
     helper_thread = threading.get_ident()
@@ -307,6 +307,16 @@ def test_cold_helper_does_not_invent_recovery_when_rebinding_fails(tmp_path, mon
     assert run.final["transaction"]["successor_pid"] == 202
     assert "continuation unproven" in caplog.text
     assert any(call[0] == "gate" for call in run.calls)  # the error also releases the child
+
+
+@pytest.mark.parametrize("fault,expected_exit", [("", 0), ("panic", 99)])
+def test_cold_helper_observes_parent_without_continuations(tmp_path, monkeypatch, fault, expected_exit):
+    run = _cold_boot(tmp_path, monkeypatch, fault=fault, with_transaction=False)
+    assert run.exit_code == expected_exit
+    assert run.final["parent"]["exit_code"] == (99 if fault else 42)
+    assert not run.final["transaction"]
+    assert any(call[0] == "gate" for call in run.calls)
+    assert not any(call[0] == "binding-write" for call in run.calls)
 
 
 def test_cold_helper_keeps_original_parent_panic_absolute(tmp_path, monkeypatch):

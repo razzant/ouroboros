@@ -308,10 +308,11 @@ def test_an_unavailable_parent_handle_spawns_the_successor_without_a_proof(monke
 
 def test_a_restart_without_a_transaction_still_holds_the_venv_server_for_panic(monkeypatch, tmp_path, stop_requests):
     run = windows_transfer(monkeypatch, tmp_path, token="")
-    assert run.error is None and run.calls == ["spawn"]
-    assert "startupinfo" not in run.captured and run.captured["argv"][0] == r"C:\Python\python.exe"
+    assert run.error is None and run.calls == ["open", "spawn", "close"]
+    assert run.captured["startupinfo"] == "only-77"
+    assert run.captured["argv"][0] == r"C:\Python\python.exe"
     assert run.captured["env"]["__PYVENV_LAUNCHER__"] == r"C:\venv\Scripts\python.exe"
-    assert recovery.PLANNED_RESTART_PARENT_ENV not in run.captured["env"]
+    assert run.captured["env"][recovery.PLANNED_RESTART_PARENT_ENV] == "77"
     run.captured["on_spawn"](SimpleNamespace(pid=4242))
     assert server_control.stop_restart_successor() == [{"pid": 4242, "requested": True}]
     assert stop_requests == [4242]

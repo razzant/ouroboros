@@ -174,8 +174,10 @@ def restart_current_process(
         base = getattr(sys, "_base_executable", None) or sys.executable
         if base != sys.executable:
             argv[0], env["__PYVENV_LAUNCHER__"] = base, sys.executable
-        if transaction_id := env.get(PLANNED_RESTART_TRANSACTION_ENV, ""):
-            handoff_context = _windows_restart_handoff(argv, env, log)
+        transaction_id = env.get(PLANNED_RESTART_TRANSACTION_ENV, "")
+        # Parent exit observation also stops a cold-bootstrap descendant on Panic
+        # when there are no prepared continuations to bind.
+        handoff_context = _windows_restart_handoff(argv, env, log)
     else:
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
         if _restart_stop_requested:
@@ -215,7 +217,7 @@ def restart_current_process(
     except Exception:
         log.exception("Spawned restart fallback failed; no successor was started.")
         raise
-    if parent is not None:
+    if parent is not None and transaction_id:
         from ouroboros.delegate_recovery import bind_restart_successor
 
         try:
