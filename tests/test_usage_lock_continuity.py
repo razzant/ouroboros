@@ -109,7 +109,8 @@ def held_name_lock(root, timeout=5):
 
 @pytest.mark.parametrize("stage", ["reserve", "dispatch"])
 @pytest.mark.parametrize("interactive", [False, True])
-def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisitions, stage, interactive):
+@pytest.mark.parametrize("scheduler_pause", [0, .25])
+def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisitions, stage, interactive, monkeypatch, scheduler_pause):
     calls, prepared, stamps = [], [], []
     with contextlib.ExitStack() as stack:
         events = stack.enter_context(owner(root, task={"_is_direct_chat": interactive, "_presence_turn": interactive}))
@@ -118,9 +119,19 @@ def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisition
 
         def start_hold():
             release = stack.enter_context(held_lock(root))
-            timer = threading.Timer(.18, release.set)
-            timer.start()
-            stack.callback(timer.join, 2)
+            original_put = events.put
+
+            def release_on_entered(item, *args, **kwargs):
+                original_put(item, *args, **kwargs)
+                data = item.get("data", {})
+                if (data.get("checkpoint_kind") == "usage_lock_wait"
+                        and data.get("phase") == "entered"):
+                    release.set()
+
+            # Hold through a real reported contention, not a scheduler-sized timer.
+            # All emitted checkpoints and one-send assertions below stay real.
+            monkeypatch.setattr(events, "put", release_on_entered)
+            time.sleep(scheduler_pause)  # longer than the former .18s release timer
 
         def before(held):
             prepared.append(held.attempt_id)
