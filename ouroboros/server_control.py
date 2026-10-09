@@ -178,6 +178,8 @@ def restart_current_process(
             handoff_context = _windows_restart_handoff(argv, env, log)
     else:
         log.info("Re-executing direct server mode on %s:%d", desired_host, port)
+        if _restart_stop_requested:
+            return  # the watcher parks in exit_after_restart; Panic keeps its thread and writes
         try:
             os.execvpe(sys.executable, argv, env)
             return  # exec does not return; only a test double of it reaches this line

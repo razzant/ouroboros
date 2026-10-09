@@ -1426,6 +1426,23 @@ def inheritable_self_handle():
         yield handle, {"startupinfo": startupinfo, "close_fds": True}
 
 
+def await_restart_binding(handle: int) -> None:
+    """Wait for a cold-bootstrap helper to finish its binding attempt, then close the pipe.
+
+    Only its read end was inherited. EOF also releases us if that helper died;
+    it says nothing about success, which the restart transaction must prove.
+    """
+    import _winapi
+
+    try:
+        try:
+            _winapi.ReadFile(handle, 1)
+        except BrokenPipeError:
+            pass
+    finally:
+        _winapi.CloseHandle(handle)
+
+
 def await_process_handle(handle: int) -> dict:
     """Windows: block until an inherited process handle signals, then close it; that process's identity and exit."""
     import _winapi

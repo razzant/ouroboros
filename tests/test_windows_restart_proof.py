@@ -385,6 +385,9 @@ def test_panic_around_real_spawn_publication_leaves_no_successor_running(real_re
 
         monkeypatch.setattr(server_control, "_restart_successors", PanicLandsHere())
     real_restart_spawn()
+    if phase == "before":
+        assert server_control._restart_successors == []  # POSIX now yields before attempting exec or fallback
+        return
     if phase == "after":
         [request] = server_control.stop_restart_successor()
         assert request["requested"] is True

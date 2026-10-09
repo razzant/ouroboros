@@ -1,7 +1,8 @@
 """Native Windows proof of parent-handle inheritance, venv identity and stdio.
 
-These child scripts exercise production restart, parent observation and Panic's
-successor stop. They do not start the application server or its other owners.
+These child scripts exercise production restart, the captured bootstrap handover,
+parent observation and Panic's successor stop. They do not start the application
+server or its other owners.
 """
 from __future__ import annotations
 
@@ -45,9 +46,12 @@ def write_receipt(name, facts):
     pending.replace(path)
 '''
 
-_SUCCESSOR = _STDIO_AND_RECEIPTS + '''from ouroboros.delegate_recovery import observe_restart_parent
+_SUCCESSOR = _STDIO_AND_RECEIPTS + '''from ouroboros import delegate_recovery as recovery
+from ouroboros.config import DATA_DIR
 from ouroboros.platform_layer import process_start_time
-parent = observe_restart_parent()
+parent = recovery.observe_restart_parent()
+recovery._ack_direct_exec_successor(DATA_DIR)
+transaction = recovery._read_restart_transaction(DATA_DIR, "native-proof")
 streams = standard_streams()
 input_text = None if sys.stdin is None else sys.stdin.read()
 print("successor-stdout", flush=True)
@@ -55,6 +59,7 @@ if sys.stderr is not None:
     print("successor-stderr", file=sys.stderr, flush=True)
 write_receipt(sys.argv[1], {"parent": parent, "pid": os.getpid(),
     "birth": process_start_time(os.getpid()), "prefix": sys.prefix, "executable": sys.executable,
+    "transaction": transaction,
     "handle_env": os.environ.get("OUROBOROS_PLANNED_RESTART_PARENT_HANDLE"),
     "stdio": streams, "input_text": input_text})
 '''
@@ -74,6 +79,10 @@ args = list(sys.argv)
 os.environ[recovery.PLANNED_RESTART_TRANSACTION_ENV] = "native-proof"
 recovery._write_restart_transaction(DATA_DIR, {"transaction_id": "native-proof", "status": "prepared",
     "supervisor_pid": os.getpid(), "task_ids": []})
+bootstrap_root = os.environ.pop("OUROBOROS_NATIVE_BOOTSTRAP_ROOT", "")
+if bootstrap_root:
+    os.environ["PYTHONPATH"] = bootstrap_root + os.pathsep + os.environ.get("PYTHONPATH", "")
+    os.environ["OUROBOROS_NATIVE_BODY_HANDOVER"] = "1"
 sys.argv = args[1:3]
 server_control.restart_current_process("127.0.0.1", 8765, repo_dir=pathlib.Path.cwd(),
     log=logging.getLogger("native"))
@@ -87,7 +96,8 @@ os._exit(int(args[4]))
 
 @pytest.mark.parametrize("parent_exit", [42, 99])
 @pytest.mark.parametrize("stdio_mode", ["redirected", "absent"])
-def test_native_restart_inherits_exact_parent_venv_and_streams(tmp_path, parent_exit, stdio_mode):
+@pytest.mark.parametrize("body_bootstrap", [False, True], ids=["direct", "body-bootstrap"])
+def test_native_restart_inherits_exact_parent_venv_and_streams(tmp_path, parent_exit, stdio_mode, body_bootstrap):
     from ouroboros.process_containment import ProcessContainer
 
     venv_dir = tmp_path / "restart venv with spaces"
@@ -101,9 +111,36 @@ def test_native_restart_inherits_exact_parent_venv_and_streams(tmp_path, parent_
     input_file.write_text("successor-stdin\n", encoding="utf-8")
     # The temporary venv keeps the runner's dependencies even when pytest itself
     # runs in a dependency-only venv rather than the base installation.
-    import_roots = [str(Path(__file__).resolve().parents[1]), *site.getsitepackages()]
+    product_root = Path(__file__).resolve().parents[1]
+    import_roots = [str(product_root), *site.getsitepackages()]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(import_roots),
            "OUROBOROS_DATA_DIR": str(tmp_path / "data")}
+    if body_bootstrap:
+        checkout, helper = tmp_path / "adopting checkout", tmp_path / "captured helper"
+        package = checkout / "ouroboros"
+        package.mkdir(parents=True)
+        (checkout / ".git").mkdir()
+        helper.mkdir()
+        # The production package hook runs before any product module. Extend its
+        # package path only so the miniature checkout can then find real modules.
+        (package / "__init__.py").write_text(
+            f"__path__.append({str(product_root / 'ouroboros')!r})\n"
+            + (product_root / "ouroboros/__init__.py").read_text(encoding="utf-8"), encoding="utf-8")
+        (checkout / ".git/ouroboros-body-adoption").write_text(str(helper), encoding="utf-8")
+        (helper / "handoff.json").write_text(json.dumps({"data_dir": env["OUROBOROS_DATA_DIR"]}),
+                                            encoding="utf-8")
+        (helper / "captured.py").write_bytes((product_root / "ouroboros/body_switch.py").read_bytes())
+        # Invoke the captured handover once through the real hook. Switching Git
+        # phases is covered portably; these native cases prove its OS transfer.
+        (helper / "switch.py").write_text('''import os
+if os.environ.pop("OUROBOROS_NATIVE_BODY_HANDOVER", "") == "1":
+    captured = os.path.join(os.path.dirname(__file__), "captured.py")
+    namespace = {"__name__": "native_captured_helper", "__file__": __file__}
+    with open(captured, "rb") as source:
+        exec(compile(source.read(), captured, "exec"), namespace)
+    namespace["_handover"]()
+''', encoding="utf-8")
+        env["OUROBOROS_NATIVE_BOOTSTRAP_ROOT"] = str(checkout)
     container, parent = ProcessContainer(), None
     try:
         with input_file.open("r", encoding="utf-8") as stdin, output_file.open("w", encoding="utf-8") as stdout:
@@ -126,8 +163,23 @@ def test_native_restart_inherits_exact_parent_venv_and_streams(tmp_path, parent_
             assert observed["parent"] == {
                 "pid": parent_facts["pid"], "birth": parent_facts["birth"], "exit_code": parent_exit,
             }
-            assert observed["pid"] == parent_facts["child_pid"]
+            assert (observed["pid"] == parent_facts["child_pid"]) is (not body_bootstrap)
             assert observed["birth"] and observed["handle_env"] is None
+            transaction = observed["transaction"]
+            assert (transaction["supervisor_pid"], transaction["supervisor_birth"]) == (
+                parent_facts["pid"], parent_facts["birth"])
+            if body_bootstrap and parent_exit == 99:
+                # Panic does not authorize rebinding to the final generation.
+                assert transaction["successor_pid"] == parent_facts["child_pid"]
+                assert transaction["successor_birth"]
+            else:
+                assert (transaction["successor_pid"], transaction["successor_birth"]) == (
+                    observed["pid"], observed["birth"])
+            if parent_exit == 42:
+                assert transaction["status"] == "normal_exit_acknowledged"
+                assert transaction["ack_source"] == "windows_direct_parent_handle"
+            else:
+                assert transaction["status"] == "prepared"
             for process in (parent_facts, observed):
                 assert Path(process["prefix"]).resolve() == venv_dir.resolve()
                 assert Path(process["executable"]).resolve() == interpreter.resolve()

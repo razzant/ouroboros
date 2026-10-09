@@ -27,6 +27,7 @@ NO_RESUME_CAUSES = (
 )
 PLANNED_RESTART_TRANSACTION_ENV = "OUROBOROS_PLANNED_RESTART_TRANSACTION_ID"
 PLANNED_RESTART_PARENT_ENV = "OUROBOROS_PLANNED_RESTART_PARENT_HANDLE"
+PLANNED_RESTART_BINDING_ENV = "OUROBOROS_PLANNED_RESTART_BINDING_HANDLE"
 _restart_parent: Optional[dict[str, Any]] = None  # this process's one observation of an inherited parent
 
 
@@ -207,6 +208,14 @@ def observe_restart_parent() -> dict[str, Any]:
     global _restart_parent
     if _restart_parent is None:
         _restart_parent, handle = {}, os.environ.pop(PLANNED_RESTART_PARENT_ENV, "")
+        binding = os.environ.pop(PLANNED_RESTART_BINDING_ENV, "")
+        if binding:
+            try:
+                from ouroboros.platform_layer import await_restart_binding
+
+                await_restart_binding(int(binding))
+            except Exception as exc:
+                log.warning("The bootstrap restart binding wait failed: %s", exc)
         if handle:
             try:
                 from ouroboros.platform_layer import await_process_handle

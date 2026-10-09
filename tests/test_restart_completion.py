@@ -14,16 +14,18 @@ import pytest
 pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("phase", ["publication", "custody", "success", "early-cleanup"])
+@pytest.mark.parametrize("phase", ["publication", "custody", "success", "early-cleanup", "posix-exec"])
 @pytest.mark.parametrize("uvicorn_returns", [True, False], ids=["returned", "held"])
 @pytest.mark.parametrize("panic_entry", ["executor", "ingress"])
 def test_actual_restart_watcher_leaves_termination_to_panic(tmp_path, phase, uvicorn_returns, panic_entry):
     """Panic persists before physical exit 99, including when the watcher raises.
 
     Run the real main/watcher, spawn consumer and Panic owner in a disposable
-    interpreter. Native child handles and unrelated stop owners are doubles;
+    interpreter. Native child handles, exec and unrelated stop owners are doubles;
     the process exit, Panic flag and disabled state are real. The ingress case
     holds its callback before execute_panic_stop can claim termination itself.
+    The POSIX case must leave this interpreter alive instead of entering exec
+    after Panic was accepted during cleanup.
     """
     script = tmp_path / "watcher_panic.py"
     ready, release = tmp_path / "watcher-ready", tmp_path / "release-panic"
@@ -99,7 +101,11 @@ def record(*a, **kw):
     if phase == "custody":
         raise OSError("test custody write failed during Panic")
 process_custody.record_process = record
-server_control.IS_WINDOWS = True  # portable spawn path; no native Win32 claim
+server_control.IS_WINDOWS = phase != "posix-exec"  # portable branches; no native Win32 claim
+if phase == "posix-exec":
+    # An unexpected exec destroys Panic's thread. Exit the disposable interpreter
+    # with a distinct code to make that loss observable to the outer consumer.
+    server_control.os.execvpe = lambda *a: os._exit(88)
 
 transfer = server._restart_current_process_impl
 def restart(*a, **kw):
@@ -109,6 +115,9 @@ def restart(*a, **kw):
         ready.write_text("watcher reached final exit")
 server._restart_current_process_impl = restart
 def cleanup(**kw):
+    if phase == "posix-exec":
+        start_panic()
+        ready.write_text("watcher reached POSIX transfer after accepted Panic")
     if phase == "early-cleanup":
         start_panic()
         ready.write_text("watcher reached cleanup failure")
@@ -514,3 +523,24 @@ def test_direct_transfer_uses_platform_process_primitive(monkeypatch, tmp_path, 
         assert captured["new_process_group"] is (platform != "nt")
         assert captured["scope"] == "daemon"
         assert captured["drive_root"] == tmp_path and captured["cwd"] == str(tmp_path)
+
+
+def test_posix_transfer_observes_panic_accepted_during_its_last_log(monkeypatch, tmp_path):
+    """Logging can yield after preparation; the Panic check belongs next to exec."""
+    from ouroboros import config, process_custody, server_control
+
+    monkeypatch.setattr(server_control, "_restart_stop_requested", False)
+    monkeypatch.setattr(server_control, "IS_WINDOWS", False)
+    monkeypatch.setattr(server_control, "os", SimpleNamespace(
+        environ={}, execvpe=lambda *a: pytest.fail("accepted Panic must prevent exec")))
+    monkeypatch.setattr(server_control, "sys", SimpleNamespace(executable="python", argv=["server.py"]))
+    monkeypatch.setattr(config, "load_settings", lambda: {})
+    monkeypatch.setattr(process_custody, "spawn_supervised",
+                        lambda *a, **kw: pytest.fail("accepted Panic must not trigger a fallback"))
+
+    def accept_panic(*a):
+        server_control._restart_stop_requested = True
+
+    log = SimpleNamespace(info=accept_panic, exception=lambda *a: pytest.fail("no transfer should be attempted"))
+    server_control.restart_current_process("127.0.0.1", 9123, repo_dir=tmp_path, log=log)
+    assert server_control._restart_stop_requested
