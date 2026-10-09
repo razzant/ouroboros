@@ -497,12 +497,19 @@ def _pre_synthesis_usage_snapshot(
     return snapshot
 
 
-def _compact_review_projection(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the public review projection without copying raw actor output."""
+def _compact_review_projection(llm_trace: Dict[str, Any], task: Dict[str, Any] | None = None,
+                               drive_root: Any = None) -> Dict[str, Any]:
+    """Build the public review projection without copying raw actor output: the trace's
+    acceptance runs, then this task's own review-ledger records (``task_ledger_records``)."""
     try:
+        from ouroboros.review_projection import task_ledger_records
         from ouroboros.review_substrate import compact_review_projection
 
-        return compact_review_projection(llm_trace.get("review_runs") or [])
+        records, omitted = task_ledger_records(task or {}, drive_root)
+        projection = compact_review_projection(llm_trace.get("review_runs") or [], records=records)
+        if records:
+            projection["review_records_omitted"] = omitted
+        return projection
     except Exception:
         log.debug("Failed to build compact review projection", exc_info=True)
         return {"panels": []}
@@ -528,7 +535,7 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
         canonical_root = pathlib.Path(task.get("budget_drive_root") or drive_logs.parent)
         result_root = pathlib.Path(getattr(env, "drive_root", canonical_root))
         stored_result = _atp().load_task_result(result_root, task_id) or {}
-        review_projection = _compact_review_projection(llm_trace)
+        review_projection = _compact_review_projection(llm_trace, task, canonical_root)
         # TZ-2 C2: how many files the task rescued into its store(s) — positive, zero or
         # unknown — by stat alone; the fact discloses that no hash was computed. A split
         # non-Project root synthesizes on the canonical drive (parent env and task): its

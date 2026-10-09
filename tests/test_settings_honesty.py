@@ -320,8 +320,8 @@ def test_handle_task_wires_the_disclosing_reload():
 
 
 def test_settings_ui_save_flow_pins():
-    """Static pins for the #285 UI surfaces (busy save, Restart now, standing
-    Review-lanes hint): the strings the flow depends on must survive edits."""
+    """Static pins for the #285 UI surfaces (busy save, Restart now, the standing
+    reviewer hint): the strings the flow depends on must survive edits."""
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
@@ -336,8 +336,9 @@ def test_settings_ui_save_flow_pins():
     settings_ui_js = (root / "settings_ui.js").read_text(encoding="utf-8")
     assert 'id="btn-restart-now" hidden' in settings_ui_js
 
-    reviewer_slots_js = (root / "reviewer_slots.js").read_text(encoding="utf-8")
-    assert "keeps the reviewer configuration it started with" in reviewer_slots_js
+    # Reviewers are catalog rows marked Reviewer; their editor carries the standing hint.
+    subagents_js = " ".join((root / "subagents_settings.js").read_text(encoding="utf-8").split())
+    assert "a task that is already running keeps the reviewers it started with" in subagents_js
 
     costs_js = (root / "costs.js").read_text(encoding="utf-8")
     assert "'Saving…'" in costs_js

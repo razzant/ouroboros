@@ -1,15 +1,18 @@
-"""Regression tests for the doc-only preflight bypass.
+"""Regression tests for the doc-only diff classifier.
 
-The maintainer hit a 6-retry loop on a documentation-only commit (39
-rounds, 3 hours) before this check existed. Each retry was running the
-full pytest suite against a `.md`-only diff. The fix in
-`ouroboros/tools/git.py::_diff_is_doc_only` short-circuits that case.
+``_diff_is_doc_only`` (``ouroboros/tools/git_review_cycle.py``, re-exported by
+``ouroboros/tools/git.py``) once short-circuited the tests preflight for a
+``.md``-only diff. That exemption is retired: the suite runs before any commit
+to the body, a documentation-only diff included, and ``skip_tests`` is the one
+exemption (owner answer A, 2026-10-08). The classifier's remaining production
+reader is the release-metadata carve in ``commit_admission``, so its boundary
+is still pinned here.
 
 JSON is deliberately not doc-only: config/schema/package JSON can change
-runtime behaviour and should keep the test preflight.
+runtime behaviour.
 
-Defensive: any staged file under ``tests/`` triggers the full preflight,
-even if the extension is markdown (test fixtures can be markdown).
+Defensive: any staged file under ``tests/`` is not doc-only, even if the
+extension is markdown (test fixtures can be markdown).
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ def test_code_to_doc_rename_is_not_doc_only():
 
 
 def test_doc_to_doc_rename_is_doc_only():
-    """Pure prose-doc renames can still skip the bypass preflight."""
+    """Pure prose-doc renames stay doc-only."""
     assert _diff_is_doc_only(["old.md", "docs/new.md"]) is True
 
 
@@ -62,7 +65,7 @@ def test_doc_to_doc_rename_is_doc_only():
     ["ouroboros/tests/foo.md"],
 ])
 def test_paths_under_tests_dir_are_not_doc_only(paths):
-    """Defensive: any file under tests/ runs the preflight, even if .md."""
+    """Defensive: any file under tests/ is not doc-only, even if .md."""
     assert _diff_is_doc_only(paths) is False
 
 

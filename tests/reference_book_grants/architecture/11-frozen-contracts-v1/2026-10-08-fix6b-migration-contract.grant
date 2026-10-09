@@ -1,0 +1,2 @@
+1508
+FIX6b audit fixes (VD3-01, VD3-03, VD3-05, VD3-11, D1-V04): the migration contract states one factory source for a document without lanes, a refusal that keeps a non-string or pool-adjacent authored lanes value in the document, receipts written by the process that saves the migrated document, and review keys in the environment announced once.

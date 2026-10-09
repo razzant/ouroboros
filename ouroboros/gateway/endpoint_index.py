@@ -82,7 +82,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/mcp/status",
     "POST /api/mcp/refresh",
     "POST /api/mcp/test",
-    "GET /api/reviewer-slots",
+    "GET /api/review-pool",
     "GET /api/claudexor/status",
     "POST /api/claudexor/quota/refresh",
     "POST /api/claudexor/wake",

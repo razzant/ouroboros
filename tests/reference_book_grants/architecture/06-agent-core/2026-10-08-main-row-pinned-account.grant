@@ -1,0 +1,2 @@
+225
+FIX3 W5: the `/review` paragraph names what the direct Main row carries beyond `OUROBOROS_MODEL` — its local flag and Main pinned account from `OUROBOROS_MODEL_ACCOUNTS`, sent as the seat model_account_override (an empty override is Auto, never a lookup of the Main role) — so a bare /review is stated to run where Main runs; the correction is recorded in the existing paragraph rather than a new section.

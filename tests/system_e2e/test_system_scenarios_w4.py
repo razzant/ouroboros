@@ -904,7 +904,7 @@ def test_s22_absorb_kill_recovery_absorbs_once_and_never_twice(
                 "commit_sha": commit_sha,
             }, marker
             assert server.proc.poll() is None, "auto-restart off must not restart the tree"
-            assert "triad_review" in stub.kinds() and "scope_review" in stub.kinds(), (
+            assert "triad_review" in stub.kinds() and "two_part_review" in stub.kinds(), (
                 stub.kinds())
 
             # HARD CRASH in the window.

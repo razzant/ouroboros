@@ -213,12 +213,12 @@ def test_session_consumer_reads_exact_retained_file_without_attachments(monkeypa
 
 
 def test_complete_compact_send_must_fit_even_without_packet_overflow(monkeypatch, tmp_path):
-    from ouroboros.tools import scope_review_session
+    from ouroboros.tools import review_brief_coupling
 
     fake = _fake_session(monkeypatch)
     _offline_env(monkeypatch, _ROW_SESSION)
     governance, workspace = _roots(tmp_path)
-    monkeypatch.setattr(scope_review_session, "SESSION_INLINE_DIFF_CEILING_CHARS", 1_000)
+    monkeypatch.setattr(review_brief_coupling, "SESSION_INLINE_DIFF_CEILING_CHARS", 1_000)
     _real_panel(monkeypatch, _EpisodeLLM(tmp_path, []))
     result = _panel(tmp_path, dict(_ACCEPTANCE_PACKET), workspace, governance)
     assert result.aggregate_signal != "PASS"
@@ -421,7 +421,7 @@ def test_native_consumer_reports_lost_retained_reader_without_switching_to_packe
 
 def test_session_rechecks_actual_request_after_packet_retention(monkeypatch, tmp_path):
     from ouroboros.review_substrate import run_review_request
-    from ouroboros.tools import scope_review_session
+    from ouroboros.tools import review_brief_coupling
 
     fake = _fake_session(monkeypatch)
     request, slot, _author, canonical, _workspace = _prepared_request(tmp_path)
@@ -431,7 +431,7 @@ def test_session_rechecks_actual_request_after_packet_retention(monkeypatch, tmp
     retain = acceptance_retrieving.retain_review_source
     def smaller_dispatch_window(*args):
         retain(*args)
-        monkeypatch.setattr(scope_review_session, "SESSION_INLINE_DIFF_CEILING_CHARS", 1000)
+        monkeypatch.setattr(review_brief_coupling, "SESSION_INLINE_DIFF_CEILING_CHARS", 1000)
     monkeypatch.setattr(acceptance_retrieving, "retain_review_source", smaller_dispatch_window)
     result = run_review_request(request, slots=[slot], drive_root=canonical, llm=_EpisodeLLM(canonical, []))
     assert result.aggregate_signal != "PASS"

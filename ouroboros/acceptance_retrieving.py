@@ -121,9 +121,7 @@ def _first_send_fits(request: Any, slot: Any, text: str, *, session: bool) -> tu
         native_first_send_chars,
         native_landing_at,
     )
-    from ouroboros.tools.scope_review_session import (
-        SESSION_INLINE_DIFF_CEILING_CHARS,
-    )
+    from ouroboros.tools.review_brief_coupling import SESSION_INLINE_DIFF_CEILING_CHARS
 
     if session:
         from ouroboros.review_execution import (

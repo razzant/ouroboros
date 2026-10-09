@@ -43,17 +43,16 @@ def test_wizard_navigation_restores_draft_and_back_position(subscription_ui, vie
     page.locator("#next-btn").scroll_into_view_if_needed()
     previous_position = page.evaluate("window.scrollY")
     page.click("#next-btn")
-    page.wait_for_selector("#reviewer-slots-section", state="attached")
+    page.wait_for_selector("[data-reviewers-note]", state="attached")
     assert page.evaluate("document.activeElement.matches('.step-title')")
     assert page.evaluate("window.scrollY") == 0
 
-    page.locator('[data-collapse="reviewers"] > summary').click()
-    page.evaluate("window.heldReviewers = document.querySelector('[data-collapse=reviewers]')")
+    page.evaluate("window.heldReviewers = document.querySelector('[data-reviewers-note]')")
     # Test keyboard focus retention explicitly: WebKit's native pointer click
     # intentionally does not focus a button as Chromium's does.
     page.locator('[data-review-mode="blocking"]').focus()
     page.locator('[data-review-mode="blocking"]').press("Enter")
-    assert page.evaluate("heldReviewers === document.querySelector('[data-collapse=reviewers]') && heldReviewers.open")
+    assert page.evaluate("heldReviewers === document.querySelector('[data-reviewers-note]')")
     assert page.locator('[data-review-mode="blocking"]').get_attribute("aria-pressed") == "true"
     assert page.locator('[data-review-mode="advisory"]').get_attribute("aria-pressed") == "false"
     assert page.evaluate("document.activeElement.matches('[data-review-mode=blocking]')")

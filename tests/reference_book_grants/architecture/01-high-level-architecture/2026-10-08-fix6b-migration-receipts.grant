@@ -1,0 +1,2 @@
+602
+FIX6b audit fixes (VD3-01, VD3-06): the module map names review_pool_receipts.py, whose receipts the process that first saves a migrated document writes, and the review-pool payload's migration receipt and credential facts.

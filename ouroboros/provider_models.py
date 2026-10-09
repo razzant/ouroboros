@@ -171,9 +171,9 @@ PROVIDER_CREDENTIAL_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 # Active settings keys that hold a ROUTED model identity (prefix -> provider via
-# provider_for_model). Heavy is a bounded migration/history input, not a live
-# route selector; keeping the split here prevents new consumers (including
-# Provider Test) from accidentally resurrecting it.
+# provider_for_model). Heavy and the retired review scalars are migration/history
+# inputs, not live route selectors; the active set keeps consumers (including
+# Provider Test) from accidentally resurrecting them.
 # Superset of the live slots; a key absent from settings still declares whatever
 # ``config.SETTINGS_DEFAULTS`` will hand the runtime, which is why declared_model_settings()
 # fills the defaults in rather than treating "unset" as "unused".
@@ -181,9 +181,7 @@ ACTIVE_MODEL_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT",
     "OUROBOROS_MODEL_VISION", "OUROBOROS_MODEL_CONSCIOUSNESS",
     "OUROBOROS_MODEL_FALLBACKS", "OUROBOROS_MODEL_FALLBACK",
-    "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "OUROBOROS_WEBSEARCH_MODEL",
-    "OUROBOROS_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODEL",
+    "OUROBOROS_WEBSEARCH_MODEL",
 )
 LEGACY_MODEL_SETTING_KEYS: tuple[str, ...] = ("OUROBOROS_MODEL_HEAVY",)
 # Compatibility import name. Its meaning is now explicitly the active set.
@@ -192,8 +190,7 @@ MODEL_SETTING_KEYS = ACTIVE_MODEL_SETTING_KEYS
 # Settings keys whose value is a Claude Agent SDK / Claude Code model NAME (``opus[1m]``),
 # NOT a routed model identity: they carry no provider prefix, so provider_for_model would
 # mis-route them to OpenRouter.  Their transport is the Anthropic SDK subprocess, which
-# authenticates with ANTHROPIC_API_KEY (the Claude runtime gateways:
-# tools/claude_advisory_review.py), so a non-empty value DECLARES the anthropic provider.
+# authenticates with ANTHROPIC_API_KEY, so a non-empty value DECLARES the anthropic provider.
 
 
 def provider_for_model(model: str) -> str:
@@ -578,11 +575,6 @@ DIRECT_PROVIDER_REVIEW_ROLES = {
     # DeepSeek install reviews with three independent thinking v4-pro calls.
     "deepseek": ("main", "main", "main"),
     "zai": ("main", "main", "main"),
-}
-
-DIRECT_PROVIDER_SCOPE_DEFAULTS = {
-    provider: defaults["main"]
-    for provider, defaults in DIRECT_PROVIDER_DEFAULTS.items()
 }
 
 _ANTHROPIC_MODEL_ALIASES = {

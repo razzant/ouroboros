@@ -51,10 +51,12 @@ import {
     taskControlBusy,
 } from './task_control_menu.js';
 import { openConfirmDialog } from './confirm_dialog.js';
+import { chooseAndSendReview } from './review_command.js';
 import { bindEnterSubmit } from './ui_interactions.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import {
     captureLiveCardPhaseState,
+    censusTaskFacts,
     desiredLiveCardPhase,
     liveCardCountBits,
     liveCardLabel,
@@ -447,8 +449,7 @@ export function createChatInstance({
     const pendingSubmissions = new Map();
     // В9: Starting… until a snapshot says supervisor_ready; a disconnect forgets it.
     let hostReady = false;
-    // Bounded conclusions block stale state snapshots; reusable logical task
-    // slots are cleared whenever their cycle settles.
+    // Bounded conclusions retain known outcomes for later cards; reusable slots clear on settlement.
     const concludedDirectActivities = new Map();
     const CONCLUDED_ACTIVITY_LEDGER_MAX = 200;
     // Queue-loss candidates and single-flight detail reads.
@@ -466,23 +467,24 @@ export function createChatInstance({
         }
     }
 
-    function recordConcludedActivity(activityId) {
+    function recordConcludedActivity(activityId, phase = '') {
         const aid = taskKey(activityId);
         if (!aid) return;
         missingManagedTaskIds.delete(aid);
+        phase ||= concludedDirectActivities.get(aid) || '';
         concludedDirectActivities.delete(aid);
-        concludedDirectActivities.set(aid, Date.now());
+        concludedDirectActivities.set(aid, phase);
         while (concludedDirectActivities.size > CONCLUDED_ACTIVITY_LEDGER_MAX) {
             concludedDirectActivities.delete(concludedDirectActivities.keys().next().value);
         }
     }
-    function recordTerminalActivity(taskId) {
+    function recordTerminalActivity(taskId, phase = '') {
         const id = taskKey(taskId);
         if (!id) return;
         activeDirectActivities.delete(id);
         missingManagedTaskIds.delete(id);
         if (REUSABLE_TASK_IDS.has(id)) concludedDirectActivities.delete(id);
-        else recordConcludedActivity(id);
+        else recordConcludedActivity(id, phase);
         settleTerminalRootChildren(id);
     }
     // A terminal root reconciles open descendants through single-flight detail
@@ -578,7 +580,8 @@ export function createChatInstance({
             if (!response.ok) return;
             const { queue } = await response.json();
             if (destroyed || !Array.isArray(queue?.pending) || !Array.isArray(queue?.running)) return;
-            const tasks = new Map([...queue.pending, ...queue.running].map(row => [row.id, row.task]));
+            const tasks = new Map([[queue.pending, 'queued'], [queue.running, 'working']]
+                .flatMap(([rows, phase]) => rows.map(row => [row.id, { ...row.task, phase }])));
             withStableViewport(() => {
                 for (const record of children) {
                     if (record.finished || !record.root?.isConnected || record.lastLiveObservedAt > started) continue;
@@ -586,6 +589,7 @@ export function createChatInstance({
                     if (task && 'project_admission_hold' in task) {
                         missingManagedTaskIds.delete(record.groupId);
                         restoreCardActivity(record, task.project_admission_hold);
+                        syncParkedPhase(record, ws.isConnected?.() === false ? 'unknown' : task.phase, task);
                         record.projectHoldQueued = Boolean(record.projectHold);
                     } else if (!task && record.projectHoldQueued) {
                         record.projectHoldQueued = false;
@@ -608,8 +612,11 @@ export function createChatInstance({
             ? data.active_chat_activities
             : data?.active_direct_turns;
         if (Array.isArray(activities)) {
-            hydrateDirectActivities(activities, snapshotRequestedAt,
-                data.active_chat_activities_complete === true && data.supervisor_ready === true);
+            withStableViewport(() => {
+                hydrateDirectActivities(activities, snapshotRequestedAt,
+                    data.active_chat_activities_complete === true && data.supervisor_ready === true);
+                return true;
+            });
             for (const activity of activities) {
                 if (activity.required_question) chatDecision.appendActivityQuestion(activity.required_question, snapshotRequestedAt);
                 if (Number(activity.chat_id ?? 1) === chatId) modelWaits.observe(activity.activity_id, activity);
@@ -1065,8 +1072,7 @@ export function createChatInstance({
             delete record.root.dataset.projectCreating;
             record.root.dataset.projectCreated = '1';
             record.root.dataset.projectId = project.id || '';
-            // Atomic detach-and-reparent (C4.5): replaceChildren swaps the whole live
-            // timeline (subagent cards, working bubble) for the chip in one paint.
+            // Replace the live timeline with its Project pointer in one paint.
             handoffs?.mount(record.root, { taskId: record.groupId, projectId: project.id, projectName: project.name,
                 title: record.titleEl?.textContent, handoffId: handoff_id, receipt: handoff_receipt, kind: 'card' });
             record.turnProjectBtn = null;
@@ -1376,6 +1382,10 @@ export function createChatInstance({
             if (record.titleEl) record.titleEl.textContent = _pendingName;
         }
         resetLiveCardRecord(record);
+        const activity = activeDirectActivities.get(normalizedGroupId);
+        if (activity) syncParkedPhase(record, activity.phase, activity);
+        const ended = concludedDirectActivities.get(normalizedGroupId);
+        if (ended) finishLiveCardMutation(normalizedGroupId, ended);
         // P5: the cancelable marker may have arrived (scheduled progress frame /
         // history replay) before this card was minted.
         syncCancelRunButton(record);
@@ -1504,8 +1514,7 @@ export function createChatInstance({
         // collapsed timelines defer DOM building; the flag says
         // the rendered timeline DOM is stale relative to record.items.
         record._timelineDirty = false;
-        // last frame's summary meta strings — meta renders from
-        // record state (renderLiveCardMeta), once per card in a batch.
+        // Render metadata once per card in a batch.
         record._lastFrameMeta = [];
         // P1: last bounded activity projection (remembered even while
         // the collapsed line is suppressed on unnamed root cards) + sticky cost.
@@ -1638,7 +1647,9 @@ export function createChatInstance({
         const typingBefore = typingEl.style.display;
         let timelineChanged = false;
         const nextPhase = summary.phase || '';
-        if (_historyRow?.history_id && record.updates > 0 && !summary.terminal
+        const closedPhase = record.finished && !isTerminalTaskPhase(nextPhase, summary.terminal) ? replayTerminalPhase(record) : '';
+        const initialContent = record.finished && (!record.updates || (summary.human && !record.lastHumanHeadline));
+        if (_historyRow?.history_id && record.updates > 0 && !initialContent && !summary.terminal
                 && (record.finished || _historyAppending
                     || Date.parse(rawTs) < Date.parse(record.latestSourceTs || ''))) {
             const changed = mergeHistoricalTimelineItem(record, summary, _historyRow, ts);
@@ -1651,7 +1662,7 @@ export function createChatInstance({
         if (summary.toolCall?.fact === 'wait_ended' && record.toolFold.calls.get(summary.toolCall.key)?.settlement) {
             summary = { ...summary, visible: false }; // wait history remains in the fold
         }
-        if (record.finished && !isTerminalTaskPhase(nextPhase, summary.terminal)) {
+        if (closedPhase && !initialContent) {
             if (foldView) {
                 upsertToolFoldRow(record, foldView, ts, rawTs);
                 renderLiveCardTimeline(record);
@@ -1661,10 +1672,11 @@ export function createChatInstance({
             renderLiveCardMeta(record, summary.costProjection);
             return liveCardProjectionChanged(before, record);
         }
-        if (summary.terminal || (!_historyReplayActive && !_syncPass1Active
-                && ['working', 'thinking'].includes(summary.phase))) {
+        if (!closedPhase && (summary.terminal || (!_historyReplayActive && !_syncPass1Active
+                && ['working', 'thinking'].includes(summary.phase)))) {
             restoreCardActivity(record);
             if (!summary.terminal) {
+                if (record.isSubagent && record.parkedPhase === 'unknown' && ws.isConnected?.() !== false) syncParkedPhase(record, summary.phase);
                 record.lastLiveObservedAt = Date.now();
                 missingManagedTaskIds.delete(nextGroupId);
             }
@@ -1673,12 +1685,12 @@ export function createChatInstance({
         if (foldView?.clearedNotice) { renderLiveCardTimeline(record); timelineChanged = true; }
 
         if (!record.isSubagent) {
-            activeLiveGroupId = nextGroupId;
+            if (!closedPhase) activeLiveGroupId = nextGroupId;
             reanchorTaskCard(record, rawTs, { suppressDomInsert });
         }
         record.updates += 1;
         const wasFinished = record.finished;
-        // No placeholder: a frame naming nothing is no narration; the chip says Working (#1369).
+        // Empty frames name nothing (#1369).
         const headline = summary.headline || record.lastHumanHeadline || '';
         const syntheticKey = summary.dedupeKey || dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const isLegacyParentSubagentKey = syntheticKey.startsWith('parent-subagent:');
@@ -1687,7 +1699,7 @@ export function createChatInstance({
             || ['subagent-lifecycle:', 'subagent-progress:', 'subagent-result:', 'task_done|', 'tool:']
                 .some((prefix) => syntheticKey.startsWith(prefix));
         if (!isLegacyParentSubagentKey) {
-            record.finished = isTerminalTaskPhase(nextPhase, summary.terminal);
+            record.finished = Boolean(closedPhase) || isTerminalTaskPhase(nextPhase, summary.terminal);
         }
         if (summary.human && headline) {
             record.lastHumanHeadline = headline;
@@ -1703,11 +1715,10 @@ export function createChatInstance({
                 || (record.updates > 1 ? record.titleEl.textContent : ''));
         // Only task facts own the outcome chip under a hold; failed tools are diagnostics.
         if (summary.observedOutcome && !record.finished) record.observedOutcome = summary.observedOutcome;
-        const desiredPhase = desiredLiveCardPhase(record, record.finished ? summary.phase || 'done' : '');
+        const desiredPhase = desiredLiveCardPhase(record, closedPhase || (record.finished ? summary.phase || 'done' : ''));
         setLiveCardPhase(record, desiredPhase.phase, desiredPhase.text, desiredPhase.className,
             desiredPhase.secondary);
-        // Title: project name, child's lineage, or activity; an empty block has none.
-        // Project naming leaves the activity headline in the timeline.
+        // Project/child identity names the card; authored activity stays in its timeline.
         const title = record.suggestedName || (record.isSubagent ? childTitle(record)
             : !blockHasWork(record) ? ''
                 : (record.finished ? record.lastHumanHeadline || 'Task activity'
@@ -1771,7 +1782,7 @@ export function createChatInstance({
         hideTypingIndicatorOnly();
         // Log task_done bypasses finishLiveCard; settle Cancel and its marker.
         if (record.finished) {
-            settleLiveCard(record, summary.phase || 'done', wasFinished);
+            settleLiveCard(record, wasFinished);
         } else {
             setLiveCardTypingVisible(record, true);
         }
@@ -1786,7 +1797,7 @@ export function createChatInstance({
     }
 
     // Author controls end; paid-review waits retain their own lifetime.
-    function settleLiveCard(record, phase, wasFinished) {
+    function settleLiveCard(record, wasFinished) {
         record.root.dataset.finished = '1';
         if (record.toolFold) {
             upsertToolFoldRow(record, noteToolHostMetrics(record, {}), '', '');
@@ -1822,7 +1833,7 @@ export function createChatInstance({
                 && record.titleEl.textContent !== presentation.headline) {
             record.titleEl.textContent = blockHasWork(record) ? 'Task activity' : '';
         }
-        settleLiveCard(record, activePhase, wasFinished);
+        settleLiveCard(record, wasFinished);
         ensureLiveCardVisible(record);
         if (activeLiveGroupId === record.groupId) activeLiveGroupId = '';
         syncChatStatus();
@@ -2160,7 +2171,7 @@ export function createChatInstance({
         if (typeof evt._is_direct_chat === 'boolean') noteDirectTurn(liveCardRecords.get(taskId), evt._is_direct_chat);
         if (evt.cancelable === true) markTaskCancelable(taskId);
         if (eventType === 'task_done' && summary.terminal) {
-            recordTerminalActivity(taskId);
+            recordTerminalActivity(taskId, summary.phase);
             syncChatStatus();
         }
         return Boolean(changed || queued || subagentChanged);
@@ -2234,6 +2245,7 @@ export function createChatInstance({
                 taskId,
                 projectId,
                 projectName,
+                taskName: opts.taskName || '',
                 handoffId: opts.handoffId || '',
                 originProjected: Boolean(opts.originProjected),
                 originId: opts.originId || '',
@@ -2288,7 +2300,9 @@ export function createChatInstance({
         `;
         if (attachments.length) chatMedia.mountAttachments(bubble, attachments, shown);
         if (!isProgress && shown) chatMedia.attachCopyControl(bubble, String(shown));
-        if (systemType === 'project_handoff' && handoffs) handoffs.mount(bubble, { taskId, projectId, projectName, title: text, handoffId: opts.handoffId, kind: 'receipt' });
+        if (['project_handoff', 'project_started'].includes(systemType) && handoffs) handoffs.mount(bubble, {
+            taskId, projectId, projectName, title: opts.taskName || text, handoffId: opts.handoffId,
+            kind: systemType === 'project_started' ? 'started' : 'receipt' });
         else if (PROJECT_ROW_TYPES.has(systemType)) decorateProjectRow(bubble, { role, projectId, projectName,
             terminalTime: opts.terminalTime, addedAt: ts, completion: systemType === 'project_completion_summary' });
         syncSavedProjectContext(bubble, opts.originProjected, opts.originId);
@@ -2309,7 +2323,7 @@ export function createChatInstance({
         const a = msg.completion_answer;
         return addMessage(a || text, a ? 'assistant' : 'system', !!(a || msg.markdown), msg.ts || null, false, {
             ...opts, systemType: msg.system_type, projectId: msg.project_id || '',
-            projectName: msg.project_name || '', handoffId: msg.handoff_id || '', terminalTime: msg.terminal_time || null,
+            projectName: msg.project_name || '', taskName: msg.task_name || '', handoffId: msg.handoff_id || '', terminalTime: msg.terminal_time || null,
         });
     }
 
@@ -3168,10 +3182,7 @@ export function createChatInstance({
             ws.send({ type: 'command', cmd: `/bg ${next ? 'start' : 'stop'}` });
             return;
         }
-        if (command === 'review') {
-            ws.send({ type: 'command', cmd: '/review' });
-            return;
-        }
+        if (command === 'review') return chooseAndSendReview({ openConfirmDialog, ws });
         if (command === 'restart') {
             await confirmAndSendRestart({ openConfirmDialog, ws });
             return;
@@ -3498,7 +3509,7 @@ export function createChatInstance({
                     return Boolean(reconcileCancelCardFromDetail(currentRecord, taskId, detail) || changed);
                 }
                 if (vouched) return changed;
-                recordTerminalActivity(taskId);
+                recordTerminalActivity(taskId, taskTerminalPhase(detail));
                 return Boolean(appendTaskSummaryToLiveCard({ ...detail, task_id: taskId }) || changed);
             });
         } catch {
@@ -3517,6 +3528,8 @@ export function createChatInstance({
 
     function hydrateDirectActivities(turnsList, snapshotBarrierMs = Infinity, complete = false) {
         if (!Array.isArray(turnsList)) return;
+        const connected = ws.isConnected?.() !== false;
+        complete &&= connected;
         const {
             activities: nextMap,
             departedManagedTaskIds,
@@ -3529,7 +3542,15 @@ export function createChatInstance({
         );
         activeDirectActivities.clear();
         for (const [k, v] of nextMap.entries()) {
+            if (v.clientMessageId) pendingSubmissions.delete(v.clientMessageId);
             const record = liveCardRecords.get(k);
+            if (!connected) v._activityUnconfirmed = true;
+            const facts = censusTaskFacts(v);
+            if (facts.ended) {
+                recordTerminalActivity(k, facts.outcome);
+                if (record) finishLiveCardMutation(k, facts.outcome);
+                continue;
+            }
             activeDirectActivities.set(k, v);
             restoreCardActivity(liveCardRecords.get(k), v.project_admission_hold);
             syncParkedPhase(record, v.phase, v);
@@ -3537,7 +3558,6 @@ export function createChatInstance({
             markReviewAnchor(record);
             noteDirectTurn(record, v.kind !== 'managed_task');
             if (v.kind === 'managed_task') missingManagedTaskIds.delete(k);
-            if (v.clientMessageId) pendingSubmissions.delete(v.clientMessageId);
         }
         for (const taskId of globallyActiveActivityIds) missingManagedTaskIds.delete(taskId);
         for (const row of settledDirectRows) {
@@ -3673,7 +3693,7 @@ export function createChatInstance({
                     // concurrent turn's state (2A keeps later `Sending...`).
                     const finished = activeDirectActivities.get(explicitTaskId);
                     activeDirectActivities.delete(explicitTaskId);
-                    if (!REUSABLE_TASK_IDS.has(explicitTaskId)) recordConcludedActivity(explicitTaskId);
+                    if (!REUSABLE_TASK_IDS.has(explicitTaskId)) recordConcludedActivity(explicitTaskId, taskTerminalPhase(msg));
                     if (finished?.clientMessageId) {
                         pendingSubmissions.delete(finished.clientMessageId);
                     }
@@ -3819,6 +3839,16 @@ export function createChatInstance({
     onWs('close', () => {
         unconfirmed.unsettle();
         handoffs?.setConnected(false);
+        withStableViewport(() => {
+            for (const [id, activity] of activeDirectActivities) {
+                activeDirectActivities.set(id, { ...activity, _activityUnconfirmed: true });
+            }
+            let changed = false;
+            for (const [id, record] of liveCardRecords) {
+                changed = syncParkedPhase(record, 'unknown', activeDirectActivities.get(id)) || changed;
+            }
+            return changed;
+        });
         hostReady = false;
         hideTypingIndicatorOnly();
         syncChatStatus();

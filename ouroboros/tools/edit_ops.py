@@ -228,10 +228,7 @@ def _finish_mutation(
         if ctx.is_workspace_mode():
             footer += " " + workspace_edit_note(ctx)
         return footer
-    footer = (
-        "Files are on disk but NOT committed. Run commit_reviewed when ready.\n"
-        "⚠️ Advisory pre-review is now stale — run preflight_review before commit_reviewed."
-    )
+    footer = "Files are on disk but NOT committed. Run commit_reviewed when ready."
     # A pro-mode edit of a protected surface announces itself here exactly as it
     # does from git._repo_write / _str_replace_editor (the protected-write contract
     # in ARCHITECTURE "Safety and runtime mode" and SYSTEM.md "Safety-critical
@@ -269,7 +266,7 @@ def _partial_write_failure(
         return (
             f"⚠️ EDIT_OPS_PARTIAL_WRITE_FAILED ({tag}): {detail}\n"
             f"PARTIALLY APPLIED — these files WERE written: {', '.join(changed_paths)}. "
-            "Re-read them before retrying; advisory pre-review is now stale.\n"
+            "Re-read them before retrying.\n"
             + footer
         )
     return f"⚠️ {tag}: {detail}\nNothing was written."

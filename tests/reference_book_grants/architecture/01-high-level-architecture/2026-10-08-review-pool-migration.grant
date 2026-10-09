@@ -1,0 +1,2 @@
+710
+The module map row for ouroboros/review_pool_migration.py (the review-lane -> review-pool migration at the settings read seam: frozen lane readers, the pure migration, the once-per-digest registry and the one owner message) and the data-layout row for state/review_migrations/ (one snapshot per migration the supervisor boot observed). Covers measured net UTF-8 growth against af674b1cef549757bae7f296d082c8627f0bd73e.

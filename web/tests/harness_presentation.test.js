@@ -287,8 +287,8 @@ test('configured identity ignores stale daemon labels until the catalog read is 
     assert.match(provenHtml, />Stale daemon label · agent<\/span>/);
 });
 
-test('Chat, Logs, onboarding, and reviewer lanes consume the same mark owner', () => {
-    const modules = ['chat_activity.js', 'logs.js', 'onboarding_agents_step.js', 'reviewer_slots.js'];
+test('Chat, Logs, onboarding, and the subagent catalog consume the same mark owner', () => {
+    const modules = ['chat_activity.js', 'logs.js', 'onboarding_agents_step.js', 'subagents_settings.js'];
     for (const name of modules) {
         const source = readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
         assert.match(source, name === 'chat_activity.js' ? /executorIdentityMarkup/ : /harnessIdentityMarkup/, `${name} bypasses harness presentation SSOT`);

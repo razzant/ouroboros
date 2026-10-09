@@ -76,6 +76,7 @@ def _assignment(repo, llm, session_task="Review the staged change; cite files.")
         effort="low",
         route=ReviewRouteKind.API_CHAT,
         subagent_id="api-critic",
+        native_retrieval_override=True,  # the row's delivery is its own fact (F8), not the id's
     )
     return ReviewAssignment(request=request, slot=slot, call_id="op-1")
 

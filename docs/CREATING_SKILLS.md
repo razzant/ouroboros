@@ -165,9 +165,10 @@ automatically disabling, deleting, or moving either payload.
 model's point of view: `what_model_sees` (what the skill adds to the model's
 context — tools, sections, attachments) and `token_effect` (roughly what that
 costs and when it is loaded). A bare string is shorthand for
-`what_model_sees`. The prose travels verbatim (bounded) to the model-visible
-surfaces — the `list_skills` JSON and the "Installed Skills" context section —
-so write it for the model, not for the human reviewer. Unknown keys or
+`what_model_sees`. The prose travels to the model-visible surfaces — bounded in
+the `list_skills` index and the "Installed Skills" context section, whole in
+`list_skills(name=...)`, which also returns the `read_file` call for this
+manifest — so write it for the model, not for the human reviewer. Unknown keys or
 non-string values are refused at parse time.
 
 Manifest refusals teach: every `SkillManifestError` carries the problem plus,
@@ -180,7 +181,7 @@ manifest instead of only what was wrong.
 ```mermaid
 flowchart LR
     install[install] --> review[skill_review]
-    review --> triad[reviewer-slot skill review]
+    review --> triad[skill review by the review panel]
     triad -- PASS --> deps
     deps --> enable[owner toggles enabled=true]
     enable --> execute[skill_exec / dispatch]

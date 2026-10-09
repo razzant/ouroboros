@@ -459,7 +459,7 @@ def test_promoted_self_body_requirement_reaches_the_contract_and_context_without
     assert parameters["properties"][field]["type"] == "boolean"
     assert field not in parameters["required"]
     description = parameters["properties"][field]["description"]
-    assert "Ouroboros's own code" in description and "another folder" in description
+    assert "Ouroboros code" in description and "copies elsewhere" in description
     assert "context_requires_development" not in parameters["properties"]
     events = []
 

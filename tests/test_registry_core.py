@@ -390,7 +390,7 @@ def test_registry_uses_typed_required_root_not_note_or_tool_name(tmp_path, monke
             "CORE_PROTECTION_BLOCKED",
             "⚠️ CORE_PROTECTION_BLOCKED: runtime_mode='advanced' refuses to run tool "
             "'write_file' against protected safety-critical path: BIBLE.md. Switch to "
-            "runtime_mode='pro' and let the normal triad + scope review cover the protected "
+            "runtime_mode='pro' and let the normal review panel cover the protected "
             "core/contract/release change before commit.",
             "protected_blocked",
         ),

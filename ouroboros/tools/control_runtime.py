@@ -236,19 +236,33 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
     return f"Promote to stable requested: {reason}"
 
 
-def _request_deep_self_review(ctx: ToolContext, reason: str) -> str:
-    # Availability follows the configured deep-review ROW (a native inspection
-    # episode or a delegated session), not the model key alone.
+def _request_deep_self_review(ctx: ToolContext, reason: str, reviewer: str = "") -> str:
+    # The executor is the one enabled catalog row the caller names (decision 3A),
+    # else the Main model; availability follows that row (a native inspection
+    # episode or a delegated session), not a model key alone.
     from ouroboros.deep_self_review import deep_review_route, deep_review_unavailable_text
     from ouroboros.consciousness_authority import consciousness_origin_metadata
-    unavailable, identity = deep_review_route()
+    reviewer = str(reviewer or "").strip()
+    if reviewer:
+        from ouroboros.tools.arg_feedback import argument_refusal
+        from ouroboros.tools.review_change import ReviewChangeArgumentError, system_review_row
+
+        try:
+            unavailable, identity = deep_review_route(system_review_row(reviewer))
+        except ReviewChangeArgumentError as exc:
+            return argument_refusal(ctx, "TOOL_ARG_ERROR (request_deep_self_review)", [str(exc)],
+                                    effect="No review was queued.")
+    else:
+        unavailable, identity = deep_review_route()
     if unavailable:
         return deep_review_unavailable_text(unavailable)
     # A consciousness turn names itself: the review root then goes through the ONE
     # admission door and its spend stays inside the consciousness allowance.
-    ctx.pending_events.append({"type": "deep_self_review_request", "reason": reason, "model": identity, "ts": utc_now_iso(),
+    ctx.pending_events.append({"type": "deep_self_review_request", "reason": reason, "reviewer": reviewer,
+                               "model": identity, "ts": utc_now_iso(),
                                **consciousness_origin_metadata(getattr(ctx, "task_metadata", None))})
-    return f"Deep self-review requested (reviewer: {identity}). It will be queued and executed asynchronously."
+    return (f"Deep self-review requested (reviewer: {reviewer or 'Main'}, runs on {identity}). "
+            "It will be queued and executed asynchronously.")
 
 
 @completed_local_read

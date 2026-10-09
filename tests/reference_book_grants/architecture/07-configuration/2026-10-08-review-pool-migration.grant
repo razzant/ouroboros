@@ -1,0 +1,2 @@
+194
+The five review-lane settings rows (OUROBOROS_REVIEWER_SLOTS and the review/scope/deep effort and deep model keys) now say they are migrated on load into reviewer rows of the subagent catalog instead of carrying a shipped default. Covers measured net UTF-8 growth against af674b1cef549757bae7f296d082c8627f0bd73e.

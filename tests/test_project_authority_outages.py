@@ -496,8 +496,7 @@ def test_assisted_apply_reports_started_only_for_an_admitted_resolver(pool, monk
         return (0, base, "") if cmd[:3] == ["git", "rev-parse", "--verify"] else (0, "", "")
 
     txs, rollbacks = [], []
-    monkeypatch.setattr(reviewer_slot_config, "commit_triad_rows", lambda: [])
-    monkeypatch.setattr(reviewer_slot_config, "commit_scope_rows", lambda: [])
+    monkeypatch.setattr(reviewer_slot_config, "review_pool_slots", lambda **_kw: [])
     monkeypatch.setattr(git_ops, "BRANCH_DEV", "ouroboros")
     monkeypatch.setattr(git_ops, "git_capture", capture)
     monkeypatch.setattr(git_ops, "_create_rescue_snapshot", lambda *_a, **_k: None)

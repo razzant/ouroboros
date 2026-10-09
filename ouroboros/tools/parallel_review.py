@@ -1,4 +1,20 @@
-"""Parallel triad + scope review orchestration for commit gates."""
+"""One commit-gate review wave: every assigned seat, one two-part brief each.
+
+There is no scope role (PR-3 B). The gate assembles ONE wave (``review
+._prepare_unified_review``): every seat is asked by its ``parts`` — a packet
+seat the change (contract A), a retrieving seat the change AND the eight
+coupling questions in one brief (contract B), a coupling-only seat Part 2 of the
+same brief. Quorum is ``adaptive_quorum(len(assigned))`` once; the coupling
+question's answer lands in ``per_question.coupling`` and its history rides the
+subject (``ctx._coupling_review_history``). The aggregate is reduced by ONE
+function — ``review_ledger.reduce_verdict`` — for the gate and for the durable
+record alike (§1.7 order: NOT_DISPATCHED → pending → QUORUM_FAILED →
+NOT_PERFORMED by coupling → FAIL → PASS).
+
+Q25-A ordering stays: every seat is PREPARED (packet fit-checked, briefs built)
+before any seat is dispatched, so a deterministic assembly failure spends $0;
+money admission prices the whole wave before the first paid call.
+"""
 from __future__ import annotations
 
 import concurrent.futures as _cf
@@ -7,16 +23,9 @@ import copy
 import hashlib
 import json
 import logging
-import time
 
 from ouroboros.utils import run_cmd, utc_now_iso
-from ouroboros.review_substrate import scope_reviewer_slots
-from ouroboros.tools.review_helpers import build_scope_actor_record, format_review_history_entry, review_enforcement_blocks
-from ouroboros.tools.scope_review import (
-    run_scope_review,
-    ScopeReviewResult,
-    _get_scope_model,
-)
+from ouroboros.tools.review_helpers import format_review_history_entry, review_enforcement_blocks
 
 log = logging.getLogger(__name__)
 
@@ -34,36 +43,34 @@ def _reserved_actor_row(slot, operation_id: str) -> dict:
     }
 
 
-def _reserve_parallel_review_roster(ctx, triad_prepared, scope_rows) -> None:
-    """Reserve both commit-review surfaces before either executor pool starts.
+def _reserve_parallel_review_roster(ctx, prepared) -> None:
+    """Reserve the wave's seats before the executor starts.
 
-    The immutable operation-id map is process-local execution state.  The full
-    roster is attached to the caller.  When the owner deadline has no
-    dispatch window left, the roster remains an unpaid typed $0 wave; otherwise
-    the existing paid write-ahead stamp records both surfaces atomically in the
-    existing CommitAttemptRecord.  A stamp failure propagates before any
-    worker or provider POST can start.
+    The immutable operation-id map is process-local execution state. The full
+    roster is attached to the caller. When the owner deadline has no dispatch
+    window left, the roster remains an unpaid typed $0 wave; otherwise the
+    existing paid write-ahead stamp records the wave atomically in the existing
+    CommitAttemptRecord. A stamp failure propagates before any worker or
+    provider POST can start.
     """
     from types import SimpleNamespace
 
     from ouroboros.observability import new_call_id
     from ouroboros.review_dispatch import slot_id_for_row, stamp_review_paid_on_dispatch
 
-    triad_rows = [
+    rows = [
         copy.deepcopy(row)
         for row in list(getattr(ctx, "_triad_withheld_seat_records", []) or [])
         if isinstance(row, dict)
     ]
-    operations = {"multi_model_review": {}, "scope_review": {}}
-    row_plan = (triad_prepared or {}).get("row_plan") or {}
+    operations = {"multi_model_review": {}}
+    row_plan = (prepared or {}).get("row_plan") or {}
     models = list(row_plan.get("models") or [])
     routes = list(row_plan.get("routes") or [])
     efforts = list(row_plan.get("efforts") or [])
     slot_ids = list(row_plan.get("slot_ids") or [])
     for index, model in enumerate(models):
-        slot_id = str(slot_ids[index] if index < len(slot_ids) else "") or slot_id_for_row(
-            index + 1,
-        )
+        slot_id = str(slot_ids[index] if index < len(slot_ids) else "") or slot_id_for_row(index + 1)
         operation_id = new_call_id(f"commit_review_multi_model_review_{slot_id}")
         slot = SimpleNamespace(
             slot_id=slot_id,
@@ -71,37 +78,17 @@ def _reserve_parallel_review_roster(ctx, triad_prepared, scope_rows) -> None:
             route=routes[index] if index < len(routes) else "api_chat",
             effort=efforts[index] if index < len(efforts) else "",
         )
-        triad_rows.append(_reserved_actor_row(slot, operation_id))
+        rows.append(_reserved_actor_row(slot, operation_id))
         operations["multi_model_review"][slot_id] = operation_id
 
-    scope_actor_rows = []
-    for row in scope_rows:
-        slot = row["slot"]
-        final = row.get("final")
-        if final is not None:
-            scope_actor_rows.append(build_scope_actor_record(
-                final,
-                fallback_model_id=getattr(final, "model_id", "") or slot.model,
-                slot_id=slot.slot_id,
-            ))
-            continue
-        operation_id = new_call_id(f"commit_review_scope_review_{slot.slot_id}")
-        scope_actor_rows.append(_reserved_actor_row(slot, operation_id))
-        operations["scope_review"][str(slot.slot_id or "")] = operation_id
-
-    if not any(operations[surface] for surface in operations):
+    if not operations["multi_model_review"]:
         return
     ctx._review_reserved_operations = operations
-    ctx._review_reserved_roster = {
-        "multi_model_review": triad_rows,
-        "scope_review": scope_actor_rows,
-    }
+    ctx._review_reserved_roster = {"multi_model_review": rows}
     from ouroboros.config import get_finalization_grace_sec
     from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
 
-    if owner_deadline_exhausted_for_context(
-        ctx, reserve_sec=get_finalization_grace_sec(),
-    ):
+    if owner_deadline_exhausted_for_context(ctx, reserve_sec=get_finalization_grace_sec()):
         return
     try:
         stamp_review_paid_on_dispatch(ctx)
@@ -114,404 +101,47 @@ def _reserve_parallel_review_roster(ctx, triad_prepared, scope_rows) -> None:
         raise
 
 
-def _scope_history_entry(scope_result) -> dict:
-    """Build scope history while preserving non-PASS epistemic status."""
+def _coupling_history_entry(outcome) -> dict:
+    """One coupling round for the subject's history, preserving a non-PASS
+    epistemic status (``not_performed`` is never read as a clean pass)."""
+    def _names(findings):
+        return "; ".join(f"{f['item']} ({f.get('obligation_id')})" if f.get("obligation_id") else f["item"]
+                         for f in findings)
+
     parts = []
-    if scope_result.critical_findings:
-        parts.append(
-            "Critical: " + "; ".join(
-                (
-                    f"{f['item']} ({f.get('obligation_id')})"
-                    if f.get("obligation_id") else f["item"]
-                )
-                for f in scope_result.critical_findings
-            )
-        )
-    if scope_result.advisory_findings:
-        parts.append(
-            "Advisory: " + "; ".join(
-                (
-                    f"{f['item']} ({f.get('obligation_id')})"
-                    if f.get("obligation_id") else f["item"]
-                )
-                for f in scope_result.advisory_findings
-            )
-        )
-    status = getattr(scope_result, "status", None) or "responded"
-    # Lead with non-responded status so empty findings are not misread as PASS.
-    if not parts and status not in ("responded",):
+    if outcome.critical_findings:
+        parts.append("Critical: " + _names(outcome.critical_findings))
+    if outcome.advisory_findings:
+        parts.append("Advisory: " + _names(outcome.advisory_findings))
+    status = str(outcome.status or "not_performed")
+    if not parts and status != "responded":
         summary = f"({status})"
     else:
         summary = " | ".join(parts) if parts else "(no findings)"
-    coverage = (getattr(scope_result, "context_manifest", {}) or {}).get("scope_coverage_diagnostics", [])
-    if coverage:
+    seats = [s for s in outcome.seats if s.get("coverage") not in (None, "", "n/a", "not_asked")]
+    if seats:
         summary += " | Read coverage (diagnostic): " + "; ".join(
-            f"{row['slot_id']}: {row['coverage']}"
-            + (f" ({', '.join(row['uncovered_sources'])})" if row["uncovered_sources"] else "")
-            for row in coverage
-        )
+            f"{s['slot_id']}: {s['coverage']}" for s in seats)
     return {
-        "blocked": scope_result.blocked,
+        "blocked": bool(outcome.blocked),
         "status": status,
+        "verdict": str(outcome.verdict or ""),
         "summary": summary,
-        "critical_findings": scope_result.critical_findings or [],
-        "advisory_findings": scope_result.advisory_findings or [],
+        "critical_findings": list(outcome.critical_findings),
+        "advisory_findings": list(outcome.advisory_findings),
     }
 
 
-def _format_scope_advisory_msg(scope_result) -> str:
-    """Format advisory scope findings as a readable message (advisory enforcement path)."""
+def _format_coupling_advisory_msg(outcome) -> str:
+    """The coupling question's findings as a readable message (advisory path)."""
     parts = []
-    if scope_result.critical_findings:
-        parts.append("Scope review findings:\n" +
-                     "\n".join(f"  • {f['item']}: {f.get('reason', '')}"
-                                for f in scope_result.critical_findings))
-    if scope_result.advisory_findings:
-        parts.append("Scope advisory notes:\n" +
-                     "\n".join(f"  • {f['item']}: {f.get('reason', '')}"
-                                for f in scope_result.advisory_findings))
+    if outcome is not None and outcome.critical_findings:
+        parts.append("Coupling findings (Part 2):\n" +
+                     "\n".join(f"  • {f['item']}: {f.get('reason', '')}" for f in outcome.critical_findings))
+    if outcome is not None and outcome.advisory_findings:
+        parts.append("Coupling advisory notes (Part 2):\n" +
+                     "\n".join(f"  • {f['item']}: {f.get('reason', '')}" for f in outcome.advisory_findings))
     return "---\n" + "\n".join(parts) if parts else ""
-def _scope_not_dispatched_result(slot, reason: str = ""):
-    """Typed $0 placeholder for a prepared scope row the admission never
-    dispatched; ``reason`` names WHICH admission withheld it (default: the
-    Q25-A assembly block)."""
-    return ScopeReviewResult(
-        blocked=False,
-        block_message="",
-        model_id=slot.model,
-        status="not_dispatched",
-        advisory_findings=[{
-            "verdict": "FAIL", "severity": "advisory",
-            "item": "scope_row_not_dispatched",
-            "reason": reason or (
-                "assembly-before-dispatch admission (Q25=A): the commit gate was "
-                "already deterministically blocked at brief assembly, so this "
-                "row was not dispatched ($0 spent)."
-            ),
-        }],
-    )
-
-
-def _scope_enforcement() -> str:
-    from ouroboros.config import get_review_enforcement
-
-    return get_review_enforcement()
-
-
-def _reservation_ids_now() -> frozenset:
-    """Attempt ids of the reservations the root telemetry holds right now (the
-    baseline a scope-first hold compares against; empty outside a usage scope)."""
-    from ouroboros.usage_accounting import current_usage_scope, last_root_accounting
-
-    root = str(getattr(current_usage_scope(), "root_task_id", "") or "")
-    rows = (last_root_accounting(root) or {}).get("reservations") if root else None
-    return frozenset(str(r.get("attempt_id") or "") for r in (rows or []))
-
-
-def _await_scope_reservation(ctx, scope_future, seats, started_monotonic: float,
-                            known_ids: frozenset = frozenset()) -> None:
-    """Hold the triad until a scope seat's OWN reservation is on the ledger
-    (owner decision 2026-09-05: scope reserves FIRST): the identity (usage
-    category + review slot) of a row ``reserve_attempt`` APPENDED for this root
-    after the wave started, read from the ledger's process-local root
-    telemetry — a refresh, a settlement or a refused reservation never leaves
-    one, so none of them can release the triad early. Bounded by the scope
-    future and ``NESTED_SETTLEMENT_MARGIN_SEC`` (a structural ordering margin,
-    not a timeout contract); a hold that ends WITHOUT observing the scope
-    reservation is a typed ``review_scope_lead_unobserved`` event, never a
-    silent fall-through. The reservation must be THIS task's (``ctx.task_id``,
-    the id the substrate stamps on the row): a sibling task's scope seat under
-    the same root never releases it. ``known_ids`` are the reservation attempt
-    ids already on the root telemetry when the wave started: only a row NOT in
-    it is this wave's (an identity check, not a clock comparison — Windows'
-    monotonic tick is ~15.6 ms, so "reserved after the start" is not decidable
-    by time). No paid scope seat or no root = no wait."""
-    scope_slots = {seat["slot_id"] for seat in seats if seat["surface"] == "scope_review"}
-    if scope_future is None or not scope_slots:
-        return
-    from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC
-    from ouroboros.review_substrate import review_usage_category
-    from ouroboros.tools.review_helpers import emit_review_event
-    from ouroboros.usage_accounting import current_usage_scope, last_root_accounting
-
-    root_task_id = str(getattr(current_usage_scope(), "root_task_id", "") or "")
-    task_id = str(getattr(ctx, "task_id", "") or "")
-    category = review_usage_category("scope_review")
-    deadline = started_monotonic + float(NESTED_SETTLEMENT_MARGIN_SEC)
-    while root_task_id:
-        now = time.monotonic()
-        for row in (last_root_accounting(root_task_id) or {}).get("reservations") or []:
-            # Category + slot + time + THIS task: a sibling task under the same
-            # root running its own gate reserves a same-named scope slot too.
-            if (str(row.get("category") or "") == category
-                    and str(row.get("review_slot_id") or "") in scope_slots
-                    and str(row.get("task_id") or "") == task_id
-                    and str(row.get("attempt_id") or "") not in known_ids):
-                return
-        scope_done = bool(scope_future.done())
-        if scope_done or now >= deadline:
-            emit_review_event(ctx, {
-                "type": "review_scope_lead_unobserved",
-                "task_id": str(getattr(ctx, "task_id", "") or ""), "root_task_id": root_task_id,
-                "scope_slot_ids": sorted(scope_slots), "scope_seat_done": scope_done,
-                "margin_sec": float(NESTED_SETTLEMENT_MARGIN_SEC),
-            })
-            log.warning("no scope seat reservation observed (%s); the triad proceeds without the scope lead",
-                        "scope seat finished" if scope_done else f"margin {NESTED_SETTLEMENT_MARGIN_SEC}s")
-            return
-        time.sleep(0.05)
-
-
-def _prepare_scope_rows(ctx, commit_message, *, goal, scope, review_rebuttal,
-                        history_snapshot, scope_history, subject=None):
-    """Phase 1 of the Q25-A admission: assemble EVERY configured scope row's
-    brief without dispatching any reviewer. Returns aligned row dicts
-    ``{slot, prepared, final}`` (exactly one of prepared/final per row).
-
-    Every scope row retrieves, so no row receives an assembled packet and no
-    packet limit can refuse a seat here; what each row is OWED in full travels
-    with its brief as the required-source manifest. ``subject`` is the frozen
-    review subject the wave runs on (``None``: the context's live index).
-
-    Identity of every scope row comes from the one SSOT that owns it, so the
-    actor record and the substrate call agree on which row spoke. No
-    except/fallback here BY DESIGN: any failure to read the configured scope
-    rows must surface (the caller converts it into the same blocked result the
-    dispatch path always produced)."""
-    from ouroboros.tools.review_admission import prepare_scope_review
-
-    scope_slots = list(scope_reviewer_slots())
-    ctx._last_scope_model = ",".join(slot.model for slot in scope_slots)
-    rows = []
-    for slot in scope_slots:
-        prepared, final = prepare_scope_review(
-            ctx, commit_message, goal=goal, scope=scope,
-            review_rebuttal=review_rebuttal,
-            review_history=history_snapshot,
-            scope_review_history=scope_history,
-            scope_model=slot.model,
-            slot_id=slot.slot_id,
-            route=slot.route,
-            slot_effort=slot.effort,
-            session_target=slot.session_target,
-            session_profile=getattr(slot, "session_profile", ""),
-            subagent_id=getattr(slot, "subagent_id", ""),
-            subject=subject,
-        )
-        rows.append({"slot": slot, "prepared": prepared, "final": final})
-    return rows
-
-
-def _scope_error_result(ctx, message):
-    """The one blocked scope result every admission failure of the wave reports
-    (the gate's typed error row, model names of the configured scope slots)."""
-    result = ScopeReviewResult(
-        blocked=True, block_message=message,
-        model_id=getattr(ctx, "_last_scope_model", "") or _get_scope_model(), status="error",
-    )
-    ctx._last_scope_raw_results = [build_scope_actor_record(
-        result, fallback_model_id=getattr(ctx, "_last_scope_model", ""), slot_id="scope_slot_error")]
-    return result
-
-
-def _run_scope(ctx, commit_message, scope_rows, dispatch, *, goal, scope,
-               review_rebuttal, history_snapshot, scope_history, retry_key="",
-               withheld_reason=""):
-    """Dispatch (or, on an admission block, typed-placeholder) every scope row
-    and aggregate the panel verdict — the dispatch half of the Q25-A split.
-    ``dispatch=False`` renders prepared rows as $0 not_dispatched placeholders:
-    by default the gate was already deterministically blocked at assembly;
-    ``withheld_reason`` names another pre-dispatch admission (the wave budget)."""
-    try:
-        def _run_one_scope(row):
-            # P3 one-pass contract: one substantive scope call per configured
-            # actor. Transport retry remains inside the same review substrate;
-            # never launch an automatic second degraded review call here.
-            # The row's configured delivery rides with it (5.3: same task,
-            # same criteria, same output contract — only delivery differs;
-            # adaptive_quorum below is delivery-blind and unchanged).
-            if row["final"] is not None:
-                return row["final"]
-            if not dispatch:
-                return _scope_not_dispatched_result(row["slot"], withheld_reason)
-            slot = row["slot"]
-            return run_scope_review(
-                ctx, commit_message, goal=goal, scope=scope,
-                review_rebuttal=review_rebuttal,
-                review_history=history_snapshot,
-                scope_review_history=scope_history,
-                scope_model=slot.model,
-                slot_id=slot.slot_id,
-                route=slot.route,
-                slot_effort=slot.effort,
-                session_target=slot.session_target,
-                session_profile=getattr(slot, "session_profile", ""),
-                prepared=row["prepared"],
-                retry_key=retry_key,
-            )
-
-        scope_slots = [row["slot"] for row in scope_rows]
-        scope_models = [slot.model for slot in scope_slots]
-        with _cf.ThreadPoolExecutor(max_workers=min(len(scope_slots), 4)) as scope_pool:
-            # copy_context (the loop_tool_execution precedent): the admitting
-            # usage scope — and its bound root fence — reaches each row's
-            # substrate; a bare pool thread would re-read the fence from the
-            # environment and reserve against a different number.
-            futures = [scope_pool.submit(contextvars.copy_context().run, _run_one_scope, row)
-                       for row in scope_rows]
-            results = [future.result() for future in futures]
-        ctx._last_scope_raw_results = [
-            build_scope_actor_record(
-                result,
-                fallback_model_id=getattr(result, "model_id", "") or slot.model,
-                slot_id=slot.slot_id,
-            )
-            for result, slot in zip(results, scope_slots)
-        ]
-        # Reviewer-slot SSOT applies to scope too (Bible P3): a single configured
-        # scope reviewer is honored but recorded as loud durable degraded-trust,
-        # and a configured>=2-but-<quorum scope run must never silently pass on
-        # "any responded". Read coverage is diagnostic evidence: it never
-        # changes a returned verdict's status, findings, or quorum eligibility.
-        from ouroboros.config import adaptive_quorum
-        from ouroboros.tools.scope_required_sources import uncovered_sources
-        _scope_statuses = [str(getattr(r, "status", "") or "") for r in results]
-        _responded = sum(1 for s in _scope_statuses if s == "responded")
-        _coverage_diagnostics = [
-            {"slot_id": str(slot.slot_id or slot.model),
-             "coverage": str(getattr(result, "coverage", "") or "unobserved"),
-             "uncovered_sources": uncovered_sources(
-                 (getattr(result, "context_manifest", {}) or {}).get("native_read_coverage"))}
-            for result, slot in zip(results, scope_slots)
-        ]
-        _required = adaptive_quorum(len(scope_models))
-        _single_scope_reviewer = len(scope_models) == 1
-        # An all-not_dispatched panel is NOT a quorum failure: the gate was
-        # already deterministically blocked at assembly and every row was a $0
-        # typed placeholder by design — a "diversity was not achieved" advisory
-        # would misread that as a degraded review that ran.
-        _all_not_dispatched = bool(_scope_statuses) and all(
-            s == "not_dispatched" for s in _scope_statuses
-        )
-        _scope_degraded: list = []
-        if _single_scope_reviewer:
-            _scope_degraded.append("single_reviewer_no_diversity")
-        elif _all_not_dispatched:
-            _scope_degraded.append(
-                f"scope_not_dispatched_budget_admission: no scope row was dispatched ($0 spent): {withheld_reason}"
-                if withheld_reason else
-                "scope_not_dispatched_assembly_block: no scope row was dispatched "
-                "(the commit gate was already deterministically blocked at brief "
-                "assembly; $0 spent)"
-            )
-        elif _responded < _required and not any(
-            getattr(r, "blocked", False) for r in results
-        ):
-            _scope_degraded.append(
-                f"scope_quorum_not_met: responded={_responded} < required={_required}"
-            )
-        _scope_quorum_manifest = {
-            "scope_responded_count": _responded,
-            "scope_required_quorum": _required,
-            "single_reviewer_no_diversity": _single_scope_reviewer,
-            "scope_coverage_incomplete_count": sum(
-                row["coverage"] == "incomplete" for row in _coverage_diagnostics),
-            "scope_coverage_diagnostics": _coverage_diagnostics,
-            "scope_degraded_reasons": _scope_degraded,
-        }
-        if len(results) == 1:
-            only = results[0]
-            only.context_manifest = {**(getattr(only, "context_manifest", {}) or {}), **_scope_quorum_manifest}
-            return only
-        critical = []
-        advisory = []
-        parsed_items = []
-        blocked_messages = []
-        statuses = []
-        for result in results:
-            statuses.append(getattr(result, "status", ""))
-            critical.extend(result.critical_findings or [])
-            advisory.extend(result.advisory_findings or [])
-            parsed_items.extend(getattr(result, "parsed_items", []) or [])
-            if result.blocked and result.block_message:
-                blocked_messages.append(result.block_message)
-        blocked = bool(blocked_messages)
-        block_messages = list(blocked_messages)
-        _qmsg = (
-            f"⚠️ SCOPE_QUORUM_NOT_MET: only {_responded} of {len(scope_models)} configured "
-            f"scope reviewers returned an authoritative verdict (adaptive quorum {_required}). "
-            "Cross-model scope diversity was not achieved this run."
-        )
-        # Bible P3 negative control: configured>=2 but a PARTIAL authoritative
-        # quorum (0 < responded < required) is a loud quorum FAILURE — block vs
-        # advisory FOLLOWS owner enforcement. A zero-responded run is NOT decided
-        # here: each delivery's own authority function already returns a BLOCKING
-        # result when it cannot authorise. Widening this condition to
-        # `_responded < _required` would make this aggregate a SECOND owner of
-        # that decision — so the fix for a fail-open row belongs in the row.
-        partial_quorum_shortfall = (
-            not _single_scope_reviewer and 0 < _responded < _required
-            and not blocked
-        )
-        if partial_quorum_shortfall:
-            if review_enforcement_blocks(_scope_enforcement()):
-                blocked = True
-                block_messages.append(_qmsg)
-        # Surface any non-blocking shortfall LOUDLY (advisory, never a silent
-        # clean pass) and persist it in the manifest below. An all-not_dispatched
-        # panel is excluded: each of its rows already carries the typed
-        # scope_row_not_dispatched advisory, and the quorum message would be
-        # false (no reviewer ran to fall short of diversity).
-        if (
-            _scope_degraded and not _single_scope_reviewer and not blocked
-            and not _all_not_dispatched
-        ):
-            advisory.append({
-                "verdict": "FAIL",
-                "severity": "advisory",
-                "item": "scope_quorum_not_met",
-                "reason": _qmsg,
-            })
-        return ScopeReviewResult(
-            blocked=blocked,
-            block_message="\n\n".join(block_messages),
-            critical_findings=critical,
-            advisory_findings=advisory,
-            parsed_items=parsed_items,
-            raw_text="\n\n".join(str(r.raw_text or "") for r in results),
-            model_id=",".join(scope_models),
-            # Quorum-aware: only an authoritative quorum yields "responded".
-            # A partial quorum (some — but <required — responded) is a loud
-            # "degraded_quorum"; zero responded preserves the joined raw
-            # statuses so downstream typed-failure detection holds.
-            status=(
-                "blocked" if blocked
-                else "responded" if _responded >= _required
-                else "degraded_quorum" if _responded > 0
-                else ",".join(statuses)
-            ),
-            prompt_chars=sum(int(r.prompt_chars or 0) for r in results),
-            tokens_in=sum(int(r.tokens_in or 0) for r in results),
-            tokens_out=sum(int(r.tokens_out or 0) for r in results),
-            cost_usd=sum(float(r.cost_usd or 0.0) for r in results),
-            context_manifest={
-                "scope_models": scope_models,
-                "actor_count": len(results),
-                **_scope_quorum_manifest,
-                "actors": [
-                    {
-                        "slot_id": slot.slot_id,
-                        "model": slot.model,
-                        "context_manifest": getattr(result, "context_manifest", {}) or {},
-                    }
-                    for result, slot in zip(results, scope_slots)
-                ],
-            },
-        )
-    except Exception as e:
-        log.warning("Scope review raised unexpected exception: %s", e)
-        return _scope_error_result(
-            ctx, f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed — {e}\nFix the issue and retry.")
 
 
 def _commit_review_retry_key(
@@ -537,8 +167,7 @@ def _commit_review_retry_key(
     }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _structured_review_result(triad_prepared, scope_rows, scope_result, *, started_ts, retry_key,
-                              wave_refusal, triad_exited, triad_early, subject=None):
+def _structured_review_result(prepared, *, started_ts, retry_key, wave_refusal, exited, early, subject=None):
     """What this wave ASSIGNED and what each seat was GIVEN, as one typed mapping
     for the review ledger record (``review_ledger.build_wave_record``). With a
     frozen ``subject`` the mapping also names it (``subject``/``layer``), so the
@@ -546,8 +175,8 @@ def _structured_review_result(triad_prepared, scope_rows, scope_result, *, start
     The gate decision reads nothing here; a failure to describe the wave is logged
     and leaves an empty mapping, never a changed verdict."""
     try:
-        described = _describe_review_wave(triad_prepared, scope_rows, scope_result, started_ts=started_ts, retry_key=retry_key,
-                                          wave_refusal=wave_refusal, triad_exited=triad_exited, triad_early=triad_early)
+        described = _describe_review_wave(prepared, started_ts=started_ts, retry_key=retry_key,
+                                          wave_refusal=wave_refusal, exited=exited, early=early)
         if subject is not None:
             described.update(subject=subject.record_subject(), layer=subject.spec.layer)
         return described
@@ -556,41 +185,48 @@ def _structured_review_result(triad_prepared, scope_rows, scope_result, *, start
         return {}
 
 
-def _describe_review_wave(triad_prepared, scope_rows, scope_result, *, started_ts, retry_key,
-                          wave_refusal, triad_exited, triad_early):
+def _describe_review_wave(prepared, *, started_ts, retry_key, wave_refusal, exited, early):
+    """The wave as one seat list with ``parts`` plus every distinct brief by sha:
+    a packet seat's brief is the assembled prompt, a retrieving seat's its own
+    two-part brief (``row_plan["brief_shas"]`` / ``prepared["brief_texts"]``)."""
+    from ouroboros.review_ledger import PARTS
     from ouroboros.review_model_routes import adaptive_quorum
     from ouroboros.reviewer_slot_config import row_plan_retrieves
 
-    prepared = triad_prepared or {}
+    prepared = prepared or {}
     plan = dict(prepared.get("row_plan") or {})
+    prompt = str(prepared.get("prompt") or "")
+    prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest() if prompt else ""
+    brief_texts = {str(k): str(v or "") for k, v in dict(prepared.get("brief_texts") or {}).items()}
+    if prompt_sha:
+        brief_texts[prompt_sha] = prompt
 
-    def _at(key, i):
+    def _at(key, i, default=""):
         values = list(plan.get(key) or [])
-        value = values[i] if i < len(values) else ""
-        return str(getattr(value, "value", value) or "")
+        value = values[i] if i < len(values) else default
+        return value if isinstance(value, (tuple, list, bool)) else str(getattr(value, "value", value) or "")
 
-    triad_rows = [
-        {"slot_id": _at("slot_ids", i), "model": _at("models", i), "route": _at("routes", i), "effort": _at("efforts", i),
-         "session_target": _at("session_targets", i), "session_profile": _at("session_profiles", i),
-         "subagent_id": _at("subagent_ids", i), "retrieves": row_plan_retrieves(plan, i)}
-        for i in range(len(plan.get("slot_ids") or []))
-    ]
-    seats, briefs = [], {}
-    for row in scope_rows or []:
-        slot = row["slot"]
-        seats.append({"slot_id": slot.slot_id, "model": slot.model, "route": str(getattr(slot.route, "value", slot.route) or ""),
-                      "effort": slot.effort, "session_target": slot.session_target, "session_profile": slot.session_profile,
-                      "subagent_id": slot.subagent_id, "retrieves": True})
-        briefs[slot.slot_id] = str((row.get("prepared") or {}).get("session_task") or "")
+    rows = []
+    for i in range(len(plan.get("slot_ids") or [])):
+        retrieves = row_plan_retrieves(plan, i)
+        parts = [p for p in PARTS if p in tuple(_at("parts", i, ()) or ())] or ["change"]
+        rows.append({
+            "slot_id": _at("slot_ids", i), "model": _at("models", i), "route": _at("routes", i),
+            "effort": _at("efforts", i), "session_target": _at("session_targets", i),
+            "session_profile": _at("session_profiles", i), "subagent_id": _at("subagent_ids", i),
+            "retrieves": retrieves, "parts": parts, "additional": bool(_at("additional", i, False)),
+            "brief_sha": str(_at("brief_shas", i) or "") if retrieves else prompt_sha,
+        })
+    coupling_shas = sorted({r["brief_sha"] for r in rows if "coupling" in r["parts"] and r["brief_sha"]})
+    assigned = [r for r in rows if not r["additional"]]
     return {
         "started_ts": started_ts, "retry_key": retry_key, "wave_refusal": str(wave_refusal or ""),
-        "triad_prompt": str(prepared.get("prompt") or ""), "triad_session_task": str(prepared.get("session_task") or ""),
-        "triad_rows": triad_rows, "triad_quorum": adaptive_quorum(len(triad_rows)) if triad_rows else 0,
-        "triad_assembly_refusal": str(triad_early or "") if triad_exited and triad_early else "",
-        "scope_rows": seats, "scope_briefs": briefs, "scope_brief": next((b for b in briefs.values() if b), ""),
-        "scope_quorum": adaptive_quorum(len(seats)) if seats else 0,
-        "scope_status": str(getattr(scope_result, "status", "") or ""),
-        "scope_blocked": bool(getattr(scope_result, "blocked", False)),
+        "rows": rows, "quorum": adaptive_quorum(len(assigned)) if assigned else 0,
+        "brief": {"change_prompt_sha": prompt_sha, "coupling_brief_sha": coupling_shas[0] if len(coupling_shas) == 1 else "",
+                  "coupling_brief_shas": coupling_shas},
+        "brief_texts": brief_texts,
+        "assembly_refusal": str(early or "") if exited and early else "",
+        "retrieving_manifests": list(prepared.get("retrieving_manifests") or []),
     }
 
 
@@ -598,13 +234,16 @@ def run_parallel_review(
     ctx, commit_message, *, goal="", scope="", review_rebuttal="",
     review_binding_fingerprint="", subject=None,
 ):
-    """Run the commit gate's triad and scope reviews against the staged diff.
+    """Run the commit gate's one review wave against the staged diff.
 
-    Q25-A ordering: the triad api pack is assembled and fit-checked and every
-    scope row's brief is built BEFORE any reviewer is dispatched, so a
-    deterministic assembly failure on either side spends $0 on the other. The
-    paid dispatches still run concurrently, and every verdict is computed by
-    the same code as before — only the ordering moved.
+    Q25-A ordering: every seat is prepared (the packet fit-checked, every
+    retrieving seat's brief built) BEFORE any seat is dispatched, so a
+    deterministic assembly failure spends $0; the wave is money-admitted as a
+    whole; then every seat is dispatched together.
+
+    Returns ``(review_err, coupling_result, block_reason, advisory)`` —
+    ``coupling_result`` is the coupling question's outcome mapping
+    (``review_ledger.coupling_outcome``), ``None`` when no seat was asked it.
 
     ``subject`` is a frozen review subject (``review_subject.FrozenSubject``):
     the wave then reads ITS diff and trees, its governance root (always the
@@ -614,15 +253,13 @@ def run_parallel_review(
     if bool(getattr(ctx, "_review_reconcile_only", False)):
         from ouroboros.review_custody import prepare_frozen_review_reconciliation
 
-        prepare_frozen_review_reconciliation(
-            ctx, getattr(ctx, "_pending_review_attempt", None),
-        )
+        prepare_frozen_review_reconciliation(ctx, getattr(ctx, "_pending_review_attempt", None))
 
     # Reset forensic fields so prior attempts cannot bleed into early exits.
-    ctx._last_scope_model = ""
     ctx._last_triad_raw_results = []
-    ctx._last_scope_raw_result = {}
-    ctx._last_scope_raw_results, ctx._last_review_structured = [], {}
+    ctx._last_coupling_result = None
+    ctx._last_review_verdict = {}
+    ctx._last_review_structured = {}
     _started_ts, wave_refusal = utc_now_iso(), None
     # Managed subject↔binding assertion input: every gate subject built during
     # THIS attempt records its S tree here; the commit gate then asserts the
@@ -656,138 +293,81 @@ def run_parallel_review(
             )
         )
     snapshot_key = snapshot_digest[:16]
-    _stored = getattr(ctx, '_scope_review_history', None) or {}
-    _scope_history = _stored.get(snapshot_key, []) if isinstance(_stored, dict) else []
-    _history_snapshot = list(getattr(ctx, '_review_history', []))
+    _stored = getattr(ctx, "_coupling_review_history", None) or {}
+    coupling_history = _stored.get(snapshot_key, []) if isinstance(_stored, dict) else []
+    # The brief builder reads this subject's prior coupling rounds from the context.
+    ctx._coupling_review_history_rounds = list(coupling_history)
 
     # Snapshot advisory state before assembly and dispatch mutate it.
-    _advisory_snapshot_before = list(getattr(ctx, '_review_advisory', []))
+    _advisory_snapshot_before = list(getattr(ctx, "_review_advisory", []))
 
-    # ---- Phase 1 (Q25=A): prepare every reviewer; dispatch NOTHING yet. ----
-    triad_prepared, triad_early, triad_exited = None, None, True
+    # ---- Phase 1 (Q25=A): prepare every seat; dispatch NOTHING yet. ----
+    prepared, early, exited = None, None, True
     try:
-        triad_prepared, triad_early, triad_exited = _prepare_unified_review(
+        prepared, early, exited = _prepare_unified_review(
             ctx, commit_message, review_rebuttal=review_rebuttal, goal=goal, scope=scope, subject=subject)
-        if triad_prepared is not None:
-            triad_prepared["retry_key"] = retry_key
+        if prepared is not None:
+            prepared["retry_key"] = retry_key
     except Exception as e:
-        log.warning("Triad review raised unexpected exception: %s", e)
-        triad_early = (
-            f"⚠️ REVIEW_BLOCKED: Triad review crashed — {e}\nFix the issue and retry."
-        )
-        ctx._last_review_block_reason = 'infra_failure'
+        log.warning("Review assembly raised unexpected exception: %s", e)
+        early = f"⚠️ REVIEW_BLOCKED: Review assembly crashed — {e}\nFix the issue and retry."
+        ctx._last_review_block_reason = "infra_failure"
         ctx._last_review_critical_findings = []
-    scope_rows, scope_result = [], None
-    try:
-        scope_rows = _prepare_scope_rows(
-            ctx, commit_message, goal=goal, scope=scope,
-            review_rebuttal=review_rebuttal,
-            history_snapshot=_history_snapshot, scope_history=_scope_history, subject=subject)
-    except Exception as e:
-        log.warning("Scope review raised unexpected exception: %s", e)
-        scope_result = _scope_error_result(
-            ctx, f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed — {e}\nFix the issue and retry.")
 
-    # ---- Admission: a deterministic assembly block anywhere → ZERO dispatch. ----
-    deterministic_block = (
-        (triad_exited and bool(triad_early))
-        or (scope_result is not None and scope_result.blocked)
-        or any(row["final"] is not None and row["final"].blocked for row in scope_rows)
-    )
-    if deterministic_block:
-        review_err = triad_early if triad_exited else None
-        if not triad_exited:
-            if not hasattr(ctx, "_review_degraded_reasons"):
-                ctx._review_degraded_reasons = []
-            ctx._review_degraded_reasons.append(
-                "triad_not_dispatched_assembly_block: the gate was already "
-                "deterministically blocked at packet assembly ($0 spent on the triad)"
-            )
-            # Seat identity survives the $0 path: every prepared-but-withheld
-            # triad seat gets a typed not_dispatched actor record, mirroring
-            # the scope rows' placeholders (durable review status shows WHICH
-            # configured seats were withheld, not just that "the triad" was).
-            from ouroboros.tools.review_admission import triad_not_dispatched_records
-            ctx._last_triad_raw_results = triad_not_dispatched_records(
-                (triad_prepared or {}).get("row_plan") or {},
-                "assembly-before-dispatch admission (Q25=A): the commit gate "
-                "was already deterministically blocked at packet assembly, so "
-                "this seat was not dispatched ($0 spent).",
-            )
-        if scope_result is None and scope_rows:
-            scope_result = _run_scope(
-                ctx, commit_message, scope_rows, False, goal=goal, scope=scope,
-                review_rebuttal=review_rebuttal, history_snapshot=_history_snapshot,
-                scope_history=_scope_history, retry_key=retry_key)
-    else:
-        # ---- Money admission (owner decision 2026-09-05): the WHOLE wave, scope
-        # seats first, must fit the root fence before ANY seat is dispatched;
-        # otherwise every seat is a typed $0 not_dispatched record and the gate
-        # blocks naming the shortfall, never a half-dispatched panel. ----
+    review_err = early if exited else None
+    if not exited:
+        # ---- Money admission (owner decision 2026-09-05, on the known-spend
+        # rule of #1487): before ANY seat is dispatched, known spend must be
+        # below every fence; otherwise every seat is a typed $0 not_dispatched
+        # record and the gate blocks naming the fence. The wave's summed seat
+        # bounds are disclosure, never an earlier refusal. ----
         from ouroboros.tools.review_admission import admit_commit_gate_wave, commit_gate_paid_seats
 
-        seats = []
         if not bool(getattr(ctx, "_review_reconcile_only", False)):
             try:
-                seats = commit_gate_paid_seats(triad_prepared, triad_exited, scope_rows)
-                wave_refusal = admit_commit_gate_wave(ctx, seats)
+                wave_refusal = admit_commit_gate_wave(ctx, commit_gate_paid_seats(prepared, exited))
             except Exception as e:
                 # Fail-open is the enforcement choice (as review_wave_budget_gate's
                 # own), but "admitted" and "admission crashed" are different
-                # facts: the wave dispatches unadmitted and without the
-                # scope-first hold, and says so once, typed.
+                # facts: the wave dispatches unadmitted, and says so once, typed.
                 from ouroboros.tools.review_helpers import emit_review_event
-                log.warning("commit-gate wave admission unavailable (%s: %s); the wave dispatches "
-                            "unadmitted and without the scope-first hold", type(e).__name__, e)
+                log.warning("commit-gate wave admission unavailable (%s: %s); the wave dispatches unadmitted",
+                            type(e).__name__, e)
                 emit_review_event(ctx, {
                     "type": "review_wave_admission_unavailable", "surface": "commit_gate",
                     "task_id": str(getattr(ctx, "task_id", "") or ""),
                     "error": f"{type(e).__name__}: {e}",
                 })
-                seats, wave_refusal = [], None
+                wave_refusal = None
         if wave_refusal is not None:
             from ouroboros.tools.review import _handle_review_block_or_warning
             from ouroboros.tools.review_admission import triad_not_dispatched_records
 
-            from ouroboros.config import get_review_enforcement
-
-            blocking_review = bool((triad_prepared or {}).get(
-                "blocking_review", review_enforcement_blocks(get_review_enforcement()))) and review_enforcement_blocks("blocking")
+            blocking_review = bool(prepared.get("blocking_review")) and review_enforcement_blocks("blocking")
             if not hasattr(ctx, "_review_degraded_reasons"):
                 ctx._review_degraded_reasons = []
             ctx._review_degraded_reasons.append(
-                "triad_not_dispatched_budget_admission: the commit-gate wave did not "
-                "fit the root budget fence, so no triad seat was dispatched ($0 spent)"
+                "review_not_dispatched_budget_admission: known spend has reached a budget "
+                "fence of the commit-gate wave, so no seat was dispatched ($0 spent)"
             )
             ctx._last_review_critical_findings = []
-            if not triad_exited:
-                ctx._last_review_block_reason = "review_wave_budget_insufficient"
-                ctx._last_triad_raw_results = list(
-                    getattr(ctx, "_triad_withheld_seat_records", []) or []
-                ) + triad_not_dispatched_records(
-                    (triad_prepared or {}).get("row_plan") or {}, wave_refusal,
-                )
-                review_err = _handle_review_block_or_warning(
-                    ctx, blocking_review, wave_refusal,
-                    "Review enforcement=Advisory: the commit-gate review wave was declined "
-                    "before dispatch (budget fence); commit proceeding without review. ",
-                )
-            else:
-                review_err = triad_early
-            if scope_rows:
-                scope_result = _run_scope(
-                    ctx, commit_message, scope_rows, False, goal=goal, scope=scope,
-                    review_rebuttal=review_rebuttal, history_snapshot=_history_snapshot,
-                    scope_history=_scope_history, retry_key=retry_key,
-                    withheld_reason=wave_refusal)
-                if blocking_review:
-                    scope_result.blocked = True
-                    scope_result.block_message = "⚠️ SCOPE_REVIEW_BLOCKED: " + wave_refusal
+            ctx._last_review_block_reason = "review_wave_budget_insufficient"
+            from ouroboros.review_ledger import CouplingOutcome
+
+            ctx._last_coupling_result = CouplingOutcome(status="not_dispatched")
+            ctx._last_triad_raw_results = list(
+                getattr(ctx, "_triad_withheld_seat_records", []) or []
+            ) + triad_not_dispatched_records(prepared.get("row_plan") or {}, wave_refusal)
+            review_err = _handle_review_block_or_warning(
+                ctx, blocking_review, wave_refusal,
+                "Review enforcement=Advisory: the commit-gate review wave was declined "
+                "before dispatch (budget fence); commit proceeding without review. ",
+            )
         else:
-            # ---- Phase 2: submit the prepared reviewers to the executor pool. ----
+            # ---- Phase 2: submit the prepared wave to the executor. ----
             try:
                 if not bool(getattr(ctx, "_review_reconcile_only", False)):
-                    _reserve_parallel_review_roster(ctx, triad_prepared, scope_rows)
+                    _reserve_parallel_review_roster(ctx, prepared)
             except Exception as e:
                 log.warning("Commit review custody reservation failed: %s", e)
                 ctx._last_review_block_reason = "infra_failure"
@@ -796,188 +376,90 @@ def run_parallel_review(
                     "⚠️ REVIEW_BLOCKED: durable review custody could not be reserved "
                     f"before dispatch — {e}\nNo reviewer was started; fix the state write and retry."
                 )
-                scope_result = ScopeReviewResult(
-                    blocked=True,
-                    block_message=(
-                        "⚠️ SCOPE_REVIEW_BLOCKED: durable review custody could not be "
-                        "reserved before dispatch; no scope reviewer was started."
-                    ),
-                    model_id=getattr(ctx, "_last_scope_model", "") or _get_scope_model(),
-                    status="not_dispatched",
-                )
             else:
-                with _cf.ThreadPoolExecutor(max_workers=2) as pool:
-                    # Scope FIRST (owner decision 2026-09-05): the blocking seat
-                    # is submitted before the triad and holds it until its own
-                    # reservation is on the ledger, so a fitting wave can never
-                    # leave scope unfunded while non-blocking seats hold the money.
-                    wave_started = time.monotonic()
-                    wave_known = _reservation_ids_now()   # identities on the root telemetry BEFORE any seat of this wave
-                    # Both seats run under a COPY of the admitting context
+                with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+                    # The wave runs under a COPY of the admitting context
                     # (contextvars.copy_context, the loop_tool_execution and
                     # plan_review precedent): the usage scope the wave was
                     # admitted with — its bound root fence included — is the
                     # one every seat's reserve_attempt binds, so admission and
                     # reservation share one fence even after a mid-turn
                     # settings reload changed the environment's number.
-                    scope_fut = (
-                        pool.submit(contextvars.copy_context().run, _run_scope, ctx, commit_message,
-                                    scope_rows, True, goal=goal, scope=scope,
-                                    review_rebuttal=review_rebuttal,
-                                    history_snapshot=_history_snapshot,
-                                    scope_history=_scope_history, retry_key=retry_key)
-                        if scope_rows else None
-                    )
-                    if not triad_exited:
-                        _await_scope_reservation(ctx, scope_fut, seats, wave_started, known_ids=wave_known)
-                    triad_fut = (
-                        None if triad_exited
-                        else pool.submit(contextvars.copy_context().run, _dispatch_unified_review,
-                                         ctx, commit_message, triad_prepared)
-                    )
-                    if triad_fut is None:
-                        review_err = triad_early
-                    else:
-                        try:
-                            review_err = triad_fut.result()
-                        except Exception as e:
-                            log.warning("Triad review raised unexpected exception: %s", e)
-                            review_err = (
-                                f"⚠️ REVIEW_BLOCKED: Triad review crashed — {e}\nFix the issue and retry."
-                            )
-                            ctx._last_review_block_reason = 'infra_failure'
-                            ctx._last_review_critical_findings = []
-                    if scope_fut is not None:
-                        try:
-                            scope_result = scope_fut.result()
-                        except Exception as e:
-                            log.warning("Scope future raised unexpected exception: %s", e)
-                            scope_result = _scope_error_result(
-                                ctx, f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review future crashed — {e}\nFix the issue and retry.")
-    triad_block_reason = getattr(ctx, '_last_review_block_reason', 'critical_findings')
-    triad_advisory_post = list(getattr(ctx, '_review_advisory', []))
-    triad_advisory = [a for a in triad_advisory_post if a not in _advisory_snapshot_before]
+                    future = pool.submit(contextvars.copy_context().run, _dispatch_unified_review,
+                                         ctx, commit_message, prepared)
+                    try:
+                        review_err = future.result()
+                    except Exception as e:
+                        log.warning("Review dispatch raised unexpected exception: %s", e)
+                        review_err = f"⚠️ REVIEW_BLOCKED: Review dispatch crashed — {e}\nFix the issue and retry."
+                        ctx._last_review_block_reason = "infra_failure"
+                        ctx._last_review_critical_findings = []
+    block_reason = getattr(ctx, "_last_review_block_reason", "critical_findings")
+    advisory_post = list(getattr(ctx, "_review_advisory", []))
+    advisory = [a for a in advisory_post if a not in _advisory_snapshot_before]
 
-    _record_scope_outcome(ctx, scope_result, snapshot_key, _scope_history)
+    coupling_result = _record_coupling_outcome(ctx, prepared, snapshot_key, coupling_history)
     ctx._last_review_structured = _structured_review_result(
-        triad_prepared, scope_rows, scope_result, started_ts=_started_ts, retry_key=retry_key,
-        wave_refusal=wave_refusal, triad_exited=triad_exited, triad_early=triad_early, subject=subject)
-    return review_err, scope_result, triad_block_reason, triad_advisory
+        prepared, started_ts=_started_ts, retry_key=retry_key,
+        wave_refusal=wave_refusal, exited=exited, early=early, subject=subject)
+    return review_err, coupling_result, block_reason, advisory
 
 
-def _record_scope_outcome(ctx, scope_result, snapshot_key, scope_history) -> None:
-    """Scope history for this snapshot plus the canonical scope actor record for
-    durable CommitAttemptRecord persistence (moved out of ``run_parallel_review``)."""
-    if scope_result is None:
-        ctx._last_scope_raw_result = {}
-        return
-    existing = getattr(ctx, '_scope_review_history', None) or {}
+def _record_coupling_outcome(ctx, prepared, snapshot_key, coupling_history):
+    """The coupling question's outcome of this wave, appended to the subject's
+    coupling history (``ctx._coupling_review_history[snapshot]``); ``None`` when
+    no seat of the wave was asked Part 2."""
+    from ouroboros.review_ledger import CouplingOutcome
+
+    plan = (prepared or {}).get("row_plan") or {}
+    asked = any("coupling" in tuple(p or ()) for p in plan.get("parts") or [])
+    outcome = getattr(ctx, "_last_coupling_result", None)
+    if not isinstance(outcome, CouplingOutcome):
+        if not asked:
+            return None
+        outcome = CouplingOutcome()
+    existing = getattr(ctx, "_coupling_review_history", None) or {}
     if not isinstance(existing, dict):
         existing = {}
-    existing[snapshot_key] = scope_history + [_scope_history_entry(scope_result)]
-    ctx._scope_review_history = existing
-    raw_results = list(getattr(ctx, "_last_scope_raw_results", []) or [])
-    if raw_results:
-        ctx._last_scope_raw_result = {
-            "status": getattr(scope_result, "status", ""),
-            "model_id": getattr(scope_result, "model_id", "") or getattr(ctx, "_last_scope_model", ""),
-            "context_manifest": getattr(scope_result, "context_manifest", {}) or {},
-            "raw_results": raw_results,
-            "raw_text": getattr(scope_result, "raw_text", ""),
-            "critical_findings": getattr(scope_result, "critical_findings", []) or [],
-            "advisory_findings": getattr(scope_result, "advisory_findings", []) or [],
-        }
-    else:
-        ctx._last_scope_raw_result = build_scope_actor_record(
-            scope_result,
-            fallback_model_id=getattr(ctx, "_last_scope_model", ""),
-        )
+    existing[snapshot_key] = list(coupling_history) + [_coupling_history_entry(outcome)]
+    ctx._coupling_review_history = existing
+    return outcome
 
 
-def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad_advisory,
-                              ctx, commit_message, commit_start, repo_dir):
-    """Aggregate triad/scope result and return block state plus advisory items."""
-    _combined_blocked = False
-    _combined_messages = []
-    _combined_findings = []
-    _scope_advisory_items = []
+def aggregate_review_verdict(review_err, coupling_result, block_reason, advisory,
+                             ctx, commit_message, commit_start, repo_dir):
+    """The wave's one verdict as the gate's block state plus advisory items.
 
-    if scope_result is not None:
-        for f in (scope_result.critical_findings or []):
-            item = {
-                "severity": "critical",
-                "tag": "scope",
-                "item": str(f.get("item", "") or ""),
-                "reason": str(f.get("reason", "") or ""),
-                "verdict": "FAIL",
-            }
+    The aggregate itself was reduced in ``_dispatch_unified_review`` by
+    ``review_ledger.reduce_verdict`` (the coupling question is one of its
+    per-question verdicts, never a second gate); this projects it onto the
+    caller's ``(blocked, message, block_reason, findings, coupling_items)``
+    contract and applies the owner's enforcement authority."""
+    coupling_items = []
+    for severity, key in (("critical", "critical_findings"), ("advisory", "advisory_findings")):
+        for f in (getattr(coupling_result, key, None) or []):
+            item = {"severity": severity, "tag": "coupling", "item": str(f.get("item", "") or ""),
+                    "reason": str(f.get("reason", "") or ""), "verdict": "FAIL"}
             if f.get("obligation_id"):
                 item["obligation_id"] = str(f.get("obligation_id"))
-            _scope_advisory_items.append(item)
-        for f in (scope_result.advisory_findings or []):
-            item = {
-                "severity": "advisory",
-                "tag": "scope",
-                "item": str(f.get("item", "") or ""),
-                "reason": str(f.get("reason", "") or ""),
-                "verdict": "FAIL",
-            }
-            if f.get("obligation_id"):
-                item["obligation_id"] = str(f.get("obligation_id"))
-            _scope_advisory_items.append(item)
+            coupling_items.append(item)
 
-    if review_err:
-        _combined_blocked = True
-        _combined_messages.append(review_err)
-        _combined_findings.extend(getattr(ctx, '_last_review_critical_findings', []))
-    if scope_result is not None:
-        if scope_result.blocked:
-            _combined_blocked = True
-            _combined_messages.append(scope_result.block_message)
-            _combined_findings.extend(scope_result.critical_findings or [])
-        elif scope_result.advisory_findings or scope_result.critical_findings:
-            _advisory_msg = _format_scope_advisory_msg(scope_result)
-            if _advisory_msg and _combined_blocked:
-                _combined_messages.append(_advisory_msg)
+    findings = list(getattr(ctx, "_last_review_critical_findings", []) or []) if review_err else []
+    if not review_err:
+        return False, None, "", findings, coupling_items
 
-    if not _combined_blocked:
-        return False, None, '', _combined_findings, _scope_advisory_items
-
-    if review_err and (scope_result is None or not scope_result.blocked):
-        block_reason = triad_block_reason
-    elif scope_result is not None and scope_result.blocked and not review_err:
-        block_reason = "scope_blocked"
-    else:
-        block_reason = triad_block_reason
-
-    if len(_combined_messages) > 1:
-        combined_msg = "\n\n".join(_combined_messages)
-        if review_err and scope_result is not None and scope_result.blocked:
-            combined_msg += "\n\n---\n⚠️ Note: Both triad review AND scope review found issues (shown above)."
-    else:
-        combined_msg = _combined_messages[0]
-
-    if triad_advisory and not review_err:
-        adv_text = "\n".join(
-            f"  ⚠️ Advisory: {format_review_history_entry(a)}"
-            for a in triad_advisory
-        )
-        combined_msg += f"\n\n---\nTriad advisory findings:\n{adv_text}"
+    combined_msg = review_err
+    coupling_note = _format_coupling_advisory_msg(coupling_result)
+    if coupling_note and block_reason not in ("critical_findings",):
+        combined_msg += f"\n\n{coupling_note}"
+    if advisory and block_reason not in ("critical_findings",):
+        adv_text = "\n".join(f"  ⚠️ Advisory: {format_review_history_entry(a)}" for a in advisory)
+        combined_msg += f"\n\n---\nAdvisory findings:\n{adv_text}"
 
     from ouroboros.config import get_review_enforcement
-    from ouroboros.tools.commit_gate import review_failure_is_technical
 
-    scope_rows = list(getattr(ctx, "_last_scope_raw_results", []) or [])
-    if scope_result is not None and not scope_rows:
-        scope_rows = [build_scope_actor_record(scope_result)]
-    failed_scope = [row for row in scope_rows if row.get("status") not in {
-        "responded", "not_dispatched",
-    }]
-    technical_scope = bool(failed_scope) and all(review_failure_is_technical(row) for row in failed_scope)
     cyber = not review_enforcement_blocks("blocking")
-    if cyber or (get_review_enforcement() == "advisory"
-            and (not review_err or triad_block_reason == "fixed_overflow")
-            and (scope_result is None or not scope_result.blocked or technical_scope)):
+    if cyber or (get_review_enforcement() == "advisory" and block_reason == "fixed_overflow"):
         from ouroboros.tools.review import _record_advisory_override
 
         disclosure = (
@@ -989,7 +471,8 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
         ctx._last_review_block_reason = block_reason
         _record_advisory_override(ctx, disclosure)
         ctx._review_advisory.append(disclosure)
-        ctx._review_degraded_reasons = list(getattr(ctx, "_review_degraded_reasons", []) or []) + ["review_cyber_authority" if cyber else "review_technical_failure_advisory"]
-        return False, combined_msg, block_reason, _combined_findings, _scope_advisory_items
+        ctx._review_degraded_reasons = list(getattr(ctx, "_review_degraded_reasons", []) or []) + [
+            "review_cyber_authority" if cyber else "review_technical_failure_advisory"]
+        return False, combined_msg, block_reason, findings, coupling_items
 
-    return True, combined_msg, block_reason, _combined_findings, _scope_advisory_items
+    return True, combined_msg, block_reason, findings, coupling_items

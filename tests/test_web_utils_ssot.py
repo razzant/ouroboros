@@ -287,7 +287,6 @@ def test_status_read_provenance_has_one_reader_across_surfaces():
         "onboarding_wizard.js",
         "onboarding_agents_step.js",
         "harness_accounts.js",
-        "reviewer_slots.js",
         "subagents_settings.js",
     )
     for name in consumers:
@@ -341,21 +340,22 @@ def test_status_read_provenance_has_one_reader_across_surfaces():
     )
 
 
-def test_reviewer_rows_label_each_pin_from_its_own_facet():
+def test_catalog_rows_label_each_pin_from_its_own_facet():
     """The read states are per-facet and INDEPENDENT — the backend pins that
     explicitly (`test_status_payload_classifies_each_fanned_out_facet_independently`).
-    The row builders therefore have to label a saved ACCOUNT pin from the
+    The row builder therefore has to label a saved ACCOUNT pin from the
     accounts read and a saved MODEL from the catalog read. Threading the wrong
     facet is invisible in the helper tests (they take the state as a parameter),
     and it re-creates the owner-visible lie in miniature: a profile nobody read
-    gets told it is "not in discovery".
+    gets told it is "not in discovery". Reviewers are catalog rows, so this one
+    builder labels every reviewer's pin too.
 
     Structural pin: each call site in the module source is inspected. The facet
     may travel as a read-state string (``accountsRead``) or as the store's
     boolean licence (``accountsKnown``) — both spellings carry the same
     provenance; what this pin forbids is one facet standing in for another.
     """
-    src = _read("reviewer_slots.js")
+    src = _read("subagents_settings.js")
 
     def call_sites(name):
         """Every call of `name` with its full argument list, definitions aside."""
@@ -376,8 +376,7 @@ def test_reviewer_rows_label_each_pin_from_its_own_facet():
         return found
 
     profile_calls = call_sites("profileOptionsFor")
-    # Two builders (the triad/scope row and the advisory row) plus nothing else.
-    assert len(profile_calls) >= 2, "the profile-option call sites moved"
+    assert profile_calls, "the profile-option call sites moved"
     for call in profile_calls:
         assert re.search(r"accounts(Read|Known)", call), (
             f"a saved account pin is labelled without the accounts read facet: {call!r}"
@@ -387,7 +386,7 @@ def test_reviewer_rows_label_each_pin_from_its_own_facet():
             f"accounts read would then be announced as discovery truth: {call!r}"
         )
     model_calls = call_sites("sessionModelOptions")
-    assert len(model_calls) >= 2, "the model-option call sites moved"
+    assert model_calls, "the model-option call sites moved"
     for call in model_calls:
         # ...and from the CATALOG read specifically. Asserting only that the
         # option exists lets the facets be swapped — the very defect this test

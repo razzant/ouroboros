@@ -1,37 +1,21 @@
 """The operator lane of the external review wrapper: the commit gate's own
 review-only cycle, run in the runtime's isolated checkout of the staged index
-(R3), with its advisory record, drift artifact and custody-bound retention."""
+(R3), with its hermetic tests, the author's optional ``surface=preflight`` look
+(record + the helper's full answer), drift artifact and custody-bound retention."""
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from tests import _contributor_packet_shared as shared
 
-
-def test_external_review_advisory_warning_uses_safe_canonical_reason(monkeypatch):
-    import scripts.run_external_review as module
-    from ouroboros.tools import claude_advisory_review as advisory
-
-    monkeypatch.setattr(advisory, "advisory_gate_unavailability_reason", lambda: "agent_session_route_unavailable")
-    warning = module._advisory_unavailability_warning()
-    assert "agent_session_route_unavailable" in warning
-    assert advisory.ADVISORY_REVIEW_CHOICE_GUIDANCE in warning
-    assert "ANTHROPIC_API_KEY" not in warning
-
-    secret_error = "secret-setting-value-must-not-leak"
-
-    def _malformed():
-        raise ValueError(secret_error)
-
-    monkeypatch.setattr(advisory, "advisory_gate_unavailability_reason", _malformed)
-    warning = module._advisory_unavailability_warning()
-    assert "invalid_advisory_configuration" in warning
-    assert secret_error not in warning
+_PREFLIGHT_ANSWER = json.dumps([{"item": "code_quality", "verdict": "PASS", "severity": "advisory",
+                                 "reason": "the preflight seat read README.md in full"}])
 
 
-def test_external_review_checks_advisory_after_settings_load_without_key_heuristic():
-    """The operator lane asks the advisory gate's own availability answer only after
-    the settings landed in the environment, and never guesses from a key's presence."""
+def test_settings_land_before_the_lane_without_a_key_heuristic():
+    """The operator lane runs only after the settings landed in the environment, and
+    never guesses a reviewer's availability from a key's presence."""
     import inspect
     import scripts.run_external_review as module
 
@@ -40,17 +24,16 @@ def test_external_review_checks_advisory_after_settings_load_without_key_heurist
     operator_source = inspect.getsource(module._operator_lane)
     assert "_load_settings_into_env()" in prepare_source
     assert main_source.index("_prepare_review_configuration(args)") < main_source.index("_operator_lane(")
-    assert "_advisory_unavailability_warning()" in operator_source
-    assert operator_source.index("_advisory_unavailability_warning()") < operator_source.index(
-        "_run_non_committing_review_cycle(")
     for source in (main_source, operator_source):
         assert 'os.environ.get("ANTHROPIC_API_KEY"' not in source
 
 
-def _operator_fixture(tmp_path: Path, monkeypatch) -> tuple[Path, list[dict]]:
+def _operator_fixture(tmp_path: Path, monkeypatch, order: list | None = None, *,
+                      scout_enabled: bool = True) -> tuple[Path, list[dict]]:
     """An installed body with a staged README edit; the operator lane's paid seam
     (the review substrate) and hermetic test runner are the golden stand-ins, and
-    the gate reads the golden panel from the frozen slot plan."""
+    the gate reads the golden panel from the frozen slot plan. ``order`` records
+    every test run (with the tree it ran in) and every paid send."""
     import ouroboros.review_substrate as substrate
     import scripts.run_external_review as module
     from ouroboros.tools import git as git_mod
@@ -65,13 +48,38 @@ def _operator_fixture(tmp_path: Path, monkeypatch) -> tuple[Path, list[dict]]:
     monkeypatch.setattr(module, "_resolved_review_config",
                         lambda *, profile="production_commit_gate": json.loads(json.dumps(shared.GOLDEN_CONFIG)))
     monkeypatch.setattr(module, "_select_healthy_openrouter_key", lambda **_kwargs: False)
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(module._slot_plan_payload(shared.GOLDEN_CONFIG)))
+    # The gate's panel is the review pool; ``api-scout`` is the unmarked row the
+    # ``--preflight-reviewer`` lane names (``tests.test_git_review_preflight_gate._roster``).
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", shared.golden_pool(
+        {"subagent_id": "api-scout", "name": "API scout", "recommended_use": "An early look.",
+         "route": {"kind": "api_model", "target_id": "openai/fake-reviewer"}, "effort": "high",
+         "enabled": scout_enabled}))
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     briefs: list[dict] = []
-    monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(briefs))
-    monkeypatch.setattr(review_helpers, "_run_review_preflight_tests", shared.passing_test_runner)
-    monkeypatch.setattr(git_mod, "_run_review_preflight_tests", shared.passing_test_runner)
+    golden = shared.golden_substrate(briefs)
+    order = [] if order is None else order
+
+    def run_review_request(request, *, slots, drive_root, llm=None, usage_ctx=None):
+        if [slot.slot_id for slot in slots] != ["api-scout"]:
+            order.append(("panel", sorted(slot.slot_id for slot in slots)))
+            return golden(request, slots=slots, drive_root=drive_root, llm=llm, usage_ctx=usage_ctx)
+        order.append(("preflight", request.session_root))
+        reserved = (getattr(usage_ctx, "_review_reserved_operations", None) or {}).get(request.surface) or {}
+        return SimpleNamespace(actors=[{
+            "slot_id": "api-scout", "model": slots[0].model, "status": "ok", "raw_text": _PREFLIGHT_ANSWER,
+            "usage": {"provider": "openrouter", "resolved_model": "openai/fake-reviewer",
+                      "prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
+            "operation_id": str(reserved.get("api-scout") or "op-api-scout"),
+            "operation_state": "settled", "late_result_pending": False}])
+
+    def tests(ctx, **kwargs):
+        order.append(("tests", Path(ctx.repo_dir)))
+        return shared.passing_test_runner(ctx, **kwargs)
+
+    monkeypatch.setattr(substrate, "run_review_request", run_review_request)
+    monkeypatch.setattr(review_helpers, "_run_review_preflight_tests", tests)
+    monkeypatch.setattr(git_mod, "_run_review_preflight_tests", tests)
     return repo, briefs
 
 
@@ -84,8 +92,8 @@ def _run_operator_lane(module, monkeypatch, tmp_path: Path, *extra: str) -> tupl
 
 def test_operator_lane_is_the_commit_gate_dry_run_in_an_isolated_checkout(tmp_path, monkeypatch):
     """R3: the operator lane runs the commit gate's own non-committing cycle over the
-    staged index, in the runtime's isolated checkout of the staged patch, and records
-    the advisory pre-review in full; the primary worktree is never touched."""
+    staged index, in the runtime's isolated checkout of the staged patch; without a
+    named preflight row the output states the fact; the primary worktree is never touched."""
     import scripts.run_external_review as module
 
     repo, briefs = _operator_fixture(tmp_path, monkeypatch)
@@ -99,9 +107,10 @@ def test_operator_lane_is_the_commit_gate_dry_run_in_an_isolated_checkout(tmp_pa
     assert outcome["exit_code"] == 0 and outcome["outcome"]["status"] == "passed"
     assert outcome["outcome"]["review_record_id"].startswith("rl-")
     assert "retained_checkout" not in outcome["outcome"]
-    # The gate's advisory pre-review is recorded in full, whatever its availability.
-    advisory = json.loads((output / "advisory.txt").read_text(encoding="utf-8"))
-    assert advisory.get("status")
+    # No preflight row named: a stated fact, never a look and never a block.
+    preflight = json.loads((output / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight["preflight"] == {"status": "not_performed", "record_id": ""}
+    assert preflight["seats"] == [] and (output / "preflight.txt").read_text(encoding="utf-8") == "\n"
     sections = shared.full_output_sections((output / "full-output.txt").read_text(encoding="utf-8"))
     seats = json.loads(sections["REVIEW SEAT RECORDS (ledger rows with retained answers, full, untruncated)"])
     assert [(seat["seat_id"], seat["answer"]) for seat in seats] == [
@@ -125,6 +134,63 @@ def test_operator_lane_is_the_commit_gate_dry_run_in_an_isolated_checkout(tmp_pa
     drift = (output / "reviewed-tree-drift.diff").read_text(encoding="utf-8")
     assert "+++ b/.gitignore" in drift and "+staged edit" in drift
     assert not (repo / ".gitignore").exists()
+
+
+def test_operator_lane_runs_the_named_preflight_through_review_change(tmp_path, monkeypatch, capsys):
+    """Contract approval item 3: ``--preflight-reviewer`` runs the commit gate's own look,
+    ``review_change(subject=worktree, surface=preflight)`` on the ONE named row, inside the
+    isolated checkout and after the hermetic tests there; the output keeps the
+    ``surface=preflight`` record beside the helper's full answer, the commit panel still
+    reviews on its own record, and the drift check still runs."""
+    import scripts.run_external_review as module
+    from tests.test_git_review_preflight_gate import _roster
+
+    _roster(monkeypatch)
+    order: list = []
+    repo, _briefs = _operator_fixture(tmp_path, monkeypatch, order)
+    checkouts = tmp_path / "drive" / "state" / "review_checkouts"
+
+    exit_code, output = _run_operator_lane(module, monkeypatch, tmp_path, "--preflight-reviewer=api-scout")
+
+    assert exit_code == 0, (output / "outcome.json").read_text(encoding="utf-8")
+    # Tests first, in the isolated checkout; then the one-seat look; then the panel.
+    (first, tested), (second, _root) = order[0], order[1]
+    assert (first, second) == ("tests", "preflight")
+    assert tested.parent.parent == checkouts and tested != repo
+    assert [kind for kind, _ in order[2:]] and {kind for kind, _ in order[2:]} == {"panel"}
+    assert sorted(slot for _kind, slots in order[2:] for slot in slots) == ["s1", "t1", "t2"]
+    summary = json.loads((output / "preflight.json").read_text(encoding="utf-8"))
+    assert summary["preflight"]["status"] == "performed" and summary["preflight"]["reviewer"] == "api-scout"
+    assert summary["review_record"]["surface"] == "preflight"
+    assert [(seat["seat_id"], seat["answer"]) for seat in summary["seats"]] == [("api-scout", _PREFLIGHT_ANSWER)]
+    assert (output / "preflight.txt").read_text(encoding="utf-8") == _PREFLIGHT_ANSWER + "\n"
+    assert _PREFLIGHT_ANSWER in capsys.readouterr().out
+    # The look's record never stands in for the commit panel's.
+    outcome = json.loads((output / "outcome.json").read_text(encoding="utf-8"))
+    assert outcome["outcome"]["review_record_id"] != summary["preflight"]["record_id"]
+    sections = shared.full_output_sections((output / "full-output.txt").read_text(encoding="utf-8"))
+    verdict = json.loads(sections["AGGREGATE VERDICT"])
+    assert verdict["review_record"]["surface"] == "commit_gate"
+    assert (output / "reviewed-tree-drift.diff").exists()
+    assert not checkouts.exists() or not any(checkouts.iterdir())
+
+
+def test_operator_lane_refuses_a_preflight_row_that_is_not_enabled(tmp_path, monkeypatch):
+    """A preflight row that is not an enabled catalog row is the caller's argument
+    error: no test run, no look, no panel."""
+    import scripts.run_external_review as module
+    from tests.test_git_review_preflight_gate import _roster
+
+    _roster(monkeypatch, enabled=False)
+    order: list = []
+    _operator_fixture(tmp_path, monkeypatch, order, scout_enabled=False)
+
+    exit_code, output = _run_operator_lane(module, monkeypatch, tmp_path, "--preflight-reviewer=api-scout")
+
+    outcome = json.loads((output / "outcome.json").read_text(encoding="utf-8"))
+    assert exit_code != 0 and outcome["outcome"]["status"] != "passed"
+    assert "is not an enabled catalog row" in json.dumps(outcome)
+    assert order == []
 
 
 def test_operator_lane_retains_the_checkout_while_a_seat_is_open(tmp_path, monkeypatch):
@@ -168,5 +234,3 @@ def test_operator_lane_without_isolation_reviews_this_worktree(tmp_path, monkeyp
     assert exit_code == 0, (output / "outcome.json").read_text(encoding="utf-8")
     assert {Path(brief["session_root"]) for brief in briefs if brief["session_root"]} == {repo}
     assert not (tmp_path / "drive" / "state" / "review_checkouts").exists()
-
-

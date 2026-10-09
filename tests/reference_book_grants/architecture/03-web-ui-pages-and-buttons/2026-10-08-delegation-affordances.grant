@@ -1,0 +1,2 @@
+49
+Name the existing neutral Subagent fallback for missing or blank role labels; explicit roles and separate model metadata are preserved.

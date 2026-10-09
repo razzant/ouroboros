@@ -167,7 +167,7 @@ test('Main: work during the start keeps its own word; only a ready census clears
             active_chat_activities: [{ activity_id: 'q-1', chat_id: 1, kind: 'managed_task', phase: 'queued' }] });
         assert.equal(chat.status(), 'Queued...', 'a restored queue row is a fact about work, not the start');
         chat.snapshot({ supervisor_ready: false });
-        assert.equal(chat.status(), 'Queued...', 'a not-ready census cannot prove the row gone');
+        assert.equal(chat.status(), 'Activity unconfirmed', 'an incomplete census retains the row without claiming its old phase is current');
         chat.snapshot({ supervisor_ready: true });
         assert.equal(chat.status(), 'Online');
     } finally { chat.close(); }

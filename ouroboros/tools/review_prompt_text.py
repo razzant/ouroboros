@@ -233,6 +233,27 @@ def build_review_history_section(
     return "\n".join(lines)
 
 
+def author_questions_block(questions, *, note: str = "") -> str:
+    """The author's own questions to the panel, numbered as asked — the ONE rendering
+    every surface uses (``review_change``'s wave, the public brief builder, the
+    system review's task), so a brief rebuilt outside the gate reads as the brief
+    the seat was sent. The questions are passed verbatim (``review_change``'s
+    contract); blank entries are dropped. ``note`` qualifies the heading (the system
+    review asks them after its own questionnaire). ``""`` without questions."""
+    asked = [str(question) for question in (questions or ()) if str(question or "").strip()]
+    if not asked:
+        return ""
+    heading = f"Author questions (answer each as asked{', ' + note if note else ''}):"
+    return heading + "".join(f"\n{number}. {question}" for number, question in enumerate(asked, 1))
+
+
+def goal_with_author_questions(goal: str, questions) -> str:
+    """The goal text a wave hands its seats: the author's goal, then the questions
+    block; the goal alone when nothing was asked."""
+    block = author_questions_block(questions)
+    return f"{goal}\n\n{block}".lstrip("\n") if block else str(goal or "")
+
+
 def build_obligations_block(open_obligations: list | None) -> str:
     """Render open review obligations from duck-typed obligation records."""
     if not open_obligations:

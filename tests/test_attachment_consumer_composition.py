@@ -613,10 +613,15 @@ def _main_media_shape(page, where: str) -> list[dict]:
     page.wait_for_function("""() => {
         const bubbles = document.querySelectorAll('#chat-messages .chat-bubble.user.has-attachments');
         const photo = [...bubbles].some(b => b.querySelector('img.chat-photo'));
-        const photoReady = [...document.querySelectorAll('#chat-messages img.chat-photo')].every(i => i.complete && i.naturalWidth > 0);
-        return bubbles.length === 4 && photo && photoReady && document.querySelector('#chat-messages .chat-attachment-player video')
+        return bubbles.length === 4 && photo && document.querySelector('#chat-messages .chat-attachment-player video')
             && document.querySelector('#chat-messages .chat-attachment-player audio');
     }""", timeout=60_000)
+    # A chat photo loads lazily, so later Main notes can push it out of the engine's load
+    # range: bring it into view as the owner would, then ask whether it rendered.
+    for photo in page.locator('#chat-messages img.chat-photo').all():
+        photo.scroll_into_view_if_needed()
+    page.wait_for_function("""() => [...document.querySelectorAll('#chat-messages img.chat-photo')]
+        .every(i => i.complete && i.naturalWidth > 0)""", timeout=60_000)
     shapes = page.evaluate(_MAIN_SHAPE)
     assert len(shapes) == 4, f"{where}: four Telegram messages are four bubbles, got {len(shapes)}"
     photo, audio, video, document = shapes

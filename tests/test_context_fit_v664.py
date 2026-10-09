@@ -464,14 +464,14 @@ def test_route_switch_without_immutable_core_fails_loudly(tmp_path):
         )
 
 
-def test_p3_commit_and_scope_review_do_not_use_task_context_fit():
+def test_p3_commit_review_seats_do_not_use_task_context_fit():
     from ouroboros import review_substrate
-    from ouroboros.tools import review, scope_review
+    from ouroboros.tools import review, review_multi_model
 
     source = (
         inspect.getsource(review_substrate.ReviewCoordinator._run_slot)
         + inspect.getsource(review._run_unified_review)
-        + inspect.getsource(scope_review._call_scope_llm)
+        + inspect.getsource(review_multi_model._query_model)
     )
     assert "run_llm_loop" not in source
     assert "ContextFitPlan" not in source

@@ -5,7 +5,8 @@
 // browser. The memory arrives as a gateway payload here: no dictionary lives in the repo.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import * as acorn from './vendor/acorn.mjs';
 import {
     applyPayload, createTranslator, currentPayload, englishTag, entryText, flushMisses, fmt, fmtInto,
     localeDirection, lookupString, missKeyFor, pendingMisses, pluralSelectMap, setLanguage, setMissTransport, tr, translateString, tx,
@@ -761,4 +762,34 @@ test('the direction seam has no opinion on a language whose script the engine do
     if (known('de')) assert.equal(localeDirection('de'), 'ltr');
     // Northern Luri: Arabic script, and no plural data in the engines that ship its script.
     if (known('lrc')) assert.equal(localeDirection('lrc'), 'rtl', 'the script decides, not the plural data');
+});
+
+// The memory translates English source text, so Cyrillic typed into a module's literal would
+// reach every English reader as-is. Comments may quote the owner verbatim and never paint; a
+// glyph table spelled as \u escapes (the matrix rain) is artwork, not words.
+function cyrillicLiterals(source) {
+    const hits = [];
+    acorn.parse(source, {
+        ecmaVersion: 'latest', sourceType: 'module', locations: true,
+        onToken: (token) => {
+            if ([acorn.tokTypes.string, acorn.tokTypes.template].includes(token.type)
+                && /[\u0400-\u04FF]/.test(source.slice(token.start, token.end))) hits.push(token.loc.start.line);
+        },
+    });
+    return hits;
+}
+
+test('every string a module or page can paint is English source text: no Cyrillic literal', () => {
+    assert.deepEqual(cyrillicLiterals('// Настройки\nconst a = "Settings";'), [], 'a comment is not a literal');
+    assert.deepEqual(cyrillicLiterals('const glyphs = "\\u0430\\u0431";'), [], 'an escaped glyph table is not text');
+    assert.deepEqual(cyrillicLiterals('const a = "Settings";\nconst b = `Настройки ${a}`;\nconst c = \'Поиск\';'), [2, 3]);
+    const modules = new URL('../modules/', import.meta.url);
+    const files = readdirSync(modules).filter((name) => name.endsWith('.js'));
+    assert.ok(files.includes('subagents_settings.js') && files.length > 100, 'the scan reads the module directory');
+    const hits = files.flatMap((name) => cyrillicLiterals(readFileSync(new URL(name, modules), 'utf8'))
+        .map((line) => `web/modules/${name}:${line}`));
+    assert.deepEqual(hits, []);
+    for (const page of ['../index.html', '../onboarding_template.html']) {
+        assert.doesNotMatch(readFileSync(new URL(page, import.meta.url), 'utf8'), /[\u0400-\u04FF]/, page);
+    }
 });

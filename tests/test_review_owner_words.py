@@ -1,6 +1,6 @@
 """Reviewers see the owner's words that caused the work.
 
-The triad, scope and advisory reviewers read the change against the author's intent;
+The triad and scope reviewers (a preflight's one seat included) read the change against the author's intent;
 ``build_goal_section`` now adds, right after that intent, the host-attested words of
 the owner the work answers (``owner_words.owner_words_text``: a root's own corpus, a
 child's inherited words, an absence line with the host marker when there are none).
@@ -23,6 +23,7 @@ from ouroboros.tools.review_helpers import build_goal_section
 from ouroboros.utils import append_jsonl
 from tests.test_plan_review_engine import CLEAN, DECK_SPEC, _call, _state, _user_text
 from tests.test_plan_review_engine import harness as _plan_review_harness
+from tests.review_pool_rosters import set_review_pool
 
 harness = _plan_review_harness  # the plan-review fixture, under the name its tests take
 
@@ -104,7 +105,12 @@ def _triad_prompt(tmp_path, monkeypatch, kind: str) -> tuple[str, int, str]:
         return ""
 
     def capture_review(*_args, **kwargs):
-        captured.update(prompt=kwargs["prompt"], stable=kwargs["stable_prefix_len"], task=kwargs["session_task"])
+        assert kwargs["row_plan"]["models"] == ["test/reviewer"]
+        plan = kwargs.get("row_plan") or {}
+        briefs = [task for task, parts in zip(plan.get("session_tasks") or [], plan.get("parts") or [])
+                  if "coupling" in tuple(parts)]
+        captured.update(prompt=kwargs["prompt"], stable=kwargs["stable_prefix_len"],
+                        task=briefs[0] if briefs else kwargs["session_task"])
         return json.dumps({"results": []})
 
     monkeypatch.setattr(review, "run_cmd", fake_run_cmd)
@@ -113,7 +119,6 @@ def _triad_prompt(tmp_path, monkeypatch, kind: str) -> tuple[str, int, str]:
     monkeypatch.setattr(review, "_load_checklist_section", lambda *_a, **_k: "checklist")
     monkeypatch.setattr(review, "load_governance_doc", lambda *_args, **_kwargs: "governance")
     monkeypatch.setattr(review, "build_touched_file_pack", lambda *_args, **_kwargs: ("files", []))
-    monkeypatch.setattr(review._cfg, "get_review_models", lambda: ["test/reviewer"])
     monkeypatch.setattr(review._cfg, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr(review, "_handle_multi_model_review", capture_review)
     ctx = SimpleNamespace(
@@ -126,7 +131,7 @@ def _triad_prompt(tmp_path, monkeypatch, kind: str) -> tuple[str, int, str]:
 
 @pytest.mark.parametrize("kind", ["root", "child"])
 def test_the_triad_packet_reads_the_words_in_its_dynamic_half(tmp_path, monkeypatch, kind):
-    monkeypatch.setattr("ouroboros.reviewer_slot_config.DEFAULT_TRIAD_DELIVERY", "")  # pin the packet seat
+    set_review_pool(monkeypatch, ["test/reviewer"])  # pin the packet seat
     prompt, stable, _task = _triad_prompt(tmp_path, monkeypatch, kind)
     conscious, conscious_stable, _task = _triad_prompt(tmp_path, monkeypatch, "conscious")
     words = _section(kind)
@@ -139,20 +144,21 @@ def test_the_triad_packet_reads_the_words_in_its_dynamic_half(tmp_path, monkeypa
 
 
 def test_the_retrieving_triad_reads_the_words_in_its_session_task(tmp_path, monkeypatch):
-    """The shipped default triad reads the work itself: its session task carries the same section."""
+    """A natively retrieving pool reads the work itself: its two-part brief carries the same section."""
+    set_review_pool(monkeypatch, ["test/reviewer"], delivery="native")
     prompt, _stable, task = _triad_prompt(tmp_path, monkeypatch, "root")
     assert not prompt and _section("root") in task and task.index("GOAL_SENTINEL") < task.index(OWNER)
     _prompt, _stable, conscious = _triad_prompt(tmp_path, monkeypatch, "conscious")
     assert ABSENT_CONSCIOUS in conscious and OWNER not in conscious
 
 
-# --- scope --------------------------------------------------------------------------------------------------
+# --- the two-part brief (Part 2 asks the coupling question) ---------------------------------------------
 
-def _scope_brief(tmp_path, kind: str) -> tuple[str, str]:
-    """One real scope row's brief (``prepare_scope_review``) on a staged repository."""
-    from ouroboros.review_execution import ReviewRouteKind
+def _two_part_brief(tmp_path, kind: str) -> tuple[str, str]:
+    """One real retrieving seat's two-part brief (``build_two_part_brief``) on a staged repository."""
     from ouroboros.tools.registry import ToolContext
-    from ouroboros.tools.review_admission import prepare_scope_review
+    from ouroboros.tools.review_admission import build_two_part_brief
+    from ouroboros.tools.review_subject import ReviewSubjectSpec, freeze_subject
     from tests.test_review_session_scope_wiring import BRIEF_TASK_ID, _staged_subject
 
     root = tmp_path / kind
@@ -163,74 +169,34 @@ def _scope_brief(tmp_path, kind: str) -> tuple[str, str]:
     ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id=BRIEF_TASK_ID)
     for name, value in _attrs(kind).items():
         setattr(ctx, name, value)
-    prepared, final = prepare_scope_review(ctx, "fix: login timeout", goal="GOAL_SENTINEL", scope_model="fixture/model",
-                                           slot_id="scope_slot_1", route=ReviewRouteKind.API_CHAT)
-    assert final is None
-    return prepared["session_task"], ow.owner_words_text(ctx)
+    frozen = freeze_subject(ctx, ReviewSubjectSpec(root_kind="system_repo", root=str(repo), kind="index",
+                                                   surface="commit_gate", layer="body"))
+    seat = {"slot_id": "seat-native", "model": "fixture/model", "route": "api_chat", "retrieves": True}
+    words = ow.owner_words_text(ctx)
+    built = build_two_part_brief(frozen, seat, goal="GOAL_SENTINEL", commit_message="fix: login timeout",
+                                 owner_words=words, drive_root=drive, task_id=BRIEF_TASK_ID)
+    assert built["parts"] == ["change", "coupling"]
+    return built["system"], words
 
 
-def test_the_scope_brief_carries_the_words_after_its_intent(tmp_path):
-    brief, words = _scope_brief(tmp_path, "root")
-    assert words == _section("root", task_id="scope-brief-task")
-    assert words in brief and brief.index("GOAL_SENTINEL") < brief.index(words) < brief.index("## Staged diff")
-    conscious, _words = _scope_brief(tmp_path, "conscious")
+def test_the_two_part_brief_carries_the_words_after_its_intent(tmp_path):
+    from tests.test_review_session_scope_wiring import BRIEF_TASK_ID
+
+    brief, words = _two_part_brief(tmp_path, "root")
+    assert words == _section("root", task_id=BRIEF_TASK_ID)
+    assert words in brief and brief.index("GOAL_SENTINEL") < brief.index(words) < brief.index("### Staged diff")
+    assert brief.index(words) < brief.index("## Part 2")  # the words ride Part 1's intent; Part 2 reads them there
+    conscious, _words = _two_part_brief(tmp_path, "conscious")
     assert ABSENT_CONSCIOUS in conscious and OWNER not in conscious
 
 
-def test_the_scope_prompt_keeps_its_stable_prefix():
-    from ouroboros.tools.review_synthesis import build_scope_review_prompt
+def test_the_coupling_part_keeps_its_stable_text():
+    """Part 2 is the same bytes whatever the owner said: the words ride Part 1's intent only."""
+    from ouroboros.tools.review_synthesis import build_coupling_part
 
-    def prompt(owner_words: str) -> tuple[str, int]:
-        goal = build_goal_section("GOAL_SENTINEL", "", "fix: retry", owner_words)
-        return build_scope_review_prompt(
-            "touched", scope_checklist="checklist", canonical_docs="docs", intent_context=f"scope\n\n{goal}",
-            history_block="", diff_text="diff", repo_pack_placeholder="pack", critical_calibration="calibration",
-            task_evidence_section="")
-
-    (bare, bare_stable), (worded, worded_stable) = prompt(""), prompt(_section("root"))
-    assert OWNER not in bare and OWNER in worded and worded.index(OWNER) > worded_stable
-    assert bare_stable == worded_stable and bare[:bare_stable] == worded[:worded_stable]
-
-
-# --- advisory -----------------------------------------------------------------------------------------------
-
-@pytest.mark.parametrize("surface", ["repo", "skill"])
-def test_both_advisory_goal_sections_carry_the_words(tmp_path, surface):
-    from ouroboros.tools import claude_advisory_review as advisory
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    def prompt(**extra) -> str:
-        return advisory._build_advisory_prompt(
-            repo, "fix: login timeout", goal="GOAL_SENTINEL", scope="PAYLOAD", resolved_paths=[],
-            prompt_context={"diff": "(not included)", "changed_files": "(not included)",
-                            "review_surface": surface, **extra})
-
-    words = _section("root")
-    worded, bare = prompt(owner_words=words), prompt()
-    assert words in worded and worded.index("GOAL_SENTINEL") < worded.index(words)
-    assert OWNER not in bare and worded.replace(f"\n\n\n{words}", "", 1) == bare
-
-
-def test_the_advisory_run_hands_the_runs_words_to_the_prompt(tmp_path, monkeypatch):
-    from tests.test_advisory_observability import _fake_native_result, _get_advisory_module
-
-    advisory = _get_advisory_module()
-    seen = []
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setattr(advisory, "_run_advisory_native", lambda prompt, repo_dir, ctx_, slot, model, **_: (
-        _fake_native_result(success=True, result_text="(no output)"), model))
-    monkeypatch.setattr(advisory, "_get_staged_diff", lambda *a, **kw: "diff")
-    monkeypatch.setattr(advisory, "_get_changed_file_list", lambda *a, **kw: "M file.py")
-    monkeypatch.setattr(advisory, "_build_advisory_prompt",
-                        lambda *a, **kw: seen.append(kw["prompt_context"]["owner_words"]) or "prompt")
-    for kind in ("root", "conscious"):
-        ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="root", pending_events=[],
-                              emit_progress_fn=lambda *_: None, **_attrs(kind))
-        advisory._run_claude_advisory(tmp_path, "msg", ctx)
-    assert seen == [_section("root"), ABSENT_CONSCIOUS]
-    assert OWNER in seen[0] and "not the owner's" not in seen[0]
+    part2 = build_coupling_part(coupling_checklist="checklist", required_sources_section="sources",
+                                repository_index="index", history_block="", layer="body")
+    assert OWNER not in part2 and "GOAL_SENTINEL" not in part2 and part2.startswith("## Part 2")
 
 
 def test_reviewers_get_no_memory_or_story(tmp_path, monkeypatch):
@@ -241,9 +207,8 @@ def test_reviewers_get_no_memory_or_story(tmp_path, monkeypatch):
     review_root.mkdir()
     mind_root.mkdir()
     headings = ("## Identity", "## My story", "## This room", "## Working sources", "## Dialogue History")
-    for delivery in (None, ""):  # the retrieving rows' session task (the default), then the packet seat
-        if delivery is not None:
-            monkeypatch.setattr("ouroboros.reviewer_slot_config.DEFAULT_TRIAD_DELIVERY", delivery)
+    for delivery in ("native", "packet"):  # the retrieving rows' session task, then the packet seat
+        set_review_pool(monkeypatch, ["test/reviewer"], delivery=delivery)
         prompt, _stable, task = _triad_prompt(review_root, monkeypatch, "root")
         assert OWNER in prompt + task
         for heading in headings:

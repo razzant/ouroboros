@@ -1,0 +1,2 @@
+256
+The onboarding chapter describes the review pool instead of reviewer slots: the preset marks catalog rows `review_eligible` (or mints `review-<harness>` rows), a generated catalog nobody marked gains the factory API rows, and Finish without agent defaults re-routes the marked rows onto Main (`review_rows_on_main`) with the explicit `allow_empty_review_pool` confirmation for an empty pool.

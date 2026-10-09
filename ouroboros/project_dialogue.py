@@ -1477,6 +1477,7 @@ def announce_project_started(
                 "project_id": pid,
                 "project_name": snapshot["project_name"],
                 "target_label": snapshot["target_label"],
+                "task_name": snapshot["task_name"],
             },
         }
         return bool(enqueue_terminal_delivery(drive_root, event))

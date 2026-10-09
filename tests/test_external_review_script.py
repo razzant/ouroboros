@@ -38,23 +38,22 @@ from tests import _contributor_packet_shared as shared
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize('delivery,refused', [('native', False), ('packet', True), ('', True)])
+@pytest.mark.parametrize('delivery,refused', [('native', False), ('packet', True), ('', False)])
 def test_contributor_config_roundtrip_keeps_direct_api_delivery(monkeypatch, delivery, refused):
-    from scripts.run_external_review import _diff_size_refusal, _slot_plan_payload
-    from ouroboros.reviewer_slot_config import parse_reviewer_slots, triad_delivery_slots
+    from scripts.run_external_review import _diff_size_refusal, _frozen_pool_catalog
+    from ouroboros.reviewer_slot_config import review_pool_rows
+    from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 
-    row = {'slot_id': 't', 'route': {'kind': 'api_chat', 'target_id': 'openai/test'}}
-    if delivery:
-        row['delivery'] = delivery
-    monkeypatch.setenv('OUROBOROS_REVIEWER_SLOTS', json.dumps({
-        'triad': [row], 'scope': [{'slot_id': 's', 'route': row['route']}]}))
+    set_review_pool(monkeypatch, pool_roster(pool_seat('t', 'openai/test', delivery=delivery or None)))
     resolved = _resolved_review_config()
-    assert resolved['triad_slots'][0].get('delivery', '') == delivery
-    stored = parse_reviewer_slots(json.dumps(_slot_plan_payload(resolved)))
-    assert triad_delivery_slots(config=stored)[0].retrieves is (not refused)
-    assert _diff_size_refusal(SimpleNamespace(contributor=True), resolved, 101, 100) is refused
-    assert _diff_size_refusal(SimpleNamespace(contributor=True), resolved, 100, 100) is False
-    assert _diff_size_refusal(SimpleNamespace(contributor=False), resolved, 101, 100) is True
+    # A catalog api row's delivery is its own explicit fact; '' means native (F8).
+    assert resolved['pool_slots'][0].get('delivery', '') == (delivery or 'native')
+    monkeypatch.setenv('OUROBOROS_SUBAGENTS', _frozen_pool_catalog(resolved))
+    assert review_pool_rows()[0].native_retrieval is (not refused)
+    # I3-D1: the cap binds a packet seat on either lane; the operator lane is not refused on its own.
+    for lane in (SimpleNamespace(contributor=True), SimpleNamespace(contributor=False)):
+        assert _diff_size_refusal(lane, resolved, 101, 100) is refused
+        assert _diff_size_refusal(lane, resolved, 100, 100) is False
 
 
 def test_contributor_mixed_panel_keeps_packet_limit():
@@ -62,16 +61,17 @@ def test_contributor_mixed_panel_keeps_packet_limit():
 
     rows = [{'route': {'kind': 'api_chat'}, 'delivery': 'native'},
             {'route': {'kind': 'agent_session'}},
-            {'route': {'kind': 'api_chat'}, 'subagent_id': 'reader'}]
+            {'route': {'kind': 'api_chat'}, 'subagent_id': 'reader', 'delivery': 'native'}]  # F8: the fact, not the id
     args = SimpleNamespace(contributor=True)
-    assert not _diff_size_refusal(args, {'triad_slots': rows}, 101, 100)
-    assert _diff_size_refusal(args, {'triad_slots': rows + [{'route': {'kind': 'api_chat'}}]}, 101, 100)
+    assert not _diff_size_refusal(args, {'pool_slots': rows}, 101, 100)
+    assert _diff_size_refusal(args, {'pool_slots': rows + [{'route': {'kind': 'api_chat'}, 'delivery': 'packet'}]},
+                              101, 100)
 
 
 def test_contributor_trust_boundary_covers_functional_review_dependencies():
-    from ouroboros.tools.scope_review import _CANONICAL_CONTEXT_DOCS
+    from ouroboros.tools.review_helpers import CANONICAL_GOVERNANCE_DOCS
 
-    assert set(_CANONICAL_CONTEXT_DOCS) <= _REVIEW_SUBSTRATE_PATHS and "docs/DESIGN.md" in _CANONICAL_CONTEXT_DOCS
+    assert set(CANONICAL_GOVERNANCE_DOCS) <= _REVIEW_SUBSTRATE_PATHS and "docs/DESIGN.md" in CANONICAL_GOVERNANCE_DOCS
     assert {
         "docs/ARCHITECTURE.md",
         "ouroboros/capability_evidence.py",
@@ -103,12 +103,14 @@ def test_contributor_trust_boundary_covers_functional_review_dependencies():
         "ouroboros/runtime_mode_policy.py",
         "ouroboros/usage_accounting.py",
         "ouroboros/utils.py",
-        "ouroboros/tools/claude_advisory_review.py",
+        "ouroboros/tools/preflight_review.py",
+        "ouroboros/tools/commit_gate.py",
         "ouroboros/tools/registry.py",
         "ouroboros/tools/release_sync.py",
         "ouroboros/tools/review_synthesis.py",
         "ouroboros/tools/review_binary_context.py",
-        "ouroboros/tools/scope_review_session.py",
+        "ouroboros/tools/review_brief_coupling.py",
+        "ouroboros/tools/scope_review_contract.py",
         "ouroboros/tools/scope_window.py",
         "ouroboros/subagents.py",
         "ouroboros/review_native_episode.py",
@@ -137,10 +139,12 @@ def test_external_review_script_is_a_wrapper_over_the_review_operation():
     assert 'root="system_repo", surface="change"' in source
     assert 'subject="base..head"' in source
     # Operator lane: the exact commit-gate dry-run, in the runtime's isolated
-    # checkout of the staged index, with the advisory pre-review recorded in full.
+    # checkout of the staged index, with the named preflight's record and full
+    # answer beside it (decision 3A; approval item 3).
     assert "_run_non_committing_review_cycle(" in source
-    assert "skip_advisory_review=False" in source
-    assert '"advisory.txt"' in source
+    assert "preflight_reviewer=args.preflight_reviewer" in source
+    assert '"preflight.json"' in source and '"preflight.txt"' in source
+    assert "advisory.txt" not in source and "skip_advisory_review" not in source
     assert 'kind="index", surface="commit_gate"' in source
     assert "adaptive_quorum" not in source
     assert "aggregate_review_verdict" not in source
@@ -160,6 +164,22 @@ def test_external_review_script_defaults_to_pro_mode():
     assert 'setdefault("OUROBOROS_RUNTIME_MODE", "pro")' in source
 
 
+def test_the_operator_lane_sets_no_retired_diff_aware_knob():
+    """The commit gate pays the suite on every diff (owner answer A, 2026-10-08), so nothing
+    reads ``OUROBOROS_PREFLIGHT_DIFF_AWARE`` any more; the lane neither sets it nor leaves a
+    mention for an operator to copy. The whole tree under test has no reader of the name."""
+    name = "OUROBOROS_PREFLIGHT_" + "DIFF_AWARE"
+    assert name not in Path("scripts/run_external_review.py").read_text(encoding="utf-8")
+    readers = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for folder in ("ouroboros", "supervisor", "scripts", "web", "docs", "prompts")
+        for path in (REPO_ROOT / folder).rglob("*")
+        if path.is_file() and path.suffix in {".py", ".js", ".md", ".json"}
+        and name in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert readers == []
+
+
 def test_external_review_script_resolves_models_and_efforts(monkeypatch):
     for key in (
         "OPENAI_API_KEY",
@@ -174,25 +194,25 @@ def test_external_review_script_resolves_models_and_efforts(monkeypatch):
         "OUROBOROS_MODEL_LIGHT",
     ):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "anthropic/claude-opus-4.8,google/gemini-3.5-flash,openai/gpt-5.5")
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "openai/gpt-5.5")
-    monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "high")
-    monkeypatch.setenv("OUROBOROS_EFFORT_SCOPE_REVIEW", "high")
+    from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
+
+    set_review_pool(monkeypatch, pool_roster(
+        pool_seat("r1", "anthropic/claude-opus-4.8", effort="high"),
+        pool_seat("r2", "google/gemini-3.5-flash", effort="high"),
+        pool_seat("r3", "openai/gpt-5.5", delivery="native", effort="xhigh")))
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
 
     config = _resolved_review_config()
 
-    assert config["triad_models"] == [
+    assert config["pool_models"] == [
         "anthropic/claude-opus-4.8",
         "google/gemini-3.5-flash",
         "openai/gpt-5.5",
     ]
-    assert config["triad_efforts"] == ["high", "high", "high"]
-    assert config["scope_models"] == ["openai/gpt-5.5"]
-    assert config["scope_efforts"] == ["high"]
-    assert all(row["route"]["kind"] == "api_chat" for row in config["triad_slots"])
+    assert config["pool_efforts"] == ["high", "high", "xhigh"]
+    assert all(row["route"]["kind"] == "api_chat" for row in config["pool_slots"])
+    assert [row["delivery"] for row in config["pool_slots"]] == ["packet", "packet", "native"]
     assert config["review_enforcement"] == "blocking"
     # v6.80.0: the scope-review floor key is gone; the operator line pins the context
     # mode instead, because that is now what decides scope-review applicability.
@@ -214,7 +234,8 @@ def _contributor_fakes(module, monkeypatch, repo: Path, drive: Path) -> None:
     monkeypatch.setattr(module, "_resolved_review_config",
                         lambda *, profile="production_commit_gate": json.loads(json.dumps(shared.GOLDEN_CONFIG)))
     monkeypatch.setattr(module, "_select_healthy_openrouter_key", lambda **_kwargs: None)
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", "")  # the slot freeze rewrites it in-process
+    # The gate's panel is the review pool: the golden's three seats as catalog rows.
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", shared.golden_pool())
 
 
 def _run_golden_contributor_review(tmp_path: Path, monkeypatch) -> SimpleNamespace:
@@ -312,6 +333,42 @@ def test_contributor_packet_is_the_pre_move_packet(tmp_path, monkeypatch):
     installed = new_trust.pop("installed_body_execution")
     assert new_trust == old_trust
     review_record = new.pop("review_record")
+    # Declared: the panel is ONE review pool now (PR-3). The pre-move wrapper described
+    # the same three seats as a triad lane plus a scope lane; the pool describes them
+    # as pool rows (the scope seat retrieving natively) and pins them as catalog rows.
+    old_config, new_config = old.pop("review_config"), new.pop("review_config")
+    lane_rows = [*old_config.pop("triad_slots"), *old_config.pop("scope_slots")]
+    assert new_config.pop("pool_slots") == [
+        {**lane_rows[0], "delivery": "packet"}, lane_rows[1], {**lane_rows[2], "delivery": "native"}]
+    assert new_config.pop("pool_models") == old_config.pop("triad_models") + old_config.pop("scope_models")
+    assert new_config.pop("pool_efforts") == old_config.pop("triad_efforts") + old_config.pop("scope_efforts")
+    assert (old_config.pop("execution_slot_config_source"), new_config.pop("execution_slot_config_source")) == (
+        "frozen_structured", "frozen_review_pool")
+    assert (old_config.pop("slot_config_source"), new_config.pop("slot_config_source")) == ("settings", "review_pool")
+    assert len(old_config.pop("slot_plan_sha256")) == len(new_config.pop("slot_plan_sha256")) == 64
+    assert new_config == old_config
+    assert (old["review_completeness"].pop("contract"), new["review_completeness"].pop("contract")) == (
+        "production_triad_quorum_plus_authoritative_scope", "production_pool_quorum_plus_coupling")
+    # ... and every receipt names the one pool surface; a seat's configured row carries
+    # its explicit delivery (the pre-move lane rows left it implicit).
+    lane_surfaces = {"triad", "scope"}
+
+    def one_pool(value):
+        if isinstance(value, dict):
+            out = {key: one_pool(item) for key, item in value.items()}
+            if out.get("surface") in lane_surfaces:
+                out["surface"] = "pool"
+            if "configured" in out and isinstance(out["configured"], dict) and "delivery" not in out["configured"]:
+                out["configured"]["delivery"] = "native" if out["configured"].get("slot_id") == "s1" else "packet"
+            return out
+        if isinstance(value, list):
+            return [one_pool(item) for item in value]
+        return value
+
+    old = one_pool(old)
+    for receipt in [*old["review_execution"]["receipts"], *new["review_execution"]["receipts"]]:
+        if receipt["configured"].get("route", {}).get("kind") == "agent_session":
+            receipt["configured"].pop("delivery", None)
     assert new == old
 
     # The review ran the installed body's rules, not the proposal's relaxed
@@ -352,13 +409,13 @@ def test_contributor_packet_is_the_pre_move_packet(tmp_path, monkeypatch):
     sections = shared.full_output_sections(full_output)
     assert json.loads(sections["CONTRIBUTOR REVIEW EVIDENCE"]) == evidence
     transcripts = json.loads(sections["AGENT SESSION TRANSCRIPTS (full, redacted)"])
-    assert shared.normalized(transcripts, run.fixture) == golden["session_transcripts"]
+    assert shared.normalized(transcripts, run.fixture) == [
+        {**row, "surface": "pool"} for row in golden["session_transcripts"]]  # one pool surface
     assert sorted(slot for slot, answer in shared.ANSWERS.items()
                   if answer in full_output or json.dumps(answer)[1:-1] in full_output
                   ) == golden["answered_slots_in_full_output"]
-    triad = json.loads(sections["TRIAD SEAT RECORDS (ledger rows with retained answers, full, redacted)"])
-    scope = json.loads(sections["SCOPE SEAT RECORDS (ledger rows with retained answers, full, redacted)"])
-    assert [(seat["seat_id"], seat["answer"]) for seat in triad + scope] == [
+    seats = json.loads(sections["REVIEW POOL SEAT RECORDS (ledger rows with retained answers, full, redacted)"])
+    assert [(seat["seat_id"], seat["answer"]) for seat in seats] == [
         (slot, shared.ANSWERS[slot]) for slot in ("t1", "t2", "s1")]
     with zipfile.ZipFile(run.output / "review-packet.zip") as archive:
         assert set(archive.namelist()) == {"review-evidence.json", "outcome.json", "full-output.txt"}
@@ -620,63 +677,54 @@ def test_contributor_result_is_decided_by_the_exit_code_alone():
 
 
 def test_contributor_policy_preserves_configured_routes(monkeypatch):
-    payload = {
-        "triad": [
-            {"slot_id": "session", "route": {
-                "kind": "agent_session", "target_id": "codex=gpt-5.6-sol",
-                "profile_id": "account-a"}, "effort": "high"},
-            {"slot_id": "direct", "route": {
-                "kind": "api_chat", "target_id": "anthropic::claude-fable-5"},
-                "effort": "xhigh"},
-        ],
-        "scope": [{"slot_id": "scope", "route": {
-            "kind": "api_chat", "target_id": "openai/gpt-5.6-sol"},
-            "effort": "high"}],
-    }
-    raw = json.dumps(payload)
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", raw)
+    from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
+
+    raw = pool_roster(
+        pool_seat("session", "codex=gpt-5.6-sol", kind="agent_session", profile_id="account-a", effort="high"),
+        pool_seat("direct", "anthropic::claude-fable-5", effort="xhigh"),
+        pool_seat("reader", "openai/gpt-5.6-sol", delivery="native", effort="high"))
+    set_review_pool(monkeypatch, raw)
     for key in ("OUROBOROS_REVIEW_ENFORCEMENT", "OUROBOROS_CONTEXT_MODE",
-                "OUROBOROS_OBSERVABILITY_KEEP_RAW", "OUROBOROS_PRE_PUSH_TESTS",
-                "OUROBOROS_PREFLIGHT_DIFF_AWARE"):
+                "OUROBOROS_OBSERVABILITY_KEEP_RAW", "OUROBOROS_PRE_PUSH_TESTS"):
         monkeypatch.setenv(key, "")
 
     _apply_contributor_review_env()
     config = _resolved_review_config(profile="external_pr_readiness")
 
-    assert os.environ["OUROBOROS_REVIEWER_SLOTS"] == raw
+    assert os.environ["OUROBOROS_SUBAGENTS"] == raw
     assert os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
     assert os.environ["OUROBOROS_OBSERVABILITY_KEEP_RAW"] == "0"
     # The review operation runs no tests (its record says tests NOT_RUN), so the
-    # wrapper no longer pins the commit gate's test-preflight knobs.
+    # wrapper no longer pins the commit gate's test-preflight knob.
     assert os.environ["OUROBOROS_PRE_PUSH_TESTS"] == ""
-    assert os.environ["OUROBOROS_PREFLIGHT_DIFF_AWARE"] == ""
-    assert [row["route"]["kind"] for row in config["triad_slots"]] == [
-        "agent_session", "api_chat",
+    assert [row["route"]["kind"] for row in config["pool_slots"]] == [
+        "agent_session", "api_chat", "api_chat",
     ]
-    assert config["triad_slots"][0]["route"]["profile_id"] == "account-a"
+    assert config["pool_slots"][0]["route"]["profile_id"] == "account-a"
     assert _configured_openrouter_models(config) == ["openai/gpt-5.6-sol"]
     assert _configured_openrouter_models({
-        "triad_slots": [{"route": {
+        "pool_slots": [{"route": {
             "kind": "api_chat", "target_id": "openrouter::openai/gpt-5.6-sol",
         }}],
     }) == ["openai/gpt-5.6-sol"]
     _assert_contributor_review_config(config)
     frozen = _freeze_contributor_slots(config)
-    assert frozen["execution_slot_config_source"] == "frozen_structured"
+    assert frozen["execution_slot_config_source"] == "frozen_review_pool"
     assert len(frozen["slot_plan_sha256"]) == 64
-    assert json.loads(os.environ["OUROBOROS_REVIEWER_SLOTS"])["triad"][0][
-        "slot_id"
-    ] == "session"
+    pinned = json.loads(os.environ["OUROBOROS_SUBAGENTS"])["items"]
+    assert [row["subagent_id"] for row in pinned] == ["session", "direct", "reader"]
+    assert pinned[0]["route"] == {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol",
+                                  "credential_profile_id": "account-a"}
+    assert all(row["review_eligible"] and row["enabled"] for row in pinned)
 
 
 def test_agent_session_only_preflight_needs_no_api_budget_or_key(monkeypatch):
     import scripts.run_external_review as module
 
     config = {
-        "triad_slots": [{"slot_id": "t1", "route": {
+        "pool_slots": [{"slot_id": "t1", "route": {
             "kind": "agent_session", "target_id": "codex=gpt-5.6-sol"},
-            "effort": "high"}],
-        "scope_slots": [{"slot_id": "s1", "route": {
+            "effort": "high"}, {"slot_id": "s1", "route": {
             "kind": "agent_session", "target_id": "cursor=claude-fable-5"},
             "effort": "high"}],
         "review_enforcement": "blocking", "context_mode": "max",
@@ -901,7 +949,7 @@ def test_contributor_packet_is_redacted_and_shareable(tmp_path):
             "patch": "diff --git a/a.txt b/a.txt\n",
             "installed_head_sha": "a" * 40,
         },
-        resolved_config={"triad_models": ["anthropic/fable"]},
+        resolved_config={"pool_models": ["anthropic/fable"]},
         outcome={"status": "passed", "path": local_root, "api_key": "test-secret-value"},
         exit_code=0,
         evidence_refs=[],
@@ -914,13 +962,13 @@ def test_contributor_packet_is_redacted_and_shareable(tmp_path):
         review_record={"record_id": "r1", "path": f"{local_root}/state/review_ledger/r1.json",
                        "checklist": {"rules_source": {"path": "docs/CHECKLISTS.md", "sha": "c" * 64}}},
         execution_receipts=[{
-            "surface": "triad", "slot_id": "slot_1",
+            "surface": "pool", "slot_id": "slot_1",
             "observed": {"route_kind": "agent_session"},
             "model_verification": "observed_display_label",
         }],
         execution_mismatches=[],
         session_transcripts=[{
-            "surface": "triad", "slot_id": "slot_1", "sha256": "a" * 64,
+            "surface": "pool", "slot_id": "slot_1", "sha256": "a" * 64,
             "chars": 18, "transcript": "transcript EOF_MARK",
         }],
         degraded_reasons=["reviewer-3=parse_failure (quorum still met)"],
@@ -934,9 +982,9 @@ def test_contributor_packet_is_redacted_and_shareable(tmp_path):
     assert "secret-token-value" not in full_text
     assert local_root not in evidence_text + full_text
     assert "$REPO" in evidence_text + full_text
-    assert "production_triad_quorum_plus_authoritative_scope" in evidence_text
+    assert "production_pool_quorum_plus_coupling" in evidence_text
     assert '"execution_receipts_consistent": true' in evidence_text
-    assert "triad:slot_1:observed_model_is_display_label" in evidence_text
+    assert "pool:slot_1:observed_model_is_display_label" in evidence_text
     assert "quorum still met" in evidence_text
     assert "transcript EOF_MARK" in full_text
     assert "scope answer EOF_SCOPE" in full_text
@@ -959,10 +1007,13 @@ def test_contributor_packet_is_redacted_and_shareable(tmp_path):
 
 
 def _actors(triad: list[dict], scope: list[dict] | None = None) -> list[tuple[str, dict]]:
-    """The seats as a review record carries them: ledger rows of the raw actors."""
+    """The seats as a review record carries them: ledger rows of the raw actors
+    of ONE wave — a seat configured under the scope role is a coupling-only seat
+    (``parts=["coupling"]``) beside the triad seats."""
     from ouroboros.review_ledger import build_commit_gate_record
 
-    record = build_commit_gate_record({"triad_raw": triad, "scope_raw": {"raw_results": scope or []}})
+    coupling_only = [{**row, "parts": ["coupling"]} for row in (scope or [])]
+    record = build_commit_gate_record({"triad_raw": [*triad, *coupling_only]})
     return _record_actors(asdict(record))
 
 
@@ -991,7 +1042,7 @@ def test_external_review_cost_report_never_turns_unknown_into_zero():
     actors = _actors(triad, [scope_actor])
     evidence, report = _review_evidence_and_cost(actors)
     assert len(evidence) == 4
-    assert [(surface, actor["slot_id"]) for surface, actor in actors][-1] == ("scope", "scope_slot_1")
+    assert [(surface, actor["slot_id"]) for surface, actor in actors][-1] == ("pool", "scope_slot_1")
     assert evidence[0]["prompt_ref"] == {"manifest_ref": "prompt-1"}
     assert report["reported_actor_cost_usd"] == 0.03
     assert report["unreported_or_unknown_cost_slots"] == ["scope_slot_1"]
@@ -1027,7 +1078,7 @@ def test_exit_classification_separates_infra_from_genuine_blocks():
 def test_contributor_outcome_fails_closed_on_receipt_drift_only():
     exit_code, outcome = finalize_contributor_outcome(
         outcome={"status": "passed"}, exit_code=0,
-        mismatches=["provider_mismatch:triad:t1"],
+        mismatches=["provider_mismatch:pool:t1"],
     )
     assert exit_code == 3
     assert outcome["block_reason"] == "execution_receipt_mismatch"
@@ -1112,10 +1163,9 @@ def _persist_review_response(
 
 def test_contributor_receipts_bind_session_and_api_execution(tmp_path):
     config = {
-        "triad_slots": [{"slot_id": "t1", "route": {
+        "pool_slots": [{"slot_id": "t1", "route": {
             "kind": "agent_session", "target_id": "codex=gpt-5.6-sol",
-            "profile_id": "pinned"}, "effort": "high"}],
-        "scope_slots": [{"slot_id": "s1", "route": {
+            "profile_id": "pinned"}, "effort": "high"}, {"slot_id": "s1", "route": {
             "kind": "api_chat", "target_id": "openai/gpt-5.6-sol"},
             "effort": "xhigh"}],
         "review_enforcement": "blocking",
@@ -1158,7 +1208,7 @@ def test_contributor_receipts_bind_session_and_api_execution(tmp_path):
     unbound_receipts, unbound_mismatches, _ = _contributor_execution_receipts(
         actors, config, tmp_path
     )
-    assert "session_custody_settlement_absent:triad:t1:run-1" in unbound_mismatches
+    assert "session_custody_settlement_absent:pool:t1:run-1" in unbound_mismatches
     assert unbound_receipts[0]["observed"]["settlement"] is None
     assert unbound_receipts[1]["observed"]["route_kind"] == "api_chat"
 
@@ -1194,17 +1244,16 @@ def test_contributor_receipts_bind_session_and_api_execution(tmp_path):
     assert receipts[0]["model_verification"] == "exact"
     assert transcripts[0]["transcript"].endswith("EOF_SENTINEL")
     drifted = json.loads(json.dumps(config))
-    drifted["triad_slots"][0]["route"]["target_id"] = "cursor=gpt-5.6-sol"
+    drifted["pool_slots"][0]["route"]["target_id"] = "cursor=gpt-5.6-sol"
     _, mismatches, _ = _contributor_execution_receipts(actors, drifted, tmp_path)
-    assert any(item.startswith("harness_mismatch:triad:t1") for item in mismatches)
+    assert any(item.startswith("harness_mismatch:pool:t1") for item in mismatches)
 
 
 def test_contributor_receipts_fail_closed_on_blob_provider_model_and_status_drift(tmp_path):
     config = {
-        "triad_slots": [{"slot_id": "t1", "route": {
+        "pool_slots": [{"slot_id": "t1", "route": {
             "kind": "api_chat", "target_id": "anthropic::claude-fable-5"},
-            "effort": "high"}],
-        "scope_slots": [{"slot_id": "s1", "route": {
+            "effort": "high"}, {"slot_id": "s1", "route": {
             "kind": "agent_session", "target_id": "codex=gpt-5.6-sol"},
             "effort": "high"}],
         "review_enforcement": "blocking", "context_mode": "max",
@@ -1243,37 +1292,36 @@ def test_contributor_receipts_fail_closed_on_blob_provider_model_and_status_drif
     _, mismatches, _ = _contributor_execution_receipts(
         _actors([triad_actor], scope_actors), config, tmp_path)
 
-    assert any(item.startswith("provider_mismatch:triad:t1") for item in mismatches)
-    assert any(item.startswith("model_mismatch:triad:t1") for item in mismatches)
-    assert any(item.startswith("model_identity_unverified:scope:s1")
+    assert any(item.startswith("provider_mismatch:pool:t1") for item in mismatches)
+    assert any(item.startswith("model_mismatch:pool:t1") for item in mismatches)
+    assert any(item.startswith("model_identity_unverified:pool:s1")
                for item in mismatches)
-    assert "delegated_run_id_absent:scope:s1" in mismatches
-    assert any(item.startswith("session_settlement_unproven:scope:s1")
+    assert "delegated_run_id_absent:pool:s1" in mismatches
+    assert any(item.startswith("session_settlement_unproven:pool:s1")
                for item in mismatches)
-    assert "capability_delta:scope:s1:session_ran_off_pinned_route" in mismatches
+    assert "capability_delta:pool:s1:session_ran_off_pinned_route" in mismatches
 
     missing_response = json.loads(json.dumps(triad_actor))
     missing_response["response_ref"] = {}
     _, missing_response_mismatches, _ = _contributor_execution_receipts(
         _actors([missing_response], scope_actors), config, tmp_path
     )
-    assert "response_receipt_absent:triad:t1" in missing_response_mismatches
+    assert "response_receipt_absent:pool:t1" in missing_response_mismatches
 
     tampered = json.loads(json.dumps(triad_actor))
     tampered["response_ref"]["redacted_projection_ref"]["sha256"] = "0" * 64
     _, tampered_mismatches, _ = _contributor_execution_receipts(
         _actors([tampered], scope_actors), config, tmp_path
     )
-    assert any(item.startswith("unreadable_response_receipt:triad:t1")
+    assert any(item.startswith("unreadable_response_receipt:pool:t1")
                for item in tampered_mismatches)
 
 
 def test_contributor_receipts_require_settlement_but_keep_advisory_delta(tmp_path):
     config = {
-        "triad_slots": [{"slot_id": "t1", "route": {
+        "pool_slots": [{"slot_id": "t1", "route": {
             "kind": "agent_session", "target_id": "codex=gpt-5.6-sol"},
-            "effort": "high"}],
-        "scope_slots": [], "review_enforcement": "blocking", "context_mode": "max",
+            "effort": "high"}], "review_enforcement": "blocking", "context_mode": "max",
     }
     prompt_ref = _persist_review_prompt(tmp_path, call_id="session_prompt_terminal", slot={
         "slot_id": "t1", "model": "codex=gpt-5.6-sol", "effort": "high",
@@ -1308,17 +1356,16 @@ def test_contributor_receipts_require_settlement_but_keep_advisory_delta(tmp_pat
 
     _, mismatches, _ = _contributor_execution_receipts(actors, config, tmp_path)
 
-    assert "session_settlement_unproven:triad:t1:settled,ledger_recorded" in mismatches
+    assert "session_settlement_unproven:pool:t1:settled,ledger_recorded" in mismatches
     assert not any(item.startswith("capability_delta:") for item in mismatches)
 
 
 def test_contributor_receipts_accept_present_usage_less_error_payload(tmp_path):
     from ouroboros.observability import persist_call
     config = {
-        "triad_slots": [{"slot_id": "t1", "route": {
+        "pool_slots": [{"slot_id": "t1", "route": {
             "kind": "api_chat", "target_id": "openai/gpt-5.6-sol"},
-            "effort": "high"}],
-        "scope_slots": [], "review_enforcement": "blocking", "context_mode": "max",
+            "effort": "high"}], "review_enforcement": "blocking", "context_mode": "max",
     }
     prompt_ref = _persist_review_prompt(tmp_path, call_id="error_prompt", slot={
         "slot_id": "t1", "model": "openai/gpt-5.6-sol", "effort": "high",

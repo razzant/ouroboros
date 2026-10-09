@@ -135,6 +135,8 @@ class LoadedSkill:
     source: str = "native"
     is_self_authored: bool = False
     identity_collision: bool = False
+    location: str = ""  # physical inventory bucket, the read_file skill_payload selector
+    manifest_file: str = ""  # the manifest load_skill parsed; "" when it could not
 
     @property
     def conflicts(self) -> tuple[str, ...]:
@@ -1004,6 +1006,7 @@ def load_skill(
         review=review,
         load_error=load_error,
         is_self_authored=is_self_authored_skill_dir(skill_dir, drive_root=drive_root),
+        manifest_file=manifest_path.name,
     )
 
 
@@ -1338,7 +1341,7 @@ def _load_skill_location_candidates(
                     error,
                     identity_collision=True,
                 )
-                broken.source = candidate.location
+                broken.source = broken.location = candidate.location
                 skills.append(broken)
             continue
 
@@ -1348,10 +1351,9 @@ def _load_skill_location_candidates(
             loaded = _broken_skill(candidate.skill_dir, "manifest missing")
         if loaded is None:
             continue
+        loaded.location = candidate.location
         loaded.source = _classify_skill_source(
-            candidate.skill_dir,
-            location=candidate.location,
-            drive_root=drive_root,
+            candidate.skill_dir, location=candidate.location, drive_root=drive_root,
         )
         skills.append(loaded)
 
@@ -1364,13 +1366,7 @@ def discover_skills(
     repo_path: str | None = None,
 ) -> List[LoadedSkill]:
     """Scan data-plane skills plus the optional user checkout."""
-    if repo_path is None:
-        from ouroboros.config import get_skills_repo_path
-        repo_path = get_skills_repo_path()
-    repo_path = str(repo_path or "").strip()
-
     candidates = _skill_location_inventory(drive_root, repo_path=repo_path)
-
     return _load_skill_location_candidates(candidates, drive_root=drive_root)
 
 
@@ -1386,17 +1382,12 @@ def discover_selected_skill_candidates(
     discovery. It exists only so a card opened before deletion can still start
     an agent repair task and so hidden physical collisions remain ambiguous.
     """
-    if repo_path is None:
-        from ouroboros.config import get_skills_repo_path
-
-        repo_path = get_skills_repo_path()
-    configured_repo = str(repo_path or "").strip()
     canonical_name = _sanitize_skill_name(name)
     candidates = tuple(
         candidate
         for candidate in _skill_location_inventory(
             drive_root,
-            repo_path=configured_repo,
+            repo_path=repo_path,
             selected_manifestless_name=canonical_name,
         )
         if candidate.name == canonical_name
@@ -1424,10 +1415,6 @@ def discover_skill_identity(
     keep ``discover_selected_skill_candidates`` and its deliberately stricter
     manifestless ambiguity.
     """
-    if repo_path is None:
-        from ouroboros.config import get_skills_repo_path
-
-        repo_path = get_skills_repo_path()
     safe = _sanitize_skill_name(name)
     candidates = tuple(
         item for item in _skill_location_inventory(drive_root, repo_path=repo_path)
@@ -1543,6 +1530,8 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
             "blocked_by_grants": not grants_usable,
             "load_error": s.load_error,
             "source": s.source,
+            "location": s.location,
+            "manifest_file": s.manifest_file,
             "conflicts": list(s.manifest.conflicts or []),
             "conflict": conflict,
             # #447 G3: an unresolvable manual dependency must reach the CALLER,

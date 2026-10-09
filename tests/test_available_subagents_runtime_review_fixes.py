@@ -486,8 +486,8 @@ def test_delegate_start_recipes_match_the_fresh_start_schema():
     )["parameters"]
     assert schema["required"] == ["prompt"]
     assert not ({"anyOf", "oneOf", "allOf"} & schema.keys())
-    assert "Required for a fresh start" in schema["properties"]["subagent_id"]["description"]
-    assert "supplying both selectors is a typed conflict" in (
+    assert "required for direct starts including continue_from" in schema["properties"]["subagent_id"]["description"]
+    assert "Omit subagent_id or receive a typed conflict" in (
         schema["properties"]["retry_of"]["description"]
     )
 

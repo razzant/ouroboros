@@ -157,10 +157,6 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_chat_delivery", "ouroboros/agent.py"),
 
     # --- telemetry_only: recorded in the ledger, no runtime action follows -----
-    "advisory_contract_warning": _telemetry(
-        "ouroboros/tools/preflight_review_run.py"),
-    "advisory_suspect_result": _telemetry(
-        "ouroboros/tools/preflight_review_run.py"),
     "plan_task_deadline_skip": _telemetry(
         "ouroboros/tools/plan_review_runtime.py",
         note="the fact that a deadline left no useful planning window"),
@@ -169,17 +165,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "review_density_probe": _telemetry(
         "ouroboros/tools/review_admission.py",
         note="one bounded exact-model send that calibrates tokenizer density before a size refusal"),
-    "review_scope_delivery_migrated": _telemetry(
-        "ouroboros/tools/review_admission.py",
-        note="one-time disclosure that a stored bare api scope row now delivers by retrieval "
-             "(a bounded native inspection episode) instead of the retired packet"),
-    "review_scope_lead_unobserved": _telemetry(
-        "ouroboros/tools/parallel_review.py",
-        note="the commit gate's scope-first hold ended without observing the scope seat's own reservation"),
     "review_wave_admission_unavailable": _telemetry(
         "ouroboros/tools/parallel_review.py",
-        note="the commit gate's money admission raised: the wave dispatched unadmitted (fail-open) "
-             "and without the scope-first hold"),
+        note="the commit gate's money admission raised: the wave dispatched unadmitted (fail-open)"),
     "review_wave_budget_insufficient": _telemetry(
         "ouroboros/tools/review_helpers.py"),
     "review_wave_budget_partial_unknown": _telemetry(

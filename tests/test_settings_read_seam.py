@@ -701,11 +701,30 @@ def test_a_retired_key_is_absent_from_every_surface_that_would_react_to_it():
                 f"instead, the way `(retired)` and `(env-only)` do.")
 
 
+# The review-lane keys are RETIRED but their value is MIGRATED, not dropped
+# (`review_pool_migration`, PR-3): a readable lanes document is consumed into reviewer
+# rows of OUROBOROS_SUBAGENTS at the same read seam, so every reader still serves
+# none of the five keys. An UNREADABLE lanes value is the one retired key that stays
+# in the document — for the owner, not as a ghost (tests/test_retired_settings_chat_notice.py).
+_READABLE_LANES_PROBE = json.dumps({
+    "triad": [{"slot_id": "t", "route": {"kind": "api_chat", "target_id": "probe/one"}, "delivery": "packet"}],
+    "scope": [{"slot_id": "s", "route": {"kind": "api_chat", "target_id": "probe/one"}}],
+})
+
+
+def _retired_probe_document() -> dict:
+    from ouroboros import config as cfg
+
+    stored = {key: "9999" for key in cfg.RETIRED_SETTING_KEYS}
+    stored["OUROBOROS_REVIEWER_SLOTS"] = _READABLE_LANES_PROBE
+    return stored
+
+
 def test_a_retired_key_is_dropped_by_every_reader(isolated_settings):
     from ouroboros import config as cfg
     from ouroboros.gateway.owner_settings import _owner_read_settings_raw
 
-    stored = {key: "9999" for key in cfg.RETIRED_SETTING_KEYS}
+    stored = _retired_probe_document()
     stored["TOTAL_BUDGET"] = 12.0
     _seed(isolated_settings, stored)
 
@@ -723,7 +742,7 @@ def test_a_retired_key_leaves_the_file_on_the_next_owner_write(isolated_settings
     path, which is the one that previously wrote the ghost straight back."""
     from ouroboros import config as cfg
 
-    stored = {key: "9999" for key in cfg.RETIRED_SETTING_KEYS}
+    stored = _retired_probe_document()
     stored["TOTAL_BUDGET"] = 12.0
     _seed(isolated_settings, stored)
 
@@ -757,9 +776,9 @@ def test_a_retired_comma_list_triad_is_not_dropped_silently(isolated_settings, c
     keys are in RETIRED_SETTING_KEYS, so the raw-stage normalization purges
     them before migration, and the install runs the SHIPPED default reviewer
     panel instead. That is the ratified migration ("move the config to the
-    structured OUROBOROS_REVIEWER_SLOTS BEFORE the upgrade"), but it happened
-    without a word: nothing in the runtime told the owner which keys went, or
-    what replaced them.
+    successor surface BEFORE the upgrade" — today the review pool, the reviewer
+    rows of OUROBOROS_SUBAGENTS), but it happened without a word: nothing in
+    the runtime told the owner which keys went, or what replaced them.
 
     The notice is ONE line per process per dropped set — the seam is on every
     settings read, so a per-call emission would be a log flood.
@@ -792,7 +811,8 @@ def test_a_retired_comma_list_triad_is_not_dropped_silently(isolated_settings, c
     for key in document:
         if key != "TOTAL_BUDGET":
             assert key in notices[0], key
-    assert "OUROBOROS_REVIEWER_SLOTS" in notices[0]
+    assert "OUROBOROS_SUBAGENTS" in notices[0] and "review pool" in notices[0]
+    assert "OUROBOROS_REVIEWER_SLOTS" not in notices[0], "the lanes are retired too; never named as the successor"
     assert "shipped" in notices[0].lower()
 
 
@@ -816,6 +836,7 @@ def test_the_retirement_notice_names_the_successor_the_table_states(
     from ouroboros.settings_defaults import (
         RETIRED_SETTING_KEYS,
         RETIRED_SETTING_SUCCESSORS,
+        REVIEW_POOL_MIGRATED_SETTING_KEYS,
     )
 
     # The map classifies INSIDE the retirement tuple: a successor for a key that
@@ -825,13 +846,20 @@ def test_the_retirement_notice_names_the_successor_the_table_states(
     # consumed into the shared cap before the purge computes the dropped set, so
     # an entry for it would promise a notice line nothing can emit.
     assert "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES" not in RETIRED_SETTING_SUCCESSORS
+    # The review-lane keys are the one migrated class the table DOES name (the
+    # catalog is their successor for the RC auditor and for a migration that could
+    # not finish, which keeps them in the document); a readable document is
+    # consumed before the purge, so this notice never carries them either — the
+    # migration's own owner message does (tests/test_review_pool_migration.py).
+    for key in REVIEW_POOL_MIGRATED_SETTING_KEYS:
+        assert RETIRED_SETTING_SUCCESSORS[key] == ("OUROBOROS_SUBAGENTS",), key
 
     # The document is DERIVED from the table, not spelled out: the D04 grep gate
     # (tests/test_legacy_timeout_retirement.py) lets the retired wall-clock pair
     # appear only in the retirement SSOT and its own audits, and this pin is
     # about the CLASS "a retired key whose successor the table states", not about
     # one key's spelling.
-    successor_bearing = sorted(RETIRED_SETTING_SUCCESSORS)
+    successor_bearing = sorted(set(RETIRED_SETTING_SUCCESSORS) - set(REVIEW_POOL_MIGRATED_SETTING_KEYS))
     assert successor_bearing, "the notice's successor shape needs a member"
     document = dict.fromkeys(successor_bearing, 900)
     document["OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES"] = 3

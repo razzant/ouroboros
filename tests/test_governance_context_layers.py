@@ -140,7 +140,7 @@ def _session_prompt(governance_root, *, layer: str, subject_root=None, explicit:
 
 def _native_prompt(governance_root, *, layer: str, subject_root=None, explicit: bool = True) -> str:
     """A native retrieving episode: the shared governance builder in retrieving
-    delivery, handed to the session-task builder as `_triad_session_task` does."""
+    delivery, handed to the session-task builder as `build_retrieving_brief` does."""
     layer_kwargs = {"layer": layer, "subject_root": subject_root} if explicit else {}
     checklist = load_checklist_layers(layer, governance_root / "docs" / "CHECKLISTS.md")
     governance = review._triad_governance_context(

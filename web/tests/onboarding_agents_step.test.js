@@ -76,9 +76,10 @@ test('the ladder is three rungs and states the launch gate honestly', () => {
 test('the footnote refuses both easy lies: "free", and "every reviewer moves"', () => {
     assert.match(LADDER_FOOTNOTE, /not free/i);
     assert.match(LADDER_FOOTNOTE, /already\s+pay for/i);
-    // Owner R2 (2026-09-01): task acceptance follows the triad rows too — the
+    // Owner R2 (2026-09-01): task acceptance runs on the review pool too — the
     // footnote states the RULE (what is routed moves), never "everything moves".
-    assert.match(LADDER_FOOTNOTE, /task acceptance each follow their configured\s+triad row/i);
+    assert.match(LADDER_FOOTNOTE, /task acceptance all run on the review pool\s+\(the rows marked Reviewer\)/i);
+    assert.doesNotMatch(LADDER_FOOTNOTE, /triad/i);
     assert.match(LADDER_FOOTNOTE, /acceptance panel on the subscription/i);
     // R12: the migration disclosure carries the measured numbers, not adjectives.
     assert.match(LADDER_FOOTNOTE, /about 12 s and\s+\$0\.07 per model row per task/i);
@@ -571,6 +572,7 @@ test('the generated onboarding draft shows a credentialed one-harness API scout 
                             recommended_use: 'Fast independent research before implementation.',
                             route: { kind: 'api_model', target_id: 'openai/gpt-5.6-luna' },
                             effort: 'high',
+                            review_eligible: true,
                         },
                         {
                             subagent_id: 'codex_builder',
@@ -596,10 +598,47 @@ test('the generated onboarding draft shows a credentialed one-harness API scout 
     assert.match(dom.nodes.get('onboarding-available-subagents').innerHTML, /Workspace implementation/);
     assert.doesNotMatch(dom.nodes.get('onboarding-available-subagents').innerHTML, /data-subagent-field="(?:id|name)"/);
     assert.match(dom.nodes.get('onboarding-available-subagents').innerHTML, /Generated draft/);
+    assert.match(dom.nodes.get('onboarding-available-subagents').innerHTML, /aria-label="Subagent 1 reviews" checked/);
+    assert.match(dom.nodes.get('onboarding-available-subagents').innerHTML, /Reviewers: 1/);
     assert.deepEqual(step.validateSubagents(), []);
 
     step.detach();
     store.dispose();
+});
+
+test('a generated draft whose rows carry no Reviewer mark is refused, never finished as an empty pool', async () => {
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, snapshotWith([])),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+        pollMs: 5000,
+    });
+    const dom = fakeDom();
+    const step = createAgentsStep({
+        doc: dom.doc,
+        store,
+        previewTransport: async () => ({
+            source: 'onboarding_default',
+            diagnostics: [],
+            available_subagents: { enabled: true, items: [{
+                subagent_id: 'api_scout', recommended_use: 'Research.',
+                route: { kind: 'api_model', target_id: 'openai/gpt-5.6-luna' },
+            }] },
+        }),
+    });
+    try {
+        step.mount();
+        await flush();
+        await flush();
+        assert.deepEqual(step.validateSubagents(), [
+            'No row is marked Reviewer. Mark at least one row, or tick “Save without reviewers”.',
+        ]);
+        assert.equal(step.allowEmptyReviewPool, false);
+        assert.match(dom.nodes.get('onboarding-available-subagents').innerHTML,
+            /No row is marked Reviewer, so reviews will not run and will report “not performed”\./);
+    } finally {
+        step.detach();
+        store.dispose();
+    }
 });
 
 test('a model change regenerates a clean onboarding draft and invalidates the older receipt', async () => {
@@ -918,8 +957,7 @@ test('preview status exposes the typed cause and explicit recovery replacement l
     const calls = [];
     const notices = [];
     let fail = true;
-    const response = { source: 'api_default', diagnostics: [], available_subagents: { enabled: true, items: [] },
-        reviewer_slots: { scope: [{ route: { kind: 'api_chat', target_id: 'claudexor::codex=owner-main' } }] } };
+    const response = { source: 'api_default', diagnostics: [], available_subagents: { enabled: true, items: [] } };
     const step = createAgentsStep({
         doc: dom.doc,
         previewPayload: () => ({ OUROBOROS_MODEL: 'claudexor::codex=owner-main' }),

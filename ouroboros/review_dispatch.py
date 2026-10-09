@@ -278,7 +278,7 @@ def slot_id_for_row(index: int, *, prefix: str = SLOT_ID_PREFIX) -> str:
     The single mint for reviewer-slot identity, and the reason the substrate
     contract says slot identity is separate from model identity. Naming a row
     after its own model instead collides two rows that share a model (a supported
-    configuration — ``get_scope_review_models`` preserves duplicates on purpose),
+    configuration — the factory pool repeats Main on purpose),
     collides two model spellings that sanitize alike (``openai::gpt-5`` and
     ``openai/gpt/5``), and moves a row's identity the moment the owner edits its
     model, so the row's receipts stop lining up with its own history. The model,

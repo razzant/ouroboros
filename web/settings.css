@@ -607,9 +607,50 @@
     overflow-wrap: anywhere;
 }
 
+/* Why a row will not run, in words: the status title needs a hover a phone lacks. */
+.available-subagent-status-reason {
+    color: var(--status-warn-fg);
+    font-size: var(--type-meta);
+    line-height: var(--line-body);
+    overflow-wrap: anywhere;
+}
+
 .available-subagent-actions .btn-default {
     min-height: 34px;
     padding: 0 11px;
+}
+
+/* Reviewer mark, its price and origin wrap as one line under the route. */
+.available-subagent-review {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+}
+
+.available-subagent-reviewer {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.available-subagent-minted {
+    padding: 0 var(--space-2);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius);
+}
+
+.available-subagents-review-empty {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--status-warn-fg);
+    font-size: var(--type-meta);
 }
 
 .settings-secret-list {

@@ -236,7 +236,6 @@ def test_failed_commit_roster_stamp_drops_unsent_process_local_reservation(
                 "models": ["test/model"], "routes": ["api_chat"],
                 "efforts": ["high"], "slot_ids": ["slot-1"],
             }},
-            [],
         )
 
     assert getattr(ctx, "_review_reserved_roster", None) is None
@@ -266,7 +265,6 @@ def test_spent_owner_window_does_not_stamp_zero_dispatch_commit_roster(
             "models": ["test/model"], "routes": ["api_chat"],
             "efforts": ["high"], "slot_ids": ["slot-1"],
         }},
-        [],
     )
 
     assert stamp_calls == []
@@ -678,32 +676,28 @@ def test_coordinator_rejoins_exact_recovery_after_spent_owner_deadline(
     assert row.get("pending_invocation_id", "") == ""
 
 
-def test_durable_triad_and_scope_rows_carry_delegated_restart_identity():
+def test_durable_rows_carry_delegated_restart_identity():
+    """One wave, one row shape: every seat's actor record — a packet seat's and a
+    retrieving seat's alike — carries the delegated restart identity."""
     from ouroboros.tools.review import _parse_model_response
-    from ouroboros.tools.review_helpers import build_scope_actor_record
-    from ouroboros.tools.scope_review import ScopeReviewResult
-    from ouroboros.triad_review import parse_model_review_results
+    from ouroboros.triad_review import parse_seat_answers
 
-    envelope = _parse_model_response("cursor/test", {
-        "choices": [{"message": {"content": "[]"}}], "slot_id": "slot_1",
-        "operation_id": "op-1", "operation_state": "in_flight",
-        "late_result_pending": True,
-        "usage": {
-            "pending_invocation_id": "inv-1", "delegated_run_id": "run-1",
-        },
-    }, None)
-    triad = parse_model_review_results({"results": [envelope]})
-    triad_row = triad.actor_records[0].to_dict()
-    assert triad_row["pending_invocation_id"] == "inv-1"
-    assert triad_row["delegated_run_id"] == "run-1"
+    def _envelope(slot_id, op, inv, run):
+        return _parse_model_response("cursor/test", {
+            "choices": [{"message": {"content": "[]"}}], "slot_id": slot_id,
+            "operation_id": op, "operation_state": "in_flight",
+            "late_result_pending": True,
+            "usage": {"pending_invocation_id": inv, "delegated_run_id": run},
+        }, None)
 
-    scope_row = build_scope_actor_record(ScopeReviewResult(
-        model_id="cursor/test", operation_id="op-2", operation_state="in_flight",
-        late_result_pending=True, pending_invocation_id="inv-2",
-        delegated_run_id="run-2",
-    ), slot_id="scope_slot_1")
-    assert scope_row["pending_invocation_id"] == "inv-2"
-    assert scope_row["delegated_run_id"] == "run-2"
+    parsed = parse_seat_answers(
+        {"results": [_envelope("slot_1", "op-1", "inv-1", "run-1"), _envelope("slot_2", "op-2", "inv-2", "run-2")]},
+        {"slot_1": ("change",), "slot_2": ("change", "coupling")})
+    rows = {record.slot_id: record.to_dict() for record in parsed.actor_records}
+    assert rows["slot_1"]["pending_invocation_id"] == "inv-1"
+    assert rows["slot_1"]["delegated_run_id"] == "run-1"
+    assert rows["slot_2"]["pending_invocation_id"] == "inv-2"
+    assert rows["slot_2"]["delegated_run_id"] == "run-2"
 
 
 def test_review_does_not_retry_an_unknown_dispatched_api_attempt(tmp_path):

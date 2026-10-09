@@ -57,7 +57,7 @@ def _old_memory(root, *, blocks=True, flat=None):
 
 @pytest.fixture
 def boot(monkeypatch, tmp_path):
-    """One install on the real state and owner-chat writers; the two settings notices already went."""
+    """One install on the real state and owner-chat writers; the task-limits notice already went."""
     from supervisor import message_bus as bus, state as ss
 
     for name, path in {"DRIVE_ROOT": tmp_path, "STATE_PATH": tmp_path / "state/state.json",
@@ -69,8 +69,7 @@ def boot(monkeypatch, tmp_path):
     prepare_startup_state(tmp_path)
     delivered = []
     monkeypatch.setattr(bus, "get_bridge", lambda: SimpleNamespace(send_message=lambda *a, **kw: delivered.append(a)))
-    ss.save_state({"owner_chat_id": 7, "owner_id": 1, notices.REVIEWER_DEFAULT_NOTICE_KEY: "already",
-                   notices.OPTIONAL_BOUNDS_NOTICE_KEY: "already"})
+    ss.save_state({"owner_chat_id": 7, "owner_id": 1, notices.OPTIONAL_BOUNDS_NOTICE_KEY: "already"})
 
     def rows():
         return [row for row in iter_jsonl_chain_objects(tmp_path / "logs" / "chat.jsonl") if row.get("type") == NOTICE]
@@ -211,7 +210,12 @@ def test_a_refused_import_keeps_the_notice_owed(boot):
 
 def test_an_unreadable_journal_leaves_only_this_notice_owed(boot, monkeypatch):
     _old_memory(boot.root)
-    boot.state.update_state(lambda st: st.pop(notices.REVIEWER_DEFAULT_NOTICE_KEY))
+    # The other notice still owed on this install: a finite saved task bound.
+    boot.state.update_state(lambda st: st.pop(notices.OPTIONAL_BOUNDS_NOTICE_KEY))
+    monkeypatch.setattr(notices, "_raw_settings_document",
+                        lambda: {"OUROBOROS_MAX_ROUNDS": 150, "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"})
+    monkeypatch.delenv("OUROBOROS_MAX_ROUNDS", raising=False)
+    monkeypatch.delenv("OUROBOROS_TASK_ABS_CEILING_SEC", raising=False)
     real_pointers, broken = ChronicleStore.legacy_pointer_rows, [True]
 
     def pointers(self):
@@ -223,7 +227,7 @@ def test_an_unreadable_journal_leaves_only_this_notice_owed(boot, monkeypatch):
     boot.run()
     sent = [row.get("type") for row in iter_jsonl_chain_objects(boot.root / "logs" / "chat.jsonl")
             if row.get("direction") == "system"]
-    assert sent == ["reviewer_default_notice"]
+    assert sent == ["optional_bounds_notice"]
     assert notices.LEGACY_MEMORY_NOTICE_KEY not in boot.state.load_state()
     broken.clear()
     boot.run()

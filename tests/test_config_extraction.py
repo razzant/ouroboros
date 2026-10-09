@@ -23,9 +23,6 @@ _LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes,
 # New subscription capabilities belong to the same leaves, but did not exist on
 # the historical extraction's facade and need not add compatibility re-exports.
 _ADDED_OWNERS = {
-    # Compatible-only review routing belongs to the existing model-route leaf.
-    "compatible_only_review_model": review_model_routes,
-    "_compatible_only_models": review_model_routes,
     "WORKER_READY_CEILING_SEC": runtime_limits,
     # The supervisor loop's bounded events pass and the budget-projection retry interval.
     "SUPERVISOR_EVENT_BATCH_MAX_EVENTS": runtime_limits,
@@ -37,6 +34,9 @@ _ADDED_OWNERS = {
     "RESTART_REQUIRED_SETTINGS": settings_scales,
     # An explicit root starting effort is validated against the effort scale it names.
     "requested_effort": settings_scales,
+    # The review pool's effort of last resort (PR-3): a marked row with no effort of
+    # its own and no compound slug reviews at this value, never the lane-era surface setting.
+    "REVIEW_POOL_DEFAULT_EFFORT": settings_scales,
     "get_finalization_grace_sec": runtime_limits,
     "PROMOTE_CONFIRM_WAIT_SEC": runtime_limits,
     "get_promote_confirm_wait_sec": runtime_limits,
@@ -135,6 +135,12 @@ _MOVED_OWNERS = {
     # retired keys whose successor SETTING the table states, so the first-boot
     # notice can name it instead of claiming there is none.
     "RETIRED_SETTING_SUCCESSORS": settings_defaults,
+    # PR-3 (review pool): the third classification inside the retirement SSOT —
+    # the review-lane keys whose stored value is MIGRATED into reviewer rows of
+    # the subagent catalog at load (`review_pool_migration`), never dropped — and
+    # the one «migrated» class line the RC auditor and the boot notice share.
+    "REVIEW_POOL_MIGRATED_SETTING_KEYS": settings_defaults,
+    "REVIEW_POOL_MIGRATION_CLASS_LINE": settings_defaults,
     # D-07: the ONE sentence both the read seam's log line and the boot-time
     # owner chat notice say about retired keys, next to the tables it reads.
     "retired_setting_keys_notice": settings_defaults,
@@ -163,7 +169,6 @@ _MOVED_OWNERS = {
     "_main_model": model_slots,
     "_parse_model_list": model_slots,
     "get_consciousness_model": model_slots,
-    "get_deep_self_review_model": model_slots,
     "get_fallback_models": model_slots,
     "get_heavy_model": model_slots,
     "get_image_input_mode": model_slots,
@@ -174,13 +179,7 @@ _MOVED_OWNERS = {
     "_DIRECT_PROVIDER_REVIEW_RUNS": review_model_routes,
     "_exclusive_direct_remote_provider_env": review_model_routes,
     "adaptive_quorum": review_model_routes,
-    "direct_provider_review_models_fallback": review_model_routes,
     "get_review_enforcement": review_model_routes,
-    "get_review_models": review_model_routes,
-    "get_scope_review_models": review_model_routes,
-    # ABI-4 (F3.2): typed views over the effective reviewer model lists.
-    "get_review_targets": review_model_routes,
-    "get_scope_review_targets": review_model_routes,
     "resolved_review_model_target": review_model_routes,
     "DELEGATE_WAIT_CEILING_SEC": runtime_limits,
     "DELEGATE_WAIT_WINDOW_MAX_SEC": runtime_limits,
@@ -331,5 +330,8 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     assert all(count <= 1000 for count in counts.values())
     # 500 -> 520: the Z.ai direct provider adds its key and plan rows to the leaf (PR #1207).
     # 520 -> 521: the desktop keep-running consent key's default row (PR #1404; its disk-authored entry adds none).
-    assert counts["ouroboros.settings_defaults"] <= 521
+    # 521 -> 538: PR-3 (review pool) — the five review-lane keys leave SETTINGS_DEFAULTS
+    # for RETIRED_SETTING_KEYS and gain the REVIEW_POOL_MIGRATED_SETTING_KEYS class
+    # (+ its shared «migrated» line) the read seam, the RC auditor and the boot notice read.
+    assert counts["ouroboros.settings_defaults"] <= 538
     assert (PACKAGE / "config.py").is_file()

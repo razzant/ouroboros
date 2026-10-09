@@ -23,28 +23,37 @@ explicit work-order review obligations.
 
 ```
 1. Finish ALL edits first (`edit_text` / `edit_batch` / `apply_patch` / `write_file`)
-2. preflight_review(commit_message="...")      ← run AFTER all edits, ONCE
-3. commit_reviewed(commit_message="...")       ← run IMMEDIATELY after advisory
+2. commit_reviewed(commit_message="...", preflight_reviewer="<enabled row>")   ← the optional early look rides the commit
+   or: preflight_review(reviewer="<enabled row>", commit_message="...") standalone, then commit_reviewed(commit_message="...")
 ```
 
-**Rules:**
-- Successful worktree mutations automatically mark advisory as **stale**. This includes
-  `write_file`, `edit_text`, `edit_batch`, `apply_patch`, and mutating `run_command` /
-  reviewed-commit paths when they change tracked worktree state.
-- A stale advisory must be re-run unless Ouroboros explicitly chooses the
-  audited skip below.
-- Do NOT interleave edits and advisory calls: `edit → advisory → edit → advisory` wastes two
-  expensive advisory cycles. Finish all edits first.
-- If advisory finds critical issues: **strongly recommended** to fix them and re-run advisory
-  before calling commit_reviewed.
-  Note: commit_reviewed's gate checks snapshot freshness, open obligations, and open
-  commit-readiness debt — it does not enforce zero advisory FAIL items as a hard
-  gate. Fixing critical findings and re-running advisory is best practice. Under
-  `OUROBOROS_REVIEW_ENFORCEMENT=advisory`, a fresh advisory also downgrades open
-  obligations and commit-readiness debt to a warning by writing
-  `advisory_obligations_acknowledged` to `events.jsonl`; stale advisory still
-  blocks. Under `blocking`, `commit_reviewed` can proceed only when no open
-  obligations or commit-readiness debt remain.
+**What runs:**
+- `preflight_review` is `review_change(subject=worktree, surface=preflight,
+  reviewers=[reviewer])` over the system repository: ONE enabled catalog row the
+  author names — a review-pool member or not — reads the live worktree and
+  informs. It never gates, its `surface=preflight` record never answers the
+  commit panel, and the same unchanged worktree returns the settled record free.
+  No tests run there. The row is the author's LLM judgment: name one when an
+  early look is likely to add value.
+- `commit_reviewed` runs, ahead of the panel: the free deterministic checks
+  (size headroom as information and warnings, release metadata of the staged
+  index, syntax of staged `.py` files), the tests preflight under its own policy
+  (`skip_tests` is the one exemption, a documentation-only diff included; a
+  managed resolution always pays the suite), then the named row's look, then ONE review
+  wave in which every pool seat answers both parts of the brief. The commit
+  records its preflight fact: `performed` with the record id, `skipped` for an
+  explicit `skip_advisory_review=True`, `not_performed` when no row was named.
+  `preflight_reviewer` and `skip_advisory_review=True` are opposite choices
+  (`TOOL_ARG_ERROR`); an author continuation dispatches no critic and names no row.
+- Finish all edits first: a worktree mutation after the look marks the recorded
+  preflight stale (`review_status` reports `stale_from_edit` and its editor);
+  staleness informs and gates nothing, and a look at a changed worktree is a new
+  record.
+- `skip_advisory_review=True` records only `preflight: skipped`; it does not
+  waive obligations or debt. Independently applicable checks and tests, the panel,
+  the coupling question, pre/post fingerprint and exact commit/tag binding still
+  run; unresolved obligations/debt remain visible. Explain the judgment in the
+  surrounding task narrative.
 - **Loud advisory enforcement (BIBLE P3 bound):** the owner chooses enforcement
   outside Cyber Pro; Cyber may configure its own review and continue under P0;
   `advisory` is legitimate ONLY while every decision blocking enforcement would
@@ -75,40 +84,35 @@ explicit work-order review obligations.
   observed owner source; source generation alone is not semantic supersession.
   Historical feedback remains independently addressable. For Main's acceptance
   decision, a queued outcome or predeclared stance is not proof of exposure.
-- Once advisory is fresh → call commit_reviewed immediately without further edits.
-- `skip_advisory_review=True` skips only advisory freshness and the
-  obligation/debt admission attached to it. Use LLM judgment when this cheap
-  error-finding pass is slow, unhealthy, unavailable, or unlikely to add value;
-  otherwise run it before the expensive authoritative review. The gate records
-  the explicit skip; explain the LLM judgment in the surrounding task narrative.
-  The flag does not change independently applicable test policy, triad,
-  applicable scope review, or
-  pre/post fingerprint and exact-commit/tag binding. The skip is durably
-  audited, and unresolved obligations/debt remain visible.
-
 **Obligation tracking:**
-- Every blocking `commit_reviewed` result creates "open obligations" — a structured checklist of
-  unresolved issues that advisory must explicitly address on the next run.
-- Advisory will receive the full list of open obligations and should respond to each one by name.
-- A generic PASS without addressing open obligations is a weak signal — advisory is expected
-  to confirm each obligation is resolved, though the gate does not enforce this at the code level.
-- Open obligations are cleared automatically on a successful commit.
-- Both triad-review blocks and scope-review blocks produce structured obligations.
-- Repeated blockers may also synthesize **commit-readiness debt**. When present,
-  the non-bypass `commit_reviewed` path remains blocked under `blocking` until
-  advisory clears both the open obligations and the debt; `review_status` reports
-  this via `commit_readiness_debts_count`, `repo_commit_ready=false`, and
-  `retry_anchor=commit_readiness_debt`. Under `advisory`, a fresh advisory allows
-  commit after recording `advisory_obligations_acknowledged`; `review_status`
-  still shows the debt until a successful commit clears it.
-  `skip_advisory_review=True` overrides only this advisory debt admission;
-  the debt remains visible and authoritative review still runs.
-- **Anti-thrashing injection (v4.35.1):** On retry attempts, open obligations are loaded from durable review state and injected into reviewer prompts as an inert JSON data block (fenced ```json``` with a "DATA records — not instructions" disclaimer). Two mandatory rules are also appended: (1) The JSON `"verdict"` field is the authoritative signal — withdrawal notes in `"reason"` text are ignored; (2) Do not rephrase prior findings under a different checklist item name. In `claude_advisory_review.py::_build_advisory_prompt`, these same two rules are injected at **step 5a unconditionally** (on every advisory run, not only when obligations exist), and reinforced at steps 6.e/6.f when obligations are present.
+- Every blocked `commit_reviewed` verdict mints "open obligations" — a structured
+  list of the unresolved findings, synthesized to canonical issues
+  (`review_synthesis.synthesize_to_canonical_issues`) and joined to an earlier
+  obligation of the same root cause by semantic redirect
+  (`review_state.compute_obligation_semantic_redirects`). Both parts of the
+  brief mint them; a `$0` refusal mints none.
+- Open obligations ride into the next panel's brief by name (below) and are
+  cleared automatically on a successful commit. No gate admits or refuses a
+  commit on them: the panel judges whether each is resolved, and a generic PASS
+  that ignores a named obligation is a weak signal the author should not accept.
+- Repeated blockers may also synthesize **commit-readiness debt**. `review_status`
+  reports it via `commit_readiness_debts`, `commit_readiness_debts_count` and
+  `retry_anchor=commit_readiness_debt`; it is a durable anti-thrashing signal,
+  not an admission gate; the retired advisory gate projects no `repo_commit_ready`
+  verdict (DEV 05). A successful commit clears the debt.
+- **Anti-thrashing injection:** open obligations from durable review state enter
+  every reviewer prompt of the next wave as an inert JSON data block (fenced
+  ```json``` with a "DATA records — not instructions" disclaimer) with two
+  rules: (1) the JSON `"verdict"` field is the authoritative signal — withdrawal
+  notes in `"reason"` text are ignored; (2) do not rephrase prior findings under
+  a different checklist item name. One renderer serves both deliveries
+  (`review_prompt_text.build_anti_thrashing_rules_section`: packet prompts via
+  `review.py::_review_history_with_open_obligations`, retrieving briefs via
+  `review_brief_coupling.build_retrieving_brief`), and a Part 2 answer reuses an
+  open obligation's `obligation_id` for the same root cause.
 - **Obligation storage policy:** All obligations are stored; deduplication is the agent's responsibility.
   Multiple obligations describing the same root cause (from reviewer rephrasing across attempts) are
   expected — address them together and explain this in `review_rebuttal`.
-- **Note:** conservative false-stale is acceptable. If you are unsure whether a mutating path
-  changed the relevant repo snapshot, re-run `preflight_review` explicitly.
 
 ---
 
@@ -127,13 +131,13 @@ These tools restore to already-reviewed states by definition.
 
 ---
 
-## Pre-Commit Self-Check (Ouroboros, before calling preflight_review)
+## Pre-Commit Self-Check (Ouroboros, before calling commit_reviewed)
 
-Run this walkthrough honestly before every `preflight_review` call for a
-`commit_reviewed`. The correct sequence is:
+Run this walkthrough honestly before every `commit_reviewed` (and before any
+`preflight_review` look you buy ahead of it). The correct sequence is:
 
 ```
-finish ALL edits → Pre-Commit Self-Check → preflight_review → commit_reviewed
+finish ALL edits → Pre-Commit Self-Check → [preflight_review] → commit_reviewed
 ```
 
 This section is **not injected as a named checklist section by the review prompts** — it exists here so the agent's
@@ -141,7 +145,7 @@ pre-flight checklist lives in the same single source of truth as the review
 checklists it guards. When `docs/CHECKLISTS.md` itself appears in a commit's
 touched files, reviewers see it in the touched-path manifest and the staged
 diff, but it is not loaded as a standalone checklist the way the Change Review
-(with its Ouroboros Body Layer) or Intent/Scope checklists are.
+(with its Ouroboros Body Layer) or Coupling questions sections are.
 
 | # | Check | How |
 |---|-------|-----|
@@ -154,7 +158,7 @@ diff, but it is not loaded as a standalone checklist the way the Change Review
 | 7 | Tests green before first `commit_reviewed`? | Run `pytest -x` on the narrowest relevant target(s) you can name before the first `preflight_review` / `commit_reviewed` attempt. Size gates no longer block locally: they live in the official-CI-only `size_ratchet` pytest lane (the manifest matching the tree plus the pairwise base-vs-tip shrink-only transition), and local surfaces (`check_worktree_readiness`, `codebase_health`) surface the same `validate_size_ratchet` findings as "official CI will enforce" warnings. When a size warning appears — or a new `.py` file lands under `ouroboros/` or `supervisor/` — run `pytest tests/ -m size_ratchet` and `scripts/regenerate_size_ratchet.py` locally to preview and fix what official CI would reject. A red test suite before the first commit attempt has caused repeated $2-5 blocked-review cycles. |
 | 8 | Adding a `README.md` version row? | BIBLE.md P9 hard cap: ≤ 2 major, ≤ 5 minor, ≤ 5 patch visible entries. Categories are mutually exclusive: major = `X.0.0` (minor=0, patch=0); minor = `X.Y.0` (patch=0, Y≠0); patch = all other `X.Y.Z` (Z≠0). Count existing rows in the category you are adding to. Easy check: `run_command(["python", "-c", "import sys; from ouroboros.tools.release_sync import check_history_limit; warns=check_history_limit(open('README.md').read()); print(warns or 'OK')"])` — if it prints warnings, trim the oldest row in the over-limit category **in the same edit** before committing. |
 | 9 | Changing any of `build.sh`, `build_linux.sh`, `build_windows.ps1`, `Dockerfile`, or `ouroboros/tools/browser.py`? | Cross-surface doc sync is mandatory. Check ALL of: `README.md` Install section (Linux native-lib caveat), `README.md` Build section (per-platform instructions), `docs/ARCHITECTURE.md` browser tools paragraph, WebKit/mobile verification notes, and inline comments in the touched build script. Any one of these being stale has blocked review twice. Verify before staging. |
-| 10 | Changing `ouroboros/tools/commit_gate.py`? | Coupled surfaces that MUST be updated atomically in the same commit: (a) `claude_advisory_review.py::get_tools()` tool description for `preflight_review` and `review_status`; (b) `claude_advisory_review.py::_next_step_guidance()` strings; (c) `docs/DEVELOPMENT.md` Review & Commit Protocol section; (d) the `prompts/SYSTEM.md` Self-Modification section IF the commit-gate rule it states changed. Missing any one has blocked review. |
+| 10 | Changing `ouroboros/tools/commit_gate.py`? | Coupled surfaces that MUST be updated atomically in the same commit: (a) `tools/preflight_review.py` tool descriptions for `preflight_review` and `review_status` and its `_next_step` strings; (b) the `commit_reviewed` schema in `tools/git.py` (`preflight_reviewer`, `skip_advisory_review`, `reviewers`/`reason` through `compose_commit_panel`) and the preflight-and-tests gate it drives; (c) `docs/DEVELOPMENT.md` Review & Commit Protocol section; (d) the `prompts/SYSTEM.md` Self-Modification section IF the commit-gate rule it states changed. Missing any one has blocked review. |
 | 11 | Changing VERSION + pyproject.toml? | Ordering matters: (1) write `VERSION`, `pyproject.toml`, `uv.lock`, `web/package.json` and `web/modules/api_types.js` first; (2) then write the `README.md` badge + changelog row + download links, both install pages' download links, and the `docs/ARCHITECTURE.md` header; (3) then run `pytest`. Never interleave — updating README before VERSION means `test_version_in_readme` will catch a stale badge. |
 | 12 | Writing or editing any JS file under `web/modules/`? | New or changed static inline visual properties are blocked: inspect the diff for added/changed `style=""` markup and `.style.<property>` assignments, and use CSS classes/tokens plus `classList`/`hidden` instead. Unchanged legacy hits are debt, not a blocker. A dynamic measured value, or a renderer's count of what it rendered, may update a narrowly named CSS custom property when that is the actual runtime data flow. |
 | 13 | Changing LLM output-token budgets? | Grep the whole repo for `max_tokens`, `max_completion_tokens`, `_MAX_TOKENS`, and `max_toks`. Keep `docs/ARCHITECTURE.md` §LLM output token budgets and `tests/test_max_tokens_constants.py` in sync so main-loop, VLM, summaries, compaction, skill publish, and consciousness floors cannot drift independently. |
@@ -166,7 +170,7 @@ diff, but it is not loaded as a standalone checklist the way the Change Review
 
 Rule: read before write. Never reconstruct `VERSION`, `pyproject.toml`
 `version`, or the README badge from memory — one stale reconstruction creates
-a `self_consistency` FAIL that an entire advisory cycle is then spent on.
+a `self_consistency` FAIL that an entire review cycle is then spent on.
 
 **Before retrying after review findings (`commit_reviewed`, `skill_review`):**
 The recorded review state — the verdict when one was reached and the individual
@@ -288,8 +292,8 @@ own finding is advisory, and repeating it across rounds or reviewers confers no
 additional authority.
 
 For any finding about narrative, prose, or cross-surface consistency, also apply
-the `Critical surface whitelist` below (same rules for every reviewer — triad,
-scope, and advisory). A mismatch outside the whitelist is advisory.
+the `Critical surface whitelist` below (same rules for every reviewer — both
+parts of the brief, and a preflight). A mismatch outside the whitelist is advisory.
 
 One root cause = one FAIL entry. Do NOT split one underlying problem into multiple
 FAIL items that all require the same change. Do NOT hold an obligation open by
@@ -298,7 +302,7 @@ named artifact is fixed, mark PASS; raise a new advisory if a broader concern re
 Coverage is semantic, not numerical: zero or one FAIL is valid, and reviewers
 must never invent findings to reach a count.
 
-### Critical surface whitelist (binding for ALL reviewers — triad, scope, advisory)
+### Critical surface whitelist (binding for ALL reviewers — every pool seat, both parts, and a preflight)
 
 When marking a cross-surface / self-consistency / narrative / "prose-vs-code"
 mismatch as **critical**, the mismatch MUST live in one of these categories:
@@ -388,7 +392,7 @@ Ownership` section is delivered beside them.
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
 | 10 | bible_compliance | Does the diff violate any BIBLE.md principle? | critical |
-| 11 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules and dependency direction — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; provider- and transport-specific decisions never flow back into core policy, judged by the `Shared Contract Ownership` section delivered with this checklist; (c) Python everywhere (including `tests/`/`devtools/`) and first-party `web/**/*.js` (including `web/tests/`) target ~1000 lines; exact repo-relative module debt above the 1600-line hard gate, exact `(path, qualname)` Python-function debt above 300 lines, the 1001-1500 band (new/re-entered paths need a nonblank rationale; an entry may stay while its module has 1501-1600 lines), and exact byte debt above 200,000 canonical UTF-8/LF bytes are checked in to `ouroboros/size_ratchet_manifest.py`; the enforcing surface for all of these is the official repository CI's `size_ratchet` pytest lane — the manifest matching the tip tree plus the pairwise base-vs-tip shrink-only transition — while local runs surface the same `validate_size_ratchet` findings as warnings (a stale or growing entry is therefore review debt to flag, not a local commit block); methods above 150 lines and more than eight parameters are decomposition signals, not hard gates; runtime-code total Python function/method count is descriptive, with no aggregate ceiling, while per-unit limits and exact shrink-only debt transitions retain their authority; (d) no gratuitous abstract layers, and any SOLID/minimalism finding names an exact symbol/authority, concrete duplication or coupling, and a smaller contract-preserving alternative rather than citing diff size (P7 Minimalism) — and when the diff ADDS a surface (a new module, state file, ledger, resolver, cache, retry path, tool, endpoint, or background loop), the reviewer consults the docs/ARCHITECTURE.md map and NAMES the existing mechanism that already covers the need when one exists (name it exactly — the reuse-first duty this checklist carries for a CHANGE; the plan-review checklist judges an intention and has no such generative duty); absence of a covering mechanism may be stated in one line; added tracked material needs a continuing purpose under DEVELOPMENT.md "Documentation contract", and completed campaign machinery is retired rather than preserved by presence-only tests; (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs, pattern register) must NOT use hardcoded `[:N]` truncation — when content must be shortened, summarize explicitly (attempts, changes, and conclusions survive) and disclose the omission with a resolvable reference, because an omission marker alone is disclosure, not sufficiency; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py; (h) provider independence — no change may make a core capability (agent loop, multi-model commit review, scope review, or memory/context flows) silently require a second provider or OpenRouter specifically, and every supported single direct provider (local, OpenAI, Anthropic, MiniMax, DeepSeek, Cloud.ru, GigaChat) must keep its model AND review/scope slots self-fillable (see DEVELOPMENT.md "Provider Independence"); (i) a claimed-complete visible UI change includes vision-inspected evidence from at least one relevant real consumer flow. A screenshot file without inspection is insufficient; states/viewports/additional engines are risk-selected, mobile/WebKit are not universal, and an unavailable optional engine alone is not degradation. | critical |
+| 11 | development_compliance | Does it follow DEVELOPMENT.md patterns? Check explicitly: (a) naming conventions (snake_case modules/vars, PascalCase classes, UPPER_SNAKE_CASE constants); (b) entity type rules and dependency direction — Gateway classes contain ONLY transport, no business logic; Tool functions are thin wrappers; provider- and transport-specific decisions never flow back into core policy, judged by the `Shared Contract Ownership` section delivered with this checklist; (c) Python everywhere (including `tests/`/`devtools/`) and first-party `web/**/*.js` (including `web/tests/`) target ~1000 lines; exact repo-relative module debt above the 1600-line hard gate, exact `(path, qualname)` Python-function debt above 300 lines, the 1001-1500 band (new/re-entered paths need a nonblank rationale; an entry may stay while its module has 1501-1600 lines), and exact byte debt above 200,000 canonical UTF-8/LF bytes are checked in to `ouroboros/size_ratchet_manifest.py`; the enforcing surface for all of these is the official repository CI's `size_ratchet` pytest lane — the manifest matching the tip tree plus the pairwise base-vs-tip shrink-only transition — while local runs surface the same `validate_size_ratchet` findings as warnings (a stale or growing entry is therefore review debt to flag, not a local commit block); methods above 150 lines and more than eight parameters are decomposition signals, not hard gates; runtime-code total Python function/method count is descriptive, with no aggregate ceiling, while per-unit limits and exact shrink-only debt transitions retain their authority; (d) no gratuitous abstract layers, and any SOLID/minimalism finding names an exact symbol/authority, concrete duplication or coupling, and a smaller contract-preserving alternative rather than citing diff size (P7 Minimalism) — and when the diff ADDS a surface (a new module, state file, ledger, resolver, cache, retry path, tool, endpoint, or background loop), the reviewer consults the docs/ARCHITECTURE.md map and NAMES the existing mechanism that already covers the need when one exists (name it exactly — the reuse-first duty this checklist carries for a CHANGE; the plan-review checklist judges an intention and has no such generative duty); absence of a covering mechanism may be stated in one line; added tracked material needs a continuing purpose under DEVELOPMENT.md "Documentation contract", and completed campaign machinery is retired rather than preserved by presence-only tests; (e) new LLM calls go through the shared `LLMClient`/`llm.py` layer, not ad-hoc HTTP clients; (f) cognitive artifacts (identity.md, scratchpad, task reflections, review outputs, pattern register) must NOT use hardcoded `[:N]` truncation — when content must be shortened, summarize explicitly (attempts, changes, and conclusions survive) and disclose the omission with a resolvable reference, because an omission marker alone is disclosure, not sufficiency; (g) new `get_tools()` exports follow the ToolEntry pattern in registry.py; (h) provider independence — no change may make a core capability (agent loop, multi-model commit review, the coupling question, or memory/context flows) silently require a second provider or OpenRouter specifically, and every supported single direct provider (local, OpenAI, Anthropic, MiniMax, DeepSeek, Cloud.ru, GigaChat) must keep its model AND review-pool rows self-fillable (see DEVELOPMENT.md "Provider Independence"); (i) a claimed-complete visible UI change includes vision-inspected evidence from at least one relevant real consumer flow. A screenshot file without inspection is insufficient; states/viewports/additional engines are risk-selected, mobile/WebKit are not universal, and an unavailable optional engine alone is not degradation. | critical |
 | 12 | version_bump | Does this commit leave VERSION unchanged, or leave release artifacts out of sync? Exception: a version-neutral contribution — an external contribution commit (P9 / CONTRIBUTING.md; the maintainer's integration commit performs the bump) or a commit prepared in a body candidate, which P9 lets the installation adopt locally as it is — keeps EVERY carrier byte-identical and takes no tag; unchanged carriers there are correct, not a FAIL. A numbered release syncs every carrier. A partial carrier change fails in either form, and the exception waives no other item. | critical |
 | 13 | changelog_and_badge | VERSION bumped but README.md badge or changelog not updated? (PASS if VERSION not bumped.) | critical |
 | 14 | tool_registration | New tool function added but not exported in `get_tools()` OR missing explicit entry in `ouroboros/safety.py::TOOL_POLICY`? (PASS if no new tool.) Both surfaces are required: `get_tools()` makes the tool visible; `TOOL_POLICY` makes the per-call safety routing explicit and is guarded by the `test_tool_policy_covers_all_builtin_tools` invariant. | critical |
@@ -396,12 +400,12 @@ Ownership` section is delivered beside them.
 | 16 | light_external_artifacts | If tool/runtime policy changed, does light mode still allow external user deliverables via `user_files`, task-scoped `task_drive`/`artifact_store`, and process `outputs` while blocking Ouroboros repo/control-plane mutation? (The external `claude_code_edit` cwd lane retired with the tool — D10.) Do review prompts avoid recommending `runtime_data/uploads` or skill payloads as generic artifact transport? | critical |
 | 17 | subagent_isolation | If the diff changes `schedule_subagent`, child-task queueing, task constraints, tool discovery/execution, data reads, or memory handoff, does it preserve the accepted live-subagent contract: strict `subagent_id` + `objective` + `expected_output` schema, inferred lineage/workspace/contract/deadline/resource inheritance, `local_readonly_subagent` schema and execute-time allowlist, parent-equivalent reads across native file, query, media and local-browser surfaces, with unchanged readonly mutation/command ceilings, nested readonly delegation only within configured depth/cap limits (depth bounds how deep delegation NESTS, never actor strength; every new call names `subagent_id`, the scheduler snapshots the exact normalized `ConfiguredSubagent` route at task start, and an `agent_session` snapshot executes on the harness by construction — the host starts that exact leaf before the child's first model round without waiting on it, a definite typed start refusal ends the child unrun and typed at $0, and ambiguous start evidence wakes the model rather than terminaling; the model-visible schema must not expose `model_lane`/`executor`, while hidden legacy selectors map deterministically to one migrated row or return `subagent_selection_required`), for an explicitly read-only child, no arbitrary local writes/commits/review/runtime/tool-expansion/skills-lifecycle/shell (bounded media projection such as `extract_video_frames` may write derived outputs only under `artifact_store/video_frames` through a host-owned command shape), ordinary external tools follow owner policy and inherited resources; Cyber acting tools come from the actual registered catalog without inherited name exclusions or default-empty grants, while explicit read-only assignments retain their contract; the restricted subagent browser boundary (external HTTP(S) + parent-equivalent local `file://` reads + loopback except actual Ouroboros control-service endpoints; concrete private origins require host-established `resource_policy.allowed_origins` with exact scheme/host/port and inherited/subset authority; unavailable identity for a matching recorded endpoint must not become foreign-service permission; apply the same target checks to direct navigation, actions and intercepted subresources, and validate every available redirect hop before returning page content; native browser redirects may send a request before post-navigation validation, so this is not a pre-request isolation or DNS-rebinding guarantee; metadata/link-local and reserved targets remain refused by the existing URL policy; `evaluate` JS unavailable to `local_readonly_subagent`, available to a valid `acting_subagent` on its current page; `vlm_query`/`analyze_screenshot` available), full task-result handoff, the helper start composition (a child or grandchild starts with governance and book maps, identity, the top level of the life account, its room's page, the memory marks of that room and the global ones, the whole assignment with attachments and the owner's originating words verbatim — never the whole dialogue history, knowledge one read away; a nanny the same without the life account; a configured session only its work order plus those words; `declared` stays the parent's explicit selection and its receipt names every omitted automatic input), a delegated child's or nanny's chronicle writes limited to its own drafts of pages and parts signed with its focus (a draft part folds only legacy sections and its own drafts; its note, correction or decision refused `not_integrator`; accepting or rejecting a draft stays with the integrating mind), new/changed wait/timeout paths for cognitive work using progress-aware/re-decidable waiting rather than a fixed cutoff that discards in-flight work (P5), and tests for both allowed and blocked paths? | critical |
 | 18 | evolution_durability | If the diff touches `supervisor/git_ops.py`, `launcher.py`, `server.py`, `ouroboros/preflight_runner.py`, `ouroboros/tools/review_helpers.py`, `ouroboros/tools/git.py`, tests, review gates, or evolution code, does it preserve hermetic preflight, live repo/data mutation fuses, remote-optional local commit success, and transaction/rescue evidence for interrupted self-modification? | critical |
-| 19 | context_budget_ssot | If the diff changes context-size budgets/constants (`ouroboros/context_budget.py`), the context layout/manifest, a section's tier/policy, or the typed ContextFit deficit/reclaim contract: does it keep the low/max context split coherent (single SSOT + both profiles + docs + drift-guard tests in sync), preserve the tier-0 always-full core (BIBLE/SYSTEM/identity/scratchpad/knowledge-index/marks in view; `context_layout.TIER0_ALWAYS_FULL`) in EVERY mode, keep the sealed story resident at its top level, and let only the physical window turn raw lines and old pages into addresses (old before new; Ouroboros's replies and people's words only when the window minus the reply reserve cannot hold them, its longest replies first and people's words last; every degraded span still named with its period; `memory_floor`); an owner-selected Low/Nano target bounds host facts, room headers, retold pointers, old pages and this room's retold page the same way, never Ouroboros's replies or people's words, use a visible on-demand pointer instead of silent truncation (P1), and keep scope review independent of the context mode (scope review applies in every mode; the mode governs Ouroboros's own working window, never whether its changes are reviewed — a change that couples the two is an immune-system change under P3, not an incidental budget tweak)? Outside Cyber Pro the owner selects the context mode; Cyber may choose its own context and review settings through the existing writer. (PASS with "Not applicable" if no context-budget/layout change.) | critical |
+| 19 | context_budget_ssot | If the diff changes context-size budgets/constants (`ouroboros/context_budget.py`), the context layout/manifest, a section's tier/policy, or the typed ContextFit deficit/reclaim contract: does it keep the low/max context split coherent (single SSOT + both profiles + docs + drift-guard tests in sync), preserve the tier-0 always-full core (BIBLE/SYSTEM/identity/scratchpad/knowledge-index/marks in view; `context_layout.TIER0_ALWAYS_FULL`) in EVERY mode, keep the sealed story resident at its top level, and let only the physical window turn raw lines and old pages into addresses (old before new; Ouroboros's replies and people's words only when the window minus the reply reserve cannot hold them, its longest replies first and people's words last; every degraded span still named with its period; `memory_floor`); an owner-selected Low/Nano target bounds host facts, room headers, retold pointers, old pages and this room's retold page the same way, never Ouroboros's replies or people's words, use a visible on-demand pointer instead of silent truncation (P1), and keep the coupling question independent of the context mode (it applies in every mode; the mode governs Ouroboros's own working window, never whether its changes are reviewed — a change that couples the two is an immune-system change under P3, not an incidental budget tweak)? Outside Cyber Pro the owner selects the context mode; Cyber may choose its own context and review settings through the existing writer. (PASS with "Not applicable" if no context-budget/layout change.) | critical |
 | 20 | delegated_transport | If the diff touches the delegated execution/review transport — the whole family, matched by shape rather than by an enumeration that goes stale: `ouroboros/delegate*.py` (containment, custody + custody_reconcile/custody_usage, directory, evidence, hold, interactions, output, pending, progress, recovery, registration_policy, shared, source_coverage, start_claims, start_instructions, state_sweep, supervision, terminal), `ouroboros/tools/delegate*.py` (delegate, delegate_integration, delegate_payload_patch, delegate_terminal_evidence), `ouroboros/subagent*.py` (subagents dispatch/route-health, subagent_bootstrap, subagent_dispatch_notes, subagent_messages, subagent_route_health, subagent_runtime, subagent_work_order, subagent_worktrees), `ouroboros/tools/subagent_integration*.py`, plus `ouroboros/review_execution.py` session executors, `ouroboros/gateways/claudexor.py`, `ouroboros/claudexor_daemon.py` and `ouroboros/claudexor_runtime.py` — does it preserve the delegation invariants: capability reductions reach all three destinations (durable envelope, child prompt, parent result — D4); a result counts as received only after a hash-bound read to EOF and retries replay the recorded byte-identical body (D7); the exact selected subagent_id snapshot starts its exact session route with custody-durable requested→effective evidence or returns a TYPED refusal, and neither host dispatch nor tool preflight substitutes another session/API/native route — any fallback is a new explicit LLM selection; quota exhaustion needs POSITIVE evidence judged against the route's own model (applies_to_models scoping, absence = unknown = usable); delegated spend settles through custody with unknown-never-rendered-as-zero and root/parent lineage; and no vendor/harness name is ever branched on in core. For direct and configured external work orders, verify complete chosen assignments and host authority across instruction roles, no arbitrary compiler cap or compulsory file/question transport, and no duplicate objective/output copies within instructions. Operative plan normalization and current reviewer inputs must preserve full content and tail-sensitive identity. Real route limits retain original input, cause and execution state. Legacy partial requests retain byte-identical pending recovery, exact renderer/selector/digest/range validation, durable source coverage and apply refusal until complete; reject remains available. Source availability never proves reading or comprehension. (PASS with "Not applicable" if no delegated-transport surface changed.) | critical |
 | 21 | source_completeness | If any changed consumer can authorize PASS, a destructive rewrite, or replacement of a full contract, does its input distinguish complete from partial and carry a source reference the same actor can resolve? Does the consumer materialize every named omitted source before the decision, or abstain with the existing typed incomplete/degraded outcome? A marker or host claim alone is never sufficient. | critical when applicable |
 | 22 | actor_readable_projection | If the diff adds a bounded projection, omission marker, summary, or status count, can the actor who must decide read the exact canonical source through an existing path? Verify the ref, root, generation/range or ID, and the reader's ability to resolve it after the real merge, promotion and cleanup; a successful copy or an intermediate packet does not prove the persisted consumer still resolves its citations. Host-unattested or merely hypothetical retrieval does not certify completeness. | critical when applicable |
 | 23 | canonical_memory_fork | If the diff touches Project/fork/execution roots, summaries, memory, or GC, does it preserve one canonical identity and distinguish authority/biography from execution-local state? Are referenced canonical artifacts promoted or retained before a child/root is collected, with missing legacy bytes represented as gaps? | critical when applicable |
-| 24 | review_artifact_continuity | If the diff changes plan, triad, scope, advisory, or acceptance evidence, are exact artifact bodies, source selectors, candidate SHA, reviewer model/profile/thread/route continuity, and all omissions retained? Continuity, transport, and coverage discrepancies are retained as typed facts beside the exact artifact bodies; a failed or truncated review delivery remains DEGRADED/NOT_RUN rather than PASS. File-read coverage is diagnostic under BIBLE P3, never a reason to discard a received verdict or remove its reviewer from quorum. No disclosure discards, blanks or relabels the bodies or their original cause. | critical when applicable |
+| 24 | review_artifact_continuity | If the diff changes plan, change-review (either part), preflight, or acceptance evidence, are exact artifact bodies, source selectors, candidate SHA, reviewer model/profile/thread/route continuity, and all omissions retained? Continuity, transport, and coverage discrepancies are retained as typed facts beside the exact artifact bodies; a failed or truncated review delivery remains DEGRADED/NOT_RUN rather than PASS. File-read coverage is diagnostic under BIBLE P3, never a reason to discard a received verdict or remove its reviewer from quorum. No disclosure discards, blanks or relabels the bodies or their original cause. | critical when applicable |
 | 25 | context_building | New data/memory files that should appear in LLM context (context.py) but don't? | advisory |
 | 26 | knowledge_index | Knowledge base topics changed but memory/knowledge/index-full.md not updated? | advisory |
 | 27 | gateway_parity | If the diff changes any browser-facing endpoint, WebSocket message, or frontend API call, are `ouroboros/gateway/contracts.py`, `ouroboros/gateway/router.py`, `web/modules/api_client.js`, `web/modules/api_types.js`, and `tests/test_gateway_parity.py` still aligned? Missing alignment is advisory unless it also breaks a frozen contract, safety guard, release metadata, or runtime behavior. | advisory |
@@ -495,9 +499,10 @@ A state-machine change that only passes the success-path test is incomplete.
 
 ## Shared Contract Ownership
 
-Applies to every review of this repository's own code — the commit triad
-(Ouroboros Body Layer item 11(b)), scope (item 6 `architecture_fit`), advisory
-and deep self-review — and is delivered to each of them beside its own
+Applies to every review of this repository's own code — the commit panel's
+change part (Ouroboros Body Layer item 11(b)), its coupling part (item 6
+`architecture_fit`), a preflight and deep self-review — and is delivered to
+each of them beside its own
 checklist. Plan and skill review judge other subjects and do not apply it, and
 a change review of another repository (the core layer alone) does not carry
 it. It is the review
@@ -537,8 +542,8 @@ or its severity; the cited contract and the reviewer's reading do.
 
 Used by `skill_review` to vet a single
 external skill before it is allowed to execute via `skill_exec`. This uses the
-shared triad reviewer-slot configuration (`OUROBOROS_REVIEWER_SLOTS`; the
-pre-ABI-7.0 model/route settings are retired and are not read) and follows every
+shared review pool (the `review_eligible` rows of `OUROBOROS_SUBAGENTS`; the
+retired comma-list model/route settings are not read) and follows every
 row's configured delivery, while preserving the existing gate semantics against a skill package in the local
 checkout of `OUROBOROS_SKILLS_REPO_PATH`, not against a staged git diff.
 
@@ -677,7 +682,7 @@ bundled native skill payload (bootstrap seed, post-bootstrap new seed,
 or version resync — all marked by `.seed-origin`), it stamps
 `review.json` with `status=clean`, `reviewer_models=["repo_commit_gate"]`,
 and `review_profile="native_seed"`, because those exact payload bytes
-already passed the repo triad+scope commit gate. The verdict is bound to
+already passed the repo commit gate's review wave. The verdict is bound to
 the post-seed content hash (lifecycle control files excluded), so ANY
 later edit flips it stale and non-executable exactly like an ordinary
 review; removing `.seed-origin` reclassifies the skill as user-managed.
@@ -691,8 +696,8 @@ as pending (non-executable). The owner opt-out is
 clawhub/external/self-authored skills. Packaged installs bind native-seed
 trust to the SHA-pinned `repo.bundle`; source-mode installs copy current
 worktree bytes and therefore lack that packaged-byte provenance.
-`skip_advisory_review` changes only advisory coverage: repo triad and
-applicable scope review still run.
+`skip_advisory_review` records only the commit's skipped preflight: the repo
+review wave, both parts, still runs.
 
 Self-authored skills carry payload-local `.self_authored.json` and
 owner-state `data/state/skills/<skill>/self_authored.json` provenance,
@@ -929,9 +934,10 @@ without the audit record).
 
 These are **separate surfaces** with separate models, prompts, and state:
 
-- Repo review (triad + scope + advisory) protects the self-modifying
-  `~/Ouroboros/repo/`. Its state lives in `data/state/advisory_review.json`
-  and is keyed by staged diff snapshot.
+- Repo review (the review pool's one wave, both parts, plus any preflight)
+  protects the self-modifying `~/Ouroboros/repo/`. Its attempt state lives in
+  `data/state/advisory_review.json`, keyed by staged diff snapshot; its records
+  in `data/state/review_ledger/`.
 - Skill review protects the external skills repo. Its state lives in
   `data/state/skills/<name>/review.json` and is keyed by a content hash
   of the skill's manifest + payload files.
@@ -1073,7 +1079,7 @@ authority, and prose outside the array is not parsed.
   envelope's `reviewer_effort` included). An empty-epoch DEGRADED wave
   (slots died at dispatch time, no structural snapshot evidence) re-dispatches a PAID panel
   on the identical envelope; so does a healed or newly dead lane or a changed roster. Only a
-  wave in which no reviewer slot was physically dispatched (typed $0 skip rows only —
+  wave in which no pool seat was physically dispatched (typed $0 skip rows only —
   pre-fan-out health skips included) stays unpaid.
   When the wave's typed rows prove the quorum STRUCTURALLY unreachable, the wave carries
   `quorum_unreachable` + the earliest reset: under blocking the finalization gate releases for
@@ -1117,38 +1123,42 @@ implementation. Critic findings, paid counts and pending custody remain intact.
 
 ---
 
-## Intent / Scope Review Checklist
+## Coupling questions
 
-Used by the scope reviewer, which runs IN PARALLEL with the triad diff review and
-delivers by RETRIEVAL: it receives the intent, the complete staged diff, the touched-path
-manifest, a compact index of the repository, navigation maps of the governance documents,
-and the per-change required-source manifest (the touched prompts, frozen contracts and
-protected runtime with their declared families and twins — a minimum, never a claim that
-everything else is dispensable), and it reads any part of the body with its own read-only
-tools. Its unique advantage is finding cross-module bugs, broken implicit contracts, and
-hidden regressions that diff-only reviewers cannot see. Reads of a native inspection
-episode are host-observed and folded over the manifest into a coverage of complete,
-incomplete or declared-empty; a vendor session's reads are recovered from the harness's
-own run journal (`harness_observed`) and folded over the same manifest, and are unobserved
-where that journal or its delivered extents are unavailable. Coverage is
-diagnostic: preserve the received verdict and quorum participation, disclose
-gaps, and leave further reading to the agent's judgment (BIBLE P3).
+Part 2 of the brief every retrieving reviewer of a change receives (`## Part 2 —
+Coupling questions`, `ouroboros/tools/review_synthesis.py`): the seat that answers
+the Change Review Checklist in Part 1 answers these eight questions in the same
+brief and reaches the repository with its own read-only tools — the intent, the
+complete change, the touched-path manifest, a compact repository index, governance
+navigation and the per-change required-source manifest (a minimum owed to the seat,
+never a claim that everything else is dispensable) are in the brief. On the
+Ouroboros body the questions apply with the `Critical surface whitelist` of the
+Ouroboros Body Layer; on another root (`review_change`, core layer) with the
+universal whitelist of the Change Review Checklist, against the subject's own
+documents. A packet seat (a model without tools) is not asked this part, and the
+record says so. This part finds cross-module bugs, broken implicit contracts and
+hidden regressions outside the diff. Reading coverage (host-observed native
+receipts; a session's `harness_observed` journal; unobserved where neither is
+available) is diagnostic: preserve the received verdict and quorum participation,
+disclose gaps, and leave further reading to the agent's judgment (BIBLE P3).
 
-**Output contract (v4.34.0):** the scope reviewer returns a JSON array that covers every
-item below (8 items total). PASS entries are mandatory for items with no problems and must
-carry 1–2 sentences of justification naming a concrete artifact or code path that was
-actually checked — a bare "PASS" or single-word reason is treated as a reviewer failure.
-Multiple FAIL entries for the same item are valid when they describe distinct concrete
-root causes; do not merge unrelated scope bugs into one summary. Do not emit duplicate
-PASS entries, and do not emit PASS for an item that also has a FAIL. See the
-`Anti pattern-lock guard` section of the scope prompt in `ouroboros/tools/scope_review.py`
-for the second-pass requirement when a single FAIL is surfaced. The commit gate still
-forwards only `verdict == "FAIL"` entries; the PASS rows exist so that coverage and the
-reviewer's actual reasoning are auditable in `scope_raw_result`. The scope
-pipeline validates this coverage contract before classifying findings: missing
-required items, unexpected items, duplicate PASS rows, or PASS+FAIL for the same
-item fail closed as reviewer output failures rather than being treated as a
-clean response.
+**Output contract:** the seat returns one JSON object whose `coupling` block is an
+array covering every item below (8 items; `REVIEW_TWO_PART_OBJECT_CONTRACT` in
+`ouroboros/triad_review.py`; a seat asked this part alone returns the bare array).
+PASS entries are mandatory for items with no problems and carry 1–2 sentences naming
+a concrete artifact or code path actually checked — a bare "PASS" or single-word
+reason is a reviewer failure. Multiple FAIL entries for one item are valid when they
+describe distinct root causes; do not merge unrelated coupling bugs, emit duplicate
+PASS entries, or emit PASS for an item that also has a FAIL. The `Anti pattern-lock
+guard` (the second pass after a single FAIL) rides Part 1 once
+(`ouroboros/tools/review_prompt_text.py`). The gate forwards only `verdict == "FAIL"`
+entries; PASS rows keep coverage and reasoning auditable in the record's per-seat
+answers. The matrix is validated before findings are classified
+(`ouroboros/tools/scope_review_contract.py`): missing or unexpected items,
+duplicate PASS rows, or PASS+FAIL for one item leave this part unanswered as a
+reviewer output failure; a seat that answered Part 1 without it is recorded
+`coupling_block_missing`, and a wave in which no responding seat answered it
+aggregates `NOT_PERFORMED`, never PASS.
 
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|
@@ -1165,10 +1175,10 @@ clean response.
 
 - Any critical FAIL must cite a concrete file, symbol, prompt, doc, test, config, or sibling flow.
 - If the reviewer cannot point to an exact touchpoint, the FAIL must be advisory, not critical.
-- Scope affects only unchanged code outside the diff. The diff itself remains fully reviewable.
+- Coupling affects only unchanged code outside the diff. The diff itself remains fully reviewable in Part 1.
 - For narrative / prose / cross-surface findings, apply the shared `Critical surface whitelist`
   defined in the Change Review Checklist section above, with the body's carriers named in the
-  Ouroboros Body Layer. Only release metadata, tool schema,
+  Ouroboros Body Layer when the subject is the body. Only release metadata, tool schema,
   module map, behavioural documentation, and safety contracts qualify as critical. Wording
   of explanatory comments, stylistic mismatches in changelogs, and non-contractual prose
   are advisory regardless of how concrete the citation is.

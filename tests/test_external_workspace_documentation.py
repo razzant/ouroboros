@@ -15,6 +15,6 @@ def test_external_workspace_docs_distinguish_plain_folders_from_git_operations()
     assert "ordinary file and process work runs directly" in readme
     assert "Ordinary folders support direct file/process work" in architecture
     assert "ordinary folder or Git worktree root" in control
-    assert "ordinary file and process work is supported directly" in control
+    assert "File/process work supports ordinary folders; Git operations need a worktree" in control
     assert "External workspaces must be separate Git worktree roots" not in readme
     assert "must be a git worktree root outside" not in control

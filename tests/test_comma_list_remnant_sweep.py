@@ -58,38 +58,15 @@ _RETIRED_KEY_MENTION_ALLOWLIST = {
     ("ouroboros/settings_defaults.py", "OUROBOROS_REVIEW_ROUTES"): ("retirement SSOT", 2),
     ("ouroboros/settings_defaults.py", "OUROBOROS_SCOPE_REVIEW_ROUTES"): ("retirement SSOT", 2),
     ("ouroboros/settings_defaults.py", "OUROBOROS_ADVISORY_REVIEW_ROUTE"): ("retirement SSOT", 2),
-    # -- derived env plane: the projection writer …
-    ("ouroboros/reviewer_slot_config.py", "OUROBOROS_REVIEW_MODELS"): ("derived env plane projection writer", 4),
-    ("ouroboros/reviewer_slot_config.py", "OUROBOROS_SCOPE_REVIEW_MODELS"): ("derived env plane projection writer", 4),
-    ("ouroboros/reviewer_slot_config.py", "OUROBOROS_SCOPE_REVIEW_MODEL"): ("derived env plane projection writer", 2),
-    # … and its API-pinned readers.
-    ("ouroboros/review_model_routes.py", "OUROBOROS_REVIEW_MODELS"): ("derived env plane reader (get_review_models)", 1),
-    ("ouroboros/review_model_routes.py", "OUROBOROS_SCOPE_REVIEW_MODELS"): ("derived env plane reader (get_scope_review_models)", 1),
-    ("ouroboros/review_model_routes.py", "OUROBOROS_SCOPE_REVIEW_MODEL"): ("derived env plane reader (singular fallback)", 2),
-    ("ouroboros/tools/scope_review.py", "OUROBOROS_SCOPE_REVIEW_MODEL"): ("derived env plane reader (scope model fallback)", 1),
     # -- raw-dict tolerance: direct-provider and prior-default review/scope
     #    normalization over dicts fed directly (load_settings purges the keys
     #    first; ABI-10-commented).
     ("ouroboros/server_runtime.py", "OUROBOROS_REVIEW_MODELS"): ("raw-dict review normalization", 5),
     ("ouroboros/server_runtime.py", "OUROBOROS_SCOPE_REVIEW_MODELS"): ("raw-dict scope review normalization", 7),
     ("ouroboros/server_runtime.py", "OUROBOROS_SCOPE_REVIEW_MODEL"): ("raw-dict scope review normalization", 7),
-    # -- declaration surface over the derived plane (Provider Test resolves a
-    #    deterministic model from declared model settings incl. the projected
-    #    comma lists; never a route selector).
-    ("ouroboros/provider_models.py", "OUROBOROS_REVIEW_MODELS"): ("declared-model surface over derived plane", 1),
-    ("ouroboros/provider_models.py", "OUROBOROS_SCOPE_REVIEW_MODELS"): ("declared-model surface over derived plane", 1),
-    ("ouroboros/provider_models.py", "OUROBOROS_SCOPE_REVIEW_MODEL"): ("declared-model surface over derived plane", 1),
-    # -- save-time warning triggers keyed on changed setting names (the
-    #    OUROBOROS_REVIEWER_SLOTS member keeps the check live; the retired
-    #    spellings are harmless startswith vestiges kept for raw-dict callers).
-    ("ouroboros/gateway/settings.py", "OUROBOROS_REVIEW_MODELS"): ("changed-key warning trigger", 1),
-    ("ouroboros/gateway/settings.py", "OUROBOROS_SCOPE_REVIEW_MODEL"): ("changed-key warning trigger", 1),
     # -- retirement prose (names the key to say it is retired/ignored).
     ("ouroboros/review_execution.py", "OUROBOROS_REVIEW_ROUTES"): ("retirement prose", 1),
     ("ouroboros/review_execution.py", "OUROBOROS_SCOPE_REVIEW_ROUTES"): ("retirement prose", 1),
-    ("ouroboros/tools/preflight_review_run.py", "OUROBOROS_ADVISORY_REVIEW_ROUTE"): ("retirement prose", 1),
-    ("web/modules/settings.js", "OUROBOROS_REVIEW_MODELS"): ("retirement prose (6.1 authoring note)", 1),
-    ("web/modules/settings.js", "OUROBOROS_SCOPE_REVIEW_MODELS"): ("retirement prose (6.1 authoring note)", 1),
 }
 
 
@@ -211,16 +188,12 @@ def test_phase5_route_plumbing_stays_removed():
 
 def test_retired_route_envs_are_ignored(monkeypatch):
     """Retired-envs-are-ignored pin: a stale environment exporting the retired
-    per-row route spellings changes NOTHING — rows built from a plain model
-    list stay api_chat."""
+    per-row route spellings changes NOTHING — a pool of api rows stays api_chat."""
     from ouroboros.review_execution import ReviewRouteKind
-    from ouroboros.review_substrate import scope_reviewer_slots
-    from ouroboros.reviewer_slot_config import reviewer_slots
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from tests.review_pool_rosters import set_review_pool
 
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    set_review_pool(monkeypatch, ["m1", "m2", "m3"])
     monkeypatch.setenv("OUROBOROS_REVIEW_ROUTES", "agent_session,agent_session,agent_session")
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_ROUTES", "agent_session,agent_session")
     assert all(row.route is ReviewRouteKind.API_CHAT
-               for row in scope_reviewer_slots(["m1", "m2"]))
-    assert all(row.route is ReviewRouteKind.API_CHAT
-               for row in reviewer_slots(["m1", "m2", "m3"], role_hint="commit review"))
+               for row in review_pool_slots(role_hint="commit review"))

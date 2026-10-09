@@ -233,7 +233,11 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-python-env
       - name: Exercise production custody with the pinned engine and fake harnesses
-        run: python -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- python scripts/claudexor_lifecycle_smoke.py
+        # The inner command names the environment's own interpreter: on Windows a bare
+        # `python` under the scrubbed environment resolved outside the virtualenv (#1641).
+        run: |
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_lifecycle_smoke.py
 
   # ────────────────────────────────────────────────────────────────────────────
   # Toolchain lane — free, credential-free. Real managed Node/npm for the CLI.

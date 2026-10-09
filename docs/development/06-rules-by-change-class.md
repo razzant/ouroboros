@@ -59,7 +59,7 @@ Enforcement: `tests/test_protected_artifacts_policy.py` and `tests/test_acceptan
 
 ### Devtools isolation
 
-`devtools/` is tracked operator code outside runtime package discovery and the runtime import graph (ARCHITECTURE §1 "Devtools boundary"): runtime modules, `server.py`, web modules and build scripts must not import it. Touched devtool files receive normal triad/scope review; unrelated files reach the scope reviewer as index rows it may open on demand, so operator code does not drown core review. Generated outputs live in an explicit external root, never in `repo/` or live `data/`; domain-specific architecture and methodology live beside the devtool, not in core governance docs. No automated import guard — review-only (triad/scope review of touched devtool files).
+`devtools/` is tracked operator code outside runtime package discovery and the runtime import graph (ARCHITECTURE §1 "Devtools boundary"): runtime modules, `server.py`, web modules and build scripts must not import it. Touched devtool files receive the normal review wave; unrelated files reach a retrieving seat as index rows it may open on demand, so operator code does not drown core review. Generated outputs live in an explicit external root, never in `repo/` or live `data/`; domain-specific architecture and methodology live beside the devtool, not in core governance docs. No automated import guard — review-only (the wave over touched devtool files).
 
 ### Live E2E stand (`devtools/e2e_live/`)
 
@@ -169,7 +169,7 @@ Run roots are append-only outside `repo/` and live `data/`; the focused contract
   `delegate_start` (registry `_disabled_tools`). The successor is the
   configured session actor — the exact-payload class via
   `delegate_start(subagent_id=..., prompt=..., root="skill_payload",
-  bucket=..., skill_name=...)` — and the api-route advisory successor is the
+  bucket=..., skill_name=...)` — and an api-route preflight's successor is the
   native inspection episode (`review_native_episode.py`). Do not resurrect the
   name.
 - `run_ci_tests` is a retired tool name with no alias and no compatibility
@@ -501,19 +501,21 @@ Settings, accounts and shared controls. Tests: `test_owner_settings_write_seam.p
   exact pins on ordinary save/reload and on catalog failure; a source's
   credential harness comes from its metadata, never an assumed equal name.
   Delivery follows the row's surface and reference, not its model or account:
-  every scope and deep-review row retrieves, a referenced API reviewer keeps
-  native inspection, and model/account edits never silently turn it into a packet.
+  a session row retrieves, an API row keeps its saved `delivery` (native by
+  default), and model/account edits never silently turn it into a packet.
 - One capability, one section: the task-actor story lives in Agents →
   Available subagents (`web/modules/subagents_settings.js`), editing one
   canonical `OUROBOROS_SUBAGENTS` object (list-level and row Enabled, at most
-  ten rows, one prose field `recommended_use`; the stored id is a hidden join
-  key). Name a row by its route-derived handle, never by a stored label or
+  `MAX_CONFIGURED_SUBAGENTS` rows, one prose field `recommended_use`; the
+  stored id is a hidden join key). The review pool is the same list: a row's
+  Reviewer mark (`review_eligible`) and an API row's `delivery` are row
+  fields, never a second editor; `GET /api/review-pool` is the read side.
+  Name a row by its route-derived handle, never by a stored label or
   the ordinal, and never render a second control over the same settings key
   (`OUROBOROS_MAX_WORKERS` stays in Advanced because it sizes the process
-  pool). Share only neutral route/model/account/effort/status primitives with
-  reviewer rows (`route_editor_primitives.js`): task routes serialize
-  `api_model` + `credential_profile_id`, reviewer routes `api_chat` +
-  `profile_id`; an empty managed-model/session pin means engine rotation;
+  pool). Routes serialize `api_model` + `credential_profile_id` through the
+  neutral primitives (`route_editor_primitives.js`); an empty
+  managed-model/session pin means engine rotation;
   saved-but-undiscovered choices stay visible and editable; a compound effort
   slug plus a conflicting separate effort is a validation error, never two
   applied efforts. The Auto-lane account preference and its one-request
@@ -893,7 +895,7 @@ and what enforces each.
   (that request ends there); a delegated agent session inherits the task operation
   window (the paid run can outlive an HTTP read); the owner deadline narrows either;
   provider transport defaults (Anthropic, VLM captioning) are ceilings, not promises.
-  Default reviewer slots deliberately have no short cognition cap; the outer `plan_task` envelope
+  Pool seats deliberately have no short cognition cap; the outer `plan_task` envelope
   covers the session lifetime; `web_search` sizes its envelope for the complete
   configured paid cascade, recomputed under an owner deadline.
 - New numeric timeouts belong to `settings_defaults.py` (`SETTINGS_DEFAULTS` key/default)
@@ -1107,8 +1109,8 @@ and what enforces each.
   narration alone buy nothing; changed criteria or material evidence can, even with
   identical text. Reuse the existing subject and paid-identity owners — no second hash,
   no cosmetic edits.
-- Task-acceptance actors are the configured triad rows
-  (`reviewer_slot_config.triad_delivery_slots`; malformed config refuses typed), one
+- Task-acceptance actors are the review pool's rows
+  (`reviewer_slot_config.review_pool_slots`; a malformed catalog refuses typed), one
   substantive interaction each on its own delivery; the retrieving work order,
   `evidence_refs` against the FULL packet, the money rule (known spend below every limit;
   one work-order send per paid row disclosed, no rounds multiplier), the once-per-panel launch floor
@@ -1127,7 +1129,7 @@ and what enforces each.
   FAIL fails and DEGRADED abstains in the critic aggregate. Apply qualified Advisory
   author completion separately, never rewriting criticism or hiding independent failed
   effects, unaccepted review or unfinished stops (DEVELOPMENT §11; ARCHITECTURE §3).
-  No task scope review or commit-gate reuse.
+  No coupling question or commit-gate reuse.
 - Plan-review answers are durable statements merged by `finding_id`: a later answer
   supersedes only its own id, and two entries for one id in ONE call stay contradictory and
   open. Answering and re-asking are one optional call: an envelope with items records them
@@ -1237,11 +1239,11 @@ descendants without removing root. The existing
 `OUROBOROS_PREFLIGHT_TEST_WORKERS` operator lever defaults to 2 and
 `OUROBOROS_PREFLIGHT_TIMEOUT_SEC` to 3600 seconds at this entry, preserving explicit
 overrides. Other installs retain the upstream 1800-second total test budget.
-Standalone preflight/advisory ToolEntry bounds add that resolved test total to the
-existing plan-style task/transport settlement envelope and finalization grace;
-they must not expire before tests and the critic can settle. This outer bound
-creates no new cognitive deadline; inner critic/owner deadlines, test containment
-and the reviewed commit's terminal wait remain unchanged. These settings change
+The test budget belongs to `commit_reviewed`. Standalone `preflight_review`
+uses the same ToolEntry envelope as `review_change`: the task/transport
+settlement envelope plus finalization grace, with no tests or test budget.
+This creates no new cognitive deadline; inner critic/owner deadlines, test
+containment and the reviewed commit's terminal wait remain unchanged. These settings change
 test concurrency/time, not test content, review models or context. Measure memory/swap and confirm process cleanup before
 running full preflight on a phone; do not deliberately reproduce a kernel panic.
 Keep reusable large downloads in the installer's durable cache.

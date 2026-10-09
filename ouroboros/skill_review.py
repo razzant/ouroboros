@@ -87,9 +87,7 @@ from ouroboros.skill_review_prompt import (  # noqa: F401 — split facade re-ex
     _SKILL_REVIEW_ITEMS,
     _build_review_prompt,
     _build_review_prompt_for_attempt,
-    _emit_skill_advisory_warning,
     _load_governance_artifact,
-    _run_skill_advisory_pre_review,
 )
 from ouroboros.skill_review_output import (  # noqa: F401 — split facade re-exports
     _aggregate_status,
@@ -657,13 +655,13 @@ def review_skill(
     if slot_err := reviewer_slot_config_error():  # #116: refuse loudly, never the silent default panel
         return SkillReviewOutcome(
             skill_name=skill.name, status=STATUS_PENDING, content_hash=content_hash,
-            error=f"invalid reviewer-slot configuration blocks skill review: {slot_err}")
+            error=f"invalid review pool configuration blocks skill review: {slot_err}")
     try:
         delivery = commit_triad_delivery()
     except ValueError as exc:
         return SkillReviewOutcome(
             skill_name=skill.name, status=STATUS_PENDING, content_hash=content_hash,
-            error=f"invalid reviewer-slot configuration blocks skill review: {exc}")
+            error=f"invalid review pool configuration blocks skill review: {exc}")
     models = list(delivery["models"])
     early_outcome, contract_fp, rebuttal_sha, review_profile = _skill_cycles_gate(
         ctx, skill, drive_root, models, delivery, review_rebuttal, content_hash, persist=persist,

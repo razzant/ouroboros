@@ -236,7 +236,8 @@ def test_e1v2_run_instance_runtime_mode_passthrough(tmp_path, monkeypatch):
            "problem_statement": "p", "requirements": "", "interface": ""}
     base = dict(out_dir=str(tmp_path), self_improve=False, model_name="m", mem_limit="",
                 solve_model="openai/gpt-5.5", per_task_cost=5.0, solve_timeout=10, absorb_max=10,
-                reflect_min=1, reflect_max=1, quiet_stable=1, memory_mode="empty", disable_tools="x")
+                reflect_min=1, reflect_max=1, quiet_stable=1, memory_mode="empty", disable_tools="x",
+                review_slots=3, review_effort="")
 
     run_pro.run_instance("inst__a", row, _types.SimpleNamespace(runtime_mode="light", **base),
                          "key", tmp_path / "seed.json", 5.0)

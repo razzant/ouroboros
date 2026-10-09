@@ -476,16 +476,19 @@ body.resizing-panels { user-select: none; }
 
 .project-handoff-heading {
     display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    padding: var(--space-3);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
 }
+
+.project-handoff-phase { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-2); }
+.project-handoff .chat-quiz-project { margin-top: var(--space-3); }
 
 .project-handoff-title {
     min-width: 0;
     overflow-wrap: anywhere;
-    font-size: var(--type-body);
+    font-size: var(--type-section);
+    font-weight: 600;
     color: var(--text-primary);
 }
 
@@ -501,6 +504,7 @@ body.resizing-panels { user-select: none; }
 
 .project-handoff > .sender { display: none; }
 .project-handoff .message { padding: 0; }
+.chat-bubble.system.project-handoff .msg-time { color: var(--text-meta); }
 
 .nav-section {
     display: flex;
@@ -1910,8 +1914,12 @@ body.resizing-panels { user-select: none; }
     background: var(--accent-10);
 }
 
-.chat-live-card:not([data-finished="1"]) .chat-live-phase:is(.working, .thinking, .progress, .calling, .context) {
+.chat-live-phase[data-motion="1"], .chat-live-phase-secondary[data-motion="1"] {
     animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .chat-live-phase[data-motion="1"], .chat-live-phase-secondary[data-motion="1"] { animation: none; }
 }
 
 /* Phase pills are status chips with class-named tones; the triple is the
@@ -6651,11 +6659,11 @@ textarea.chat-input {
     }
 }
 
-/* Review lanes (6.2) + agent accounts (D30).
+/* Agent accounts (D30).
    Borders read the theme's --divider like every other panel surface. They used
    to name --border, which this dark-only :root never declares, so all three
    rules silently took their literal grey fallback instead of the token. */
-/* === design-system:migrated-begin (harness accounts + reviewer slots + Dashboard Updates tab) ===
+/* === design-system:migrated-begin (harness accounts + Dashboard Updates tab) ===
    Down to the matching end marker: docs/DESIGN.md tokens only, guarded by
    tests/test_web_typography_static.py. The rest of this file is a later pass. */
 /* Subsection rhythm: a group is its head (heading + that group's own Add
@@ -8068,8 +8076,7 @@ textarea.chat-input {
 
 
 
-.form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox),
-.reviewer-slot-controls input:not(.ui-control):not(.ui-checkbox), .reviewer-slot-controls select:not(.ui-control):not(.ui-checkbox) {
+.form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox) {
     padding: 8px 12px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--divider);

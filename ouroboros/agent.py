@@ -539,11 +539,11 @@ class OuroborosAgent:
         )
         if str(task.get("delegation_role") or "") == "subagent" and self._event_queue is not None and self._current_chat_id is not None:
             try:
+                role = str(task.get("role") or "").strip()
                 self._event_queue.put({
-                    "type": "send_message",
-                    "chat_id": self._current_chat_id,
+                    "type": "send_message", "chat_id": self._current_chat_id,
                     "role": "system", "system_type": "subagent_started",
-                    "text": f"▶️ Subagent {task.get('id')} running ({task.get('role') or 'researcher'}).",
+                    "text": f"▶️ Subagent {task.get('id')} running{' (' + role + ')' if role else ''}.",
                     "format": "markdown",
                     "is_progress": True,
                     "task_id": str(task.get("id") or ""),
@@ -954,19 +954,25 @@ class OuroborosAgent:
             elif str(cap_info.get("executor_blocked_reason") or ""):
                 text, usage, llm_trace = _blocked_executor_terminal(cap_info, task)
             elif task_type_str == "deep_self_review":
-                # Deep self-review bypasses the tool loop: it runs on the
-                # configured deep-review ROW (the row decides the delivery).
+                # Deep self-review bypasses the tool loop: review_change(subject=system,
+                # surface=system) on the row the request named, else Main (decision 3A).
+                # It writes memory/deep_review.md itself and keeps the last report on failure.
                 try:
-                    from ouroboros.deep_self_review import run_deep_self_review
+                    from ouroboros.deep_self_review import deep_review_unavailable_text
+                    from ouroboros.tools.review_change import ReviewChangeArgumentError, run_system_review
                     self._emit_progress("Starting deep self-review... This may take several minutes.")
-                    text, usage = run_deep_self_review(
-                        repo_dir=self.env.repo_dir,
-                        drive_root=self.env.drive_root,
-                        llm=self.llm,
-                        emit_progress=self._emit_progress,
-                        task_id=str(task.get("id") or ""),
-                        deadline_at=str((self._current_task_metadata or {}).get("deadline_at") or ""),
-                    )
+                    try:
+                        outcome = run_system_review(
+                            ctx, reviewer=str(task.get("reviewer") or ""), llm=self.llm,
+                            emit_progress=self._emit_progress,
+                            deadline_at=str((self._current_task_metadata or {}).get("deadline_at") or ""),
+                        )
+                        text, usage = str(outcome.get("report") or ""), dict(outcome.get("usage") or {})
+                        if outcome.get("record_id"):
+                            text += f"\n\nReview record: {outcome['record_id']} (surface=system)"
+                    except ReviewChangeArgumentError as exc:
+                        text = deep_review_unavailable_text(str(exc))
+                        usage = {"execution_status": "infra_failed", "reason_code": "deep_self_review_unavailable"}
                     if usage:
                         self._pending_events.append({
                             "type": "llm_usage",
@@ -984,12 +990,6 @@ class OuroborosAgent:
                             "task_id": task.get("id"), "error": text,
                             "reason_code": str(usage.get("reason_code") or ""),
                         })
-                    else:
-                        try:
-                            review_path = pathlib.Path(self.env.drive_root) / "memory" / "deep_review.md"
-                            review_path.write_text(text, encoding="utf-8")
-                        except Exception as save_err:
-                            log.warning("Failed to save deep review to memory: %s", save_err)
                     llm_trace = {"reasoning_notes": ["deep_self_review"], "tool_calls": []}
                 except BudgetExceeded:
                     raise

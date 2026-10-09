@@ -128,80 +128,16 @@ from ouroboros.review_dispatch import (  # noqa: E402,F401 — re-exports
 )
 
 
-# reviewer_slots()/triad_delivery_slots() live in reviewer_slot_config (altitude, P7); re-exported for callers here.
-from ouroboros.reviewer_slot_config import SCOPE_ROLE_HINT, reviewer_slots, triad_delivery_slots  # noqa: F401,E402
-
-
-def scope_reviewer_slots(
-    models: List[str] | None = None, *, effort: str | None = None,
-) -> List[ReviewSlot]:
-    """The configured scope-reviewer rows — the single owner of scope-slot identity.
-
-    Both scope surfaces read their ids from here: the substrate call that produces
-    the durable prompt/response refs, and the actor records the commit attempt
-    persists. One row therefore carries exactly one identity instead of two that
-    disagree. Each row also carries its configured delivery route (D14: every
-    scope slot is independently harness-or-API).
-
-    With no explicit ``models`` the rows come from the reviewer-slot SSOT
-    (6.1): stable owner ids, per-row route/target/effort. An explicit list
-    keeps the historical positional behavior for callers that rebuild one row;
-    such rows are pinned ``api_chat`` (the caller that fans out a delegated
-    row overrides the route itself — the phase-5 per-row route envs are
-    retired, ABI-10).
-
-    An omitted ``effort`` resolves to the configured scope-review effort: the
-    legacy path used to take this parameter's old literal default instead,
-    silently running the BLOCKING reviewer below configured strength (the
-    downgrade class the owner forbade).
-
-    Every scope row delivers by RETRIEVAL (owner decision 2026-09-17): an
-    ``api_chat`` row on this surface means a bounded native inspection episode
-    on that model, an ``agent_session`` row a delegated read-only session.
-    ``scope_delivery_rows`` states that on the row itself, so the transport
-    seam reads one fact instead of inferring delivery from an actor id the
-    scope surface does not require.
-    """
-    if effort is None:
-        from ouroboros.config import resolve_effort
-
-        effort = resolve_effort("scope_review")
-    if models is None:
-        from ouroboros.reviewer_slot_config import structured_scope_review_slots
-
-        structured = structured_scope_review_slots()
-        if structured is not None:
-            return scope_delivery_rows(structured)
-        # Resolved at call time so the configured list stays the live authority.
-        from ouroboros.config import get_scope_review_models
-
-        models = get_scope_review_models()
-    return scope_delivery_rows(reviewer_slots(
-        models, effort=effort, role_hint=SCOPE_ROLE_HINT, id_prefix=SCOPE_SLOT_ID_PREFIX,
-    ))
-
-
-def scope_delivery_rows(slots: List[ReviewSlot]) -> List[ReviewSlot]:
-    """Mark every ``api_chat`` scope row as a native retrieving reviewer.
-
-    The scope surface owns the delivery of its own rows, so the fact rides the
-    row rather than a synthesized ``subagent_id``: identity, route, model,
-    credential pin, effort, processing preference and local-route flag stay
-    exactly as configured.
-    """
-    return [
-        replace(slot, native_retrieval_override=True)
-        if str(getattr(slot.route, "value", slot.route) or "") == ReviewRouteKind.API_CHAT.value
-        else slot
-        for slot in slots
-    ]
+# triad_delivery_slots() (the pool under its historical name) lives in reviewer_slot_config (altitude, P7);
+# re-exported for the acceptance callers and their tests here.
+from ouroboros.reviewer_slot_config import triad_delivery_slots  # noqa: F401,E402
 
 
 def review_usage_category(surface: str) -> str:
     """The usage-scope category every send of a review surface is attributed
     under — the key the ledger's cache split and the root telemetry's
-    reservation identities carry, so the commit gate's admission and its
-    scope-first hold name the same scope the substrate sends under."""
+    reservation identities carry, so the commit gate's admission names the
+    same scope the substrate sends under."""
     return f"{surface}_review"
 
 
@@ -368,7 +304,6 @@ class ReviewCoordinator:
             "plan_review",
             "skill_review",
             "task_acceptance",
-            "advisory_review",
         }
         route_owned_executor = (
             str(getattr(getattr(self._run_slot, "__func__", None), "__module__", ""))
@@ -830,14 +765,16 @@ class ReviewCoordinator:
 def run_review_request(
     request: ReviewRequest,
     *,
-    slots: List[ReviewSlot] | None = None,
+    slots: List[ReviewSlot],
     drive_root: pathlib.Path | None = None,
     llm: LLMClient | None = None,
     usage_ctx: Any = None,
 ) -> ReviewRunResult:
-    resolved_slots = reviewer_slots(role_hint=request.surface) if slots is None else slots
+    """Run ONE review wave on ``slots`` — the rows the caller took from the pool
+    (``review_pool_slots`` / ``triad_delivery_slots``) or composed for its wave;
+    the substrate never picks reviewers itself."""
     coordinator = ReviewCoordinator(llm=llm, drive_root=drive_root, usage_ctx=usage_ctx)
-    result = coordinator.run(request, resolved_slots)
+    result = coordinator.run(request, slots)
     if request.surface == "task_acceptance":
         # D-Q5 annotation-only pass: feeds the clean bit + disclosure, never parse
         # validity/quorum/verdicts. Called UNGUARDED on purpose — the annotator is

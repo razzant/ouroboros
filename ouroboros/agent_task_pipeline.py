@@ -1176,7 +1176,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                     "pass_index": 0,
                 }
             root_phase_checkpoint.setdefault("post_task_synthesis", "pending_once")
-        review_projection = _compact_review_projection(llm_trace)
+        review_projection = _compact_review_projection(llm_trace, task, env.drive_root)
         model_execution = model_execution_projection(usage)
         from ouroboros.acceptance_history import retain_acceptance_history
         history_fields = retain_acceptance_history(
@@ -1270,8 +1270,6 @@ def build_review_context(env: Any) -> str:
     try:
         from ouroboros.review_state import (
             _LEGACY_CURRENT_REPO_KEY,
-            advisory_commit_ready,
-            compute_snapshot_hash,
             format_status_section,
             load_state,
             make_repo_key,
@@ -1288,7 +1286,6 @@ def build_review_context(env: Any) -> str:
         continuations, corrupt = list_review_continuations(env.drive_root)
         repo_dir = pathlib.Path(env.repo_dir)
         repo_key = make_repo_key(repo_dir)
-        snapshot_hash = compute_snapshot_hash(repo_dir)
         open_obs = state.get_open_obligations(repo_key=repo_key)
         open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
         if (
@@ -1301,34 +1298,10 @@ def build_review_context(env: Any) -> str:
         ):
             return ""
 
-        current_run = None
-        for run in reversed(state.advisory_runs):
-            if run.snapshot_hash != snapshot_hash:
-                continue
-            if run.repo_key not in ("", repo_key, _LEGACY_CURRENT_REPO_KEY):
-                continue
-            current_run = run
-            break
-
-        # H5 (capinv-447): honestly named — this is the ADVISORY readiness
-        # projection, not the full commit gate (triad/scope/custody independent).
-        lines: List[str] = ["## Review Continuity", "### Advisory readiness (not the full commit gate)"]
-        live_status = str(getattr(current_run, "status", "") or "missing")
-        repo_commit_ready = advisory_commit_ready(
-            current_run is not None and current_run.status in ("fresh", "bypassed", "skipped"),
-            open_obs, open_debts,
-            matching_run=current_run if getattr(current_run, "repo_key", None) == repo_key else None,
-        )
-        lines.append(f"- repo_key={repo_key}")
-        lines.append(f"- snapshot_hash={snapshot_hash[:12] or '(empty)'}")
-        lines.append(f"- advisory_status={live_status}")
-        lines.append(f"- repo_commit_ready={'yes' if repo_commit_ready else 'no'}")
-        if current_run is not None:
-            lines.append(f"- current_review_ts={str(current_run.ts or '')[:19]}")
-            if current_run.bypass_reason:
-                lines.append(f"- bypass_reason={_truncate_with_notice(current_run.bypass_reason, 220)}")
-        else:
-            lines.append("- no advisory run matches the current worktree snapshot")
+        # Owed work and the checkout's stale marker only: the retired advisory
+        # gate projected no readiness here (decision 3A), and the commit gate is
+        # the panel, tests, custody and binding, none of which this section decides.
+        lines: List[str] = ["## Review Continuity", f"- repo_key={repo_key}"]
 
         stale_matches_repo = not state.last_stale_repo_key or state.last_stale_repo_key == repo_key
         if state.last_stale_from_edit_ts and stale_matches_repo:

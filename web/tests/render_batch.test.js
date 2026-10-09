@@ -289,8 +289,7 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // Both finished-transition paths share settleLiveCard; the task-bound
     // review lifecycle keeps its own trigger. The replay decision stays ONLY
     // behind the scheduler's gate, so sharing cleanup cannot mute either path.
-    assert.match(chatSource, /settleLiveCard\(record, summary\.phase \|\| 'done', wasFinished\);/);
-    assert.match(chatSource, /settleLiveCard\(record, activePhase, wasFinished\);/);
+    assert.equal((chatSource.match(/settleLiveCard\(record, wasFinished\);/g) || []).length, 2);
     assert.match(chatSource, /if \(!wasFinished && blockVisible\(record\)\) scheduleHistorySync\(\);/);
     // The third occurrence is the scheduler re-arming when a run settles with the bound
     // still armed, which is how a run that only JOINED an older in-flight fetch (and

@@ -3,15 +3,10 @@
 These checks decide whether a candidate tree may spend paid review budget at
 all — release-metadata coherence (BIBLE P9), staged-Python syntax, and the
 hermetic pytest run whose execution receipt can cover an equivalent later
-preflight. They are ADMISSION policy, shared
-by the advisory pre-review gate and the commit gate; the critic delivery
-(which model reads the tree, over which transport) is a separate axis and
-lives on the review substrate.
-
-Extracted from ``ouroboros/tools/claude_advisory_review.py`` (owner decision
-Q3=A, 2026-08-29): the advisory module keeps thin aliases as its monkeypatch
-seams, but the single implementation lives here so the two gates can never
-drift apart.
+preflight. They are ADMISSION policy the commit gate runs before any reviewer
+is paid (``commit_gate.deterministic_preflight``); the critic delivery (which
+model reads the tree, over which transport) is a separate axis and lives on
+the review substrate.
 """
 from __future__ import annotations
 
@@ -340,8 +335,8 @@ def syntax_preflight_staged_py_files(
     return (
         "⚠️ PREFLIGHT_BLOCKED: syntax errors:\n"
         + "\n".join(f"- {err}" for err in errors)
-        + "\n\nFix the syntax error(s) above and re-run preflight_review. "
-        "The paid advisory episode was skipped to save budget."
+        + "\n\nFix the syntax error(s) above and re-run commit_reviewed. "
+        "No reviewer was paid for this candidate."
     )
 
 

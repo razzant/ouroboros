@@ -86,15 +86,6 @@ def test_env_skip_and_managed_force_share_one_proof_owner(tmp_path, monkeypatch,
     assert _proof_events(ctx.drive_root) == []
 
 
-def test_advisory_failure_does_not_borrow_main_physical_capture(monkeypatch):
-    from ouroboros.tools.preflight_review_run import _advisory_failure
-
-    monkeypatch.setattr("ouroboros.usage_accounting.last_physical_attempt_capture", lambda: SimpleNamespace(state="unresolved", provider_status_code=None))
-    result = _advisory_failure(RuntimeError("critic unavailable"), SimpleNamespace(failure_custody=lambda: {}))
-    assert result.usage["operation_state"] == "settled"
-    assert "physical_attempt_state" not in result.usage
-
-
 @pytest.mark.parametrize("setting", ["0", "1"])
 def test_actual_managed_proof_owner_reruns_after_commit(tmp_path, monkeypatch, setting, physical_passes):
     from tests.test_managed_review_subject import _managed_resolution_repo, _git
@@ -112,9 +103,9 @@ def test_actual_managed_proof_owner_reruns_after_commit(tmp_path, monkeypatch, s
         assert update_merge.record_managed_tests_proof(ctx) == ""
         assert not getattr(ctx, "_preflight_test_proof", None)
     assert git._managed_candidate_needs_proof(ctx)
-    result = git._advisory_and_tests_gate(
+    result = git._preflight_and_tests_gate(
         ctx, "managed candidate", 0,
-        classification_paths=["docs/note.md"], advisory_paths=None,
+        classification_paths=["docs/note.md"],
         skip_advisory_pre_review=True, skip_tests=True,
     )
     assert result is None and len(physical_passes) == 2  # one real parallel+serial suite

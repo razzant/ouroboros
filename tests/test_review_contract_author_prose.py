@@ -30,8 +30,6 @@ _AUTHOR_COACHING_AND_GOVERNANCE_BINDINGS = (
     ("ouroboros.tools.review_helpers",
      ("REVIEW_REPAIR_JUDGMENT", "build_self_verification_template",
       "load_governance_doc", "load_checklist_section")),
-    ("ouroboros.tools.claude_advisory_review",
-     ("REVIEW_REPAIR_JUDGMENT", "load_governance_doc", "load_checklist_section")),
     ("ouroboros.tools.review",
      ("build_self_verification_template", "load_governance_doc",
       "_load_checklist_section_precise")),

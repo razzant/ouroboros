@@ -93,8 +93,8 @@ def test_ui_smoke_agents_panel_list_editor(direct_server_with_data):
     the head status to Draft in place; Add reveals the appended card with the caret in it and
     no error; only a Save attempt (whichever validation aborts it) turns the empty route into
     a section-level line plus a tinted, self-naming card, and the fix typed into the card
-    clears line, tint and footer together; a later Add is an invitation again; Review lanes'
-    Add lives in the group head and reveals its new row (docs/DESIGN.md "List editors")."""
+    clears line, tint and footer together; a later Add is an invitation again; a card's
+    Reviewer box joins the review pool in place (docs/DESIGN.md "List editors")."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -113,6 +113,9 @@ def test_ui_smoke_agents_panel_list_editor(direct_server_with_data):
                 page = browser.new_page(viewport={"width": 1440, "height": 900})
                 _open_agents_tab(page, url)
                 assert page.evaluate(_AGENTS_PANEL_VISIBLE_ROWS_JS, ".available-subagent-row") >= 3
+                # This roster marks no Reviewer; the owner's explicit choice keeps the empty
+                # pool out of the validation this test is about (it is decided per load).
+                page.check('[data-review-pool-allow-empty]')
                 _agents_panel_typing_reads_draft(page)
                 _agents_panel_add_reveals_the_new_card(page)
 
@@ -179,22 +182,16 @@ def test_ui_smoke_agents_panel_list_editor(direct_server_with_data):
                 assert page.locator("#settings-status").inner_text().startswith("Every-N cadence")
                 set_cadence(mode_before, "")
 
-                # Review lanes: the group's Add sits in its head and reveals the appended row.
-                assert page.evaluate(
-                    "() => Boolean(document.getElementById('btn-add-triad-slot').closest('.reviewer-slots-head'))")
-                before = page.locator("#reviewer-triad-rows .reviewer-slot-row").count()
-                page.click("#btn-add-triad-slot")
+                # A card's Reviewer box joins the pool in place: the count and the empty-pool
+                # warning follow at once, and the box keeps the focus through the repaint.
+                page.locator('[data-subagent-field="review_eligible"]').nth(1).check()
                 page.wait_for_function(
-                    """(before) => {
-                        const rows = document.querySelectorAll('#reviewer-triad-rows .reviewer-slot-row');
-                        if (rows.length !== before + 1) return false;
-                        const last = rows[rows.length - 1];
-                        const box = document.querySelector('.settings-scroll').getBoundingClientRect();
-                        const r = last.getBoundingClientRect();
-                        return r.top >= box.top - 1 && r.bottom <= box.bottom + 1
-                            && document.activeElement === last.querySelector('[data-slot-route]');
+                    """() => {
+                        const boxes = document.querySelectorAll('[data-subagent-field="review_eligible"]');
+                        return document.querySelector('[data-review-pool-count]').textContent === 'Reviewers: 1'
+                            && document.querySelector('[data-review-pool-empty]').hidden
+                            && boxes[1].checked && document.activeElement === boxes[1];
                     }""",
-                    arg=before,
                     timeout=5_000,
                 )
             finally:
@@ -278,8 +275,9 @@ _WIZARD_ON_SUMMARY_JS = "() => (document.querySelector('.step-title')?.textConte
 def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_with_data):
     """First-run wizard (docs/ARCHITECTURE.md §2): an unrouted entry added on the Models step
     does not block Continue; Finish on the summary reports it and, back on Models, the card
-    is already tinted and self-naming; the fix reconciles line and tint together and the
-    second Finish passes the wizard's own checks and enters saving (the save's provider
+    is already tinted and self-naming; the fix reconciles line and tint together; a roster
+    marking no Reviewer is named next, until the owner ticks Save without reviewers, and
+    then Finish passes the wizard's own checks and enters saving (the save's provider
     round-trip is not this test's subject)."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
@@ -341,9 +339,22 @@ def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_wit
                     timeout=5_000)
                 capture(page, "wizard-roster-repaired")
 
+                # With every Reviewer box cleared (the generated roster marks the factory
+                # reviewers), Finish names the empty pool until the owner says Save without reviewers.
+                boxes = page.locator('#onboarding-available-subagents [data-subagent-field="review_eligible"]')
+                for index in range(boxes.count()):
+                    boxes.nth(index).set_checked(False)
                 _wizard_step_until(page, _WIZARD_ON_SUMMARY_JS, forward=True)
                 page.click("#next-btn")
-                # The second Finish passes the wizard's own checks and hands the draft to
+                page.wait_for_function(
+                    "() => (document.querySelector('.wizard-error')?.textContent || '').includes('No row is marked Reviewer')",
+                    timeout=5_000)
+                _wizard_step_until(page, _WIZARD_ON_AGENTS_JS, forward=False)
+                page.check('#onboarding-available-subagents [data-review-pool-allow-empty]')
+
+                _wizard_step_until(page, _WIZARD_ON_SUMMARY_JS, forward=True)
+                page.click("#next-btn")
+                # The last Finish passes the wizard's own checks and hands the draft to
                 # the save (which probes providers — with a placeholder key that round-trip
                 # is not this test's subject): saved, or saving with no wizard error.
                 try:
@@ -356,7 +367,7 @@ def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_wit
                     seen = page.evaluate(
                         "() => ({title: document.querySelector('.step-title')?.textContent,"
                         " error: document.querySelector('.wizard-error')?.textContent})")
-                    raise AssertionError(f"second Finish was refused: {seen}") from exc
+                    raise AssertionError(f"the last Finish was refused: {seen}") from exc
             finally:
                 browser.close()
     except PlaywrightError as exc:

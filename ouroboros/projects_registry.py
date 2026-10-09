@@ -833,6 +833,18 @@ def _bounded_presentation_name(value: Any, *, fallback: str = "") -> str:
     return name if len(name) <= PROJECT_NAME_MAX else name[: PROJECT_NAME_MAX - 1].rstrip() + "…"
 
 
+def task_presentation_name(*sources: Any) -> str:
+    """Plain work title from structured task/result rows, without storage reads."""
+    sources = [row for row in sources if isinstance(row, dict)]
+    for field in ("title", "suggested_name", "objective", "description"):
+        for source in sources:
+            # Strip markdown before flattening the raw request into a plain label.
+            name = _bounded_presentation_name(strip_markdown(str(source.get(field) or "")))
+            if name:
+                return name
+    return "Task"
+
+
 def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = None,
                                result: Any = None, project_id: str = "", strict: bool = False) -> Dict[str, Any]:
     tid = str(task_id or "").strip()
@@ -878,17 +890,7 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
         pname = ""
     if pid and not pname:
         pname = "Project"
-    task_name = ""
-    for field in ("title", "suggested_name", "objective", "description"):
-        for source in sources:
-            # Strip markdown BEFORE the name is flattened: the task half is a raw
-            # request line, and ARCHITECTURE promises this label is plain text.
-            task_name = _bounded_presentation_name(strip_markdown(str(source.get(field) or "")))
-            if task_name:
-                break
-        if task_name:
-            break
-    task_name = task_name or "Task"
+    task_name = task_presentation_name(*sources)
     label = f"{pname} › {task_name}" if pname else task_name
     # One name, said once: a task whose own name IS the project name renders
     # "Launch › Launch", which reads as two different things. Exact equality
@@ -1482,6 +1484,7 @@ __all__ = [
     "project_id_for_origin",
     "project_task_bindings",
     "task_presentation_snapshot",
+    "task_presentation_name",
     "registered_project_chat_ids",
     "reserved_project_chat_ids",
     "projects_summary",

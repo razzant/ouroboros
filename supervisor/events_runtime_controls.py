@@ -24,6 +24,7 @@ def _handle_deep_self_review_request(evt: Dict[str, Any], ctx: Any) -> None:
         reason=str(evt.get("reason") or "agent_self_review"),
         model=str(evt.get("model") or ""),
         origin=consciousness_origin_metadata(evt),
+        reviewer=str(evt.get("reviewer") or ""),
     )
 
 

@@ -13,6 +13,7 @@ import logging
 import os
 from typing import Any, Optional, TYPE_CHECKING
 
+from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS
 from ouroboros.review_substrate import SLOT_ID_PREFIX
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
@@ -38,7 +39,9 @@ def _rev():
     return review
 
 
-MAX_MODELS = 10
+# The commit panel is the review pool: every marked catalog row runs, so the
+# fan-out ceiling is the catalog's own ceiling (26), not a separate lane cap.
+MAX_MODELS = MAX_CONFIGURED_SUBAGENTS
 
 
 CONCURRENCY_LIMIT = 5
@@ -199,10 +202,11 @@ async def _query_model(
             from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
             slot_route = route if route is not None else ReviewRouteKind.API_CHAT
             delegated = slot_route is ReviewRouteKind.AGENT_SESSION
-            # RETRIEVES class (session row, native api row or configured-subagent
-            # api row): the compact session task replaces the assembled pack.
+            # RETRIEVES class (session row, or an api row saved as ``native``):
+            # the compact session task replaces the assembled pack. The row's
+            # catalog id is identity, never a delivery signal (F8).
             native_retrieval = bool(native_retrieval) and not delegated
-            retrieves = native_retrieval or delivery_retrieves(slot_route, subagent_id)
+            retrieves = delivery_retrieves(slot_route, native_retrieval)
             from ouroboros.review_evidence import commit_review_evidence_refs, commit_review_evidence_section
             evidence = task_evidence or {}
             policy = dict(session_policy or {"output_contract": _rev().REVIEW_JSON_ARRAY_CONTRACT}) if retrieves else {}
@@ -238,7 +242,7 @@ async def _query_model(
             slot = ReviewSlot(
                 slot_id=slot_id,
                 model=model,
-                effort=effort or _rev()._cfg.resolve_effort("review"),
+                effort=effort or _rev()._cfg.REVIEW_POOL_DEFAULT_EFFORT,
                 max_tokens=_out_budget,
                 default_temperature=0.2,
                 role_hint=TRIAD_ROLE_HINT,
@@ -247,7 +251,8 @@ async def _query_model(
                 session_target=session_target if delegated else "",
                 session_profile=session_profile,
                 subagent_id=str(subagent_id or ""),
-                native_retrieval_override=True if native_retrieval else None,
+                # Explicit both ways for an api row: the slot's own delivery fact.
+                native_retrieval_override=None if delegated else bool(native_retrieval),
             )
             loop = asyncio.get_running_loop()
             # run_in_executor copies no context: carry the usage scope (and its
@@ -321,10 +326,16 @@ async def _multi_model_review_async(content: str, prompt: str,
     row_ids = _row_vector("slot_ids", lambda idx: _rev().slot_id_for_row(idx + 1))
     row_actors = _row_vector("subagent_ids", lambda idx: "")
     row_local = _row_vector("use_local", lambda idx: None)
+    # One brief per seat (PR-3 B): a retrieving row carries ITS OWN two-part
+    # brief and answer policy; an absent entry keeps the shared task/policy.
+    row_tasks = _row_vector("session_tasks", lambda idx: "")
+    row_policies = _row_vector("session_policies", lambda idx: None)
     # Pack assembly follows the RETRIEVES class, not the route name: a native
-    # or configured-subagent api row retrieves with its own tools and must
-    # never trigger (or be counted into) the assembled pack.
-    plan = {**(row_plan or {}), "routes": row_routes, "subagent_ids": row_actors}
+    # api row retrieves with its own tools and must never trigger (or be counted
+    # into) the assembled pack. The class is the plan's explicit ``retrieves``
+    # vector; an uncovered row is its route's own class (a bare api row receives
+    # the packet) — never inferred from its catalog id (F8).
+    plan = {**(row_plan or {}), "routes": row_routes}
     row_retrieves = [row_plan_retrieves(plan, idx) for idx in range(len(models))]
     any_api_rows = not all(row_retrieves)
     if not content:
@@ -358,14 +369,13 @@ async def _multi_model_review_async(content: str, prompt: str,
     llm_client = _rev().LLMClient()
     tasks = [
         _query_model(llm_client, m, messages, semaphore, ctx, slot_id=row_ids[idx],
-                     route=row_routes[idx], session_task=session_task, session_root=session_root,
+                     route=row_routes[idx], session_task=row_tasks[idx] or session_task, session_root=session_root,
                      effort=row_efforts[idx], session_target=row_targets[idx],
                      session_profile=row_profiles[idx], surface=surface,
-                     session_policy=session_policy, usage_attribution=usage_attribution,
+                     session_policy=row_policies[idx] or session_policy, usage_attribution=usage_attribution,
                      retry_key=retry_key, subagent_id=row_actors[idx], use_local=row_local[idx], task_evidence=task_evidence,
                      resolved_wave_id=fan_out_wave,
-                     native_retrieval=row_retrieves[idx] and row_routes[idx] is ReviewRouteKind.API_CHAT
-                     and not row_actors[idx])
+                     native_retrieval=row_retrieves[idx] and row_routes[idx] is ReviewRouteKind.API_CHAT)
         for idx, m in enumerate(models)
     ]
     results = await asyncio.gather(*tasks)

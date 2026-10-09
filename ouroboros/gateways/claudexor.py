@@ -1374,7 +1374,7 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("Non-finite JSON number")
 
 
-def pending_interactions(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
+def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> List[Dict[str, Any]]:
     """The run detail's live interactive questions, normalized and complete.
 
     ``GET /v2/runs/:id`` carries ``pendingInteractions`` — full
@@ -1384,10 +1384,33 @@ def pending_interactions(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
     strings normalized to ``None``/empty, rows without an interaction id dropped
     (an unanswerable row is noise, not a question). Purely shape translation — no
     truncation here; bounding belongs to the delivery layer that knows its budget.
+    ``strict`` rejects malformed observations instead of silently dropping rows:
+    only an actual empty list can prove there were no questions at read time.
     """
     rows = detail.get("pendingInteractions") if isinstance(detail, dict) else None
+    if strict and not isinstance(rows, list):
+        raise ValueError("run detail has no pendingInteractions list")
     out: List[Dict[str, Any]] = []
     for row in rows or []:
+        if strict:
+            if (not isinstance(row, dict) or not isinstance(row.get("interactionId"), str)
+                    or not row["interactionId"] or not isinstance(row.get("questions"), list)
+                    or not row["questions"]):
+                raise ValueError("malformed pendingInteractions row")
+            if any(row.get(key) is not None and not isinstance(row[key], str) for key in (
+                    "runId", "attemptId", "harnessId", "sourceTool", "requestedAt", "timeoutAt")):
+                raise ValueError("malformed pendingInteractions identity or timestamp")
+            for question in row["questions"]:
+                if (not isinstance(question, dict) or not isinstance(question.get("id"), str)
+                        or not question["id"] or not isinstance(question.get("question"), str)
+                        or not isinstance(question.get("options", []), list)
+                        or not isinstance(question.get("multi_select", False), bool)
+                        or (question.get("header") is not None and not isinstance(question["header"], str))):
+                    raise ValueError("malformed pendingInteractions question")
+                if any(not isinstance(option, dict) or not isinstance(option.get("label"), str)
+                       or (option.get("description") is not None and not isinstance(option["description"], str))
+                       for option in question.get("options", [])):
+                    raise ValueError("malformed pendingInteractions option")
         if not isinstance(row, dict):
             continue
         questions: List[Dict[str, Any]] = []
@@ -1411,6 +1434,9 @@ def pending_interactions(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         out.append({
             "interaction_id": interaction_id,
+            **{target: row[source] for source, target in (
+                ("runId", "run_id"), ("attemptId", "attempt_id"), ("harnessId", "harness_id"),
+            ) if source in row},
             "source_tool": str(row.get("sourceTool") or "") or None,
             "requested_at": str(row.get("requestedAt") or ""),
             "timeout_at": str(row.get("timeoutAt") or "") or None,

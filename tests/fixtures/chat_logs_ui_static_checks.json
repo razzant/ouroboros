@@ -165,7 +165,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "if (record.finished && !isTerminalTaskPhase(nextPhase, summary.terminal)) {"
+    "value": "if (closedPhase && !initialContent) {"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -189,13 +189,13 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "settleLiveCard(record, summary.phase || 'done', wasFinished);"
+    "value": "settleLiveCard(record, wasFinished);"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "function settleLiveCard(record, phase, wasFinished) {"
+    "value": "function settleLiveCard(record, wasFinished) {"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -225,13 +225,13 @@
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "const desiredPhase = desiredLiveCardPhase(record, record.finished ? summary.phase || 'done' : '');"
+    "value": "const desiredPhase = desiredLiveCardPhase(record, closedPhase || (record.finished ? summary.phase || 'done' : ''));"
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "record.finished = isTerminalTaskPhase(nextPhase, summary.terminal);"
+    "value": "record.finished = Boolean(closedPhase) || isTerminalTaskPhase(nextPhase, summary.terminal);"
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
@@ -489,7 +489,7 @@
     "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-live-card:not([data-finished=\"1\"]) .chat-live-phase:is(.working, .thinking, .progress, .calling, .context)"
+    "value": ".chat-live-phase[data-motion=\"1\"], .chat-live-phase-secondary[data-motion=\"1\"]"
   },
   {
     "id": "test_live_card_has_inline_typing_dots_and_pulsing_phase_badge",
@@ -1089,7 +1089,7 @@
     "id": "test_inflight_keyed_final_scoped_conclusion",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "recordConcludedActivity(explicitTaskId);"
+    "value": "recordConcludedActivity(explicitTaskId, taskTerminalPhase(msg));"
   },
   {
     "id": "test_inflight_keyed_final_scoped_conclusion",

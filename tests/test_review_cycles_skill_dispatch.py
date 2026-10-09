@@ -12,6 +12,7 @@ import types
 
 import pytest
 from tests._usage_store_testing import ledger_rows
+from tests.review_pool_rosters import pool_roster, pool_seat
 
 
 KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
@@ -39,7 +40,6 @@ def _fake_manifest():
 
 def _wire_skill_wave(monkeypatch, tmp_path, *, content_hash, passes):
     import ouroboros.skill_review_passes as passes_mod
-    from ouroboros import config as cfg
     from ouroboros import skill_review
 
     drive = pathlib.Path(tmp_path)
@@ -64,7 +64,8 @@ def _wire_skill_wave(monkeypatch, tmp_path, *, content_hash, passes):
             requested_keys=[], granted_keys=[],
             requested_permissions=[], granted_permissions=[]),
     )
-    monkeypatch.setattr(cfg, "get_review_models", lambda: ["m1", "m2"])
+    # The review pool: two packet seats, slot_1 on m1 and slot_2 on m2.
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", pool_roster(pool_seat("slot_1", "m1"), pool_seat("slot_2", "m2")))
     monkeypatch.setattr(passes_mod, "run_skill_review_passes", passes)
     return skill
 

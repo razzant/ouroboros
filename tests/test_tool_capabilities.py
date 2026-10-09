@@ -668,6 +668,6 @@ def test_burst_absorb_clause_states_the_prefix_write_cost():
         if s["function"]["name"] == "schedule_subagent"
     )
     description = schema["function"]["description"]
-    assert "BURST + ABSORB" in description
+    assert "one round run concurrently; wait_tasks(any_terminal) absorbs whichever finishes first" in description
     assert "prefix write" in description
-    assert "burst buys latency and spacing buys cash" in description
+    assert "choose burst latency or spaced cost savings" in description

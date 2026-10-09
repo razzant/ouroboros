@@ -1,0 +1,2 @@
+66
+The Agents rules say the review pool is the same `OUROBOROS_SUBAGENTS` list — a row's Reviewer mark and an API row's `delivery` are row fields, never a second editor, with `GET /api/review-pool` as the read side — and that the catalog ceiling is `MAX_CONFIGURED_SUBAGENTS`.

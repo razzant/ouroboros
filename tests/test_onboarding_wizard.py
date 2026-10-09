@@ -476,7 +476,7 @@ def test_agents_step_ladder_states_the_startup_gate_honestly():
     assert "a plan cannot run it" not in source
     assert "not free" in source
     assert "Task acceptance stays on the API" not in source
-    assert "commit, plan, skill review and task acceptance each follow their configured" in source
+    assert "commit, plan, skill review and task acceptance all run on the review pool" in source
     assert "acceptance panel on the subscription" in source
     assert "about 12 s" in source and "$0.07 per model row per task" in source  # R12 numbers, not adjectives
     assert "all reviewers" not in source.lower()

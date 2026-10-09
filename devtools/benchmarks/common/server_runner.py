@@ -32,7 +32,7 @@ import uuid
 if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
-from devtools.benchmarks.common.manifests import runtime_attestation
+from devtools.benchmarks.common.manifests import ACTIVE_MODEL_SLOT_KEYS, MODEL_SLOT_KEYS, runtime_attestation
 from devtools.benchmarks.common.secrets import isolated_credential_grants  # noqa: F401 (re-export)
 from ouroboros.context_mode_compat import normalize_context_mode_compat
 from ouroboros.platform_layer import (
@@ -68,7 +68,10 @@ STALE_INHERITED_ENV_KEYS = (
     # advanced sandbox — strip it so the sanitized settings win.
     "OUROBOROS_BOOT_RUNTIME_MODE",
     "USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK",
-    "USE_LOCAL_CONSCIOUSNESS", "OUROBOROS_REVIEWER_SLOTS",
+    "USE_LOCAL_CONSCIOUSNESS",
+    # The review pool rides the roster (OUROBOROS_SUBAGENTS, stripped above); the
+    # lane-era panel key is inert but must not leak either.
+    "OUROBOROS_REVIEWER_SLOTS",
     # Owner/control SECRETS must never leak into the isolated server's env (untrusted
     # benchmark tasks run here). Provider creds are loaded from the sanitized settings.json.
     "GITHUB_TOKEN", "GITHUB_REPO", "OUROBOROS_NETWORK_PASSWORD",
@@ -86,10 +89,9 @@ _ISO_SETTINGS_ALLOW_PREFIX = ("OUROBOROS_MODEL", "OUROBOROS_EFFORT", "LOCAL_MODE
 # see _grant_provider_credentials. Deliberately NOT a `*_API_KEY` pattern either: a custom
 # skill secret could be named `<x>_API_KEY` and must NOT be copied.
 _ISO_SETTINGS_ALLOW_EXACT = frozenset({
+    # The roster carries the delegation actor AND the review pool (its marked rows).
     "OUROBOROS_SUBAGENTS",
-    "OUROBOROS_REVIEWER_SLOTS",
-    "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+    "OUROBOROS_WEBSEARCH_MODEL",
     # Review policy knobs (non-secret): must propagate so settings.json's task-acceptance
     # self-review config is honored by isolated benchmark servers (else it silently
     # falls back to the "auto" default and the end-of-task review never runs).
@@ -221,6 +223,9 @@ def build_isolated_settings(
         if ks in _ISO_SETTINGS_ALLOW_EXACT or ks.startswith(_ISO_SETTINGS_ALLOW_PREFIX):
             out[ks] = value
     out.update(overrides)
+    # Historical manifest keys are never execution settings for a new run.
+    for key in set(MODEL_SLOT_KEYS) - set(ACTIVE_MODEL_SLOT_KEYS):
+        out.pop(key, None)
     if "OUROBOROS_CONTEXT_MODE" in overrides and "OUROBOROS_CONTEXT_MODE_AUTO_LOW" not in overrides:
         # A benchmark override is an explicit operator choice, not ambiguous legacy disk state.
         out["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"

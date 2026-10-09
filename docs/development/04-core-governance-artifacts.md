@@ -9,7 +9,7 @@ MUST include these artifacts as **first-class context sections** — not as
 optional or opportunistic inclusions via touched-file packs. Each registry row
 names its inline and on-demand delivery; neither permits silent truncation.
 
-Commit triad, scope, advisory and deep self-review share
+Every change-review seat (both parts; the preflight's one seat included) and deep self-review share
 `ouroboros/tools/governance_context.py`, driven by ONE external switch: the
 checklist `layer`, decided by the body predicate
 (`ouroboros/review_body_fact.py`: `body_fact` → `layer_for`; ARCHITECTURE §6
@@ -22,9 +22,9 @@ and CHECKLISTS_ARCHIVE standing disclosures in full. Tier 2 selects the
 review-protocol chapter, DEVELOPMENT chapters naming touched files, and DESIGN
 for `web/` changes within `runtime_limits.REVIEW_GOVERNANCE_INLINE_SHARE` of
 the usable window; overflow stays named in navigation. Tier 3 delivers the
-ARCHITECTURE book navigation, never the whole map; tool-free triad packet rows
+ARCHITECTURE book navigation, never the whole map; tool-free packet rows
 also receive relevant sections within that share. **Core layer** (another
-repository, or a skill payload in skill advisory): the surface's own universal
+repository): the surface's own universal
 section is the whole rule set; BIBLE, the archive, the shared-contract section,
 DEVELOPMENT, DESIGN and ARCHITECTURE are recorded `not_applicable`, and the
 navigation indexes the subject's own documents plus its required-source
@@ -46,20 +46,20 @@ The context-delivery registry:
 | Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
 |------|----------|-----------------|----------------|
 | Main task context (`context.py`) | full tier-0 | full composition in Max, a subagent child excepted (issue #1026), which starts from the helper start composition — no whole dialogue history or resident knowledge, a nanny without the life account; book navigation in Low/Nano and for every subagent child | book navigation in Low/Nano and for a subagent child; in Max a separate stable block after the common governance prefix when the active binding targets the system repo (evolution/self-body work, `workspace="none"`, a project-room turn with no external binding), else a visible on-demand pointer (external workspace, API/CLI/scheduled surface) |
-| Triad review (`tools/review.py`) | full via API preamble or retrieving task | Tier 3: book navigation; packet rows also receive sections naming touched files within the inline share | Tier 2: review protocol and chapters naming touched files within the share; the rest remains navigable |
-| ↳ `review_change` by layer (`review_body_fact.layer_for`) | body: as the triad row above; core: not delivered — recorded `not_applicable`, the preamble names no constitution (`review_prompt_text.review_preamble("core")`) | body: as above; core: not delivered; the navigation indexes the SUBJECT's own documents (`governance_context(..., layer="core", subject_root=...)`) | body: as above; core: not delivered; the universal `Change Review Checklist` alone, with the subject's (empty-by-rule) required-source manifest |
+| Change review, Part 1 (`tools/review.py`) | full via API preamble or retrieving task | Tier 3: book navigation; packet rows also receive sections naming touched files within the inline share | Tier 2: review protocol and chapters naming touched files within the share; the rest remains navigable |
+| ↳ `review_change` by layer (`review_body_fact.layer_for`) | body: as the Part 1 row above; core: not delivered — recorded `not_applicable`, the preamble names no constitution (`review_prompt_text.review_preamble("core")`) | body: as above; core: not delivered; the navigation indexes the SUBJECT's own documents (`governance_context(..., layer="core", subject_root=...)`) | body: as above; core: not delivered; the universal `Change Review Checklist` alone, with the subject's (empty-by-rule) required-source manifest |
 | ↳ Cold-start density rung | — | — | Triad packets only: an oversized packet without fresh exact-model density evidence gets one bounded probe of its own 80,000-char slice and one rebuild; a budget refusal stays disclosed (`review_admission.density_probe_before_size_refusal`). Retrieving surfaces have no packet-fit rung. |
-| ↳ Anti-thrashing | — | — | Open obligations from `review_state` (`load_state(drive_root)` + `make_repo_key(repo_dir)`) enter `_build_review_history_section`; the scope brief does the same when `drive_root` is available (`scope_review_session.build_scope_session_task`). |
+| ↳ Anti-thrashing | — | — | Open obligations from `review_state` (`load_state(drive_root)` + `make_repo_key(repo_dir)`) enter `_build_review_history_section`; the retrieving seat's two-part brief does the same when `drive_root` is available (`review_brief_coupling.build_retrieving_brief`). |
 | Background consciousness wake-up (`consciousness.py` → `handle_wake_direct`) | = Main task context | = Main task context | = Main task context |
-| Advisory pre-review (`tools/claude_advisory_review.py`) | body layer on both retrieving deliveries: full tier 1 (BIBLE, the standing disclosures, the surface's own section); the repository surface also carries `Shared Contract Ownership`, the skill surface — a payload judged under the constitution but not this repository's code — does not (`repository_rules=False`) | Tier 3: book navigation and on-demand reading | Tier 2 within this row’s transcript-bound share; touched files arrive as a size/disposition manifest with the span-only carrier cut disclosed, while changed lines are in the diff |
-| Scope review (`tools/scope_review.py`) | full, shared tier 1 beside the Intent / Scope checklist, in every context mode | Tier 3: physical chapter navigation and on-demand reading | Tier 2 within the usable-window share; the brief carries the complete staged change inline or as an exact paged source |
+| Preflight (`review_change(surface=preflight)`: one named row over the system repository's live worktree) | the `review_change` body row above | as above | as above |
+| The coupling question (Part 2 of the retrieving seat's brief, `tools/review_brief_coupling.py`) | full, shared tier 1 beside the `Coupling questions` section, in every context mode | Tier 3: physical chapter navigation and on-demand reading | Tier 2 within the usable-window share; the brief carries the complete staged change inline or as an exact paged source |
 | Skill review (`skill_review.py`) | full inline (`api_chat`) / mandatory full source-root read (`agent_session`) | same two classes | same two classes |
 | Plan review (`tools/plan_review.py`) | full for a SELF-MODIFICATION plan; otherwise a runtime heading-derived navigation map, never a copy | full for a self-modification plan (`api_chat` inline, `agent_session` mandatory full read); otherwise book navigation + a resolvable pointer | not resident: a named on-demand pointer; a reviewer needing it returns `need_evidence` with an exact `::lines=A-B` range |
 | Deep self-review (`deep_self_review.py`) | full inline through shared tier 1 on native and session deliveries, without a duplicate-read demand; the seven-file memory whitelist stays byte-exact inline with per-entry dispositions | Tier 3: book navigation and chapters on demand | Tier 2 within this row’s transcript-bound share; deep keeps its own report criteria and CHECKLISTS navigation (ARCHITECTURE §6 "Deep self-review") |
 
 A scheduled child's `input_sources="declared"` (API model or configured session) selects assignment/common sources; governance delivery and ordinary shared children stay unchanged. Qualify actual physical sends and source receipts, not disk `memory_mode=empty`. Tools/mail may broaden inputs; first position and exchange remain author decisions. Mechanism/limits: ARCHITECTURE §6 "Selected first-input sources".
 
-Scope's change-relative source manifest (`tools/scope_required_sources.py`)
+The coupling question's change-relative source manifest (`tools/scope_required_sources.py`)
 names touched protected runtime, frozen contracts and prompts, their declared
 families and cross-language twins. It is a minimum, not a sufficiency claim;
 reviewers may read any part of the body. Every one of those rules names a file
@@ -125,7 +125,7 @@ the task starts in the next physically possible mode (Max → Low → Nano,
 `memory_floor.physical_mode`, checkpoint `context_fit_physical_mode`). Otherwise
 only actual provider overflow may use a task-local Low projection, then at most
 one same-route strictly-smaller call, and none of it changes owner mode or P3
-commit/scope review. Disclosed residual: an explicit per-task handbook override
+commit review. Disclosed residual: an explicit per-task handbook override
 (`context_requires_self_body_docs`) wins in Max only: Low and Nano ignore it
 (issue #1019), as does a delegated subagent child in every mode (issue #1026); the
 sibling `context_requires_development` flag is ignored on the same paths.
@@ -185,7 +185,7 @@ If a core governance artifact cannot fit in the available context budget:
 - A reviewer or agent operating without ARCHITECTURE.md MUST NOT be treated as
   operating with full context — findings may be incomplete.
 - Tools returning multi-model review findings (`commit_reviewed`,
-  `skill_review`, scope/advisory review helpers) MUST be in
+  `skill_review`, `preflight_review`, `review_change`) MUST be in
   `UNTRUNCATED_TOOL_RESULTS` or carry an explicit per-tool limit; the default
   15,000-char `DEFAULT_TOOL_RESULT_LIMIT` is not acceptable for review verdicts.
 - Book **navigation** (`context_layout.book_navigation`: per chapter the

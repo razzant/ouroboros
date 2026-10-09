@@ -769,17 +769,12 @@ def test_an_author_finish_narrates_its_rationale_in_the_models_voice(harness, mo
 
 
 def _pinned_xhigh_rows_env(monkeypatch):
-    """Three api rows the owner pinned `xhigh`, read by the REAL plan builder."""
-    from ouroboros.reviewer_slot_config import REVIEWER_SLOTS_ENV
+    """Three api pool rows the owner pinned `xhigh`, read by the REAL plan builder."""
     from ouroboros.tools import plan_review as pr, plan_review_runtime
+    from tests.review_pool_rosters import pool_roster, pool_seat
 
-    payload = {
-        "triad": [{"slot_id": sid, "route": {"kind": "api_chat", "target_id": model}, "effort": "xhigh"}
-                  for sid, model in (("s1", "m/a"), ("s2", "m/b"), ("s3", "m/c"))],
-        "scope": [{"slot_id": "scope-route", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-sol"}}],
-        "advisory": {"enabled": True, "route": {"kind": "api", "target_id": ""}},
-    }
-    monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps(payload))
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", pool_roster(*(
+        pool_seat(sid, model, effort="xhigh") for sid, model in (("s1", "m/a"), ("s2", "m/b"), ("s3", "m/c")))))
     monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "medium")
     monkeypatch.setattr(pr, "_plan_review_slots", plan_review_runtime.plan_review_slots)
 
@@ -826,11 +821,10 @@ def test_the_owner_baseline_is_recorded_at_dispatch_and_carried_through_collecti
     wave = _state(harness)["waves"][-1]
     assert wave["custody_pending"] is True and wave["owner_efforts"]["s1"] == "xhigh"
     # The owner drops every pin before collection: the recorded baseline still speaks.
-    from ouroboros.reviewer_slot_config import REVIEWER_SLOTS_ENV
-    payload = json.loads(__import__("os").environ[REVIEWER_SLOTS_ENV])
-    for row in payload["triad"]:
+    payload = json.loads(__import__("os").environ["OUROBOROS_SUBAGENTS"])
+    for row in payload["items"]:
         row["effort"] = "low"
-    monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps(payload))
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps(payload))
     collected = _collect(ctx, wave["request_fingerprint"])
     settled = _state(harness)["waves"][-1]
     assert settled["custody_pending"] is False and settled["owner_efforts"] == wave["owner_efforts"]

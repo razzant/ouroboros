@@ -1,8 +1,10 @@
 """Tests for anti-thrashing behavior in pre-commit review history sections.
 
 Covers v4.35.x changes: obligation ID injection, verdict-authoritative
-instructions, and anti-rephrase guidance in `_build_review_history_section`
-(both the triad `review.py` and the scope-level `scope_review.py` copies).
+instructions, and anti-rephrase guidance in the ONE shared
+`build_review_history_section` — as the packet seat (`review.py`) and the
+two-part brief (`review_brief_coupling.py`) both render it — plus the Part-2
+coupling-history block.
 """
 import pathlib
 import subprocess
@@ -22,10 +24,8 @@ from ouroboros.tools.review_helpers import (
     _ANTI_THRASHING_RULE_ITEM_NAME,
     _HISTORY_VERIFICATION_ONLY_RULE,
 )
-from ouroboros.tools.scope_review import (
-    _build_review_history_section as scope_hist,
-    _build_scope_history_section,
-)
+from ouroboros.tools.review_brief_coupling import build_coupling_history_section as _build_scope_history_section
+from ouroboros.tools.review_helpers import build_review_history_section as scope_hist
 
 
 @dataclass
@@ -114,7 +114,7 @@ def test_history_section_obligations_only_no_history():
 
 
 # ---------------------------------------------------------------------------
-# Scope review._build_review_history_section
+# The two-part brief's Part-1 history (the same shared builder)
 # ---------------------------------------------------------------------------
 
 
@@ -138,17 +138,17 @@ def test_scope_review_history_section_empty_without_inputs():
 
 
 # ---------------------------------------------------------------------------
-# Scope review._build_scope_history_section — verdict-authoritative note
+# review_brief_coupling.build_coupling_history_section — verdict-authoritative note
 # ---------------------------------------------------------------------------
 
 
-def test_scope_history_section_verdict_authoritative():
+def test_coupling_history_section_verdict_authoritative():
     history = [
-        {"summary": "previous scope round noted a broken contract",
+        {"summary": "previous coupling round noted a broken contract",
          "status": "responded"},
     ]
     out = _build_scope_history_section(history)
-    # The shared constant is now interpolated into the scope history section.
+    # The shared constant is interpolated into the Part-2 history block.
     assert _ANTI_THRASHING_RULE_VERDICT in out
     assert _HISTORY_VERIFICATION_ONLY_RULE in out
 
@@ -186,27 +186,6 @@ def test_format_obligation_excerpt_redacts_secrets_before_collapsing():
     out = format_obligation_excerpt(reason_with_secret, max_chars=300)
     assert "supersecret123" not in out, "Secret value must not appear in excerpt"
     assert "***REDACTED***" in out or "REDACTED" in out, "Redaction marker must be present"
-
-
-def test_advisory_prompt_includes_verdict_authoritative_and_anti_rephrase_rules():
-    """The advisory prompt must carry the same verdict-authoritative and anti-rephrase
-    rules as the triad/scope history sections (step 6.e and 6.f)."""
-    from ouroboros.tools.claude_advisory_review import _build_advisory_prompt
-    import pathlib
-    prompt = _build_advisory_prompt(
-        repo_dir=pathlib.Path("/tmp/test-repo"),
-        commit_message="test commit",
-        goal="",
-        scope="",
-        drive_root=None,
-        prompt_context={
-            "diff": "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new",
-            "changed_files": "foo.py",
-        },
-    )
-    assert "VERDICT IS AUTHORITATIVE" in prompt
-    assert "DO NOT REPHRASE" in prompt
-    assert "VERIFICATION ONLY" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +228,15 @@ def test_run_unified_review_obligation_loading_uses_drive_root_and_make_repo_key
     This tests the production call-site wiring in review.py:
     - load_state(pathlib.Path(ctx.drive_root)) is used (not a file path)
     - make_repo_key(pathlib.Path(ctx.repo_dir)) is used (not str())
-    - The loaded obligations reach _build_review_history_section
+    - The loaded obligations reach build_review_history_section through the one
+      history owner (``review_helpers.review_history_with_obligations``)
 
-    Strategy: monkeypatch _build_review_history_section to capture its arguments,
-    then verify the persisted obligation was passed via the correct repo_key path.
+    Strategy: monkeypatch review_helpers.build_review_history_section (the owner's
+    call-time binding) to capture its arguments, then verify the persisted
+    obligation was passed via the correct repo_key path.
     """
     import ouroboros.tools.review as review_mod
+    import ouroboros.tools.review_helpers as review_helpers
 
     drive_root = tmp_path / "data"
     drive_root.mkdir()
@@ -275,14 +257,14 @@ def test_run_unified_review_obligation_loading_uses_drive_root_and_make_repo_key
 
     # Capture obligations passed to the prompt builder.
     captured_obligations = []
-    original_build = review_mod._build_review_history_section
+    original_build = review_helpers.build_review_history_section
 
-    def capturing_build(history, open_obligations=None):
+    def capturing_build(history, open_obligations=None, **kwargs):
         if open_obligations:
             captured_obligations.extend(open_obligations)
-        return original_build(history, open_obligations=open_obligations)
+        return original_build(history, open_obligations=open_obligations, **kwargs)
 
-    monkeypatch.setattr(review_mod, "_build_review_history_section", capturing_build)
+    monkeypatch.setattr(review_helpers, "build_review_history_section", capturing_build)
 
     # Stub out heavy git / LLM / file I/O so we never leave the obligation-loading path.
     monkeypatch.setattr(
@@ -326,7 +308,7 @@ def test_run_unified_review_obligation_loading_uses_drive_root_and_make_repo_key
     found_ids = [ob.obligation_id for ob in captured_obligations]
     assert "ob-unified-999" in found_ids, (
         f"Expected obligation 'ob-unified-999' to be loaded via make_repo_key+drive_root "
-        f"and passed to _build_review_history_section. Got: {found_ids}"
+        f"and passed to build_review_history_section. Got: {found_ids}"
     )
     all_prompt_text = original_build(_mk_history(), open_obligations=captured_obligations)
     assert '"obligation_id": "ob-unified-999"' in all_prompt_text
@@ -366,10 +348,10 @@ def test_run_unified_review_injects_obligation_ids_with_correct_repo_key(tmp_pat
     assert '"item": "code_quality"' in out
 
 
-def test_scope_brief_loads_obligations_from_drive_root(tmp_path, monkeypatch):
-    """The retrieving scope brief with a valid `drive_root` loads obligations from
-    the persisted state and renders them into the reviewer's history section."""
-    from ouroboros.tools import scope_review_session as session
+def test_two_part_brief_loads_obligations_from_drive_root(tmp_path, monkeypatch):
+    """The two-part brief with a valid `drive_root` loads obligations from the
+    persisted state and renders them into the reviewer's history section."""
+    from ouroboros.tools import review_brief_coupling as brief_mod
 
     drive_root = tmp_path / "data"
     drive_root.mkdir()
@@ -388,7 +370,7 @@ def test_scope_brief_loads_obligations_from_drive_root(tmp_path, monkeypatch):
     )
     _write_obligation_to_state(drive_root, repo_key, persisted)
 
-    brief, _manifest = session.build_scope_session_task(repo_dir, session.ScopeBriefInputs(
+    brief, _manifest = brief_mod.build_retrieving_brief(repo_dir, brief_mod.BriefInputs(
         commit_message="fix: integration scope test",
         drive_root=drive_root,
     ))
@@ -428,8 +410,8 @@ def test_triad_history_section_backtick_in_reason_does_not_break_fence():
     assert "abc123" in result
 
 
-def test_scope_history_section_backtick_in_reason_does_not_break_fence():
-    """Same fence-safety guarantee for scope_review copy of _build_review_history_section."""
+def test_brief_history_section_backtick_in_reason_does_not_break_fence():
+    """Same fence-safety guarantee as the two-part brief renders it."""
     reason_with_backticks = "See ```json\n{\"key\": \"value\"}\n``` for details"
     ob = _make_ob("def456", "security_issues", reason_with_backticks)
     result = scope_hist([], open_obligations=[ob])

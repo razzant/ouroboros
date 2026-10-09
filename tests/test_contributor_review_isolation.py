@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -120,19 +121,21 @@ def _personal_engine(home: pathlib.Path, port: int) -> None:
 # A synthetic, provider-neutral stand-in for a credential the host keeps in its
 # settings: the leak check compares exact bytes, so no provider key shape is needed.
 _HOST_PROVIDER_VALUE = "isolation-fixture-host-provider-value"
-_REVIEWER_SLOTS = {  # the scope row's effort is the host's surface setting
-    "triad": [{"slot_id": "t1", "route": {"kind": "agent_session", "target_id": "codex=gpt-host"},
-               "effort": "high"}],
-    "scope": [{"slot_id": "s1", "route": {"kind": "agent_session", "target_id": "cursor=claude-host"}}],
-}
+# The host's review pool: two session rows of its subagent catalog, each with its own effort.
+_REVIEW_POOL = {"enabled": True, "items": [
+    {"subagent_id": "t1", "name": "t1", "recommended_use": "Host reviewer.", "review_eligible": True,
+     "route": {"kind": "agent_session", "target_id": "codex=gpt-host"}, "effort": "high"},
+    {"subagent_id": "s1", "name": "s1", "recommended_use": "Host reviewer.", "review_eligible": True,
+     "route": {"kind": "agent_session", "target_id": "cursor=claude-host"}, "effort": "xhigh"},
+]}
 # A stale projection of another panel, as a harness environment exported before
-# the owner's last settings edit would carry it.
+# the owner's last settings edit would carry it (its catalog, and the retired lane keys).
 _INHERITED_PANEL = {
+    "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [
+        {"subagent_id": "stale", "name": "stale", "recommended_use": "Stale reviewer.", "review_eligible": True,
+         "route": {"kind": "agent_session", "target_id": "codex=gpt-stale"}, "effort": "low"}]}),
     "OUROBOROS_REVIEWER_SLOTS": json.dumps({
-        "triad": [{"slot_id": "stale", "route": {"kind": "agent_session", "target_id": "codex=gpt-stale"},
-                   "effort": "low"}],
-        "scope": [{"slot_id": "stale-scope", "route": {"kind": "agent_session", "target_id": "codex=gpt-stale"}}],
-    }),
+        "triad": [{"slot_id": "stale", "route": {"kind": "agent_session", "target_id": "codex=gpt-stale"}}]}),
     "OUROBOROS_EFFORT_SCOPE_REVIEW": "low",
 }
 
@@ -154,8 +157,7 @@ def _legacy_host(root: pathlib.Path, port: int) -> pathlib.Path:
     (host / "settings.json").write_text(json.dumps({
         "TOTAL_BUDGET": 500.0,
         "OPENROUTER_API_KEY": _HOST_PROVIDER_VALUE,
-        "OUROBOROS_REVIEWER_SLOTS": json.dumps(_REVIEWER_SLOTS),
-        "OUROBOROS_EFFORT_SCOPE_REVIEW": "xhigh",
+        "OUROBOROS_SUBAGENTS": json.dumps(_REVIEW_POOL),
         "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
     }, indent=2), encoding="utf-8")
     _engine_home(host, port)
@@ -190,7 +192,7 @@ def run_review_change(ctx, **arguments):
     from ouroboros import config
     from ouroboros.claudexor_daemon import ensure_owned_gateway, read_owned_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway
-    from ouroboros.reviewer_slot_config import load_reviewer_slot_config, record_reviewer_slot_executions
+    from ouroboros.reviewer_slot_config import record_reviewer_slot_executions, review_pool_rows
     from ouroboros.settings_setup_contract import resolve_total_budget_usd
     from ouroboros.usage_accounting import (
         AttemptRequest, BudgetExceeded, mark_dispatched, release_attempt, reserve_attempt,
@@ -241,8 +243,8 @@ def run_review_change(ctx, **arguments):
     if report["spend_1"] == "admitted":
         spend(3.0)  # known spend reaches the explicit cap
     probe("at_cap", lambda: release_attempt(admit(0.01)))
-    slots = {row.slot_id: row for row in load_reviewer_slot_config().triad}
-    report["configured_triad"] = sorted(slots)
+    slots = {row.slot_id: row for row in review_pool_rows()}
+    report["configured_pool"] = sorted(slots)
     record_reviewer_slot_executions(
         "review", [SimpleNamespace(slot_id="t1", status="responded", usage={})], slots)
     pathlib.Path(os.environ["ISOLATION_PROBE_OUT"]).write_text(json.dumps(report, default=str))
@@ -289,8 +291,21 @@ def _fixture_repo(root: pathlib.Path) -> pathlib.Path:
     return repo
 
 
+def _interpreter(executable: str = sys.executable, *, base: str = getattr(sys, "_base_executable", sys.executable),
+                 windows: bool = os.name == "nt") -> tuple[str, dict[str, str]]:
+    """The interpreter process itself. A Windows venv's ``python.exe`` is a redirector
+    that runs the base interpreter as its CHILD, so the started process would not be
+    the wrapper. As ``multiprocessing`` does (bpo-35797), start the base interpreter and
+    name the venv in ``__PYVENV_LAUNCHER__``, which it reads and clears: the same venv
+    interpreter, one process."""
+    if windows and os.path.normcase(executable) != os.path.normcase(base):
+        return base, {"__PYVENV_LAUNCHER__": executable}
+    return executable, {}
+
+
 def _review(repo: pathlib.Path, host: pathlib.Path, out: pathlib.Path, *extra: str,
             inherited: dict | None = None):
+    python, launcher = _interpreter()
     env = {**os.environ, "OUROBOROS_DATA_DIR": str(host),
            "OUROBOROS_SETTINGS_PATH": str(host / "settings.json"),
            "ISOLATION_PROBE_OUT": str(out / "probe.json")}
@@ -298,8 +313,9 @@ def _review(repo: pathlib.Path, host: pathlib.Path, out: pathlib.Path, *extra: s
                 "OUROBOROS_CLAUDEXOR_ATTACH_HOME", "TOTAL_BUDGET", *_INHERITED_PANEL):
         env.pop(key, None)
     env.update(inherited or {})
+    env.update(launcher)
     return subprocess.run(
-        [sys.executable, str(repo / "scripts" / "run_external_review.py"), "--contributor",
+        [python, str(repo / "scripts" / "run_external_review.py"), "--contributor",
          "--base-ref=base", "--head-ref=proposal", f"--output={out / 'packet'}",
          f"--drive-root={out / 'drive'}", *extra, "--", "PR title"],
         cwd=str(repo), env=env, capture_output=True, text=True, timeout=600,
@@ -369,7 +385,7 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
     assert [float(row["cost_usd"]) for row in probe_rows("settled")] == [1.0, 3.0]
     assert len(probe_rows("released")) == 1  # the $10 hold, admitted then let go
     # The configured rows came from the host settings; the marker landed in the drive.
-    assert report["configured_triad"] == ["t1"]
+    assert report["configured_pool"] == ["s1", "t1"]
     marker = json.loads((drive / "state" / "reviewer_slot_last_execution.json").read_text(encoding="utf-8"))
     assert marker["t1"]["requested"]["effort"] == "high"
     # Engine: attach at the floor version, own-run cancel allowed, nothing managed:
@@ -389,15 +405,15 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
     outcome = evidence["production_outcome"]
     assert (outcome["block_reason"], outcome["original_block_reason"]) == (
         "execution_receipt_mismatch", "review_record_unavailable")
-    assert outcome["execution_receipt_mismatches"] == ["missing_actor:scope:s1", "missing_actor:triad:t1"]
+    assert outcome["execution_receipt_mismatches"] == ["missing_actor:pool:s1", "missing_actor:pool:t1"]
     assert evidence["review_record"] == {"record_id": None, "available": False}
     assert evidence["budget"]["run_cap_usd"] == 4.0
     assert evidence["budget"]["authority"] == "isolated_review_ledger"
     isolation = evidence["review_config"]["data_isolation"]
     assert isolation["review_data_root"] == "$REVIEW_DRIVE"
-    slots = {surface: [(row["slot_id"], row["route"]["target_id"], row["effort"])
-                       for row in evidence["review_config"][f"{surface}_slots"]] for surface in ("triad", "scope")}
-    assert slots == {"triad": [("t1", "codex=gpt-host", "high")], "scope": [("s1", "cursor=claude-host", "xhigh")]}
+    assert [(row["slot_id"], row["route"]["target_id"], row["effort"])
+            for row in evidence["review_config"]["pool_slots"]] == [
+        ("t1", "codex=gpt-host", "high"), ("s1", "cursor=claude-host", "xhigh")]
     assert run.returncode == 3  # the probe dispatched no reviewer: never READY
     # Neither the host's provider key nor its engine token reaches any output.
     outputs = [run.stdout.encode(), run.stderr.encode()]
@@ -422,6 +438,29 @@ def test_full_entrypoint_keeps_a_legacy_host_untouched(tmp_path, engine):
     changed = _review(repo, host, out, "--run-cap-usd=9", "--attach-host-engine")
     assert changed.returncode == 3 and "keeps that cap" in changed.stderr
     assert _tree_state(host) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="on Windows the full-entrypoint test meets the real venv redirector")
+def test_the_started_process_is_the_interpreter_even_behind_a_venv_redirector(tmp_path):
+    """The full-entrypoint test names the wrapper by its parent PID. A redirector in
+    front of the interpreter (what a Windows venv's ``python.exe`` is) would be that
+    parent; the launch starts the interpreter itself and names the venv."""
+    redirector = tmp_path / "venv" / "Scripts" / "python"
+    redirector.parent.mkdir(parents=True)
+    redirector.write_text(f'#!/bin/sh\n__PYVENV_LAUNCHER__="$0" {shlex.quote(sys.executable)} "$@"\nexit $?\n',
+                          encoding="utf-8")
+    redirector.chmod(0o755)
+
+    def parent_of(python: str, env: dict[str, str]) -> int:
+        return int(subprocess.run([python, "-c", "import os; print(os.getppid())"], env={**os.environ, **env},
+                                  capture_output=True, text=True, check=True, timeout=60).stdout)
+
+    assert parent_of(str(redirector), {}) != os.getpid()  # the hazard: the redirector is the parent
+    python, launcher = _interpreter(str(redirector), base=sys.executable, windows=True)
+    assert parent_of(python, launcher) == os.getpid()
+    assert launcher == {"__PYVENV_LAUNCHER__": str(redirector)}
+    assert _interpreter(sys.executable, base=sys.executable, windows=True) == (sys.executable, {})
+    assert _interpreter(str(redirector), base=sys.executable, windows=False) == (str(redirector), {})
 
 
 def test_the_proposal_checkout_is_refused_before_any_engine_or_review(tmp_path, engine):
@@ -806,12 +845,12 @@ def test_wrapper_settings_load_makes_the_pinned_document_the_whole_panel(tmp_pat
             monkeypatch.delenv(SETTINGS_INTEGRITY_ENV, raising=False)
         module._load_settings_into_env()
 
-    stale = {**_INHERITED_PANEL, "OUROBOROS_SUBAGENTS": "[]", "TOTAL_BUDGET": "7"}
-    # The document stores the panel as an object and leaves the scope effort and
-    # the subagent registry unset: the stale projection supplies none of them.
-    load({"OUROBOROS_REVIEWER_SLOTS": _REVIEWER_SLOTS, "TOTAL_BUDGET": 500}, **stale)
-    assert json.loads(os.environ["OUROBOROS_REVIEWER_SLOTS"]) == _REVIEWER_SLOTS
-    assert not {"OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_SUBAGENTS"} & set(os.environ)
+    stale = {**_INHERITED_PANEL, "TOTAL_BUDGET": "7"}
+    # The document stores the catalog as an object and carries no retired lane key:
+    # the stale projection supplies none of them.
+    load({"OUROBOROS_SUBAGENTS": _REVIEW_POOL, "TOTAL_BUDGET": 500}, **stale)
+    assert json.loads(os.environ["OUROBOROS_SUBAGENTS"]) == _REVIEW_POOL
+    assert not {"OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_REVIEWER_SLOTS"} & set(os.environ)
     assert os.environ["TOTAL_BUDGET"] == "7"  # outside the panel an explicit environment value still wins
     # A retired reviewer comma-list is no panel: the read seam drops the document's copy and an
     # inherited one is a stale projection, so with the panel unset the default panel stays the default.
@@ -819,8 +858,8 @@ def test_wrapper_settings_load_makes_the_pinned_document_the_whole_panel(tmp_pat
     load(dict(retired), **retired)
     assert not set(RETIRED_COMMA_LIST_SETTING_KEYS) & set(os.environ)
     # The unpinned operator lane keeps "an explicit environment value wins" for every key.
-    load({"OUROBOROS_REVIEWER_SLOTS": json.dumps(_REVIEWER_SLOTS)}, pinned=False, **stale)
-    assert {key: os.environ.get(key) for key in _INHERITED_PANEL} == _INHERITED_PANEL
+    load({"OUROBOROS_SUBAGENTS": json.dumps(_REVIEW_POOL)}, pinned=False, **stale)
+    assert os.environ["OUROBOROS_SUBAGENTS"] == _INHERITED_PANEL["OUROBOROS_SUBAGENTS"]
     # A pinned document that is not a settings object refuses instead of running the default panel.
     with pytest.raises(RuntimeError, match="not a settings object"):
         load([], **stale)
@@ -831,16 +870,14 @@ def test_wrapper_settings_load_makes_the_pinned_document_the_whole_panel(tmp_pat
 # the lane it dispatches on (``" (local)"`` where ``use_local``).
 _HOST_TASK_PANEL = '''import json
 from ouroboros.model_slots import local_lane_label
-from ouroboros.review_substrate import scope_reviewer_slots
-from ouroboros.reviewer_slot_config import load_reviewer_slot_config, triad_delivery_slots
+from ouroboros.reviewer_slot_config import review_pool_slots
 from ouroboros.settings_integrity import task_settings_scope
 from ouroboros.subagent_runtime import apply_task_start_settings
 
+# The review pool under the task's pinned view, each row on its lane.
 with task_settings_scope(apply_task_start_settings()):
-    source = load_reviewer_slot_config().source
-    triad, scope = ([local_lane_label(slot.model, slot.use_local) for slot in slots]
-                    for slots in (triad_delivery_slots(), scope_reviewer_slots()))
-print(json.dumps({"source": source, "triad": triad, "scope": scope}))
+    pool = [local_lane_label(slot.model, slot.use_local) for slot in review_pool_slots()]
+print(json.dumps({"pool": pool}))
 '''
 # The wrapper's resolution in ``_prepare_review_configuration`` order, after its real
 # isolation (no proposal read, no provider probe), frozen and then delivered as the
@@ -855,23 +892,30 @@ wrapper._load_settings_into_env()
 wrapper._apply_contributor_review_env()
 frozen = wrapper._freeze_contributor_slots(wrapper._resolved_review_config(profile=wrapper._CONTRIBUTOR_PROFILE))
 from ouroboros.model_slots import local_lane_label
-from ouroboros.review_substrate import scope_reviewer_slots
-from ouroboros.reviewer_slot_config import triad_delivery_slots
+from ouroboros.reviewer_slot_config import review_pool_slots
 
-triad, scope = ([local_lane_label(slot.model, slot.use_local) for slot in slots]
-                for slots in (triad_delivery_slots(), scope_reviewer_slots()))
-print(json.dumps({"source": frozen["slot_config_source"], "triad": triad, "scope": scope,
-                  "openrouter_probe": wrapper._configured_openrouter_models(frozen)}))
+# The frozen pool the wrapper runs (each row labelled with its lane) and the pool the
+# pinned catalog now resolves to: the freeze is what the review dispatches.
+pool = [row["route"]["target_id"] for row in frozen["pool_slots"]]
+assert pool == [local_lane_label(slot.model, slot.use_local) for slot in review_pool_slots()], pool
+print(json.dumps({"pool": pool, "openrouter_probe": wrapper._configured_openrouter_models(frozen)}))
 '''
 
 
-def _panel_resolver(root: pathlib.Path, document: dict):
-    """Run a panel script against a host whose settings are ``document``, and its pin."""
+def _panel_resolver(root: pathlib.Path, document: dict, pool_document: dict | None = None):
+    """Run a panel script against a host whose settings are ``document``, and its pin.
+
+    The review pool is the document's catalog: the document carries the factory rows
+    the one-time migration mints for it (``factory_review_rows``) — for the document
+    ``pool_document`` names when the minting view differs from the saved one."""
     from ouroboros.settings_defaults import RETIRED_COMMA_LIST_SETTING_KEYS, settings_env_keys
+    from ouroboros.subscription_install_presets import factory_review_rows
 
     host = root / "host-data"
     host.mkdir(parents=True)
     settings = host / "settings.json"
+    document = {**document, "OUROBOROS_SUBAGENTS": json.dumps(
+        {"enabled": False, "items": factory_review_rows(pool_document or document)})}
     settings.write_text(json.dumps(document), encoding="utf-8")
     dropped = {*settings_env_keys(), *RETIRED_COMMA_LIST_SETTING_KEYS, SETTINGS_INTEGRITY_ENV, "OUROBOROS_KEYS_FILE"}
     clean = {key: value for key, value in os.environ.items() if key not in dropped}
@@ -889,17 +933,16 @@ def _panel_resolver(root: pathlib.Path, document: dict):
 
 
 def test_a_pinned_document_without_a_panel_gets_its_hosts_default_panel(tmp_path):
-    """The default panel's model and provider inputs come from the pinned document too."""
+    """The factory pool's model and provider inputs come from the pinned document too."""
     resolve, pin = _panel_resolver(tmp_path, {"ANTHROPIC_API_KEY": _HOST_PROVIDER_VALUE,
                                               "OUROBOROS_MODEL": "anthropic::claude-opus-5"})
 
     host_panel = resolve(_HOST_TASK_PANEL, **pin)
-    assert host_panel["source"] == "default"
-    assert host_panel["triad"] == ["anthropic::claude-opus-5"] * 3  # the host's exclusive direct provider
+    assert host_panel["pool"] == ["anthropic::claude-opus-5"] * 3  # the host's exclusive direct provider
     assert resolve(_WRAPPER_PANEL, str(tmp_path / "drive-clean")) == (host_panel, [])
-    # A shell exported for another configuration: an older Main.
+    # A shell exported for another configuration: an older Main. The pool is the saved
+    # catalog, so the stale export moves nothing, pinned or not.
     stale = {"OUROBOROS_MODEL": "anthropic::claude-sonnet-4-5"}
-    assert resolve(_WRAPPER_PANEL, **stale)[0] != host_panel  # unpinned, it selects another panel
     assert resolve(_WRAPPER_PANEL, str(tmp_path / "drive-stale"), **stale) == (host_panel, [])
     # Another provider's key is a credential the run's calls can use, so the panel is the one
     # the host derives with that credential available, whichever source supplies it.
@@ -914,9 +957,12 @@ def test_a_pinned_default_panel_keeps_the_credentials_its_calls_use(tmp_path):
     well as from the document (synthetic values; no provider is contacted).
     """
     credential = {"ANTHROPIC_API_KEY": _HOST_PROVIDER_VALUE}
-    resolve, pin = _panel_resolver(tmp_path, {"OUROBOROS_MODEL": "anthropic::claude-opus-5"})
+    # The pool was minted while the credential was in the document; the saved
+    # document keeps the rows, the credential now arrives from the run.
+    resolve, pin = _panel_resolver(tmp_path, {"OUROBOROS_MODEL": "anthropic::claude-opus-5"},
+                                   pool_document={"OUROBOROS_MODEL": "anthropic::claude-opus-5", **credential})
     host_panel = resolve(_HOST_TASK_PANEL, **pin, **credential)
-    assert host_panel["triad"] == ["anthropic::claude-opus-5"] * 3
+    assert host_panel["pool"] == ["anthropic::claude-opus-5"] * 3
     keys_file = tmp_path / "keys.txt"
     keys_file.write_text(f"anthropic: {_HOST_PROVIDER_VALUE}\n", encoding="utf-8")
     for name, supplied in (("environment", credential), ("keys-file", {"OUROBOROS_KEYS_FILE": str(keys_file)}),
@@ -930,8 +976,7 @@ def test_a_frozen_default_row_dispatches_on_the_lane_it_was_resolved_on(tmp_path
     resolve, pin = _panel_resolver(tmp_path, {
         "USE_LOCAL_MAIN": True, "LOCAL_MODEL_SOURCE": "owner/local-model.gguf", "OUROBOROS_MODEL": "owner-local"})
     local_panel = resolve(_HOST_TASK_PANEL, **pin)
-    assert local_panel["triad"] == ["owner-local (local)"] * 3
-    assert local_panel["scope"] and set(local_panel["scope"]) == {"owner-local (local)"}
+    assert local_panel["pool"] == ["owner-local (local)"] * 3  # the local-only factory pool: three runs of Main
     for name, inherited in (("clean", {}), ("stale-lane-flag", {"USE_LOCAL_MAIN": "0"}),
                             ("remote-credential", {"OPENAI_API_KEY": "isolation-fixture-second-provider-value"})):
         host = resolve(_HOST_TASK_PANEL, **pin, **inherited)

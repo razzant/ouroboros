@@ -43,7 +43,7 @@ function settingsLoader({ activePage = 'settings', extensions } = {}) {
         updateSettingsDirtyState() { calls.dirtyChecks += 1; },
         renderRequestedSkillSecrets(root, skills) { calls.rows.push(skills); },
         renderExtensionSettingsSections: async (root, sections, { isCurrent }) => { if (isCurrent()) calls.sections.push(sections); },
-        reloadReviewerSlots: async () => {}, reloadSubagentsSection: async () => {},
+        reloadReviewPool: async () => {}, reloadSubagentsSection: async () => {},
     });
     vm.runInContext(source('    const settingsPageActive = ', '\n    async function reloadSettingsWithFeedback'), context);
     return { context, calls, load: () => context.loadSettings() };

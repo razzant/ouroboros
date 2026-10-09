@@ -3,7 +3,7 @@
 ``review_change`` operation (``ouroboros.tools.review_change``).
 
 The operator lane reviews this checkout's staged index. The ``--contributor``
-lane reviews a committed base..head proposal with the configured triad + scope,
+lane reviews a committed base..head proposal with the configured review pool,
 blocking semantics, and a redacted shareable packet bound to base/head/tree/diff.
 The runtime freezes the subject and reads it; the review flow and rules that run
 are the installed body's — the checkout this wrapper runs from — never the
@@ -71,6 +71,9 @@ os.environ.setdefault("OUROBOROS_RUNTIME_MODE", "pro")
 # fixing the environment.
 _GENUINE_BLOCK_REASONS = {"critical_findings"}
 _OPENROUTER_MIN_REMAINING_USD = 10.0
+# Split-the-commit policy for a diff a reviewer receives as prompt text (the number the
+# retired advisory gate carried); retrieving actors read the files and are not bound by it.
+_PACKET_DIFF_CHARS_CAP = 500_000
 _CONTRIBUTOR_DEFAULT_BASE_REF = "upstream/ouroboros"
 _CONTRIBUTOR_LANDING_OBLIGATION_ITEMS = frozenset({
     "version_bump",
@@ -95,16 +98,16 @@ _REVIEW_SUBSTRATE_PATHS = frozenset({
     "ouroboros/review_verdict.py", "ouroboros/review_projection.py", "ouroboros/review_state.py",
     "ouroboros/review_state_records.py", "ouroboros/review_state_model.py", "ouroboros/review_state_custody.py",
     "ouroboros/runtime_mode_policy.py", "ouroboros/triad_review.py", "ouroboros/usage_accounting.py",
-    "ouroboros/observability.py", "ouroboros/utils.py", "ouroboros/tools/claude_advisory_review.py",
-    "ouroboros/tools/preflight_review_prompt.py", "ouroboros/tools/preflight_review_run.py", "ouroboros/tools/commit_gate.py",
+    "ouroboros/observability.py", "ouroboros/utils.py", "ouroboros/tools/preflight_review.py",
+    "ouroboros/commit_admission.py", "ouroboros/tools/commit_gate.py",
     "ouroboros/tools/git.py", "ouroboros/tools/parallel_review.py", "ouroboros/tools/registry.py",
     "ouroboros/tools/review.py", "ouroboros/tools/review_multi_model.py", "ouroboros/tools/review_context_atlas.py",
     "ouroboros/tools/review_helpers.py", "ouroboros/tools/review_prompt_text.py", "ouroboros/tools/review_file_pack.py",
     "ouroboros/tools/review_checklist.py", "ouroboros/tools/review_subject.py", "ouroboros/tools/review_change.py",
     "ouroboros/review_body_fact.py", "ouroboros/review_ledger.py",
     "ouroboros/tools/review_revalidation.py", "ouroboros/tools/review_binary_context.py", "ouroboros/tools/release_sync.py",
-    "ouroboros/tools/review_synthesis.py", "ouroboros/tools/scope_review.py", "ouroboros/tools/scope_review_contract.py",
-    "ouroboros/tools/scope_review_session.py", "ouroboros/tools/scope_required_sources.py",
+    "ouroboros/tools/review_synthesis.py", "ouroboros/tools/scope_review_contract.py",
+    "ouroboros/tools/review_brief_coupling.py", "ouroboros/tools/scope_required_sources.py", "ouroboros/tools/review_admission.py",
     "ouroboros/tools/governance_context.py", "ouroboros/review_session_reads.py",
     "ouroboros/tools/scope_window.py", "ouroboros/claudexor_daemon.py", "ouroboros/delegate_custody.py",
     "ouroboros/delegate_custody_usage.py", "ouroboros/delegate_output.py", "ouroboros/gateways/claudexor.py",
@@ -212,27 +215,6 @@ def _load_settings_into_env() -> None:
     _fallback("OPENROUTER_API_KEY", "openrouter")
 
 
-def _advisory_unavailability_warning() -> str:
-    """Return a safe route-aware operator warning, or ``""`` when available."""
-    from ouroboros.tools.claude_advisory_review import (
-        ADVISORY_REVIEW_CHOICE_GUIDANCE,
-        advisory_gate_unavailability_reason,
-    )
-
-    try:
-        reason = advisory_gate_unavailability_reason()
-    except ValueError:
-        reason = "invalid_advisory_configuration"
-    if reason is None:
-        return ""
-    return (
-        f"WARN: configured advisory review is unavailable ({reason}). "
-        "The production flow keeps its existing reason-specific behavior; "
-        "inspect advisory.txt and the typed review outcome. "
-        f"{ADVISORY_REVIEW_CHOICE_GUIDANCE}"
-    )
-
-
 def _git_text(args: list[str], *, cwd: pathlib.Path | None = None) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -266,7 +248,7 @@ def _apply_contributor_review_env() -> None:
     """Pin readiness policy while preserving the contributor's reviewer slots."""
     os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] = "blocking"
     # Scope-review applicability follows the context mode (v6.80.0): pin max so the
-    # operator review line always runs the blocking whole-repo scope reviewer, even
+    # operator review line always asks the blocking whole-repo coupling questions, even
     # when the host happens to sit in the owner's low mode.
     os.environ["OUROBOROS_CONTEXT_MODE"] = "max"
     os.environ["OUROBOROS_OBSERVABILITY_KEEP_RAW"] = "0"
@@ -436,9 +418,9 @@ def _probe_model_for_key(token: str, model: str) -> tuple[bool, str]:
 
 def _review_probe_models() -> list[str]:
     try:
-        from ouroboros.config import get_review_models, get_scope_review_models
+        from ouroboros.reviewer_slot_config import review_pool_rows
 
-        ordered = [*get_review_models(), *get_scope_review_models()]
+        ordered = [row.target_id for row in review_pool_rows() if not row.is_session]
         return list(dict.fromkeys(str(model) for model in ordered if str(model).strip()))
     except Exception:
         return []
@@ -517,13 +499,10 @@ def _select_healthy_openrouter_key(
 
 
 def _assert_contributor_review_config(resolved_config: dict) -> None:
-    """Fail closed unless a complete typed slot plan will reach the review gate."""
-    slots = [
-        *list(resolved_config.get("triad_slots") or []),
-        *list(resolved_config.get("scope_slots") or []),
-    ]
-    if not resolved_config.get("triad_slots") or not resolved_config.get("scope_slots"):
-        raise RuntimeError("contributor review needs at least one triad and scope slot")
+    """Fail closed unless a complete typed pool plan will reach the review gate."""
+    slots = list(resolved_config.get("pool_slots") or [])
+    if not slots:
+        raise RuntimeError("contributor review needs at least one review pool seat")
     slot_ids = [str(row.get("slot_id") or "") for row in slots]
     if any(not slot_id for slot_id in slot_ids) or len(slot_ids) != len(set(slot_ids)):
         raise RuntimeError("contributor reviewer slot identities are empty or duplicated")
@@ -546,10 +525,7 @@ def _configured_openrouter_models(resolved_config: dict) -> list[str]:
     from ouroboros.provider_models import provider_for_model
 
     models: list[str] = []
-    for row in [
-        *list(resolved_config.get("triad_slots") or []),
-        *list(resolved_config.get("scope_slots") or []),
-    ]:
+    for row in list(resolved_config.get("pool_slots") or []):
         route = row.get("route") or {}
         model = str(route.get("target_id") or "")
         if route.get("kind") == "api_chat" and provider_for_model(model) == "openrouter":
@@ -598,14 +574,8 @@ def _review_record(ctx, result: dict) -> tuple[dict | None, str]:
 
 
 def _actor_records_with_surface(ctx: object) -> list[tuple[str, dict]]:
-    """``(surface, raw actor row)`` per triad and scope seat the cycle left on ``ctx``."""
-    scope_raw = getattr(ctx, "_last_scope_raw_result", {}) or {}
-    scope_rows = scope_raw.get("raw_results") if isinstance(scope_raw, dict) else None
-    if not isinstance(scope_rows, list):
-        scope_rows = [scope_raw] if isinstance(scope_raw, dict) and any(
-            key in scope_raw for key in ("slot", "slot_id", "prompt_ref", "response_ref")) else []
-    rows = [("triad", row) for row in (getattr(ctx, "_last_triad_raw_results", []) or [])]
-    return [(surface, dict(row)) for surface, row in rows + [("scope", row) for row in scope_rows]
+    """``("pool", raw actor row)`` per pool seat the cycle left on ``ctx``."""
+    return [("pool", dict(row)) for row in (getattr(ctx, "_last_triad_raw_results", []) or [])
             if isinstance(row, dict)]
 
 
@@ -617,8 +587,9 @@ def _raw_actor(row: dict) -> dict:
 
 
 def _pending_checkout_custody(ctx) -> dict:
-    """Retain the candidate while actual reviewer custody is unresolved."""
-    from ouroboros.review_state import _load_state_unlocked, make_repo_key
+    """Retain the candidate while actual reviewer custody is unresolved: a panel seat,
+    or the author's preflight seat whose ``surface=preflight`` record is still pending."""
+    from ouroboros.review_ledger import STATE_PENDING
     from ouroboros.tools.git import _review_custody_pending
 
     facts = {}
@@ -626,15 +597,14 @@ def _pending_checkout_custody(ctx) -> dict:
     if _review_custody_pending(ctx) and (reviewers or getattr(ctx, "_review_custody_lost", False)):
         facts["reviewers"] = reviewers
         facts["custody_lost"] = bool(getattr(ctx, "_review_custody_lost", False))
-    try:
-        state = _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
-        runs = state.filter_advisory_runs(repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)))
-        active = [run.execution for run in runs if run.execution_pending]
-        if active:
-            facts["preflight"] = active
-    except Exception as exc:
-        # Unknown is disclosed as unknown; it does not assert a live worker.
-        facts["custody_unreadable"] = f"{type(exc).__name__}: {exc}"
+    preflight = dict(getattr(ctx, "_commit_preflight", None) or {})
+    if preflight.get("record_id"):
+        record, problem = _review_record(ctx, preflight)
+        if record is None:
+            # Unknown is disclosed as unknown; it does not assert a live worker.
+            facts["custody_unreadable"] = problem
+        elif str(record.get("state") or "") == STATE_PENDING:
+            facts["preflight"] = {"record_id": preflight["record_id"], "state": STATE_PENDING}
     return facts
 
 
@@ -714,7 +684,8 @@ def _record_actors(record: dict | None) -> list[tuple[str, dict]]:
             continue
         refs = {ref.get("role"): ref.get("ref") for ref in row.get("source_refs") or []
                 if isinstance(ref, dict)}
-        actors.append(("scope" if "coupling" in (row.get("parts") or []) else "triad", {
+        # One wave, one pool: every seat is a pool seat whatever parts it was asked.
+        actors.append(("pool", {
             "slot_id": str(row.get("seat_id") or ""), "status": str(row.get("status") or ""),
             "model_id": str((row.get("requested") or {}).get("model") or ""), "usd": row.get("usd"),
             "prompt_ref": refs.get("observability_prompt") or {},
@@ -822,9 +793,10 @@ def _record_link(record: dict | None, result: dict, drive_root: pathlib.Path) ->
 
 
 def _pinned_default_panel_view(profile: str):
-    """The pinned document's task view for a contributor default panel, else ``None``.
+    """The pinned document's task view for the contributor lane's pool, else ``None``.
 
-    Main, the model slots and provider routes (``review_model_routes``) come from the
+    The pool is the document's catalog; each row's lane (local or remote) is the
+    document's too. Main, the model slots and provider routes (``review_model_routes``) come from the
     verified document over the product and provider defaults, never from an inherited
     projection (whose keys still serve the calls); a credential the document leaves empty
     is the run's own (environment or keys file), merged as a host task merges it
@@ -832,12 +804,10 @@ def _pinned_default_panel_view(profile: str):
     """
     from ouroboros import config
     from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS
-    from ouroboros.reviewer_slot_config import structured_reviewer_slots_present
     from ouroboros.server_runtime import apply_runtime_provider_defaults
     from ouroboros.settings_integrity import read_settings_json_verified, task_settings_snapshot
 
-    if profile != _CONTRIBUTOR_PROFILE or not os.environ.get(SETTINGS_INTEGRITY_ENV) \
-            or structured_reviewer_slots_present():
+    if profile != _CONTRIBUTOR_PROFILE or not os.environ.get(SETTINGS_INTEGRITY_ENV):
         return None  # the process environment, as before
     settings, document = config.defaults_for_settings_document(True), config.normalize_settings_raw(
         read_settings_json_verified(config.SETTINGS_PATH))
@@ -849,39 +819,36 @@ def _pinned_default_panel_view(profile: str):
 
 
 def _resolved_review_config(*, profile: str = "production_commit_gate") -> dict:
-    """Return resolved review slots and efforts after settings/env loading."""
+    """Return the resolved review pool (catalog rows marked review-eligible) and
+    efforts after settings/env loading."""
     from ouroboros.config import get_context_mode, get_review_enforcement, resolved_review_model_target
     from ouroboros.model_slots import local_lane_label
-    from ouroboros.reviewer_slot_config import load_reviewer_slot_config, row_effort
+    from ouroboros.reviewer_slot_config import review_pool_rows, row_effort
     from ouroboros.settings_integrity import task_settings_scope
 
     view = _pinned_default_panel_view(profile)
     with task_settings_scope(view):
-        config = load_reviewer_slot_config()
+        rows = review_pool_rows()
         # The view chose each row's lane; its frozen row says so, so probing and dispatch keep it.
-        local = {row.target_id for row in (*config.triad, *config.scope)
+        local = {row.target_id for row in rows
                  if view is not None and resolved_review_model_target(row.target_id).provider_route == "local"}
 
-    def _project(row, surface: str) -> dict:
+    def _project(row) -> dict:
         route = {"kind": row.kind, "target_id": local_lane_label(row.target_id, row.target_id in local),
                  **({"profile_id": row.profile_id} if row.profile_id else {})}
-        return {"slot_id": row.slot_id, "route": route, "effort": row_effort(row, surface),
-                **({"subagent_id": row.subagent_id} if row.subagent_id else {}),
-                **({"delivery": row.delivery} if row.delivery else {})}
+        # An api row states its delivery explicitly (F8: the fact, never the actor id).
+        delivery = row.delivery or ("native" if row.native_retrieval else "")
+        return {"slot_id": row.slot_id, "route": route, "effort": row_effort(row),
+                **({"delivery": delivery} if delivery else {})}
 
-    triad_slots = [_project(row, "review") for row in config.triad]
-    scope_slots = [_project(row, "scope_review") for row in config.scope]
-
+    pool_slots = [_project(row) for row in rows]
     return {
         "profile": profile,
         "provider": "configured_per_slot",
-        "slot_config_source": config.source,
-        "triad_slots": triad_slots,
-        "scope_slots": scope_slots,
-        "triad_models": [row["route"]["target_id"] for row in triad_slots],
-        "triad_efforts": [row["effort"] for row in triad_slots],
-        "scope_models": [row["route"]["target_id"] for row in scope_slots],
-        "scope_efforts": [row["effort"] for row in scope_slots],
+        "slot_config_source": "review_pool",
+        "pool_slots": pool_slots,
+        "pool_models": [row["route"]["target_id"] for row in pool_slots],
+        "pool_efforts": [row["effort"] for row in pool_slots],
         "review_enforcement": get_review_enforcement(),
         "context_mode": get_context_mode(),
         "runtime_mode": os.environ.get("OUROBOROS_RUNTIME_MODE", ""),
@@ -889,40 +856,44 @@ def _resolved_review_config(*, profile: str = "production_commit_gate") -> dict:
 
 
 def _slot_plan_payload(resolved_config: dict) -> dict:
-    def wire_row(row):
-        # A stored reference and its resolved route are mutually exclusive.
-        return ({key: row[key] for key in ("slot_id", "subagent_id", "effort")}
-                if row.get("subagent_id") else dict(row))
-
-    return {
-        "triad": [wire_row(row) for row in resolved_config.get("triad_slots") or []],
-        "scope": [wire_row(row) for row in resolved_config.get("scope_slots") or []],
-        "advisory": {"enabled": False},
-    }
+    """The pool plan the wrapper pins: one row per pool seat (the wire form)."""
+    return {"pool": [dict(row) for row in resolved_config.get("pool_slots") or []]}
 
 
 def _slot_plan_sha256(resolved_config: dict) -> str:
-    plan = _slot_plan_payload(resolved_config)
-    for surface in ("triad", "scope"):
-        rows = list(resolved_config.get(f"{surface}_slots") or [])
-        if any(row.get("subagent_id") for row in rows):
-            plan[surface] = rows  # evidence binds the reference AND its resolved route
-    raw = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    raw = json.dumps(_slot_plan_payload(resolved_config), sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
+def _frozen_pool_catalog(resolved_config: dict) -> str:
+    """The resolved pool as an ``OUROBOROS_SUBAGENTS`` catalog: every seat an enabled,
+    review-eligible row under its own id with its route, effort and delivery."""
+    items = []
+    for row in resolved_config.get("pool_slots") or []:
+        route = dict(row.get("route") or {})
+        kind = "api_model" if str(route.get("kind") or "") == "api_chat" else str(route.get("kind") or "")
+        catalog_route = {"kind": kind, "target_id": str(route.get("target_id") or "")}
+        if route.get("profile_id"):
+            catalog_route["credential_profile_id"] = str(route["profile_id"])
+        item = {"subagent_id": str(row.get("slot_id") or ""), "name": str(row.get("slot_id") or ""),
+                "recommended_use": "Pinned review pool seat (contributor review wrapper).",
+                "route": catalog_route, "effort": str(row.get("effort") or ""), "review_eligible": True,
+                "enabled": True}
+        if kind == "api_model" and row.get("delivery"):
+            item["delivery"] = str(row["delivery"])
+        items.append(item)
+    return json.dumps({"enabled": True, "items": items}, sort_keys=True, separators=(",", ":"))
+
+
 def _freeze_contributor_slots(resolved_config: dict) -> dict:
-    """Pin the resolved rows so hot settings cannot change the executing panel."""
+    """Pin the resolved pool so hot settings cannot change the executing panel."""
     source = str(resolved_config.get("slot_config_source") or "")
-    raw = json.dumps(
-        _slot_plan_payload(resolved_config), sort_keys=True, separators=(",", ":")
-    )
-    os.environ["OUROBOROS_REVIEWER_SLOTS"] = raw
+    os.environ["OUROBOROS_SUBAGENTS"] = _frozen_pool_catalog(resolved_config)
     frozen = _resolved_review_config(profile=_CONTRIBUTOR_PROFILE)
-    if any(frozen.get(key) != resolved_config.get(key) for key in ("triad_slots", "scope_slots")):
-        raise RuntimeError("contributor reviewer slot freeze changed the resolved plan")
+    if frozen.get("pool_slots") != resolved_config.get("pool_slots"):
+        raise RuntimeError("contributor review pool freeze changed the resolved plan")
     frozen["slot_config_source"] = source
-    frozen["execution_slot_config_source"] = "frozen_structured"
+    frozen["execution_slot_config_source"] = "frozen_review_pool"
     frozen["slot_plan_sha256"] = _slot_plan_sha256(frozen)
     return frozen
 
@@ -980,27 +951,24 @@ def _apply_contributor_landing_obligations(
     }
 
 
-def _diff_size_refusal(args, resolved_config: dict, reviewable_chars: int, cap: int) -> bool:
-    """The cap binds packet recipients; configured retrieving actors read files.
-
-    Scope rows always retrieve; only triad rows can receive a packet. The
-    operator lane keeps the advisory hard cap of the commit gate it previews,
-    whose commit would refuse such a diff anyway. Native API actors remain paid
-    seats even though they do not receive a packet.
+def _diff_size_refusal(_args, resolved_config: dict, reviewable_chars: int, cap: int) -> bool:
+    """The cap binds where the gate's admission binds: a pool seat that receives
+    the diff as prompt text. Retrieving seats (sessions, native api rows) read
+    the files and are not bound, so a panel of retrieving seats is never refused
+    here — on either lane; the per-model capacity itself stays the gate's
+    (``fit_triad_prompt`` refuses typed, $0, where a packet does not fit).
     """
     from ouroboros.reviewer_slot_config import row_plan_retrieves
 
     if reviewable_chars <= cap:
         return False
-    if not getattr(args, "contributor", False):
-        return True
     return any(
         not row_plan_retrieves({
             "routes": [(row.get("route") or {}).get("kind")],
             "subagent_ids": [row.get("subagent_id")],
             **({"retrieves": [row["delivery"] == "native"]} if row.get("delivery") else {}),
         }, 0)
-        for row in resolved_config.get("triad_slots") or []
+        for row in resolved_config.get("pool_slots") or []
     )
 
 
@@ -1078,6 +1046,10 @@ def _parse_args():
     parser.add_argument("--attach-host-engine", action="store_true", help=(
         "With --contributor: use the host's running Claudexor engine attach-only; "
         "never start, prepare, rotate, claim or stop one."))
+    parser.add_argument("--preflight-reviewer", default="", help=(
+        "Operator lane only: one enabled catalog row (id or handle) that reads the staged change "
+        "first, as commit_reviewed(preflight_reviewer=...) does; its surface=preflight record and "
+        "full answer land in preflight.json / preflight.txt. Omitted = no preflight."))
     parser.add_argument("--no-isolated-checkout", action="store_true", help=(
         "Operator lane only: run the gate cycle in this worktree instead of a frozen "
         "isolated checkout of the staged patch (edits during the run then reach the reviewers)."))
@@ -1087,6 +1059,8 @@ def _parse_args():
         parser.error("--base-ref/--head-ref require --contributor")
     if args.contributor and args.no_isolated_checkout:
         parser.error("--contributor requires the frozen isolated checkout")
+    if args.contributor and args.preflight_reviewer:
+        parser.error("--preflight-reviewer is an operator-lane option")
     if args.contributor and not args.head_ref:
         parser.error(
             "--contributor requires --head-ref: the review runs this checkout's review "
@@ -1175,7 +1149,7 @@ def _prepare_review_configuration(args) -> tuple[dict | None, dict]:
         _assert_contributor_review_config(resolved_config)
         from ouroboros.provider_models import provider_for_model
 
-        engine_rows = [row["slot_id"] for row in [*resolved_config["triad_slots"], *resolved_config["scope_slots"]]
+        engine_rows = [row["slot_id"] for row in resolved_config["pool_slots"]
                        if row["route"]["kind"] == "agent_session"
                        or provider_for_model(row["route"]["target_id"]) == "claudexor"]
         if engine_rows and not args.attach_host_engine:
@@ -1198,7 +1172,7 @@ def _operator_reviewable_diff_chars(fallback_chars: int) -> int:
     """Size of the TEXTUAL staged diff — what the commit gate's reviewers read.
 
     ``git diff --cached`` shows binary blobs as "Binary files differ" stubs;
-    measuring the advisory hard cap against the ``--binary`` patch refused
+    measuring the packet cap against the ``--binary`` patch refused
     image-asset commits for bytes no reviewer model would see. The contributor
     lane keeps its conservative patch-size measurement, and a failed git
     invocation falls back to ``fallback_chars`` (the conservative binary-patch
@@ -1238,12 +1212,10 @@ def main() -> int:
             print("ERROR: staged diff is empty — `git add` the changes first.", file=sys.stderr)
             return 2
         reviewable_chars = _operator_reviewable_diff_chars(len(staged))
-    from ouroboros.tools.claude_advisory_review import _MAX_DIFF_CHARS_ERROR
-
-    if _diff_size_refusal(args, resolved_config, reviewable_chars, _MAX_DIFF_CHARS_ERROR):
+    if _diff_size_refusal(args, resolved_config, reviewable_chars, _PACKET_DIFF_CHARS_CAP):
         print(
-            f"ERROR: staged diff is {reviewable_chars:,} chars — over the advisory hard cap "
-            f"({_MAX_DIFF_CHARS_ERROR:,}) and at least one reviewer receives the diff as prompt "
+            f"ERROR: staged diff is {reviewable_chars:,} chars — over the review packet cap "
+            f"({_PACKET_DIFF_CHARS_CAP:,}) and at least one reviewer receives the diff as prompt "
             "text. Policy: split the phase into smaller single-intent commits instead of "
             "relaxing the gate (a panel of retrieving actors reads the diff itself and is "
             "not bound by this cap).",
@@ -1288,7 +1260,7 @@ def _contributor_lane(args, host_ctx, proposal: dict, *, resolved_config: dict, 
     print(
         "Contributor profile: Claude advisory excluded; the proposal's hermetic test "
         "preflight runs first, then the installed review flow and rules read the frozen "
-        "base..head subject through the configured triad + scope routes.",
+        "base..head subject through the configured review pool.",
         file=sys.stderr,
     )
     t0 = time.time()
@@ -1352,17 +1324,20 @@ def _contributor_lane(args, host_ctx, proposal: dict, *, resolved_config: dict, 
     return exit_code
 
 
-def _write_advisory_record(output_dir: pathlib.Path, review_drive_root: pathlib.Path, repo_dir) -> None:
-    """``advisory.txt``: the full recorded advisory pre-review of this cycle."""
-    from dataclasses import asdict
-
-    from ouroboros.review_state import load_state, make_repo_key
-
-    runs = load_state(review_drive_root).filter_advisory_runs(repo_key=make_repo_key(pathlib.Path(repo_dir)))
-    record = asdict(runs[-1]) if runs else {"status": "not_run", "reason": "cycle did not reach preflight"}
-    advisory_text = json.dumps(record, ensure_ascii=False, indent=2)
-    (output_dir / "advisory.txt").write_text(advisory_text + "\n", encoding="utf-8")
-    print("ADVISORY PRE-REVIEW (recorded full source)\n" + advisory_text)
+def _write_preflight_record(output_dir: pathlib.Path, ctx, review_drive_root: pathlib.Path) -> None:
+    """``preflight.json`` + ``preflight.txt``: the cycle's preflight fact, its ``surface=preflight``
+    record with every seat row, and the helper's full answer beside it (``--preflight-reviewer``)."""
+    fact = dict(getattr(ctx, "_commit_preflight", None)
+                or {"status": "not_performed", "record_id": "", "reason": "cycle did not reach preflight"})
+    record, problem = _review_record(ctx, fact) if fact.get("record_id") else (None, "")
+    seats = _seat_records(record, review_drive_root)
+    text = "\n\n".join(str(seat.get("answer") or "") for seat in seats)
+    summary = {"preflight": fact, "review_record": _record_link(record, fact, review_drive_root),
+               **({"record_problem": problem} if problem else {})}
+    _write_json(output_dir / "preflight.json", {**summary, "seats": seats})
+    (output_dir / "preflight.txt").write_text(text + "\n", encoding="utf-8")
+    print("PREFLIGHT REVIEW (surface=preflight record; the helper's full answer follows)\n"
+          + _json_text(summary) + ("\n" + text if text else ""))
 
 
 def _reviewed_tree_drift(checkout: pathlib.Path, staged: str, output_dir: pathlib.Path) -> bool:
@@ -1386,15 +1361,23 @@ def _reviewed_tree_drift(checkout: pathlib.Path, staged: str, output_dir: pathli
 
 def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str, staged: str,
                    resolved_config: dict, output_dir: pathlib.Path, review_drive_root: pathlib.Path) -> int:
-    """The commit gate's own non-committing cycle (advisory, tests preflight, triad +
-    scope, ledger record) over the staged index, run in an isolated checkout of the
-    staged patch that the runtime materializes (``review_subject.isolated_checkout``):
-    edits in this worktree during the run cannot reach the reviewers, and the checkout
-    is retained when review custody is still open after the cycle."""
+    """The commit gate's own non-committing cycle (deterministic checks, hermetic tests
+    preflight, the author's optional ``surface=preflight`` look, the review panel, ledger record)
+    over the staged index, run in an isolated checkout of the staged patch that the runtime
+    materializes (``review_subject.isolated_checkout``): edits in this worktree during the run
+    cannot reach the reviewers, and the checkout is retained when review custody is still
+    open after the cycle."""
+    from ouroboros.tools.commit_gate import preflight_reviewer_error
     from ouroboros.tools.git import _run_non_committing_review_cycle
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.review_subject import ReviewSubjectSpec, isolated_checkout
 
+    refusal = preflight_reviewer_error(args.preflight_reviewer.strip()) if args.preflight_reviewer.strip() else ""
+    if refusal:  # as commit_reviewed refuses it: before any checkout, test run or paid look
+        print(f"ERROR: {refusal}", file=sys.stderr)
+        _write_json(output_dir / "outcome.json", {"exit_code": 2, "outcome": {
+            "status": "failed", "block_reason": "tool_arg_error", "message": f"TOOL_ARG_ERROR: {refusal}"}})
+        return 2
     spec = ReviewSubjectSpec(root_kind="system_repo", root=str(REPO), kind="index", surface="commit_gate")
     retained: dict = {}
     outcome: dict = {}
@@ -1412,14 +1395,11 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
             checkout = pathlib.Path(frozen.checkout)
             ctx = ToolContext(repo_dir=checkout, drive_root=review_drive_root)
             print(f"Isolated review checkout: {checkout}", file=sys.stderr)
-        # The shared cycle owns preparation, admission and any paid preflight.
-        advisory_warning = _advisory_unavailability_warning()
-        if advisory_warning:
-            print(advisory_warning, file=sys.stderr)
+        # The shared cycle owns preparation, admission and the named preflight.
         try:
             outcome = _run_non_committing_review_cycle(
-                ctx, commit_message, skip_advisory_review=False, goal=goal, scope=scope)
-            _write_advisory_record(output_dir, review_drive_root, ctx.repo_dir)
+                ctx, commit_message, goal=goal, scope=scope, preflight_reviewer=args.preflight_reviewer)
+            _write_preflight_record(output_dir, ctx, review_drive_root)
             if checkout is not None and not _pending_checkout_custody(ctx):
                 _reviewed_tree_drift(checkout, staged, output_dir)
         finally:
@@ -1446,10 +1426,8 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
     out = "\n".join([
         sep, "RESOLVED REVIEW CONFIG", sep,
         _json_text({**resolved_config, "drive_root": str(review_drive_root)}),
-        sep, "TRIAD RAW RESULTS (full, untruncated)", sep,
+        sep, "POOL RAW RESULTS (full, untruncated)", sep,
         _json_text(getattr(ctx, "_last_triad_raw_results", [])),
-        sep, "SCOPE RAW RESULT (full, untruncated)", sep,
-        _json_text(getattr(ctx, "_last_scope_raw_result", {})),
         sep, "REVIEW SEAT RECORDS (ledger rows with retained answers, full, untruncated)", sep,
         _json_text(_seat_records(record, review_drive_root)),
         sep, "AGGREGATE VERDICT", sep,

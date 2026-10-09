@@ -85,14 +85,6 @@ def test_fallback_chain_empty_means_no_fallback(monkeypatch):
     assert config.get_fallback_models("primary") == []
 
 
-def test_advisory_fallback_model_uses_main_when_light_empty(monkeypatch):
-    from ouroboros.tools.claude_advisory_review import _resolve_fallback_model
-    monkeypatch.setenv("OUROBOROS_MODEL", "provider::main-x")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "")
-    # Empty Light must resolve to Main, never "" (which would call chat with no model id).
-    assert _resolve_fallback_model() == "provider::main-x"
-
-
 def test_parse_fallback_chain_ssot(monkeypatch):
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "a, b , a")
     monkeypatch.delenv("OUROBOROS_MODEL_FALLBACK", raising=False)

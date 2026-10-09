@@ -1,14 +1,14 @@
-"""Task acceptance on the configured triad rows (owner decisions R0/R2/R3,
-2026-09-01, Ф2 of the agentic-review sprint).
+"""Task acceptance on the review pool (owner decisions R0/R2/R3, 2026-09-01,
+Ф2 of the agentic-review sprint; PR-3: the pool replaces the triad lane).
 
-ONE builder — ``reviewer_slot_config.triad_delivery_slots`` — turns the triad
-rows into ``ReviewSlot`` objects for plan review, skill/commit review (as the
-aligned vectors of ``commit_triad_delivery``) and task acceptance, so acceptance
-carries every row's own delivery, effort, credential pin, configured-subagent
-binding and stable slot id instead of an api-pinned projection. A malformed
-structured configuration refuses acceptance typed (DEGRADED) exactly as it
-refuses plan and skill review; a legacy comma-key config reproduces today's
-panel rows; child-task and ``off``-mode acceptance follow the configured rows'
+ONE builder — ``reviewer_slot_config.review_pool_slots`` — turns the catalog's
+review-eligible rows into ``ReviewSlot`` objects for plan review, skill/commit
+review (as the aligned vectors of ``commit_triad_delivery``) and task acceptance,
+so acceptance carries every row's own delivery, effort, credential pin and
+stable id (the catalog id) instead of an api-pinned projection. A malformed
+catalog refuses acceptance typed (DEGRADED) exactly as it refuses plan and skill
+review; a comma list without a catalog is an EMPTY pool and a typed refusal, not
+a default panel; child-task and ``off``-mode acceptance follow the pool rows'
 delivery (a child with at most one row, #1334).
 """
 
@@ -19,36 +19,40 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.review_execution import ReviewRouteKind
-from ouroboros.reviewer_slot_config import REVIEWER_SLOTS_ENV, triad_delivery_slots
+from ouroboros.reviewer_slot_config import review_pool_slots
 
-_ROSTER = {
-    "enabled": True,
-    "items": [{
-        "subagent_id": "api-critic",
-        "name": "API critic",
-        "recommended_use": "Exact recursive API reviewer.",
-        "route": {"kind": "api_model", "target_id": "openai/gpt-5.6-terra"},
-        "effort": "medium",
-    }],
-}
 
-_TRIAD = {
-    "triad": [
-        {"slot_id": "t_api", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-luna"},
-         "effort": "high"},
-        {"slot_id": "t_sess",
-         "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol", "profile_id": "acct-1"},
-         "effort": "xhigh"},
-        {"slot_id": "t_actor", "subagent_id": "api-critic"},
-    ],
-    "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-terra"}}],
-}
+def _row(subagent_id, target, *, kind="api_model", review_eligible=True, **extra):
+    route = {"kind": kind, "target_id": target}
+    if kind == "agent_session":
+        route["credential_profile_id"] = extra.pop("profile_id", "")
+    row = {"subagent_id": subagent_id, "recommended_use": f"{subagent_id} reviewer.", "route": route, **extra}
+    if review_eligible:
+        row["review_eligible"] = True
+    return row
+
+
+def _roster(*rows):
+    return {"enabled": True, "items": list(rows)}
+
+
+# The pool: a packet api row, a pinned agent-session row and a native api row.
+_POOL_ROWS = (
+    _row("t_api", "openai/gpt-5.6-luna", effort="high", delivery="packet"),
+    _row("t_sess", "codex=gpt-5.6-sol", kind="agent_session", profile_id="acct-1", effort="xhigh"),
+    _row("t_actor", "openai/gpt-5.6-terra", effort="medium"),
+)
+_ROSTER = _roster(*_POOL_ROWS)
+
+
+@pytest.fixture(autouse=True)
+def _provider_catalog_stays_off_the_wire(provider_catalog_offline):
+    """The work orders here measure the native row's window; see `provider_catalog_offline`."""
 
 
 @pytest.fixture()
 def structured_env(monkeypatch):
     monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps(_ROSTER))
-    monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps(_TRIAD))
     for key in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ROUTES", "OUROBOROS_REVIEW_SESSION_ROUTE"):
         monkeypatch.delenv(key, raising=False)
     return monkeypatch
@@ -112,31 +116,32 @@ def _capture_panel(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_triad_delivery_slots_is_the_one_builder_shared_by_plan_and_commit_vectors(structured_env):
-    from ouroboros.reviewer_slot_config import commit_triad_delivery
+def test_review_pool_slots_is_the_one_builder_shared_by_plan_and_commit_vectors(structured_env):
+    from ouroboros.reviewer_slot_config import commit_triad_delivery, triad_delivery_slots
     from ouroboros.tools.plan_review_runtime import (
         PLAN_REVIEW_MAX_TOKENS,
         plan_review_slots,
     )
 
-    acceptance = triad_delivery_slots(role_hint="task acceptance")
+    acceptance = review_pool_slots(role_hint="task acceptance")
     plan = plan_review_slots()
     identity = lambda s: (s.slot_id, s.model, s.route, s.session_target, s.session_profile, s.subagent_id)  # noqa: E731
     assert [identity(s) for s in plan] == [identity(s) for s in acceptance]
-    assert [s.slot_id for s in acceptance] == ["t_api", "t_sess", "t_actor"]
+    assert [identity(s) for s in triad_delivery_slots(role_hint="task acceptance")] == [identity(s) for s in acceptance]
+    assert [s.slot_id for s in acceptance] == ["t_api", "t_sess", "t_actor"]  # the catalog ids
     # Plan review keeps its own slot properties on the shared rows.
     assert all(s.role_hint == "plan reviewer" and s.max_tokens == PLAN_REVIEW_MAX_TOKENS for s in plan)
     assert all(s.role_hint == "task acceptance" for s in acceptance)
-    # Effort: explicit row → row; compound/none → the caller's default (plan) or the
-    # roster row's own effort (actor row).
-    assert [s.effort for s in plan] == ["high", "xhigh", "medium"]  # the review setting, as for every triad surface
+    # Effort: each row's own value, on every pool surface alike.
+    assert [s.effort for s in plan] == ["high", "xhigh", "medium"]
     # The commit/skill vectors are a projection of the same slots.
     vectors = commit_triad_delivery()
     assert vectors["slot_ids"] == [s.slot_id for s in acceptance]
     assert vectors["models"] == [s.model for s in acceptance]
     assert vectors["routes"] == [s.route for s in acceptance]
     assert vectors["session_profiles"] == ["", "acct-1", ""]
-    assert vectors["subagent_ids"] == ["", "", "api-critic"]
+    assert vectors["subagent_ids"] == ["t_api", "t_sess", "t_actor"]
+    assert vectors["retrieves"] == [False, True, True]
     assert vectors["legacy_skill_fingerprint"] is False
 
 
@@ -149,23 +154,23 @@ def test_acceptance_panel_carries_each_rows_identity_effort_pin_and_binding(stru
     assert result.aggregate_signal == "PASS"
     (request, kwargs), = captured
     slots = kwargs["slots"]
-    assert [s.slot_id for s in slots] == ["t_api", "t_sess", "t_actor"]  # owner ids, not slot_N
+    assert [s.slot_id for s in slots] == ["t_api", "t_sess", "t_actor"]  # catalog ids, not slot_N
     assert [s.route for s in slots] == [
         ReviewRouteKind.API_CHAT, ReviewRouteKind.AGENT_SESSION, ReviewRouteKind.API_CHAT,
     ]
     assert [s.effort for s in slots] == ["high", "xhigh", "medium"]  # per-row, not one global effort
     assert slots[1].session_target == "codex=gpt-5.6-sol" and slots[1].session_profile == "acct-1"
-    assert slots[2].subagent_id == "api-critic" and slots[2].native_retrieval
+    assert slots[2].subagent_id == "t_actor" and slots[2].native_retrieval and not slots[0].native_retrieval
     assert request.policy["min_successful_slots"] == adaptive_quorum(3)
 
 
-def test_malformed_structured_config_refuses_acceptance_typed(structured_env, tmp_path):
+def test_malformed_catalog_refuses_acceptance_typed(structured_env, tmp_path):
     """R3: the same typed refusal plan and skill review give — never the silently
     projected default panel the retired residual used to run."""
     import ouroboros.review_substrate as rs
     from ouroboros import loop as loop_mod
 
-    structured_env.setenv(REVIEWER_SLOTS_ENV, "{broken")
+    structured_env.setenv("OUROBOROS_SUBAGENTS", "{broken")
     structured_env.setattr(
         rs, "run_review_request",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no reviewer may be called")),
@@ -179,27 +184,20 @@ def test_malformed_structured_config_refuses_acceptance_typed(structured_env, tm
     assert result.actors == []
 
 
-def test_legacy_comma_config_reproduces_todays_api_panel(monkeypatch, tmp_path):
-    """The GAIA/CLB/SWE-Pro class: no structured key, a comma list — the panel is
-    the same three api rows with the legacy `slot_N` ids and the configured
-    Review effort; since #1334 the shipped default rows read the work themselves
-    (native delivery on the same models) instead of receiving the packet."""
+def test_a_comma_list_without_a_catalog_is_an_empty_pool_and_a_typed_refusal(monkeypatch, tmp_path):
+    """PR-3: the lane-era comma list projects NO panel any more. With no catalog
+    (or no marked row) the pool is empty and acceptance refuses typed — nobody
+    is called, no default rows are invented. The benchmark classes that used to
+    ride the comma list carry explicit catalog rows instead."""
     from ouroboros import loop as loop_mod
-    from ouroboros.config import resolve_effort
 
-    monkeypatch.delenv(REVIEWER_SLOTS_ENV, raising=False)
-    monkeypatch.delenv("OUROBOROS_REVIEW_ROUTES", raising=False)
+    for key in ("OUROBOROS_REVIEW_ROUTES", "OUROBOROS_SUBAGENTS"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "openai/a,openai/b,openai/c")
     captured = _capture_panel(monkeypatch)
-    loop_mod._execute_task_acceptance_panel(_acceptance_ctx(tmp_path))
-    (_request, kwargs), = captured
-    slots = kwargs["slots"]
-    assert [(s.slot_id, s.model, s.route) for s in slots] == [
-        ("slot_1", "openai/a", ReviewRouteKind.API_CHAT),
-        ("slot_2", "openai/b", ReviewRouteKind.API_CHAT),
-        ("slot_3", "openai/c", ReviewRouteKind.API_CHAT),
-    ]
-    assert all(s.effort == resolve_effort("review") and s.native_retrieval and not s.subagent_id for s in slots)
+    result = loop_mod._execute_task_acceptance_panel(_acceptance_ctx(tmp_path))
+    assert captured == []
+    assert result.aggregate_signal == "DEGRADED" and result.degraded_reasons == ["no_review_slots"]
 
 
 def test_child_and_off_acceptance_follow_the_configured_rows(structured_env, tmp_path):
@@ -244,15 +242,15 @@ def test_child_and_off_acceptance_follow_the_configured_rows(structured_env, tmp
     _handle_task_acceptance_review(child, claim="child done", reviewer_slot_id="t_actor")
     assert calls[-1][0] == ["t_actor"] and set(calls[-1][1]) == {"t_actor"}
 
-    # A single configured row needs no name.
-    structured_env.setenv(REVIEWER_SLOTS_ENV, json.dumps({**_TRIAD, "triad": _TRIAD["triad"][1:2]}))
+    # A single pool row needs no name.
+    structured_env.setenv("OUROBOROS_SUBAGENTS", json.dumps(_roster(_POOL_ROWS[1])))
     _handle_task_acceptance_review(child, claim="child done")
     assert calls[-1][0] == ["t_sess"]
 
-    # Malformed configuration: the same typed refusal, never a default panel.
-    structured_env.setenv(REVIEWER_SLOTS_ENV, "{broken")
+    # Malformed catalog: the same typed refusal, never a default panel.
+    structured_env.setenv("OUROBOROS_SUBAGENTS", "{broken")
     payload = json.loads(_handle_task_acceptance_review(root, claim="root done"))
-    assert payload["status"] == "not_dispatched" and "invalid reviewer-slot configuration" in payload["error"]
+    assert payload["status"] == "not_dispatched" and "invalid review pool configuration" in payload["error"]
     assert len(calls) == 3
 
 
@@ -276,14 +274,14 @@ def test_a_typed_predispatch_refusal_is_tool_evidence_not_a_degraded_review_run(
     from ouroboros.tools.review import _handle_task_acceptance_review
 
     structured_env.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    structured_env.setenv(REVIEWER_SLOTS_ENV, json.dumps({**_TRIAD, "triad": _TRIAD["triad"][1:]}))
+    structured_env.setenv("OUROBOROS_SUBAGENTS", json.dumps(_roster(*_POOL_ROWS[1:])))
     # #1334 now permits the off-mode ROOT's full configured panel. A child
     # facing multiple rows still needs a selection and is genuinely zero-run.
     ctx = SimpleNamespace(drive_root=str(tmp_path), task_id="child", root_task_id="root",
                           task_metadata={"root_task_id": "root", "parent_task_id": "root"}, task_contract={})
     refused = _handle_task_acceptance_review(ctx, claim="child done")
     assert json.loads(refused)["reason"] == "reviewer_selection_required"
-    structured_env.setenv(REVIEWER_SLOTS_ENV, "{broken")
+    structured_env.setenv("OUROBOROS_SUBAGENTS", "{broken")
     misconfigured = _handle_task_acceptance_review(ctx, claim="root done")
     trace = _consume_acceptance_results([refused, misconfigured])
     assert "review_runs" not in trace
@@ -343,23 +341,14 @@ _CLEAN_VERDICT = {
     "findings": [], "summary": "verified against the receipts",
 }
 
-_FAKE_ROSTER = {
-    "enabled": True,
-    "items": [{
-        "subagent_id": "api-critic", "name": "API critic", "recommended_use": "Exact reviewer.",
-        "route": {"kind": "api_model", "target_id": "openai/fake-reviewer"},
-    }],
-}
-_ROW_API = {"slot_id": "t_api", "route": {"kind": "api_chat", "target_id": "openai/fake-reviewer"}}
-_ROW_NATIVE = {"slot_id": "t_actor", "subagent_id": "api-critic"}
-_ROW_SESSION = {"slot_id": "t_sess", "route": {"kind": "agent_session", "target_id": "fake-review=fake-small"}}
-_ROW_SCOPE = {"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/fake-reviewer"}}
+_ROW_API = _row("t_api", "openai/fake-reviewer", delivery="packet")
+_ROW_NATIVE = _row("t_actor", "openai/fake-reviewer")
+_ROW_SESSION = _row("t_sess", "fake-review=fake-small", kind="agent_session")
 
 
 def _offline_env(monkeypatch, *rows):
-    """An offline structured triad (fake model ids never reach a provider)."""
-    monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps(_FAKE_ROSTER))
-    monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps({"triad": list(rows), "scope": [_ROW_SCOPE]}))
+    """An offline review pool (fake model ids never reach a provider)."""
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps(_roster(*rows)))
     for key in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ROUTES", "OUROBOROS_REVIEW_SESSION_ROUTE"):
         monkeypatch.delenv(key, raising=False)
 
@@ -624,7 +613,7 @@ def test_wave_budget_gate_prices_only_the_api_money(structured_env, tmp_path):
     # The session row is subscription, not API money; the native row is one episode send.
     assert kw["models"] == ["openai/gpt-5.6-luna", "openai/gpt-5.6-terra"] and kw["prompt_chars"] > 0
     # An all-session panel spends no API money: the gate is not consulted at all.
-    structured_env.setenv(REVIEWER_SLOTS_ENV, json.dumps({**_TRIAD, "triad": [_TRIAD["triad"][1]]}))
+    structured_env.setenv("OUROBOROS_SUBAGENTS", json.dumps(_roster(_POOL_ROWS[1])))
     loop_mod._execute_task_acceptance_panel(ctx)
     assert len(gate_calls) == 1
 
@@ -754,7 +743,7 @@ def test_replayed_panel_keeps_the_delivery_it_actually_ran_on(monkeypatch, tmp_p
                           workspace_root=str(workspace), workspace_mode="project")
     record = loop_mod._record_host_acceptance_run(ctx, loop_mod._execute_task_acceptance_panel(ctx))
     assert record["actors"][0]["usage"]["delivery"] == "native_tool_rounds"
-    monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps({"triad": [_ROW_API], "scope": [_ROW_SCOPE]}))
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps(_roster(_ROW_API)))
     _cache, prior = _prior_acceptance_run(ctx.tools._ctx, ctx.llm_trace, ctx.review_binding["binding_hash"])
     assert prior is record and prior["actors"][0]["usage"]["delivery"] == "native_tool_rounds"
     assert len(llm.calls) == 1
@@ -867,7 +856,7 @@ def test_a_renderer_tail_ending_in_a_newline_still_loses_its_slot_label(structur
     (or CRLF) after the label — the `.rstrip()` branch of the trim."""
     from ouroboros import review_execution
     from ouroboros.loop_acceptance_review import acceptance_retrieving_work_order
-    from ouroboros.review_substrate import ReviewRequest, triad_delivery_slots
+    from ouroboros.review_substrate import ReviewRequest
 
     original = review_execution._render_prompt_parts
 
@@ -880,49 +869,9 @@ def test_a_renderer_tail_ending_in_a_newline_still_loses_its_slot_label(structur
     request = ReviewRequest(surface="task_acceptance", goal="ship it", subject="deliverable",
                             evidence=dict(_ACCEPTANCE_PACKET), task_id="root-delivery",
                             policy={"classify_outcome_tier": True})
-    retrieving = [slot for slot in triad_delivery_slots(role_hint="task acceptance") if slot.retrieves]
+    retrieving = [slot for slot in review_pool_slots(role_hint="task acceptance") if slot.retrieves]
     assert [slot.slot_id for slot in retrieving] == ["t_sess", "t_actor"]
     acceptance_retrieving_work_order(request, retrieving, session_root=str(tmp_path), data_root=tmp_path)
     for slot_id, order in request.slot_session_tasks.items():
         assert "Slot:" not in order and not order.endswith(("\n", "\r"))
         assert "RETRIEVAL POINTERS" in order and "verification_receipts[0]" in order, slot_id
-
-
-# ---------------------------------------------------------------------------
-# The one-time R12 migration disclosure at save time.
-# ---------------------------------------------------------------------------
-
-
-def test_the_save_that_first_makes_the_triad_retrieve_discloses_once_with_numbers(monkeypatch, tmp_path):
-    """R12: an owner whose triad gains a retrieving row hears ONCE, with the
-    measured numbers, that every substantive task's acceptance panel now runs
-    on it; keeping that triad on later saves discloses nothing again, and a
-    packet-only triad never did."""
-    from tests.test_settings_honesty import _save
-    from ouroboros import config as cfg
-
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    settings_path = data_dir / "settings.json"
-    monkeypatch.setattr(cfg, "DATA_DIR", data_dir, raising=True)
-    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path, raising=True)
-    cfg.reset_runtime_mode_baseline_for_tests()
-    try:
-        monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps(_ROSTER))
-        packet_only = json.dumps({**_TRIAD, "triad": [_TRIAD["triad"][0]]})
-        assert _save(monkeypatch, settings_path, {REVIEWER_SLOTS_ENV: packet_only}).get("warnings") in (None, [])
-        # The transition save: legacy/packet-only → a triad with a session and a native row.
-        data = _save(monkeypatch, settings_path, {REVIEWER_SLOTS_ENV: json.dumps(_TRIAD)})
-        (disclosure,) = [w for w in data.get("warnings") or [] if "Task acceptance now follows" in w]
-        assert "t_sess (agent session codex=gpt-5.6-sol" in disclosure
-        assert "t_actor (native inspection via api-critic → openai/gpt-5.6-terra)" in disclosure
-        assert "≈12 s and ≈$0.07 per model row per task" in disclosure and "≈75 s / ≈$0.82" in disclosure
-        assert "minutes of your subscription window" in disclosure and "keeps a packet panel" in disclosure
-        # Saving the same retrieving triad again is silent — the notice is one-time.
-        data = _save(monkeypatch, settings_path, {REVIEWER_SLOTS_ENV: json.dumps(_TRIAD)})
-        assert not [w for w in data.get("warnings") or [] if "Task acceptance now follows" in w]
-        # A roster-only save keeps the stored triad: still silent.
-        data = _save(monkeypatch, settings_path, {"OUROBOROS_SUBAGENTS": json.dumps(_ROSTER)})
-        assert not [w for w in data.get("warnings") or [] if "Task acceptance now follows" in w]
-    finally:
-        cfg.reset_runtime_mode_baseline_for_tests()

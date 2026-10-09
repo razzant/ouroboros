@@ -412,6 +412,8 @@ D20 = "Presence"
 "ouroboros/review_ledger.py" = "D06"
 "ouroboros/review_native_episode.py" = "D06"
 "ouroboros/review_owner_custody.py" = "D06"
+"ouroboros/review_pool_migration.py" = "D06"
+"ouroboros/review_pool_receipts.py" = "D06"
 "ouroboros/review_projection.py" = "D06"
 "ouroboros/review_status_projection.py" = "D06"
 "ouroboros/review_records.py" = "D06"
@@ -451,6 +453,7 @@ D20 = "Presence"
 "ouroboros/skill_conflicts.py" = "D14"
 "ouroboros/skill_lifecycle_queue.py" = "D14"
 "ouroboros/skill_loader.py" = "D14"
+"ouroboros/skill_catalogue.py" = "D14"
 "ouroboros/skill_peer_inventory.py" = "D14"
 "ouroboros/skill_uninstall_state.py" = "D14"
 "ouroboros/skill_owner_attestation.py" = "D14"
@@ -514,9 +517,7 @@ D20 = "Presence"
 "ouroboros/tools/arg_feedback.py" = "D04"
 "ouroboros/tools/browser.py" = "D05"
 "ouroboros/tools/chronicle.py" = "D15"
-"ouroboros/tools/claude_advisory_review.py" = "D06"
-"ouroboros/tools/preflight_review_prompt.py" = "D06"
-"ouroboros/tools/preflight_review_run.py" = "D06"
+"ouroboros/tools/preflight_review.py" = "D06"
 "ouroboros/tools/commit_gate.py" = "D10"
 "ouroboros/tools/compact_context.py" = "D03"
 "ouroboros/tools/control.py" = "D08"
@@ -583,6 +584,7 @@ D20 = "Presence"
 "ouroboros/tools/review_multi_model.py" = "D06"
 "ouroboros/tools/review_admission.py" = "D06"
 "ouroboros/tools/review_binary_context.py" = "D06"
+"ouroboros/tools/review_brief_coupling.py" = "D06"
 "ouroboros/tools/review_change.py" = "D06"
 "ouroboros/tools/review_change_custody.py" = "D06"
 "ouroboros/tools/review_checklist.py" = "D06"
@@ -595,10 +597,8 @@ D20 = "Presence"
 "ouroboros/tools/review_revalidation.py" = "D10"
 "ouroboros/tools/review_subject.py" = "D06"
 "ouroboros/tools/review_synthesis.py" = "D06"
-"ouroboros/tools/scope_review.py" = "D06"
 "ouroboros/tools/scope_required_sources.py" = "D06"
 "ouroboros/tools/scope_review_contract.py" = "D06"
-"ouroboros/tools/scope_review_session.py" = "D06"
 "ouroboros/tools/scope_window.py" = "D06"
 "ouroboros/tools/search.py" = "D05"
 "ouroboros/tools/services.py" = "D05"
@@ -809,7 +809,6 @@ allowed = [
   "D06->D10",
   "D06->D12",
   "D06->D13",
-  "D06->D14",
   "D06->D16",
   "D06->D17",
   "D06->D18",
@@ -966,6 +965,7 @@ lazy_only = [
   "D06->D03",
   "D06->D05",
   "D06->D08",
+  "D06->D14",
   "D06->D15",
   "D07->D03",
   "D07->D09",
@@ -990,6 +990,7 @@ lazy_only = [
   "D10->D11",
   "D10->D14",
   "D10->D15",
+  "D10->D16",
   "D10->D17",
   "D11->D06",
   "D11->D15",

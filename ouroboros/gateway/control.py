@@ -726,83 +726,26 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
     # Money admission is the known-spend rule every reviewer seat's reservation
     # applies (#1487), checked just above: known spend below TOTAL_BUDGET admits
     # the update, and a review that later reaches the limit pauses on its own
-    # fences. One full triad+scope wave is still priced at the review packs' own
-    # worst-case caps — the shared 920K-token input SSOT per API row, the triad's
-    # default output reserve, and the scope reviewer's 100K output reserve — but
-    # as DISCLOSURE, never a second, earlier refusal: a prospective wave larger
+    # fences. One commit-gate wave over the review pool's paid seats is still
+    # priced at the review packs' own worst-case caps by the one explicit
+    # estimator (``review_admission.managed_update_wave_estimate``), but as
+    # DISCLOSURE, never a second, earlier refusal: a prospective wave larger
     # than the remainder used to refuse an update the owner's limit still
     # allowed. Agent-session rows ride subscriptions, not USD budget; an
-    # estimator error is recorded, never a zero.
+    # estimator error is recorded, never a zero, and a broken import is not
+    # swallowed.
+    from ouroboros.tools.review_admission import managed_update_wave_estimate
+
+    estimate_event = managed_update_wave_estimate(float(remaining))
     try:
-        from ouroboros.reviewer_slot_config import commit_scope_rows, commit_triad_rows
-        from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
-        from ouroboros.usage_admission import review_wave_admission
+        from supervisor.git_ops import DRIVE_ROOT as _dr
+        from ouroboros.utils import append_jsonl as _aj, utc_now_iso as _n
 
-        # Native-retrieving actor rows (subagent_id + api route) are priced at
-        # the SAME one-pack-call convention as packet rows: their true worst
-        # case is bounded by the episode's own rails (round cap x transcript
-        # cap) and can exceed this estimate.
-        triad_models = [
-            row.target_id for row in commit_triad_rows()
-            if not row.is_session and row.target_id
-        ]
-        scope_models = [
-            row.target_id for row in commit_scope_rows()
-            if not row.is_session and row.target_id
-        ]
-        prompt_chars_cap = int(REVIEW_PROMPT_TOKEN_BUDGET) * 4
-        estimated_total = 0.0
-        any_estimate = False
-        unpriced_total = 0
-        for models, max_out in ((triad_models, 65_536), (scope_models, 100_000)):
-            if not models:
-                continue
-            part = review_wave_admission(
-                root_task_id="managed-update-admission",
-                models=models,
-                prompt_chars=prompt_chars_cap,
-                max_completion_tokens=max_out,
-                remaining_usd_override=float(remaining),
-            )
-            part_estimate = part.get("estimated_wave_usd")
-            unpriced_total += int(part.get("unpriced_slots") or 0)
-            if part_estimate is not None:
-                estimated_total += float(part_estimate)
-                any_estimate = True
-            else:
-                # The estimator failed open for this whole surface: every one of
-                # its slots is unknown, not silently zero.
-                unpriced_total += len(models)
-        session_slots = sum(
-            1 for row in (*commit_triad_rows(), *commit_scope_rows()) if row.is_session
-        )
-        try:
-            from supervisor.git_ops import DRIVE_ROOT as _dr
-            from ouroboros.utils import append_jsonl as _aj, utc_now_iso as _n
-
-            # One durable disclosure of the wave estimate beside the known room;
-            # unknowable parts are counted, never filled in (P1).
-            _aj(_dr / "logs" / "supervisor.jsonl", {
-                "ts": _n(), "type": "managed_update_wave_estimate",
-                "estimated_wave_usd": round(estimated_total, 6) if any_estimate else None,
-                "exceeds_known_remaining": bool(any_estimate and estimated_total > float(remaining) + 1e-9),
-                "unpriced_slots": unpriced_total, "session_slots": session_slots,
-                "remaining_usd": float(remaining),
-            })
-        except Exception:
-            log.debug("wave estimate event write failed", exc_info=True)
+        # One durable disclosure of the wave estimate beside the known room;
+        # unknowable parts are counted, never filled in (P1).
+        _aj(_dr / "logs" / "supervisor.jsonl", {"ts": _n(), **estimate_event})
     except Exception:
-        log.debug("assisted admission wave estimate failed", exc_info=True)
-        try:
-            from supervisor.git_ops import DRIVE_ROOT as _dr2
-            from ouroboros.utils import append_jsonl as _aj2, utc_now_iso as _n2
-
-            _aj2(_dr2 / "logs" / "supervisor.jsonl", {
-                "ts": _n2(), "type": "managed_update_wave_estimate_failed",
-                "remaining_usd": float(remaining),
-            })
-        except Exception:
-            log.debug("estimator-failure event write failed", exc_info=True)
+        log.debug("wave estimate event write failed", exc_info=True)
 
     _create_rescue_snapshot(
         branch, "ui_update_assisted_merge", _collect_repo_sync_state(),

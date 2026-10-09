@@ -466,13 +466,15 @@ def _finish_task_done_dispatch(
             # carried no cost field at all.
             _cost_meta = carry_cost_meta(
                 {"accounted_upper_bound_usd": None, **task_done_event})
+            role = str(task.get("role") or "").strip()
+            role_suffix = f" ({role})" if role else ""
             progress_meta = {
                 "subagent_event": subagent_event,
                 "subagent_task_id": str(task_id or ""),
                 "root_task_id": str(task.get("root_task_id") or ""),
                 "parent_task_id": str(task.get("parent_task_id") or ""),
                 "delegation_role": "subagent",
-                "subagent_role": str(task.get("role") or ""),
+                "subagent_role": role,
                 "write_surface": str(constraint.get("surface") or ""),
                 "status": status,
                 # C2/C12 (ABI-3): the honest cost names plus EVERY openness/
@@ -521,7 +523,7 @@ def _finish_task_done_dispatch(
                 progress_meta["model_execution"] = task_done_event["model_execution"]
             ctx.send_with_budget(
                 chat_id,
-                f"{icon} Subagent {task_id} {verb} ({task.get('role') or 'researcher'}).",
+                f"{icon} Subagent {task_id} {verb}{role_suffix}.",
                 is_progress=True,
                 task_id=str(task_id or ""),
                 progress_meta=progress_meta,

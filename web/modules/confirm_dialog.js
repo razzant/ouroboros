@@ -33,6 +33,8 @@ export function openConfirmDialog({
     details = null,
     input = false,
     initialValue = '',
+    // [{value, label}] makes the input a <select>; the result shape is unchanged.
+    choices = null,
     // Alert mode (v6.90.3): one OK-style button, no cancel button. Escape,
     // backdrop, and the header Close still resolve the promise (false), same
     // as a cancelled confirm — callers treat any resolution as "seen".
@@ -54,7 +56,9 @@ export function openConfirmDialog({
                 <div class="marketplace-modal-body">
                     <p>${escapeHtml(body || 'Continue?')}</p>
                     ${renderConfirmDialogDetails(details)}
-                    ${input ? `<input class="ui-control files-modal-input confirm-dialog-input" data-confirm-input type="text" aria-labelledby="confirm-dialog-title" value="${escapeHtml(initialValue)}">` : ''}
+                    ${!input ? '' : Array.isArray(choices)
+                        ? `<select class="ui-control files-modal-input confirm-dialog-input" data-confirm-input aria-labelledby="confirm-dialog-title">${choices.map((choice) => `<option value="${escapeHtml(String(choice?.value ?? ''))}">${escapeHtml(String(choice?.label ?? choice?.value ?? ''))}</option>`).join('')}</select>`
+                        : `<input class="ui-control files-modal-input confirm-dialog-input" data-confirm-input type="text" aria-labelledby="confirm-dialog-title" value="${escapeHtml(initialValue)}">`}
                 </div>
                 <div class="marketplace-modal-actions">
                     ${alert ? '' : `<button type="button" class="btn btn-default" data-confirm-cancel>${escapeHtml(cancelLabel)}</button>`}

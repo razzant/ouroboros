@@ -120,6 +120,7 @@ def _bounded_interactions(pending: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         } for question in questions[:_MAX_INLINE_QUESTIONS]]
         out.append({
             "interaction_id": str(row.get("interaction_id") or ""),
+            **{key: row[key] for key in ("run_id", "attempt_id", "harness_id") if key in row},
             "source_tool": _preview_scalar(row.get("source_tool"), _SCALAR_PREVIEW_CHARS),
             "requested_at": _preview_scalar(row.get("requested_at"), _SCALAR_PREVIEW_CHARS),
             "timeout_at": _preview_scalar(row.get("timeout_at"), _SCALAR_PREVIEW_CHARS),
@@ -201,22 +202,34 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
         full["work_order_verification"] = dict(source_verification)
     if seen is not None and getattr(seen, "advances", None):
         full["advances"] = seen.rows(_WAITING_ADVANCES_BUDGET_CHARS)
-    budget = tool_result_limit("delegate_wait")
+    artifact_payload = {key: full[key] for key in (
+        "run_id", "pending_interactions", "work_order_source_request", "work_order_verification",
+    ) if key in full}
+    return json.dumps(_interactions_payload(ctx, full, "delegate_wait", artifact_payload),
+                      ensure_ascii=False, indent=2)
+
+
+def _interactions_payload(ctx: ToolContext, full: Dict[str, Any], tool_name: str,
+                          artifact_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Fit the caller's envelope; spill the complete observation before previewing.
+
+    Shared by wait and message refusal; neither rendering path marks questions
+    as reported. Whole answer keys survive inline or in the addressed artifact.
+    """
+    run_id, pending = full["run_id"], full.get("pending_interactions", [])
+    budget = tool_result_limit(tool_name)
     text = json.dumps(full, ensure_ascii=False, indent=2)
     if len(text) <= budget - _PAYLOAD_ENVELOPE_HEADROOM:
-        return text
-    spill = json.dumps({
-        "run_id": run_id,
-        "pending_interactions": pending,
-        **({"work_order_source_request": source_request}
-           if isinstance(source_request, dict) and source_request else {}),
-        **({"work_order_verification": source_verification}
-           if isinstance(source_verification, dict) and source_verification else {}),
-    },
-                       ensure_ascii=False, indent=2)
+        return full
+    spill = (json.dumps(artifact_payload, ensure_ascii=False, indent=2)
+             if artifact_payload is not None else text)
     spill_sha = hashlib.sha256(spill.encode("utf-8", "replace")).hexdigest()[:12]
-    artifact = _stage_full_output(ctx, run_id, spill,
-                                  suffix=f".{spill_sha}.interactions")
+    try:
+        artifact = _stage_full_output(ctx, run_id, spill,
+                                      suffix=f".{spill_sha}.interactions")
+    except Exception:
+        log.warning("Failed to stage pending interaction observation", exc_info=True)
+        artifact = None
     full["interactions_delivery"] = {
         "complete": False,
         "artifact": artifact,
@@ -226,10 +239,12 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
         "note": (
             "The inline questions are a bounded preview; the artifact holds the FULL "
             "question set, and its sha256/size above is the completeness receipt — "
-            "read it to EOF before answering."
+            "read it to EOF before answering. Preview option labels are not exact "
+            "selectable values."
             if artifact else
             "PARTIAL AND UNRECOVERABLE INLINE: the full question set could not be "
-            "staged to the task drive. Treat the preview as incomplete."
+            "staged to the task drive. Treat the preview as incomplete; do not answer "
+            "using preview labels. Re-check with delegate_wait."
         ),
     }
     # The preview must FIT, not merely be smaller: rows shed from the tail with
@@ -241,17 +256,19 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
         full["interactions_omitted"] = max(0, len(pending) - len(bounded))
         rendered = json.dumps(full, ensure_ascii=False, indent=2)
         if len(rendered) <= budget - _PAYLOAD_ENVELOPE_HEADROOM:
-            return rendered
+            return full
         if len(bounded) <= 1 and "advances" in full:
             # The question is the point of this payload: the compact advances
             # ride-along yields before the last question row does.
             full.pop("advances", None)
             continue
         if not bounded:
+            if tool_name == "delegate_message":
+                return _bounded_message_envelope(full, budget - _PAYLOAD_ENVELOPE_HEADROOM)
             # Nothing left to shed: the remaining bytes are this module's own
             # envelope plus the artifact receipt, which cannot realistically
             # overflow — hand back what there is.
-            return rendered
+            return full
         bounded = bounded[:-1]
         if not bounded:
             # R2-4 last resort (proven 15 210 > 15 000): when even the single
@@ -260,9 +277,9 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
             # artifact (sha256/size receipt above) is what ships, never a
             # payload the generic truncator would sever mid-structure.
             full["interactions_note"] = (
-                "not even one bounded question row fits this payload; the run "
-                "is still PAUSED on the full set — read the staged artifact "
-                "above to EOF before answering."
+                "not even one bounded question row fits this payload; "
+                + ("read the staged artifact above to EOF before answering." if artifact else
+                   "the full source could not be staged; re-check with delegate_wait.")
             )
 
 
@@ -683,7 +700,11 @@ _MESSAGE_NOTES = {
                   "harness. A later message needs a NEW message_id.",
     "unsupported": "This route/run has no live-input channel (engine without the operation, "
                    "harness liveInput none, or a thread-bound run). Nothing was written. "
-                   "Steer by cancel + a new delegate_start, or wait for the terminal.",
+                   "Wait for terminal settlement, or cancel a misdirected run and verify settlement. "
+                   "Then preserve useful work with delegate_start(subagent_id=..., continue_from=<run_id>, "
+                   "prompt=<corrections>), following its actor-selection and authority rules. "
+                   "The engine reuses the session where possible, otherwise retained evidence; "
+                   "some work may need repeating.",
     "delivery_unknown": "The message MAY have landed (transport loss, timeout, malformed "
                         "reply, receipt-save failure). Do NOT send a different message. "
                         "Re-check the timeline with delegate_wait (rows carrying this messageId "
@@ -713,7 +734,7 @@ _MESSAGE_REASON_NOTES = {
 _MESSAGE_PAYLOAD_VERDICT_CODES = frozenset({400, 413, 422})
 # The internal wall-clock budget for ONE delegate_message call, strictly below
 # its ToolEntry timeout (120s): handshake, the two capability reads and the
-# POST are budgeted against what remains (the codex steer itself is bounded at
+# POST plus any question read are budgeted against what remains (the steer is bounded at
 # 30s inside the engine), and exhaustion returns a typed outcome instead of an
 # executor thread-kill mid-wire.
 _MESSAGE_DEADLINE_SEC = 100.0
@@ -776,9 +797,73 @@ def _message_problem_outcome(exc: Exception) -> Tuple[str, str, Optional[str]]:
     return "delivery_unknown", code, None
 
 
+def _message_pending_observation(gateway: Any, run_id: str,
+                                 remaining: Callable[[], float]) -> Dict[str, Any]:
+    """One current detail read, separate from the possibly replayed refusal."""
+    from ouroboros.delegate_progress import _strict_poll, poll_bound
+    from ouroboros.gateways.claudexor import pending_interactions
+
+    observation: Dict[str, Any] = {"status": "not_read", "reason": "deadline_exhausted"}
+    result: Dict[str, Any] = {"interaction_observation": observation}
+    seconds_left = remaining()
+    if seconds_left > 0:
+        try:
+            detail = _strict_poll(gateway, run_id, poll_bound(seconds_left, strict=True))
+            # Missing/malformed rows are unknown, never an observed empty set.
+            pending = pending_interactions(detail, strict=True)
+            result["pending_interactions"] = pending
+            observation.update(status="observed" if pending else "empty", reason=None)
+        except Exception as exc:  # an observation failure cannot replace the refusal
+            observation.update(status="unavailable", reason="detail_read_failed",
+                               detail=truncate_within_limit(
+                                   f"{getattr(exc, 'code', type(exc).__name__)}: {exc}", 600))
+    observation["note"] = (
+        "Current run-detail observation after the message refusal, which may be a stored "
+        "receipt; this does not prove these questions blocked that POST. Questions may "
+        "resolve before an answer arrives; use delegate_answer "
+        "with these IDs and answer from task context, or escalate beyond your authority."
+        if observation["status"] == "observed" else
+        "The current detail returned no answerable pending questions; the original refusal is "
+        "unchanged. The question may have resolved since dispatch; this does not prove "
+        "an answer was delivered. Re-check with delegate_wait."
+        if observation["status"] == "empty" else
+        "Pending questions are unknown: the detail read failed or the call budget was "
+        "spent. The original refusal is unchanged; re-check with delegate_wait."
+    )
+    return result
+
+
+def _bounded_message_envelope(payload: Dict[str, Any], budget: int) -> Dict[str, Any]:
+    """Keep the typed refusal while shedding oversized receipt fields WHOLE.
+
+    The full receipt is already in interactions_delivery's addressed source (or
+    explicitly unavailable). IDs are never shortened into plausible new IDs.
+    This measures the final JSON, including delivery and omission metadata.
+    """
+    fields = ("detail", "run_id", "message_id", "attempt_id", "harness_id",
+              "live_input", "native_turn_id")
+    while len(json.dumps(payload, ensure_ascii=False, indent=2)) > budget:
+        present = [key for key in fields if key in payload]
+        if not present:
+            raise ValueError("message refusal envelope exceeds its fixed budget")
+        key = max(present, key=lambda name: len(json.dumps(payload[name], ensure_ascii=False)))
+        payload.pop(key)
+        payload.setdefault("fields_omitted", []).append(key)
+        payload["fields_omitted_count"] = len(payload["fields_omitted"])
+        payload["fields_omitted_note"] = (
+            "These receipt fields were omitted whole to fit; exact values are in "
+            "interactions_delivery.artifact. Do not infer or reconstruct IDs."
+            if payload.get("interactions_delivery", {}).get("artifact") else
+            "These receipt fields were omitted whole to fit and the full source could "
+            "not be staged. Their values are unavailable here; do not infer IDs."
+        )
+    return payload
+
+
 def _message_result(ctx: ToolContext, facts: Dict[str, Any], *, outcome: str,
                     reason: str = "", http_status: int = 0, detail: str = "",
-                    host_code: Optional[str] = None, **engine: Any) -> ToolResult:
+                    host_code: Optional[str] = None,
+                    questions: Optional[Dict[str, Any]] = None, **engine: Any) -> ToolResult:
     """Record the receipt (``delegate_message_outcome``, digest and size, never
     the text) and render the typed result. ``host_code`` marks a refusal;
     ``delivery_unknown`` and the two positive outcomes are OK observations."""
@@ -799,6 +884,28 @@ def _message_result(ctx: ToolContext, facts: Dict[str, Any], *, outcome: str,
     }
     if host_code:
         payload.update({"ok": False, "host_code": host_code})
+    if questions is not None:
+        payload.update(questions)
+        try:
+            # Even an unknown/empty question read can carry an oversized refusal.
+            renderable = dict(payload)
+            payload = _interactions_payload(ctx, renderable, "delegate_message")
+            if "pending_interactions" not in questions:
+                payload.pop("pending_interactions", None)
+        except Exception as exc:
+            # Keep the typed message receipt even if observation rendering fails.
+            payload.pop("pending_interactions", None)
+            payload["interaction_observation"] = {
+                "status": "unavailable", "reason": "detail_render_failed",
+                "detail": truncate_within_limit(f"{type(exc).__name__}: {exc}", 600),
+                "note": "Questions could not be rendered; re-check with delegate_wait.",
+            }
+            payload["interactions_delivery"] = {
+                "complete": False, "artifact": None, "read_next": None,
+                "note": "The complete observation could not be rendered or staged.",
+            }
+            payload = _bounded_message_envelope(
+                payload, tool_result_limit("delegate_message") - _PAYLOAD_ENVELOPE_HEADROOM)
     return delegate_result(payload)
 
 
@@ -860,47 +967,59 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
         gateway.close()
         return _fail("delegate_message", exc.code, str(exc), run_id=rid, message_id=mid)
     try:
-        live_input = ""
-        if not replay:
-            reason, detail, live_input = _live_input_unsupported(
-                gateway, str(entry.route_id or ""), _left)
-            if reason and reason != "deadline_exhausted":
-                return _message_result(ctx, facts, outcome="unsupported", reason=reason,
-                                       host_code=SUBSTRATE_REFUSAL_CODE, detail=detail,
-                                       live_input=live_input)
-        if _left() <= 0:
-            # Spent before the POST: nothing was sent, and the same-id retry the
-            # delivery_unknown note prescribes is exactly right (the key is unused).
-            return _message_result(
-                ctx, facts, outcome="delivery_unknown", reason="deadline_exhausted",
-                detail=(f"local time budget ({_MESSAGE_DEADLINE_SEC:.0f}s) spent before "
-                        "the message POST was sent; nothing was sent"), live_input=live_input)
         try:
-            body = gateway.send_run_message(rid, body_text, idempotency_key=mid,
-                                            timeout_sec=poll_bound(_left()))
-        except ClaudexorUnavailable as exc:
-            outcome, reason, host_code = _message_problem_outcome(exc)
+            live_input = ""
+            if not replay:
+                reason, detail, live_input = _live_input_unsupported(
+                    gateway, str(entry.route_id or ""), _left)
+                if reason and reason != "deadline_exhausted":
+                    return _message_result(ctx, facts, outcome="unsupported", reason=reason,
+                                           host_code=SUBSTRATE_REFUSAL_CODE, detail=detail,
+                                           live_input=live_input)
+            if _left() <= 0:
+                # Spent before the POST: nothing was sent, and the same-id retry the
+                # delivery_unknown note prescribes is exactly right (the key is unused).
+                return _message_result(
+                    ctx, facts, outcome="delivery_unknown", reason="deadline_exhausted",
+                    detail=(f"local time budget ({_MESSAGE_DEADLINE_SEC:.0f}s) spent before "
+                            "the message POST was sent; nothing was sent"), live_input=live_input)
+            try:
+                body = gateway.send_run_message(rid, body_text, idempotency_key=mid,
+                                                timeout_sec=poll_bound(_left()))
+            except ClaudexorUnavailable as exc:
+                outcome, reason, host_code = _message_problem_outcome(exc)
+                return _message_result(
+                    ctx, facts, outcome=outcome, reason=reason, host_code=host_code,
+                    http_status=int(getattr(exc, "status_code", 0) or 0), detail=str(exc),
+                    live_input=live_input)
+            outcome = str(body.get("outcome") or "")
+            reason = str(body.get("reason") or "")
+            host_code = None
+            if outcome == "rejected":
+                host_code = refusal_host_code(reason)
+            elif outcome in ("not_active", "unsupported"):
+                host_code = SUBSTRATE_REFUSAL_CODE
+        except Exception as exc:  # noqa: BLE001 — F7: never a raw traceback to the model
+            log.warning("delegate_message failed untyped for %s/%s", rid, mid, exc_info=True)
             return _message_result(
-                ctx, facts, outcome=outcome, reason=reason, host_code=host_code,
-                http_status=int(getattr(exc, "status_code", 0) or 0), detail=str(exc),
-                live_input=live_input)
-        outcome = str(body.get("outcome") or "")
-        reason = str(body.get("reason") or "")
-        host_code = None
-        if outcome == "rejected":
-            host_code = refusal_host_code(reason)
-        elif outcome in ("not_active", "unsupported"):
-            host_code = SUBSTRATE_REFUSAL_CODE
+                ctx, facts, outcome="delivery_unknown", reason="host_exception",
+                detail=f"{type(exc).__name__}: {exc}")
+        questions = None
+        if outcome == "not_active" and reason == "interaction_pending":
+            try:
+                questions = _message_pending_observation(gateway, rid, _left)
+            except Exception as exc:
+                # Enrichment is after the known POST verdict, outside its catch-all.
+                questions = {"interaction_observation": {
+                    "status": "unavailable", "reason": "detail_read_failed",
+                    "detail": truncate_within_limit(f"{type(exc).__name__}: {exc}", 600),
+                    "note": "Current questions are unknown; re-check with delegate_wait.",
+                }}
         return _message_result(
             ctx, facts, outcome=outcome, reason=reason, http_status=200,
             host_code=host_code, detail=str(body.get("message") or ""),
             attempt_id=body.get("attemptId"), harness_id=body.get("harnessId"),
             live_input=body.get("liveInput") or live_input,
-            native_turn_id=body.get("nativeTurnId"))
-    except Exception as exc:  # noqa: BLE001 — F7: never a raw traceback to the model
-        log.warning("delegate_message failed untyped for %s/%s", rid, mid, exc_info=True)
-        return _message_result(
-            ctx, facts, outcome="delivery_unknown", reason="host_exception",
-            detail=f"{type(exc).__name__}: {exc}")
+            native_turn_id=body.get("nativeTurnId"), questions=questions)
     finally:
         gateway.close()

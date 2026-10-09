@@ -112,105 +112,22 @@ def test_module_load_failure_recorded_and_survives_schema_rebuilds(tmp_path, mon
 
 
 # ---------------------------------------------------------------------------
-# H4 — typed preflight_blocked reason_kind
+# H5 — the retired advisory gate (3A) projects no readiness axis anywhere
 # ---------------------------------------------------------------------------
 
-def _guidance_for(reason_kind: str, status: str = "preflight_blocked") -> str:
-    from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord
-    from ouroboros.tools.claude_advisory_review import _next_step_guidance
-
-    latest = AdvisoryRunRecord(
-        snapshot_hash="cafe" * 4,
-        commit_message="m",
-        status=status,
-        ts="2026-09-01T00:00:00Z",
-        raw_result="detail text",
-        reason_kind=reason_kind,
-    )
-    return _next_step_guidance(
-        latest=latest, state=AdvisoryReviewState(),
-        stale_from_edit=False, stale_from_edit_ts=None,
-        open_obs=[], open_debts=[], effective_is_fresh=False,
-    )
-
-
-def test_release_metadata_block_never_claims_syntax_error():
-    guidance = _guidance_for("release_metadata")
-    assert "SyntaxError" not in guidance
-    assert "release metadata" in guidance
-
-
-def test_unavailable_release_guidance_preserves_the_failure_kind():
-    guidance = _guidance_for("release_metadata_unavailable", status="error")
-    assert "unavailable release metadata evidence" in guidance
-    assert "Restore access" in guidance
-
-
-def test_untyped_preflight_block_stays_generic():
-    guidance = _guidance_for("")
-    assert "SyntaxError" not in guidance
-    assert "raw_result" in guidance
-
-
-@pytest.mark.parametrize("unavailable", [False, True])
-def test_commit_gate_block_message_branches_on_reason_kind(tmp_path, monkeypatch, unavailable):
-    from ouroboros.review_state import AdvisoryRunRecord, compute_snapshot_hash, load_state, make_repo_key, save_state
-    from ouroboros.tools.commit_gate import _check_advisory_freshness
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    ctx = SimpleNamespace(
-        repo_dir=str(repo), drive_root=tmp_path,
-        drive_logs=lambda: tmp_path / "logs", task_id="t1",
-    )
-    snapshot_hash = compute_snapshot_hash(repo, "msg", paths=None)
-    state = load_state(tmp_path)
-    state.add_run(AdvisoryRunRecord(
-        snapshot_hash=snapshot_hash, commit_message="msg",
-        status="error" if unavailable else "preflight_blocked", ts="2026-09-01T00:00:00Z",
-        raw_result="exact release source diagnostic",
-        reason_kind="release_metadata_unavailable" if unavailable else "release_metadata", repo_key=make_repo_key(repo),
-    ))
-    save_state(tmp_path, state)
-
-    message = _check_advisory_freshness(ctx, "msg")
-    assert message is not None
-    assert "SyntaxError" not in message
-    assert "exact release source diagnostic" in message
-    assert "Snapshot changed" not in message
-    assert ("evidence could not be read" if unavailable else "release metadata preflight failed") in message
-
-
-# ---------------------------------------------------------------------------
-# H5 — repo_commit_ready SSOT mirrors advisory enforcement
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    ("fresh", "debt", "enforcement", "expected"),
-    [
-        (False, False, "advisory", False),
-        (False, False, "blocking", False),
-        (True, False, "advisory", True),
-        (True, False, "blocking", True),
-        (True, True, "advisory", True),   # debt disclosed, not gating
-        (True, True, "blocking", False),
-    ],
-)
-def test_advisory_commit_ready_is_enforcement_aware(fresh, debt, enforcement, expected):
-    from ouroboros.review_state import advisory_commit_ready
-
-    debts = [object()] if debt else []
-    assert advisory_commit_ready(fresh, [], debts, enforcement) is expected
-
-
-def test_review_context_heading_no_longer_claims_full_gate():
+def test_the_retired_advisory_gate_has_no_readiness_projection_left():
+    """Decision 3A retired the advisory gate; its `repo_commit_ready` mirror said
+    "yes" on every surface and made the author chase a readiness that nothing
+    decides. Neither the function nor the context heading exists any more."""
     import inspect
 
-    from ouroboros import agent_task_pipeline
+    from ouroboros import agent_task_pipeline, review_state
 
+    assert not hasattr(review_state, "advisory_commit_ready")
     source = inspect.getsource(agent_task_pipeline)
     assert "Live repo gate" not in source
-    assert "Advisory readiness" in source
+    assert "Advisory readiness" not in source
+    assert "repo_commit_ready" not in source
 
 
 # ---------------------------------------------------------------------------

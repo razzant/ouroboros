@@ -1528,8 +1528,8 @@ def test_schedule_subagent_publishes_the_depth_request_and_the_handler_accepts_i
     assert row["default"] == 0
     # Absolute from the root, and telemetry rather than a cap: both semantics
     # have to be readable by the model that fills the field in.
-    assert "ABSOLUTELY FROM THE ROOT" in row["description"]
-    assert "never widens or narrows" in row["description"]
+    assert "absolute nesting depth from root=0" in row["description"]
+    assert "never changes configured caps" in row["description"]
     # The handler's closed keyword set DERIVES from the same schema.
     assert "requested_depth" in control.schedule_subagent_param_names()
     assert "requested_depth" not in control.HIDDEN_LEGACY_SCHEDULE_PARAMS

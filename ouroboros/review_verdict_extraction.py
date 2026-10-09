@@ -21,6 +21,7 @@ from ouroboros.triad_review import (
     extract_fenced_json,
     extract_json_array,
     object_verdict_payload,
+    two_part_payload,
 )
 
 log = logging.getLogger("review_execution")
@@ -121,6 +122,15 @@ def _strictly_parseable(
             return object_verdict_payload(json.loads(body.strip())) is not None
         except (TypeError, ValueError):
             return False
+    if shape == "two_part":
+        # The two-part object, or the bare change array (recorded by the gate as
+        # a seat that left the coupling block out — still a readable answer).
+        if empty_array_is_verified_clean(body):
+            return True
+        try:
+            return two_part_payload(json.loads(body.strip())) is not None
+        except (TypeError, ValueError):
+            return False
     if empty_array_is_verified_clean(body):
         return True
     try:
@@ -139,6 +149,9 @@ def _canonical_payload_text(
     if shape == "object":
         verdict = object_verdict_payload(payload)
         return None if verdict is None else json.dumps(verdict, ensure_ascii=False)
+    if shape == "two_part":
+        answer = two_part_payload(payload)
+        return None if answer is None else json.dumps(answer, ensure_ascii=False)
     findings = _findings_array(payload)
     if findings is None or (findings and array_validator is not None and not array_validator(findings)):
         return None
@@ -231,7 +244,7 @@ def _extract_verdict_via_light_model(
         # Observation-only while the owning task pauses (#1196): the raw
         # answer is kept verbatim; no Light call canonicalizes it on the way out.
         return None, {"model": model, "reason_code": "budget_pausing_no_extraction", "dispatch": "not_dispatched"}
-    template = _SESSION_EXTRACT_OBJECT_PROMPT if shape == "object" else _SESSION_EXTRACT_PROMPT
+    template = _SESSION_EXTRACT_OBJECT_PROMPT if shape in ("object", "two_part") else _SESSION_EXTRACT_PROMPT
     prompt = template.format(
         contract=contract or default_output_contract(shape),
         raw_text=raw_text,  # WHOLE — the caller already bounded the one send
@@ -280,7 +293,7 @@ def _extract_verdict_via_light_model(
     usage["model"] = model
     if not body or _UNEXTRACTABLE in body.upper()[:80]:
         return None, usage
-    if shape == "object":
+    if shape in ("object", "two_part"):
         try:
             payload: Any = json.loads(body)
         except (TypeError, ValueError):

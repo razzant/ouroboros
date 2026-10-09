@@ -5,12 +5,13 @@ Covers:
 - chat_async with no_proxy=True passes no_proxy through to _chat_anthropic for Anthropic
 - _chat_anthropic with no_proxy=True uses requests.Session(trust_env=False)
 - _chat_remote passes no_proxy through to _chat_anthropic for Anthropic provider
-- plan_review, review.py, scope_review.py call chat_async with no_proxy=True
+- plan_review, review.py, review_multi_model.py call chat_async with no_proxy=True
 """
 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -467,17 +468,20 @@ def test_review_query_model_uses_no_proxy():
 
 
 # ---------------------------------------------------------------------------
-# Test: scope_review _call_scope_llm calls chat_async with no_proxy=True
+# Test: the retrieving seat of the one wave sends with no_proxy=True
 # ---------------------------------------------------------------------------
 
-def test_scope_review_call_scope_llm_uses_no_proxy(tmp_path):
-    """_call_scope_llm must send with no_proxy=True.
+def test_retrieving_review_seat_uses_no_proxy(tmp_path):
+    """A retrieving seat (two-part brief, native inspection episode) must send
+    with no_proxy=True.
 
-    Every scope row retrieves, so the send is the bounded native inspection
-    episode's synchronous ``chat`` call; the flag rides the shared request the
-    same way it does on every other review transport.
+    The send is the bounded native inspection episode's synchronous ``chat``
+    call; the flag rides the shared request the same way it does on every
+    other review transport.
     """
-    from ouroboros.tools import scope_review
+    import asyncio
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.tools.review_multi_model import _query_model
 
     captured_kwargs = []
 
@@ -486,13 +490,14 @@ def test_scope_review_call_scope_llm_uses_no_proxy(tmp_path):
             captured_kwargs.append(kwargs)
             return {"content": "[]"}, {"prompt_tokens": 100, "completion_tokens": 50}
 
-    with patch.object(scope_review, "LLMClient", return_value=FakeLLMClient()):
-        scope_review._call_scope_llm(
-            "", session_task="review the staged change", session_root=str(tmp_path),
-        )
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t", pending_events=[])
+    asyncio.run(_query_model(
+        FakeLLMClient(), "openai/gpt-5.5", [], asyncio.Semaphore(1), ctx=ctx, slot_id="slot_1",
+        route=ReviewRouteKind.API_CHAT, native_retrieval=True,
+        session_task="review the staged change", session_root=str(tmp_path)))
 
     assert len(captured_kwargs) >= 1, "the episode should send at least once"
     for kw in captured_kwargs:
         assert kw.get("no_proxy") is True, (
-            f"scope_review._call_scope_llm sent without no_proxy=True: {kw}"
+            f"the retrieving seat sent without no_proxy=True: {kw}"
         )

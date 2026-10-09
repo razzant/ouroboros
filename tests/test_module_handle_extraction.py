@@ -170,13 +170,14 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/tools/git_review_cycle.py": ("ouroboros/tools/git.py", "_git", frozenset({
         "_DOC_ONLY_EXTENSIONS", "_acquire_git_lock",
-        "_advisory_and_tests_gate", "_aggregate_review_verdict",
+        "_aggregate_review_verdict",
         "_authorized_managed_update_resolver", "_check_overlapping_review_attempt",
         "_current_runtime_mode", "_ensure_gitignore", "_finalize_blocked_review",
         "_finalize_pending_review", "_fingerprint_staged_diff", "_free_cycle_gate",
-        "_handle_advisory_pre_review", "_handle_revalidation_failure", "_install_paid_dispatch_stamp",
+        "_handle_revalidation_failure", "_install_paid_dispatch_stamp",
+        "_preflight_and_tests_gate",
         "_protected_paths_block_message", "_reconcile_and_clear_review_roster",
-        "_record_commit_attempt", "_release_git_lock", "_reconcile_advisory_before_preparation",
+        "_record_commit_attempt", "_release_git_lock",
         "_reset_commit_review_state",
         "_review_binding_precondition_error", "_review_custody_pending",
         "_review_cycle_infra_failure", "_run_parallel_review",
@@ -396,7 +397,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     "ouroboros/review_state_model.py": ("ouroboros/review_state.py", "_rs", frozenset({
         "CommitReadinessDebtItem", "ObligationItem", "_DEFAULT_TOOL_NAME",
         "_LEGACY_CURRENT_REPO_KEY", "_MAX_ATTEMPT_HISTORY", "_MAX_COMMIT_READINESS_DEBTS",
-        "_MAX_RUN_HISTORY", "_OPEN_COMMIT_READINESS_DEBT_STATUSES", "_allocate_prefixed_id",
+        "_OPEN_COMMIT_READINESS_DEBT_STATUSES", "_allocate_prefixed_id",
         "_attempt_has_active_review_custody", "_attempt_history_evictable",
         "_attempt_identity_tuple", "_attempt_review_roster_rows",
         "_commit_readiness_debts_view", "_dedupe_strings", "_filter_lifecycle_records",
@@ -422,29 +423,6 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/tools/review_prompt_text.py": ("ouroboros/tools/review_helpers.py", "_rh", frozenset({
         "sanitize_tool_result_for_log",
-    })),
-    # F2.3b D06 lane rows (advisory re-derive on the native-episode form).
-    # Same-leaf members that tests monkeypatch on the facades are declared too,
-    # so the patch points keep binding through the handle.
-    "ouroboros/tools/preflight_review_prompt.py": ("ouroboros/tools/claude_advisory_review.py", "_car", frozenset({
-        "CRITICAL_FINDING_CALIBRATION", "_build_blocking_history_section",
-        "_get_changed_file_list", "_get_staged_diff",
-        "build_blocking_findings_json_section", "build_goal_section",
-        "build_scope_section", "build_skill_host_context", "load_checklist_section",
-        "load_governance_doc", "load_state", "make_repo_key",
-    })),
-    "ouroboros/tools/preflight_review_run.py": ("ouroboros/tools/claude_advisory_review.py", "_car", frozenset({
-        "SEVERITY_DRIVEN_ITEMS", "_advisory_native_model", "_advisory_review_diff",
-        "_api_window_skip_warning",
-        "_build_advisory_prompt", "_format_advisory_error", "_get_changed_file_list",
-        "_get_runtime_diagnostics", "_llm_extract_advisory_items",
-        "_mandatory_read_corpus_chars", "_maybe_overflow_skip", "_predispatch_size_skip", "_persist_preflight_record",
-        "_run_advisory_delegated",
-        "_run_advisory_native", "_syntax_preflight_staged_py_files",
-        "advisory_gate_unavailability_reason",
-        "emit_review_event", "emit_review_usage", "empty_array_is_verified_clean",
-        "extract_json_array", "get_finalization_grace_sec",
-        "owner_deadline_exhausted_for_context",
     })),
     "ouroboros/loop_round_limits.py": ("ouroboros/loop.py", "_loop", frozenset({
         "DeliveryCandidate", "_append_or_merge_user_content",

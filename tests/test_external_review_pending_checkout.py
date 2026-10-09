@@ -13,7 +13,6 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.review_substrate as substrate
-from ouroboros.review_state import AdvisoryRunRecord, compute_snapshot_hash, make_repo_key, update_state
 from ouroboros.tools import git
 from ouroboros.tools import review_subject
 from ouroboros.tools.registry import ToolContext
@@ -21,7 +20,7 @@ from ouroboros.tools.review_change import run_review_change
 from ouroboros.tools.review_subject import ReviewSubjectSpec, isolated_checkout
 from scripts import run_external_review as runner
 from tests import _contributor_packet_shared as shared
-from tests.test_advisory_inline_freshness import candidate  # noqa: F401
+from tests.test_git_review_preflight_gate import candidate  # noqa: F401
 
 
 def _checkouts(drive: Path) -> list[Path]:
@@ -62,7 +61,7 @@ def test_review_change_records_the_retained_checkout(tmp_path, monkeypatch, pend
 
     fixture = shared.init_installed_body(tmp_path)
     repo, drive = Path(fixture["repo"]), tmp_path / "drive"
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(runner._slot_plan_payload(shared.GOLDEN_CONFIG)))
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", shared.golden_pool())  # the gate's panel is the review pool
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     settled = shared.golden_substrate([])
 
@@ -98,19 +97,39 @@ def test_review_change_records_the_retained_checkout(tmp_path, monkeypatch, pend
     assert shared.git(repo, "worktree", "list", "--porcelain").count("worktree ") == (2 if pending else 1)
 
 
+def _preflight_record(ctx, answer: str, *, pending: bool) -> dict:
+    """A real ``surface=preflight`` ledger record of the author's one seat, as
+    ``commit_gate.run_commit_preflight`` leaves it, and the cycle's preflight fact."""
+    from ouroboros import review_ledger
+
+    record = review_ledger.build_wave_record({
+        "task_id": "operator", "pending": pending,
+        "structured": {"triad_rows": [{"slot_id": "api-scout", "subagent_id": "api-scout",
+                                       "model": "openai/fake-reviewer", "route": "api_chat"}]},
+        "triad_raw": [{"slot_id": "api-scout", "status": "responded", "raw_text": answer}] if answer else [],
+    }, surface="preflight", drive_root=ctx.drive_root)
+    review_ledger.write_record(ctx.drive_root, record)
+    return {"status": "performed", "record_id": record.record_id, "reviewer": "api-scout",
+            "aggregate": str(record.verdict.get("aggregate") or "")}
+
+
 @pytest.mark.parametrize("mode", ["preflight", "wave", "exception_pending", "base_exception_pending", "finished",
-                                  "exception_empty"])
+                                  "answered", "exception_empty"])
 def test_wrapper_retains_only_unresolved_custody(candidate, monkeypatch, tmp_path, mode):  # noqa: F811
+    from ouroboros.review_ledger import STATE_PENDING
+    from tests.test_git_review_preflight_gate import _roster
+
+    _roster(monkeypatch)
     repo = candidate.repo_dir
     (repo / "VERSION").write_text("1.0.0\n")
     output, drive = tmp_path / "output", tmp_path / "review-data"
     monkeypatch.setattr(runner, "REPO", repo)
     args = SimpleNamespace(contributor=False, commit_message="candidate", goal="", scope="",
-                           output=str(output), drive_root=str(drive), no_isolated_checkout=False)
+                           output=str(output), drive_root=str(drive), no_isolated_checkout=False,
+                           preflight_reviewer="api-scout")
     monkeypatch.setattr(runner, "_parse_args", lambda: args)
     monkeypatch.setattr(runner, "_prepare_review_configuration", lambda args: (None, {}))
-    monkeypatch.setattr(runner, "_advisory_unavailability_warning", lambda: "")
-    monkeypatch.setattr("ouroboros.tools.claude_advisory_review._handle_advisory_pre_review",
+    monkeypatch.setattr("ouroboros.tools.review_change.run_review_change",
                         lambda *a, **kw: pytest.fail("wrapper must not pay before cycle admission"))
     created: list[Path] = []
     materialize = review_subject.isolated_checkout
@@ -133,15 +152,12 @@ def test_wrapper_retains_only_unresolved_custody(candidate, monkeypatch, tmp_pat
         pass
 
     def cycle(ctx, message, **kwargs):
-        assert kwargs["skip_advisory_review"] is False
+        assert kwargs["preflight_reviewer"] == "api-scout"
         (ctx.repo_dir / "late-untracked.txt").write_text("preserve without staging\n")
         if mode in {"preflight", "exception_pending", "base_exception_pending"}:
-            update_state(ctx.drive_root, lambda state: state.add_run(AdvisoryRunRecord(
-                snapshot_hash=compute_snapshot_hash(ctx.repo_dir), commit_message=message,
-                repo_key=make_repo_key(ctx.repo_dir), status="pending", ts="2026-09-06T00:00:00Z",
-                raw_result=full_source,
-                execution={"invocation_id": "inv", "pending_invocation_id": "inv", "operation_state": "in_flight"},
-            )))
+            ctx._commit_preflight = _preflight_record(ctx, "", pending=True)
+        if mode == "answered":
+            ctx._commit_preflight = _preflight_record(ctx, full_source, pending=False)
         if mode == "wave":
             ctx._last_triad_raw_results = [{"slot_id": "s", "operation_id": "op", "operation_state": "in_flight",
                                             "late_result_pending": True}]
@@ -171,10 +187,19 @@ def test_wrapper_retains_only_unresolved_custody(candidate, monkeypatch, tmp_pat
             assert result["exit_code"] == 3
             assert result["outcome"]["retained_checkout"] == str(checkout)
             assert result["outcome"]["retained_custody"]
+        if mode in {"preflight", "exception_pending", "base_exception_pending"}:
+            preflight = json.loads((output / "outcome.json").read_text(encoding="utf-8"))["outcome"]["retained_custody"]["preflight"]
+            assert preflight["state"] == STATE_PENDING and preflight["record_id"]
         if mode == "preflight":
-            assert json.loads((output / "advisory.txt").read_text())["raw_result"] == full_source
+            summary = json.loads((output / "preflight.json").read_text(encoding="utf-8"))
+            assert summary["review_record"]["record_id"] == summary["preflight"]["record_id"]
         if mode == "finished":
-            assert json.loads((output / "advisory.txt").read_text())["status"] == "not_run"
+            assert json.loads((output / "preflight.json").read_text(encoding="utf-8"))["preflight"]["status"] == "not_performed"
+        if mode == "answered":
+            summary = json.loads((output / "preflight.json").read_text(encoding="utf-8"))
+            assert summary["preflight"]["status"] == "performed"
+            assert [seat["answer"] for seat in summary["seats"]] == [full_source]
+            assert (output / "preflight.txt").read_text(encoding="utf-8") == full_source + "\n"
     finally:
         for checkout in created:
             if checkout.exists():

@@ -120,7 +120,7 @@ def test_custody_lost_slot_is_named_in_pending_report(monkeypatch, tmp_path):
         lambda *_args, **_kwargs: json.dumps({"results": [{"model": "placeholder"}]}),
     )
 
-    def _lost_row(run_ctx, _model_results):
+    def _lost_row(run_ctx, _model_results, _row_plan=None):
         run_ctx._last_triad_raw_results = [{
             "slot_id": "custody_lost_slot_1",
             "status": "error",

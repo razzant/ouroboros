@@ -1,11 +1,10 @@
 """
 Tests for budget/cost tracking across all tools and pipeline components.
-Verifies that real LLM spend from advisory, plan_task, reflection,
+Verifies that real LLM spend from review usage, plan_task, reflection,
 consolidation, scope review, and supervisor dedup all reach accounting.
 """
 from __future__ import annotations
 
-import importlib
 import pytest
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
@@ -26,16 +25,16 @@ class _FakeCtx:
 
 
 # ---------------------------------------------------------------------------
-# Advisory SDK cost tracking
+# Review usage emission (the shared helper every review surface uses)
 # ---------------------------------------------------------------------------
 
 class TestAdvisoryUsageEmit:
-    """Advisory usage emission must route through the shared review helper."""
+    """Review usage emission must route through the shared review helper."""
 
     def _get_fn(self):
-        mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
+        from ouroboros.tools.review_helpers import emit_review_usage
         def _emit(ctx, model, cost_usd, usage, source="advisory", provider="anthropic", session_id="", prompt_chars=0):
-            return mod.emit_review_usage(
+            return emit_review_usage(
                 ctx,
                 model=model,
                 provider=provider,
@@ -146,12 +145,12 @@ class TestScopeReviewProviderAttribution:
 
 
 class TestAdvisoryFallbackProviderAttribution:
-    """Advisory fallback provider kwarg must reflect fallback model prefix."""
+    """A review fallback's provider kwarg must reflect the fallback model prefix."""
 
     def _get_fn(self):
-        mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
+        from ouroboros.tools.review_helpers import emit_review_usage
         def _emit(ctx, model, cost_usd, usage, source="advisory", provider="anthropic", session_id="", prompt_chars=0):
-            return mod.emit_review_usage(
+            return emit_review_usage(
                 ctx,
                 model=model,
                 provider=provider,
@@ -177,12 +176,12 @@ class TestAdvisoryFallbackProviderAttribution:
         assert ev["provider"] == expected_provider
 
 
-class TestScopeReviewUsageFallback:
-    """_emit_usage in scope_review.py must fall back to pending_events."""
+class TestReviewUsageFallback:
+    """``emit_review_usage`` (review_helpers) must fall back to pending_events."""
 
     def _get_fn(self):
         from ouroboros.tools.review_helpers import emit_review_usage
-        return lambda ctx, model, usage: emit_review_usage(ctx, model=model, usage=usage, source="scope_review")
+        return lambda ctx, model, usage: emit_review_usage(ctx, model=model, usage=usage, source="review")
 
     def test_routes_to_pending_events_when_no_queue(self):
         fn = self._get_fn()
@@ -284,74 +283,6 @@ class TestUpdatePatternsCostTracking:
             mock_budget.assert_called_once()
             usage_arg = mock_budget.call_args[0][0]
             assert usage_arg.get("prompt_tokens") == 300
-
-
-class TestAdvisoryCostAccounting:
-    """Advisory spend is accounted inside the review substrate: the native
-    episode executor stamps every paid send into the usage ledger under
-    usage_scope(category="advisory_review"), and the session route accounts
-    through the same substrate. A second call-site emit (the retired
-    Claude-SDK transport re-emitted source="advisory_sdk") would now
-    double-count that spend, so its absence is the contract.
-    """
-
-    def test_call_site_no_longer_re_emits_transport_usage(self):
-        import inspect
-        mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
-        source = inspect.getsource(mod._run_claude_advisory)
-        assert "advisory_sdk" not in source
-        assert "emit_review_usage" not in source
-
-    def test_native_dispatch_scopes_usage_to_advisory_review(self):
-        import inspect
-        mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
-        source = inspect.getsource(mod._run_advisory_native)
-        assert 'category="advisory_review"' in source
-        assert 'source="advisory_native"' in source
-
-
-
-class TestAdvisoryFallbackCostTracking:
-    """_llm_extract_advisory_items must emit cost for the fallback LLM call."""
-
-    def test_emit_called_with_fallback_usage_for_toolcontext(self):
-        """When ctx is a ToolContext, emit is called with fallback usage."""
-        from ouroboros.tools.registry import ToolContext as TC
-        mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
-
-        ctx = _FakeCtx()
-        # Make _FakeCtx pass isinstance check by setting its class's MRO
-        ctx.__class__ = TC  # type: ignore[assignment]
-
-        fake_usage = {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.05}
-
-        with patch("ouroboros.llm.LLMClient") as mock_cls, \
-             patch.object(mod, "emit_review_usage") as mock_emit:
-            inst = MagicMock()
-            inst.chat.return_value = (
-                {"content": '[{"item":"code_quality","verdict":"PASS","reason":"ok"}]'},
-                fake_usage,
-            )
-            mock_cls.return_value = inst
-            mod._llm_extract_advisory_items("narrative text with findings", ctx)
-            mock_emit.assert_called_once()
-            assert mock_emit.call_args.kwargs["model"] == mod._resolve_fallback_model()
-
-    def test_no_emit_when_ctx_not_toolcontext(self):
-        """When ctx is not a ToolContext, emit must be skipped gracefully."""
-        mod = importlib.import_module("ouroboros.tools.claude_advisory_review")
-
-        with patch("ouroboros.llm.LLMClient") as mock_cls, \
-             patch.object(mod, "emit_review_usage") as mock_emit:
-            inst = MagicMock()
-            inst.chat.return_value = (
-                {"content": '[{"item":"code_quality","verdict":"PASS","reason":"ok"}]'},
-                {"cost": 0.01},
-            )
-            mock_cls.return_value = inst
-            # Plain object — not a ToolContext
-            mod._llm_extract_advisory_items("some text", object())
-            mock_emit.assert_not_called()
 
 
 class TestScratchpadConsolidationCostTracking:

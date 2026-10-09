@@ -23,7 +23,8 @@ def test_native_first_request_has_room_for_a_real_inspection(harness, monkeypatc
 
     ctx = harness.make_ctx()
     ctx.current_chat_id = 1
-    harness.state['slots'] = [replace(harness.state['slots'][0], subagent_id='native-reader')]
+    harness.state['slots'] = [replace(harness.state['slots'][0], subagent_id='native-reader',
+                                      native_retrieval_override=True)]
     monkeypatch.setattr(reviewer_window, 'reviewer_context_window', lambda *a, **kw: 200_000)
     append_jsonl(harness.drive / 'logs/chat.jsonl', {'direction': 'out', 'chat_id': 1,
                  'text': 'Discussion and tradeoffs. ' * (50000 if large else 10)})
@@ -154,7 +155,8 @@ def test_native_first_send_carries_no_required_source_manifest_for_the_room(harn
 
     ctx = harness.make_ctx()
     ctx.current_chat_id = 1
-    harness.state['slots'] = [replace(harness.state['slots'][0], subagent_id='native-reader')]
+    harness.state['slots'] = [replace(harness.state['slots'][0], subagent_id='native-reader',
+                                      native_retrieval_override=True)]
     append_jsonl(harness.drive / 'logs/chat.jsonl', {'direction': 'out', 'chat_id': 1, 'text': 'Discussion and tradeoffs.'})
     substrate = harness.install({'s1': CLEAN})
     _call(ctx)

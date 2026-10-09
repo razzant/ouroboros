@@ -1,0 +1,2 @@
+190
+The review-pool paragraph states what the commit gate does with an empty pool: it exits at assembly with review NOT_PERFORMED (typed `pool_empty`), dispatches nothing, and its ledger record is NOT_DISPATCHED naming `pool_empty` as its dispatch refusal under either enforcement — the typed fact the settings panel promises, never an API-key failure.

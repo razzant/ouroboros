@@ -53,7 +53,7 @@ def synthetic_repo(tmp_path):
     (repo / "docs" / "CHECKLISTS.md").write_text(
         "# Checklists\n\n## Change Review Checklist\n\n- synthetic item 7f3a\n\n"
         "## Ouroboros Body Layer\n\n- synthetic body item 7f3b\n\n"
-        "## Intent / Scope Review Checklist\n\n- synthetic scope item 9c1e\n\n## Other\n\nnot inlined\n",
+        "## Coupling questions\n\n- synthetic scope item 9c1e\n\n## Other\n\nnot inlined\n",
         encoding="utf-8")
     (repo / "docs" / "CHECKLISTS_ARCHIVE.md").write_text("archive row 7f3a\n", encoding="utf-8")
     for rel in ("DEVELOPMENT.md", "DESIGN.md", "ARCHITECTURE.md"):
@@ -188,13 +188,16 @@ def test_headroom_is_derived_from_the_zero_diff_message(synthetic_repo, isolated
 
 
 def _plan(rows):
-    """``commit_triad_delivery()``'s aligned vectors from ``(model, route, subagent_id)`` rows."""
-    from ouroboros.review_execution import ReviewRouteKind
+    """``commit_triad_delivery()``'s aligned vectors from ``(model, route, subagent_id[, native])``
+    rows. F8: whether an api row retrieves is its own delivery fact (``native``), never its id."""
+    from ouroboros.review_execution import ReviewRouteKind, delivery_retrieves
 
+    rows = [(*row, False)[:4] for row in rows]
     return {
-        "models": [model for model, _route, _actor in rows],
-        "routes": [ReviewRouteKind(route) for _model, route, _actor in rows],
-        "subagent_ids": [actor for _model, _route, actor in rows],
+        "models": [model for model, _route, _actor, _native in rows],
+        "routes": [ReviewRouteKind(route) for _model, route, _actor, _native in rows],
+        "subagent_ids": [actor for _model, _route, actor, _native in rows],
+        "retrieves": [delivery_retrieves(ReviewRouteKind(route), native) for _model, route, _actor, native in rows],
     }
 
 
@@ -206,10 +209,9 @@ def test_direct_native_rows_use_the_resolved_delivery_vector():
 
 
 def test_saved_direct_native_panel_has_no_packet_headroom(synthetic_repo, isolated_roots, monkeypatch):
-    monkeypatch.setenv('OUROBOROS_REVIEWER_SLOTS', json.dumps({
-        'triad': [{'slot_id': 'reader', 'route': {'kind': 'api_chat', 'target_id': 'openai/native'},
-                   'delivery': 'native'}],
-        'scope': [{'slot_id': 'scope', 'route': {'kind': 'api_chat', 'target_id': 'openai/scope'}}]}))
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    monkeypatch.setenv('OUROBOROS_SUBAGENTS', pool_roster(pool_seat('reader', 'openai/native', delivery='native')))
     monkeypatch.setattr(mrp, '_quorum_limit', lambda _models: pytest.fail('native rows cannot constrain a packet'))
     monkeypatch.setattr(mrp, '_o200k', _no_bpe)
     report = mrp.measure(synthetic_repo)
@@ -220,7 +222,7 @@ def test_saved_direct_native_panel_has_no_packet_headroom(synthetic_repo, isolat
 
 def test_only_the_rows_that_receive_the_api_pack_bound_the_headroom(synthetic_repo, isolated_roots, monkeypatch):
     """``review._prepare_unified_review`` hands ``fit_triad_prompt`` the api_chat
-    rows WITHOUT a configured-subagent binding; a session row and a subagent api
+    rows whose delivery is the packet; a session row and a native-delivery api
     row retrieve with their own tools. The headroom/quorum limit must be sized
     over exactly that filtered set — the whole delivery plan overstated a mixed
     panel's constraint by every retrieving row."""
@@ -229,7 +231,7 @@ def test_only_the_rows_that_receive_the_api_pack_bound_the_headroom(synthetic_re
     monkeypatch.setattr(rsc, "commit_triad_delivery", lambda: _plan([
         ("openai/packet", "api_chat", ""),
         ("claude=opus", "agent_session", ""),
-        ("openai/native", "api_chat", "reviewer-b"),
+        ("openai/native", "api_chat", "reviewer-b", True),
     ]))
     sized = []
 
@@ -258,7 +260,7 @@ def test_an_all_retrieving_panel_reports_no_api_pack_instead_of_a_number(
     import ouroboros.reviewer_slot_config as rsc
 
     monkeypatch.setattr(rsc, "commit_triad_delivery", lambda: _plan([
-        ("claude=opus", "agent_session", ""), ("openai/native", "api_chat", "reviewer-b")]))
+        ("claude=opus", "agent_session", ""), ("openai/native", "api_chat", "reviewer-b", True)]))
 
     def _never(models):
         raise AssertionError(f"no api row receives a pack, nothing to size: {models}")
@@ -279,25 +281,22 @@ def test_an_all_retrieving_panel_reports_no_api_pack_instead_of_a_number(
 
 
 def test_a_checkout_whose_index_is_not_its_working_tree_is_refused(synthetic_repo, isolated_roots, monkeypatch, capsys):
-    """The advisory arm resolves its paths from ``git status --porcelain`` and
-    every pack reads working-tree text, while the index arms take the staged
-    list: one change only when the index IS the working tree. That used to be a
-    comment; now an unstaged edit or an untracked file is a typed refusal, and
-    a clean checkout reports the one path set both advisory arms measured."""
+    """Every pack reads working-tree text, while the index arms take the staged
+    list: one change only when the index IS the working tree, so an unstaged edit
+    or an untracked file is a typed refusal and a clean checkout is measured."""
     monkeypatch.setattr(mrp, "_quorum_limit", lambda models: (10_000, {}))
     monkeypatch.setattr(mrp, "_o200k", _no_bpe)
 
-    clean = mrp.measure(synthetic_repo)
-    assert clean["advisory_touched_manifest"]["paths"] == ["app.py"] == clean["staged_paths"]
+    assert mrp.measure(synthetic_repo)["staged_paths"] == ["app.py"]
 
-    # An unstaged edit of the staged file: the advisory arm would read text the index arms never see.
+    # An unstaged edit of the staged file: the packs would read text the index never staged.
     (synthetic_repo / "app.py").write_text("BUTTON_COLOUR = 'green'\n", encoding="utf-8")
     with pytest.raises(mrp.MeasuredCheckoutDirty, match=r"MM app\.py"):
         mrp.measure(synthetic_repo)
     _git(synthetic_repo, "add", "app.py")
-    assert mrp.measure(synthetic_repo)["advisory_touched_manifest"]["paths"] == ["app.py"]
+    assert mrp.measure(synthetic_repo)["staged_paths"] == ["app.py"]
 
-    # An untracked file: the porcelain-resolved arm would pack a path the index does not name.
+    # An untracked file: the worktree holds a path the index does not name.
     (synthetic_repo / "scratch.txt").write_text("stray\n", encoding="utf-8")
     with pytest.raises(mrp.MeasuredCheckoutDirty, match=r"\?\? scratch\.txt"):
         mrp.measure(synthetic_repo)
@@ -370,17 +369,12 @@ def test_a_staged_deletion_is_parsed_like_the_host_parses_name_status(
     assert sorted(mrp._staged_entries(synthetic_repo)) == [("D", "old.py", "old.py"), ("M", "app.py", "app.py")]
     report = mrp.measure(synthetic_repo)
     assert sorted(report["staged_paths"]) == ["app.py", "old.py"]  # the triad's --name-only list, unchanged
-    # The deleted path has no body to pack — a zero-char pack fragment, not a
-    # missing row — and the advisory manifest says so instead of dropping it.
+    # The deleted path has no body to pack — a zero-char pack fragment, not a missing row.
     assert report["touched_pack"]["per_file"]["old.py"]["chars"] == 0
     assert report["touched_pack"]["per_file"]["app.py"]["chars"] > 0
-    from ouroboros.tools.preflight_review_prompt import _advisory_touched_manifest
-
-    assert "old.py — no file in the tree — deleted" in _advisory_touched_manifest(
-        synthetic_repo, ["app.py", "old.py"], mrp._porcelain(synthetic_repo))
 
 
-def test_main_prints_the_triad_packet_parts_and_the_advisory_manifest(
+def test_main_prints_the_triad_packet_parts(
         synthetic_repo, isolated_roots, monkeypatch, capsys):
     monkeypatch.setattr('ouroboros.reviewer_slot_config.commit_triad_delivery',
                         lambda: _plan([('openai/packet', 'api_chat', '')]))
@@ -388,30 +382,13 @@ def test_main_prints_the_triad_packet_parts_and_the_advisory_manifest(
     monkeypatch.setattr(mrp, "_o200k", _no_bpe)
     assert mrp.main(["--repo", str(synthetic_repo)]) == 0
     out = capsys.readouterr().out
-    for label in ("touched pack before", "advisory touched manifest (bodies not inlined):",
-                  "governance context (one checkout:", "checklist_section_plus_archive",
+    for label in ("touched pack before", "governance context (one checkout:", "checklist_section_plus_archive",
                   "navigation_maps", "change-relative governance tail",
                   "docs/ARCHITECTURE.md", "zero-diff message ("):
         assert label in out, label
-    assert "scope full input" not in out
+    assert "scope full input" not in out and "advisory touched manifest" not in out
     assert mrp.main(["--repo", str(synthetic_repo), "--json"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert set(report) >= {"repo", "staged_paths", "tokenizer", "touched_pack",
-                           "advisory_touched_manifest", "governance_context",
-                           "zero_diff_message", "fit"}
-    assert "scope_full" not in report
-
-
-def test_advisory_measurement_keeps_a_changed_architecture_entrypoint(synthetic_repo, isolated_roots, monkeypatch):
-    from ouroboros.tools.preflight_review_prompt import _advisory_touched_manifest
-
-    path = synthetic_repo / "docs/ARCHITECTURE.md"
-    path.write_text("# ARCHITECTURE.md\n\nChanged entrypoint.\n", encoding="utf-8")
-    _git(synthetic_repo, "add", "docs/ARCHITECTURE.md")
-    monkeypatch.setattr(mrp, "_o200k", _no_bpe)
-    report = mrp.measure(synthetic_repo)
-    measured = report["advisory_touched_manifest"]
-    assert "docs/ARCHITECTURE.md" in measured["paths"]
-    porcelain = subprocess.check_output(["git", "status", "--porcelain"], cwd=synthetic_repo, text=True)
-    actual = _advisory_touched_manifest(synthetic_repo, report["staged_paths"], porcelain)
-    assert measured["chars"] == len(actual)
+                           "governance_context", "zero_diff_message", "fit"}
+    assert "scope_full" not in report and "advisory_touched_manifest" not in report

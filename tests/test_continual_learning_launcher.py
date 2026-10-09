@@ -53,9 +53,12 @@ def test_settings_template_contract():
     assert settings["OUROBOROS_POST_TASK_EVOLUTION"] == "false"
     actors = json.loads(settings["OUROBOROS_SUBAGENTS"])
     assert actors["enabled"] is True
-    assert [row["route"]["target_id"] for row in actors["items"]] == [
-        settings["OUROBOROS_MODEL"]
-    ]
+    # One actor row plus the three packet review seats, all on the solve model.
+    rows = {marked: [row["route"]["target_id"] for row in actors["items"]
+                     if bool(row.get("review_eligible")) is marked] for marked in (False, True)}
+    assert rows == {False: [settings["OUROBOROS_MODEL"]], True: [settings["OUROBOROS_MODEL"]] * 3}
+    assert all(row["delivery"] == "packet" for row in actors["items"] if row.get("review_eligible"))
+    assert "OUROBOROS_REVIEWER_SLOTS" not in settings
     assert "claude_code_edit" in settings["CLBENCH_SOLVE_DISABLED_TOOLS"]
     # The declared solve denylist must cover the registry's REAL web-tool set
     # (cumulative review r2: youtube_transcript had drifted out) and must not

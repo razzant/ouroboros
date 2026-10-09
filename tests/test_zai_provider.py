@@ -17,7 +17,6 @@ from ouroboros.llm import LLMClient
 from ouroboros.provider_models import (
     DIRECT_PROVIDER_DEFAULTS,
     DIRECT_PROVIDER_REVIEW_ROLES,
-    DIRECT_PROVIDER_SCOPE_DEFAULTS,
     ZAI_DIRECT_DEFAULTS,
     ZAI_PLAN_ENDPOINTS,
     ZAI_REASONING_EFFORT_ALIASES,
@@ -88,7 +87,6 @@ class TestRegistry:
         # live 2026-10-06, Coding Plan endpoint; plain glm-5.3 is text-only).
         assert ZAI_DIRECT_DEFAULTS["vision"] == "zai::glm-5.3-flash"
         assert DIRECT_PROVIDER_REVIEW_ROLES["zai"] == ("main", "main", "main")
-        assert DIRECT_PROVIDER_SCOPE_DEFAULTS["zai"] == "zai::glm-5.3"
 
     def test_migrate_and_normalize_round_trip(self):
         assert migrate_model_value("zai", "zai/glm-5.3") == "zai::glm-5.3"
@@ -230,18 +228,13 @@ class TestSingleProviderIndependence:
         assert has_startup_ready_provider(settings) is True
         assert _exclusive_direct_remote_provider(settings) == "zai"
 
-    def test_review_fallback_compiles_for_zai(self, monkeypatch):
-        _clear_provider_env(monkeypatch)
-        monkeypatch.setenv("ZAI_API_KEY", "sk-x")
-        monkeypatch.setenv("OUROBOROS_MODEL", "zai::glm-5.3")
-        monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "zai::glm-5.3-flash")
-        monkeypatch.setattr(
-            "ouroboros.review_model_routes.runtime_setting",
-            lambda key, default="": os.environ.get(key, default),
-        )
-        from ouroboros.config import get_review_models
+    def test_factory_review_pool_compiles_for_zai(self):
+        from ouroboros.subscription_install_presets import factory_review_rows
 
-        assert get_review_models() == ["zai::glm-5.3"] * 3
+        # PR-3: the provider panel is minted as catalog rows, not multiplied at read time.
+        rows = factory_review_rows({"ZAI_API_KEY": "sk-x", "OUROBOROS_MODEL": "zai::glm-5.3",
+                                    "OUROBOROS_MODEL_LIGHT": "zai::glm-5.3-flash"})
+        assert [row["route"]["target_id"] for row in rows] == ["zai::glm-5.3"] * 3
 
     def test_local_only_review_route_sees_zai(self, monkeypatch):
         _clear_provider_env(monkeypatch)

@@ -1320,113 +1320,89 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("delegate_start", {
             "name": "delegate_start",
             "description": (
-                "Start a delegated run on the owner's configured subscription harness and "
-                "become its NANNY. Subscription execution is REQUESTED, so the usual case "
-                "is no metered API money — but the actual spend is a fact of the finished "
-                "run, not a promise of this call: it may come back zero, billed, "
-                "estimated, or undisclosed (an expired session, a route that bills by "
-                "construction, or an auth fallback all charge real money). Read the "
-                "terminal `cost` block from delegate_wait before you treat this as free; "
-                "it also costs time, quota and a worker slot. Your working root, "
-                "access profile and route come from YOUR task authority; you cannot widen "
-                "them. Optional access only lowers native rights; omission inherits. If you hold "
-                "a MUTATING shape a Git workspace uses a PRIVATE SNAPSHOT of your write "
-                "root. For an ordinary folder, choose directory_strategy=direct or copy "
-                "and select copied inputs with scope_paths; omission means direct work. "
-                "Direct changes are already on site and have no full rollback promise. "
-                "A copied result's full file manifest and bytes are captured at "
-                "terminal (delegate_wait's workspace_capture block) and reaches your tree "
-                "ONLY when you explicitly call integrate_delegated_patch(run_id=..., "
-                "decision='apply'|'reject'); read the captured diff before applying, and "
-                "never let the run commit inside its snapshot. If you are read-only it "
-                "can only read and answer. "
-                "A TOP-LEVEL task may instead select ONE exact installed user-managed "
-                "skill payload with root='skill_payload' + bucket + skill_name: the "
-                "selector chooses authority you already hold (it grants nothing), the "
-                "run edits a private standalone snapshot of that payload, the LIVE "
-                "payload stays byte-identical until you explicitly "
-                "integrate_delegated_patch, and after an apply the skill's prior "
-                "review is stale — run skill_preflight and skill_review as usual. "
-                "The payload must already exist (create a NEW skill's manifest first). "
-                "Seeded native stays system-repo territory; markerless native is logical external. "
-                "Returns a run_id: watch it with delegate_wait, stop it with "
-                "delegate_cancel. The run's output is a CLAIM you must check — you are the "
-                "host, so verification receipts are still yours to write. If no route is "
-                "configured or it is unavailable you get a typed refusal: choose an "
-                "explicit configured alternative, wait, narrow, or report blocked. A direct "
-                "fresh start requires subagent_id. In a configured session the host already STARTED the exact "
-                "leaf before your first round (the startup receipt carries its run id): never start a duplicate — "
-                "supervise it; a replacement delegate_start(prompt='') is legal only after verified cancellation/"
-                "terminal settlement or a typed refusal proving no run exists. Recovery retries use retry_of without a new selector. "
-                "A stopped run of your task line (cap, subscription limit, crash, restart, cancel, a question) is "
-                "continued with continue_from rather than redone by a fresh start (see that argument)."
-                " This ordinary call requests no extra Claudexor review panel; new ordinary "
-                "runs on engine 3.9.8+ default to no panel. The started receipt names the serving "
-                "engine_version; an older engine or a recovered historical run may retain its "
-                "earlier review behavior. Engine review, execution success, your integration "
-                "decision, and applicable Ouroboros review gates remain separate."
+                "Start a run on the owner's configured subscription harness; you become its NANNY. "
+                "Subscription is requested, not guaranteed free: expired auth, paid routes or auth fallback "
+                "may bill. Read delegate_wait's terminal cost (zero, billed, estimated or undisclosed); "
+                "time, quota and a worker slot are also spent. Root, route and access inherit your authority "
+                "and cannot widen; access only lowers native rights. Read-only runs only read and answer. "
+                "Mutating Git runs edit a PRIVATE SNAPSHOT, never commit. Ordinary folders use "
+                "directory_strategy=direct (default) or copy with scope_paths. Direct edits are already "
+                "on site, without full rollback. Snapshot/copied results reach your tree only through "
+                "integrate_delegated_patch(run_id=..., decision='apply'|'reject'); inspect the captured "
+                "diff first. delegate_wait.workspace_capture carries the full file manifest and bytes. "
+                "A TOP-LEVEL task may select one existing user-managed skill via root='skill_payload', "
+                "bucket and skill_name, within existing authority. It edits a private standalone snapshot; "
+                "the live payload stays unchanged until integration. Apply stales prior review: run "
+                "skill_preflight and skill_review. Create a new skill's manifest first. Seeded native is "
+                "system-repo territory; markerless native is logical external. "
+                "Returns run_id for delegate_wait/delegate_cancel. Output is a claim to verify; host "
+                "verification receipts remain yours. Missing/unavailable routes refuse typed: explicitly "
+                "select a configured alternative, wait, narrow or report blocked. Direct starts require "
+                "subagent_id. A configured session's exact leaf is already started before your first round: "
+                "supervise the startup receipt's run, never duplicate it. Replacement with prompt='' requires "
+                "verified cancellation/terminal settlement or a typed refusal proving no run exists. "
+                "Recover an unknown start with retry_of, without a new selector; continue settled work "
+                "with continue_from (see arguments). This call requests no extra Claudexor review panel; "
+                "new ordinary runs on engine 3.9.8+ default to none. The receipt names engine_version; "
+                "older engines or a recovered historical run may retain earlier review behavior. Engine review, execution, "
+                "integration and Ouroboros review gates remain separate."
             ),
             "parameters": {
                 "type": "object",
                 "required": ["prompt"],
                 "properties": {
                 "prompt": {"type": "string", "description":
-                    "Complete task for a direct start, standing on its own: the session has none of my memory, so write "
-                    "why the work exists, what is already decided and where the materials are (paths); the host appends "
-                    "my human's originating words verbatim. For the configured snapshotted session (retry/replacement), "
-                    "only optional advisory coordination context — the host supplies the canonical work order."},
+                    "Direct start: a complete standalone task (why the work exists, decisions, material paths); "
+                    "the session has none of my memory. The host appends my human's originating words verbatim. "
+                    "Configured-session retry/replacement: optional advisory coordination only; "
+                    "the host supplies the canonical work order."},
                 "subagent_id": {"type": "string", "description":
-                    "Required for a fresh start made directly (continue_from included): exact agent_session actor id from Available "
-                    "subagents. Omit for the current configured snapshotted route and for retry_of. API actor ids are refused here "
-                    "and must be scheduled as recursive children."},
+                    "Exact agent_session id from Available subagents, required for direct starts including continue_from. "
+                    "Omit for the configured snapshot and retry_of. Schedule API actors as recursive children instead."},
                 "access": {"type": "string", "enum": list(SESSION_ACCESS_LOWERING), "description":
-                    "Optional reduction of native access for this fresh run: readonly or workspace_write. "
-                    "Omit to inherit the captured actor profile (new mutating sessions default to full). "
-                    "Explicit readonly task authority still wins. Omit on retry_of."},
+                    "Lower native access to readonly or workspace_write; omit to inherit the captured profile "
+                    "(new mutating sessions default full). Explicit readonly authority wins. Omit on retry_of."},
                 "root": {"type": "string", "enum": ["active_workspace", "skill_payload"],
                     "default": "active_workspace", "description":
-                    "active_workspace (the default, same as omitting) is ordinary workspace "
-                    "delegation. 'skill_payload' delegates ONE installed user-managed skill "
-                    "payload you can already write, named by bucket and skill_name."},
+                    "active_workspace (default/omitted): ordinary delegation. skill_payload: one installed "
+                    "user-managed payload you can already write, selected by bucket and skill_name."},
                 "bucket": {"type": "string", "description":
                     "With root='skill_payload': the payload location "
                     "(external|clawhub|ouroboroshub|user_repo)."},
                 "skill_name": {"type": "string", "description":
                     "With root='skill_payload': the exact skill name."},
                 "directory_strategy": {"type": "string", "enum": ["direct", "copy"], "description":
-                    "Ordinary folders only: direct writes in the selected folder; copy prepares scope_paths separately for explicit result application. Choose according to the task and any owner preference. Omission means direct. Write-capable children only: if you are read-only, omit this and scope_paths (direct with no scope is the same as omitting)."},
+                    "Ordinary folders: direct (default) edits the selected folder; copy prepares scope_paths separately "
+                    "for explicit application. Choose by task/owner preference. Read-only callers omit this and "
+                    "scope_paths; direct without scope equals omission."},
                 "scope_paths": {"type": "array", "items": {"type": "string"}, "description":
-                    "Relative files/directories to copy, or to capture after direct work (including future output paths); ['.'] explicitly selects the whole folder. Copy needs nonempty scope_paths. Write-capable children only: a read-only child omits this and directory_strategy (there is nothing for it to copy back or capture). Unselected large inputs stay at their source address. Direct work with no selected or observed file paths cannot claim a complete changed-file list."},
+                    "Relative copy inputs or direct-work capture paths, including future outputs; ['.'] selects the "
+                    "whole folder. Copy requires nonempty scope. Read-only callers omit this and directory_strategy. "
+                    "Unselected large inputs stay at source. Direct work without selected/observed paths cannot "
+                    "claim a complete changed-file list."},
                 "max_seconds": {"type": "integer", "description":
-                    "Wall-clock cap for the run; narrowed to your own remaining deadline. "
-                    "Harness runs routinely need 3-5+ minutes end to end, so do not set a "
-                    "tight cap for what feels like a quick edit. While delegate_wait shows "
-                    "an advancing cursor the run is WORKING, and it enforces this cap "
-                    "itself — cancelling a progressing run discards the whole run's spend."},
+                    "Wall-clock cap, narrowed by your remaining deadline. Allow realistic end-to-end time "
+                    "(often 3-5+ minutes). An advancing delegate_wait cursor means progress; the run enforces "
+                    "its own cap. Do not cancel progressing work just to hurry it."},
                 "continue_from": {"type": "string", "description":
-                    "Continue ONE settled run of your task line (yours, your confirmed retry predecessor's, or, in a "
-                    "root the owner's Continue created, a run of the predecessor's task tree), whatever ended it: cap, "
-                    "subscription limit, crash or restart, cancel, or input_required (put the answers in prompt). The "
-                    "engine resumes the same session where it can, else briefs a new one with the old run's evidence; "
-                    "a writing run continues IN the old run's private snapshot while its patch is undisposed (one "
-                    "cumulative patch; the old capture is superseded). Prefer it to a fresh start whenever the work is "
-                    "worth keeping. prompt holds only what is new (remaining work, answers, corrections) and may be "
-                    "empty. A terminal resumable block whose cause is pool_exhausted or a limit with resetsAt: sleep "
-                    "with await_messages(wake_at=resetsAt), then continue. Its floors: your task line, settled and "
-                    "not already continued (else continue from the head), no ambiguous apply, access never wider. "
-                    "The actor is selected as for any start (subagent_id; a configured session omits it); never with retry_of."},
+                    "Continue a settled run after cap, subscription limit, crash/restart, cancel or input_required. "
+                    "Prefer this when work is worth keeping. It must belong to your task line: yours, your confirmed "
+                    "retry predecessor's, or the predecessor's task tree in an owner-created Continue root. "
+                    "The engine reuses the session where possible, else briefs a new one with retained evidence; "
+                    "some work may need repeating. A writer keeps its undisposed private snapshot as one cumulative "
+                    "patch, superseding the old capture. prompt carries only new work/answers/corrections and may "
+                    "be empty. For resumable pool_exhausted or a limit with resetsAt, use "
+                    "await_messages(wake_at=resetsAt) before continuing. Must be settled, not already continued "
+                    "(otherwise use the head), with no ambiguous apply and no wider access. Select subagent_id "
+                    "as for a start; configured sessions omit it. Never combine with retry_of."},
                 "continue_carrier": {"type": "string", "enum": ["auto", "packet"], "description":
-                    "With continue_from only: auto (the default) lets the engine continue the old session where it "
-                    "can; packet starts a NEW session briefed with the old run's evidence, for a session gone astray."},
+                    "With continue_from: auto (default) reuses the session where possible; packet starts a new "
+                    "session with retained evidence when the old session has gone astray."},
                 "retry_of": {"type": "string", "description":
-                    "EXPLICIT retry token: the pending_invocation_id from a start whose "
-                    "outcome was unknown (transport failure, lost response). Replays THAT "
-                    "invocation byte-identically under its original key, so the engine "
-                    "returns the run it already accepted instead of starting a second one. "
-                    "Omit subagent_id on this recovery path; supplying both selectors is a "
-                    "typed conflict. "
-                    "Never set it for an intended new run — a plain call always starts a "
-                    "NEW invocation, even with an identical prompt."},
+                    "pending_invocation_id from an unknown start outcome (transport failure/lost response). "
+                    "Replays that invocation byte-identically under its original key to retrieve an accepted run "
+                    "without duplicating it. Omit subagent_id or receive a typed conflict. Never use for intended "
+                    "new work: a plain call creates a new invocation even with identical prompt."},
                 },
             },
         }, _published_entry(_delegate_start_entry),
@@ -1480,11 +1456,12 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("delegate_cancel", {
             "name": "delegate_cancel",
             "description": (
-                "Cancel a delegated run. Claudexor keeps partial artifacts, but a cancelled "
-                "session has no verdict and no finished work product — cancel a stuck or "
-                "misdirected run, never one you merely want to hurry. The result is typed: "
-                "only `confirmed` means a verified terminal receipt; `requested`, `failed` "
-                "and `containment_fault_run_may_still_be_live` all mean it may still be running."
+                "Cancel a stuck or misdirected delegated run, never just to hurry it. Partial artifacts "
+                "are retained, not a finished verdict/product. Only confirmed proves a terminal receipt; "
+                "requested, failed and containment_fault_run_may_still_be_live may still be running. "
+                "After verified settlement, preserve useful work with delegate_start(subagent_id=..., continue_from=<run_id>, "
+                "prompt=<corrections>), following that tool's selection/authority rules. The engine reuses "
+                "the session where possible, else retained evidence; some work may need repeating."
             ),
             "parameters": {"type": "object", "required": ["run_id"], "properties": {
                 "run_id": {"type": "string", "description": "Run id from delegate_start."},

@@ -22,8 +22,7 @@
   },
   "preview": {
     "source": "onboarding_default",
-    "available_subagents": {"enabled": true, "items": [{"subagent_id": "codex", "recommended_use": "General tasks and independent reviews.", "route": {"kind": "agent_session", "target_id": "codex=gpt-test"}}]},
-    "model_settings": {"OUROBOROS_MODEL": "claudexor::codex=gpt-test", "OUROBOROS_MODEL_LIGHT": "claudexor::codex=gpt-test", "OUROBOROS_MODEL_VISION": "", "OUROBOROS_MODEL_CONSCIOUSNESS": "", "OUROBOROS_MODEL_FALLBACKS": "", "OUROBOROS_MODEL_ACCOUNTS": {}, "OUROBOROS_MODEL_CONTEXT_WINDOWS": {}},
-    "reviewer_slots": {"triad": [{"slot_id": "triad_1", "subagent_id": "codex"}], "scope": [{"slot_id": "scope_1", "subagent_id": "codex"}], "advisory": {"enabled": true, "subagent_id": "codex"}, "deep_review": {"subagent_id": "codex"}}
+    "available_subagents": {"enabled": true, "items": [{"subagent_id": "codex", "recommended_use": "General tasks and independent reviews.", "route": {"kind": "agent_session", "target_id": "codex=gpt-test"}, "review_eligible": true}]},
+    "model_settings": {"OUROBOROS_MODEL": "claudexor::codex=gpt-test", "OUROBOROS_MODEL_LIGHT": "claudexor::codex=gpt-test", "OUROBOROS_MODEL_VISION": "", "OUROBOROS_MODEL_CONSCIOUSNESS": "", "OUROBOROS_MODEL_FALLBACKS": "", "OUROBOROS_MODEL_ACCOUNTS": {}, "OUROBOROS_MODEL_CONTEXT_WINDOWS": {}}
   }
 }

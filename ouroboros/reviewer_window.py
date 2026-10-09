@@ -175,6 +175,7 @@ def resolve_reviewer_window(
     model_role: str = "",
     credential_profile_id: Optional[str] = None,
     model_route: Optional[dict] = None,
+    allow_fetch: bool = True,
 ) -> ReviewerWindow:
     """The reviewer's :class:`ReviewerWindow` from Capability Evidence.
 
@@ -185,7 +186,9 @@ def resolve_reviewer_window(
     otherwise never reach, and it stays re-confirmable for as long as the process
     lives: remote probes serve the cache inside its TTL and reach the network once
     it expires; local probes read the current serving instance (see the
-    module-level note on ``_LAZY_ROUTE_LOCKS``).
+    module-level note on ``_LAZY_ROUTE_LOCKS``). ``allow_fetch=False`` is the
+    hot-path reading (:func:`capability_evidence.probe`): the evidence already
+    held, stale or absent, and never a wait on the network.
 
     ``use_local=None`` (the default) derives the EFFECTIVE route from
     ``provider_models.review_model_uses_local`` — the same predicate every review
@@ -234,7 +237,7 @@ def resolve_reviewer_window(
                 model=model,
                 base_url=base_url,
                 use_local=use_local,
-                allow_fetch=True,
+                allow_fetch=allow_fetch,
                 api_key=_probe_api_key,
                 options=options,
             )
@@ -266,6 +269,7 @@ def reviewer_context_window(
     model_role: str = "",
     credential_profile_id: Optional[str] = None,
     model_route: Optional[dict] = None,
+    allow_fetch: bool = True,
 ) -> int:
     """Reviewer window from Capability Evidence, or ``unknown_window`` when absent.
 
@@ -273,12 +277,14 @@ def reviewer_context_window(
     docstring: sizing a review pack DOWN on a guess declines the review outright,
     which is why the main lane's unknown-route policy is the same). A caller that
     must fail closed passes its own sub-floor explicitly. ``use_local=None``
-    derives the effective route exactly as :func:`resolve_reviewer_window` does.
+    derives the effective route exactly as :func:`resolve_reviewer_window` does;
+    so does ``allow_fetch`` (a hot-path reader passes ``False``).
     The NUMBER only — a caller that also discloses its provenance takes
     :func:`resolve_reviewer_window` whole."""
     return resolve_reviewer_window(
         model_id, use_local=use_local, model_role=model_role,
         credential_profile_id=credential_profile_id, model_route=model_route,
+        allow_fetch=allow_fetch,
     ).sizing_window(unknown_window)
 
 

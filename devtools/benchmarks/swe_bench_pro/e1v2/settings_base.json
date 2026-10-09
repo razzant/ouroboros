@@ -11,7 +11,7 @@
   "OUROBOROS_SERVER_HOST": "0.0.0.0",
   "OUROBOROS_HOST_SERVICE_PORT": 8767,
   "OUROBOROS_MODEL": "anthropic/claude-sonnet-4.5",
-  "OUROBOROS_SUBAGENTS": "{\"enabled\":true,\"items\":[{\"subagent_id\":\"benchmark-model\",\"recommended_use\":\"Use for substantial implementation, difficult debugging, research synthesis, and end-to-end ownership. Prefer when overall quality and continuity matter more than speed.\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}}]}",
+  "OUROBOROS_SUBAGENTS": "{\"enabled\":true,\"items\":[{\"subagent_id\":\"benchmark-model\",\"recommended_use\":\"Use for substantial implementation, difficult debugging, research synthesis, and end-to-end ownership. Prefer when overall quality and continuity matter more than speed.\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}},{\"subagent_id\":\"benchmark-review-1\",\"recommended_use\":\"Fixed-model benchmark reviewer: packet delivery on the measured model\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.5\"},\"review_eligible\":true,\"delivery\":\"packet\",\"minted_from\":\"factory_default\"},{\"subagent_id\":\"benchmark-review-2\",\"recommended_use\":\"Fixed-model benchmark reviewer: packet delivery on the measured model\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.5\"},\"review_eligible\":true,\"delivery\":\"packet\",\"minted_from\":\"factory_default\"},{\"subagent_id\":\"benchmark-review-3\",\"recommended_use\":\"Fixed-model benchmark reviewer: packet delivery on the measured model\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.5\"},\"review_eligible\":true,\"delivery\":\"packet\",\"minted_from\":\"factory_default\"}]}",
   "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.5",
   "OUROBOROS_MODEL_FALLBACKS": "anthropic/claude-sonnet-4.5",
   "OUROBOROS_MAX_WORKERS": 4,
@@ -33,8 +33,6 @@
   "MCP_TOOL_TIMEOUT_SEC": 60,
   "OUROBOROS_EFFORT_TASK": "high",
   "OUROBOROS_EFFORT_EVOLUTION": "high",
-  "OUROBOROS_EFFORT_REVIEW": "high",
-  "OUROBOROS_EFFORT_SCOPE_REVIEW": "high",
   "OUROBOROS_EFFORT_CONSCIOUSNESS": "high",
   "OUROBOROS_TASK_REVIEW_MODE": "required",
   "OUROBOROS_RETURN_REASONING": true,
@@ -50,12 +48,10 @@
   "USE_LOCAL_LIGHT": false,
   "USE_LOCAL_FALLBACK": false,
   "OUROBOROS_FILE_BROWSER_DEFAULT": "",
-  "OUROBOROS_EFFORT_DEEP_SELF_REVIEW": "high",
   "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS": "true",
   "OUROBOROS_POST_TASK_EVOLUTION": "false",
   "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "every_n:1",
   "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD": 0.0,
   "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "",
-  "OUROBOROS_SAFETY_MODE": "light",
-  "OUROBOROS_REVIEWER_SLOTS": "{\"triad\":[{\"slot_id\":\"benchmark-triad-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}},{\"slot_id\":\"benchmark-triad-2\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}},{\"slot_id\":\"benchmark-triad-3\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}}],\"scope\":[{\"slot_id\":\"benchmark-scope-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}}]}"
+  "OUROBOROS_SAFETY_MODE": "light"
 }

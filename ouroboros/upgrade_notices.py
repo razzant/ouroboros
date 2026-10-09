@@ -2,13 +2,15 @@
 
 An update may change a shipped default without changing what an existing
 install actually runs: a settings document an earlier release wrote keeps the
-finite round/lifetime bounds it ran under, and an install that never saved a
-reviewer panel follows whatever panel ships. Neither is migrated silently or
-behind the owner's back; each is stated ONCE, factually, in the owner's chat.
+finite round/lifetime bounds it ran under. That is not migrated silently or
+behind the owner's back; it is stated ONCE, factually, in the owner's chat.
 The same holds for the memory the old dialogue writer left: the chronicle
 imports it unchanged, it keeps working in that format and is folded gradually,
 and the owner hears once how much of it there is and that Ouroboros can be asked
-to keep folding it, part by part.
+to keep folding it, part by part. (Which reviewers run is no longer a notice
+of this module: the review lanes became rows of the subagent catalog, and the
+migration's own one-time report — ``server_maintenance._startup_review_pool_notice``
+— says which rows run now.)
 
 The facts are only what the document, the environment and the imported memory
 show — a key absent from the document, an invalid value, a saved value, an
@@ -28,7 +30,6 @@ from typing import Any, Dict, List, Mapping, Optional
 
 log = logging.getLogger(__name__)
 
-REVIEWER_DEFAULT_NOTICE_KEY = "reviewer_default_delivery_notified"
 OPTIONAL_BOUNDS_NOTICE_KEY = "optional_bounds_notified"
 LEGACY_MEMORY_NOTICE_KEY = "legacy_memory_notified"
 # The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
@@ -106,15 +107,6 @@ def optional_bounds_notice(facts: List[Dict[str, Any]]) -> str:
             "limits (unlimited); nothing was changed here. Change them in Settings → Advanced → Runtime Limits.")
 
 
-REVIEWER_DEFAULT_NOTICE = (
-    "⚙️ Reviewers: this install has no saved reviewer panel, so it runs the shipped default — "
-    "three reviewers that read the work themselves with read-only tools on the same models "
-    "(several model calls per review instead of one packet send), plus the scope reviewer for commits. "
-    "A saved panel is never changed. See or change it in Settings → Agents; a model without tool "
-    "calling can be switched to Packet there."
-)
-
-
 def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
     """How much memory the old dialogue writer left, as the chronicle imported it; ``None`` = unknown.
 
@@ -186,7 +178,6 @@ def _raw_settings_document() -> Optional[Dict[str, Any]]:
 def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
     """Send each still-owed one-time notice to the bound owner chat (never raises)."""
     try:
-        from ouroboros.reviewer_slot_config import authored_reviewer_slots_state
         from ouroboros.utils import utc_now_iso
         from supervisor import message_bus
         from ouroboros.notice_receipts import recorded
@@ -198,9 +189,6 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
             return  # display-only backup values never authorize delivery
         owner_chat = int(owner_chat)
         owed = []
-        if not state.get(REVIEWER_DEFAULT_NOTICE_KEY) and authored_reviewer_slots_state(
-                str((settings or {}).get("OUROBOROS_REVIEWER_SLOTS") or ""))[0] == "absent":
-            owed.append((REVIEWER_DEFAULT_NOTICE_KEY, REVIEWER_DEFAULT_NOTICE, "reviewer_default_notice"))
         if not state.get(OPTIONAL_BOUNDS_NOTICE_KEY):
             text = optional_bounds_notice(optional_bound_facts(_raw_settings_document(), settings or {}))
             if text:

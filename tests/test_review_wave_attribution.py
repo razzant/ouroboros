@@ -90,33 +90,27 @@ def test_attribution_is_not_reconciliation_or_attempt_identity():
         assert before == after
 
 
-@pytest.mark.parametrize("surface,route", [
-    ("deep_self_review", "api_chat"), ("deep_self_review", "agent_session"),
-    ("advisory_review", "api_chat"), ("advisory_review", "agent_session"),
-])
-def test_reviews_that_run_their_executor_directly_name_their_round(tmp_path, monkeypatch, surface, route):
-    """Deep self-review and the advisory pre-review build their own usage scope instead of the
-    substrate's; their real entry points still send under the round's wave."""
+@pytest.mark.parametrize("route", ["api_chat", "agent_session"])
+def test_reviews_that_run_their_executor_directly_name_their_round(tmp_path, monkeypatch, route):
+    """Deep self-review builds its own usage scope instead of the substrate's; its real entry
+    point still sends under the round's wave."""
     from dataclasses import asdict
 
     from ouroboros import deep_self_review as deep
-    from ouroboros import observability, reviewer_slot_config
+    from ouroboros import observability
     from ouroboros import usage_accounting as ua
     from ouroboros.review_execution import AgentSessionReviewExecutor, ReviewAttemptResult
     from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
     from ouroboros.reviewer_slot_config import ConfiguredReviewerSlot
-    from ouroboros.tools import claude_advisory_review as advisory
-    from ouroboros.tools import preflight_review_run as preflight
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    row = ConfiguredReviewerSlot(slot_id="deep_review" if surface == "deep_self_review" else "advisory_slot_1",
-                                 kind=route, target_id="test/model", effort="low")
+    row = ConfiguredReviewerSlot(slot_id="deep_review", kind=route, target_id="test/model", effort="low")
     observed = []
 
     def capture(self):
         observed.append({"scope": asdict(ua.current_usage_scope()), "request": asdict(self.assignment.request)})
-        body = "# Independent deep review\nNo findings." if surface == "deep_self_review" else "[]"
+        body = "# Independent deep review\nNo findings."
         return ReviewAttemptResult(message={"content": body}, usage={}, raw_text=body)
 
     monkeypatch.setattr(NativeToolRoundReviewExecutor, "execute", capture)
@@ -128,17 +122,10 @@ def test_reviews_that_run_their_executor_directly_name_their_round(tmp_path, mon
         "bible_chars": 0, "governance_manifest": {}}))
     monkeypatch.setattr(deep, "_memory_line", lambda memory: "fixture memory")
     monkeypatch.setattr(deep, "_record_execution", lambda *args, **kwargs: None)
-    monkeypatch.setattr(reviewer_slot_config, "advisory_slot_config", lambda: row)
-    ctx = SimpleNamespace(task_id="review-owner", task_metadata={}, drive_root=tmp_path)
-    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=ctx.task_id, non_task_operation=True)):
-        if surface == "deep_self_review":
-            _text, usage = deep.run_deep_self_review(repo, tmp_path, object(), lambda text: None,
-                                                     task_id=ctx.task_id, slot=row)
-            assert "execution_status" not in usage
-        elif route == "api_chat":
-            assert advisory._run_advisory_native("review task", repo, ctx, row, "test/model")[0].success
-        else:
-            assert preflight._run_advisory_delegated("review task", repo, ctx)[0].success
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="review-owner", non_task_operation=True)):
+        _text, usage = deep.run_deep_self_review(repo, tmp_path, object(), lambda text: None,
+                                                 task_id="review-owner", slot=row)
+        assert "execution_status" not in usage
     [seen] = observed
     assert seen["scope"]["review_wave_id"].startswith("wave-") and not seen["scope"]["review_slot_id"]
     assert seen["request"]["resolved_wave_id"] == seen["scope"]["review_wave_id"]

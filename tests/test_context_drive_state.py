@@ -75,7 +75,7 @@ def test_review_ledger_caps_runs_and_attempts_with_omission_notes(tmp_path):
     state = AdvisoryReviewState()
     long_msg = "feat: " + ("y" * 2000)
     for i in range(8):
-        state.add_run(AdvisoryRunRecord(
+        state.advisory_runs.append(AdvisoryRunRecord(
             snapshot_hash=f"hash{i:04d}00000000",
             commit_message=long_msg if i == 7 else f"commit {i}",
             status="fresh",

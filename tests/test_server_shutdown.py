@@ -740,7 +740,7 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
         # tests/test_retired_settings_chat_notice.py; here it would be a
         # crash alert (this harness's send_with_budget double records every
         # send, and the boot/crash assertions below own that list).
-        "_startup_retired_settings_notice",
+        "_startup_retired_settings_notice", "_startup_review_pool_notice",
     ):
         monkeypatch.setattr(server, name, noop)
     monkeypatch.setattr(server, "_start_supervisor_liveness_watchdog",

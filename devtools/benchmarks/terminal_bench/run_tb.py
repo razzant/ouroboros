@@ -59,22 +59,20 @@ DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
 # subtree the adapter's dataset-parametric wall-clock lookup already globs.
 FRONTIER_BENCH_DATASET = "frontier-bench/frontier-bench"
 
-# Every model slot the in-container adapter forwards (plus the review triad, handled specially).
+# Every model slot the in-container adapter forwards (plus the review pool, which rides the
+# roster: ``review_slots`` identical packet seats on the measured model, written as catalog rows).
 # Used by --all-model for a single-model run: review STAYS ON but lightened to ONE reviewer at low
 # effort by default (configurable). Exported to os.environ so the harbor subprocess and the adapter's forwarded-slot reads
 # (harbor_installed_agent._container_env) pick them up. This does NOT change repo config defaults.
 # Only slots the in-container adapter actually forwards (harbor_installed_agent._container_env).
 # Deliberately omitted because the container already covers them: the internal Consciousness
 # role defaults to Main, the adapter pins both fallback spellings to Main, and child selection is
-# the explicit one-row Available-subagents value below. The advisory pre-review is explicitly
-# disabled by the structured fixed-model reviewer panel for comparability across runs.
+# the explicit Available-subagents value below. Scope review and the advisory pre-review are
+# commit-time gates that never fire inside a task; neither is pinned.
 _ALL_MODEL_SLOT_KEYS = (
     "OUROBOROS_MODEL",
     "OUROBOROS_MODEL_LIGHT",
-    "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
     "OUROBOROS_WEBSEARCH_MODEL",
-    "OUROBOROS_SCOPE_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODEL",
 )
 
 
@@ -89,9 +87,10 @@ def apply_all_model(model: str, review_slots: int = 1,
     Review for a single-model run defaults to ONE reviewer at ``low`` effort (configurable via
     --review-slots / --review-effort): three identical-model reviewers add latency/cost but no
     diversity (a monoculture), and a single-model run cannot achieve reviewer-model diversity anyway.
-    This is a BENCHMARK setting, NOT a claim that the review subsystem got more reliable
-    (single_reviewer_no_diversity stays loud). EFFORT_SCOPE_REVIEW is set too for completeness
-    ("там и там"); scope review does not fire on a terminal-bench task (it is a commit-time gate)."""
+    The seats are catalog rows on the roster (the host never multiplies a seat). This is a
+    BENCHMARK setting, NOT a claim that the review subsystem got more reliable
+    (single_reviewer_no_diversity stays loud); scope review does not fire on a terminal-bench
+    task (it is a commit-time gate) and is not pinned."""
     return fixed_model_actor_snapshot(
         model,
         review_slots=review_slots,
@@ -123,38 +122,38 @@ class HarborCommandConfig:
     harbor_env: str = ""
 
 
-def _container_triad(measured_model: str, settings: Mapping[str, Any] | None):
-    """The structured triad rows the container adapter forwards (operator env,
-    else the host settings file), parsed under the container's one-model
-    roster; ``None`` when no structured panel is configured."""
-    from devtools.benchmarks.common.model_slots import single_model_subagents_setting
-    from ouroboros.reviewer_slot_config import (
-        REVIEWER_SLOTS_ENV,
-        parse_reviewer_slots,
-        roster_env_override,
-    )
+def _host_roster_raw(settings: Mapping[str, Any] | None) -> Any:
+    """The host roster the container adapter reads: operator env first, else
+    the host settings file (the adapter's own precedence)."""
+    raw = os.environ.get("OUROBOROS_SUBAGENTS")
+    if raw is None and settings:
+        raw = settings.get("OUROBOROS_SUBAGENTS")
+    return raw
 
-    structured = os.environ.get(REVIEWER_SLOTS_ENV)
-    if structured is None and settings:
-        structured = settings.get(REVIEWER_SLOTS_ENV)
-    structured = str(structured or "").strip()
-    if not structured:
-        return None
-    with roster_env_override(single_model_subagents_setting(measured_model)):
-        return list(parse_reviewer_slots(structured).triad)
+
+def _container_review_pool(measured_model: str, settings: Mapping[str, Any] | None):
+    """The review-pool rows the container EXECUTES: the marked rows of the
+    roster the adapter forwards (``container_subagents_setting``)."""
+    from devtools.benchmarks.common.model_slots import container_subagents_setting
+    from ouroboros.reviewer_slot_config import review_pool_rows
+
+    raw = container_subagents_setting(measured_model, _host_roster_raw(settings))
+    return review_pool_rows({"OUROBOROS_SUBAGENTS": raw})
 
 
 def triad_rows_not_executable_in_container(
     measured_model: str, settings: Mapping[str, Any] | None = None,
 ) -> list[str]:
-    """Typed provenance disclosure: the configured triad rows a Terminal-Bench
+    """Typed provenance disclosure: the host review-pool seats a Terminal-Bench
     task container structurally cannot run — the agent-session rows (no harness
     CLI/daemon in the image, no harness credentials in the forwarded-env
     allowlist, container secret policy) — as their `harness[=model]` targets in
     row order. Recorded on the run manifest and as a comment in metadata.yaml;
-    never declared as a used model. Their acceptance seat degrades typed inside
-    the container, so a TB run should configure api/native rows."""
-    return [row.target_id.strip() for row in _container_triad(measured_model, settings) or [] if row.is_session]
+    never declared as a used model. The container runs the pool's API seats
+    instead, so a TB run should configure api seats."""
+    from devtools.benchmarks.common.model_slots import host_pool_session_targets
+
+    return host_pool_session_targets(_host_roster_raw(settings))
 
 
 def _effective_helper_models(
@@ -169,39 +168,24 @@ def _effective_helper_models(
     assist the run. Scope review and the advisory pre-review are commit-time
     gates that never fire inside a task and are NOT declared. Declaring only
     the measured model in metadata.yaml would misrepresent the submission.
-    Values mirror what the container EXECUTES: the structured reviewer panel
-    (``OUROBOROS_REVIEWER_SLOTS``) is read the way the container adapter
-    forwards it — operator env first, else the host settings file — and parsed
-    under the container's one-model roster (a row bound to an operator-roster
-    subagent does not resolve there and is a typed refusal, never a
-    declared-but-never-run model). Inside a Terminal-Bench task nothing
-    commits: the panel reaches the run through task acceptance, which runs
-    every row on its own delivery (owner R2, 2026-09-01) — an api packet row
-    and a configured-subagent native inspection row execute in the container
-    and are declared by model id; an agent-session row structurally cannot
-    (the image has no harness CLI/daemon and the forwarded-env allowlist
-    carries no harness credentials), so it is never declared as a used model
-    and is carried by `triad_rows_not_executable_in_container` instead.
-    Without a panel the legacy comma keys apply (env override else the shipped
-    config defaults). Returns ordered (model_id, role) pairs, deduped by model
-    id.
+    Values mirror what the container EXECUTES: the review pool is the marked
+    rows of the roster the container adapter forwards (operator env first, else
+    the host settings file; ``container_subagents_setting``). Inside a
+    Terminal-Bench task nothing commits: the pool reaches the run through task
+    acceptance, which runs every seat on its own delivery (owner R2,
+    2026-09-01) — an api seat executes in the container and is declared by
+    model id; an agent-session seat structurally cannot (the image has no
+    harness CLI/daemon and the forwarded-env allowlist carries no harness
+    credentials), so it is never forwarded or declared as a used model and is
+    carried by `triad_rows_not_executable_in_container` instead. A malformed
+    host roster is a typed refusal (ValueError), never a declared-but-never-run
+    default. Returns ordered (model_id, role) pairs, deduped by model id.
     """
-    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
-
-    review_default = ",".join(OPENROUTER_REVIEW_DEFAULTS["triad"])
     websearch_default = str(SETTINGS_DEFAULTS["OUROBOROS_WEBSEARCH_MODEL"])
     websearch = os.environ.get("OUROBOROS_WEBSEARCH_MODEL", websearch_default) or websearch_default
     ordered: list[tuple[str, str]] = [(measured_model, "agent")]
-    triad = _container_triad(measured_model, settings)
-    if triad is not None:
-        for row in triad:
-            if not row.is_session:  # a session row cannot run in the container: disclosed, never declared
-                ordered.append((row.target_id.strip(), "commit_review_triad"))
-    else:
-        review = os.environ.get("OUROBOROS_REVIEW_MODELS", review_default) or review_default
-        for m in review.split(","):
-            if m.strip():
-                ordered.append((m.strip(), "commit_review_triad"))
+    for row in _container_review_pool(measured_model, settings):
+        ordered.append((row.target_id.strip(), "commit_review_triad"))
     if light_model.strip():
         ordered.append((light_model.strip(), "light_safety_post_task_synthesis"))
     # Only declare a web_search model if web tools are actually available this run. With
@@ -1190,11 +1174,11 @@ def main(argv: list[str] | None = None) -> int:
             final["triad_rows_not_executable_in_container"] = not_executable
             if not_executable:
                 print(
-                    "[run_tb] WARNING: the configured reviewer triad carries agent-session rows the "
+                    "[run_tb] WARNING: the configured review pool carries agent-session rows the "
                     f"task container CANNOT run: {', '.join(not_executable)}. A Terminal-Bench container "
                     "has no harness CLI/daemon and no harness credentials, so these rows are not "
-                    "declared as used models and their acceptance seat degrades typed inside the "
-                    "container. Configure api/native triad rows for a submittable run.",
+                    "forwarded, not declared as used models, and the container reviews with the "
+                    "pool's API seats only. Configure api seats for a submittable run.",
                     file=sys.stderr,
                 )
         except ValueError as exc:

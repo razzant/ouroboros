@@ -340,14 +340,15 @@ def record_raw_plan_request_attempt(
 
 
 def plan_review_slots(default_effort: str = "") -> list:
-    """The configured commit-triad rows as plan-review ``ReviewSlot`` objects:
-    the shared ``triad_delivery_slots`` builder (one reader of the triad rows
-    for plan, skill and acceptance review) with plan review's own slot
-    properties — timeout, output budget, temperature — and the envelope's
-    ``reviewer_effort`` as the ORDER for this plan: it outranks each row's own
-    pinned effort, a compound route slug keeps its encoded effort, and ``''``
-    leaves every row at its own effort or the owner's review-effort setting,
-    exactly like the commit triad. The order is an ARGUMENT of this builder
+    """The review pool's rows as plan-review ``ReviewSlot`` objects: the shared
+    ``triad_delivery_slots`` builder (one reader of the pool for plan, skill
+    and acceptance review) with plan review's own slot properties — timeout,
+    output budget, temperature — and the envelope's ``reviewer_effort`` as the
+    ORDER for this plan: it outranks each row's own pinned effort, a compound
+    route slug keeps its encoded effort, and ``''`` leaves every row at its own
+    effort, else that compound effort, else the pool's
+    ``REVIEW_POOL_DEFAULT_EFFORT`` (never the retired ``OUROBOROS_EFFORT_REVIEW``
+    surface setting), exactly like the commit gate. The order is an ARGUMENT of this builder
     only, never a contextvar: the commit gate, scope, acceptance and skill
     review keep reading the untouched rows. Both delivery kinds ride; slot ids
     are the rows' own.

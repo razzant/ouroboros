@@ -174,7 +174,6 @@ def test_vlm_query_honors_protected_artifact_policy(monkeypatch, tmp_path):
     assert "RESOURCE_POLICY_BLOCKED" in out
 
 
-# --- WA3 round-3: multi-scope review must not NameError on ScopeReviewResult ---
 # --- claudexor round: acceptance re-review must not be poisoned by stale verdict -
 def test_superseded_pre_revision_review_does_not_poison_objective():
     """claudexor finding (E/M): the objective reducer is worst-of-all-runs, so a

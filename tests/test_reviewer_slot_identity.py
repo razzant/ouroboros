@@ -12,7 +12,6 @@ actor record under another. These tests pin both halves of the contract:
     rather than aspirational.
 """
 
-import asyncio
 import json
 import pathlib
 import re
@@ -136,42 +135,9 @@ def test_triad_row_ids_come_from_the_one_mint(tmp_path, monkeypatch):
     assert durable == ran_as, durable
 
 
-def test_plan_row_ids_come_from_the_one_mint(monkeypatch):
-    """Plan review is the third configured-reviewer surface; its rows are the
-    reviewer-slot SSOT's triad rows (legacy: minted ``slot_N`` by the ONE mint)."""
-    from ouroboros.tools import plan_review_runtime
-
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "m/one,m/two")
-    _repoint_the_mint(monkeypatch)
-    slots = plan_review_runtime.plan_review_slots()
-    assert [s.slot_id for s in slots] == ["slot_row1", "slot_row2"]
-    assert [s.model for s in slots] == ["m/one", "m/two"]
-
-
-def test_duplicate_model_plan_rows_stay_distinct_through_the_substrate(tmp_path, monkeypatch):
-    """Two plan rows configured on the SAME model keep their own ids all the way
-    into the raw rows the engine records (identity is CARRIED, never re-derived)."""
-    from ouroboros import review_substrate
-    from ouroboros.tools import plan_review_runtime
-
-    ran_as: list = []
-    monkeypatch.setattr(review_substrate, "run_review_request", _substrate_stub(ran_as))
-    monkeypatch.setattr(plan_review_runtime, "LLMClient", lambda *a, **k: object())
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "m/dup,m/dup")
-
-    ctx = _fake_ctx(tmp_path)
-    slots = plan_review_runtime.plan_review_slots()
-    raw = asyncio.run(plan_review_runtime.run_plan_review_slots(
-        ctx, slots, system_prompt="system prompt", user_content="user content",
-    ))
-    assert ran_as == ["slot_1", "slot_2"], ran_as
-    # The converted rows carry the id each row RAN; the model cannot tell them apart.
-    assert [r.get("model") for r in raw] == ["m/dup", "m/dup"], raw
-    assert [r.get("slot_id") for r in raw] == ["slot_1", "slot_2"], raw
-    assert {r.get("route") for r in raw} == {"api_chat"}
-    assert {r.get("host_file_read_attestation") for r in raw} == {"host_assembled_packet"}
+# Plan review's rows are the review POOL's catalog rows (PR-3): their ids are
+# the rows' own stored ids, not minted — see ``tests/test_review_pool.py``
+# (``test_plan_review_rows_are_the_pool_rows_and_duplicate_models_stay_distinct``).
 
 
 def test_skill_review_dispatches_through_the_slot_id_stamping_entry():

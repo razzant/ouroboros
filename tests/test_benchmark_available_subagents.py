@@ -11,12 +11,15 @@ import pytest
 
 from devtools.benchmarks.common.manifests import MODEL_SLOT_KEYS, model_slot_snapshot
 from devtools.benchmarks.common.model_slots import (
+    BENCHMARK_SUBAGENT_ID,
     configured_subagents_snapshot,
+    container_subagents_setting,
     disabled_subagents_setting,
     fixed_model_actor_snapshot,
+    fixed_model_roster_mismatches,
+    host_pool_session_targets,
     pin_single_model,
     runtime_actor_snapshot,
-    single_model_reviewer_slots_setting,
     single_model_slot_snapshot,
     single_model_subagents_setting,
 )
@@ -30,7 +33,10 @@ from ouroboros.configured_subagents import (
     serialize_configured_subagents,
 )
 from ouroboros.provider_models import provider_for_model, review_model_uses_local
-from ouroboros.reviewer_slot_config import REVIEWER_SLOTS_ENV, parse_reviewer_slots
+from ouroboros.reviewer_slot_config import review_pool_rows
+from tests.test_cybergym_benchmark import RETIRED_REVIEW_KEYS
+
+REVIEWER_SLOTS_ENV = "OUROBOROS_REVIEWER_SLOTS"  # the lane-era panel key: inert bytes now
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 PROFILE_TARGETS = {
@@ -57,14 +63,25 @@ _PROVIDER_ROUTE_ENV_KEYS = tuple(
 
 
 def _only_target(raw: object) -> str:
+    """The one delegation actor of a fixed-model roster (its unmarked row); the
+    marked rows are the review pool and are checked by ``_pool``."""
     config = parse_configured_subagents(raw)
     assert config.enabled is True
-    assert len(config.items) == 1
-    row = config.items[0]
-    assert row.subagent_id == "benchmark-model"
+    actors = [row for row in config.items if not row.review_eligible]
+    assert len(actors) == 1
+    row = actors[0]
+    assert row.subagent_id == BENCHMARK_SUBAGENT_ID
     assert row.route.kind == "api_model"
     assert row.route.credential_profile_id == ""
     return row.route.target_id
+
+
+def _pool(raw: object) -> list[tuple[str, str, str]]:
+    """``(target, delivery, effort)`` per review seat of a roster, in row order."""
+    return [
+        (row.route.target_id, row.delivery, row.effort)
+        for row in parse_configured_subagents(raw).items if row.review_eligible
+    ]
 
 
 def _fixed_actor_settings(model: str, *, review_slots: int = 1) -> dict[str, str]:
@@ -83,7 +100,16 @@ def _scrub_model_route_env(monkeypatch) -> None:
 def test_single_model_encoder_round_trips_one_exact_api_actor():
     raw = single_model_subagents_setting("openai::gpt-5.6-sol")
     assert _only_target(raw) == "openai::gpt-5.6-sol"
+    # One packet review seat on the measured model rides the same roster.
+    assert _pool(raw) == [("openai::gpt-5.6-sol", "packet", "")]
     assert serialize_configured_subagents(parse_configured_subagents(raw)) == raw
+    # N seats are N identical catalog rows (the host never multiplies a seat).
+    three = single_model_subagents_setting("openai::gpt-5.6-sol", review_slots=3, review_effort="medium")
+    assert _pool(three) == [("openai::gpt-5.6-sol", "packet", "medium")] * 3
+    assert [row.slot_id for row in review_pool_rows({"OUROBOROS_SUBAGENTS": three})] == [
+        "benchmark-review-1", "benchmark-review-2", "benchmark-review-3",
+    ]
+    assert all(not row.retrieves for row in review_pool_rows({"OUROBOROS_SUBAGENTS": three}))
 
 
 def test_pin_single_model_replaces_legacy_heavy_and_prior_actor_list():
@@ -118,13 +144,12 @@ def test_pin_single_model_replaces_legacy_heavy_and_prior_actor_list():
     # Retired Claude-SDK setting: stale bytes, not execution authority — the
     # pin no longer rewrites it (nothing reads it).
     assert target["CLAUDE_CODE_MODEL"] == "foreign-sdk-model"
-    reviewers = parse_reviewer_slots(target[REVIEWER_SLOTS_ENV])
-    assert [row.target_id for row in reviewers.triad] == ["openai/gpt-5.5"]
-    assert [row.target_id for row in reviewers.scope] == ["openai/gpt-5.5"]
-    assert all(not row.is_session for row in (*reviewers.triad, *reviewers.scope))
-    assert reviewers.advisory.enabled is False
+    # The lane-era panel is dropped: the review pool is the roster's marked rows.
+    assert REVIEWER_SLOTS_ENV not in target
+    assert _pool(target["OUROBOROS_SUBAGENTS"]) == [("openai/gpt-5.5", "packet", "")]
     assert snapshot["mismatches"] == []
-    assert snapshot["reviewer_slots"]["advisory"]["enabled"] is False
+    assert [row["route"]["target_id"] for row in snapshot["review_pool"]] == ["openai/gpt-5.5"]
+    assert snapshot["review_pool"][0]["delivery"] == "packet"
 
 
 def test_pin_single_model_preserves_canonical_local_route_semantics():
@@ -136,11 +161,7 @@ def test_pin_single_model_preserves_canonical_local_route_semantics():
         "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK",
         "USE_LOCAL_CONSCIOUSNESS",
     ))
-    reviewers = parse_reviewer_slots(target[REVIEWER_SLOTS_ENV])
-    assert [row.target_id for row in reviewers.triad] == [model, model]
-    assert [row.target_id for row in reviewers.scope] == [model]
-    assert all(not row.is_session for row in (*reviewers.triad, *reviewers.scope))
-    assert reviewers.advisory.enabled is False
+    assert _pool(target["OUROBOROS_SUBAGENTS"]) == [(model, "packet", "")] * 2
     actor = runtime_actor_snapshot(target, expected_model=model)
     assert actor["mismatches"] == []
     assert all(actor["local_routes"].values())
@@ -194,10 +215,14 @@ def test_disabled_encoder_is_explicit_empty_off():
 
 
 def test_disabled_encoder_can_retain_one_exact_measured_actor():
-    config = parse_configured_subagents(disabled_subagents_setting("openai/gpt-5.5"))
+    raw = disabled_subagents_setting("openai/gpt-5.5")
+    config = parse_configured_subagents(raw)
     assert config.enabled is False
-    assert len(config.items) == 1
-    assert config.items[0].route.target_id == "openai/gpt-5.5"
+    assert [row.route.target_id for row in config.items] == ["openai/gpt-5.5"] * 2
+    # The pool ignores the delegation switch: the measured model still reviews.
+    assert _pool(raw) == [("openai/gpt-5.5", "packet", "")]
+    assert [row.target_id for row in review_pool_rows({"OUROBOROS_SUBAGENTS": raw})] == ["openai/gpt-5.5"]
+    assert _pool(disabled_subagents_setting("m/x", review_effort="max")) == [("m/x", "packet", "max")]
 
 
 def test_runtime_actor_snapshot_compares_main_and_canonical_actor():
@@ -208,7 +233,7 @@ def test_runtime_actor_snapshot_compares_main_and_canonical_actor():
     assert exact["mismatches"] == []
     assert exact["model_slots"]["OUROBOROS_MODEL_FALLBACKS"] == f"{model}, {model}"
     assert not any(exact["local_routes"].values())
-    assert exact["reviewer_slots"]["advisory"]["enabled"] is False
+    assert [row["route"]["target_id"] for row in exact["review_pool"]] == [model]
     assert _only_target(json.dumps(exact["available_subagents"])) == model
 
     contaminated_settings = dict(settings)
@@ -229,37 +254,41 @@ def test_runtime_actor_snapshot_compares_main_and_canonical_actor():
     )
 
 
+def _with_review_seat(settings: dict[str, str], seat: dict) -> dict[str, str]:
+    """Replace the roster's first review seat with ``seat`` (a raw catalog row)."""
+    payload = json.loads(settings["OUROBOROS_SUBAGENTS"])
+    index = next(i for i, row in enumerate(payload["items"]) if row.get("review_eligible"))
+    payload["items"][index] = seat
+    return {**settings, "OUROBOROS_SUBAGENTS": json.dumps(payload)}
+
+
 @pytest.mark.parametrize(
-    "kind,target,needle",
+    "route,needle",
     (
-        ("api_chat", "foreign/reviewer", "foreign/reviewer"),
-        ("agent_session", "codex=gpt-5.6-sol-high", "agent_session"),
+        ({"kind": "api_model", "target_id": "foreign/reviewer"}, "foreign/reviewer"),
+        ({"kind": "agent_session", "target_id": "codex=gpt-5.6-sol-high"}, "agent_session"),
     ),
 )
-def test_runtime_actor_snapshot_refuses_foreign_or_session_reviewer_rows(
-    kind, target, needle
-):
+def test_runtime_actor_snapshot_refuses_foreign_or_session_reviewer_rows(route, needle):
     model = "openai/gpt-5.5"
-    settings = _fixed_actor_settings(model)
-    payload = json.loads(settings[REVIEWER_SLOTS_ENV])
-    payload["triad"][0]["route"] = {"kind": kind, "target_id": target}
-    settings[REVIEWER_SLOTS_ENV] = json.dumps(payload)
+    settings = _with_review_seat(_fixed_actor_settings(model), {
+        "subagent_id": "foreign-seat", "recommended_use": "x", "route": route,
+        "review_eligible": True,
+    })
     snapshot = runtime_actor_snapshot(settings, expected_model=model)
-    assert any(needle in item for item in snapshot["mismatches"])
+    assert any("foreign-seat" in item and needle in item for item in snapshot["mismatches"])
 
 
-def test_runtime_actor_snapshot_refuses_a_retrieving_row_even_on_the_measured_model(monkeypatch):
-    """A configured-subagent api row on the measured model RETRIEVES the subject
+def test_runtime_actor_snapshot_refuses_a_retrieving_row_even_on_the_measured_model():
+    """A NATIVE-delivery seat on the measured model RETRIEVES the subject
     (native tool rounds): a different delivery class from the packet panel every
     published number was produced with, so provenance must refuse it too."""
-    from devtools.benchmarks.common.model_slots import BENCHMARK_SUBAGENT_ID
-
     model = "openai/gpt-5.5"
-    settings = _fixed_actor_settings(model)
-    monkeypatch.setenv("OUROBOROS_SUBAGENTS", settings["OUROBOROS_SUBAGENTS"])
-    payload = json.loads(settings[REVIEWER_SLOTS_ENV])
-    payload["triad"][0] = {"slot_id": "native-t", "subagent_id": BENCHMARK_SUBAGENT_ID}
-    settings[REVIEWER_SLOTS_ENV] = json.dumps(payload)
+    settings = _with_review_seat(_fixed_actor_settings(model), {
+        "subagent_id": "native-t", "recommended_use": "x",
+        "route": {"kind": "api_model", "target_id": model},
+        "review_eligible": True,  # delivery omitted → native
+    })
     snapshot = runtime_actor_snapshot(settings, expected_model=model)
     assert any(
         "native-t" in item and "native_tool_rounds" in item and "packet delivery" in item
@@ -267,21 +296,19 @@ def test_runtime_actor_snapshot_refuses_a_retrieving_row_even_on_the_measured_mo
     )
 
 
-def test_runtime_actor_snapshot_refuses_enabled_foreign_advisory():
+def test_runtime_actor_snapshot_requires_a_review_seat():
+    """An actor-only roster has an EMPTY review pool: not the fixed-model contract."""
     model = "openai/gpt-5.5"
     settings = _fixed_actor_settings(model)
-    payload = json.loads(settings[REVIEWER_SLOTS_ENV])
-    payload["advisory"] = {
-        "enabled": True,
-        "route": {"kind": "api_chat", "target_id": "foreign-sdk-model"},
-        "effort": "high",
-    }
-    settings[REVIEWER_SLOTS_ENV] = json.dumps(payload)
+    payload = json.loads(settings["OUROBOROS_SUBAGENTS"])
+    payload["items"] = [row for row in payload["items"] if not row.get("review_eligible")]
+    settings["OUROBOROS_SUBAGENTS"] = json.dumps(payload)
     snapshot = runtime_actor_snapshot(settings, expected_model=model)
-    assert any("advisory is enabled" in item for item in snapshot["mismatches"])
+    assert any("lacks the fixed-model review pool" in item for item in snapshot["mismatches"])
+    assert snapshot["review_pool"] == []
 
 
-def test_runtime_actor_snapshot_uses_structured_reviewers_not_stale_legacy_strings():
+def test_runtime_actor_snapshot_reads_the_pool_not_stale_lane_or_legacy_strings():
     model = "openai/gpt-5.5"
     settings = _fixed_actor_settings(model, review_slots=3)
     settings.update({
@@ -289,13 +316,13 @@ def test_runtime_actor_snapshot_uses_structured_reviewers_not_stale_legacy_strin
         "OUROBOROS_SCOPE_REVIEW_MODELS": "foreign/stale-scope",
         "OUROBOROS_SCOPE_REVIEW_MODEL": "foreign/stale-singular",
         "CLAUDE_CODE_MODEL": "foreign-stale-sdk-model",
+        REVIEWER_SLOTS_ENV: json.dumps({"triad": [{"slot_id": "stale", "route": {
+            "kind": "api_chat", "target_id": "foreign/stale-panel"}}]}),
     })
     snapshot = runtime_actor_snapshot(settings, expected_model=model)
     assert snapshot["mismatches"] == []
-    assert [row["route"]["target_id"] for row in snapshot["reviewer_slots"]["triad"]] == [
-        model, model, model,
-    ]
-    assert snapshot["reviewer_slots"]["advisory"]["enabled"] is False
+    assert [row["route"]["target_id"] for row in snapshot["review_pool"]] == [model, model, model]
+    assert {row["delivery"] for row in snapshot["review_pool"]} == {"packet"}
 
 
 @pytest.mark.parametrize(
@@ -311,11 +338,12 @@ def test_runtime_actor_snapshot_refuses_each_remote_to_local_route_drift(local_k
 
 
 def test_single_model_slot_snapshot_is_cli_derived_and_has_no_heavy():
-    slots = single_model_slot_snapshot("openai/gpt-5.6-sol", review_slots=2)
+    slots = single_model_slot_snapshot("openai/gpt-5.6-sol", review_slots=2, review_effort="low")
     assert slots["OUROBOROS_MODEL"] == "openai/gpt-5.6-sol"
-    assert slots["OUROBOROS_REVIEW_MODELS"] == (
-        "openai/gpt-5.6-sol,openai/gpt-5.6-sol"
-    )
+    # The seats live on the roster, not on a comma key (retired) or the lane panel.
+    assert "OUROBOROS_REVIEW_MODELS" not in slots and REVIEWER_SLOTS_ENV not in slots
+    assert not RETIRED_REVIEW_KEYS.intersection(slots)
+    assert "OUROBOROS_EFFORT_SCOPE_REVIEW" not in slots
     assert "OUROBOROS_MODEL_HEAVY" not in slots
 
 
@@ -324,35 +352,33 @@ def test_committed_single_model_profiles_use_one_canonical_actor(relative: str, 
     payload = json.loads((REPO / relative).read_text(encoding="utf-8"))
     raw = payload["OUROBOROS_SUBAGENTS"]
     assert _only_target(raw) == expected == payload["OUROBOROS_MODEL"]
+    # The review pool rides the roster: packet seats on the measured model only.
+    pool = _pool(raw)
+    assert pool and {(target, delivery) for target, delivery, _effort in pool} == {(expected, "packet")}
+    assert REVIEWER_SLOTS_ENV not in payload  # the lane-era panel key is gone from templates
     assert serialize_configured_subagents(parse_configured_subagents(raw)) == raw
     assert "OUROBOROS_MODEL_HEAVY" not in payload
     assert "USE_LOCAL_HEAVY" not in payload
+    assert not RETIRED_REVIEW_KEYS.intersection(payload)
 
 
 @pytest.mark.parametrize(
-    "relative,expected,triad_count,scope_count",
+    "relative,expected,seat_count,effort",
     (
-        ("devtools/benchmarks/programbench/settings_base.json", "openai/gpt-5.5", 3, 3),
-        ("devtools/benchmarks/osworld/settings_base.json", "anthropic/claude-sonnet-4.6", 3, 1),
+        ("devtools/benchmarks/programbench/settings_base.json", "openai/gpt-5.5", 3, "medium"),
+        ("devtools/benchmarks/osworld/settings_base.json", "anthropic/claude-sonnet-4.6", 3, "high"),
     ),
 )
-def test_target_attached_profiles_override_foreign_runtime_defaults(
-        relative, expected, triad_count, scope_count):
+def test_target_attached_profiles_override_foreign_runtime_defaults(relative, expected, seat_count, effort):
     payload = json.loads((REPO / relative).read_text(encoding="utf-8"))
-    # ABI 7.0 (ABI-10): the comma keys are retired — the structured slots value
-    # is the template's ONE reviewer configuration surface. The slot counts are
-    # the committed template shape (programbench 3 triad + 3 scope, osworld
-    # 3 triad + 1 scope), pinned as literals: derived from the payload they
-    # would certify whatever count the file happens to carry.
-    slots = json.loads(payload[REVIEWER_SLOTS_ENV])
-    assert (len(slots["triad"]), len(slots["scope"])) == (triad_count, scope_count)
-    assert payload[REVIEWER_SLOTS_ENV] == single_model_reviewer_slots_setting(
-        expected,
-        review_slots=triad_count,
-        scope_slots=scope_count,
-        review_effort=payload["OUROBOROS_EFFORT_REVIEW"],
-        scope_effort=payload["OUROBOROS_EFFORT_SCOPE_REVIEW"],
+    # The roster is the template's ONE review configuration surface: its marked
+    # rows are the pool (N identical packet seats on the measured model). The
+    # seat count is the committed template shape (3), pinned as a literal:
+    # derived from the payload it would certify whatever count the file carries.
+    assert payload["OUROBOROS_SUBAGENTS"] == single_model_subagents_setting(
+        expected, review_slots=seat_count, review_effort=effort,
     )
+    assert len(_pool(payload["OUROBOROS_SUBAGENTS"])) == seat_count
     assert "CLAUDE_CODE_MODEL" not in payload  # retired setting: dropped from templates
     assert all(payload[key] is False for key in (
         "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK",
@@ -363,7 +389,7 @@ def test_target_attached_profiles_override_foreign_runtime_defaults(
     actor = runtime_actor_snapshot(effective, expected_model=expected)
     assert actor["mismatches"] == []
     assert not any(actor["local_routes"].values())
-    assert actor["reviewer_slots"]["advisory"]["enabled"] is False
+    assert [row["route"]["target_id"] for row in actor["review_pool"]] == [expected] * seat_count
     assert all(
         item.strip() == expected
         for raw in actor["model_slots"].values()
@@ -377,9 +403,11 @@ def test_benchmark_snapshot_records_canonical_actor_and_refuses_malformed(tmp_pa
     raw = single_model_subagents_setting("anthropic/claude-fable-5")
     settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": raw}), encoding="utf-8")
     snapshot = configured_subagents_snapshot(settings, env_overrides=False)
+    # The actor row plus its one packet review seat, both on the measured model.
     assert [row["route"]["target_id"] for row in snapshot["items"]] == [
-        "anthropic/claude-fable-5"
+        "anthropic/claude-fable-5", "anthropic/claude-fable-5",
     ]
+    assert [row.get("review_eligible", False) for row in snapshot["items"]] == [False, True]
 
     settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": "not-json"}), encoding="utf-8")
     with pytest.raises(ValueError, match="not valid JSON"):
@@ -388,20 +416,47 @@ def test_benchmark_snapshot_records_canonical_actor_and_refuses_malformed(tmp_pa
 
 def test_isolated_settings_copy_active_actor_but_not_legacy_heavy():
     model = "openai/gpt-5.5"
-    raw = single_model_subagents_setting(model)
-    reviewers = single_model_reviewer_slots_setting(model)
+    raw = single_model_subagents_setting(model, review_slots=2)
     isolated = build_isolated_settings({
         "OUROBOROS_MODEL": model,
         "OUROBOROS_MODEL_HEAVY": "decoy/heavy",
         "OUROBOROS_SUBAGENTS": raw,
-        REVIEWER_SLOTS_ENV: reviewers,
+        REVIEWER_SLOTS_ENV: "{}",
+        "OUROBOROS_REVIEW_MODELS": "foreign/stale",
     })
-    assert isolated["OUROBOROS_SUBAGENTS"] == raw
-    assert isolated[REVIEWER_SLOTS_ENV] == reviewers
+    assert isolated["OUROBOROS_SUBAGENTS"] == raw  # the pool rides the roster
+    assert REVIEWER_SLOTS_ENV not in isolated and "OUROBOROS_REVIEW_MODELS" not in isolated
     assert "OUROBOROS_MODEL_HEAVY" not in isolated
     assert {REVIEWER_SLOTS_ENV, "USE_LOCAL_CONSCIOUSNESS"}.issubset(
         STALE_INHERITED_ENV_KEYS
     )
+
+
+def test_container_roster_forwards_a_fixed_model_host_roster_verbatim_else_adapts():
+    """The one-model container runs: a fixed-model host roster verbatim (seat
+    count and effort kept); otherwise the actor plus the host pool's API seats
+    (session seats cannot run there and are the typed disclosure); and one
+    packet seat on the measured model when the host configured no API seat."""
+    model = "openai/gpt-5.5"
+    pinned = single_model_subagents_setting(model, review_slots=3, review_effort="low")
+    assert container_subagents_setting(model, pinned) == pinned
+    host = json.dumps({"enabled": True, "items": [
+        {"subagent_id": "builder", "recommended_use": "x", "review_eligible": True,
+         "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}},
+        {"subagent_id": "critic", "recommended_use": "x", "review_eligible": True,
+         "route": {"kind": "api_model", "target_id": "google/gemini-3.5-pro"}, "effort": "high"},
+        {"subagent_id": "scout", "recommended_use": "x",
+         "route": {"kind": "api_model", "target_id": "openai/gpt-5.5-mini"}},
+    ]})
+    adapted = container_subagents_setting(model, host)
+    assert _only_target(adapted) == model
+    assert _pool(adapted) == [("google/gemini-3.5-pro", "native", "high")]
+    assert host_pool_session_targets(host) == ["codex=gpt-5.6-sol"]
+    assert host_pool_session_targets(None) == [] and host_pool_session_targets(pinned) == []
+    assert _pool(container_subagents_setting(model, None)) == [(model, "packet", "")]
+    assert fixed_model_roster_mismatches(parse_configured_subagents(adapted), model)
+    with pytest.raises(ValueError, match="OUROBOROS_SUBAGENTS"):
+        container_subagents_setting(model, "{not json")
 
 
 def test_legacy_heavy_read_vocabulary_does_not_leak_into_new_projection(
@@ -444,6 +499,41 @@ def test_programbench_preflight_requires_exact_benchmark_actor(tmp_path, monkeyp
     }), encoding="utf-8")
     with pytest.raises(SystemExit, match="OUROBOROS_SUBAGENTS"):
         preflight_model_slots(settings, solve_model="openai/gpt-5.5")
+
+
+def test_programbench_preflight_refuses_a_review_seat_on_another_model(tmp_path, monkeypatch):
+    from devtools.benchmarks.programbench.run_programbench_e2e import preflight_model_slots
+
+    _scrub_model_route_env(monkeypatch)
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "OPENROUTER_API_KEY": "test-key", "OUROBOROS_MODEL": "openai/gpt-5.5-mini",
+        "OUROBOROS_SUBAGENTS": single_model_subagents_setting(
+            "openai/gpt-5.5-mini", review_models=["anthropic/claude-sonnet-4.6"]),
+    }), encoding="utf-8")
+    with pytest.raises(SystemExit, match="exact one-model"):
+        preflight_model_slots(settings, solve_model="openai/gpt-5.5-mini")
+
+
+def test_gaia_review_pool_is_three_packet_seats_or_the_explicit_panel(tmp_path):
+    """GAIA renders its review pool into the roster (the lane comma keys are
+    gone): three packet seats on the solve model, or one packet seat per model
+    of ``--review-models``; a settings file without a roster gets the default."""
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    base = pathlib.Path(run_gaia.__file__).parent / "settings_base.json"
+    rendered = run_gaia._render_run_settings(base, "openai/gpt-5.5", tmp_path)
+    doc = json.loads(rendered.read_text(encoding="utf-8"))
+    assert _pool(doc["OUROBOROS_SUBAGENTS"]) == [("openai/gpt-5.5", "packet", "")] * 3
+    assert not any(key.startswith("OUROBOROS_SCOPE_REVIEW") or key == "OUROBOROS_REVIEW_MODELS" for key in doc)
+    panel = run_gaia._render_run_settings(
+        base, "openai/gpt-5.5", tmp_path / "panel", review_models="openai/gpt-5.5,anthropic/claude-sonnet-4.6")
+    assert [t for t, _, _ in _pool(json.loads(panel.read_text(encoding="utf-8"))["OUROBOROS_SUBAGENTS"])] == [
+        "openai/gpt-5.5", "anthropic/claude-sonnet-4.6"]
+    bare = tmp_path / "bare.json"
+    bare.write_text(json.dumps({"OUROBOROS_MODEL": "openai/gpt-5.5"}), encoding="utf-8")
+    env = run_gaia._settings_env(bare, "google/gemini-2.5-pro", tmp_path / "bare")
+    assert _pool(env["OUROBOROS_SUBAGENTS"]) == [("google/gemini-2.5-pro", "packet", "")] * 3
 
 
 def test_programbench_preflight_requires_a_declared_measured_model(tmp_path, monkeypatch):
@@ -538,7 +628,7 @@ def test_programbench_target_actor_is_durable_before_discovery_and_first_task_cr
         assert actor["model"] == measured
         assert actor["model_slots"]["OUROBOROS_MODEL"] == measured
         assert not any(actor["local_routes"].values())
-        assert actor["reviewer_slots"]["advisory"]["enabled"] is False
+        assert [row["route"]["target_id"] for row in actor["review_pool"]] == [measured]
         assert durable["available_subagents"] == actor["available_subagents"]
 
     observed = {"discovery": False, "first_task": False}
@@ -682,8 +772,8 @@ def test_harness_and_harbor_manifests_use_exact_cli_model(tmp_path, monkeypatch)
         actor = manifest["harness"]["fixed_model_actor"]
         assert actor["mismatches"] == []
         assert not any(actor["local_routes"].values())
-        assert actor["reviewer_slots"]["advisory"]["enabled"] is False
-        assert {row["route"]["target_id"] for row in actor["reviewer_slots"]["triad"]} == {measured}
+        assert {row["route"]["target_id"] for row in actor["review_pool"]} == {measured}
+        assert {row["delivery"] for row in actor["review_pool"]} == {"packet"}
 
     hbf_root = tmp_path / "hbf"
 
@@ -840,7 +930,37 @@ def test_editbench_seed_disables_but_records_effective_main_actor(tmp_path, monk
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     config = parse_configured_subagents(payload["OUROBOROS_SUBAGENTS"])
     assert config.enabled is False
-    assert len(config.items) == 1
-    assert config.items[0].route.target_id == payload["OUROBOROS_MODEL"]
+    assert {row.route.target_id for row in config.items} == {payload["OUROBOROS_MODEL"]}
+    assert _pool(payload["OUROBOROS_SUBAGENTS"]) == [(payload["OUROBOROS_MODEL"], "packet", "")]
     assert payload["OUROBOROS_MODEL"] == "anthropic/claude-fable-5"
     assert "OUROBOROS_MODEL_HEAVY" not in payload
+
+
+@pytest.mark.parametrize("effort", ["", "low", "max"])
+def test_new_benchmark_settings_drop_retired_review_keys_and_keep_pool(effort):
+    model = "vendor/measured"
+    stale = {key: "foreign/stale" for key in RETIRED_REVIEW_KEYS}
+    pinned = pin_single_model(model, review_slots=2, review_effort=effort, target=dict(stale))
+    assert not RETIRED_REVIEW_KEYS.intersection(pinned)
+    assert _pool(pinned["OUROBOROS_SUBAGENTS"]) == [(model, "packet", effort)] * 2
+    # Seeding an isolated runtime cannot copy an old template's inert fields.
+    isolated = build_isolated_settings({**stale, **pinned}, **stale)
+    assert not RETIRED_REVIEW_KEYS.intersection(isolated)
+    assert isolated["OUROBOROS_SUBAGENTS"] == pinned["OUROBOROS_SUBAGENTS"]
+
+
+@pytest.mark.parametrize("env_overrides", [False, True])
+def test_manifest_keeps_retired_review_keys_historical_only(tmp_path, monkeypatch, env_overrides):
+    from devtools.benchmarks.common.manifests import ACTIVE_MODEL_SLOT_KEYS
+
+    assert RETIRED_REVIEW_KEYS.issubset(MODEL_SLOT_KEYS)
+    assert not RETIRED_REVIEW_KEYS.intersection(ACTIVE_MODEL_SLOT_KEYS)
+    settings = {key: "foreign/stale" for key in RETIRED_REVIEW_KEYS}
+    settings["OUROBOROS_MODEL"] = "vendor/measured"
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    for key, value in settings.items():
+        monkeypatch.setenv(key, value)
+    snapshot = model_slot_snapshot(path, env_overrides=env_overrides)
+    assert snapshot["OUROBOROS_MODEL"] == "vendor/measured"
+    assert not RETIRED_REVIEW_KEYS.intersection(snapshot)

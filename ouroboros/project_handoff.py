@@ -83,6 +83,7 @@ def _receipt_state(drive_root, task_id: str, *, source_ref=None) -> str:
             "delivery_id": identity,
             "progress_meta": {
                 "project_id": pid, "project_name": snapshot["project_name"],
+                "task_name": snapshot["task_name"],
                 "handoff_id": identity, "target_label": snapshot["target_label"],
             },
         })

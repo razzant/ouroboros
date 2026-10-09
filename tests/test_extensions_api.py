@@ -172,6 +172,10 @@ def test_testclient_settings_hot_reload_uses_app_state_drive_root(tmp_path, monk
     srv.app.app.state.repo_dir = tmp_path / "repo"  # type: ignore[attr-defined]
     settings = {"OUROBOROS_SKILLS_REPO_PATH": str(old_repo), "OUROBOROS_RUNTIME_MODE": "advanced"}
     _patch_lifespan_for_drive_root_test(monkeypatch, srv, settings)
+    # The POST persists through the gateway's owner writer (``config.SETTINGS_PATH``), not
+    # through the ``server.save_settings`` name patched above: keep the document it writes
+    # in this test's tree instead of the worker-shared pytest data root.
+    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", drive_root / "settings.json")
     monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: str(old_repo))
     calls: list[tuple[pathlib.Path, str | None]] = []
     monkeypatch.setattr(

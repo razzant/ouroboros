@@ -83,17 +83,16 @@ def test_review_substrate_leaves_are_non_catalog_owners_without_backedges():
 def test_review_substrate_keeps_the_coordinator():
     """Running a panel and resolving the governance/subject roots stay authored
     by ``review_substrate`` itself; the leaves own the records, the reducers and
-    the projection. The tip's own re-homes (``reviewer_slots`` ->
+    the projection. The tip's own re-homes (``triad_delivery_slots`` ->
     reviewer_slot_config, ``slot_id_for_row`` -> review_dispatch,
     ``_render_prompt`` -> review_execution) are pinned as re-exports."""
     for name in (
         "ReviewCoordinator",
         "run_review_request",
-        "scope_reviewer_slots",
         "review_repo_dirs_for",
     ):
         assert getattr(review_substrate, name).__module__ == "ouroboros.review_substrate", name
-    assert review_substrate.reviewer_slots.__module__ == "ouroboros.reviewer_slot_config"
+    assert review_substrate.triad_delivery_slots.__module__ == "ouroboros.reviewer_slot_config"
     assert review_substrate.slot_id_for_row.__module__ == "ouroboros.review_dispatch"
     assert review_substrate._render_prompt.__module__ == "ouroboros.review_execution"
 

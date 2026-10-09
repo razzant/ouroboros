@@ -454,6 +454,38 @@ test('a staged language the gateway refuses for good does not hold the finished 
     }
 });
 
+test('the summary warns, and still offers Start, when Blocking review has no reviewer that reads the work', async () => {
+    // Completion closes the wizard, so a save warning would never be read: the summary says it before the save.
+    const reviewer = (id, target, delivery) => ({
+        subagent_id: id, recommended_use: `use ${id}`, review_eligible: true,
+        route: { kind: 'api_model', target_id: target }, ...(delivery ? { delivery } : {}),
+    });
+    const packetOnly = { enabled: true, items: [reviewer('packet-a', 'openai/gpt-5.6-sol', 'packet'), reviewer('packet-b', 'anthropic/claude-fable-5', 'packet')] };
+    const withReader = { ...packetOnly, items: [...packetOnly.items, reviewer('reader', 'x-ai/grok-4.6')] };
+    const summaryHtml = async (query, initial) => {
+        let html = '';
+        const bootstrap = {
+            ...BOOTSTRAP,
+            stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
+            initialState: { ...BOOTSTRAP.initialState, ...initial },
+        };
+        await withWizard(bootstrap, query, ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+        return html;
+    };
+    const warning = /data-review-pool-warning>Every reviewer is a Packet row, so none reads the repository/;
+
+    const warned = await summaryHtml('pool=packet-blocking', { reviewEnforcement: 'blocking', availableSubagents: packetOnly });
+    assert.match(warned, warning);
+    assert.match(warned, /Start Ouroboros/, 'a warning, never a refusal');
+    for (const [query, initial] of [
+        ['pool=packet-advisory', { reviewEnforcement: 'advisory', availableSubagents: packetOnly }],
+        ['pool=reader-blocking', { reviewEnforcement: 'blocking', availableSubagents: withReader }],
+        ['pool=packet-cyber-pro', { reviewEnforcement: 'blocking', runtimeMode: 'cyber_pro', availableSubagents: packetOnly }],
+    ]) {
+        assert.doesNotMatch(await summaryHtml(query, initial), /data-review-pool-warning/, query);
+    }
+});
+
 // PR #1560: walk the real wizard from Accounts to the completion POST. A fresh Z.ai-only
 // setup saves the provider's image-capable Vision; an owner's edit and an existing
 // install's saved value, blank included, are what gets saved instead.

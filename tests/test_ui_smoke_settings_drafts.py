@@ -191,14 +191,14 @@ def test_settings_complete_draft_validation_and_local_stop(direct_server_with_da
             if evidence:
                 page.screenshot(path=str(Path(evidence) / f"settings-stop-{engine}.png"))
 
-            # Confirmed page leave also discards the reviewer editor, before any future GET.
+            # Confirmed page leave also discards the catalog editor (reviewers included), before any future GET.
             page.click('[data-settings-tab="agents"]')
-            reviewer = page.locator('[data-slot-custom-api]').first
-            saved_model = reviewer.input_value()
-            reviewer.fill("test/unsaved-reviewer")
+            description = page.locator('[data-subagent-field="recommended_use"]').first
+            saved_use = description.input_value()
+            description.fill("Unsaved description.")
             page.click('[data-nav-page="chat"]')
             page.locator('[data-confirm-ok]').click()
-            expect(reviewer).to_have_value(saved_model)
+            expect(description).to_have_value(saved_use)
         finally:
             browser.close()
 
@@ -217,14 +217,14 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     ui["fixture"]["catalog"]["model_sources"] = [
         {"id": "opaque-source", "label": "Managed models", "credentialHarness": "codex"},
     ]
-    page.route("**/api/reviewer-slots", lambda route: pending["reviewers"].append(route))
+    page.route("**/api/review-pool", lambda route: pending["reviewers"].append(route))
     page.route("**/api/claudexor/status*", lambda route: pending["status"].append(route))
     page.route("**/api/model-catalog", lambda route: pending["catalog"].append(route))
     page.goto(ui["url"] + "/#settings")
     page.click('[data-settings-tab="models"]')
     main = page.locator('[data-model-role="main"]')
     main.wait_for(state="visible")
-    assert pending["reviewers"], "the reviewer read must still be pending"
+    assert pending["reviewers"], "the review pool read must still be pending"
     assert pending["status"], "the status read must still be pending"
     assert page.locator('#btn-save-settings').is_enabled(), "the known document can be saved before enrichment"
     source = main.locator('[data-model-role-source]')
@@ -234,10 +234,11 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     model.evaluate("element => { window.__earlyModel = element; element.setSelectionRange(4, 4); }")
     expect(page.locator('#settings-unsaved-indicator')).to_have_class(re.compile('is-visible'))
 
-    page.unroute("**/api/reviewer-slots")
+    page.unroute("**/api/review-pool")
     page.unroute("**/api/claudexor/status*")
     for route in pending["reviewers"]:
-        route.fulfill(json=ui["fixture"]["preview"]["reviewer_slots"])
+        route.fulfill(json={"pool": [], "excluded": [], "last_executions": {}, "row_costs": {},
+                            "config_error": "", "migration": None})
     for route in pending["status"]:
         route.fulfill(json=ui["fixture"]["status"])
     expect(page.locator('#settings-status')).to_contain_text('Your edits are kept')

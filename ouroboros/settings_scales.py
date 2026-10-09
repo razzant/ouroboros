@@ -20,6 +20,11 @@ from ouroboros.settings_integrity import runtime_setting
 # vendor tier above `max`; above-ceiling tiers adapt per route (API wire recovery / delegated).
 EFFORT_SCALE: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
+# A review-pool row saved with an empty effort reviews at this tier (the former
+# `OUROBOROS_EFFORT_REVIEW` shipped default). The row's own effort, when set, and
+# a wave's explicit order both outrank it; a compound route keeps its own tier.
+REVIEW_POOL_DEFAULT_EFFORT = "high"
+
 
 def effort_rank(value: str) -> int:
     """Index of an effort in EFFORT_SCALE (−1 if unknown). Strength-ordering SSOT."""
@@ -54,20 +59,17 @@ def requested_effort(value: Any) -> str:
 
 
 def resolve_effort(task_type: str) -> str:
-    """Return the configured reasoning effort for the given task type."""
+    """Return the configured reasoning effort for the given task type.
+
+    Review is not a task type here: a reviewer's effort is a field of its pool
+    row (``reviewer_slot_config.row_effort``, falling back to
+    ``REVIEW_POOL_DEFAULT_EFFORT``); the lane-era surface keys are retired and
+    an exported one is not read.
+    """
     t = (task_type or "").lower().strip()
 
     if t == "evolution":
         key = "OUROBOROS_EFFORT_EVOLUTION"
-        default = "high"
-    elif t == "review":
-        key = "OUROBOROS_EFFORT_REVIEW"
-        default = "high"
-    elif t == "deep_self_review":
-        key = "OUROBOROS_EFFORT_DEEP_SELF_REVIEW"
-        default = "high"
-    elif t in ("scope_review", "scope-review"):
-        key = "OUROBOROS_EFFORT_SCOPE_REVIEW"
         default = "high"
     elif t == "consciousness":
         # An empty slot is Main's effort (owner decision 16.09, 1=A): a wake-up is an

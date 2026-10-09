@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import commit_admission as admission
-from ouroboros.tools import claude_advisory_review as advisory, review
+from ouroboros.tools import preflight_review, review
 from ouroboros.tools.release_sync import release_metadata_findings
 
 pytestmark = pytest.mark.serial  # real Git processes and isolated runtime globals
@@ -119,8 +119,8 @@ def _snapshot(root):
 
 
 def _diagnose(ctx, source, **kwargs):
-    return json.loads(advisory._handle_advisory_pre_review(
-        ctx, "release", deterministic_only=True, source=source, **kwargs))
+    return json.loads(preflight_review._handle_preflight_review(
+        ctx, commit_message="release", deterministic_only=True, source=source, **kwargs))
 
 
 @pytest.mark.parametrize("source", ["worktree", "index"])
@@ -146,12 +146,16 @@ def test_diagnostic_has_no_effects_even_with_pending_managed_review(candidate, m
     def forbidden(*args, **kwargs):
         pytest.fail("diagnostics crossed into review, preparation or test work")
 
-    for name in ("pending_advisory_execution", "_auto_sync_release_metadata_if_needed",
-                 "compute_snapshot_hash", "load_state", "update_state", "make_repo_key",
-                 "_record_bypass", "_persist_preflight_record", "advisory_review_route",
-                 "advisory_slot_enabled", "_advisory_pre_sdk_gate", "_run_claude_advisory",
-                 "_run_advisory_tests", "check_worktree_readiness", "append_jsonl"):
-        monkeypatch.setattr(advisory, name, forbidden)
+    for target in ("ouroboros.tools.review_change._handle_review_change",
+                   "ouroboros.tools.review_change.run_review_change",
+                   "ouroboros.tools.commit_gate.preflight_reviewer_error",
+                   "ouroboros.tools.commit_gate.run_commit_preflight",
+                   "ouroboros.tools.commit_gate.deterministic_preflight",
+                   "ouroboros.tools.review_helpers.check_worktree_readiness",
+                   "ouroboros.tools.review_helpers._run_review_preflight_tests",
+                   "ouroboros.review_state.compute_snapshot_hash", "ouroboros.review_state.load_state",
+                   "ouroboros.review_state.update_state"):
+        monkeypatch.setattr(target, forbidden)
     monkeypatch.setattr("ouroboros.tools.release_sync.sync_release_metadata", forbidden)
     monkeypatch.setattr("ouroboros.provider_models.model_has_credentials", forbidden)
     monkeypatch.setattr("ouroboros.tools.review._fingerprint_staged_diff", forbidden, raising=False)
@@ -163,7 +167,8 @@ def test_diagnostic_has_no_effects_even_with_pending_managed_review(candidate, m
         return real_run(argv, *args, **kwargs)
 
     monkeypatch.setattr(admission.subprocess, "run", only_reads)
-    result = _diagnose(ctx, source, prepared=True, skip_advisory_review=True, skip_tests=False)
+    # A named row changes nothing: the diagnostics never validate, seat or pay it.
+    result = _diagnose(ctx, source, reviewer="api-scout", goal="release", scope="carriers")
     assert result["status"] == outcome, result
     assert result["source"] == source and result["review_freshness"] is False
     assert "snapshot_hash" not in result and "review_reference" not in result
@@ -448,43 +453,32 @@ def test_explicit_source_is_required_before_any_context_access(source):
 
 
 def test_schema_and_alias_offer_the_same_diagnostic_contract():
-    entries = {entry.name: entry for entry in advisory.get_tools()}
+    entries = {entry.name: entry for entry in preflight_review.get_tools()}
     canonical, alias = entries["preflight_review"], entries["advisory_review"]
     assert canonical.schema["parameters"] == alias.schema["parameters"]
     params = canonical.schema["parameters"]["properties"]
     assert params["deterministic_only"]["default"] is False
     assert params["source"]["enum"] == ["worktree", "index"]
-    assert "freshness" in params["deterministic_only"]["description"]
+    assert "no reviewer" in params["deterministic_only"]["description"]
 
 
-@pytest.mark.parametrize("prepared", [False, True])
-def test_normal_preflight_selects_worktree_or_prepared_index(candidate, monkeypatch, prepared):
-    repo = candidate.repo_dir
-    _broken(repo)
-    _git(repo, "add", ".")
-    _write(repo, _release("1.2.4"))
-    monkeypatch.setattr(advisory, "check_worktree_readiness", lambda *a, **kw: [])
-    monkeypatch.setattr(advisory, "_get_changed_file_list", lambda *a, **kw: "VERSION\nREADME.md")
-    warnings, changed, result = advisory._advisory_pre_sdk_gate(
-        candidate, repo, candidate.drive_root, "fixture", "release", ["VERSION", "README.md"],
-        skip_tests=True, prepared=prepared)
-    assert bool(result) == prepared
-    if prepared:
-        assert json.loads(result)["status"] == "preflight_blocked"
-        assert "no table row" in json.loads(result)["error"]
+@pytest.mark.parametrize("unreadable, reason", [(True, "infra_failure"), (False, "preflight")])
+def test_the_commit_gate_tells_an_unreadable_carrier_from_a_candidate_defect(candidate, monkeypatch, unreadable, reason):
+    """The staged index's release metadata blocks every commit before any test run or
+    look; an unreadable carrier is the check's own failure (``infra_failure``), a
+    malformed one the candidate's defect (``preflight``)."""
+    from ouroboros.tools import git
 
-
-def test_normal_preflight_records_unavailable_as_failure_not_candidate_defect(candidate, monkeypatch):
     _broken(candidate.repo_dir)
-    monkeypatch.setattr(advisory, "check_worktree_readiness", lambda *a, **kw: [])
-    monkeypatch.setattr(advisory, "_get_changed_file_list", lambda *a, **kw: "VERSION\nREADME.md")
-    (candidate.repo_dir / "VERSION").write_bytes(b"\xff")
-    _, _, result = advisory._advisory_pre_sdk_gate(
-        candidate, candidate.repo_dir, candidate.drive_root, "fixture", "release", ["VERSION"], True)
-    assert json.loads(result)["status"] == "error"
-    record = advisory.load_state(candidate.drive_root).advisory_runs[-1]
-    assert record.status == "error" and record.reason_kind == "release_metadata_unavailable"
-    assert not advisory.load_state(candidate.drive_root).is_fresh("fixture")
+    if unreadable:
+        (candidate.repo_dir / "VERSION").write_bytes(b"\xff")
+    _git(candidate.repo_dir, "add", ".")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setattr("ouroboros.tools.review_helpers.check_worktree_readiness", lambda *a, **kw: [])
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *a, **kw: pytest.fail("no tests after a failed check"))
+    outcome = git._preflight_and_tests_gate(candidate, "release", 0, classification_paths=["VERSION", "README.md"])
+    assert outcome["status"] == "blocked" and outcome["block_reason"] == reason
+    assert ("PREFLIGHT_UNAVAILABLE" in outcome["message"]) is unreadable
 
 
 def test_author_continuation_formats_real_name_status_and_keeps_checks(candidate):

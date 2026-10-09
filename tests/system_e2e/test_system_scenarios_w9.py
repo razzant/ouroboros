@@ -273,7 +273,7 @@ def test_s37_restart_adopts_the_reviewed_candidate_commit_on_one_real_server(tmp
                 (True, cand, cand)], verified
             assert json.loads(_fetch(server.base_url + "/api/health"))["runtime_version"] == source.version_text
             assert any(row.get("git_sha") == cand for row in _jsonl(events_log, "worker_boot")), boots
-            assert "triad_review" in stub.kinds() and "scope_review" in stub.kinds(), stub.kinds()
+            assert "triad_review" in stub.kinds() and "two_part_review" in stub.kinds(), stub.kinds()
             assert ArtifactOracle(data_root).task_drive(task_id).tools_rows(), "generation A's tool log is empty"
         finally:
             server.stop()
@@ -343,7 +343,7 @@ def test_s38_boot_recovers_a_crashed_evolution_candidate_commit_without_absorbin
                 rows = _candidate_rows(data_root)
                 assert len(rows) == 1 and rows[0]["task_id"] == task_id and rows[0]["reviewed_commits"] == [cand]
                 assert tx["commit_intent"]["parents"] == [old_head] and _git(install, "rev-parse", "HEAD") == old_head
-                assert "triad_review" in stub.kinds() and "scope_review" in stub.kinds(), stub.kinds()
+                assert "triad_review" in stub.kinds() and "two_part_review" in stub.kinds(), stub.kinds()
                 _sigkill_server_group(server)
             finally:
                 gate.release.set()

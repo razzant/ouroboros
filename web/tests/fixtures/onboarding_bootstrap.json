@@ -322,7 +322,7 @@
       },
       {
         "className": "pro",
-        "copy": "Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal triad + scope review gate.",
+        "copy": "Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal review gate.",
         "label": "Pro",
         "tone": "Power",
         "value": "pro"

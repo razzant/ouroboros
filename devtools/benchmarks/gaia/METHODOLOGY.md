@@ -45,15 +45,16 @@ does not rewrite the scorer or normalize Ouroboros's core `final_answer`.
   with the typed `review_cycles_exhausted` reason instead of looping. Numbers from runs
   before that change are NOT comparable on this axis; set the key explicitly to restore
   the old protocol.
-- **Acceptance panels follow the configured triad rows (2026-09-02).** Task acceptance
-  no longer runs an API-only projection of the reviewer panel: every
-  `OUROBOROS_REVIEWER_SLOTS.triad` row runs on its own delivery (API packet,
-  configured-subagent native inspection episode, or agent session), with per-row
-  effort and credential pin. Runs here use the comma-list `OUROBOROS_REVIEW_MODELS`
-  (three API packet rows), so their acceptance axis is unchanged and comparable with
-  earlier runs; a run whose triad has a retrieving row is NOT comparable on the
+- **Acceptance panels follow the configured review pool (2026-09-02; pool since PR-3).**
+  Task acceptance no longer runs an API-only projection of the reviewer panel: every
+  review-pool row (the review-eligible rows of `OUROBOROS_SUBAGENTS`) runs on its own
+  delivery (API packet, native inspection episode, or agent session), with per-row
+  effort and credential pin. Runs here write three API packet seats on the solve model
+  into the roster (`--review-models` substitutes an explicit panel, one packet seat per
+  model), so their acceptance axis is unchanged and comparable with earlier
+  comma-list runs; a run whose pool has a retrieving row is NOT comparable on the
   acceptance axis (different evidence view, cost class and — for a session — an
-  unobserved read set). Declare the triad rows in the run manifest and never overlay
+  unobserved read set). Declare the pool rows in the run manifest and never overlay
   such a run with API-panel runs.
 - **Acceptance review is required.** GAIA Track A measures the full Ouroboros
   scaffold chosen for this sprint: `OUROBOROS_TASK_REVIEW_MODE=required`, empty

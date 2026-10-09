@@ -1,0 +1,2 @@
+997
+ABI 7.0 gains the review-lanes → review-pool bullet: `REVIEW_POOL_MIGRATED_SETTING_KEYS` are migrated at the settings read seam into Reviewer-marked catalog rows (nothing partial), with the owner message, the `state/review_migrations/` snapshot and `state.json:review_pool_migrations`; the comma-key migration note points at the catalog instead of the retired structured key.

@@ -432,46 +432,6 @@ def make_repo_key(repo_dir: pathlib.Path) -> str:
     return str(discover_repo_root(repo_dir))
 
 
-def advisory_commit_ready(
-    effectively_fresh: bool,
-    open_obligations: Any,
-    open_debts: Any,
-    enforcement: str | None = None,
-    *, matching_run: AdvisoryRunRecord | None = None,
-) -> bool:
-    """SSOT for every ``repo_commit_ready`` projection (H5, capinv-447).
-
-    Mirrors the real advisory gate: Cyber retains action authority; otherwise
-    fresh/bypassed/skipped coverage, or a
-    typed technical failure permitted under owner-selected advisory enforcement.
-    ``matching_run`` is supplied only after the caller matches current repo/hash;
-    permission never changes its failure status or makes it fresh. Obligations
-    and debt block only under blocking enforcement. Triad, scope, custody and
-    every other commit requirement remain independent.
-    """
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-
-    if not review_enforcement_blocks("blocking"):
-        return True
-    if not effectively_fresh:
-        from ouroboros.config import get_review_enforcement
-        from ouroboros.tools.commit_gate import review_failure_is_technical
-
-        # The caller has already matched the record to the current repo/hash.
-        # This is permission under advisory enforcement, never freshness/PASS.
-        if ((enforcement or get_review_enforcement()) != "advisory"
-                or getattr(matching_run, "status", "") not in {"error", "parse_failure"}
-                or not review_failure_is_technical(getattr(matching_run, "execution", {}) or {})):
-            return False
-    if open_obligations or open_debts:
-        if enforcement is None:
-            from ouroboros.config import get_review_enforcement
-
-            enforcement = get_review_enforcement()
-        return str(enforcement or "").strip().lower() != "blocking"
-    return True
-
-
 def compute_snapshot_hash(
     repo_dir: pathlib.Path,
     commit_message: str = "",
@@ -555,10 +515,23 @@ def invalidate_advisory_after_mutation(
         reason = _build_invalidation_reason(source_tool, mutation_root, changed_paths, resolved_repo_keys)
         # Exactly one resolved checkout scopes the invalidation; none or several stale all.
         repo_key = resolved_repo_keys[0] if len(resolved_repo_keys) == 1 else ""
-        update_state(drive_root, lambda state: state.mark_repo_stale(
+        invalidated = update_state(drive_root, lambda state: state.mark_repo_stale(
             repo_key=repo_key, reason_ts=reason_ts, reason=reason,
             stale_repo_key=repo_key, stale_task_id=mutating_task_id,
         ))
+        if isinstance(invalidated, int) and invalidated > 0:
+            return
+        # The author's preflight is a review-ledger record, not a legacy run: with no
+        # run left to invalidate, the newest look on the checkout is what the mutation
+        # makes stale (CHECKLISTS "Finish all edits first", D5-002).
+        from ouroboros.review_ledger import latest_preflight_record
+
+        look_ts = str((latest_preflight_record(drive_root, repo_key=repo_key) or {}).get("ts") or "")
+        if look_ts:
+            update_state(drive_root, lambda state: state.mark_look_stale(
+                look_ts, reason_ts=reason_ts, reason=reason,
+                stale_repo_key=repo_key, stale_task_id=mutating_task_id,
+            ))
     except Exception as e:
         log.debug("invalidate_advisory_after_mutation failed (non-fatal): %s", e)
 
@@ -622,7 +595,6 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
         if state.last_stale_reason:
             lines.append(f"   Reason: {state.last_stale_reason}")
         lines.append(f"   Invalidated by: {state.stale_marker_attribution_note()}")
-        lines.append("   Run preflight_review again before commit_reviewed.")
 
     if open_debts:
         lines.append(f"\n### Commit-readiness debt ({len(open_debts)})")

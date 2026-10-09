@@ -82,7 +82,7 @@ def test_operator_lane_reviews_the_replayed_bytes_and_surfaces_drift(tmp_path, m
     observed = {}
 
     def cycle(ctx, _message, **kwargs):
-        assert kwargs["skip_advisory_review"] is False
+        assert kwargs["preflight_reviewer"] == ""
         assert _git_bytes(ctx.repo_dir, "write-tree").strip() == expected_tree
         assert (ctx.repo_dir / "change.py").read_bytes() == proposed
         observed["cycle"] = ctx.repo_dir
@@ -93,10 +93,9 @@ def test_operator_lane_reviews_the_replayed_bytes_and_surfaces_drift(tmp_path, m
 
     monkeypatch.setattr(runner, "REPO", repo)
     monkeypatch.setattr(runner, "_parse_args", lambda: SimpleNamespace(
-        contributor=False, commit_message="candidate", goal="", scope="",
+        contributor=False, commit_message="candidate", goal="", scope="", preflight_reviewer="",
         output=str(output), drive_root=str(tmp_path / "data"), no_isolated_checkout=False))
     monkeypatch.setattr(runner, "_prepare_review_configuration", lambda _args: (None, {}))
-    monkeypatch.setattr(runner, "_advisory_unavailability_warning", lambda: "")
     monkeypatch.setattr(review_git, "_run_non_committing_review_cycle", cycle)
 
     assert runner.main() == 3

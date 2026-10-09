@@ -30,10 +30,11 @@ from ouroboros.skill_loader import (
     skill_state_dir,
     summarize_skills,
 )
+from ouroboros.skill_catalogue import LIST_SKILLS_SCHEMA as _LIST_SCHEMA, list_skills_payload
 from ouroboros.skill_review import review_skill as _review_skill_impl
 from ouroboros.skill_review_status import normalize_skill_review_status
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.tools.tool_result import completed_local_read
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     build_resolved_resource_binding,
@@ -564,13 +565,17 @@ def _skill_tool_preflight(
 
 
 @completed_local_read
-def _handle_list_skills(ctx: ToolContext, **_kwargs: Any) -> str:
-    err = _skill_tool_preflight(ctx)
-    if err:
-        return err
-    drive_root = canonical_data_root(ctx)
-    summary = summarize_skills(drive_root)
-    return json.dumps(summary, ensure_ascii=False, indent=2)
+def _handle_list_skills(ctx: ToolContext, *, name: str = "", offset: int = 0,
+                        snapshot: str = "") -> str:
+    try:
+        payload = list_skills_payload(summarize_skills(canonical_data_root(ctx)),
+                                      name=name, offset=offset, snapshot=snapshot)
+    except ValueError as exc:
+        return f"⚠️ TOOL_ARG_ERROR (list_skills): {exc}"
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if payload.get("found") is False:  # a completed lookup, not a failed read
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="LEGACY_WARNING", text=text))
+    return text
 
 
 def _author_finish_existing_skill_review(
@@ -1239,23 +1244,11 @@ def _handle_skill_owner_action(
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)
     return "⚠️ SKILL_ACTION_BLOCKED: " + rendered if payload.get("error") else rendered
 
-_LIST_SCHEMA = {
-    "name": "list_skills",
-    "description": (
-        "List external skill packages discovered in OUROBOROS_SKILLS_REPO_PATH. "
-        "Returns counts + per-skill metadata (name, type, enabled, review_status, and "
-        "available_for_execution, which is the SCRIPT-execution flag only). Extension "
-        "rows also carry desired_live, live_loaded, live_reason, load_error and process, "
-        "which is where an extension's liveness actually lives. Read-only."
-    ),
-    "parameters": {"type": "object", "properties": {}, "required": []},
-}
-
 _REVIEW_SCHEMA = {
     "name": "skill_review",
     "description": (
-        "Run reviewer-slot skill review on one external skill package using the "
-        "shared reviewer-slot configuration and scored against the "
+        "Run skill review by the review panel on one external skill package "
+        "using the review pool configuration and scored against the "
         "Skill Review Checklist section in docs/CHECKLISTS.md. Persists the "
         "verdict to data/state/skills/<name>/review.json with a content "
         "hash so a later edit invalidates the review automatically. "

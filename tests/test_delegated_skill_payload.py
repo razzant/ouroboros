@@ -690,9 +690,6 @@ def test_registry_golden_e2e_start_wait_apply_review_stale(tmp_path, monkeypatch
     from tests.test_skill_review_persist_guard import _pass_actor
 
     monkeypatch.setattr(
-        "ouroboros.skill_review._run_skill_advisory_pre_review",
-        lambda *_a, **_kw: {"status": "empty"})
-    monkeypatch.setattr(
         "ouroboros.tools.review._handle_multi_model_review",
         lambda *_a, **_kw: json.dumps(
             {"results": [_pass_actor("fake/a"), _pass_actor("fake/b")]}))

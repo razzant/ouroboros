@@ -6,13 +6,13 @@ import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectC
 import { bindLocalModelControls } from './settings_local_model.js';
 import { bindAutostartControl } from './settings_autostart.js';
 import { applyMcpSettings, collectMcpSettings, initMcpSettings, validateMcpSettings } from './mcp_settings.js';
-import { adoptSubagentRoster, collectReviewerSlots, initReviewerSlots, reloadReviewerSlots, validateReviewerSlots, noteReviewerSlotsSaveAttempt, discardReviewerSlotsDraft, setReviewerProcessingPreference, setReviewerSourceContext } from './reviewer_slots.js';
 import {
     applySubagentsSettings,
     availableSubagentsPreviewPayload,
     collectSubagentsSettings,
     initSubagentsSection,
     noteSubagentsSaveAttempt,
+    reloadReviewPool,
     reloadSubagentsSection,
     subagentSettingsFingerprint,
     validateSubagentsDraft,
@@ -27,8 +27,8 @@ import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
-import { createModelRolesEditor, modelRoleMap } from './model_roles.js';
-import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY } from './route_editor_primitives.js';
+import { createModelRolesEditor } from './model_roles.js';
+import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow } from './ui_helpers.js';
 import { extensionActionStatus } from './extension_status_text.js';
 import { bindLanguageSettings } from './settings_language.js';
@@ -45,12 +45,8 @@ const INPUT_FIELDS = [
     ['s-minimax-region', 'MINIMAX_REGION'],
     ['s-zai-plan', 'ZAI_PLAN'],
     ['s-server-host', 'OUROBOROS_SERVER_HOST', '127.0.0.1'],
-    // 6.1: OUROBOROS_REVIEW_MODELS / OUROBOROS_SCOPE_REVIEW_MODELS are no
-    // longer authored here — the Review lanes section composes the ONE
-    // structured setting; the comma keys stay a backend-derived projection.
-    // R7: OUROBOROS_MODEL_DEEP_SELF_REVIEW is not authored here either — the
-    // deep self-review row lives in Review lanes; the key is the backend's
-    // invisible migration source for that row.
+    // No review route is authored here: the review pool is the Reviewer mark
+    // on the Available subagents rows.
     ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
     ['s-extra-ca-bundle', 'OUROBOROS_EXTRA_CA_BUNDLE'],
     ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
@@ -63,10 +59,9 @@ const INPUT_FIELDS = [
     ['s-max-rounds', 'OUROBOROS_MAX_ROUNDS', 'unlimited'], ['s-task-lifetime', 'OUROBOROS_TASK_ABS_CEILING_SEC', 'unlimited'],
 ];
 const VALUE_FIELDS = [
-    // 6.3: Review / Scope Review efforts are per-slot rows in Agents → Review
-    // lanes now; their global keys remain backend defaults, no longer UI-authored.
+    // A review's effort is its catalog row's effort; no global review effort is UI-authored.
     ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'],
-    ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', ''], ['s-effort-deep-self-review', 'OUROBOROS_EFFORT_DEEP_SELF_REVIEW', 'high'],
+    ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', ''],
     ['s-consciousness-autonomy', 'OUROBOROS_CONSCIOUSNESS_AUTONOMY', 'act'],
     ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
     // Shared paid-review-cycle cap (plan review / task acceptance / commit gate);
@@ -507,9 +502,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         onChange: (settings) => { syncProcessingPreference(settings); onSettingsEdited(); } });
     modelRoles.mount();
     initMcpSettings({ onChange: onSettingsEdited });
-    initReviewerSlots({ onChange: () => onSettingsEdited() });
     initSubagentsSection({
-        onChange: (setting) => { adoptSubagentRoster({ OUROBOROS_SUBAGENTS: setting }); onSettingsEdited(); },
+        onChange: () => onSettingsEdited(),
         // A judged roster may clear only the validation footer it authored.
         // A cadence or other field error keeps its typed subject and survives.
         onJudged: (clean) => {
@@ -529,7 +523,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
 
     function syncProcessingPreference(settings) {
         setSubagentsProcessingPreference(settings[PROCESSING_PREFERENCE_KEY]);
-        setReviewerProcessingPreference(settings[PROCESSING_PREFERENCE_KEY], modelRoleMap(settings[MODEL_PROCESSING_PREFERENCES_KEY]));
     }
 
     function syncRestartState(value) {
@@ -652,7 +645,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
 
     function discardUnsavedSettingsDraft() {
         applySettings(currentSettings || {});
-        discardReviewerSlotsDraft();
         renderCustomSecrets(page, currentSettings || {});
         validationAttempted = false;
         paintSettingsFieldErrors(page, []);
@@ -706,14 +698,10 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         // The actor list lives next to it in Agents → Available subagents.
         applySubagentsSettings(s);
         syncProcessingPreference(s);
-        // The Review-lanes «Configured subagent» selects reference the SAME
-        // roster; adopt it from the same loaded document.
-        adoptSubagentRoster(s);
-        // …and both editors offer the API providers THIS document has a
-        // credential for, named by the setup contract. Derived from the loaded
-        // settings, so a key added under Accounts shows up on the next load
-        // rather than being typed as a prefix (docs/DESIGN.md §7).
-        setReviewerSourceContext({ settings: s, providerProfiles: setupContract.providerProfiles });
+        // The editor offers the API providers THIS document has a credential
+        // for, named by the setup contract. Derived from the loaded settings,
+        // so a key added under Accounts shows up on the next load rather than
+        // being typed as a prefix (docs/DESIGN.md §7).
         setSubagentsSourceContext(s, setupContract.providerProfiles);
         // Post-task evolution: one owner-facing selector maps to enable + cadence.
         const evoEnabled =
@@ -839,7 +827,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         // it was pending, so it lands only on an unchanged draft.
         const isCurrent = () => sequence === loadSequence && revision === draftRevision;
         const enriched = (async () => {
-            const enrichment = [reloadReviewerSlots({ isCurrent }), reloadSubagentsSection()];
+            const enrichment = [reloadReviewPool({ isCurrent }), reloadSubagentsSection()];
             const extData = await extensionsRead;
             if (extData && isCurrent()) {
                 renderRequestedSkillSecrets(page, extData.skills || [], data);
@@ -927,9 +915,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 ? ({ on: 'true', off: 'false' }[mutativeInput?.value] ?? '')
                 : (rawMutative ? ({ true: 'true', false: 'false' }[rawMutative] ?? rawMutative) : ''),
             ...collectMcpSettings(),
-            // 6.1: the ONE structured reviewer-slot setting; {} until the rows
-            // view has loaded, so an unrelated save cannot blank it.
-            ...collectReviewerSlots(),
             // Saved config and live availability are independent: a loaded
             // actor list is collected even when status is down; only an
             // unloaded/unparseable editor omits the key on an unrelated save.
@@ -1002,7 +987,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             ['fields', fields.map(({ message }) => message)],
             ['models', modelRoles.validateAll()],
             ['subagents', validateSubagentsDraft().map((error) => `Available subagents: ${error}`)],
-            ['reviewers', validateReviewerSlots()],
         ];
         const messages = groups.flatMap(([, rows]) => rows).filter(Boolean);
         const subject = groups.find(([, rows]) => rows.some(Boolean))?.[0] || '';
@@ -1325,7 +1309,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         // whichever validation aborts it below — so from here the roster shows
         // its own errors beside the rows they name, not only in this status.
         noteSubagentsSaveAttempt();
-        noteReviewerSlotsSaveAttempt();
         modelRoles.noteSaveAttempt();
         page.querySelectorAll('[data-custom-secret-row]').forEach((row) => { row.dataset.judged = '1'; });
         validationAttempted = true;

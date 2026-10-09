@@ -103,4 +103,9 @@ def parse_model_response(model: str, result: Any, headers_dict: Any) -> dict:
         **operation_fields,
         "prompt_ref": result.get("prompt_ref", {}) if isinstance(result, dict) else {},
         "response_ref": result.get("response_ref", {}) if isinstance(result, dict) else {},
+        # A retrieving seat's observed read coverage of its required-source
+        # manifest rides with the answer (the coupling part's diagnostic).
+        **({"native_read_coverage": usage["native_read_coverage"],
+            "read_provenance": str(usage.get("read_provenance") or usage.get("host_file_read_attestation") or "")}
+           if isinstance(usage.get("native_read_coverage"), dict) else {}),
     }

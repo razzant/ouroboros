@@ -407,16 +407,16 @@ def test_model_id_classifiers_preserve_the_prior_ordered_vocabulary():
     from devtools.benchmarks.common.model_slots import _ACTIVE_FIXED_MODEL_KEYS
     from devtools.benchmarks.programbench.run_programbench_e2e import _MODEL_ID_SLOT_KEYS
 
-    # Exact pre-subscription vocabulary: adding role metadata must not drop a
-    # fallback/reviewer list, resurrect Heavy, or widen model-ID admission.
+    # Exact pre-subscription vocabulary minus the reviewer carriers (the review
+    # pool lives in the roster, OUROBOROS_SUBAGENTS): adding role metadata must not
+    # drop a fallback list, resurrect Heavy, or widen model-ID admission.
     prior = (
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_VISION",
         "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACKS",
-        "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "OUROBOROS_WEBSEARCH_MODEL",
-        "OUROBOROS_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_WEBSEARCH_MODEL",
     )
     assert _ACTIVE_FIXED_MODEL_KEYS == prior
-    assert _MODEL_ID_SLOT_KEYS == (*prior[:7], "OUROBOROS_REVIEWER_SLOTS", *prior[7:])
+    assert _MODEL_ID_SLOT_KEYS == prior
 
 
 @pytest.mark.parametrize("model", ["openai::model-x", "claudexor::codex=model-x"])
@@ -440,7 +440,7 @@ def test_fixed_actor_records_account_window_options_without_changing_model_check
     assert actual["model_slots"] == baseline["model_slots"]
     assert actual["model_route_options"] == options
     assert actual["available_subagents"] == baseline["available_subagents"]
-    assert actual["reviewer_slots"] == baseline["reviewer_slots"]
+    assert actual["review_pool"] == baseline["review_pool"]
     assert all(settings[key] == value for key, value in options.items())
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
@@ -451,9 +451,11 @@ def test_fixed_actor_records_account_window_options_without_changing_model_check
     settings["OUROBOROS_MODEL_FALLBACKS"] = f"{model},foreign/model"
     refused = runtime_actor_snapshot(settings, expected_model=model)
     assert any("OUROBOROS_MODEL_FALLBACKS" in error for error in refused["mismatches"])
-    panel = json.loads(settings["OUROBOROS_REVIEWER_SLOTS"])
-    panel["triad"][0]["route"] = {"kind": "agent_session", "target_id": "codex=model-x"}
-    settings["OUROBOROS_REVIEWER_SLOTS"] = json.dumps(panel)
+    roster = json.loads(settings["OUROBOROS_SUBAGENTS"])
+    seat = next(row for row in roster["items"] if row.get("review_eligible"))
+    seat["route"] = {"kind": "agent_session", "target_id": "codex=model-x"}
+    seat.pop("delivery", None)
+    settings["OUROBOROS_SUBAGENTS"] = json.dumps(roster)
     refused = runtime_actor_snapshot(settings, expected_model=model)
     assert any("agent_session" in error for error in refused["mismatches"])
     # The direct-provider legacy model-ID refusal still runs with role metadata present.

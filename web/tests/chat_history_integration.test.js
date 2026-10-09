@@ -89,6 +89,45 @@ function readUp(f) {
     for (const handler of f.messages.listeners.get('wheel')) handler({ type: 'wheel', deltaY: -1, target: f.messages, timeStamp: 0 });
 }
 
+function recordRenderedMarkup(t) {
+    const query = ElementStub.prototype.querySelector;
+    ElementStub.prototype.querySelector = function (selector) {
+        const direct = query.call(this, selector);
+        if (direct) return direct;
+        for (const child of this.children) { const found = child.querySelector(selector); if (found) return found; }
+        return null;
+    };
+    t.after(() => { ElementStub.prototype.querySelector = query; });
+    const descriptor = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'innerHTML'), markup = [];
+    Object.defineProperty(ElementStub.prototype, 'innerHTML', { ...descriptor,
+        set(value) { markup.push(String(value)); descriptor.set.call(this, value); } });
+    t.after(() => Object.defineProperty(ElementStub.prototype, 'innerHTML', descriptor));
+    return markup;
+}
+
+test('R3 a terminal census before first history preserves source narration and its chronological anchor', async t => {
+    const text = 'Retained authored evidence from the original task';
+    const progress = row('progress:11', text, { task_id: 'closed-before-history', is_progress: true, narration: true });
+    const markup = recordRenderedMarkup(t);
+    const f = fixture(t, page([progress, row('chat:12', 'A newer conversation row', { ts: '2026-09-12T12:01:00Z' })]));
+    f.instance.hydrateStateSnapshot({ active_chat_activities: [{ activity_id: progress.task_id, chat_id: 2,
+        kind: 'managed_task', phase: 'working', status: 'cancelled' }], active_chat_activities_complete: true,
+        supervisor_ready: true });
+    await f.refresh();
+    const card = walkCard(f.messages, progress.task_id);
+    assert.ok(card);
+    assert.equal(card.querySelector('[data-live-title]').textContent, text);
+    assert.equal(card.querySelector('[data-live-phase]').textContent, 'Cancelled');
+    assert.equal(card.querySelector('[data-live-phase]').dataset.motion, '0');
+    assert.equal(card.dataset.finished, '1');
+    assert.equal(card.dataset.ts, String(Date.parse(progress.ts)));
+    assert.ok(markup.some(value => value.includes(text) && value.includes('chat-live-line')), 'the retained source row is rendered');
+    assert.ok(f.messages.children.indexOf(card) < f.messages.children.findIndex(node => node.dataset.historyId === 'chat:12'));
+    await f.refresh();
+    assert.equal(walkCard(f.messages, progress.task_id), card);
+    assert.equal(card.querySelector('[data-live-phase]').textContent, 'Cancelled', 'replay without a terminal row keeps the known census outcome');
+});
+
 // One saved message and nothing else: every page below it is empty down to the
 // archive floor. This is the sparse Project room that grew a 64-click pill.
 const sparseRoom = (t, floor = 5) => fixture(t,

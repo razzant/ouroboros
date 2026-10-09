@@ -42,10 +42,13 @@ def test_provider_test_max_tokens_pinned():
     assert PROVIDER_TEST_MAX_TOKENS == 16
 
 
-def test_scope_review_max_tokens():
-    """scope_review.py _SCOPE_MAX_TOKENS must be ≥100000."""
-    from ouroboros.tools.scope_review import _SCOPE_MAX_TOKENS
-    assert _SCOPE_MAX_TOKENS >= 100_000
+def test_two_part_seat_output_budget_is_the_one_review_budget():
+    """One wave: a seat answering both parts reserves the same review output
+    budget as a packet seat (floor 8192, cap 65536) — there is no separate
+    scope output reservation any more."""
+    from ouroboros.tools.review_multi_model import _review_output_budget
+
+    assert 8_192 <= _review_output_budget() <= 65_536
 
 
 def test_llm_client_default_max_tokens():
@@ -335,13 +338,13 @@ def test_measured_density_never_loosens_a_models_own_review_pack_cap(tmp_path, m
     assert limit("anthropic/claude-fable-5") < tightened
 
 
-def test_scope_normalize_defaults_pass_severity_only():
+def test_coupling_normalize_defaults_pass_severity_only():
     """PASS rows may omit severity (semantically void there); FAIL rows must
     carry an explicit valid severity because it decides blocking (fail-closed)."""
-    from ouroboros.tools.scope_review import _SCOPE_REQUIRED_ITEMS, _normalize_scope_items
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS, normalize_scope_items
 
     items = []
-    required = sorted(_SCOPE_REQUIRED_ITEMS)
+    required = sorted(SCOPE_REQUIRED_ITEMS)
     for idx, item_id in enumerate(required):
         if idx == 0:
             items.append({"item": item_id, "verdict": "FAIL", "severity": "advisory",
@@ -350,33 +353,33 @@ def test_scope_normalize_defaults_pass_severity_only():
             # PASS rows WITHOUT severity — the fable-5 output shape.
             items.append({"item": item_id, "verdict": "PASS",
                           "reason": "verified against the staged diff and context"})
-    normalized, err = _normalize_scope_items(items)
+    normalized, err = normalize_scope_items(items)
     assert err == "", f"PASS rows without severity must normalize cleanly: {err}"
     assert len(normalized) == len(required)
 
     # A FAIL row without severity stays invalid (fail-closed).
     bad = list(items)
     bad[0] = {"item": required[0], "verdict": "FAIL", "reason": "a concrete finding with enough words"}
-    _normalized, err = _normalize_scope_items(bad)
+    _normalized, err = normalize_scope_items(bad)
     assert "missing or invalid severity" in err
 
 
-def test_scope_actor_record_surfaces_error_text():
-    """A non-responded scope actor record must carry the failure text so a
+def test_seat_actor_record_surfaces_error_text():
+    """A non-responded seat's actor record must carry the failure text so a
     provider 400 is visible in the verdict without observability digging."""
-    from ouroboros.tools.review_helpers import build_scope_actor_record
-    from ouroboros.tools.scope_review import ScopeReviewResult
+    from ouroboros.triad_review import parse_seat_answers
 
-    failed = ScopeReviewResult(
-        blocked=True,
-        block_message="SCOPE_REVIEW_BLOCKED: Error code: 400 - prompt is too long",
-        model_id="anthropic/claude-fable-5",
-        status="error",
-    )
-    record = build_scope_actor_record(failed, slot_id="scope_slot_1")
-    assert "400" in record["error"]
-    ok = ScopeReviewResult(model_id="m", status="responded", raw_text="[]")
-    assert build_scope_actor_record(ok, slot_id="s")["error"] == ""
+    # The envelope of a failed seat carries the failure text as its ``text``
+    # (review_response._parse_model_response); the record keeps it as raw_text.
+    parsed = parse_seat_answers({"results": [
+        {"model": "anthropic/claude-fable-5", "slot_id": "slot_1", "verdict": "ERROR",
+         "text": "Error: Error code: 400 - prompt is too long"},
+        {"model": "m", "slot_id": "slot_2", "text": "[]\nNO_FINDINGS"},
+    ]}, {"slot_1": ("change", "coupling"), "slot_2": ("change",)})
+    failed, ok = (record.to_dict() for record in parsed.actor_records)
+    assert failed["status"] == "error" and "400" in failed["raw_text"]
+    assert failed["answers"] == {} and failed["parts"] == ["change", "coupling"]
+    assert ok["status"] == "responded" and ok["answers"]["change"]["verdict"] == "PASS"
 
 
 def test_tool_timeout_uses_max_of_settings_and_per_tool():
@@ -444,12 +447,14 @@ def test_run_script_timeout_360():
     assert rs[0].timeout_sec == 360
 
 
-def test_advisory_pre_review_timeout_covers_tests_and_review():
-    """Both names share the finite envelope around tests and the critic."""
-    from ouroboros.tools.claude_advisory_review import get_tools, _preflight_tool_timeout_sec
-    entries = {entry.name: entry for entry in get_tools()}
+def test_preflight_review_timeout_is_the_review_change_envelope():
+    """Both names are the same review_change action, so they share its finite envelope."""
+    from ouroboros.tools import preflight_review, review_change
+    [envelope] = [entry.timeout_sec for entry in review_change.get_tools() if entry.name == "review_change"]
+    entries = {entry.name: entry for entry in preflight_review.get_tools()}
+    assert envelope > 0
     for name in ("preflight_review", "advisory_review"):
-        assert entries[name].timeout_sec == _preflight_tool_timeout_sec()
+        assert entries[name].timeout_sec == envelope
 
 
 def test_repository_index_collapses_junk_dirs():

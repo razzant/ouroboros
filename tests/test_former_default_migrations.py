@@ -34,25 +34,26 @@ def test_formerly_remapped_review_ids_are_no_longer_rewritten():
 
 @pytest.mark.parametrize("model", _FORMERLY_REMAPPED_IDS)
 def test_a_saved_model_is_not_rewritten_as_retired_on_an_aggregator_install(model):
-    from ouroboros.reviewer_slot_config import parse_reviewer_slots
+    from ouroboros.reviewer_slot_config import review_pool_rows
 
-    slots = json.dumps({
-        "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": model}}],
-        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": model}}],
-    })
+    catalog = json.dumps({"enabled": True, "items": [
+        {"subagent_id": "t1", "recommended_use": "Reviews.", "review_eligible": True,
+         "route": {"kind": "api_model", "target_id": model}},
+        {"subagent_id": "s1", "recommended_use": "Reviews natively.", "review_eligible": True,
+         "route": {"kind": "api_model", "target_id": model}, "delivery": "native"},
+    ]})
     document = {
         "OPENROUTER_API_KEY": "sk-or",
         "OUROBOROS_MODEL": model,
         "OUROBOROS_MODEL_LIGHT": model,
         "OUROBOROS_MODEL_FALLBACKS": model,
-        "OUROBOROS_REVIEWER_SLOTS": slots,
+        "OUROBOROS_SUBAGENTS": catalog,
     }
     normalized, changed, changed_keys = apply_runtime_provider_defaults(dict(document))
 
     assert (changed, changed_keys) == (False, [])
     assert normalized == document
-    panel = parse_reviewer_slots(normalized["OUROBOROS_REVIEWER_SLOTS"])
-    assert [slot.target_id for slot in (*panel.triad, *panel.scope)] == [model, model]
+    assert [row.target_id for row in review_pool_rows(normalized)] == [model, model]
 
 
 def test_direct_openai_keeps_a_saved_id_that_was_never_our_default_for_its_slot():
@@ -61,7 +62,6 @@ def test_direct_openai_keeps_a_saved_id_that_was_never_our_default_for_its_slot(
         "OUROBOROS_MODEL": "openai::gpt-5.4-pro",
         "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.4",
         "OUROBOROS_MODEL_FALLBACKS": "openai::gpt-5.4",
-        "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "openai::gpt-5.6-sol",
     }
     normalized, changed, changed_keys = apply_runtime_provider_defaults(dict(document))
 

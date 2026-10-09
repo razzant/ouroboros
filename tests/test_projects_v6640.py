@@ -143,6 +143,7 @@ def test_project_started_row_rides_outbox_pins_main_and_dedupes_durably(tmp_path
     assert queued[0]["progress_meta"] == {
         "project_id": "launch",
         "project_name": "Launch 🚀",
+        "task_name": "Ship release",
         "target_label": "Launch 🚀 › Ship release",
     }
 

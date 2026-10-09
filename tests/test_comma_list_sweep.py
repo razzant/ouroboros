@@ -3,10 +3,10 @@
 Grep-level checker pinning that the legacy reviewer comma-list migration read
 stays gone: no migration-read branches, the settings vocabulary carries the
 comma keys only as RETIRED, and no bench settings template configures
-reviewers through them. The comma ENV spellings legitimately survive as the
-derived runtime projection (``project_reviewer_slots_into_env`` + the
-API-pinned getters) — the sweep therefore pins SETTINGS-plane and
-migration-branch absence, not env-name absence.
+reviewers through them. Live reviews read the catalog pool; historical raw-dict
+normalizers may still name the comma keys. The sweep pins SETTINGS-plane and
+migration-branch absence, while test_comma_list_remnant_sweep owns the textual
+remnant allowlist.
 """
 
 from __future__ import annotations
@@ -48,11 +48,16 @@ def test_no_migration_read_branches_remain():
     assert not hits, f"migration-read remnants: {hits}"
 
 
-def test_reviewer_config_source_is_never_legacy():
-    """`ReviewerSlotConfig.source` vocabulary is structured|default now."""
+def test_review_pool_state_vocabulary_is_structured_empty_error():
+    """The pool's state vocabulary is structured|empty|error — never ``legacy``."""
+    from ouroboros.reviewer_slot_config import review_pool_state
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
     text = (_ROOT / "ouroboros" / "reviewer_slot_config.py").read_text(encoding="utf-8")
-    assert 'source="legacy"' not in text
-    assert 'source="default"' in text and 'source="structured"' in text
+    assert 'source="legacy"' not in text and '"legacy"' not in text
+    assert review_pool_state(None)["state"] == "empty"
+    assert review_pool_state(pool_roster(pool_seat("a", "m/one")))["state"] == "structured"
+    assert review_pool_state("{not json")["state"] == "error"
 
 
 def test_settings_vocabulary_retired_the_comma_keys():
@@ -107,8 +112,12 @@ def test_prose_no_longer_promises_a_comma_list_migration():
         assert "старый читается" not in text, rel
 
 
-def test_derived_projection_survives():
-    """5.4=A removes the migration READ; the derived projection STAYS."""
-    from ouroboros.reviewer_slot_config import project_reviewer_slots_into_env
+def test_the_derived_projection_left_with_the_lanes():
+    """5.4=A removed the migration READ; PR-3 removed the lane projection too — the
+    comma plane has no writer, and ``apply_settings_to_env`` projects no floor."""
+    import inspect
 
-    assert callable(project_reviewer_slots_into_env)
+    from ouroboros import config, reviewer_slot_config
+
+    assert not hasattr(reviewer_slot_config, "project_reviewer_slots_into_env")
+    assert "project_reviewer_slots_into_env" not in inspect.getsource(config.apply_settings_to_env)

@@ -137,10 +137,11 @@ def test_wait_switch_restores_api_hint_and_later_override_defers_again(live_wait
     assert [row["state"] for row in ledger(root)].count("released") == 1
 
 
-@pytest.mark.parametrize("surface", ["triad", "scope", "plan", "native_plan"])
+@pytest.mark.parametrize("surface", ["triad", "two_part", "plan", "native_plan"])
 def test_actual_review_authors_reach_strict_raw_dispatch(setup, monkeypatch, surface):
-    from ouroboros import config, reviewer_slot_config
-    from ouroboros.tools import scope_review, plan_review_runtime
+    from ouroboros import config
+    from ouroboros.tools import plan_review_runtime
+    from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
     from ouroboros.tools.review_multi_model import _query_model
     from ouroboros.tools.registry import ToolContext
 
@@ -162,15 +163,17 @@ def test_actual_review_authors_reach_strict_raw_dispatch(setup, monkeypatch, sur
                                       ctx, slot_id="critic", session_profile="account-a", effort="high")
         _model, payload, _extra = asyncio.run(triad())
         assert "error" not in payload
-    elif surface == "scope":
-        _text, _usage, error = scope_review._call_scope_llm(
-            "", MODEL, ctx, slot_id="critic", session_profile="account-a",
-            session_task="Review the staged change", session_root=str(root))
-        assert not error
+    elif surface == "two_part":
+        # The retrieving seat of the one wave: its own two-part brief, no packet.
+        async def two_part():
+            return await _query_model(client, MODEL, [], asyncio.Semaphore(1), ctx, slot_id="critic",
+                                      session_profile="account-a", effort="high", native_retrieval=True,
+                                      session_task="Review the staged change", session_root=str(root))
+        _model, payload, _extra = asyncio.run(two_part())
+        assert "error" not in payload
     else:
-        row = reviewer_slot_config.ConfiguredReviewerSlot("critic", "api_chat", MODEL, profile_id="account-a",
-                                                        subagent_id="actor" if surface == "native_plan" else "")
-        monkeypatch.setattr(reviewer_slot_config, "load_reviewer_slot_config", lambda: SimpleNamespace(triad=(row,)))
+        set_review_pool(monkeypatch, pool_roster(pool_seat(
+            "critic", MODEL, profile_id="account-a", delivery="native" if surface == "native_plan" else "packet")))
         slots = plan_review_runtime.plan_review_slots()
         assert slots[0].temperature is None and slots[0].default_temperature == 0.2
         rows = asyncio.run(plan_review_runtime.run_plan_review_slots(

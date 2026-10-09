@@ -1,5 +1,5 @@
 {
-  "_provenance": "Captured from scripts/run_external_review.py at 578360c41, the wrapper before the review moved into ouroboros.tools.review_change: contributor lane over tests/_contributor_packet_shared.py with its commit-gate review cycle replaced by persist_golden_actors, normalized by normalized(). This is the pre-move side of an equivalence; never regenerate it from a later wrapper. One input was re-derived on 2026-10-07 with the SAME capture function (persist_golden_actors), not a later wrapper: the scope seat's fixture answer now covers the whole Intent / Scope Review Checklist, because the real scope reviewer refuses partial coverage; only s1's response blob identity (sha256/size) changed with it.",
+  "_provenance": "Captured from scripts/run_external_review.py at 578360c41, the wrapper before the review moved into ouroboros.tools.review_change: contributor lane over tests/_contributor_packet_shared.py with its commit-gate review cycle replaced by persist_golden_actors, normalized by normalized(). This is the pre-move side of an equivalence; never regenerate it from a later wrapper. One input was re-derived on 2026-10-07 with the SAME capture function (persist_golden_actors), not a later wrapper: the scope seat's fixture answer now covers the whole Intent / Scope Review Checklist, because the real scope reviewer refuses partial coverage; only s1's response blob identity (sha256/size) changed with it. Re-derived again on 2026-10-08 with the same capture function for PR-3 (one review pool): the retrieving seats t2 and s1 now answer contract B (one object with the change and the coupling blocks) because the pool asks a retrieving seat both parts of the brief; only their response blob identities (sha256/size) changed with it.",
   "answered_slots_in_full_output": [
     "s1",
     "t1",
@@ -121,9 +121,9 @@
             "compressed_size": "<compressed_size>",
             "encoding": "gzip",
             "kind": "json",
-            "path": "$REVIEW_DRIVE/observability/blobs/0ee9dc60a70319efe1e7fa619412c77a867774d50a20b70452ec95411cc9201e.json.gz",
-            "sha256": "0ee9dc60a70319efe1e7fa619412c77a867774d50a20b70452ec95411cc9201e",
-            "size": 643
+            "path": "$REVIEW_DRIVE/observability/blobs/ac79ce406c66da74771ef9eac589fc10f2ab5c5e9543327502bb576b23b52003.json.gz",
+            "sha256": "ac79ce406c66da74771ef9eac589fc10f2ab5c5e9543327502bb576b23b52003",
+            "size": 1739
           },
           "redaction": {
             "count": 0,
@@ -170,9 +170,9 @@
             "compressed_size": "<compressed_size>",
             "encoding": "gzip",
             "kind": "json",
-            "path": "$REVIEW_DRIVE/observability/blobs/81b5a3cb7e1a21c90ec814fe67448dea038513f545ae3cc25bf7769576e40676.json.gz",
-            "sha256": "81b5a3cb7e1a21c90ec814fe67448dea038513f545ae3cc25bf7769576e40676",
-            "size": 1155
+            "path": "$REVIEW_DRIVE/observability/blobs/7b162d619c5c224a3a62f3a11dc75c57f6cb99567bf4eea6641abf87279605e8.json.gz",
+            "sha256": "7b162d619c5c224a3a62f3a11dc75c57f6cb99567bf4eea6641abf87279605e8",
+            "size": 1211
           },
           "redaction": {
             "count": 0,

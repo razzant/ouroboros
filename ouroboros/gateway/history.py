@@ -401,6 +401,7 @@ def _annotate_terminal_task_truth(
 
     try:
         from ouroboros.project_dialogue import outcome_phase
+        from ouroboros.projects_registry import task_presentation_name
         from ouroboros.task_status import FINAL_STATUSES
 
         cache = result_cache if result_cache is not None else {}
@@ -555,6 +556,9 @@ def _annotate_terminal_task_truth(
             task_id = str(message.get("task_id") or "")
             if not task_id or message.get("system_type") == "project_question_pointer":
                 continue
+            if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
+                # Legacy rows reuse this request's result read, never split the prose label.
+                message["task_name"] = task_presentation_name(cache.get(task_id))
             # Selected receipt events keep their physical identity, but show current task-result truth.
             row_id = str(message.get("card_row_id") or "")
             if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
@@ -826,7 +830,7 @@ def _collect_chat_rows(
                 rec["text"] = strip_markdown(rec["text"])
                 if isinstance(entry.get("terminal_time"), dict):
                     rec["terminal_time"] = dict(entry["terminal_time"])
-                for key in ("project_id", "project_name", "target_label", "status", "completion_answer", "handoff_id"):
+                for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "handoff_id"):
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
             annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)

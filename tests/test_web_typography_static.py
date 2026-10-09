@@ -137,7 +137,6 @@ def _migrated_sources() -> dict[str, str]:
         "web/onboarding.css": _decommented(_read("web/onboarding.css")),
         "web/model_roles.css": _decommented(_read("web/model_roles.css")),
         "web/model_wait.css": _decommented(_read("web/model_wait.css")),
-        "web/reviewer_slots.css": _decommented(_read("web/reviewer_slots.css")),
         "web/style.css (migrated regions)": _migrated_style_region(),
     }
 
@@ -298,12 +297,12 @@ def test_muted_is_a_global_colour_only_utility() -> None:
 def test_chips_and_meta_lines_declare_their_own_foreground() -> None:
     """Root cause #2. A rule that declares a size and no colour inherits
     near-white --text-primary — invisible in the CSS, loudest on screen."""
-    region = _migrated_style_region() + _decommented(_read("web/reviewer_slots.css"))
-    for selector in (".harness-chip", ".reviewer-slot-meta", ".harness-account-main strong"):
+    region = _migrated_style_region() + _decommented(_read("web/settings.css"))
+    for selector in (".harness-chip", ".available-subagent-review", ".harness-account-main strong"):
         bodies = [
             body for sel, body in RULE.findall(region) if sel.strip() == selector
         ]
-        assert bodies, f"{selector} missing from the migrated region of web/style.css"
+        assert bodies, f"{selector} missing from the migrated region of web/style.css or web/settings.css"
         assert any("color:" in body for body in bodies), (
             f"{selector} declares no colour, so it inherits --text-primary "
             "(docs/DESIGN.md 'Status and chips')"
@@ -332,7 +331,6 @@ def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
     strictly alternating) is asserted by ``_style_marker_spans`` on every call
     that reads a region."""
     region = _migrated_style_region(raw=True)
-    assert ".reviewer-slots-heading" in _read("web/reviewer_slots.css")
     assert ".harness-account-row" in region
     # The Dashboard -> Updates tab migrated on 2026-08-31; its rules must stay
     # inside the guarded region so a later edit cannot drift them out of it.

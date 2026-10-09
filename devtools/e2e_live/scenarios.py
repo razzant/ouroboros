@@ -41,8 +41,6 @@ _VERSION_PARTS_RE = re.compile(r"^(\d+\.\d+\.)(\d+)(-?(?:rc|alpha|beta|a|b)\.?)?
 # The runtime's typed refusal prefix on a blocked review tool result ("⚠️ CODE: ...").
 _REFUSAL_CODE_RE = re.compile(r"⚠️\s*([A-Z][A-Z_]+):")
 _REVIEW_TOOLS = ("preflight_review", "commit_reviewed")
-# The prefix ``claude_advisory_review`` stamps on an oversize-prompt skip row's ``raw_result``.
-_ADVISORY_SKIP_PREFIX = "⚠️ ADVISORY_SKIPPED:"
 # The product's vision/browser inspection surfaces (``ouroboros/tools/vision.py``, ``browser.py``).
 _VISION_TOOLS = ("analyze_screenshot", "vlm_query", "view_image")
 _BROWSER_TOOL = "browser_action"
@@ -145,19 +143,23 @@ SK1_ECHO_EXPECTED = f"echo: {SK1_ECHO_MESSAGE}"   # exactly what ``_echo`` in SK
 
 
 # The STAND's review panel (the owner's choice of 2026-09-06, questions 1-4 = A): cheap, three model families, every
-# reviewer at effort low, task and evolution at medium. The product's own defaults (gemini/terra/opus triad, terra
-# scope, sonnet advisory, high efforts) stay untouched for installs; ``--production-panel`` runs them on the stand.
+# reviewer at effort low, task and evolution at medium. The product's own defaults (the factory reviewer rows, high
+# efforts) stay untouched for installs; ``--production-panel`` runs them on the stand.
 # run3 on the defaults cost 141.63 USD, 75% of it review and opus alone 39%; this panel is estimated at ~40%.
-_ROW = lambda slot_id, model: {"slot_id": slot_id, "route": {"kind": "api_chat", "target_id": model}, "effort": "low"}  # noqa: E731
-STAND_REVIEW_PANEL = {
-    "triad": [_ROW("t_gemini", "google/gemini-3.8-flash"), _ROW("t_luna", "openai/gpt-5.6-luna"),
-              _ROW("t_deepseek", "deepseek/deepseek-v4-pro")],
-    "scope": [_ROW("s_deepseek", "deepseek/deepseek-v4-pro")],
-    "advisory": {"route": {"kind": "api_chat", "target_id": "anthropic/claude-sonnet-5"}, "effort": "low"},
-}
-STAND_PANEL_SETTINGS = {"OUROBOROS_REVIEWER_SLOTS": json.dumps(STAND_REVIEW_PANEL), "OUROBOROS_EFFORT_TASK": "medium",
-                        "OUROBOROS_EFFORT_EVOLUTION": "medium", "OUROBOROS_EFFORT_REVIEW": "low",
-                        "OUROBOROS_EFFORT_SCOPE_REVIEW": "low"}
+# The panel IS the review pool: catalog rows marked Reviewer, the effort on each row. ``build_isolated_settings`` drops
+# the retired lane-era keys it was once written under, which left the paid stand reviewing with the factory rows.
+_ROW = lambda subagent_id, model, **extra: {  # noqa: E731
+    "subagent_id": subagent_id, "recommended_use": "E2E stand reviewer (the cheap panel).",
+    "route": {"kind": "api_model", "target_id": model}, "effort": "low", **extra}
+STAND_REVIEW_PANEL = {"enabled": True, "items": [
+    _ROW("stand-gemini", "google/gemini-3.8-flash", review_eligible=True, delivery="packet"),
+    _ROW("stand-luna", "openai/gpt-5.6-luna", review_eligible=True, delivery="packet"),
+    _ROW("stand-deepseek", "deepseek/deepseek-v4-pro", review_eligible=True, delivery="packet"),
+    _ROW("stand-deepseek-reads", "deepseek/deepseek-v4-pro", review_eligible=True, delivery="native"),
+    _ROW("stand-advisory", "anthropic/claude-sonnet-5"),  # unmarked: an author may still name it for a preflight
+]}
+STAND_PANEL_SETTINGS = {"OUROBOROS_SUBAGENTS": json.dumps(STAND_REVIEW_PANEL), "OUROBOROS_EFFORT_TASK": "medium",
+                        "OUROBOROS_EFFORT_EVOLUTION": "medium"}
 
 
 def _git(args: list[str], cwd: pathlib.Path) -> str:
@@ -200,15 +202,14 @@ def tool_result_rows(tools_rows: list) -> list:
 def commit_refusal_facts(ledger: dict, tools_rows: list, stored: dict) -> dict:
     """The TYPED trail of every ``commit_reviewed``/``preflight_review`` refusal of a task.
 
-    Three durable sources, none of them model prose: the advisory ledger's attempt rows
-    (``phase``/``status``/``block_reason``) and advisory-run statuses, the tools.jsonl rows of
+    Three durable sources, none of them model prose: the review state's attempt rows
+    (``phase``/``status``/``block_reason``), the tools.jsonl rows of
     the two review tools (their typed ``status`` plus the runtime's own ``⚠️ CODE:`` refusal
     prefix — PREFLIGHT_BLOCKED, TESTS_PREFLIGHT_BLOCKED, SCOPE_REVIEW_BLOCKED, ...), and the
     task's terminal ``reason_code`` (``budget_exhausted`` = BudgetExceeded, ``deadline_local``
     = the deadline). The first paid run's SM1 lanes failed on exactly this ladder and the
     result rows named none of it."""
     attempts = [a for a in (ledger.get("attempts") or []) if isinstance(a, dict)]
-    runs = [r for r in (ledger.get("advisory_runs") or []) if isinstance(r, dict)]
     tools_rows = tool_result_rows(tools_rows)
     calls = []
     for row in tools_rows:
@@ -227,12 +228,38 @@ def commit_refusal_facts(ledger: dict, tools_rows: list, stored: dict) -> dict:
         "commit_attempts": [{"attempt": a.get("attempt"), "phase": str(a.get("phase") or ""),
                              "status": str(a.get("status") or ""), "block_reason": str(a.get("block_reason") or "")}
                             for a in attempts],
-        "advisory_run_statuses": [str(r.get("status") or "") for r in runs],
         "review_tool_calls": calls,
         "refusal_codes": sorted({c["code"] for c in calls if c["code"]}),
         "terminal_status": str(stored.get("status") or ""),
         "terminal_reason_code": str(stored.get("reason_code") or ""),
     }
+
+
+WAVE_ANSWERS = {"PASS", "FAIL"}  # review_ledger.VERDICT_PASS / VERDICT_FAIL: a substantive answer to a question
+
+
+def commit_wave_fact(records: list, task_id: str) -> dict:
+    """SM1's durable fact of the review WAVE: the newest commit-gate review-ledger record of this task
+    (``surface=commit_gate``) that is SETTLED, dispatched at least one seat (the ledger reserves a row
+    per planned seat BEFORE dispatch, so a NOT_DISPATCHED record's rows prove nothing) and answers
+    BOTH questions (``verdict.per_question`` ``change``/``coupling``) with PASS or FAIL — ``unanswered``
+    and ``not_performed`` are not answers; FAIL is wave evidence too, the wave ran and spoke (NEW-T2).
+    ``{}`` when none; never a verdict judgement (the landing's PASS is ``commit_landed``'s check)."""
+    waves = sorted((r for r in records if isinstance(r, dict) and r.get("surface") == "commit_gate"
+                    and str(r.get("task_id") or "") == str(task_id)), key=lambda r: str(r.get("ts") or ""))
+    for record in reversed(waves):
+        verdict = record.get("verdict") if isinstance(record.get("verdict"), dict) else {}
+        answers = verdict.get("per_question") if isinstance(verdict.get("per_question"), dict) else {}
+        rows = [row for row in (record.get("rows") or []) if isinstance(row, dict)]
+        dispatched = [row for row in rows
+                      if "not_dispatched" not in (str(row.get("status") or ""), str(row.get("operation_state") or ""))]
+        substantive = all(str(answers.get(part) or "").upper() in WAVE_ANSWERS for part in ("change", "coupling"))
+        if (dispatched and substantive and str(record.get("state") or "") == "settled"
+                and str(verdict.get("aggregate") or "") != "NOT_DISPATCHED"):
+            return {"record_id": str(record.get("record_id") or ""), "aggregate": str(verdict.get("aggregate") or ""),
+                    "per_question": {k: str(v) for k, v in answers.items()}, "seats": len(rows),
+                    "dispatched_seats": len(dispatched)}
+    return {}
 
 
 def dispatch_verdict(rows: list, expected_text: str) -> dict:
@@ -426,7 +453,7 @@ def sm1_prompt() -> str:
         "Keep the effective palette consistent on / and /onboarding, including their actual controls "
         "(tests/test_web_typography_static.py pins the shared source); verify the visible result the way the "
         "review policy requires (exercise real consumers in both browser documents and inspect "
-        "it); then land it as a reviewed release through preflight_review and commit_reviewed with "
+        "it); then land it as a reviewed release through commit_reviewed with "
         f"commit message '{SM1_COMMIT_MESSAGE}', following the release policy the review organs "
         "enforce (every commit is a release: the synchronized version carriers are bumped in the same "
         "diff — a patch bump). Finish once the commit has landed."
@@ -445,17 +472,6 @@ def version_is_bumped(before: str, after: str) -> bool:
         return is_release_version(after) and Version(after.strip()) > Version(before.strip())
     except InvalidVersion:
         return False
-
-
-def advisory_run_is_real(run: dict) -> bool:
-    """A ledger row the advisory reviewer actually produced. ``fresh`` is written only by a
-    completed reviewer episode; ``stale`` is ANY aged row (fresh, bypassed or skipped), told
-    apart by the bypass fields and the skip prefix the two audited paths stamp."""
-    status = str(run.get("status") or "")
-    if status == "fresh":
-        return True
-    return (status == "stale" and not run.get("bypass_reason") and not run.get("bypassed_by_task")
-            and not str(run.get("raw_result") or "").startswith(_ADVISORY_SKIP_PREFIX))
 
 
 def vision_evidence_rows(tools_rows: list) -> list:
@@ -560,9 +576,6 @@ def run_sm1(ctx: LaneContext) -> None:
     ctx.check("worktree_clean_after_commit", clean, worktree_porcelain=porcelain, worktree_transient=transient)
     task_oracle = ctx.oracle.task_drive(task_id)
     ledger = task_oracle.advisory_review()
-    runs = [r for r in (ledger.get("advisory_runs") or []) if isinstance(r, dict)]
-    # A REAL advisory run, not the audited skip/bypass row the earlier prompt routed through.
-    ctx.check("advisory_ledger_row_present", any(advisory_run_is_real(r) for r in runs))
     tools_rows = task_oracle.tools_rows()
     ctx.facts["commit_reviewed_refusals"] = commit_refusal_facts(ledger, tools_rows, stored)
     ctx.check("landed_without_skip_flags", ctx.checks["commit_landed"]
@@ -571,8 +584,12 @@ def run_sm1(ctx: LaneContext) -> None:
     vision = vision_evidence_rows(tools_rows)
     ctx.facts["vision_evidence_present"] = bool(vision)
     ctx.facts["vision_evidence_tools"] = sorted({str(r.get("tool") or "") for r in vision})
-    ctx.check("scope_review_complete_event",
-              bool(ctx.wait_events(task_oracle, "scope_review_complete", lambda _row: True)))
+    # The wave's durable record (the task's forked drive root, else the server root): the gate writes
+    # it inside the commit call, so this wait only covers a late durable row, as the event wait did.
+    wave = ctx.h.wait_until(lambda: commit_wave_fact(
+        task_oracle.review_ledger_records() + ctx.oracle.review_ledger_records(), task_id) or None, 90) or {}
+    ctx.facts["commit_gate_wave"] = wave
+    ctx.check("commit_gate_wave_record", bool(wave))
     ctx.check_paid_tokens([task_id])
     # Include the original names too: silently dropping a role cannot shrink the browser proof.
     names = SM1_REQUIRED_PALETTE | palette.keys() | sm1_palette_tokens(before[SM1_CSS_PATH]).keys()
@@ -677,11 +694,9 @@ def sm1_stub_script(clone: pathlib.Path) -> dict:
     writes.extend(sm1_release_writes(clone, sm1_next_version((clone / "VERSION").read_text(encoding="utf-8"), taken)))
     return {"agent": [
         *writes,
-        # The full user path, no skip flags: the release preflight sees VERSION in scope, the
-        # advisory episode runs against the stub (a REAL ledger row), and the hermetic suite is
-        # the tests preflight exactly like the paid prompt (``preflight_runner._preflight_env``
-        # scrubs every settings key the loopback lane projects).
-        {"tool": "preflight_review", "arguments": {"commit_message": SM1_COMMIT_MESSAGE}},
+        # The full user path, no skip flags: the release preflight sees VERSION in scope and the
+        # hermetic suite is the tests preflight exactly like the paid prompt
+        # (``preflight_runner._preflight_env`` scrubs every settings key the loopback lane projects).
         {"tool": "commit_reviewed", "arguments": {
             "commit_message": SM1_COMMIT_MESSAGE, "paths": [w["arguments"]["path"] for w in writes],
             "goal": "Change the brand accent for the live E2E stand and release it",
@@ -694,13 +709,20 @@ def sm1_stub_script(clone: pathlib.Path) -> dict:
 # SW1 — Swarm: force_plan + roster, >=2 children, fanout receipt, cost rollup, no orphans
 # --------------------------------------------------------------------------- #
 
-def sw1_roster(child_model: str) -> str:
-    return json.dumps({"enabled": True, "items": [{
-        "subagent_id": SW1_ROSTER_ID,
-        "recommended_use": "Read-only scout for parallel repository surveys.",
-        "route": {"kind": "api_model", "target_id": child_model},
-        "effort": "low",
-    }]})
+def sw1_roster(child_model: str, template: dict | None = None) -> str:
+    """SW1's catalog: the scout row BESIDE the lane template's reviewers (T2b). The catalog is one
+    document key, so a scout-only catalog made the lane's pool a loud EMPTY one (no reviewer runs,
+    nothing is minted — that rule stands). A template with a catalog (the stand panel's marked rows,
+    the stub lane's keyless reviewers) keeps its rows; one without (``--production-panel``) gets
+    exactly the factory rows the tree would mint for it (``factory_review_rows``)."""
+    from ouroboros.subscription_install_presets import factory_review_rows
+
+    template = dict(template or {})
+    stored = str(template.get("OUROBOROS_SUBAGENTS") or "").strip()
+    reviewers = [dict(row) for row in json.loads(stored).get("items") or []] if stored else factory_review_rows(template)
+    scout = {"subagent_id": SW1_ROSTER_ID, "recommended_use": "Read-only scout for parallel repository surveys.",
+             "route": {"kind": "api_model", "target_id": child_model}, "effort": "low"}
+    return json.dumps({"enabled": True, "items": [scout, *reviewers]})
 
 
 def _find_root_task(ctx: LaneContext, marker: str) -> str:
@@ -945,10 +967,12 @@ class Scenario:
     # scenario that commits nothing (SW1, SK1) has no absorb to wait for or to confirm.
     expects_absorb: bool = False
 
-    def overrides(self, model: str) -> dict:
+    def overrides(self, model: str, template: dict | None = None) -> dict:
+        """The scenario's keys over the lane ``template`` (the document the runner wrote so far);
+        SW1 composes its catalog from that template's reviewers (:func:`sw1_roster`)."""
         out = dict(self.settings_overrides)
         if self.id == "SW1":
-            out["OUROBOROS_SUBAGENTS"] = sw1_roster(model)
+            out["OUROBOROS_SUBAGENTS"] = sw1_roster(model, template)
         if not self.expects_absorb:
             # A lane that commits nothing must not promote either: under --self-mod its one-shot cycle could
             # commit and re-exec the server in the middle of the lifecycle under test (SK1 review/grants/

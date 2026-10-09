@@ -77,23 +77,7 @@
  * @property {string} phase
  * @property {number} started_at
  */
-/**
- * @typedef {Object} ActiveChatActivity
- * @property {Object=} owner_wait  // quiz-bound state, quiz_state and optional wait_ended_at, independent of Project detail
- * @property {Object=} project_admission_hold  // accepted unstarted work waiting for original Project authority
- * @property {string=} pause_cause  // budget | owner | restart | sleep | unknown; display only
- * @property {Object=} required_question  // read-only pointer to the current required Project quiz
- * @property {boolean=} required_question_unavailable  // a recorded owner-question wait whose detail could not be read: possibly blocked, never "no question"
- * @property {Object.<string,Object>=} model_waits
- * @property {number=} task_attempt
- * @property {string} activity_id
- * @property {number} chat_id
- * @property {string} project_id
- * @property {string} client_message_id  // empty for managed queue rows
- * @property {string} kind  // direct_chat | managed_task — presentational label; membership in this census, not kind, decides liveness
- * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown (unreadable Pause authority); direct: thinking or unknown; parked direct turns retain ID/kind and use managed phases
- * @property {number} started_at
- */
+/** @typedef {import('./task_activity_types.js').ActiveChatActivity} ActiveChatActivity */
 /**
  * @typedef {Object} EvolutionDataResponse
  * @property {Object[]} points
@@ -462,6 +446,7 @@
  *   taskSourceDownloadUrl; not an original reviewer transcript or a copy of the row.
  * @property {string=} target_label
  * @property {string=} project_id
+ * @property {string=} task_name  // structured work title on Project creation/transfer entries
  * @property {string=} project_name
  * @property {string=} handoff_id  // immutable origin/destination receipt identity
  * @property {Object=} terminal_time  // host-owned occurrence; ts remains publication time

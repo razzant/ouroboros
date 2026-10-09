@@ -1,4 +1,4 @@
-"""Git/write tools with advisory, triad, and scope review commit gates."""
+"""Git/write tools with the optional preflight, triad, and scope review commit gates."""
 
 from __future__ import annotations
 
@@ -38,15 +38,9 @@ from ouroboros.tool_access import (
     binding_targets_system_repo,  # noqa: F401
     build_resolved_resource_binding,  # noqa: F401
 )
-from ouroboros.tools.claude_advisory_review import (
-    ADVISORY_REVIEW_CHOICE_GUIDANCE,
-    _handle_advisory_pre_review,
-    advisory_gate_unavailable,
-)
 from ouroboros.tools.commit_gate import (
     BLOCK_CLASS_INFRA,
     IDENTICAL_DIFF_BLOCK_REASON,
-    _check_advisory_freshness,
     _check_overlapping_review_attempt,
     _current_review_tool_name,
     _invalidate_advisory,  # noqa: F401
@@ -58,6 +52,7 @@ from ouroboros.tools.commit_gate import (
     classify_review_block,  # noqa: F401
     commit_review_contract_fingerprint,
     compute_rebuttal_sha256,
+    commit_preflight_choice_error as _commit_preflight_choice_error,
     resolve_root_task_id,
 )
 from ouroboros.review_cycles import (
@@ -111,7 +106,7 @@ def _free_cycle_gate(
     goal: str = "",
     scope: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Max-Review-Cycles gate, run BEFORE advisory freshness and any paid
+    """Max-Review-Cycles gate, run BEFORE the preflight and any paid
     dispatch. ``None`` allows a paid attempt. Two free typed outcomes:
     a byte-identical resubmission of a verdict-blocked diff without a NEW
     rebuttal, and an exhausted per-root-task paid-cycle ceiling. Under
@@ -397,10 +392,9 @@ def _tests_preflight_block_message(managed_needs_proof: bool, test_err: str) -> 
             f"{test_err}"
         )
     return (
-        "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before triad + scope review "
-        "when advisory is bypassed.\n"
-        "Fix the failures below, then re-run commit_reviewed (or drop "
-        "skip_advisory_review=True to run the full advisory flow).\n"
+        "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before the review panel runs.\n"
+        "Fix the failures below, then re-run commit_reviewed "
+        "(skip_tests=True for intentionally incomplete work).\n"
         "Set OUROBOROS_PRE_PUSH_TESTS=0 to skip tests entirely.\n\n"
         f"{test_err}"
     )
@@ -411,8 +405,8 @@ def _managed_candidate_needs_proof(ctx: ToolContext) -> bool:
     CURRENT candidate workload carries no recorded green-suite proof (advisory ran
     with skip_tests, or the tree changed since) — the compensating preflight
     must then run PRE-commit, before paid review and before any commit exists,
-    regardless of skip_tests/doc-only, so a red candidate is fixed in place
-    instead of committed and rolled back.
+    regardless of skip_tests (the only exemption the ordinary rule knows), so a
+    red candidate is fixed in place instead of committed and rolled back.
 
     AUTHORITY (synthesis F2): the proof consulted here is the PROCESS-HELD ctx
     record pinned by the hermetic runner when the host itself ran
@@ -488,143 +482,62 @@ def _subject_binding_mismatch_outcome(
     }
 
 
-def _advisory_and_tests_gate(
+def _preflight_and_tests_gate(
     ctx: ToolContext,
     commit_message: str,
     commit_start: float,
     *,
     classification_paths: List[str],
-    advisory_paths: Optional[List[str]],
-    skip_advisory_pre_review: bool,
-    skip_tests: bool,
+    preflight_reviewer: str = "",
+    skip_advisory_pre_review: bool = False,
+    skip_tests: bool = False,
     review_rebuttal: str = "",
-    free_replay: bool = False,
     goal: str = "",
     scope: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Advisory-freshness gate plus the compensating tests preflight (moved
-    whole out of ``_run_reviewed_stage_cycle`` at the function-size gate).
-    ``None`` = proceed to review."""
-    decision: Dict[str, Any] = {}
-    advisory_err = _check_advisory_freshness(
-        ctx, commit_message, skip_advisory_pre_review, paths=advisory_paths,
-        review_rebuttal=review_rebuttal, decision=decision,
-    )
-    if (not free_replay and advisory_err and decision.get("refresh_required")
-            and not bool(getattr(ctx, "_advisory_reconciled", False))):
-        ctx.emit_progress_fn("Running preflight_review for the prepared candidate...")
-        _handle_advisory_pre_review(
-            ctx, commit_message, paths=advisory_paths, skip_tests=skip_tests,
-            review_rebuttal=review_rebuttal, goal=goal, scope=scope, prepared=True,
-        )
-        advisory_err = _check_advisory_freshness(
-            ctx, commit_message, paths=advisory_paths,
-            review_rebuttal=review_rebuttal, decision=decision,
-        )
-    if advisory_err:
-        if not decision.get("pending"):
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-        _record_commit_attempt(
-            ctx,
-            commit_message,
-            "blocked",
-            block_reason="no_advisory",
-            block_details=advisory_err,
-            duration_sec=time.time() - commit_start,
-        )
-        return {
-            "status": "blocked",
-            "message": advisory_err,
-            "block_reason": "no_advisory",
-        }
+    """Ahead of the panel: the free deterministic checks, the tests preflight, then the author's
+    preflight when one row was named (decision 3A). The checks and the tests block as before
+    (Cyber Pro continues with a warning); the preflight only informs. ``None`` = proceed."""
+    from ouroboros.commit_admission import preflight_evidence_unavailable, run_tests_preflight_with_proof
+    from ouroboros.tools.commit_gate import deterministic_preflight, run_commit_preflight
 
-    # Route/slot-aware bypass detection (#123): the bare ANTHROPIC_API_KEY probe
-    # missed a disabled advisory slot (audited bypass with NO compensating test
-    # preflight) and falsely bypassed the keyless delegated route (duplicate
-    # hermetic pytest + a false "Advisory bypassed" progress line).
-    if skip_advisory_pre_review or free_replay:
-        _advisory_bypassed = True
-    else:
-        try:
-            _advisory_bypassed = advisory_gate_unavailable()
-        except ValueError:
-            # Malformed slots/route config: fail closed INTO the compensating
-            # preflight — an unreadable advisory gate must cost a hermetic
-            # pytest run, never silently skip it.
-            _advisory_bypassed = True
-    # DISCLOSED RESIDUAL (owner decision, this release): this reads the CURRENT
-    # advisory availability, not the status of the advisory record that
-    # satisfied freshness above. Settings live outside the Git snapshot, so a
-    # run that recorded `bypassed` (slot off, or api route with no key) and was
-    # then followed by enabling the slot / adding the key reaches the commit
-    # with no compensating preflight. That is UNCHANGED from the key-only
-    # predicate this replaced — the same transition skipped it before — and the
-    # evidence-based alternative (deriving compensation from the matching
-    # AdvisoryRunRecord's recorded status) was weighed and deliberately not
-    # taken here. What DID change is the same-configuration case, which is
-    # where the silent gap actually lived: a disabled slot now costs the
-    # preflight instead of skipping both advisory and tests.
-    _diff_aware = (os.environ.get("OUROBOROS_PREFLIGHT_DIFF_AWARE", "true") or "true").strip().lower() in ("true", "1", "yes")
-    _doc_only = _diff_aware and _diff_is_doc_only(classification_paths)
+    ctx._commit_preflight = {"status": "skipped" if skip_advisory_pre_review else "not_performed", "record_id": ""}
+    named = bool(preflight_reviewer) and not skip_advisory_pre_review
+    message = deterministic_preflight(ctx, commit_message, classification_paths or None)
+    reason = "infra_failure" if preflight_evidence_unavailable(message) else "preflight"
     _managed_needs_proof = _managed_candidate_needs_proof(ctx)
-    if (_advisory_bypassed and not skip_tests and not _doc_only) or _managed_needs_proof:
-        try:
-            ctx.emit_progress_fn(
-                "Managed candidate lacks a pre-commit test proof — running the mandatory "
-                "hermetic suite before review..."
-                if _managed_needs_proof
-                else "Advisory bypassed — running test preflight before triad + scope review..."
-            )
-        except Exception:
-            pass
-        from ouroboros.commit_admission import run_tests_preflight_with_proof
-
+    # The retired advisory's own tests rule, for every commit: the suite runs unless the author
+    # says skip_tests (documentation has tests too), and a managed resolution always pays it.
+    if not message and (not skip_tests or _managed_needs_proof):
+        ctx.emit_progress_fn(
+            "Managed candidate lacks a pre-commit test proof — running the mandatory hermetic suite before review..."
+            if _managed_needs_proof else "Running the tests preflight before the review panel...")
         test_err = run_tests_preflight_with_proof(
             ctx, runner=lambda c, **kw: _run_review_preflight_tests(c, **kw))
         if test_err:
-            msg = _tests_preflight_block_message(_managed_needs_proof, test_err)
-            if not review_enforcement_blocks("blocking"):
-                from ouroboros.tools.review import _handle_review_block_or_warning
-
-                ctx._last_review_block_reason = "tests_preflight_blocked"
-                _handle_review_block_or_warning(ctx, True, msg, "")
-                return None
-            try:
-                run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-            except Exception:
-                pass
-            _record_commit_attempt(
-                ctx,
-                commit_message,
-                "blocked",
-                block_reason="tests_preflight_blocked",
-                block_details=msg,
-                duration_sec=time.time() - commit_start,
-                # Preflight, not a review verdict: must neither inflate nor
-                # reset the identical-diff refusal streak.
-                phase="preflight",
-            )
-            _mark_failed_bypass_advisory_stale(ctx, commit_message, advisory_paths)
-            return {
-                "status": "blocked",
-                "message": msg,
-                "block_reason": "tests_preflight_blocked",
-            }
+            message, reason = _tests_preflight_block_message(_managed_needs_proof, test_err), "tests_preflight_blocked"
         # Q10 single-run: the green preflight IS the managed pre-commit proof —
         # recorded by the shared admission helper (commit_admission SSOT).
-    elif _advisory_bypassed:
-        if skip_tests and _doc_only:
-            _skip_reason = "skip_tests + doc_only"
-        elif skip_tests:
-            _skip_reason = "skip_tests"
-        else:
-            _skip_reason = "doc_only"
+    elif not message:
+        ctx.emit_progress_fn("Tests preflight skipped (skip_tests).")
+    if message and not review_enforcement_blocks("blocking"):
+        from ouroboros.tools.review import _handle_review_block_or_warning
+
+        ctx._last_review_block_reason = reason
+        _handle_review_block_or_warning(ctx, True, message, "")
+    elif message:
         try:
-            ctx.emit_progress_fn(
-                f"Advisory bypassed — preflight tests skipped ({_skip_reason})."
-            )
+            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
         except Exception:
             pass
+        # Preflight, not a review verdict: must neither inflate nor reset the
+        # identical-diff refusal streak.
+        _record_commit_attempt(ctx, commit_message, "blocked", block_reason=reason, block_details=message,
+                               duration_sec=time.time() - commit_start, phase="preflight")
+        return {"status": "blocked", "message": message, "block_reason": reason}
+    if named:
+        ctx._commit_preflight = run_commit_preflight(ctx, preflight_reviewer, commit_message=commit_message,
+                                                     goal=goal, scope=scope, review_rebuttal=review_rebuttal)
     return None
 
 
@@ -1172,6 +1085,26 @@ _COMMIT_ROOT_REFUSAL = (
 )
 
 
+def _commit_request_refusals(ctx: ToolContext, *, root: str, preflight_reviewer: str, skipped: bool,
+                             continuation: bool, reviewers: Optional[List[str]], reason: str) -> tuple:
+    """The typed refusals of a commit request that come before anything is staged, reviewed
+    or recorded — a foreign root, a bad preflight choice, a panel the one composer
+    ``review_change`` applies refuses (decision 1A) — and the composed panel when none
+    applies: ``(panel, refusal_text)``."""
+    from ouroboros.tools.commit_gate import compose_commit_panel
+    from ouroboros.tools.review_change import ReviewChangeArgumentError
+
+    if str(root or "system_repo") != "system_repo":  # no id to name
+        return None, _COMMIT_ROOT_REFUSAL
+    error = _commit_preflight_choice_error(preflight_reviewer, skipped=skipped, continuation=continuation)
+    if not error:
+        try:
+            return compose_commit_panel(ctx, list(reviewers or []), str(reason or "")), ""
+        except ReviewChangeArgumentError as exc:
+            error = str(exc)
+    return None, f"⚠️ TOOL_ARG_ERROR: {error} Nothing was staged, reviewed or recorded."
+
+
 def _repo_commit_push(ctx: ToolContext, commit_message: str,
                        paths: Optional[List[str]] = None,
                        skip_tests: bool = False,
@@ -1180,13 +1113,18 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                        skip_advisory_pre_review: bool = False,
                        goal: str = "",
                        scope: str = "", review_reference: Optional[dict] = None,
-                       author_disposition: Optional[dict] = None, root: str = "") -> str:
+                       author_disposition: Optional[dict] = None, root: str = "",
+                       preflight_reviewer: str = "", reviewers: Optional[List[str]] = None, reason: str = "") -> str:
     """Stage, review, and commit files with unified pre-commit review."""
     from ouroboros import body_candidate  # lazy: the Git tools reach the candidate owner only when committing
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
+    preflight_reviewer = str(preflight_reviewer or "").strip()
     _reset_commit_review_state(ctx)
-    if str(root or "system_repo") != "system_repo":  # before any staging, review or record: no id to name
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=_COMMIT_ROOT_REFUSAL))
+    panel, refusal = _commit_request_refusals(  # before any staging, review or record
+        ctx, root=root, preflight_reviewer=preflight_reviewer, skipped=skip_advisory_pre_review,
+        continuation=review_reference is not None or author_disposition is not None, reviewers=reviewers, reason=reason)
+    if refusal:
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=refusal))
     error = prepare_author_commit_request(ctx, review_reference, author_disposition, review_rebuttal)
     if error:
         return error
@@ -1230,12 +1168,6 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             phase="preflight",
         )
         return overlap_err
-    preflight_pending = "" if ctx._author_commit_source is not None else _reconcile_advisory_before_preparation(
-        ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
-        skip_advisory_review=skip_advisory_pre_review,
-    )
-    if preflight_pending:
-        return preflight_pending
     if not bool(getattr(ctx, "_review_resume_pending", False)):
         _record_commit_attempt(ctx, commit_message, "reviewing")
     try:
@@ -1279,6 +1211,8 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             review_rebuttal=review_rebuttal,
             came_from_detached_checkout=came_from_detached_checkout,
             require_release_tag=not bool(_managed_tx),
+            preflight_reviewer=preflight_reviewer,
+            panel=panel,
         )
         if outcome.get("status") != "passed":
             if _managed_tx:
@@ -1443,7 +1377,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             except Exception:
                 log.warning("mutation baseline advance failed after commit", exc_info=True)
         record_bound_commit_success(ctx, commit_message, _commit_start, pre_fingerprint, post_fingerprint)
-        ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
+        ctx._coupling_review_history = {}  # the subject's coupling rounds end with its commit (the attempt rows keep them)
     finally:
         _release_git_lock(lock)
     if _managed_tx:
@@ -1493,12 +1427,16 @@ def _run_git_network_cmd(cmd: List[str], cwd: pathlib.Path) -> str:
 
 def get_tools() -> List[ToolEntry]:
     reviewed_commit_description = (
-        "Commit already-changed files through the unified reviewed commit workflow. "
-        f"{ADVISORY_REVIEW_CHOICE_GUIDANCE}"
+        "Commit already-changed files through the unified reviewed commit workflow: free deterministic checks, "
+        "the tests preflight, then the review panel (both questions), which is the gate. preflight_reviewer optionally buys "
+        "ONE named row's early look at the worktree first (review_change surface=preflight): it informs, never "
+        "gates, and its record never answers the panel. Without it the commit records preflight not_performed, "
+        "a fact rather than a bypass. reviewers/reason compose the panel by review_change's rule (in Cyber Pro the "
+        "marked pool rows are a menu; below it the whole pool judges and named rows outside it are only added)."
     )
     skip_advisory_description = (
-        "Choose the audited advisory-only skip for this call. "
-        f"{ADVISORY_REVIEW_CHOICE_GUIDANCE}"
+        "Record that this commit deliberately goes without a preflight (preflight: skipped). The deterministic "
+        "checks, the tests (see skip_tests) and the panel still run; the opposite of preflight_reviewer."
     )
     commit_properties = {
         "root": {"type": "string", "enum": ["system_repo"], "default": "system_repo", "description": "The reviewed commit lands in Ouroboros's own body only; review any other root with review_change and commit it with ordinary git."},
@@ -1506,8 +1444,11 @@ def get_tools() -> List[ToolEntry]:
         "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of task-attributed paths. Omitted computes candidates; empty never stages the whole tree."},
         "skip_tests": {"type": "boolean", "default": False, "description": "Skip pre-commit tests."},
         "review_rebuttal": {"type": "string", "default": "", "description": "A NEW content-hashed counter-argument buys one paid re-review within capacity; repeating it is free-refused."},
+        "preflight_reviewer": {"type": "string", "default": "", "description": "One ENABLED catalog row (id or handle; a review-pool member or not) for an early informational look at the worktree before the panel; unknown or disabled is TOOL_ARG_ERROR."},
+        "reviewers": {"type": "array", "items": {"type": "string"}, "default": [], "description": "The panel's seats by catalog id or handle, under review_change's panel rule: in Cyber Pro the marked pool rows are the owner's menu and the named pool rows ARE the counted panel (say why in reason; an enabled row outside the pool is an added critic, never the quorum); below Cyber Pro the whole pool judges and a named row outside it is only added. Omitted = the whole pool; unknown or disabled is TOOL_ARG_ERROR."},
+        "reason": {"type": "string", "default": "", "description": "Why the panel named in reviewers is composed as it is; recorded with the review (a narrowed panel without one is recorded reason_missing)."},
         "skip_advisory_review": {"type": "boolean", "default": False, "description": skip_advisory_description},
-        "goal": {"type": "string", "default": "", "description": "High-level goal of this change. Used by scope reviewer to judge completeness."}, "scope": {"type": "string", "default": "", "description": "Declared scope boundary. Issues outside scope are advisory-only for scope reviewer."},
+        "goal": {"type": "string", "default": "", "description": "High-level goal of this change. Used by the panel's coupling questions to judge completeness."}, "scope": {"type": "string", "default": "", "description": "Declared scope boundary. Without a goal it is the intended transformation the panel's coupling questions judge the change against (completeness, forgotten adjacent surfaces)."},
         "review_reference": {"type": "object", "description": "Exact reference returned by this task's prior commit review, for free informed Advisory continuation."},
         "author_disposition": {"type": "object", "additionalProperties": False,
             "properties": {"disposition": {"type": "string", "enum": ["accepted", "rejected", "partial", "deferred"]}, "rationale": {"type": "string"}},
@@ -1595,12 +1536,10 @@ from ouroboros.tools.git_review_cycle import (  # noqa: E402,F401
     _finalize_pending_review,
     _fingerprint_staged_diff,
     _handle_revalidation_failure,
-    _mark_failed_bypass_advisory_stale,
     _review_binding_precondition_error,
     _review_custody_pending,
     _review_cycle_infra_failure,
     _run_non_committing_review_cycle,
-    _reconcile_advisory_before_preparation,
     _reset_commit_review_state,
     _run_reviewed_stage_cycle,
     _stage_candidate_for_review,

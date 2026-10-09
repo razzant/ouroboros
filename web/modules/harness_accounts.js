@@ -982,7 +982,7 @@ export function renderAgentAccountsSection() {
         <div class="form-section" id="harness-accounts-section">
             <h3>Accounts</h3>
             <div class="settings-section-copy">
-                Subscriptions shared by Models, delegated subagents, and review lanes. Unpinned work
+                Subscriptions shared by Models, delegated subagents, and reviewers. Unpinned work
                 rotates across a family's enabled, signed-in accounts; a disabled account keeps its
                 login and stays out of rotation. Accounts live in Ouroboros's own agent home; your
                 personal logins are never read or imported.

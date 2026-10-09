@@ -610,7 +610,7 @@ def test_review_cycle_publishes_only_structural_critical_finding_rejection(
 
     Tip adaptation of the reference pin: this tree's stage cycle reads its
     collaborators through the call-time facade handle _git() and gates with
-    _free_cycle_gate/_advisory_and_tests_gate (the reference's
+    _free_cycle_gate/_preflight_and_tests_gate (the reference's
     _check_advisory_freshness/advisory_gate_unavailable/_refuse_capped_attempt
     spellings do not exist here), so the facade is the patch point and the
     aggregate verdict is stubbed per scenario. The durable fact is unchanged."""
@@ -637,7 +637,7 @@ def test_review_cycle_publishes_only_structural_critical_finding_rejection(
     monkeypatch.setattr(git_facade, "_current_runtime_mode", lambda: "advanced")
     monkeypatch.setattr(git_facade, "_fingerprint_staged_diff", lambda *_a: fingerprint)
     monkeypatch.setattr(git_facade, "_free_cycle_gate", lambda *_a, **_k: None)
-    monkeypatch.setattr(git_facade, "_advisory_and_tests_gate", lambda *_a, **_k: None)
+    monkeypatch.setattr(git_facade, "_preflight_and_tests_gate", lambda *_a, **_k: None)
     monkeypatch.setattr(git_facade, "_review_binding_precondition_error", lambda *_a, **_k: "")
     monkeypatch.setattr(git_facade, "_record_commit_attempt", lambda *_a, **_k: None)
     monkeypatch.setattr(git_facade, "_install_paid_dispatch_stamp", lambda *_a, **_k: None)

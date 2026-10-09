@@ -604,8 +604,9 @@ lightweight JSON decisions on the expensive measured model.
 
 ### Why `--all-model` pins the review slots too
 
-`run_tb.py --all-model` pins `OUROBOROS_REVIEW_MODELS` and the Light lane to the solve model
-(lightened to ONE reviewer at low effort). This is intentional and must stay:
+`run_tb.py --all-model` pins the review pool (ONE packet review seat on the solve model,
+written as a catalog row of `OUROBOROS_SUBAGENTS`, at low effort) and the Light lane to
+the solve model. This is intentional and must stay:
 a TB run claims a SINGLE-MODEL measurement, so the acceptance-review content —
 which feeds improvement passes back into the answer — must come from the same
 model. Substituting a stronger/different reviewer would smuggle a second

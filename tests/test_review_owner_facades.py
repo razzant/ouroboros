@@ -7,13 +7,10 @@ monkeypatching tests keep working unchanged while the split lands.
 Re-derived on the v7next tip from the reference suite: the reference's
 ``review_session_verdict`` block is superseded (upstream made the same
 extraction as ``review_verdict_extraction`` and pins it with its own tests);
-the ``claude_advisory_review`` blocks are re-derived on the native-episode
-form under the organ's public rename (``preflight_review_prompt`` /
-``preflight_review_run``) — the SDK-era rows
-(``advisory_route_requires_api_key``, ``_advisory_session_deltas``,
-``_advisory_sdk_budget``, ``_changed_paths``) died with the transport, and the
-three deterministic preflights live with their upstream owner
-``commit_admission`` (the parent keeps the alias seams);
+the ``claude_advisory_review`` blocks left with the advisory pipeline itself
+(decision 3A: the preflight is ``review_change(surface=preflight)``, and the
+three deterministic preflights it ran stay with ``commit_admission``, called
+by ``commit_gate.deterministic_preflight``);
 ``DEFAULT_REVIEW_MODEL_TIMEOUT_SEC`` / ``_review_model_timeout_sec`` are
 retired with the adaptive-timeout contract while ``_parse_model_response``
 lives with its upstream owner ``tools/review_response`` (the parent re-imports
@@ -34,42 +31,7 @@ REVIEW_LEAF_OWNERS: dict[str, dict[str, str]] = {
             "_multi_model_review_async"
         ),
     },
-    "ouroboros.tools.claude_advisory_review": {
-        "ouroboros.tools.preflight_review_prompt": (
-            "_MAX_DIFF_CHARS_ERROR _get_staged_diff _get_changed_file_list "
-            "_build_blocking_history_section _build_advisory_prompt"
-        ),
-        "ouroboros.tools.preflight_review_run": (
-            "_ADVISORY_PROMPT_MAX_CHARS "
-            "_ADVISORY_EXTRACT_CONTRACT _ADVISORY_SESSION_MAX_SECONDS "
-            "_resolve_fallback_model _llm_extract_advisory_items "
-            "_check_expected_items advisory_review_route advisory_slot_enabled "
-            "advisory_gate_unavailability_reason advisory_gate_unavailable "
-            "_run_advisory_delegated _note_meta_error _run_claude_advisory "
-            "_is_clean_verdict _needs_fallback_extraction _parse_advisory_output "
-            "_is_checklist_array"
-        ),
-    },
 }
-
-
-def test_the_deterministic_preflights_live_with_commit_admission():
-    """The reference rows moved the three deterministic preflights into the
-    advisory prompt leaf; upstream had already extracted them into
-    commit_admission (Q3=A SSOT) — the upstream home wins and the parent's
-    alias imports stay the gate's monkeypatch seams."""
-    import ouroboros.commit_admission as owner
-    import ouroboros.tools.claude_advisory_review as parent
-
-    assert parent._release_metadata_preflight is owner.release_metadata_preflight
-    assert (
-        parent._auto_sync_release_metadata_if_needed
-        is owner.auto_sync_release_metadata_if_needed
-    )
-    assert (
-        parent._syntax_preflight_staged_py_files
-        is owner.syntax_preflight_staged_py_files
-    )
 
 
 def test_review_owner_facades_preserve_identity():

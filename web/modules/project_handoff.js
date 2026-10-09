@@ -1,7 +1,8 @@
-/** A compact Main transfer receipt; existing census/task details own its phase. */
+/** Compact Project work entries; event identity and observed work stay separate. */
 import { projectReference } from './project_reference.js';
-import { activeModelWaits } from './model_wait.js';
-import { isTerminalTaskDetail, taskTerminalPhase, taskPresentation } from './log_events.js';
+import { activeModelWaits, mergeModelWaits } from './model_wait.js';
+import { isTerminalTaskDetail } from './log_events.js';
+import { censusTaskPhase, paintTaskPhase } from './task_phase_chip.js';
 
 // The gateway's typed receipt word (ouroboros/project_handoff.py RECEIPT_STATES).
 // The binding is committed under every word; only these two prove that the Main
@@ -19,35 +20,22 @@ export function receiptNotice(status) {
 }
 
 export function handoffPhase(activity, detail, connected = true) {
-    if (isTerminalTaskDetail(detail)) {
-        const view = taskPresentation(taskTerminalPhase(detail));
-        return { text: view.headline, className: view.phase };
-    }
-    if (!connected || !activity) return { text: 'Activity unconfirmed', className: 'neutral' };
-    const held = activity.project_admission_hold?.label;
-    if (held) {
-        // An independent budget pause stays beside the Project wait, as in the sidebar.
-        const pause = { budget_paused: 'Paused', budget_pausing: 'Pausing…' }[activity.phase];
-        return { text: pause ? `${pause} · ${held}` : held, className: 'warn' };
-    }
-    if (activity.required_question || activeModelWaits(activity.model_waits || {}, false, activity.task_attempt || 0).length) {
-        return { text: 'Waiting', className: 'warn' };
-    }
-    const phases = { thinking: 'Thinking', queued: 'Queued', budget_paused: 'Paused', budget_pausing: 'Pausing…', finalizing: 'Finalizing…', working: 'Working' };
-    const text = phases[activity.phase];
-    return text ? { text, className: (activity.phase === 'budget_paused' || activity.phase === 'budget_pausing') ? 'warn' : 'working' }
-        : { text: 'Activity unconfirmed', className: 'neutral' };
+    const waits = mergeModelWaits({}, activity?.model_waits);
+    return censusTaskPhase(activity, detail, connected,
+        activeModelWaits(waits, false, activity?.task_attempt || 0).length > 0);
 }
 
-// Anchors per handoff identity. Two node kinds carry one: a converted live card
+// Transfer anchors share their recorded handoff identity: a converted live card
 // (`card`, at the request's own position; several roots of ONE owner message may
 // each convert, and every one of them stays a visible card — a card is never a
 // shadow) and the durable receipt row (`receipt`, at most one visible per
 // identity). A receipt is folded under the first visible card of its identity, or
 // under the earlier receipt, and every folded node stays in `shadows` so an
 // evicted anchor hands over instead of dropping the transfer from the feed.
+// A creation entry retains its own identity and subject. Matching transfers
+// fold it visually; they never turn creation into a transfer or lend it status.
 export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
-    const rows = new Map();  // key: `card:<taskId>` or the receipt's handoff id
+    const rows = new Map();  // Converted task, transfer receipt, or creation entry.
     let connected = true, destroyed = false, complete = false;
     let activities = new Map();
     const inFeed = node => feed.contains(node);
@@ -56,12 +44,17 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
     const matching = (taskId, projectId) => [...rows.values()].find(row =>
         row.projectId === projectId && row.subjects.has(taskId) && inFeed(row.node));
     function paint(row) {
-        const phase = handoffPhase(activities.get(row.taskId), row.detail, connected);
-        row.status.textContent = phase.text;
-        row.status.className = `chat-live-phase ${phase.className}`;
+        const activity = activities.get(row.taskId);
+        // Keep already observed result facts when connectivity or a partial
+        // census withdraws activity. A retry clears this same-subject cache.
+        if (activity?.status || activity?.outcome_axes) row.detail = { ...activity };
+        const phase = handoffPhase(activity, row.detail, connected);
+        paintTaskPhase(row.status, phase, row.secondary);
     }
     function reconcileStarted(node) {
-        node.hidden = Boolean(matching(node.dataset.taskId, node.dataset.projectId));
+        const represented = [...rows.values()].some(row => row.kind !== 'started'
+            && row.projectId === node.dataset.projectId && row.subjects.has(node.dataset.taskId) && inFeed(row.node));
+        node.hidden = represented;
     }
     function reconcileAnnotation(note) {
         const [projectId, , taskId] = (note.dataset.destinationKey || '').split('|');
@@ -93,8 +86,12 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
             if (survivor) { fold(next, survivor); continue; }
             if (!inFeed(next.node)) continue;
             next.node.hidden = false;
+            // Folding groups receipts, not execution evidence. A different root
+            // sharing the origin must recover its OWN status when it reappears.
+            const follows = row.followed.has(next.taskId);
             rows.set(next.key, { ...next, subjects: new Set([...row.subjects, ...next.subjects]),
-                shadows: row.shadows.filter(other => other !== next), detail: row.detail, taskId: row.taskId,
+                shadows: row.shadows.filter(other => other !== next),
+                ...(follows ? { detail: row.detail, taskId: row.taskId, followed: new Set(row.followed) } : {}),
                 epoch: row.epoch + 1, pending: false, checked: false });
             return true;
         }
@@ -112,15 +109,27 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
             if (node.dataset?.systemType === 'project_started') reconcileStarted(node);
             const note = node.querySelector?.('.msg-routing-annotation');
             if (note) reconcileAnnotation(note);
-            if (node.dataset?.systemType !== 'project_handoff') return;
+            const mountedStart = node.dataset?.systemType === 'project_started'
+                && rows.get(`started:${node.dataset.projectId}`)?.node === node;
+            if (node.dataset?.systemType !== 'project_handoff' && !mountedStart) return;
         }
         sweep();
         for (const started of feed.querySelectorAll('[data-system-type="project_started"]')) reconcileStarted(started);
         for (const note of feed.querySelectorAll('.msg-routing-annotation')) reconcileAnnotation(note);
     }
+    function follow(row, successor) {
+        if (!successor || row.followed.has(successor)) return false;
+        row.followed.add(successor);
+        row.subjects.add(successor);
+        row.taskId = successor;
+        row.epoch++;
+        row.checked = false;
+        row.detail = null;
+        return true;
+    }
     function resolve(row) {
         if (!current(row) || !complete || !connected || activities.has(row.taskId)
-            || row.pending || row.checked || isTerminalTaskDetail(row.detail)) return;
+            || row.node.hidden || row.pending || row.checked || isTerminalTaskDetail(row.detail)) return;
         const taskId = row.taskId, epoch = row.epoch;
         row.pending = true;
         row.checked = true;
@@ -131,13 +140,14 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
                 && (detail?.original_task_id === taskId || detail?.retry_lineage?.some(item => item.task_id === taskId));
             const successor = String((effectiveRetry ? detail.task_id : '') || detail?.superseded_by || detail?.retry_task_id || '');
             if (successor && successor !== taskId) {
-                if (row.followed.has(successor)) return; // malformed cyclic lineage stays unknown
-                row.followed.add(successor);
-                row.subjects.add(successor);
-                row.taskId = successor;
-                row.checked = false;
-                row.detail = null;
-            } else if (isTerminalTaskDetail(detail)) row.detail = detail;
+                if (!follow(row, successor)) return;
+            } else {
+                row.detail = detail;
+                // A successful read during withdrawal/retry publication is not
+                // a settled absence. The existing census refresh revisits that
+                // in-flight fact; failures and inactive history remain latched.
+                if (['running', 'scheduled'].includes(detail?.status)) row.checked = false;
+            }
             mutate(() => paint(row));
         }).catch(() => {
             // A failed read remains unknown until a real re-entry/reconnect,
@@ -149,23 +159,30 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
     }
     function mount(node, { taskId, projectId, projectName, title, handoffId, kind = 'receipt', receipt = '' }) {
         if (!taskId || !projectId || destroyed) return node;
-        const id = handoffId || `legacy:${JSON.stringify([taskId, projectId])}`;
+        const id = kind === 'started' ? `started:${projectId}` : handoffId || `legacy:${JSON.stringify([taskId, projectId])}`;
         sweep();
         const anchor = visibleAnchor(id);
         if (anchor && anchor.node === node) { anchor.subjects.add(taskId); return node; }
         node.dataset.projectId = projectId;
-        node.dataset.handoffId = id;
-        node.dataset.systemType = 'project_handoff';
+        node.dataset.taskId = taskId;
+        if (kind !== 'started') node.dataset.handoffId = id;
+        node.dataset.systemType = kind === 'started' ? 'project_started' : 'project_handoff';
         node.classList.add('project-handoff');
         const body = node.querySelector('.message') || node;
         const line = document.createElement('div');
         line.className = 'project-handoff-heading';
         const status = document.createElement('span');
         status.setAttribute('role', 'status');
+        const secondary = document.createElement('span');
+        secondary.className = 'chat-live-phase-secondary';
+        secondary.hidden = true;
         const name = document.createElement('span');
         name.className = 'project-handoff-title';
         name.textContent = title || projectName || 'Project';
-        line.append(status, name);
+        const phases = document.createElement('div');
+        phases.className = 'project-handoff-phase';
+        phases.append(status, secondary);
+        line.append(phases, name);
         // A converted card whose receipt is not durable is an honest live chip,
         // never a claim that Main history holds this transfer (it will not
         // survive a reload as an anchor; the binding and the pointer do).
@@ -174,8 +191,8 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
             node.classList.add('project-handoff--unsaved');
         }
         body.replaceChildren(line, projectReference({ id: projectId, name: projectName }, { layout: 'inline', taskId }));
-        const row = { key: kind === 'card' ? `card:${taskId}` : id, id, node, status, kind, taskId, projectId,
-            subjects: new Set([taskId]), followed: new Set(), shadows: [], detail: null, pending: false, checked: false, epoch: 0 };
+        const row = { key: kind === 'card' ? `card:${taskId}` : id, id, node, status, secondary, kind, taskId, projectId,
+            subjects: new Set([taskId]), followed: new Set([taskId]), shadows: [], detail: null, pending: false, checked: false, epoch: 0 };
         if (kind === 'receipt' && anchor) {
             // Duplicate delivery is not evidence that a differently named
             // execution supersedes its subject: one receipt, the rest shadowed.
@@ -186,7 +203,7 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
         if (kind === 'card' && anchor?.kind === 'receipt') {
             rows.delete(anchor.key);
             fold(anchor, row);
-            row.detail = anchor.detail;
+            if (row.taskId === anchor.taskId) row.detail = anchor.detail;
         }
         paint(row);
         // A card is already in the feed when it converts: the rows it now
@@ -199,7 +216,15 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
         if (destroyed) return;
         complete = data?.active_chat_activities_complete === true && data.supervisor_ready === true;
         const incoming = new Map((data?.active_chat_activities || []).map(a => [String(a.activity_id || ''), a]));
+        // Only the host's explicit technical retry linkage advances a subject.
+        // A shared Project, owner origin or an explicit Continue is not lineage.
+        const successors = new Map();
+        for (const [id, activity] of incoming) {
+            const predecessor = String(activity.timeout_retry_from || activity.original_task_id || '');
+            if (predecessor && predecessor !== id) successors.set(predecessor, id);
+        }
         for (const row of rows.values()) {
+            while (successors.has(row.taskId) && follow(row, successors.get(row.taskId))) { /* explicit chain */ }
             if (incoming.has(row.taskId) && !activities.has(row.taskId)) {
                 row.epoch++;
                 row.checked = false;
@@ -215,6 +240,8 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
         setConnected(value) {
             if (connected !== value) {
                 connected = value;
+                // Reconnection alone is not a fresh activity observation.
+                activities = new Map();
                 for (const row of rows.values()) { row.epoch++; row.checked = false; }
             }
             if (rows.size) mutate(() => { for (const row of rows.values()) paint(row); });

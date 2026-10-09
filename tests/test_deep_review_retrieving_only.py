@@ -10,16 +10,14 @@ episode is sent on THAT route.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from ouroboros.deep_self_review import deep_review_route, run_deep_self_review
 from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS
-from ouroboros.reviewer_slot_config import (
-    DEEP_REVIEW_SLOT_ID,
-    ConfiguredReviewerSlot,
-    reviewer_slot_last_executions,
-)
-from tests.test_deep_review_slot import _ScriptedLLM, _tool_call
+from ouroboros.reviewer_slot_config import ConfiguredReviewerSlot, reviewer_slot_last_executions
+from tests.test_deep_review_slot import _DEEP_SLOT_ID, _ScriptedLLM, _tool_call
 
 _BIBLE = "# BIBLE\n\n## Principle 0: Agency\n\nOuroboros is a becoming personality.\n" * 3
 _REPORT = "Read: BIBLE.md in full; memory inline.\n\n# Deep self-review\n\nCRITICAL: loop.py finalization race.\n"
@@ -27,7 +25,7 @@ _REPORT = "Read: BIBLE.md in full; memory inline.\n\n# Deep self-review\n\nCRITI
 
 def _bare_row(target: str = "openai/fake-deep", **fields) -> ConfiguredReviewerSlot:
     """The row an install has without configuring one: an api route, no subagent."""
-    return ConfiguredReviewerSlot(slot_id=DEEP_REVIEW_SLOT_ID, kind="api_chat", target_id=target, **fields)
+    return ConfiguredReviewerSlot(slot_id=_DEEP_SLOT_ID, kind="api_chat", target_id=target, **fields)
 
 
 @pytest.fixture()
@@ -85,9 +83,32 @@ def test_a_bare_api_row_runs_the_native_inspection_episode(repo, drive, monkeypa
     assert task.count(_BIBLE) == 1, "tier 1 is actually delivered, not just promised"
     assert [tool["function"]["name"] for tool in first["tools"] or []], "read-only tools ride the send"
     assert any("native_tool_rounds" in line for line in progress)
-    last = reviewer_slot_last_executions()[DEEP_REVIEW_SLOT_ID]
+    last = reviewer_slot_last_executions()[_DEEP_SLOT_ID]
     assert last["surface"] == "deep_self_review" and last["status"] == "responded"
     assert last["effective"]["model"] == "openai/fake-deep"
+
+
+@pytest.mark.parametrize("pin", ["personal", ""])
+def test_w5_a_bare_review_on_main_sends_under_mains_pinned_account(repo, drive, monkeypatch, pin):
+    """No row named: the deep self-review runs on the direct Main row, and every send
+    of the episode carries Main's pinned account as its ``model_account_override``
+    under ``model_role=reviewer:main``. The engine treats an EMPTY override as Auto
+    (never a lookup of Main's role), so a pinned Main must ride here or the review
+    would run on whatever account the engine picked; an unpinned Main stays Auto."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/fake-deep")
+    monkeypatch.setenv("OUROBOROS_MODEL_ACCOUNTS", json.dumps({"main": pin, "light": "someone-else"}))
+    llm = _ScriptedLLM([
+        {"tool_calls": [_tool_call("read_file", {"path": "BIBLE.md"}, "c1")]},
+        {"content": _REPORT},
+    ])
+    text, usage = run_deep_self_review(repo, drive, llm, lambda _m: None, task_id="main-pin-1")
+
+    assert text.endswith(_REPORT) and usage["native_rounds"] == 2
+    assert len(llm.calls) == 2
+    assert [call["model_role"] for call in llm.calls] == ["reviewer:main", "reviewer:main"]
+    assert [call["model_account_override"] for call in llm.calls] == [pin, pin]
+    assert reviewer_slot_last_executions()["main"]["requested"]["profile_id"] == pin
 
 
 def test_a_stored_openrouter_spelling_runs_on_the_direct_openai_route(repo, drive, monkeypatch):
@@ -118,7 +139,7 @@ def test_a_stored_openrouter_spelling_runs_on_the_direct_openai_route(repo, driv
     assert usage["resolved_model"] == "openai::gpt-5.5"
     assert "model=openai::gpt-5.5" in text.split("\n")[0]
     assert any("openai::gpt-5.5" in line for line in progress)
-    last = reviewer_slot_last_executions()[DEEP_REVIEW_SLOT_ID]
+    last = reviewer_slot_last_executions()[_DEEP_SLOT_ID]
     assert last["effective"]["model"] == "openai::gpt-5.5"
     assert last["requested"]["profile_id"] == "account-a"
 

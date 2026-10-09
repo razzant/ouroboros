@@ -1,0 +1,2 @@
+124
+The module map's `review_pool_migration.py` row no longer says identical engines merge: repeated triad references to one catalog row mint twin reviewer rows so the seat count and quorum survive the migration; only the scope seat merges into an identical engine.

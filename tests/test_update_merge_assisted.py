@@ -1171,7 +1171,7 @@ def test_tests_evidence_records_only_for_authorized_resolver_and_live_suite(tmp_
     suite must not forge a proof)."""
     from ouroboros import preflight_runner as pr
     from ouroboros.commit_admission import preflight_test_proof_matches
-    from tests.test_advisory_preflight import _stub_preflight_lanes
+    from tests.test_git_review_preflight_gate import _stub_preflight_lanes
 
     repo, head, plan, tx = _materialized_conflict_tx(tmp_path, monkeypatch)
     meta = _authority_metadata(tx)
@@ -1211,7 +1211,7 @@ def test_managed_post_commit_gate_reuses_matching_workload_proof(tmp_path, monke
     is a plain resolver-writable file) never suppresses the mandatory run."""
     from ouroboros import preflight_runner as pr
     from ouroboros.tools import git as git_tool
-    from tests.test_advisory_preflight import _stub_preflight_lanes
+    from tests.test_git_review_preflight_gate import _stub_preflight_lanes
 
     repo, head = _init_repo(tmp_path)
     _point_at(monkeypatch, tmp_path, repo, head)

@@ -1,0 +1,2 @@
+77
+FIX6d: the retired advisory gate projects no readiness anywhere; the protocol names the three surfaces that carry owed work, the stale marker and the preflight look instead of a `repo_commit_ready` verdict.

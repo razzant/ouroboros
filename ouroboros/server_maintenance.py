@@ -375,22 +375,17 @@ def _startup_retired_settings_notice(settings: dict) -> None:
     """Tell the OWNER, in their chat, that retired keys in ``settings.json`` are NOT honored.
 
     ``config.normalize_settings_raw`` reports the loss on the module logger only, which an
-    owner who never opens the Logs panel does not see — and the reviewer comma-lists are
-    the case that matters: an install upgraded without authoring
-    ``OUROBOROS_REVIEWER_SLOTS`` silently runs the shipped default panel, and one that
-    authored it malformed has every review refused until it is repaired. The dropped sets
-    come from that same read seam (``config.retired_key_sets_seen``), the sentence is the
-    one the log line uses (``settings_defaults.retired_setting_keys_notice``, fed the
-    document's absent / authored / invalid state by
-    ``reviewer_slot_config.authored_reviewer_slots_state``), and the
-    dedupe is durable: ``state.json:retired_settings_notified`` keyed by the exact
-    retired-key set, so a restart or a supervisor revival never repeats it. Nothing is
-    sent — and nothing marked — while no owner chat is bound: the notice waits for the
-    first boot that has somewhere to deliver it.
+    owner who never opens the Logs panel does not see. The dropped sets come from that same
+    read seam (``config.retired_key_sets_seen``), the sentence is the one the log line uses
+    (``settings_defaults.retired_setting_keys_notice``), and the dedupe is durable:
+    ``state.json:retired_settings_notified`` keyed by the exact retired-key set, so a
+    restart or a supervisor revival never repeats it. Nothing is sent — and nothing
+    marked — while no owner chat is bound: the notice waits for the first boot that has
+    somewhere to deliver it. Which reviewers run is the review-pool migration's report
+    (``_startup_review_pool_notice``), not this one's.
     """
     try:
         from ouroboros.config import retired_key_sets_seen
-        from ouroboros.reviewer_slot_config import authored_reviewer_slots_state
         from ouroboros.settings_defaults import retired_setting_keys_notice
         from supervisor.message_bus import send_with_budget
         from supervisor.state import load_state, update_state
@@ -401,28 +396,193 @@ def _startup_retired_settings_notice(settings: dict) -> None:
             return
         notified = state.get("retired_settings_notified")
         notified = notified if isinstance(notified, dict) else {}
-        slots_state = authored_reviewer_slots_state(
-            str((settings or {}).get("OUROBOROS_REVIEWER_SLOTS") or ""))
         for dropped in retired_key_sets_seen():
             marker = ",".join(dropped)
             if marker in notified:
                 continue
             send_with_budget(
                 owner_chat,
-                "⚙️ Settings: " + retired_setting_keys_notice(
-                    dropped, reviewer_slots=slots_state),
+                "⚙️ Settings: " + retired_setting_keys_notice(dropped),
                 role="system", system_type="retired_settings_notice",
             )
-
-            def _mark(st: dict, key: str = marker) -> None:
-                seen = st.get("retired_settings_notified")
-                seen = dict(seen) if isinstance(seen, dict) else {}
-                seen[key] = utc_now_iso()
-                st["retired_settings_notified"] = seen
-
-            update_state(_mark)
+            update_state(lambda st, key=marker: _mark_retired_settings_notified(st, key))
     except Exception:
         log.debug("retired settings owner notice failed", exc_info=True)
+
+
+def _mark_retired_settings_notified(st: dict, marker: str) -> None:
+    """Stamp ``marker`` in the durable owner-notice ledger ``state.json:retired_settings_notified``."""
+    seen = st.get("retired_settings_notified")
+    seen = dict(seen) if isinstance(seen, dict) else {}
+    seen[marker] = utc_now_iso()
+    st["retired_settings_notified"] = seen
+
+
+def environment_retired_review_keys(environ: Dict[str, str] | None = None) -> tuple[str, ...]:
+    """The retired review keys the PROCESS ENVIRONMENT carries with a value: the review lanes
+    (``OUROBOROS_REVIEWER_SLOTS``), the per-surface review efforts / deep-review model and the
+    older reviewer comma-lists. No release reads them from the environment any more — the
+    environment merge (``config.load_settings``) walks ``SETTINGS_DEFAULTS``, which retired
+    them, and the pool migration reads the DOCUMENT — so an operator who still exports them
+    (a Docker/Linux unit, a Colab cell) configures nothing (D1-V03): the install runs its own
+    pool (the catalog in the document, else the factory rows)."""
+    from ouroboros.settings_defaults import RETIRED_COMMA_LIST_SETTING_KEYS, REVIEW_POOL_MIGRATED_SETTING_KEYS
+
+    env = os.environ if environ is None else environ
+    return tuple(key for key in REVIEW_POOL_MIGRATED_SETTING_KEYS + RETIRED_COMMA_LIST_SETTING_KEYS
+                 if str(env.get(key) or "").strip())
+
+
+def environment_review_notice(keys: tuple[str, ...]) -> str:
+    """The ONE sentence (log line and owner chat alike) for review keys found in the environment."""
+    plural = len(keys) != 1
+    return (
+        f"⚙️ Settings: the process environment sets {', '.join(keys)}, which {'are' if plural else 'is'} no longer "
+        "read: the review lanes and the reviewer lists became the review pool — the rows of the subagent "
+        "catalog marked “Reviewer” (OUROBOROS_SUBAGENTS, Settings → Agents). "
+        f"{'Those values were' if plural else 'That value was'} not applied; the install's own pool runs. "
+        "To configure the pool from the environment, set OUROBOROS_SUBAGENTS to a catalog with marked rows."
+    )
+
+
+def _startup_environment_review_notice() -> None:
+    """Say ONCE, loudly, that review keys set in the environment are not read (D1-V03 / VD3-03):
+    a WARNING on the server log at every boot, and the same sentence in the owner chat once per
+    exact key set (durable: ``state.json:retired_settings_notified`` under an ``environment:``
+    marker, the retired-settings notice's own ledger). Nothing is read from the environment
+    into the pool here or anywhere: the fact is loud, the behaviour unchanged."""
+    keys = environment_retired_review_keys()
+    if not keys:
+        return
+    text = environment_review_notice(keys)
+    log.warning(text)
+    try:
+        from supervisor.message_bus import send_with_budget
+        from supervisor.state import load_state, update_state
+
+        state = load_state()
+        owner_chat = int(state.get("owner_chat_id") or 0)
+        if not owner_chat:
+            return
+        marker = "environment:" + ",".join(keys)
+        notified = state.get("retired_settings_notified")
+        if marker in (notified if isinstance(notified, dict) else {}):
+            return
+        send_with_budget(owner_chat, text, role="system", system_type="retired_settings_notice")
+        update_state(lambda st: _mark_retired_settings_notified(st, marker))
+    except Exception:
+        log.debug("environment review keys owner notice failed", exc_info=True)
+
+
+REVIEW_POOL_MIGRATION_STATE_KEY = "review_pool_migrations"  # ``review_pool_receipts.STATE_KEY``
+REVIEW_POOL_NOTICE_TYPE = "review_pool_migration_notice"
+
+
+def review_pool_migration_records(state: dict | None = None) -> dict:
+    """The durable per-document migration records (``state.json:review_pool_migrations``):
+    ``input_sha256 -> {ts, snapshot, trigger, outcome, error, reported}`` — the ledger
+    ``review_pool_receipts`` keeps; this is the name the ``## Review`` block reads."""
+    from ouroboros.review_pool_receipts import migration_records
+
+    return migration_records(state)
+
+
+def review_pool_migration_payload(settings: dict, *, document: dict | None = None) -> dict | None:
+    """The review-pool payload's ``migration`` fact for this data root (``review_pool_receipts.migration_payload`` over
+    the ledger plus the snapshot files no record names yet). ``settings`` is what RUNS; ``document`` (default ``settings``)
+    is the settings document the receipt is judged against — the GET handler passes the document on disk (VD3-06)."""
+    from ouroboros.review_pool_receipts import migration_payload
+
+    return migration_payload(settings if document is None else document, DATA_DIR, review_pool_migration_records(), running=settings)
+
+
+def _startup_review_pool_notice(settings: dict) -> None:
+    """Tell the OWNER once about every review-lane -> review-pool migration recorded for this
+    data root, from the DURABLE receipts — never from this process's memory alone.
+
+    The migration itself is pure and runs at the read seam (``config.normalize_settings_raw``
+    -> ``review_pool_migration.apply_at_read_seam``) in whichever process reads an old document;
+    the process that SAVES the migrated document writes its receipts before that write
+    (``review_pool_receipts.persist_write_receipts`` from the persistence prologue and the Colab
+    writer): the snapshot ``state/review_migrations/<ts>-slots-to-pool.json`` and the
+    ``state.json`` record. This boot step first gives receipts, by the writer's rule, only to
+    the migrations deciding the document on disk now (``persist_boot_receipts``: the N-1 document
+    the boot read before any save; with no file, the defaults ``settings`` carries; never the
+    factory rows of defaults read before the wizard saved its own catalog), then reconciles a
+    record for every snapshot another process left without one (a Colab kernel, the launcher
+    menu, the UI before this supervisor generation), and sends ONE English owner-chat message
+    (``review_pool_migration.owner_message``) per record whose ``reported`` is still unset,
+    once an owner chat is bound. A migration that could not finish is reported the same way
+    (its snapshot carries the error; the lane keys stay in the document for the owner's catalog
+    save). A no-op outcome (the catalog was already a pool) leaves no receipt: nothing changed.
+    Each unreported record is judged against the document AS READ (``review_pool_receipts.document_as_read``: the
+    file as the seam leaves it, no environment); ``settings`` is what RUNS (the environment merged over it). A record
+    whose outcome no longer decides that document (the factory rows receipted at a file-less start before the wizard
+    saved its own catalog) is closed as history without a message (``review_pool_receipts.close_as_history``), never
+    delivered as if the owner's catalog were the environment's. Where the environment's catalog overrides the rows the
+    seam minted for a document without review settings of its own (``environment_overridable_keys``), the message names
+    THAT pool — loudly empty when none of its rows is marked. A never-configured document whose process environment
+    still carries the retired review keys is told those keys are no longer read (``environment_retired_review_keys``).
+    """
+    try:
+        from ouroboros import config, review_pool_receipts as receipts
+        from ouroboros.review_pool_migration import owner_message
+        from supervisor.message_bus import send_with_budget
+        from supervisor.state import load_state, update_state
+
+        receipts.persist_boot_receipts(DATA_DIR, config.SETTINGS_PATH, settings)
+        state = load_state()
+        owner_chat = int(state.get("owner_chat_id") or 0)
+        records = receipts.reconcile_records(DATA_DIR, state, update_state)
+        if not owner_chat:
+            return
+        document = receipts.document_as_read(config.SETTINGS_PATH, settings)
+        for digest, record in sorted(records.items(), key=lambda item: str(item[1].get("ts") or "")):
+            if record.get("reported"):
+                continue
+            snapshot = receipts.load_snapshot(DATA_DIR, record)
+            if snapshot is None:
+                log.warning("review pool migration snapshot missing, owner not told: %s", record.get("snapshot"))
+                continue
+            outcome = receipts.outcome_from_snapshot(snapshot)
+            snapshot_path = str(record.get("snapshot") or "")
+            if receipts.close_as_history(outcome, document, update_state, digest, record):
+                continue
+            in_force = receipts.environment_catalog_in_force(outcome, document, settings)
+            text = (_environment_pool_message(snapshot_path, in_force) if in_force is not None else
+                    owner_message(outcome, snapshot_path, environment_retired_keys=environment_retired_review_keys()))
+            if not text:
+                continue
+            send_with_budget(owner_chat, text, role="system", system_type=REVIEW_POOL_NOTICE_TYPE)
+            receipts.mark_reported(update_state, digest, record)
+    except Exception:
+        log.debug("review pool migration notice failed", exc_info=True)
+
+
+def _environment_pool_message(snapshot_path: str, catalog_text: str) -> str:
+    """The ONE owner-chat message when the catalog the environment carries, not the factory
+    rows the migration prepared, is the review pool: it names what runs, and says loudly
+    when that is nothing (``pool_empty`` — a configured fact, never a default panel)."""
+    from ouroboros import reviewer_slot_config as rs
+    from ouroboros.review_pool_migration import ROLLBACK_SENTENCE
+
+    where = (f"Snapshot: {snapshot_path}. {ROLLBACK_SENTENCE}" if snapshot_path
+             else "No snapshot could be written, so there is no rollback source.")
+    head = ("⚙️ Review pool: the subagent catalog set in the environment (OUROBOROS_SUBAGENTS) is in force. "
+            "This document had no review settings of its own (no authored review lanes, no saved subagent "
+            "catalog), so the factory reviewer rows were prepared for it — but a catalog the environment "
+            "carries is explicit configuration and runs instead; the factory rows do not.")
+    state = rs.review_pool_state(catalog_text)
+    if state["state"] == "error":
+        body = f"That catalog cannot be read ({state['error']}): no review runs until it is repaired."
+    elif state["state"] == "empty":
+        body = ("None of its rows is marked “Reviewer”, so the review pool is empty (pool_empty): reviews will not "
+                "run and will report not performed.")
+    else:
+        rows = rs.review_pool_rows({"OUROBOROS_SUBAGENTS": catalog_text})
+        body = (f"{len(rows)} reviewer rows, {len({row.target_id for row in rows})} distinct models: "
+                + "; ".join(f"{row.slot_id} ({row.target_id})" for row in rows) + ".")
+    return "\n".join([head, body, f"{where} Adjust in Settings → Agents or in the environment."])
 
 
 def _prune_event(event_type: str, keys: tuple, **reports: dict) -> None:

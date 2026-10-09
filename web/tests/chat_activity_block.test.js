@@ -469,6 +469,39 @@ test('a child frame that outruns the first history load leaves no root control i
     } finally { f.close(); }
 });
 
+for (const replay of [false, true]) {
+    test(`optional child roles keep neutral titles, separate models and twin ids (${replay ? 'replay' : 'live'})`, async () => {
+        const children = [
+            ['omitted-child', {}, 'Subagent'],
+            ['null-child', { subagent_role: null }, 'Subagent'],
+            ['empty-child', { subagent_role: '' }, 'Subagent'],
+            ['spaces-child', { subagent_role: ' \t ' }, 'Subagent'],
+            ['named-child', { subagent_role: 'interface reviewer' }, 'interface reviewer'],
+            ['historic-child', { subagent_role: 'researcher' }, 'researcher'],
+        ];
+        const frames = children.map(([id, role]) => ({
+            role: 'system', system_type: 'subagent_started', is_progress: true,
+            text: `Subagent ${id} running.`, content: `Subagent ${id} running.`,
+            chat_id: 1, ts: TS, task_id: id, subagent_task_id: id,
+            subagent_event: 'running', parent_task_id: TASK, root_task_id: TASK,
+            delegation_role: 'subagent', model: 'openai/gpt-5.6-sol', ...role,
+        }));
+        const f = fixture(replay ? frames : []);
+        try {
+            if (replay) await f.instance.refreshHistory({ revision: 1 });
+            else for (const frame of frames) f.emit('chat', frame);
+            for (const [id, , role] of children) {
+                const card = f.card(id);
+                assert.ok(card, `child ${id} is rendered`);
+                const title = role === 'Subagent' ? `${role} (${id.slice(0, 8)})` : role;
+                assert.equal(card.querySelector('[data-live-title]').textContent, title);
+                assert.match(f.meta(id), /Agent model: gpt-5\.6-sol/);
+                assert.equal(card.dataset.parentTaskId, TASK);
+            }
+        } finally { f.close(); }
+    });
+}
+
 test('a wake-up is an ordinary direct block: an empty frame mints nothing, a tool call mints the block', () => {
     const f = fixture();
     try {

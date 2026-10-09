@@ -5,7 +5,7 @@ assembled prompt and the typed context-reclaim request/receipt contract.
 
 They are deliberately SEPARATE from the REVIEW-prompt budget family
 (``ouroboros.tools.review_helpers.REVIEW_PROMPT_TOKEN_BUDGET`` and the
-``ouroboros.tools.scope_review`` window constants), which sizes reviewer
+``ouroboros.tools.scope_window`` window constants), which sizes reviewer
 prompts, not the agent's own context. Merging the two would couple unrelated
 concerns and is explicitly avoided.
 

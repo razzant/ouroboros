@@ -179,10 +179,99 @@ def test_strict_parser_rejects_ambiguous_or_lossy_shapes(payload, match):
         parse_configured_subagents(payload)
 
 
-def test_maximum_ten_is_real_and_row_precise():
-    parse_configured_subagents(_config(*(_row(f"row-{i}") for i in range(10))))
+def test_maximum_twenty_six_is_real_and_row_precise():
+    """PR-3 (contract §1.1): the roster ceiling is 26 — the pool's seats live
+    on the same list as the delegation rows, so the former 10 would not hold a
+    full install (factory review rows + harness rows + the owner's own)."""
+    assert MAX_CONFIGURED_SUBAGENTS == 26
+    parse_configured_subagents(_config(*(_row(f"row-{i}") for i in range(26))))
     with pytest.raises(ValueError, match=f"maximum is {MAX_CONFIGURED_SUBAGENTS}"):
-        parse_configured_subagents(_config(*(_row(f"row-{i}") for i in range(11))))
+        parse_configured_subagents(_config(*(_row(f"row-{i}") for i in range(27))))
+
+
+# --- PR-3 package A: review-pool fields on the catalog row -----------------------
+
+def _api_row(row_id: str = "critic", **overrides):
+    return _row(row_id, route={"kind": "api_model", "target_id": "openai/gpt-5.5"}, **overrides)
+
+
+def test_review_eligible_defaults_false_and_is_written_only_when_true():
+    config = parse_configured_subagents(_config(_row(), _api_row(review_eligible=True)))
+    assert [row.review_eligible for row in config.items] == [False, True]
+    serialized = json.loads(serialize_configured_subagents(config))
+    assert "review_eligible" not in serialized["items"][0]
+    assert serialized["items"][1]["review_eligible"] is True
+    with pytest.raises(ValueError, match="review_eligible must be a boolean"):
+        parse_configured_subagents(_config(_api_row(review_eligible="yes")))
+
+
+def test_delivery_is_an_api_row_field_defaulting_to_native_and_packet_round_trips():
+    native = parse_configured_subagents(_config(_api_row(review_eligible=True))).items[0]
+    assert native.delivery == "native"
+    packet_config = parse_configured_subagents(_config(_api_row(review_eligible=True, delivery="packet")))
+    assert packet_config.items[0].delivery == "packet"
+    serialized = json.loads(serialize_configured_subagents(packet_config))
+    assert serialized["items"][0]["delivery"] == "packet"
+    # The native default is not written back (defaults stay implicit).
+    assert "delivery" not in json.loads(serialize_configured_subagents(
+        parse_configured_subagents(_config(_api_row(review_eligible=True)))
+    ))["items"][0]
+    with pytest.raises(ValueError, match="delivery must be native or packet"):
+        parse_configured_subagents(_config(_api_row(delivery="courier")))
+
+
+def test_delivery_on_a_session_row_is_refused_a_session_always_retrieves():
+    with pytest.raises(ValueError, match="delivery is meaningful only for api_model"):
+        parse_configured_subagents(_config(_row(delivery="packet", review_eligible=True)))
+    with pytest.raises(ValueError, match="delivery is meaningful only for api_model"):
+        parse_configured_subagents(_config(_row(delivery="native")))
+
+
+def test_minted_from_round_trips_and_rejects_unknown_provenance():
+    for value in ("review_lane", "factory_default"):
+        config = parse_configured_subagents(_config(_api_row(review_eligible=True, minted_from=value)))
+        assert config.items[0].minted_from == value
+        assert json.loads(serialize_configured_subagents(config))["items"][0]["minted_from"] == value
+    assert parse_configured_subagents(_config(_api_row())).items[0].minted_from == ""
+    with pytest.raises(ValueError, match="minted_from"):
+        parse_configured_subagents(_config(_api_row(minted_from="wizard")))
+
+
+def test_pre_pool_documents_serialize_byte_identically():
+    """Defaults are not written: a document saved before the pool fields
+    existed round-trips to the same bytes, so no install is rewritten by the
+    mere presence of the new fields."""
+    old_document = json.dumps({"enabled": True, "items": [
+        {"subagent_id": "builder", "recommended_use": "Use for substantial implementation.",
+         "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol", "credential_profile_id": ""},
+         "effort": "medium", "access": "full"},
+        {"subagent_id": "critic", "recommended_use": "Use for review.",
+         "route": {"kind": "api_model", "target_id": "openai/gpt-5.5"}},
+    ]}, ensure_ascii=False, separators=(",", ":"))
+    assert serialize_configured_subagents(parse_configured_subagents(old_document)) == old_document
+    assert "review_eligible" not in old_document and "delivery" not in old_document
+
+
+def test_unique_engines_allows_marked_twins_and_a_minted_row_beside_the_owners():
+    from ouroboros.configured_subagents import validate_unique_engines
+
+    def twins(first: dict, second: dict):
+        return parse_configured_subagents(_config(_api_row("one", **first), _api_row("two", **second)))
+
+    # The same engine twice is refused on save...
+    with pytest.raises(ValueError, match="runs the same engine"):
+        validate_unique_engines(twins({}, {}), {})
+    # ...unless BOTH seats are review-eligible (one engine judging twice)...
+    validate_unique_engines(twins({"review_eligible": True}, {"review_eligible": True, "delivery": "packet"}), {})
+    # ...or at least one of them is a row the runtime minted: beside the owner's own row...
+    validate_unique_engines(twins({}, {"review_eligible": True, "minted_from": "factory_default"}), {})
+    # ...or beside its own reviewer row (M4: a former advisory/deep seat coinciding with a
+    # triad seat gives one marked reviewer and one unmarked helper, both minted; two helpers too).
+    validate_unique_engines(twins({"review_eligible": True, "minted_from": "review_lane"}, {"minted_from": "review_lane"}), {})
+    validate_unique_engines(twins({"minted_from": "review_lane"}, {"minted_from": "review_lane"}), {})
+    # Two rows the owner authored stay refused, marked or not.
+    with pytest.raises(ValueError, match="runs the same engine"):
+        validate_unique_engines(twins({}, {"review_eligible": True}), {})
 
 
 def test_legacy_name_is_accepted_and_dropped_never_fabricated():

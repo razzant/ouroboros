@@ -43,7 +43,6 @@ _MOVED_OWNERS = {
     "_finalize_blocked_review": git_review_cycle,
     "_fingerprint_staged_diff": git_review_cycle,
     "_handle_revalidation_failure": git_review_cycle,
-    "_mark_failed_bypass_advisory_stale": git_review_cycle,
     "_review_binding_precondition_error": git_review_cycle,
     "_review_cycle_infra_failure": git_review_cycle,
     "_run_non_committing_review_cycle": git_review_cycle,
@@ -109,7 +108,7 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     ).encode()
     # Informed Advisory commit aliases plus explicit local vcs_diff base/head.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "2f84efeb7144cd1379e3fc92146e9d976e9c4623744fc82f31ff6ec015a3c3b3"  # commit_reviewed gained root=["system_repo"] (review_change takes other roots)
+        "e20b653778ee12e2e41d0f6baee598e28165260483038540a4143686abdfe7dd"  # FIX6a 1: `reviewers`/`reason` compose the commit panel by review_change's rule (decision 1A); FIX3 T1 before it: `scope` described by the panel's coupling questions
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

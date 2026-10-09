@@ -176,16 +176,16 @@ def test_record_commit_attempt_reviewing_lands_paid_on_the_ledger(tmp_path):
     assert count_paid_review_cycles(ctx, root_task_id="root-9") == 1
 
 
-def test_stage_cycle_free_gate_runs_before_advisory_gate():
-    """Order pin: the free Max-Review-Cycles gate precedes the advisory/tests
+def test_stage_cycle_free_gate_runs_before_preflight_gate():
+    """Order pin: the free Max-Review-Cycles gate precedes the preflight/tests
     gate, which precedes the paid dispatch."""
     import inspect
 
-    import ouroboros.tools.git as git_mod
+    from ouroboros.tools import git_review_cycle
 
-    source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
-    assert source.index("_free_cycle_gate(") < source.index("_advisory_and_tests_gate(")
-    assert source.index("_advisory_and_tests_gate(") < source.index("_run_parallel_review(")
+    source = inspect.getsource(git_review_cycle._reviewed_stage_cycle)  # the cycle body under the panel
+    assert source.index("_free_cycle_gate(") < source.index("_preflight_and_tests_gate(")
+    assert source.index("_preflight_and_tests_gate(") < source.index("_run_parallel_review(")
 
 
 def test_resolve_root_task_id_ignores_the_followup_chain():
@@ -390,11 +390,11 @@ def test_skill_review_contract_fingerprint_tracks_roster_items_and_profile(monke
     # aggregates blockers differently, so a profile change lapses replay.
     assert base != skill_review_contract_fingerprint(
         ["m1", "m2"], required_items=("a", "b"), review_profile="official_hub")
-    # Synthesis F4: the RESOLVED review effort is contract identity — the panel
-    # dispatches every slot at resolve_effort("review"), so an effort change is
-    # a different reviewer contract and must lapse free replay.
+    # The legacy identity's effort is the pool default; the lane-era global
+    # OUROBOROS_EFFORT_REVIEW is retired, and an exported one is inert here too
+    # (a structured panel carries each row's own effort in its row identity).
     monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "low")
-    assert base != skill_review_contract_fingerprint(["m1", "m2"], required_items=("a", "b"))
+    assert base == skill_review_contract_fingerprint(["m1", "m2"], required_items=("a", "b"))
 
 
 def test_skill_review_contract_fingerprint_preserves_legacy_and_tracks_rows(monkeypatch):
@@ -404,8 +404,10 @@ def test_skill_review_contract_fingerprint_preserves_legacy_and_tracks_rows(monk
     monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "high")
     legacy = skill_review_contract_fingerprint(["m1", "m2"], required_items=("a",))
     # The author-finality contract is part of the skill-review prompt contract;
-    # its deliberate wording change invalidates the old fingerprint.
-    assert legacy == "b0d298d70bf93185b2b88f647af3ab28233e18db517c13398d7b323c786dd16b"
+    # its deliberate wording change invalidates the old fingerprint. Decision 3A
+    # then removed the advisory-evidence input from the prompt builder (no
+    # advisory critic feeds the skill reviewer), which moved it once more.
+    assert legacy == "2401d2c34e3805f5ba6dcd933a2abf4d44c3af88dc5d140bddc24018cfebfca7"
     legacy_delivery = {
         "legacy_skill_fingerprint": True,
         "models": ["m1", "m2"], "routes": ["api_chat", "api_chat"],
@@ -471,21 +473,34 @@ def test_skill_review_contract_fingerprint_preserves_legacy_and_tracks_rows(monk
 
 
 def test_commit_contract_fingerprint_tracks_resolved_review_efforts(monkeypatch):
-    """Synthesis F4 (commit side): the commit fingerprint's triad/scope rows
-    carry RESOLVED efforts (surface defaults fill empty per-row efforts), so a
-    global review or scope-review effort change lapses refusal/replay."""
+    """Synthesis F4 (commit side): the commit fingerprint's pool rows carry their
+    RESOLVED efforts, so a pool row's effort change lapses refusal/replay. PR-3:
+    the pool reads no global review effort — a row with no effort of its own
+    reviews at the pool default — so only the ROW's value moves the fingerprint.
+    (The scope-review effort leg was the lane's; the fold that read it is gone, I3-B2.)"""
+    import json
+
     from ouroboros.tools.commit_gate import commit_review_contract_fingerprint
 
+    def _catalog(effort):
+        return json.dumps({"enabled": True, "items": [{
+            "subagent_id": "critic", "recommended_use": "Reviewer.",
+            "route": {"kind": "api_model", "target_id": "openai/gpt-5.6-terra"},
+            "effort": effort, "review_eligible": True,
+        }]})
+
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _catalog("high"))
     monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "high")
-    monkeypatch.setenv("OUROBOROS_EFFORT_SCOPE_REVIEW", "high")
     base = commit_review_contract_fingerprint()
     assert base and len(base) == 64
     monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "low")
+    assert base == commit_review_contract_fingerprint()  # the lane-era global effort is not a pool fact
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _catalog("low"))
     assert base != commit_review_contract_fingerprint()
-    monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "high")
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _catalog("high"))
     assert base == commit_review_contract_fingerprint()
     monkeypatch.setenv("OUROBOROS_EFFORT_SCOPE_REVIEW", "low")
-    assert base != commit_review_contract_fingerprint()
+    assert base == commit_review_contract_fingerprint()  # the retired scope-lane effort is not a pool fact either
 
 
 def _write_history(drive_root, skill, rows):

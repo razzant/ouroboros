@@ -1,6 +1,38 @@
 """Receipt-honesty regressions for the contributor review lane."""
 
 import hashlib
+import pathlib
+
+
+def test_packet_path_fields_are_posix_under_their_placeholders_on_every_os(monkeypatch):
+    """A Windows run writes the packet a POSIX run writes: a path field under a
+    replaced root reads ``$REVIEW_DRIVE/observability/...``, while free text keeps
+    its own characters (a transcript's ``\\d`` is not a separator)."""
+    from scripts import contributor_review_evidence as evidence
+
+    win = pathlib.PureWindowsPath
+    drive, repo, home = win("D:/a/_temp/drive"), win("D:/a/ouroboros"), win("C:/Users/runneradmin")
+    replacements = sorted([(str(drive), "$REVIEW_DRIVE"), (str(repo), "$REPO"), (str(home), "$HOME")],
+                          key=lambda item: len(item[0]), reverse=True)
+    monkeypatch.setattr(evidence, "_NATIVE_SEPARATORS", ("\\", "/"), raising=False)
+    packet = evidence.public_projection({
+        "prompt_ref": {"manifest_ref": {"path": str(drive / "observability" / "calls" / "review" / "t1_prompt.json")}},
+        "review_record": {"path": str(drive / "state" / "r1.json"), "subject": {"root": str(repo)}},
+        "review_data_root": str(drive),
+        "transcript": f"read {repo / 'README.md'}\nmatch \\d+ then {drive}",
+    }, replacements=replacements)
+    assert packet == {
+        "prompt_ref": {"manifest_ref": {"path": "$REVIEW_DRIVE/observability/calls/review/t1_prompt.json"}},
+        "review_record": {"path": "$REVIEW_DRIVE/state/r1.json", "subject": {"root": "$REPO"}},
+        "review_data_root": "$REVIEW_DRIVE",
+        "transcript": "read $REPO\\README.md\nmatch \\d+ then $REVIEW_DRIVE",
+    }
+
+    monkeypatch.setattr(evidence, "_NATIVE_SEPARATORS", ("/",), raising=False)
+    assert evidence.public_projection(
+        {"path": "/tmp/drive/odd\\name.json", "root": "/tmp/drive"},
+        replacements=[("/tmp/drive", "$REVIEW_DRIVE")],
+    ) == {"path": "$REVIEW_DRIVE/odd\\name.json", "root": "$REVIEW_DRIVE"}
 
 
 def test_receipt_mismatch_preserves_the_original_block_cause():
@@ -30,7 +62,7 @@ def test_shared_project_receipts_bind_final_retirement_after_all_slots_settle(tm
     from scripts.contributor_review_evidence import bind_execution_receipts
 
     config = {
-        "triad_slots": [{
+        "pool_slots": [{
             "slot_id": slot_id,
             "route": {
                 "kind": "agent_session",
@@ -39,7 +71,6 @@ def test_shared_project_receipts_bind_final_retirement_after_all_slots_settle(tm
             },
             "effort": "high",
         } for slot_id in ("slot_1", "slot_2")],
-        "scope_slots": [],
     }
     actors = []
     for index, slot_id in enumerate(("slot_1", "slot_2"), start=1):
@@ -76,7 +107,7 @@ def test_shared_project_receipts_bind_final_retirement_after_all_slots_settle(tm
                 },
             },
         )
-        actors.append(("triad", {
+        actors.append(("pool", {
             "slot_id": slot_id, "status": "responded",
             "prompt_ref": prompt_ref, "response_ref": response_ref,
         }))

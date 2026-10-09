@@ -179,14 +179,15 @@ class TestRepoWriteMultiFile:
 class TestReviewInCommitPipeline:
     # ``test_repo_commit_calls_unified_review`` was removed in
     # v5.8.3-rc.5 — it is a strict subset of
-    # ``tests/test_scope_review.py::TestScopeReview::test_scope_review_wired_in_commit``
-    # which additionally verify ``run_scope_review`` is reached and the
-    # ``ThreadPoolExecutor`` parallelism contract holds.
+    # ``tests/test_review_helpers_pack.py::TestGitWiring::test_one_wave_wired_in_commit``
+    # which additionally verifies the one wave (assembly → admission → dispatch)
+    # is reached and the ``ThreadPoolExecutor`` parallelism contract holds.
 
     def test_blocked_review_unstages(self):
         """When review blocks, git reset HEAD must be called."""
-        git_mod = _get_git_module()
-        source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
+        from ouroboros.tools import git_review_cycle
+
+        source = inspect.getsource(git_review_cycle._reviewed_stage_cycle)  # the cycle body under the panel
         assert 'git", "reset", "HEAD"' in source
 
     def test_review_rebuttal_forwarded(self):

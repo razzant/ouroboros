@@ -405,8 +405,8 @@ function undiscoveredLabel(value, known) {
 }
 
 /**
- * The one grouped source select every editor draws: Models, Available subagents
- * and every review lane. Group vocabulary and order are identical everywhere;
+ * The one grouped source select every editor draws: Models and Available subagents
+ * (reviewers included). Group vocabulary and order are identical everywhere;
  * a surface that cannot deliver a group omits it instead of renaming it.
  * @param {object} args
  * @param {Array} [args.harnesses] discovered agent harnesses

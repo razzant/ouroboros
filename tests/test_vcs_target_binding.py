@@ -229,12 +229,10 @@ def test_light_mode_uses_selected_vcs_target_and_commit_stays_system_intrinsic(
 def test_workspace_focus_exposes_but_does_not_retarget_system_review_lifecycle(tmp_path):
     import inspect
 
-    from ouroboros.tools import claude_advisory_review, git as git_tools
+    from ouroboros.tools import git as git_tools, preflight_review
 
     registry, _ctx, _system, _project = _registry(tmp_path)
     assert registry.get_schema_by_name("preflight_review") is not None
     assert registry.get_schema_by_name("commit_reviewed") is not None
-    assert "repo_dir = pathlib.Path(ctx.repo_dir)" in inspect.getsource(
-        claude_advisory_review._handle_advisory_pre_review
-    )
+    assert 'root="system_repo"' in inspect.getsource(preflight_review._handle_preflight_review)
     assert "ctx.repo_dir" in inspect.getsource(git_tools._repo_commit_push)

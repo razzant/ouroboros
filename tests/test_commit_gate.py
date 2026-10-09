@@ -15,7 +15,6 @@ Verifies (Phase 5):
 """
 import importlib
 import inspect
-import json
 import os
 import sys
 import types
@@ -216,13 +215,13 @@ def test_tests_preflight_block_recorded_with_preflight_phase():
     phase="preflight": without it `infer_review_phase` defaults a blocked
     record to "blocking_review" and legacy-row classification could read a
     flaky test failure as a review verdict for the identical-diff refusal."""
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod)
-    idx = source.find('block_reason="tests_preflight_blocked"')
+    source = inspect.getsource(_get_git_module()._preflight_and_tests_gate)
+    assert '"tests_preflight_blocked"' in source
+    idx = source.find("_record_commit_attempt(")
     assert idx != -1
     # The phase stamp must live in the same _record_commit_attempt call.
     window = source[idx:idx + 400]
-    assert 'phase="preflight"' in window
+    assert "block_reason=reason" in window and 'phase="preflight"' in window
 
 
 def test_legacy_rows_classify_by_block_reason(tmp_path, monkeypatch):
@@ -284,7 +283,6 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tm
     released = []
 
     monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
-    monkeypatch.setattr(git_mod, "_reconcile_advisory_before_preparation", lambda *a, **kw: "")
     monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
     monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
     monkeypatch.setattr(
@@ -310,12 +308,16 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tm
         lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
     )
 
-    ctx = types.SimpleNamespace(repo_dir="/tmp/repo", drive_root=tmp_path)
+    ctx = types.SimpleNamespace(
+        repo_dir="/tmp/repo", drive_root=tmp_path,
+        _coupling_review_history={"snap": [{"round": 1, "status": "FAIL"}]},
+    )
     outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
 
     assert outcome["status"] == "passed"
     assert "Commit was not created" in outcome["message"]
-    assert ctx._scope_review_history == {}
+    # A completed cycle closes the subject's coupling rounds; the next starts fresh.
+    assert ctx._coupling_review_history == {}
     assert recorded == [{"status": "reviewed", "phase": "review_only"}]
     assert released == ["lock-token"]
     assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
@@ -327,7 +329,6 @@ def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch, tmp_
     released = []
 
     monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
-    monkeypatch.setattr(git_mod, "_reconcile_advisory_before_preparation", lambda *a, **kw: "")
     monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
     monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
     monkeypatch.setattr(
@@ -559,12 +560,12 @@ def test_version_sync_checks_architecture_md():
 
 
 # ---------------------------------------------------------------------------
-# Advisory pre-review gate (new)
+# The author's preflight (decision 3A): the wrapper names and the commit gate
 # ---------------------------------------------------------------------------
 
-def _get_advisory_module():
+def _get_preflight_module():
     sys.path.insert(0, REPO)
-    return importlib.import_module("ouroboros.tools.claude_advisory_review")
+    return importlib.import_module("ouroboros.tools.preflight_review")
 
 
 def _get_review_state_module():
@@ -573,346 +574,40 @@ def _get_review_state_module():
 
 
 def test_advisory_pre_review_registered():
-    """advisory_pre_review must be registered as a tool."""
-    adv_mod = _get_advisory_module()
-    names = [t.name for t in adv_mod.get_tools()]
-    assert "advisory_review" in names
+    """The old advisory_review name stays callable as an alias of preflight_review."""
+    names = [t.name for t in _get_preflight_module().get_tools()]
+    assert "advisory_review" in names and "preflight_review" in names
 
 
 def test_review_status_registered():
     """review_status must be registered as a tool."""
-    adv_mod = _get_advisory_module()
-    names = [t.name for t in adv_mod.get_tools()]
+    names = [t.name for t in _get_preflight_module().get_tools()]
     assert "review_status" in names
 
 
-def test_advisory_gate_in_repo_commit_push():
-    """The shared reviewed stage must gate review on advisory freshness (the
-    check lives in the extracted _advisory_and_tests_gate helper, called before
-    any paid dispatch and after the free Max-Review-Cycles gate)."""
+def test_preflight_gate_in_repo_commit_push():
+    """The shared reviewed stage runs the free checks, the tests and the optional named
+    preflight (the extracted _preflight_and_tests_gate helper) before any paid dispatch;
+    no advisory freshness is read any more."""
+    from ouroboros.tools import git_review_cycle
+
     git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
-    gate_pos = source.find("_advisory_and_tests_gate")
+    # `_run_reviewed_stage_cycle` runs the cycle body under the commit's composed panel.
+    assert "_reviewed_stage_cycle(" in inspect.getsource(git_mod._run_reviewed_stage_cycle)
+    source = inspect.getsource(git_review_cycle._reviewed_stage_cycle)
+    gate_pos = source.find("_preflight_and_tests_gate")
     review_pos = source.find("_run_parallel_review")
-    assert gate_pos != -1, "_advisory_and_tests_gate not found in _run_reviewed_stage_cycle"
+    assert gate_pos != -1, "_preflight_and_tests_gate not found in _run_reviewed_stage_cycle"
     assert review_pos != -1, "_run_parallel_review not found in _run_reviewed_stage_cycle"
-    assert gate_pos < review_pos, "Advisory gate must precede parallel review"
-    gate_source = inspect.getsource(git_mod._advisory_and_tests_gate)
-    assert "_check_advisory_freshness" in gate_source
+    assert gate_pos < review_pos, "the preflight gate must precede parallel review"
+    gate_source = inspect.getsource(git_mod._preflight_and_tests_gate)
+    assert "deterministic_preflight" in gate_source and "run_commit_preflight" in gate_source
+    assert "_check_advisory_freshness" not in gate_source
     # Verify _run_parallel_review contains the triad phases (Q25-A: assembly
     # before dispatch superseded the single _run_unified_review call).
     parallel_source = inspect.getsource(git_mod._run_parallel_review)
     assert "_prepare_unified_review" in parallel_source
     assert "_dispatch_unified_review" in parallel_source
-
-
-def test_advisory_freshness_blocks_without_fresh_run(tmp_path):
-    """_check_advisory_freshness must return ADVISORY_PRE_REVIEW_REQUIRED if no fresh run."""
-    git_mod = _get_git_module()
-
-    class FakeCtx:
-        repo_dir = tmp_path
-        drive_root = tmp_path
-        task_id = "test-task"
-        def drive_logs(self):
-            logs = tmp_path / "logs"
-            logs.mkdir(parents=True, exist_ok=True)
-            return logs
-
-    # Initialize a bare git repo so compute_snapshot_hash works
-    import subprocess
-    subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
-
-    result = git_mod._check_advisory_freshness(FakeCtx(), "test commit message")
-    assert result is not None
-    assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
-
-
-def test_advisory_freshness_passes_with_fresh_run(tmp_path):
-    """_check_advisory_freshness must return None when a fresh run exists."""
-    import subprocess
-    git_mod = _get_git_module()
-    rs_mod = _get_review_state_module()
-
-    # Separate repo_dir and drive_root so drive data doesn't pollute git status
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    (drive_root / "state").mkdir()
-    (drive_root / "logs").mkdir()
-
-    # Init git repo in repo_dir
-    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-    commit_message = "test commit"
-
-    class FakeCtx:
-        pass
-    ctx = FakeCtx()
-    ctx.repo_dir = repo_dir
-    ctx.drive_root = drive_root
-    ctx.task_id = "test-task"
-    ctx.drive_logs = lambda: drive_root / "logs"
-
-    # advisory_review.json is excluded from snapshot hash (see _SNAPSHOT_EXCLUDE_PATHS)
-    # drive_root is outside repo_dir so no git pollution
-    snapshot_hash = rs_mod.compute_snapshot_hash(repo_dir, commit_message)
-
-    # Inject a fresh run with that exact hash
-    state = rs_mod.AdvisoryReviewState()
-    state.add_run(rs_mod.AdvisoryRunRecord(
-        snapshot_hash=snapshot_hash,
-        commit_message=commit_message,
-        status="fresh",
-        ts="2026-01-01T00:00:00",
-    ))
-    rs_mod.save_state(drive_root, state)
-
-    # Hash is stable — drive_root is outside repo_dir, no git status pollution
-    result = git_mod._check_advisory_freshness(ctx, commit_message)
-    assert result is None, f"Expected gate to pass but got: {result}"
-
-
-def test_advisory_freshness_blocks_on_open_commit_readiness_debt(tmp_path, monkeypatch):
-    """Fresh advisory is not enough when commit-readiness debt remains open."""
-    import subprocess
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    git_mod = _get_git_module()
-    rs_mod = _get_review_state_module()
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    (drive_root / "state").mkdir()
-    (drive_root / "logs").mkdir()
-    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-    commit_message = "test commit"
-    snapshot_hash = rs_mod.compute_snapshot_hash(repo_dir, commit_message)
-    repo_key = rs_mod.make_repo_key(repo_dir)
-
-    state = rs_mod.AdvisoryReviewState()
-    state.add_run(rs_mod.AdvisoryRunRecord(
-        snapshot_hash=snapshot_hash,
-        commit_message=commit_message,
-        status="fresh",
-        ts="2026-01-01T00:00:00",
-        repo_key=repo_key,
-        readiness_warnings=["Manual verification still required before commit."],
-    ))
-    state._sync_commit_readiness_debts(repo_key=repo_key)
-    assert len(state.get_open_commit_readiness_debts(repo_key=repo_key)) == 1
-    rs_mod.save_state(drive_root, state)
-
-    class FakeCtx:
-        pass
-
-    ctx = FakeCtx()
-    ctx.repo_dir = repo_dir
-    ctx.drive_root = drive_root
-    ctx.task_id = "test-task"
-    ctx.drive_logs = lambda: drive_root / "logs"
-
-    result = git_mod._check_advisory_freshness(ctx, commit_message)
-    assert result is not None
-    assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
-    assert "Commit-readiness debt" in result
-
-
-def test_advisory_obligations_acknowledged_under_advisory_enforcement(tmp_path, monkeypatch):
-    """Fresh advisory downgrades obligations/debt under advisory enforcement and audits it."""
-    import subprocess
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    git_mod = _get_git_module()
-    rs_mod = _get_review_state_module()
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    (drive_root / "state").mkdir()
-    (drive_root / "logs").mkdir()
-    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-    commit_message = "test commit"
-    snapshot_hash = rs_mod.compute_snapshot_hash(repo_dir, commit_message)
-    repo_key = rs_mod.make_repo_key(repo_dir)
-
-    state = rs_mod.AdvisoryReviewState()
-    state.add_run(rs_mod.AdvisoryRunRecord(
-        snapshot_hash=snapshot_hash,
-        commit_message=commit_message,
-        status="fresh",
-        ts="2026-01-01T00:00:00",
-        repo_key=repo_key,
-        readiness_warnings=["Manual verification still required before commit."],
-    ))
-    state.add_blocking_attempt(rs_mod.CommitAttemptRecord(
-        ts="2026-01-01T00:05:00",
-        commit_message="blocked commit",
-        status="blocked",
-        repo_key=repo_key,
-        block_reason="critical_findings",
-        critical_findings=[{
-            "item": "tests_affected",
-            "verdict": "FAIL",
-            "severity": "critical",
-            "reason": "missing tests",
-        }],
-    ))
-    state.open_obligations = [
-        rs_mod.ObligationItem(
-            obligation_id=f"obl-{idx:04d}",
-            item=f"item_{idx}",
-            severity="critical",
-            reason=f"missing tests {idx}",
-            source_attempt_ts="2026-01-01T00:05:00",
-            source_attempt_msg="blocked commit",
-            repo_key=repo_key,
-        )
-        for idx in range(1, 7)
-    ]
-    state.commit_readiness_debts = [
-        rs_mod.CommitReadinessDebtItem(
-            debt_id=f"crd-{idx:04d}",
-            category=f"category_{idx}",
-            summary=f"readiness debt {idx}",
-            repo_key=repo_key,
-        )
-        for idx in range(1, 7)
-    ]
-    assert state.get_open_obligations(repo_key=repo_key)
-    assert state.get_open_commit_readiness_debts(repo_key=repo_key)
-    rs_mod.save_state(drive_root, state)
-
-    class FakeCtx:
-        pass
-
-    ctx = FakeCtx()
-    ctx.repo_dir = repo_dir
-    ctx.drive_root = drive_root
-    ctx.task_id = "test-task"
-    ctx.drive_logs = lambda: drive_root / "logs"
-
-    result = git_mod._check_advisory_freshness(ctx, commit_message)
-
-    assert result is None
-    events = [
-        json.loads(line)
-        for line in (drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    event = [item for item in events if item.get("type") == "advisory_obligations_acknowledged"][0]
-    assert event["snapshot_hash"] == snapshot_hash
-    assert event["repo_key"] == repo_key
-    assert event["open_obligations_count"] == 6
-    assert event["open_debts_count"] >= 6
-    assert len(event["open_obligations"]) == event["open_obligations_count"]
-    assert len(event["open_debts"]) == event["open_debts_count"]
-    assert any("obl-0006" in item for item in event["open_obligations"])
-    assert any("crd-0006" in item for item in event["open_debts"])
-
-
-def test_advisory_freshness_is_repo_scoped(tmp_path):
-    """A fresh run for repo A must not satisfy repo B when hashes coincide."""
-    import subprocess
-    git_mod = _get_git_module()
-    rs_mod = _get_review_state_module()
-
-    repo_a = tmp_path / "repo-a"
-    repo_b = tmp_path / "repo-b"
-    repo_a.mkdir()
-    repo_b.mkdir()
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    (drive_root / "state").mkdir()
-    (drive_root / "logs").mkdir()
-    subprocess.run(["git", "init"], cwd=str(repo_a), capture_output=True)
-    subprocess.run(["git", "init"], cwd=str(repo_b), capture_output=True)
-
-    commit_message = "same commit message"
-    snapshot_hash = rs_mod.compute_snapshot_hash(repo_a, commit_message)
-    state = rs_mod.AdvisoryReviewState()
-    state.add_run(rs_mod.AdvisoryRunRecord(
-        snapshot_hash=snapshot_hash,
-        commit_message=commit_message,
-        status="fresh",
-        ts="2026-01-01T00:00:00",
-        repo_key=rs_mod.make_repo_key(repo_a),
-    ))
-    rs_mod.save_state(drive_root, state)
-
-    class FakeCtx:
-        pass
-
-    ctx = FakeCtx()
-    ctx.repo_dir = repo_b
-    ctx.drive_root = drive_root
-    ctx.task_id = "repo-b-task"
-    ctx.drive_logs = lambda: drive_root / "logs"
-
-    result = git_mod._check_advisory_freshness(ctx, commit_message)
-    assert result is not None
-    assert "ADVISORY_PRE_REVIEW_REQUIRED" in result
-
-
-def test_open_obligations_are_repo_scoped(tmp_path):
-    """Open obligations in repo A must not block a fresh advisory in repo B."""
-    import subprocess
-    git_mod = _get_git_module()
-    rs_mod = _get_review_state_module()
-
-    repo_a = tmp_path / "repo-a"
-    repo_b = tmp_path / "repo-b"
-    repo_a.mkdir()
-    repo_b.mkdir()
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    (drive_root / "state").mkdir()
-    (drive_root / "logs").mkdir()
-    subprocess.run(["git", "init"], cwd=str(repo_a), capture_output=True)
-    subprocess.run(["git", "init"], cwd=str(repo_b), capture_output=True)
-
-    commit_message = "shared message"
-    state = rs_mod.AdvisoryReviewState()
-    state.add_run(rs_mod.AdvisoryRunRecord(
-        snapshot_hash=rs_mod.compute_snapshot_hash(repo_b, commit_message),
-        commit_message=commit_message,
-        status="fresh",
-        ts="2026-01-01T00:00:00",
-        repo_key=rs_mod.make_repo_key(repo_b),
-    ))
-    state.add_blocking_attempt(rs_mod.CommitAttemptRecord(
-        ts="2026-01-01T00:05:00",
-        commit_message="repo a blocked",
-        status="blocked",
-        repo_key=rs_mod.make_repo_key(repo_a),
-        block_reason="critical_findings",
-        critical_findings=[{
-            "item": "tests_affected",
-            "verdict": "FAIL",
-            "severity": "critical",
-            "reason": "missing tests in repo a",
-        }],
-    ))
-    rs_mod.save_state(drive_root, state)
-
-    class FakeCtx:
-        pass
-
-    ctx = FakeCtx()
-    ctx.repo_dir = repo_b
-    ctx.drive_root = drive_root
-    ctx.task_id = "repo-b-task"
-    ctx.drive_logs = lambda: drive_root / "logs"
-
-    result = git_mod._check_advisory_freshness(ctx, commit_message)
-    assert result is None, f"Repo-scoped obligations should not block repo B: {result}"
 
 
 def test_snapshot_hash_stable_on_message_change(tmp_path):
@@ -930,45 +625,6 @@ def test_snapshot_hash_stable_on_message_change(tmp_path):
     assert h1 == h2
 
 
-def test_bypass_is_audited(tmp_path):
-    """Bypassing advisory gate must write advisory_review_bypassed to events.jsonl."""
-    import json
-    import subprocess
-    git_mod = _get_git_module()
-    subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
-    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
-
-    class FakeCtx:
-        repo_dir = tmp_path
-        drive_root = tmp_path
-        task_id = "bypass-task"
-        def drive_logs(self):
-            return tmp_path / "logs"
-
-    result = git_mod._check_advisory_freshness(
-        FakeCtx(), "bypassed commit", skip_advisory_pre_review=True
-    )
-    assert result is None  # bypass passes
-
-    events_path = tmp_path / "logs" / "events.jsonl"
-    assert events_path.exists(), "events.jsonl must exist after bypass"
-    events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
-    bypass_events = [e for e in events if e.get("type") == "advisory_review_bypassed"]
-    assert len(bypass_events) == 1, "Exactly one bypass event must be logged"
-    assert bypass_events[0]["task_id"] == "bypass-task"
-
-
-def test_advisory_pre_review_tool_schema_has_skip_param():
-    """advisory_review schema must expose skip_advisory_review param."""
-    adv_mod = _get_advisory_module()
-    tools = adv_mod.get_tools()
-    adv_tool = next(t for t in tools if t.name == "advisory_review")
-    props = adv_tool.schema["parameters"]["properties"]
-    assert "skip_advisory_review" in props
-    assert props["skip_advisory_review"].get("default") is False
-
-
 def test_repo_commit_schema_has_skip_advisory_param():
     """commit_reviewed schema must expose skip_advisory_review param."""
     git_mod = _get_git_module()
@@ -978,290 +634,21 @@ def test_repo_commit_schema_has_skip_advisory_param():
     assert "skip_advisory_review" in props
 
 
-def test_advisory_choice_guidance_is_shared_across_model_facing_schemas():
-    adv_mod = _get_advisory_module()
-    git_mod = _get_git_module()
-    advisory_tools = {tool.name: tool for tool in adv_mod.get_tools()}
-    git_tools = {tool.name: tool for tool in git_mod.get_tools()}
-
-    advisory_tool = advisory_tools["preflight_review"]
-    status_tool = advisory_tools["review_status"]
-    commit_tool = git_tools["commit_reviewed"]
-    alias_tool = git_tools["vcs_commit_reviewed"]
-    advisory_skip = advisory_tool.schema["parameters"]["properties"]["skip_advisory_review"]
-    commit_skip = commit_tool.schema["parameters"]["properties"]["skip_advisory_review"]
-    alias_skip = alias_tool.schema["parameters"]["properties"]["skip_advisory_review"]
-
-    guidance = adv_mod.ADVISORY_REVIEW_CHOICE_GUIDANCE
-    surfaces = [
-        advisory_tool.schema["description"],
-        advisory_skip["description"],
-        status_tool.schema["description"],
-        commit_tool.schema["description"],
-        commit_skip["description"],
-        alias_tool.schema["description"],
-        alias_skip["description"],
-    ]
-    assert all(guidance in surface for surface in surfaces)
-    assert all("skip_advisory_review=True" in surface for surface in surfaces)
-    assert "bypasses only the requirements for advisory freshness" in guidance
-    assert "records remain visible" in guidance
-    assert "removes only advisory" not in guidance
-    assert commit_tool.schema["description"] == alias_tool.schema["description"]
-    assert commit_skip["description"] == alias_skip["description"]
-    assert "advisory-readiness projection" in status_tool.schema["description"]
-    assert "not the full commit gate" in status_tool.schema["description"]
-    assert "bypass the entire commit gate" not in " ".join(surfaces).lower()
-
-
-def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
-    """advisory_pre_review auto-bypasses with audit when the advisory model's
-    provider credentials are absent (the retired ANTHROPIC_API_KEY probe's
-    successor: availability follows the routed model)."""
-    import json
-    import subprocess
-    adv_mod = _get_advisory_module()
-    rs_mod = _get_review_state_module()
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    (drive_root / "state").mkdir()
-    (drive_root / "logs").mkdir()
-    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    for _key in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-                 "MINIMAX_API_KEY", "GIGACHAT_AUTH_KEY", "CLOUD_RU_API_KEY"):
-        monkeypatch.delenv(_key, raising=False)
-    progress_calls = []
-
-    class FakeCtx:
-        pass
-    ctx = FakeCtx()
-    ctx.repo_dir = str(repo_dir)
-    ctx.drive_root = str(drive_root)
-    ctx.task_id = "autobypass-task"
-    ctx.drive_logs = lambda: drive_root / "logs"
-    ctx.emit_progress_fn = lambda msg: progress_calls.append(msg)
-
-    result_raw = adv_mod._handle_advisory_pre_review(ctx, commit_message="test commit")
-    result = json.loads(result_raw)
-
-    # Must be bypassed, not errored
-    assert result["status"] == "bypassed"
-    assert "no provider credentials" in result["bypass_reason"]
-
-    # Must create a fresh advisory state (bypassed counts as fresh for gate)
-    state = rs_mod.load_state(drive_root)
-    assert state.latest() is not None
-    assert state.latest().status == "bypassed"
-
-    # Must audit bypass to events.jsonl
-    events_path = drive_root / "logs" / "events.jsonl"
-    assert events_path.exists(), "events.jsonl must exist after auto-bypass"
-    events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
-    bypass_events = [e for e in events if e.get("type") == "advisory_review_bypassed"]
-    assert len(bypass_events) == 1
-    assert "no provider credentials" in bypass_events[0]["bypass_reason"]
-
-
-def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
-    """Advisory prompt must include blocking history section when last commit was blocked."""
-    import subprocess
-    adv_mod = _get_advisory_module()
-    rs_mod = _get_review_state_module()
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    (drive_root / "state").mkdir()
-    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-    # Create a blocked commit attempt with structured critical findings
-    state = rs_mod.AdvisoryReviewState()
-    attempt = rs_mod.CommitAttemptRecord(
-        ts="2026-04-02T22:00:00",
-        commit_message="test blocked commit",
-        status="blocked",
-        block_reason="critical_findings",
-        block_details=(
-            "⚠️ REVIEW_BLOCKED: Critical issues found.\n"
-            "  CRITICAL: [gpt-5.5] bible_compliance: Missing BIBLE.md update\n"
-            "  CRITICAL: [gpt-5.5] tests_affected: No tests for new function\n"
-            "  WARN: [opus] self_consistency: Minor doc drift"
-        ),
-        critical_findings=[
-            {"verdict": "FAIL", "severity": "critical",
-             "item": "bible_compliance", "reason": "Missing BIBLE.md update", "model": "m"},
-            {"verdict": "FAIL", "severity": "critical",
-             "item": "tests_affected", "reason": "No tests for new function", "model": "m"},
-        ],
-    )
-    state.add_blocking_attempt(attempt)
-    rs_mod.save_state(drive_root, state)
-
-    # Build the advisory prompt with drive_root
-    prompt = adv_mod._build_advisory_prompt(
-        repo_dir, "test commit", drive_root=drive_root
-    )
-
-    # Must contain obligations section (new format)
-    assert "Unresolved obligations" in prompt
-    assert "bible_compliance" in prompt
-    assert "tests_affected" in prompt
-    assert "should explicitly address" in prompt
-
-
-def test_advisory_prompt_no_blocking_history_when_succeeded(tmp_path):
-    """Advisory prompt must NOT include blocking history when last commit succeeded."""
-    import subprocess
-    adv_mod = _get_advisory_module()
-    rs_mod = _get_review_state_module()
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    drive_root = tmp_path / "drive"
-    drive_root.mkdir()
-    (drive_root / "state").mkdir()
-    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-    state = rs_mod.AdvisoryReviewState()
-    state.attempts = [rs_mod.CommitAttemptRecord(
-        ts="2026-04-02T22:00:00",
-        commit_message="test commit",
-        status="succeeded",
-    )]
-    rs_mod.save_state(drive_root, state)
-
-    prompt = adv_mod._build_advisory_prompt(
-        repo_dir, "test commit", drive_root=drive_root
-    )
-
-    assert "## Unresolved obligations from previous blocking rounds" not in prompt
-
-
-def test_advisory_prompt_no_blocking_history_without_drive_root(tmp_path):
-    """Advisory prompt must gracefully skip blocking history when no drive_root."""
-    import subprocess
-    adv_mod = _get_advisory_module()
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-    prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
-    assert "## Unresolved obligations from previous blocking rounds" not in prompt
-
-
-def test_advisory_prompt_strictness_formulations():
-    """Advisory prompt must contain the same strictness language as blocking reviewers."""
-    import subprocess
-    adv_mod = _get_advisory_module()
-
-    import pathlib as _pl
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        repo_dir = _pl.Path(d)
-        (repo_dir / "BIBLE.md").write_text("test bible", encoding="utf-8")
-        subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
-
-        # Key strictness formulations that must be present
-        assert "same rigor" in prompt.lower() or "same severity threshold" in prompt.lower()
-        assert "do not stop after finding the first issue" in prompt.lower()
-        assert "distinct problem" in prompt.lower()
-        assert "read the full content of every changed file" in prompt.lower()
-        assert "all bugs, logic errors" in prompt.lower()
-        # Must NOT contain the old relaxing language
-        assert "findings do not directly block" not in prompt.lower()
-
-
-def test_advisory_prompt_references_architecture_doc_via_read_tool():
-    """The advisory brief NAMES ARCHITECTURE.md with the read instruction.
-
-    The map is the one governance tier that is never inlined whole (the
-    governance tiers, owner decision 2026-09-17): a retrieving reviewer reads
-    the version-sync and module-structure facts it needs from the exact
-    chapter, so the brief carries the addressable navigation instead of the
-    body.
-    """
-    import subprocess
-    adv_mod = _get_advisory_module()
-
-    import pathlib as _pl
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        repo_dir = _pl.Path(d)
-        (repo_dir / "BIBLE.md").write_text("test bible", encoding="utf-8")
-        (repo_dir / "docs").mkdir(parents=True, exist_ok=True)
-        (repo_dir / "docs" / "ARCHITECTURE.md").write_text(
-            "# Ouroboros v99.0.0 — Architecture", encoding="utf-8"
-        )
-        subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
-
-        assert "docs/ARCHITECTURE.md" in prompt, "the brief must name ARCHITECTURE.md"
-        assert 'read_file(root="system_repo"' in prompt, (
-            "the brief must carry the instruction that reaches it"
-        )
-        assert "Ouroboros v99.0.0" not in prompt, (
-            "the map is delivered as navigation, never inlined whole"
-        )
-
-
-def test_advisory_prompt_strictness_concrete_fix_requirement():
-    """Advisory prompt must require concrete fix suggestions for FAIL findings."""
-    import subprocess
-    adv_mod = _get_advisory_module()
-
-    import pathlib as _pl
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        repo_dir = _pl.Path(d)
-        subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
-
-        # Must require actionable fix suggestions
-        assert "concrete" in prompt.lower()
-        assert "fix" in prompt.lower()
-        assert "how to fix" in prompt.lower() or "how to change" in prompt.lower() or "what to change" in prompt.lower()
-
-
-def test_blocking_history_section_with_scope_blocked(tmp_path):
-    """Blocking history should also work for scope_blocked commits."""
-    adv_mod = _get_advisory_module()
-    rs_mod = _get_review_state_module()
-
-    drive_root = tmp_path
-    (drive_root / "state").mkdir(parents=True)
-
-    state = rs_mod.AdvisoryReviewState()
-    attempt = rs_mod.CommitAttemptRecord(
-        ts="2026-04-02T22:00:00",
-        commit_message="scope blocked commit",
-        status="blocked",
-        block_reason="scope_blocked",
-        block_details=(
-            "⚠️ SCOPE_REVIEW_BLOCKED: Missing touchpoint.\n"
-            "CRITICAL: [opus] forgotten_touchpoints: ARCHITECTURE.md not updated"
-        ),
-        critical_findings=[
-            {"verdict": "FAIL", "severity": "critical",
-             "item": "forgotten_touchpoints", "reason": "ARCHITECTURE.md not updated", "model": "opus"},
-        ],
-    )
-    state.add_blocking_attempt(attempt)
-    rs_mod.save_state(drive_root, state)
-
-    section = adv_mod._build_blocking_history_section(drive_root)
-    assert "Unresolved obligations" in section
-    assert "scope_blocked" in section
-    assert "ARCHITECTURE.md" in section
+def test_commit_schema_states_the_preflight_as_a_fact_not_a_bypass():
+    """Without a named row the commit records preflight not_performed, and skipping records
+    skipped: both are facts, never an audited bypass of advisory freshness."""
+    git_tools = {tool.name: tool for tool in _get_git_module().get_tools()}
+    commit, alias = git_tools["commit_reviewed"], git_tools["vcs_commit_reviewed"]
+    assert commit.schema == {**alias.schema, "name": "commit_reviewed"}
+    props = commit.schema["parameters"]["properties"]
+    assert "not_performed" in commit.schema["description"]
+    assert "preflight: skipped" in props["skip_advisory_review"]["description"]
+    assert "TOOL_ARG_ERROR" in props["preflight_reviewer"]["description"]
+    surfaces = " ".join((commit.schema["description"], props["skip_advisory_review"]["description"],
+                         props["preflight_reviewer"]["description"])).lower()
+    assert "audited bypass" not in surfaces and "advisory freshness" not in surfaces
+    wrapper = next(t for t in _get_preflight_module().get_tools() if t.name == "preflight_review")
+    assert "skip_advisory_review" not in wrapper.schema["parameters"]["properties"]
 
 
 def test_review_blocked_message_keeps_evidence_based_rebuttal_on_repeat():
@@ -1399,33 +786,3 @@ def test_development_compliance_checklist_expanded():
 # exercised by the actual triad-review integration tests in
 # test_review_fidelity.py, test_review_observability.py, and the
 # git+review pipeline suite.
-
-
-def test_advisory_prompt_contains_obligation_targeting_instructions(tmp_path):
-    """_build_advisory_prompt must instruct the reviewer how to target a specific
-    obligation when multiple open obligations share the same checklist item.
-    Without this, a generic item-name PASS cannot disambiguate which obligation
-    was resolved, and the resolution logic leaves all same-item obligations open.
-    """
-    import tempfile
-    import pathlib as _pl
-    import subprocess as _sp
-    adv_mod = _get_advisory_module()
-
-    with tempfile.TemporaryDirectory() as d:
-        repo_dir = _pl.Path(d)
-        _sp.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
-
-        prompt = adv_mod._build_advisory_prompt(repo_dir, "test commit")
-
-        # Must explain the (obligation <id>) suffix mechanism
-        assert "obligation" in prompt.lower(), (
-            "Prompt must mention 'obligation' targeting to allow per-finding resolution"
-        )
-        assert "(obligation" in prompt, (
-            "Prompt must show the '(obligation <id>)' suffix syntax for targeting specific obligations"
-        )
-        # Must warn that a generic PASS won't resolve all same-item obligations
-        assert "will NOT resolve" in prompt or "will not resolve" in prompt.lower(), (
-            "Prompt must warn that generic item-name PASS won't resolve all same-item obligations"
-        )

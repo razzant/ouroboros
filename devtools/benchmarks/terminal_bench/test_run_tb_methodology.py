@@ -20,20 +20,16 @@ from devtools.benchmarks.terminal_bench import run_tb
 def _hermetic_process_environment():
     """`run_tb.apply_all_model` (and `main --all-model` through it) writes the
     fixed-model contract into `os.environ` directly — the launcher's real
-    behaviour, kept. Under xdist that leaked `OUROBOROS_REVIEWER_SLOTS` and the
-    forwarded slot keys into every later test of the same worker (the
-    `benchmark-scope-1` contamination class). Every test here runs on a
-    snapshot of the environment that is restored afterwards, whatever it wrote —
-    and starts WITHOUT the operator shell's reviewer panel or legacy comma-list
-    keys, in the spirit of tests/conftest.py's
-    `_scrub_inherited_subagent_selection` but with a deliberately different key
-    set: conftest drops the subagent roster, the account pin and the structured
-    panel; this suite reads BOTH panel forms, so it drops the structured panel
-    AND the legacy comma-list keys (`OUROBOROS_REVIEW_MODELS`,
-    `OUROBOROS_SCOPE_REVIEW_MODELS`, `OUROBOROS_SCOPE_REVIEW_MODEL`). A
-    panel-reading test here is hermetic against the shell either way."""
+    behaviour, kept. Under xdist that leaked the roster and the forwarded slot
+    keys into every later test of the same worker (the `benchmark-scope-1`
+    contamination class). Every test here runs on a snapshot of the environment
+    that is restored afterwards, whatever it wrote — and starts WITHOUT the
+    operator shell's roster (the review pool rides it), the lane-era reviewer
+    panel or the retired comma-list keys, in the spirit of tests/conftest.py's
+    `_scrub_inherited_subagent_selection`. A pool-reading test here is hermetic
+    against the shell either way."""
     saved = dict(os.environ)
-    for key in ("OUROBOROS_REVIEWER_SLOTS", "OUROBOROS_REVIEW_MODELS",
+    for key in ("OUROBOROS_SUBAGENTS", "OUROBOROS_REVIEWER_SLOTS", "OUROBOROS_REVIEW_MODELS",
                 "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL"):
         os.environ.pop(key, None)
     try:
@@ -122,15 +118,29 @@ def test_pip_cache_mount_rejects_repo_path(monkeypatch):
 
 # --- apply_all_model + metadata -------------------------------------------------
 
+def _pool_row(subagent_id, target, *, kind="api_model", **extra):
+    return {"subagent_id": subagent_id, "recommended_use": f"{subagent_id} reviewer.",
+            "route": {"kind": kind, "target_id": target}, "review_eligible": True, **extra}
+
+
+def _roster(*rows):
+    return json.dumps({"enabled": True, "items": list(rows)})
+
+
+def _pool(roster_raw):
+    """The review pool of a serialized roster: its marked rows."""
+    return [row for row in json.loads(roster_raw)["items"] if row.get("review_eligible")]
+
+
 def _poison_fixed_actor_env(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
-        "triad": [{"slot_id": "foreign-t", "route": {
-            "kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}}],
-        "scope": [{"slot_id": "foreign-s", "route": {
-            "kind": "api_chat", "target_id": "foreign/scope"}}],
-        "advisory": {"enabled": True, "route": {
-            "kind": "api_chat", "target_id": "foreign-advisory"}},
-    }))
+    # The operator shell's roster: a foreign review pool (a session seat and a
+    # foreign api seat) the fixed-model run must replace, plus stale lane keys.
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _roster(
+        _pool_row("foreign-session", "codex=gpt-5.6-sol", kind="agent_session"),
+        _pool_row("foreign-critic", "foreign/critic"),
+    ))
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", "{stale lane panel")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "foreign/stale-triad")
     monkeypatch.setenv("CLAUDE_CODE_MODEL", "foreign-sdk-model")
     monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "foreign/heavy")
     for key in ("USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK",
@@ -153,35 +163,37 @@ def test_apply_all_model_sets_forwarded_slots(monkeypatch):
     actor = run_tb.apply_all_model("google/gemini-3.5-flash")
     import os
     assert actor["mismatches"] == []
-    assert actor["reviewer_slots"]["advisory"]["enabled"] is False
     assert "OUROBOROS_MODEL_HEAVY" not in os.environ
     for key in run_tb._ALL_MODEL_SLOT_KEYS:
         assert os.environ[key] == "google/gemini-3.5-flash"
-    # Single-model run defaults to ONE reviewer at low effort (3 identical = monoculture, no diversity).
-    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash"
-    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "low"
-    assert os.environ["OUROBOROS_EFFORT_SCOPE_REVIEW"] == "low"
-    actors = json.loads(os.environ["OUROBOROS_SUBAGENTS"])
-    assert [row["route"]["target_id"] for row in actors["items"]] == ["google/gemini-3.5-flash"]
-    reviewers = json.loads(os.environ["OUROBOROS_REVIEWER_SLOTS"])
-    assert [row["route"]["target_id"] for row in reviewers["triad"]] == [
-        "google/gemini-3.5-flash"
+    # Single-model run defaults to ONE packet review seat at low effort (3 identical =
+    # monoculture, no diversity). The seat is a catalog row; the lane-era carriers are gone.
+    assert "OUROBOROS_EFFORT_REVIEW" not in os.environ
+    for key in ("OUROBOROS_REVIEWER_SLOTS", "OUROBOROS_REVIEW_MODELS",
+                "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+                "OUROBOROS_EFFORT_SCOPE_REVIEW"):
+        assert key not in os.environ
+    roster = json.loads(os.environ["OUROBOROS_SUBAGENTS"])
+    assert [row["route"]["target_id"] for row in roster["items"]] == ["google/gemini-3.5-flash"] * 2
+    assert [(row["subagent_id"], row["delivery"], row["effort"], row["minted_from"])
+            for row in _pool(os.environ["OUROBOROS_SUBAGENTS"])] == [
+        ("benchmark-review-1", "packet", "low", "factory_default"),
     ]
-    assert [row["route"]["target_id"] for row in reviewers["scope"]] == [
-        "google/gemini-3.5-flash"
+    assert [(row["subagent_id"], row["route"]["target_id"], row["delivery"]) for row in actor["review_pool"]] == [
+        ("benchmark-review-1", "google/gemini-3.5-flash", "packet"),
     ]
-    assert reviewers["advisory"]["enabled"] is False
     assert all(os.environ[key] == "false" for key in (
         "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK",
         "USE_LOCAL_CONSCIOUSNESS",
     ))
-    # Configurable: the 3-identical-reviewer / medium-effort path is still available.
+    # Configurable: the 3-identical-reviewer / medium-effort path is still available —
+    # as three identical catalog rows (the host never multiplies a seat).
     run_tb.apply_all_model("google/gemini-3.5-flash", review_slots=3, review_effort="medium")
-    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash,google/gemini-3.5-flash,google/gemini-3.5-flash"
-    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "medium"
-    reviewers = json.loads(os.environ["OUROBOROS_REVIEWER_SLOTS"])
-    assert len(reviewers["triad"]) == 3
-    assert {row["effort"] for row in reviewers["triad"]} == {"medium"}
+    assert "OUROBOROS_EFFORT_REVIEW" not in os.environ
+    seats = _pool(os.environ["OUROBOROS_SUBAGENTS"])
+    assert [row["subagent_id"] for row in seats] == ["benchmark-review-1", "benchmark-review-2", "benchmark-review-3"]
+    assert {row["route"]["target_id"] for row in seats} == {"google/gemini-3.5-flash"}
+    assert {row["effort"] for row in seats} == {"medium"} and {row["delivery"] for row in seats} == {"packet"}
 
 
 def test_all_model_actor_is_durable_before_tb_external_probe(tmp_path, monkeypatch):
@@ -196,8 +208,7 @@ def test_all_model_actor_is_durable_before_tb_external_probe(tmp_path, monkeypat
         actor = manifest["harness"]["fixed_model_actor"]
         assert actor["mismatches"] == []
         assert not any(actor["local_routes"].values())
-        assert actor["reviewer_slots"]["advisory"]["enabled"] is False
-        assert {row["route"]["target_id"] for row in actor["reviewer_slots"]["triad"]} == {model}
+        assert {(row["route"]["target_id"], row["delivery"]) for row in actor["review_pool"]} == {(model, "packet")}
         return "test-harbor"
 
     monkeypatch.setattr(run_tb, "harbor_version", external_probe)
@@ -208,17 +219,17 @@ def test_all_model_actor_is_durable_before_tb_external_probe(tmp_path, monkeypat
     ]) == 0
 
 
-def test_malformed_reviewer_panel_is_a_typed_refusal_on_the_durable_manifest(tmp_path, monkeypatch):
+def test_malformed_host_roster_is_a_typed_refusal_on_the_durable_manifest(tmp_path, monkeypatch):
     """The launcher structural gate: nothing reads files before admission, so a
-    malformed panel (here: in the host settings file the adapter forwards) is
+    malformed roster (here: in the host settings file the adapter forwards) is
     refused INSIDE the finalize seam — recorded on the durable manifest with the
     launcher's own vocabulary, no traceback, and no submission tree built."""
     model = "openai/gpt-5.5"
     run_root = tmp_path / "run"
     settings = tmp_path / "settings.json"
-    settings.write_text(json.dumps({"OUROBOROS_REVIEWER_SLOTS": "{not json"}), encoding="utf-8")
+    settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": "{not json"}), encoding="utf-8")
     _poison_fixed_actor_env(monkeypatch)
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
     monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "test-harbor")
     assert run_tb.main([
         "--model", model, "--allow-low-k", "--allow-dirty-seed",
@@ -227,7 +238,7 @@ def test_malformed_reviewer_panel_is_a_typed_refusal_on_the_durable_manifest(tmp
     ]) == 1
     manifest_text = (run_root / "run_manifest.json").read_text(encoding="utf-8")
     assert '"leaderboard_metadata"' in manifest_text and '"refused"' in manifest_text
-    assert "OUROBOROS_REVIEWER_SLOTS" in manifest_text  # the typed reason names the key
+    assert "OUROBOROS_SUBAGENTS" in manifest_text  # the typed reason names the key
     assert not list((tmp_path / "submission").rglob("metadata.yaml"))
 
 
@@ -247,11 +258,16 @@ def test_adapter_forwards_fixed_model_execution_contract(tmp_path, monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
     run_tb.apply_all_model(model)
+    from tests.test_cybergym_benchmark import RETIRED_REVIEW_KEYS
+
+    for key in RETIRED_REVIEW_KEYS:
+        monkeypatch.setenv(key, "foreign/stale")
     env = tb_agent.OuroborosTerminalBenchAgent(logs_dir=tmp_path)._container_env()
-    reviewers = json.loads(env["OUROBOROS_REVIEWER_SLOTS"])
-    assert {row["route"]["target_id"] for row in reviewers["triad"]} == {model}
-    assert {row["route"]["target_id"] for row in reviewers["scope"]} == {model}
-    assert reviewers["advisory"]["enabled"] is False
+    assert not RETIRED_REVIEW_KEYS.intersection(env)
+    # The fixed-model roster is forwarded verbatim: the actor and the packet seat on the model.
+    assert env["OUROBOROS_SUBAGENTS"] == os.environ["OUROBOROS_SUBAGENTS"]
+    assert {(row["route"]["target_id"], row["delivery"]) for row in _pool(env["OUROBOROS_SUBAGENTS"])} == {(model, "packet")}
+    assert "OUROBOROS_REVIEWER_SLOTS" not in env and "OUROBOROS_REVIEW_MODELS" not in env
     assert "CLAUDE_CODE_MODEL" not in env
     assert all(env[key] == "false" for key in (
         "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK",
@@ -309,7 +325,6 @@ def test_harbor_smoke_child_uses_the_durable_pinned_actor(
             ouroboros_light_model=agent_kwargs["ouroboros_light_model"],
             host_settings_path=agent_kwargs["host_settings_path"],
         )._container_env()
-        reviewers = json.loads(container_env["OUROBOROS_REVIEWER_SLOTS"])
         subagents = json.loads(container_env["OUROBOROS_SUBAGENTS"])
         assert actor["mismatches"] == []
         assert actor["model_slots"]["OUROBOROS_MODEL"] == model
@@ -333,10 +348,9 @@ def test_harbor_smoke_child_uses_the_durable_pinned_actor(
         assert container_env["OUROBOROS_MODEL_LIGHT"] == light_model
         assert container_env["OUROBOROS_MODEL_FALLBACK"] == model
         assert container_env["OUROBOROS_MODEL_FALLBACKS"] == model
-        assert [row["route"]["target_id"] for row in subagents["items"]] == [model]
-        assert {row["route"]["target_id"] for row in reviewers["triad"]} == {model}
-        assert {row["route"]["target_id"] for row in reviewers["scope"]} == {model}
-        assert reviewers["advisory"]["enabled"] is False
+        assert [row["route"]["target_id"] for row in subagents["items"]] == [model] * 2
+        assert [(row["route"]["target_id"], row["delivery"]) for row in _pool(container_env["OUROBOROS_SUBAGENTS"])] == [(model, "packet")]
+        assert "OUROBOROS_REVIEWER_SLOTS" not in container_env
         assert container_env["USE_LOCAL_MAIN"] == "false"
         assert container_env["USE_LOCAL_LIGHT"] == str(uses_local_light).lower()
         assert container_env["USE_LOCAL_FALLBACK"] == "false"
@@ -363,41 +377,38 @@ def test_metadata_omits_web_search_when_web_disabled(monkeypatch):
     assert not any("web_search" in r for r in roles_off.values())
 
 
-_PANEL = {
-    "triad": [
-        {"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.5"}},
-        {"slot_id": "t2", "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}},
-    ],
-    "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "google/gemini-3.5-pro"}}],
-    "advisory": {"enabled": False},
-}
+_HOST_ROSTER = _roster(
+    _pool_row("t1", "openai/gpt-5.5", delivery="packet"),
+    _pool_row("t2", "codex=gpt-5.6-sol", kind="agent_session"),
+    {"subagent_id": "helper", "recommended_use": "Unmarked helper.",
+     "route": {"kind": "api_model", "target_id": "google/gemini-3.5-pro"}},
+)
 
 
-def test_metadata_declares_what_the_container_executes_from_the_structured_panel(monkeypatch):
-    """The container runs the structured panel the adapter forwards (operator
-    env, else the host settings file). Inside a TB task nothing commits: the
-    panel reaches the run through task acceptance, which runs every row on its
-    own delivery (owner R2, 2026-09-01) — but a task container structurally
-    cannot run an agent-session row (no harness CLI/daemon, no harness
-    credentials in the forwarded env). Metadata therefore declares the api rows
-    by model id and NEVER the session row (a declared-but-never-run model would
-    misrepresent the submission); the session row is a typed disclosure,
-    `triad_rows_not_executable_in_container`, and neither a stale legacy comma
-    key nor a shipped default the container does not run is declared."""
+def test_metadata_declares_what_the_container_executes_from_the_review_pool(monkeypatch):
+    """The container runs the review pool the adapter forwards (operator env,
+    else the host settings file; ``container_subagents_setting``). Inside a TB
+    task nothing commits: the pool reaches the run through task acceptance,
+    which runs every seat on its own delivery (owner R2, 2026-09-01) — but a
+    task container structurally cannot run an agent-session seat (no harness
+    CLI/daemon, no harness credentials in the forwarded env). Metadata therefore
+    declares the api seats by model id and NEVER the session seat (a
+    declared-but-never-run model would misrepresent the submission); the session
+    seat is a typed disclosure, `triad_rows_not_executable_in_container`, and
+    neither a stale retired comma key nor an unmarked catalog row is declared."""
 
     monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
     monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "foreign/stale-triad")
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "foreign/stale-scope")
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(_PANEL))
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _HOST_ROSTER)
     roles = dict(run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True))
     assert "foreign/stale-triad" not in roles and "foreign/stale-scope" not in roles
     assert roles["openai/gpt-5.5"] == "agent+commit_review_triad"
-    # The session row is disclosed, not declared: nothing in the container runs it.
+    # The session seat is disclosed, not declared: nothing in the container runs it.
     assert "codex=gpt-5.6-sol" not in roles and not any("agent_session" in r for r in roles.values())
     assert run_tb.triad_rows_not_executable_in_container("openai/gpt-5.5") == ["codex=gpt-5.6-sol"]
-    # Scope review is a commit-time gate: it never fires inside a task, so its
-    # rows are not declared (the same honesty rule as the advisory).
-    assert "google/gemini-3.5-pro" not in roles and "scope_review" not in roles.values()
+    # An unmarked catalog row is a delegation actor, not a reviewer: never declared.
+    assert "google/gemini-3.5-pro" not in roles
     assert roles["google/gemini-3.5-flash"] == "light_safety_post_task_synthesis"
     meta = run_tb.leaderboard_metadata(
         agent_name="Ouroboros", org_name="Ouroboros", model="openai/gpt-5.5",
@@ -408,15 +419,12 @@ def test_metadata_declares_what_the_container_executes_from_the_structured_panel
     # and run_manifest.json as the typed field.
     assert '# triad_rows_not_executable_in_container: ["codex=gpt-5.6-sol"]' in meta
 
-    # An all-session triad declares NO reviewer row — and not the shipped defaults
-    # either: nothing in the container runs them.
-    all_session = {**_PANEL, "triad": [_PANEL["triad"][1]]}
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(all_session))
+    # An all-session pool: the container cannot run any host seat, so it reviews on
+    # ONE packet seat on the measured model — declared as such — and not on the
+    # shipped defaults: nothing in the container runs them.
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _roster(_pool_row("t2", "codex=gpt-5.6-sol", kind="agent_session")))
     roles = dict(run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True))
-    assert roles["openai/gpt-5.5"] == "agent" and "commit_review_triad" not in "+".join(roles.values())
-    # The shipped triad defaults: ABI 7.0 retired the OUROBOROS_REVIEW_MODELS
-    # settings key, and the launcher itself reads the SSOT list the key used
-    # to be derived from (run_tb._effective_helper_models).
+    assert roles["openai/gpt-5.5"] == "agent+commit_review_triad" and list(roles) == ["openai/gpt-5.5", "google/gemini-3.5-flash"]
     from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
 
     for helper in OPENROUTER_REVIEW_DEFAULTS["triad"]:
@@ -424,41 +432,39 @@ def test_metadata_declares_what_the_container_executes_from_the_structured_panel
     assert run_tb.triad_rows_not_executable_in_container("openai/gpt-5.5") == ["codex=gpt-5.6-sol"]
 
     # Settings-file fallback, exactly like the container adapter's env → settings order.
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    settings = {"OUROBOROS_REVIEWER_SLOTS": json.dumps(_PANEL)}
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    settings = {"OUROBOROS_SUBAGENTS": _HOST_ROSTER}
     roles = dict(run_tb._effective_helper_models(
         "openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True, settings=settings))
     assert roles["openai/gpt-5.5"] == "agent+commit_review_triad" and "foreign/stale-triad" not in roles
     assert run_tb.triad_rows_not_executable_in_container("openai/gpt-5.5", settings) == ["codex=gpt-5.6-sol"]
-    # No structured panel at all: nothing to disclose.
+    # No host roster at all: the container reviews on one packet seat on the measured
+    # model (the fixed-model contract); nothing to disclose.
     assert run_tb.triad_rows_not_executable_in_container("openai/gpt-5.5") == []
+    roles = dict(run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True))
+    assert roles["openai/gpt-5.5"] == "agent+commit_review_triad"
 
 
-_PANEL_WITH_TWO_SESSIONS = {
-    "triad": [
-        {"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.5"}},
-        {"slot_id": "t2", "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}},
-        {"slot_id": "t3", "route": {"kind": "agent_session", "target_id": "cursor=openai/gpt-5"}},
-    ],
-    "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "google/gemini-3.5-pro"}}],
-    "advisory": {"enabled": False},
-}
+_HOST_ROSTER_WITH_TWO_SESSIONS = _roster(
+    _pool_row("t1", "openai/gpt-5.5", delivery="packet"),
+    _pool_row("t2", "codex=gpt-5.6-sol", kind="agent_session"),
+    _pool_row("t3", "cursor=openai/gpt-5", kind="agent_session"),
+)
 
 
 def test_run_manifest_and_metadata_carry_the_rows_the_container_cannot_run(tmp_path, monkeypatch, capsys):
     """End to end through `main` (command generation, no harbor): the durable
     `run_manifest.json` carries `extra.triad_rows_not_executable_in_container`
-    with the session rows' targets verbatim and in row order — a target with
+    with the session seats' targets verbatim and in row order — a target with
     its own `/` (`cursor=openai/gpt-5`) included — `metadata.yaml` carries the
-    same list as a comment while declaring no session row as a model, and
-    (owner R40) admission prints ONE loud stderr warning naming each row and
-    the typed degradation while the run continues."""
+    same list as a comment while declaring no session seat as a model, and
+    (owner R40) admission prints ONE loud stderr warning naming each seat and
+    what the container reviews with instead while the run continues."""
     model = "openai/gpt-5.5"
     run_root = tmp_path / "run"
     settings = tmp_path / "settings.json"
-    settings.write_text(
-        json.dumps({"OUROBOROS_REVIEWER_SLOTS": json.dumps(_PANEL_WITH_TWO_SESSIONS)}), encoding="utf-8")
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": _HOST_ROSTER_WITH_TWO_SESSIONS}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
     monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
     monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "test-harbor")
     assert run_tb.main([
@@ -475,48 +481,54 @@ def test_run_manifest_and_metadata_carry_the_rows_the_container_cannot_run(tmp_p
     assert 'model_name: "codex' not in meta and 'model_name: "cursor' not in meta
     assert f'model_name: "{model}"' in meta and 'role: "agent+commit_review_triad"' in meta
     err = capsys.readouterr().err
-    assert err.count("[run_tb] WARNING: the configured reviewer triad carries agent-session rows") == 1
-    assert "codex=gpt-5.6-sol, cursor=openai/gpt-5" in err and "degrades typed" in err
-    assert "Configure api/native triad rows" in err
+    assert err.count("[run_tb] WARNING: the configured review pool carries agent-session rows") == 1
+    assert "codex=gpt-5.6-sol, cursor=openai/gpt-5" in err and "pool's API seats only" in err
+    assert "Configure api seats" in err
 
 
-def test_an_api_only_panel_prints_no_container_warning(tmp_path, monkeypatch, capsys):
-    """The R40 warning is for session rows only: an api-only panel admits silently."""
+def test_an_api_only_pool_prints_no_container_warning(tmp_path, monkeypatch, capsys):
+    """The R40 warning is for session seats only: an api-only pool admits silently."""
     run_root = tmp_path / "run"
     settings = tmp_path / "settings.json"
-    api_only = {**_PANEL_WITH_TWO_SESSIONS, "triad": [_PANEL_WITH_TWO_SESSIONS["triad"][0]]}
-    settings.write_text(json.dumps({"OUROBOROS_REVIEWER_SLOTS": json.dumps(api_only)}), encoding="utf-8")
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    api_only = _roster(_pool_row("t1", "openai/gpt-5.5", delivery="packet"))
+    settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": api_only}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
     monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "test-harbor")
     assert run_tb.main([
         "--model", "openai/gpt-5.5", "--allow-low-k", "--allow-dirty-seed",
         "--run-root", str(run_root), "--submission-root", str(tmp_path / "submission"),
         "--settings-path", str(settings),
     ]) == 0
-    assert "[run_tb] WARNING: the configured reviewer triad" not in capsys.readouterr().err
+    assert "[run_tb] WARNING: the configured review pool" not in capsys.readouterr().err
     manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["extra"]["triad_rows_not_executable_in_container"] == []
 
 
-def test_metadata_parses_the_panel_under_the_container_roster(monkeypatch):
-    """A subagent-bound row resolves against the CONTAINER's one-model roster
-    (the adapter replaces the operator roster), never the operator shell's."""
-    from devtools.benchmarks.common.model_slots import BENCHMARK_SUBAGENT_ID
+def test_the_container_roster_is_the_host_pools_api_seats_under_the_measured_actor(monkeypatch):
+    """The container never inherits the operator's delegation actors: it gets the
+    canonical one-model actor plus the host pool's API seats as they are (their
+    delivery and effort included), and a native seat on the measured model
+    declares the model once (acceptance executes it in the container)."""
+    from devtools.benchmarks.common.model_slots import BENCHMARK_SUBAGENT_ID, container_subagents_setting
 
-    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
-    panel = {**_PANEL, "triad": [{"slot_id": "t1", "subagent_id": BENCHMARK_SUBAGENT_ID}]}
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(panel))
+    host = _roster(
+        {"subagent_id": "operator-critic", "recommended_use": "Operator actor.",
+         "route": {"kind": "api_model", "target_id": "foreign/actor"}},
+        _pool_row("native-seat", "openai/gpt-5.5", effort="medium"),
+        _pool_row("t2", "codex=gpt-5.6-sol", kind="agent_session"),
+    )
+    container = json.loads(container_subagents_setting("openai/gpt-5.5", host))
+    assert [row["subagent_id"] for row in container["items"]] == [BENCHMARK_SUBAGENT_ID, "native-seat"]
+    assert container["items"][1]["effort"] == "medium" and "delivery" not in container["items"][1]
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", host)
     roles = dict(run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True))
-    # The benchmark actor row RETRIEVES (native tool rounds) on the measured
-    # model: acceptance executes it, so the measured model carries the triad
-    # role and no shipped default is declared.
     from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
 
-    assert roles["openai/gpt-5.5"] == "agent+commit_review_triad"
+    assert roles["openai/gpt-5.5"] == "agent+commit_review_triad" and "foreign/actor" not in roles
     assert not any(h in roles for h in OPENROUTER_REVIEW_DEFAULTS["triad"])
-    # An operator-roster reference the container cannot resolve is a typed refusal.
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({**panel, "triad": [{"slot_id": "t1", "subagent_id": "operator-critic"}]}))
-    with pytest.raises(ValueError, match="operator-critic"):
+    # A malformed host roster is a typed refusal, never a declared default.
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", "{not json")
+    with pytest.raises(ValueError, match="OUROBOROS_SUBAGENTS"):
         run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True)
 
 
@@ -524,7 +536,7 @@ def test_metadata_never_declares_the_retired_claude_code_role(monkeypatch):
     """The Claude-SDK transport (claude_code_edit) is retired: a stale
     CLAUDE_CODE_MODEL in the operator env must not add a metadata role."""
     monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_MODEL", "anthropic/claude-opus-4.8")
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "google/gemini-3.5-flash")
     monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "google/gemini-3.5-flash")
@@ -795,3 +807,43 @@ def test_harbor_version_reports_a_fake_binary_and_swallows_failures(monkeypatch)
 
     monkeypatch.setattr(run_tb.subprocess, "run", _fake_run(FileNotFoundError("no such binary")))
     assert run_tb.harbor_version("does-not-exist") == ""
+
+
+def test_t3_the_methodology_describes_the_pool_adapters_container_roster_and_manifest_record(monkeypatch):
+    """The METHODOLOGY bullet on reviewer rows is a behavioral contract an auditor
+    follows into the artifacts, so it is pinned to the adapter it describes: the
+    container roster is DERIVED from the host pool (`container_subagents_setting`:
+    the host's API seats, one packet seat on the measured model when the host has
+    none, session seats excluded and disclosed), and the fixed-model manifest's
+    per-row record is `harness.fixed_model_actor.review_pool` with the projection's
+    own keys — not the retired `reviewer_slots` / `slot_id` shape, and no
+    "degrades typed" session seat inside the container."""
+    from devtools.benchmarks.common.model_slots import (
+        BENCHMARK_SUBAGENT_ID, container_subagents_setting, fixed_model_actor_snapshot,
+    )
+
+    text = (pathlib.Path(run_tb.__file__).parent / "METHODOLOGY.md").read_text(encoding="utf-8")
+    start = text.index("- **Every reviewer row the container can run is declared")
+    bullet = text[start:text.index("\n- **", start)]
+
+    model = "openai/gpt-5.5"
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _roster(_pool_row("only-session", "codex=gpt-5.6-sol", kind="agent_session")))
+    projection = fixed_model_actor_snapshot(model, review_slots=2, review_effort="low", target={})
+    assert [row["route"]["target_id"] for row in projection["review_pool"]] == [model, model]
+    for key in projection["review_pool"][0]:  # subagent_id, route, effort, delivery
+        assert f"`{key}" in bullet, key
+    assert "`harness.fixed_model_actor.review_pool`" in bullet
+    assert "reviewer_slots" not in bullet and "`slot_id`" not in bullet and "degrades typed" not in bullet
+
+    # The derivation the bullet describes, on the adapter itself.
+    host = _roster(_pool_row("api-seat", "foreign/reviewer", effort="medium"),
+                   _pool_row("session-seat", "codex=gpt-5.6-sol", kind="agent_session"))
+    derived = json.loads(container_subagents_setting(model, host))["items"]
+    assert [(row["subagent_id"], row["route"]["target_id"]) for row in derived] == [
+        (BENCHMARK_SUBAGENT_ID, model), ("api-seat", "foreign/reviewer")]
+    none_left = json.loads(container_subagents_setting(model, _roster(
+        _pool_row("session-seat", "codex=gpt-5.6-sol", kind="agent_session"))))["items"]
+    assert [row["route"]["target_id"] for row in none_left] == [model, model] and _pool(json.dumps({"items": none_left}))
+    assert "`container_subagents_setting`" in bullet
+    assert "one packet seat on the\n  measured model when the host pool has no API seat at all" in bullet
+    assert "`extra.triad_rows_not_executable_in_container`" in bullet and "NOT forwarded" in bullet

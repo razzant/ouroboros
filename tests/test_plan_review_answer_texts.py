@@ -89,8 +89,9 @@ def test_disposition_schema_states_the_answer_route_and_escalation():
     assert "the quiz id while it is open (defer)" in items["items"]["properties"]["rationale"]["description"]
     tool = next(t for t in get_tools() if t.name == "plan_task")
     desc = tool.schema["description"]
-    assert "your answer re-judged by the slot that raised the finding" in desc
-    assert "asks again only the slots those items name" in desc and "subsequent paid delta" not in desc
+    assert "your answer re-judged by the originating slot" in desc
+    assert "See review_disposition for free answers, closure rules and paid re-asks" in desc
+    assert "subsequent paid delta" not in desc
     effort = tool.schema["parameters"]["properties"]["reviewer_effort"]["description"]
     assert "ignored when only collecting a recorded wave" in effort and "answering" not in effort
 

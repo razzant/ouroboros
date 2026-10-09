@@ -793,7 +793,7 @@ def subagent_schedule_preflight(
             ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
             parent_id=evt.get("parent_task_id"),
             root_task_id=str(evt.get("root_task_id") or evt.get("parent_task_id") or tid),
-            role=str(evt.get("role") or "researcher"), result_fields={},
+            role=str(evt.get("role") or "").strip(), result_fields={},
             detail=(
                 f"{label} not scheduled: the existing durable result for this task id "
                 "is unreadable, so its identity authority was preserved."

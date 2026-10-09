@@ -237,16 +237,15 @@ def _compose_subagent_text(
     task_constraint=None,
     delegation_budget=None,
 ) -> str:
-    parts = [
-        "[SUBAGENT ROLE]",
-        role or "researcher",
-        "",
+    role = str(role or "").strip()
+    parts = ["[SUBAGENT ROLE]", role, ""] if role else []
+    parts.extend([
         "[OBJECTIVE]",
         objective,
         "",
         "[EXPECTED_OUTPUT]",
         expected_output,
-    ]
+    ])
     if constraints:
         parts.extend(["", "[CONSTRAINTS]", constraints])
     if context:

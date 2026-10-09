@@ -18,6 +18,7 @@ import types
 
 import pytest
 
+from ouroboros import review_ledger
 from ouroboros.review_evidence import collect_review_evidence
 from ouroboros.review_state import (
     AdvisoryReviewState,
@@ -50,9 +51,10 @@ def _drive(tmp_path):
 
 
 def _fresh(drive, *repos, owner="task-a"):
+    """Rows a former install wrote (no writer remains): the coverage an edit invalidates."""
     state = AdvisoryReviewState()
     for repo in repos:
-        state.add_run(AdvisoryRunRecord(
+        state.advisory_runs.append(AdvisoryRunRecord(
             snapshot_hash=compute_snapshot_hash(repo), commit_message="ready", status="fresh",
             ts="2026-09-28T00:00:00+00:00", repo_key=make_repo_key(repo), task_id=owner,
         ))
@@ -157,7 +159,7 @@ def test_missing_identity_on_either_side_is_unknown_never_a_guess(tmp_path):
 
 
 def test_review_status_attributes_relative_to_the_caller_not_the_task_filter(tmp_path):
-    from ouroboros.tools.claude_advisory_review import _handle_review_status
+    from ouroboros.tools.preflight_review import _handle_review_status
 
     drive, shared = _drive(tmp_path), _checkout(tmp_path, "shared")
     _fresh(drive, shared)
@@ -170,21 +172,7 @@ def test_review_status_attributes_relative_to_the_caller_not_the_task_filter(tmp
     assert caller_a["stale_attribution"] == "this_task"
     assert caller_b["stale_from_edit"] is True and caller_a["stale_from_edit"] is True
     assert caller_b["stale_reason"] == caller_a["stale_reason"]
-    assert caller_b["repo_commit_ready"] == caller_a["repo_commit_ready"]
-
-
-def test_the_commit_gate_names_whose_edit_invalidated_the_advisory(tmp_path, monkeypatch):
-    from ouroboros.tools.commit_gate import _check_advisory_freshness
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    drive, shared = _drive(tmp_path), _checkout(tmp_path, "shared")
-    _fresh(drive, shared)
-    _edit(drive, shared, "task-a")
-
-    result = _check_advisory_freshness(_ctx(drive, shared, "task-b"), "commit")
-
-    assert result and "ADVISORY_PRE_REVIEW_REQUIRED" in result
-    assert "by another task (task-a); the shared checkout stays stale for every task on it" in result
+    assert caller_b["latest_advisory_status"] == caller_a["latest_advisory_status"]
 
 
 def test_text_surfaces_without_a_reader_identity_state_only_the_recorded_writer(tmp_path):
@@ -201,17 +189,7 @@ def test_text_surfaces_without_a_reader_identity_state_only_the_recorded_writer(
     assert "this task" not in context and "another task" not in context
 
 
-def test_a_failed_bypass_preflight_is_attributed_to_the_reviewing_task(tmp_path):
-    from ouroboros.tools.git_review_cycle import _mark_failed_bypass_advisory_stale
-
-    drive, shared = _drive(tmp_path), _checkout(tmp_path, "shared")
-    _mark_failed_bypass_advisory_stale(_ctx(drive, shared, "task-a"), "commit", None)
-
-    state = load_state(drive)
-    assert (state.last_stale_reason, state.last_stale_task_id) == ("tests_preflight_blocked", "task-a")
-
-
-def test_the_writer_round_trips_names_the_invalidation_and_clears_with_the_marker(tmp_path):
+def test_the_writer_round_trips_names_the_invalidation_and_clears_with_a_commit(tmp_path):
     drive, shared = _drive(tmp_path), _checkout(tmp_path, "shared")
     repo_key = make_repo_key(shared)
     _fresh(drive, shared)
@@ -222,17 +200,15 @@ def test_the_writer_round_trips_names_the_invalidation_and_clears_with_the_marke
     state = load_state(drive)
     assert state.last_stale_task_id == "task-a"
 
-    state.add_run(AdvisoryRunRecord(snapshot_hash="re-reviewed", commit_message="m", status="fresh",
-                                    ts="2026-09-28T01:00:00+00:00", repo_key=repo_key, task_id="task-b"))
-    assert (state.last_stale_from_edit_ts, state.last_stale_task_id) == ("", "")
     for commit_scope in (repo_key, None):
+        # mark_repo_stale only writes the marker while a row is still invalidatable.
+        state.advisory_runs.append(AdvisoryRunRecord(snapshot_hash=f"before-{commit_scope}", commit_message="m",
+                                                     status="fresh", ts="2026-09-28T01:00:00+00:00", repo_key=repo_key))
         state.mark_repo_stale(repo_key=repo_key, reason_ts="2026-09-28T02:00:00+00:00", reason="r",
                               stale_repo_key=repo_key, stale_task_id="task-a")
         assert state.last_stale_task_id == "task-a"
         state.on_successful_commit(repo_key=commit_scope)
-        assert state.last_stale_task_id == ""
-        state.add_run(AdvisoryRunRecord(snapshot_hash=f"after-{commit_scope}", commit_message="m",
-                                        status="fresh", ts="2026-09-28T03:00:00+00:00", repo_key=repo_key))
+        assert (state.last_stale_from_edit_ts, state.last_stale_task_id) == ("", "")
 
 
 def test_attribution_never_changes_freshness_obligations_or_debt(tmp_path):
@@ -265,8 +241,7 @@ def test_attribution_never_changes_freshness_obligations_or_debt(tmp_path):
             [(d.category, d.title, d.summary, list(d.evidence), d.fingerprint, d.status)
              for d in state.get_open_commit_readiness_debts(repo_key=repo_key)],
             [(o.item, o.status) for o in state.get_open_obligations(repo_key=repo_key)],
-            {key: projection[key] for key in ("stale_from_edit", "effective_status", "effective_is_fresh",
-                                              "repo_commit_ready")},
+            {key: projection[key] for key in ("stale_from_edit", "effective_status", "effective_is_fresh")},
         )
     assert observed["task-a"] == observed["task-b"] == observed[""]
     assert observed[""][0] == ["stale"] and observed[""][2], "the stale debt is still owed"
@@ -281,7 +256,6 @@ def test_registered_writer_persists_identity_without_changing_shared_freshness(t
 
     import ouroboros.safety as safety
     from ouroboros.review_evidence import format_review_evidence_for_prompt
-    from ouroboros.tools.commit_gate import _check_advisory_freshness
     from ouroboros.tools.registry import ToolRegistry
 
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
@@ -298,8 +272,6 @@ def test_registered_writer_persists_identity_without_changing_shared_freshness(t
     separate = tmp_path / "separate"
     subprocess.run(["git", "clone", "-q", str(shared), str(separate)], check=True)
     _fresh(drive, shared, separate)
-    reader = _ctx(drive, shared, "task-b")
-    assert _check_advisory_freshness(reader, "commit") is None
     tools = ToolRegistry(repo_dir=shared, drive_root=drive)
     tools._ctx.task_id = "task-a"
     # Exercise intentional shared-body edits via the supported Cyber override;
@@ -339,23 +311,118 @@ def test_registered_writer_persists_identity_without_changing_shared_freshness(t
     assert state.advisory_runs[0].status == "stale"
     panel = _panel(drive, shared, "task-b")
     assert panel["stale_attribution"] == "other_task" and panel["stale_reason"]
-    assert not panel["repo_commit_ready"]
+    # The marker is disclosed, never a hold: no advisory freshness gates a commit (3A),
+    # and no readiness verdict is projected next to the marker.
+    assert "repo_commit_ready" not in panel
     prompt = format_review_evidence_for_prompt(
         collect_review_evidence(drive, task_id="task-b", repo_dir=shared))
     assert '"stale_task_id": "task-a"' in prompt and '"stale_attribution": "other_task"' in prompt
-    refusal = _check_advisory_freshness(reader, "commit")
-    assert "ADVISORY_PRE_REVIEW_REQUIRED" in refusal and "another task (task-a)" in refusal
     other_checkout = _panel(drive, separate, "task-b")
-    assert other_checkout["repo_commit_ready"] and not other_checkout["stale_reason"]
+    assert not other_checkout["stale_reason"]
     assert all(other_checkout[key] == "" for key in _ATTRIBUTION_KEYS)
-    assert _check_advisory_freshness(_ctx(drive, separate, "task-b"), "commit") is None
 
-    # A fresh review of the changed bytes clears the marker and admits either task.
-    update_state(drive, lambda current: current.add_run(AdvisoryRunRecord(
-        snapshot_hash=compute_snapshot_hash(shared), commit_message="ready", status="fresh",
-        ts="2026-10-01T00:00:00+00:00", repo_key=make_repo_key(shared), task_id="task-b")))
+    # A successful commit of the checkout clears the marker for either task.
+    update_state(drive, lambda current: current.on_successful_commit(repo_key=make_repo_key(shared)))
     for task_id in ("task-a", "task-b"):
         panel = _panel(drive, shared, task_id)
-        assert panel["repo_commit_ready"] and not panel["stale_reason"]
+        assert not panel["stale_reason"]
         assert all(panel[key] == "" for key in _ATTRIBUTION_KEYS)
-        assert _check_advisory_freshness(_ctx(drive, shared, task_id), "commit") is None
+
+
+# --- the author's preflight look (decision 3A, D5-002) ----------------------------------
+#
+# The look is a ``surface=preflight`` review-ledger record, not a legacy advisory run;
+# CHECKLISTS "Finish all edits first" promises that a worktree mutation after it marks
+# the recorded preflight stale and ``review_status`` reports ``stale_from_edit`` and
+# its editor. Real repository, real ``review_change``; only the paid seats are golden.
+
+
+def _installed_body(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from tests import _contributor_packet_shared as shared
+    from tests.review_pool_rosters import set_review_pool
+
+    repo = Path(shared.init_installed_body(tmp_path)["repo"])
+    set_review_pool(monkeypatch, shared.golden_pool())
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    return repo
+
+
+def _look(ctx, monkeypatch) -> str:
+    """The author's early look at the live worktree: ``review_change(subject=worktree,
+    surface=preflight, reviewers=[one row])``, the record's id."""
+    import ouroboros.review_substrate as substrate
+    from ouroboros.tools.review_change import run_review_change
+    from tests import _contributor_packet_shared as shared
+
+    monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate([]))
+    result = run_review_change(ctx, root="system_repo", subject="worktree", surface="preflight",
+                               reviewers=["s1"], goal="An early look before the commit")
+    assert result["state"] == "settled", result
+    assert review_ledger.load_record(ctx.drive_root, result["record_id"])["surface"] == "preflight"
+    return result["record_id"]
+
+
+def _status(drive, repo, reader):
+    from ouroboros.tools.preflight_review import _handle_review_status
+
+    return json.loads(_handle_review_status(_ctx(drive, repo, reader)))
+
+
+def test_an_edit_after_the_preflight_look_marks_it_stale_and_names_the_editor(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext
+
+    repo, drive = _installed_body(tmp_path, monkeypatch), _drive(tmp_path)
+    (repo / "README.md").write_text("# Fixture project\n\nEdited before the look.\n", encoding="utf-8")
+    record_id = _look(ToolContext(repo_dir=repo, drive_root=drive, task_id="task-a"), monkeypatch)
+
+    before = _status(drive, repo, "task-b")
+    assert (before["stale_from_edit"], before["latest_advisory_status"]) == (False, "fresh")
+    assert before["preflight"]["record_id"] == record_id and before["preflight"]["reviewer"] == "s1"
+    assert before["stale_reason"] is None and all(before[key] == "" for key in _ATTRIBUTION_KEYS)
+
+    (repo / "README.md").write_text("# Fixture project\n\nEdited AFTER the look.\n", encoding="utf-8")
+    _edit_through_the_tool_path(drive, repo, "task-a", changed=["README.md"])
+
+    after = _status(drive, repo, "task-b")
+    assert (after["stale_from_edit"], after["latest_advisory_status"]) == (True, "stale")
+    assert "edit_text mutated the worktree" in after["stale_reason"] and after["stale_from_edit_ts"]
+    assert (after["stale_task_id"], after["stale_attribution"]) == ("task-a", "other_task")
+    assert after["preflight"]["record_id"] == record_id and after["preflight"]["marked"] is True
+    assert _status(drive, repo, "task-a")["stale_attribution"] == "this_task"
+    # As for runs: the marker names the mutation that invalidated the look, not the latest editor.
+    _edit_through_the_tool_path(drive, repo, "task-b", changed=["README.md"])
+    assert _status(drive, repo, "task-b")["stale_task_id"] == "task-a"
+
+
+def test_a_marker_older_than_the_look_does_not_stale_it_and_an_unrecorded_move_still_shows(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext
+
+    repo, drive = _installed_body(tmp_path, monkeypatch), _drive(tmp_path)
+    (repo / "README.md").write_text("# Fixture project\n\nEdited before the look.\n", encoding="utf-8")
+    # A legacy marker from before the look (a state file with history) is not about it.
+    update_state(drive, lambda state: state.mark_look_stale(
+        "2026-01-01T00:00:00+00:00", reason_ts="2026-01-01T00:00:01+00:00", reason="an old edit",
+        stale_repo_key=make_repo_key(repo), stale_task_id="task-z"))
+    record_id = _look(ToolContext(repo_dir=repo, drive_root=drive, task_id="task-a"), monkeypatch)
+
+    fresh = _status(drive, repo, "task-a")
+    assert (fresh["stale_from_edit"], fresh["latest_advisory_status"]) == (False, "fresh")
+    assert fresh["preflight"]["record_id"] == record_id and fresh["stale_task_id"] == ""
+
+    # A move no tool recorded (an editor outside Ouroboros): the tree speaks, the editor is unknown.
+    (repo / "README.md").write_text("# Fixture project\n\nMoved by hand.\n", encoding="utf-8")
+    moved = _status(drive, repo, "task-a")
+    assert (moved["stale_from_edit"], moved["latest_advisory_status"]) == (True, "stale")
+    assert moved["stale_from_edit_ts"] == "now (worktree moved)"
+    assert moved["stale_reason"] == "The worktree no longer matches the tree the preflight read."
+    assert moved["preflight"] == {**fresh["preflight"], "tree_moved": True, "stale_from_edit": True}
+    assert all(moved[key] == "" for key in _ATTRIBUTION_KEYS)
+
+
+def _edit_through_the_tool_path(drive, repo, task_id, *, changed):
+    from ouroboros.tools.commit_gate import _invalidate_advisory
+
+    _invalidate_advisory(_ctx(drive, repo, task_id), changed_paths=changed, source_tool="edit_text")

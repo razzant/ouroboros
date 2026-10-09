@@ -279,30 +279,22 @@ def get_tools():
             schema={
                 "name": "plan_task",
                 "description": (
-                    "Multi-model design review of an INTENTION before the work starts — code, "
-                    "research, a deliverable, a computer-use flow, or an action in the world. "
-                    "Submit goal + spec (what/how-checked/deferred) + plan prose; independent "
-                    "reviewers return typed findings against the spec (blocking findings must name "
-                    "the spec element they break); the host aggregates: GREEN = no blocking finding and "
-                    "no open need_evidence (notes never change the verdict); need_evidence closes by "
-                    "review_disposition at no cost; under advisory enforcement a reject with its rationale "
-                    "also closes a blocking finding below quorum; REVISE_PLAN needs "
-                    "a changed spec, or your answer re-judged by the slot that raised the finding. "
-                    "Cycles are bounded by the owner's Max review cycles; an unchanged "
-                    "envelope replays the recorded result for free (a locator a reviewer asked for "
-                    "with need_evidence is attached by the host next time and makes the envelope "
-                    "new; on an OPEN review a different reviewer_effort re-dispatches the panel, a CLOSED review stands for its envelope); "
-                    "the unchanged envelope together with review_disposition items records the answers and asks again "
-                    "only the slots those items name (one paid cycle; the others keep their answers at $0), while a "
-                    "changed envelope with items is reviewed by every slot. Under blocking enforcement an "
-                    "open review holds implementation. An explicit review_disposition.author_action=stop "
-                    "permits unfinished finalization only. Advisory author_action=finish may select a corrected "
-                    "goal+plan+spec in the same call without another panel, citing the earlier review_fingerprint "
-                    "and author_disposition rationale. Under advisory you may proceed with the "
-                    "review open; it stays typed in the task's state and your own answer states it. "
-                    "Declare evidence reviewers need; "
-                    "affected_paths is required — the files the work will change ([] when none) — "
-                    "and is what gives a self-modification the constitutional pack."
+                    "Multi-model design review before the work starts: code, research, a deliverable, "
+                    "computer use, or an action in the world. Submit goal + spec + plan prose. "
+                    "Independent reviewers return typed findings; blocking findings must name the spec "
+                    "element they break. The host aggregates: GREEN means no blocking finding and no open "
+                    "need_evidence; notes never change the verdict. REVISE_PLAN needs a changed spec "
+                    "or your answer re-judged by the originating slot. See review_disposition for free "
+                    "answers, closure rules and paid re-asks. Paid cycles obey the owner's Max review "
+                    "cycles. An unchanged envelope replays free; host-attached need_evidence makes it "
+                    "new, and changed reviewer_effort re-dispatches an OPEN panel (a CLOSED review "
+                    "stands for its envelope). Blocking holds implementation while review is open; "
+                    "author_action=stop permits unfinished finalization only. Advisory author_action=finish "
+                    "may select corrected goal+plan+spec without another panel, citing the earlier "
+                    "review_fingerprint and author_disposition rationale. Advisory may proceed with "
+                    "review open: it stays typed in task state and your own answer states it. Declare "
+                    "needed evidence and affected_paths ([] for no changed files); the latter selects "
+                    "the constitutional pack for self-modification."
                 ),
                 "parameters": {
                     "type": "object",
@@ -678,8 +670,8 @@ def _plan_slots_for_wave(ctx: ToolContext, slots_fn: Any, existing: dict, resume
 
     if not resume_in_flight and (err := reviewer_slot_config_error()):
         return [], _plan_unavailable(
-            ctx, f"ERROR: Invalid reviewer-slot configuration blocks plan review — {err}. "
-            "Fix Review lanes on the Agents tab in Settings.", "reviewer_slot_config_invalid")
+            ctx, f"ERROR: Invalid review pool configuration blocks plan review — {err}. "
+            "Fix the Reviewer rows on the Agents tab in Settings.", "reviewer_slot_config_invalid")
     if resume_in_flight:
         from ouroboros.tools.plan_review_artifacts import frozen_plan_slots
         try:
@@ -806,8 +798,8 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
         return slot_error
     if not slots:
         return _plan_unavailable(
-            ctx, "ERROR: No review models configured. Configure Review lanes "
-            "(OUROBOROS_REVIEWER_SLOTS) on the Agents tab in Settings.",
+            ctx, "ERROR: No review models configured. Mark at least one catalog row "
+            "Reviewer (OUROBOROS_SUBAGENTS) on the Agents tab in Settings.",
             "review_models_unconfigured")
     configured_slots = list(slots)
     resume = _plan_in_flight_resume_inputs(

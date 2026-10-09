@@ -320,6 +320,7 @@ class AttemptRequest:
     # None when the candidate carries none. An identity, never a row field.
     candidate_clock_free_sha256: Optional[str] = None
     effort: Optional[Dict[str, Any]] = None
+    allow_live_fetch: bool = True  # False only for a price display: cached tariffs, never a fetch
 @dataclass(frozen=True)
 class AttemptReservation:
     attempt_id: str
@@ -630,7 +631,7 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
         cache_usage={"cache_write_tokens": cache_write_tokens,
                      "cached_tokens": cached_tokens,
                      "prompt_cache_ttl": prompt_cache_ttl},
-        allow_live_fetch=True,
+        allow_live_fetch=request.allow_live_fetch,
         provider=request.provider,
         **({"processing_mode": request.submitted_processing_mode}
            if request.submitted_processing_mode else {}),

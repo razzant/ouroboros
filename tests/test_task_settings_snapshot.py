@@ -48,7 +48,9 @@ def isolated_runtime(tmp_path, monkeypatch):
 
 
 def document(label, *, safety="full", enforcement="blocking"):
-    row = {"slot_id": "critic", "route": {"kind": "api_chat", "target_id": f"openai::{label}"},
+    # The review pool: one marked catalog row whose model and effort name the document.
+    row = {"subagent_id": "critic", "recommended_use": "Reviews.", "review_eligible": True,
+           "route": {"kind": "api_model", "target_id": f"openai::{label}"},
            "effort": "high" if label == "old" else "low"}
     return {
         "OUROBOROS_MODEL": f"openai::{label}",
@@ -60,8 +62,7 @@ def document(label, *, safety="full", enforcement="blocking"):
         "OUROBOROS_MODEL_CONTEXT_WINDOWS": json.dumps({"main": 200000 if label == "old" else 400000}),
         "OUROBOROS_PROCESSING_PREFERENCE": "fast" if label == "old" else "economy",
         "OUROBOROS_EFFORT_TASK": "high" if label == "old" else "low",
-        "OUROBOROS_REVIEWER_SLOTS": json.dumps({"triad": [row], "scope": [dict(row, slot_id="scope")],
-                                                "advisory": {"enabled": False}}),
+        "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [row]}),
         "OUROBOROS_SAFETY_MODE": safety,
         "OUROBOROS_REVIEW_ENFORCEMENT": enforcement,
         "OUROBOROS_CONTEXT_MODE": "max" if label == "old" else "low",
@@ -85,12 +86,12 @@ def observe():
     from ouroboros.context_fit import _context_route
     from ouroboros.llm import LLMClient
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, model_role_option
-    from ouroboros.reviewer_slot_config import commit_triad_rows
+    from ouroboros.reviewer_slot_config import review_pool_rows
     from ouroboros.review_cycles import review_max_cycles
     from ouroboros.usage_accounting import current_usage_scope
 
     client = LLMClient()
-    row = commit_triad_rows()[0]
+    row = review_pool_rows()[0]
     route, settings = _context_route({})
     return {
         "model": client.default_model(), "light": config.get_light_model(),
@@ -417,16 +418,16 @@ def test_real_immediate_consumers_remain_live():
 
 
 def test_private_projection_uses_incoming_roster_and_keeps_empty_env(monkeypatch):
-    from ouroboros.reviewer_slot_config import commit_triad_rows
+    """A task's frozen settings carry its catalog, so the review pool a task sees is
+    the pool of ITS document even after the owner saves another; an empty string
+    the owner saved stays an empty string in the projection."""
+    from ouroboros.reviewer_slot_config import review_pool_rows
 
     def values(label):
         result = document(label)
         result["OUROBOROS_SUBAGENTS"] = json.dumps({"enabled": True, "items": [{
-            "subagent_id": "actor", "name": "Actor", "recommended_use": "Review",
+            "subagent_id": "actor", "name": "Actor", "recommended_use": "Review", "review_eligible": True,
             "route": {"kind": "api_model", "target_id": f"openai::{label}"}, "effort": "high"}]})
-        result["OUROBOROS_REVIEWER_SLOTS"] = json.dumps({
-            "triad": [{"slot_id": "critic", "subagent_id": "actor"}],
-            "scope": [{"slot_id": "scope", "subagent_id": "actor"}]})
         return result
 
     save_owner(values("old"))
@@ -436,11 +437,11 @@ def test_private_projection_uses_incoming_roster_and_keeps_empty_env(monkeypatch
         assert config.runtime_setting("OUROBOROS_RETURN_REASONING", "missing") == ""
         save_owner(values("new"))
         new = subagent_runtime.apply_task_start_settings()
-        assert commit_triad_rows()[0].target_id == "openai::old"
+        assert [row.target_id for row in review_pool_rows()] == ["openai::old"]
         with config.task_settings_scope(new):
-            assert commit_triad_rows()[0].target_id == "openai::new"
-            assert config.runtime_setting("OUROBOROS_REVIEW_MODELS") == "openai::new"
-        assert commit_triad_rows()[0].target_id == "openai::old"
+            assert [row.target_id for row in review_pool_rows()] == ["openai::new"]
+            assert json.loads(config.runtime_setting("OUROBOROS_SUBAGENTS"))["items"][0]["route"]["target_id"] == "openai::new"
+        assert [row.target_id for row in review_pool_rows()] == ["openai::old"]
 
 
 def test_plugin_settings_reader_keeps_grants_and_uses_task_values(tmp_path):

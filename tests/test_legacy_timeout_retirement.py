@@ -107,13 +107,15 @@ def test_status_no_longer_renders_a_legacy_timeout_line():
 
 
 def test_no_runtime_or_settings_surface_still_names_either_key():
-    """The grep-class assertion. The N−1 audit fixture is the ONE file that
-    must keep them: it is a frozen byte-copy of a v6.113.4 settings document,
-    and the RC auditor's retired-setting finding is proven against it."""
+    """The grep-class assertion. The N−1 and N−2 audit fixtures are the files
+    that must keep them: frozen byte-copies of real v6.113.4 / v6.87.5 settings
+    documents (the RC auditor's retired-setting finding is proven against the
+    first; the review-pool migration reads the second as written)."""
     allowed = {
         "ouroboros/settings_defaults.py",       # the RETIRED_SETTING_KEYS entry
         "scripts/rc_audit.py",                  # RETIRED_IN_THIS_ABI
         "tests/fixtures/nminus1/settings_v6.113.4.json",
+        "tests/fixtures/nminus1/settings_v6.87.5.json",
         "tests/test_legacy_timeout_retirement.py",
         "tests/test_rc_audit_fixture_suite.py",
         "tests/test_settings_honesty.py",

@@ -1,8 +1,11 @@
 """Deep self-review of the whole Ouroboros system against BIBLE.md.
 
-The review runs on the configured ``deep_review`` reviewer row
-(``reviewer_slot_config.deep_review_slot``). Every row DELIVERS BY RETRIEVAL —
-the reviewer reads the repository itself — in one of two shapes:
+``/review`` is ``review_change(subject=system, surface=system)``
+(``tools/review_change.run_system_review``): the review runs on the ONE row the
+call names — any enabled catalog row — or, by default, the direct Main row
+(``main_review_row``), and its report is that record's answer. Every row
+DELIVERS BY RETRIEVAL — the reviewer reads the repository itself — in one of
+two shapes:
 
 * an ``api_chat`` row (a bare route or a configured-subagent reference) is a
   NATIVE inspection episode — the reviewer reads the repository through the
@@ -12,7 +15,7 @@ the reviewer reads the repository itself — in one of two shapes:
 * an ``agent_session`` row is a delegated read-only session — the same task,
   reads not host-observed (disclosed as ``unobserved``).
 
-Both deliveries ride the executor seam exactly like the advisory: the product
+Both deliveries ride the shared review executor seam: the product
 is free markdown (``triad_review`` shape ``report``), a bound landing before
 the final answer delivers the collected draft marked INCOMPLETE, and the host
 prepends a provenance header naming the delivery, model, rounds, receipts,
@@ -26,12 +29,14 @@ import json
 import pathlib
 import posixpath
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 from ouroboros.tools.review_helpers import (  # noqa: E402
     _MAX_FULL_REPO_FILE_BYTES,
+    author_questions_block,
     load_governance_doc,
 )
 from ouroboros.shell_parse import is_absolute_path_text  # noqa: E402
@@ -41,7 +46,6 @@ from ouroboros.reviewer_slot_config import (  # noqa: E402
     ROUTE_KIND_API,
     ROUTE_KIND_SESSION,
     ConfiguredReviewerSlot,
-    deep_review_slot,
     row_effort,
 )
 from ouroboros.usage_accounting import BudgetExceeded  # noqa: E402
@@ -111,6 +115,40 @@ _MANDATORY_READS = ("BIBLE.md",)
 # session root); a read under the data plane never satisfies a repository read.
 _REPO_ROOTS = frozenset({"", "active_workspace", "system_repo"})
 
+# The standing goal of a bare ``/review``: the one spelling the request, the ledger
+# record and the reviewer's brief share.
+STANDING_GOAL = "Deep self-review of the whole Ouroboros system against BIBLE.md."
+
+
+@dataclass(frozen=True)
+class SystemReviewAsk:
+    """What the caller asks of this self-review BESIDE its standing questionnaire —
+    ``review_change(subject=system, surface=system)``'s ``goal``, ``author_questions``
+    and ``reason``. ONE typed object reaches the brief builder and the ledger record,
+    so what the reviewer is asked and what the record says it was asked cannot
+    diverge: an empty goal is the standing goal; the questions are put to the
+    reviewer verbatim, after its own questionnaire; the reason names why this row
+    was chosen and is recorded with the panel."""
+
+    goal: str = ""
+    author_questions: Tuple[str, ...] = ()
+    reason: str = ""
+
+    @property
+    def effective_goal(self) -> str:
+        return self.goal.strip() or STANDING_GOAL
+
+    def brief_section(self) -> str:
+        """The caller's addition to the task text: its goal when it set one, then its
+        questions numbered as asked; ``""`` when the call asked nothing of its own."""
+        parts = []
+        if self.goal.strip():
+            parts.append(f"The caller's goal for this review (beside the standing review above): {self.goal.strip()}")
+        questions = author_questions_block(self.author_questions, note="after your own questionnaire")
+        if questions:
+            parts.append(questions)
+        return "\n\n".join(parts)
+
 
 # ---------------------------------------------------------------------------
 # Availability — route-aware on the configured row.
@@ -173,20 +211,36 @@ def _session_route_reason(row: ConfiguredReviewerSlot) -> str:
     return str(unavailable or "")
 
 
+def main_review_row() -> ConfiguredReviewerSlot:
+    """The direct Main row — ``OUROBOROS_MODEL``, its local flag and Main's pinned
+    account (``OUROBOROS_MODEL_ACCOUNTS["main"]``): ``/review``'s executor when the
+    call names none (decision 3A) and the deep self-review default.
+
+    The pin rides as the row's credential profile because the executor sends under
+    ``model_role=reviewer:main`` with ``model_account_override=<row profile>``, and an
+    EMPTY override is Auto, never a lookup of Main's own role: without it a pinned
+    Main would review on whatever account the engine picked. An unpinned Main stays
+    Auto; an invalid pin document raises here as it does for Main's own calls.
+    """
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
+    from ouroboros.subagents import _lane_model, _use_local_for_lane
+
+    model = _lane_model("main")
+    return ConfiguredReviewerSlot(slot_id="main", kind=ROUTE_KIND_API, target_id=model,
+                                  use_local=True if _use_local_for_lane("main", model) else None,
+                                  profile_id=str(model_role_option(MODEL_ACCOUNTS_KEY, "main") or ""))
+
+
 def deep_review_route(row: Optional[ConfiguredReviewerSlot] = None) -> Tuple[str, Optional[str]]:
-    """``(unavailable_reason, identity)`` for the deep-review row.
+    """``(unavailable_reason, identity)`` for the deep-review row (default: Main).
 
     '' means available; ``identity`` is then what the review runs on — the api
     row's sendable model (``_api_route_model``, the direct-OpenAI resolution
     included) or the session row's ``harness[=model]`` target. Availability is
     ROUTE-AWARE: an api row needs its routed model's credentials, a session row
-    a healthy delegated route. A malformed reviewer-slot setting is the typed
-    reason, never a fallback.
+    a healthy delegated route.
     """
-    try:
-        row = row or deep_review_slot()
-    except ValueError as exc:
-        return str(exc), None
+    row = row or main_review_row()
     if row.kind not in (ROUTE_KIND_API, ROUTE_KIND_SESSION):
         return f"deep_review row has an unknown route kind {row.kind!r}", None
     if not str(row.target_id or "").strip():
@@ -200,9 +254,8 @@ def deep_review_route(row: Optional[ConfiguredReviewerSlot] = None) -> Tuple[str
 def deep_review_unavailable_text(reason: str) -> str:
     """The ONE unavailable message (prefix classified by ``outcomes``)."""
     return (
-        f"❌ Deep self-review unavailable: {reason}. Configure the deep-review row in "
-        "Settings → Agents → Review lanes (or OUROBOROS_MODEL_DEEP_SELF_REVIEW) with a "
-        "route this install can pay."
+        f"❌ Deep self-review unavailable: {reason}. Run /review on a row this install can pay: "
+        "any enabled Settings → Agents row, or the Main model (the default)."
     )
 
 
@@ -437,9 +490,11 @@ def _failed(text: str, *, reason_code: str, usage: Optional[Dict[str, Any]] = No
 def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
                      usable_window_tokens: int = 0,
                      required_sources: Optional[list] = None,
-                     required_sources_ref: Optional[dict] = None) -> Tuple[str, Dict[str, Any]]:
-    """The route-owned task text for a deep-review row: role + method, the
-    governance tiers this surface receives, and the memory whitelist inline
+                     required_sources_ref: Optional[dict] = None,
+                     ask: Optional[SystemReviewAsk] = None) -> Tuple[str, Dict[str, Any]]:
+    """The route-owned task text for a deep-review row: role + method, the caller's
+    own goal and questions when it set any (``ask``, after the standing questionnaire),
+    the governance tiers this surface receives, and the memory whitelist inline
     byte-exact.
 
     The tiers come from the ONE SSOT every review surface asks
@@ -494,6 +549,7 @@ def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
     sources = with_inline_sources(sources, governance.inline_whole_documents)
     parts = [
         _ROLE_PROMPT + _RETRIEVING_METHOD.format(bible_chars=len(bible)),
+        (ask or SystemReviewAsk()).brief_section(),
         governance.stable_inline,
         governance.selected_inline,
         governance.navigation,
@@ -546,11 +602,13 @@ def _run_retrieving_review(
     model: str = "",
     required_sources: Optional[list] = None,
     required_sources_ref: Optional[dict] = None,
+    ask: Optional[SystemReviewAsk] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    """The row's delivery (native episode or delegated session), exactly like
-    the advisory: hand-built request, slot and assignment; the product is the
+    """The row's delivery (native episode or delegated session): hand-built
+    request, slot and assignment; the product is the
     report text. ``model`` is the sendable spelling ``deep_review_route``
-    resolved for the row (its own target when the caller names none)."""
+    resolved for the row (its own target when the caller names none); ``ask`` is
+    the caller's goal and questions, in the request's goal and the task text."""
     from dataclasses import asdict
 
     from ouroboros.config import get_finalization_grace_sec, get_task_abs_ceiling_sec, operation_window_sec
@@ -568,18 +626,20 @@ def _run_retrieving_review(
     # `utils.estimate_tokens` scale the tiering budgets with (4 chars a token).
     # A session row's harness model carries no evidenced window, so it resolves
     # the owner ceiling — the one bound that holds for every route.
+    ask = ask or SystemReviewAsk()
     task_text, task_facts = _retrieving_task(
         repo_dir, drive_root, required_sources=required_sources, required_sources_ref=required_sources_ref,
         usable_window_tokens=review_native_transcript_bound(
             sendable, output_reserve=_DEEP_MAX_OUTPUT_TOKENS, use_local=row.use_local,
             model_role=f"reviewer:{row.slot_id}",
-            credential_profile_id=row.profile_id or None) // 4)
+            credential_profile_id=row.profile_id or None) // 4,
+        ask=ask)
     policy = {"output_contract": _REPORT_CONTRACT, "native_data_root": str(drive_root)}
     policy.update(native_required_sources=task_facts["required_sources"],
                   native_required_sources_ref=required_sources_ref or {})
     request = ReviewRequest(
         surface="deep_self_review",
-        goal="Deep self-review of the whole Ouroboros system against BIBLE.md.",
+        goal=ask.effective_goal,
         task_id=task_id, call_type="deep_self_review",
         max_tokens=_DEEP_MAX_OUTPUT_TOKENS, no_proxy=True,
         session_root=str(repo_dir), session_task=task_text,
@@ -605,7 +665,7 @@ def _run_retrieving_review(
     from ouroboros.review_substrate import ReviewSlot
 
     slot = ReviewSlot(
-        slot_id=row.slot_id, model=sendable, effort=row_effort(row, "deep_self_review"),
+        slot_id=row.slot_id, model=sendable, effort=row_effort(row),
         timeout_sec=window, max_tokens=_DEEP_MAX_OUTPUT_TOKENS,
         role_hint="deep self-reviewer",
         use_local=row.use_local if row.use_local is not None else review_model_uses_local(sendable),
@@ -621,8 +681,7 @@ def _run_retrieving_review(
         executor = _review_route_executor(assignment, llm=llm)
     else:
         # An api deep_review row IS the bounded inspection episode, whether or
-        # not a configured subagent binds it — the same direct binding the
-        # advisory api row uses (`claude_advisory_review`), so a bare route
+        # not a configured subagent binds it, so a bare route (Main included)
         # never falls back to a one-shot chat with nothing to read.
         from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 
@@ -758,8 +817,9 @@ def run_deep_self_review(
     slot: Optional[ConfiguredReviewerSlot] = None,
     required_sources: Optional[list] = None,
     required_sources_ref: Optional[dict] = None,
+    ask: Optional[SystemReviewAsk] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Execute the deep self-review on the configured row.
+    """Execute the deep self-review on ``slot`` (default: the direct Main row).
 
     Returns ``(text, usage)``. A delivered report carries the host provenance
     header; every ordinary review failure returns its text with typed usage
@@ -771,16 +831,15 @@ def run_deep_self_review(
     exception that propagates is ``BudgetExceeded`` — the paid ledger's
     refusal is budget vocabulary for the agent's budget-pause rail, not a
     review error.
-    ``slot`` overrides the configured row (tests, callers that already resolved it).
+    ``slot`` is the row ``/review`` chose (``review_change.system_review_row``);
+    ``ask`` is what the call asked beside the standing questionnaire
+    (``SystemReviewAsk``: goal, author questions, reason).
     ``required_sources`` and its exact source handle may come from the caller's
     immutable review assembler. Without one, coverage names only the
     constitution actually delivered inline, never an inferred whole-tree scope.
     """
     try:
-        try:
-            row = slot or deep_review_slot()
-        except ValueError as exc:
-            return _failed(deep_review_unavailable_text(str(exc)), reason_code="deep_self_review_unavailable")
+        row = slot or main_review_row()
         from ouroboros.review_records import apply_review_model_override
         from ouroboros.model_wait import current_model_wait
         waiter = current_model_wait()
@@ -794,7 +853,7 @@ def run_deep_self_review(
         return _run_retrieving_review(
             repo_dir, drive_root, llm, emit_progress, row, task_id=task_id, deadline_at=deadline_at,
             model=row.target_id if row.is_session else str(model or row.target_id),
-            required_sources=required_sources, required_sources_ref=required_sources_ref,
+            required_sources=required_sources, required_sources_ref=required_sources_ref, ask=ask,
         )
     except BudgetExceeded:
         # The paid ledger's refusal is BUDGET vocabulary, not a review error:

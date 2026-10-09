@@ -1,0 +1,2 @@
+201
+The Available subagents card states that a row which will not run (Unavailable, No account, Limit reached) prints its status sentence as a visible line under the head (rowStatusReason), because the status title is a desktop tooltip and a phone or the Telegram mini app has no hover.

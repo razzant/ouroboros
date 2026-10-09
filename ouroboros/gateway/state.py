@@ -282,13 +282,13 @@ def _epoch_or_zero(value: Any) -> float:
         return 0.0
 
 
-# Exact root/task path -> stat-keyed finalizing and question display facts.
+# Exact root/task path -> stat-keyed outcome, finalizing and question display facts.
 _FINALIZING_MEMO: Dict[tuple, tuple] = {}
 _FINALIZING_MEMO_MAX = 64
 
 
 def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
-    """One stat-keyed read serves finalizing and the current required question."""
+    """One stat-keyed read serves outcome, finalizing, retry and question facts."""
     memo_id = (str(pathlib.Path(drive_root).resolve()), task_id)
     try:
         from ouroboros.task_results import task_results_dir
@@ -316,7 +316,18 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     wait = data.get("owner_wait") if isinstance(data.get("owner_wait"), dict) else {}
     quizzes = data.get("owner_quiz") if isinstance(data.get("owner_quiz"), dict) else {}
     quiz = quizzes.get(str(wait.get("quiz_id") or ""), {})
+    # Outcome knowledge does not end live activity: a failed answer can still
+    # have open post-task work. Carry the same canonical axes as history/detail.
+    from ouroboros.outcomes import normalize_outcome_axes
+
+    display = {key: data[key] for key in ("status", "reason_code", "timeout_retry_from", "original_task_id")
+               if key in data}
+    if data.get("status") or data.get("outcome_axes"):
+        display["outcome_axes"] = normalize_outcome_axes(data)
+    if synthesis:
+        display["root_phase_checkpoint"] = {"post_task_synthesis": synthesis}
     facts = {"finalizing": post_task_synthesis_is_open(synthesis), "late_phase": synthesis,
+             "display": display,
              # An answered root's census row (D10) carries only its own routing identity.
              "row": {key: data[key] for key in ("chat_id", "project_id", "_is_direct_chat", "queued_at")
                      if key in data},
@@ -455,6 +466,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                    if phase in {"budget_paused", "budget_pausing"} else {}),
                 "started_at": started_at,
                 "task_attempt": int(row.get("_attempt") or 1),
+                **{key: row[key] for key in ("timeout_retry_from", "original_task_id") if row.get(key)},
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
@@ -544,6 +556,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     for activity in activities:
         try:
             facts = _task_activity_facts(drive_root, str(activity.get("activity_id") or ""))
+            activity.update(facts.get("display") or {})
             wait = facts.get("owner_wait", {})
             if not wait.get("quiz_id"):
                 continue

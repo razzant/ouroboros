@@ -174,8 +174,8 @@ def test_the_stand_runs_with_the_operator_flag_set_on_a_clean_seed_of_the_checko
 # devtools/e2e_live/scenarios.py: the task POST (60); LaneContext.wait_task's
 # grace past the deadline (300), the cancel POST after a timeout
 # (IsolatedServer.cancel_task, 300: it answers once the task is torn down) and
-# the wait after it (300), the durable-row wait (180); the two event waits of
-# run_sm1 (scope_review_complete and llm_usage, 90 each); the palette check's
+# the wait after it (300), the durable-row wait (180); run_sm1's wait for the
+# wave's review-ledger record and its llm_usage event wait (90 each); the palette check's
 # two page loads after the restart (goto and ready selector, 60 + 60 each,
 # devtools/e2e_live/ui_probe.py).
 # devtools/benchmarks/common/server_runner.py: the health wait wait_for_absorb

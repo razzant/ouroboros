@@ -41,6 +41,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # non-blocking skip gate leaves headroom for default 1M-context reviewer models.
 REVIEW_PROMPT_TOKEN_BUDGET = 920_000
 
+# The empty review pool is a configured fact, the one the ``## Review`` context block
+# states as ``pool_empty`` and the settings panel promises as "reviews will not run and
+# will report not performed": the commit gate says the same, typed ``pool_empty``, and
+# never blames a provider key for it.
+REVIEW_POOL_EMPTY_REASON = "pool_empty"
+REVIEW_POOL_EMPTY_SENTENCE = (
+    "the review pool is empty (pool_empty): no enabled catalog row is marked Reviewer, so no review "
+    "wave ran and the review is NOT_PERFORMED. Mark a row as Reviewer in Settings → Agents (or run "
+    "the wizard), then retry the commit."
+)
+
 
 def review_enforcement_blocks(enforcement: str | None = None) -> bool:
     """Project action authority without changing configured policy or review facts."""
@@ -98,6 +109,51 @@ def calibrated_input_token_limit(
         int((context_window - output_reserve) / max(1.0, density)),
         context_window - output_reserve - tokenizer_margin,
     )
+
+
+def review_row_call_usd(row: Any, *, allow_live_fetch: bool = True) -> Optional[float]:
+    """The price of ONE full call of a review row: the number Settings → Agents shows for a
+    catalog row and ``## Review`` for its pool seat. ``row`` is a pool slot, or a mapping with
+    its ``slot_id``, ``model``, ``profile_id`` and ``processing_preference``.
+
+    A full call is the row's calibrated input cap inside its reviewer window (the fit ladder's
+    bound, at most ``REVIEW_PROMPT_TOKEN_BUDGET``) plus the review output reservation, priced
+    by the reservation math a review wave is admitted with. A packet reviewer makes one such
+    call per review; a reading reviewer makes several, each reserved as it is sent, so this
+    never bounds a whole review. ``None`` is unknown, never zero; a local route is the known
+    zero (``pricing.estimate_cost_optional`` prices route ``local`` at ``0.0``).
+
+    ``allow_live_fetch=False`` keeps the whole measurement in this process: the tariff AND
+    the reviewer window are read as already held (an unevidenced window prices at the full
+    window), so a context-assembly reader never waits on a provider catalog."""
+    get = row.get if isinstance(row, dict) else lambda key, default=None: getattr(row, key, default)
+    model = str(get("model", "") or "")
+    if not model:
+        return None
+    try:
+        from ouroboros.provider_models import review_model_uses_local
+
+        use_local = get("use_local", None)
+        if review_model_uses_local(model) if use_local is None else use_local:
+            return 0.0
+        from ouroboros.reviewer_window import reviewer_context_window, reviewer_window_binding, window_scaled_reserves
+        from ouroboros.tools.review_multi_model import _review_output_budget
+        from ouroboros.usage_admission import review_wave_admission
+
+        output = _review_output_budget()
+        window = reviewer_context_window(model, allow_fetch=allow_live_fetch, **reviewer_window_binding(row))
+        reserve, margin = window_scaled_reserves(window, output_reserve=output, tokenizer_margin=50_000)
+        prompt = max(0, calibrated_input_token_limit(
+            model, context_window=window, output_reserve=reserve, tokenizer_margin=margin))
+        bounds = review_wave_admission(
+            root_task_id="review-row-price", models=[model], prompt_chars=prompt * 4, max_completion_tokens=output,
+            remaining_usd_override=0.0, processing_preferences=str(get("processing_preference", "") or ""),
+            allow_live_fetch=allow_live_fetch,
+        ).get("slot_bounds") or [None]
+    except Exception:
+        logger.debug("review row price estimate failed open", exc_info=True)
+        return None
+    return bounds[0]
 
 
 SKILL_HOST_CONTEXT_FILES = (
@@ -239,7 +295,7 @@ def review_wave_budget_gate(
     Returns admission data when the wave must be declined, else None. Every paid
     review wave is admitted here as a whole — skill/plan/acceptance reviewers
     and, since the owner decision of 2026-09-05, the P3 commit gate
-    (``surface="commit_gate"``: scope seats first, then the triad, each seat
+    (``surface="commit_gate"``: every paid seat of the one wave, each seat
     priced with its own pack size and output reservation — ``prompt_chars`` /
     ``max_completion_tokens`` take one value per slot, and ``categories`` /
     ``slot_ids`` name the usage scope each seat will SEND under, so its bound
@@ -457,56 +513,6 @@ def load_governance_doc(
 # ---------------------------------------------------------------------------
 
 
-# Anti-thrashing prompt rules — shared across triad, scope, and advisory reviewers.
-
-
-# Shared anti-thrashing prompt scaffolding (DRY — used by triad, scope, skill
-# reviewers); per-reviewer history bodies stay local because record shapes differ.
-
-
-def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "", slot_id: str = "") -> dict:
-    parsed_items = list(getattr(scope_result, "parsed_items", None) or [])
-    critical_findings = list(getattr(scope_result, "critical_findings", None) or [])
-    advisory_findings = list(getattr(scope_result, "advisory_findings", None) or [])
-    if not parsed_items:
-        parsed_items = critical_findings + advisory_findings
-    status = getattr(scope_result, "status", "responded")
-    # Surface the failure text on non-responded actors: the provider error
-    # (e.g. a deterministic 400 prompt-too-long) lives in block_message, and
-    # dropping it here previously forced operators to dig observability blobs
-    # to learn WHY a scope slot recorded status=error with empty raw_text.
-    error_text = ""
-    if status not in ("responded", "ok"):
-        error_text = str(getattr(scope_result, "block_message", "") or "")
-    return {
-        "slot": slot_id,
-        "slot_id": slot_id,
-        "model_id": getattr(scope_result, "model_id", "") or fallback_model_id,
-        "status": status,
-        "error": error_text,
-        **{key: str(getattr(scope_result, key, "") or "") for key in ("failure_phase", "failure_code")},
-        "raw_text": getattr(scope_result, "raw_text", ""),
-        "prompt_chars": getattr(scope_result, "prompt_chars", 0),
-        # measured | estimated_from_tokens | not_assembled — a back-computed count
-        # must not read as a measurement (RS5).
-        "prompt_chars_source": getattr(scope_result, "prompt_chars_source", "measured"),
-        "tokens_in": getattr(scope_result, "tokens_in", 0),
-        "tokens_out": getattr(scope_result, "tokens_out", 0),
-        "cost_usd": getattr(scope_result, "cost_usd", 0.0),
-        "context_manifest": getattr(scope_result, "context_manifest", {}) or {},
-        "prompt_ref": getattr(scope_result, "prompt_ref", {}) or {},
-        "response_ref": getattr(scope_result, "response_ref", {}) or {},
-        "operation_id": str(getattr(scope_result, "operation_id", "") or ""),
-        "operation_state": str(getattr(scope_result, "operation_state", "settled") or "settled"),
-        "late_result_pending": bool(getattr(scope_result, "late_result_pending", False)),
-        "pending_invocation_id": str(getattr(scope_result, "pending_invocation_id", "") or ""),
-        "delegated_run_id": str(getattr(scope_result, "delegated_run_id", "") or ""),
-        "parsed_items": parsed_items,
-        "critical_findings": critical_findings,
-        "advisory_findings": advisory_findings,
-    }
-
-
 def build_blocking_findings_json_section(
     open_obligations: list,
     blocking_history: list,
@@ -640,6 +646,24 @@ def build_goal_section(
         )
 
     return "\n".join(sections)
+
+
+def review_history_with_obligations(history: Any, *, drive_root: Any, repo_root: Any) -> str:
+    """The prior-rounds section with the repository's durable open obligations
+    (anti-thrashing across restarts) — the ONE owner for every brief that carries
+    history: the gate's packet, the retrieving seats' brief and the public builder,
+    so a brief rebuilt outside the gate reads the history the seat was sent.
+    Best-effort: unreadable state states the history it has, never fails."""
+    open_obligations: list = []
+    if drive_root is not None and repo_root is not None:
+        try:
+            from ouroboros.review_state import load_state, make_repo_key
+
+            state = load_state(pathlib.Path(drive_root))
+            open_obligations = state.get_open_obligations(repo_key=make_repo_key(pathlib.Path(repo_root)))
+        except Exception:
+            open_obligations = []
+    return build_review_history_section(list(history or []), open_obligations=open_obligations)
 
 
 def build_scope_section(scope: str = "") -> str:
@@ -843,6 +867,7 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     _SECRET_LINE_RE,
     _make_fence,
     anti_pattern_lock_guard,
+    author_questions_block,
     build_anti_thrashing_rules_section,
     build_obligations_block,
     build_rebuttal_section,
@@ -851,6 +876,7 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     format_obligation_excerpt,
     format_prompt_code_block,
     format_review_history_entry,
+    goal_with_author_questions,
     normalize_reviewer_item,
     normalize_reviewer_items,
     normalize_reviewer_obligation_id,

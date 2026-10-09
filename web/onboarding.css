@@ -270,6 +270,8 @@ textarea::placeholder {
   line-height: var(--line-meta);
 }
 
+.wizard-inline-note[data-tone="warn"] { color: var(--status-warn-fg); }
+
 .wizard-inline-note code,
 .field-note code {
   padding: 1px 4px;
@@ -802,9 +804,6 @@ textarea::placeholder {
   line-height: var(--line-body);
   margin-block: var(--space-2);
 }
-.wizard-content .reviewer-slots-group { margin-block: var(--space-3); }
-.wizard-content .reviewer-slot-controls > input,
-.wizard-content .reviewer-slot-controls > select { min-width: 0; }
 .subscription-quota-row {
   display: flex;
   flex-wrap: wrap;
@@ -984,9 +983,50 @@ textarea::placeholder {
   overflow-wrap: anywhere;
 }
 
+/* Why a row will not run, in words: the status title needs a hover a phone lacks. */
+.available-subagent-status-reason {
+  color: var(--status-warn-fg);
+  font-size: var(--type-meta);
+  line-height: var(--line-body);
+  overflow-wrap: anywhere;
+}
+
 .available-subagent-actions .btn-default {
   min-height: 34px;
   padding: 0 11px;
+}
+
+/* Reviewer mark, its price and origin share the card head: an unmarked card keeps its height. */
+.available-subagent-review {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-meta);
+  font-size: var(--type-meta);
+}
+
+.available-subagent-reviewer {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.available-subagent-minted {
+  padding: 0 var(--space-2);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius);
+}
+
+.available-subagents-review-empty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--status-warn-fg);
+  font-size: var(--type-meta);
 }
 
 /* The shared login card (harness_login_cards.js) renders the same markup here

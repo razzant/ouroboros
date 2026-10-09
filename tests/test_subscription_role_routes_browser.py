@@ -1,4 +1,7 @@
-"""Existing Agents/Reviewers save/reload through controlled APIs; no runtime or login."""
+"""Existing Agents save/reload through controlled APIs; no runtime or login.
+
+Reviewers are catalog rows marked Reviewer, so every reviewer is edited where
+its Available-subagents row is."""
 from __future__ import annotations
 
 import json
@@ -29,7 +32,6 @@ def role_ui(subscription_ui):
             payload = route.request.post_data_json
             ui["posts"].append(("/api/settings", payload))
             ui["settings"].update(payload)
-            ui["fixture"]["preview"]["reviewer_slots"] = json.loads(payload["OUROBOROS_REVIEWER_SLOTS"])
             result = {"status": "saved", "saved": True, "restart_required": False}
         else:
             result = ui["settings"]
@@ -45,21 +47,14 @@ def role_ui(subscription_ui):
 def configure_mixed(ui):
     target = "claudexor::opaque-source=gpt-test"
     actors = {"enabled": True, "items": [
-        {"subagent_id": "native", "recommended_use": "Inspect the project.",
+        {"subagent_id": "native", "recommended_use": "Inspect the project.", "review_eligible": True,
          "route": {"kind": "api_model", "target_id": target, "credential_profile_id": "personal"}},
-        {"subagent_id": "direct", "recommended_use": "Direct API model.",
-         "route": {"kind": "api_model", "target_id": "openai::gpt-api"}},
+        {"subagent_id": "direct", "recommended_use": "Direct API model.", "review_eligible": True,
+         "delivery": "packet", "route": {"kind": "api_model", "target_id": "openai::gpt-api"}},
         {"subagent_id": "agent", "recommended_use": "Existing agent session.",
          "route": {"kind": "agent_session", "target_id": "codex=gpt-test", "credential_profile_id": "personal"}},
     ]}
-    slots = {
-        "triad": [{"slot_id": "triad_1", "route": {"kind": "api_chat", "target_id": target, "profile_id": "personal"}}],
-        "scope": [{"slot_id": "scope_1", "subagent_id": "native"}],
-        "advisory": {"enabled": True, "route": {"kind": "api_chat", "target_id": target, "profile_id": "personal"}},
-        "deep_review": {"subagent_id": "native"},
-    }
-    ui["settings"].update(OUROBOROS_SUBAGENTS=actors, OUROBOROS_REVIEWER_SLOTS=json.dumps(slots))
-    ui["fixture"]["preview"]["reviewer_slots"] = slots
+    ui["settings"].update(OUROBOROS_SUBAGENTS=actors)
     ui["fixture"]["catalog"]["model_sources"] = [
         {"id": "opaque-source", "label": "Codex", "credentialHarness": "codex"},
     ]
@@ -74,45 +69,22 @@ def open_agents(ui):
     page.goto(ui["url"] + "/#settings")
     page.locator('[data-settings-tab="agents"]').click()
     page.wait_for_selector('[data-subagent-field="account"]')
-    page.wait_for_function("""() => document.querySelector('[data-slot-route]')
+    page.wait_for_function("""() => document.querySelector('[data-subagent-field="route"]')
         ?.querySelector('option[value="subscription:opaque-source"]')""")
     return page
 
 
-def test_reviewer_source_roundtrip_restores_its_own_model_and_account(role_ui):
-    configure_mixed(role_ui)
-    lane = api_lane(role_ui, 'openai')
-    page = open_agents(role_ui)
-    for selector, model_field, account_field in [
-        ('[data-slot-id="triad_1"]', '[data-slot-custom-api]', '[data-slot-profile]'),
-        ('[data-advisory-row]', '[data-advisory-api-model]', '[data-advisory-profile]'),
-    ]:
-        row = page.locator(selector)
-        route = row.locator('[data-slot-route], [data-advisory-route]')
-        route.select_option(lane)
-        # The chooser holds the model alone; the source select names the provider.
-        row.locator(model_field).fill('other-choice')
-        route.select_option('subscription:opaque-source')
-        assert row.locator(model_field).input_value() == 'gpt-test'
-        assert row.locator(account_field).input_value() == 'personal'
-        route.select_option(lane)
-        assert row.locator(model_field).input_value() == 'other-choice'
-        assert route.input_value() == lane
-        route.select_option('subscription:opaque-source')
-    page.locator('[data-advisory-row]').scroll_into_view_if_needed()
-    capture(page, "reviewer-source-roundtrip-restored")
-    page.locator('[data-slot-custom-api]').fill('temporary-before-reload')
-    with page.expect_response('**/api/reviewer-slots'):
-        page.locator('#btn-reload-settings').click()
-        page.get_by_role('button', name='Discard and continue', exact=True).click()
-    page.locator('[data-advisory-route]').select_option(lane)
-    assert page.locator('[data-advisory-api-model]').input_value() == ''
+def saved_catalog(ui):
+    writes = [body for path, body in ui["posts"] if path == "/api/settings"]
+    actors = writes[-1]["OUROBOROS_SUBAGENTS"]
+    return json.loads(actors) if isinstance(actors, str) else actors
 
 
 @pytest.mark.parametrize("width", [1360, 390])
 def test_subscription_accounts_roundtrip_existing_editors(role_ui, width):
     ui = role_ui
     configure_mixed(ui)
+    api_lane(ui, "openai")
     ui["page"].set_viewport_size({"width": width, "height": 900})
     page = open_agents(ui)
     actors = page.locator("[data-subagent-row]")
@@ -123,30 +95,19 @@ def test_subscription_accounts_roundtrip_existing_editors(role_ui, width):
     assert raw.locator('[data-subagent-field="account"]').input_value() == "personal"
     assert direct.locator('[data-subagent-field="account"]').count() == 0
     assert agent.locator('[data-subagent-field="account"]').input_value() == "personal"
+    assert [actors.nth(i).locator('[data-subagent-field="review_eligible"]').is_checked() for i in range(3)] == [
+        True, True, False]
+    assert page.locator("[data-review-pool-count]").inner_text() == "Reviewers: 2"
     raw.locator('[data-subagent-field="model"]').fill("gpt-next")
     raw.locator('[data-subagent-field="account"]').select_option("work")
-    triad = page.locator('[data-slot-id="triad_1"]')
-    assert triad.locator('[data-slot-profile]').input_value() == "personal"
-    triad.locator('[data-slot-custom-api]').fill("gpt-review")
-    triad.locator('[data-slot-profile]').select_option("work")
-    advisory = page.locator('[data-advisory-row]')
-    advisory.locator('[data-advisory-api-model]').fill("gpt-advisory")
-    advisory.locator('[data-advisory-profile]').select_option("work")
-    assert page.locator('[data-deep-review-route]').input_value() == "subagent:native"
-    assert "native" in page.locator('[data-deep-review-row]').inner_text().lower()
-    assert page.locator('[data-deep-review-profile]').count() == 0
-    triad.scroll_into_view_if_needed()
+    agent.locator('[data-subagent-field="review_eligible"]').check()
+    assert page.locator("[data-review-pool-count]").inner_text() == "Reviewers: 3"
+    direct.scroll_into_view_if_needed()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    controls = triad.locator(".reviewer-slot-controls")
-    boxes = controls.locator("select, input, button").evaluate_all(
+    controls = direct.locator(".available-subagent-review")
+    boxes = controls.locator("select, input, label").evaluate_all(
         "els => els.filter(e => !e.hidden).map(e => {const b=e.getBoundingClientRect();return {x:b.x,y:b.y,w:b.width,h:b.height}})")
-    assert all(b["x"] >= 0 and b["x"] + b["w"] <= width for b in boxes)
-    if width > 1000:
-        # Direct triad delivery adds a second line; every control remains
-        # reachable and no pair overlaps, including the trailing Remove.
-        assert all(a["x"] + a["w"] <= b["x"] or b["x"] + b["w"] <= a["x"]
-                   or a["y"] + a["h"] <= b["y"] or b["y"] + b["h"] <= a["y"]
-                   for i, a in enumerate(boxes) for b in boxes[i + 1:]), boxes
+    assert boxes and all(b["x"] >= 0 and b["x"] + b["w"] <= width for b in boxes)
     capture(page, f"role-reviewers-{width}")
     raw.scroll_into_view_if_needed()
     capture(page, f"role-actors-{width}")
@@ -154,26 +115,17 @@ def test_subscription_accounts_roundtrip_existing_editors(role_ui, width):
     page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
     writes = [body for path, body in ui["posts"] if path == "/api/settings"]
     assert len(writes) == 1
-    saved = writes[0]
-    saved_actors = saved["OUROBOROS_SUBAGENTS"]
-    if isinstance(saved_actors, str):
-        saved_actors = json.loads(saved_actors)
-    assert saved_actors["items"][0]["route"] == {
+    assert "OUROBOROS_REVIEWER_SLOTS" not in writes[0], "review lanes are never authored"
+    items = saved_catalog(ui)["items"]
+    assert items[0]["route"] == {
         "kind": "api_model", "target_id": "claudexor::opaque-source=gpt-next", "credential_profile_id": "work"}
-    assert saved_actors["items"][1]["route"] == {"kind": "api_model", "target_id": "openai::gpt-api"}
-    assert saved_actors["items"][2]["route"]["kind"] == "agent_session"
-    saved_slots = json.loads(saved["OUROBOROS_REVIEWER_SLOTS"])
-    assert saved_slots["triad"][0]["route"] == {
-        "kind": "api_chat", "target_id": "claudexor::opaque-source=gpt-review", "profile_id": "work"}
-    assert saved_slots["advisory"]["route"]["profile_id"] == "work"
-    assert saved_slots["deep_review"] == {"subagent_id": "native"}
-    assert saved_slots["scope"][0] == {"slot_id": "scope_1", "subagent_id": "native"}
+    assert items[1]["route"] == {"kind": "api_model", "target_id": "openai::gpt-api"}
+    assert items[1]["delivery"] == "packet"
+    assert items[2]["route"]["kind"] == "agent_session"
+    assert [row.get("review_eligible") for row in items] == [True, True, True]
     open_agents(ui)
     assert page.locator('[data-subagent-row]').nth(0).locator('[data-subagent-field="account"]').input_value() == "work"
-    assert page.locator('[data-slot-profile]').input_value() == "work"
-    assert page.locator('[data-advisory-profile]').input_value() == "work"
-    assert page.locator('[data-deep-review-route]').input_value() == "subagent:native"
-    assert "account work" in page.locator('[data-deep-review-row]').inner_text()
+    assert page.locator('[data-subagent-row]').nth(2).locator('[data-subagent-field="review_eligible"]').is_checked()
     assert not any("login" in path for path, _ in ui["posts"])
 
 
@@ -182,60 +134,62 @@ def test_source_switch_and_catalog_refresh_keep_focus_and_draft(role_ui):
     configure_mixed(ui)
     lane = api_lane(ui, 'openai')
     page = open_agents(ui)
-    triad = page.locator('[data-slot-id="triad_1"]')
-    triad.locator('[data-slot-route]').select_option(lane)
-    assert triad.locator('[data-slot-profile]').count() == 0
-    triad.locator('[data-slot-custom-api]').fill("openai::gpt-api")
-    triad.locator('[data-slot-route]').select_option("subscription:opaque-source")
-    assert triad.locator('[data-slot-custom-api]').input_value() == "gpt-test"
-    assert triad.locator('[data-slot-profile]').input_value() == "personal"
-    triad.locator('[data-slot-custom-api]').fill("gpt-manual")
-    triad.scroll_into_view_if_needed()
-    field = triad.locator('[data-slot-custom-api]')
+    row = page.locator('[data-subagent-row]').first
+    row.locator('[data-subagent-field="route"]').select_option(lane)
+    assert row.locator('[data-subagent-field="account"]').count() == 0
+    # A source change clears only source-bound fields: the Reviewer mark stays.
+    assert row.locator('[data-subagent-field="review_eligible"]').is_checked()
+    row.locator('[data-subagent-field="route"]').select_option("subscription:opaque-source")
+    assert row.locator('[data-subagent-field="account"]').count() == 1
+    field = row.locator('[data-subagent-field="model"]')
+    field.fill("gpt-manual")
+    row.scroll_into_view_if_needed()
     field.focus()
     field.evaluate("e => e.setSelectionRange(3, 3)")
     before = page.locator("#content").evaluate("e => e.scrollTop")
     page.evaluate("""detail => document.dispatchEvent(new CustomEvent(
         'settings-model-catalog:updated', {detail}))""", ui["fixture"]["catalog"])
-    assert page.evaluate("document.activeElement.hasAttribute('data-slot-custom-api')")
+    assert page.evaluate("document.activeElement.getAttribute('data-subagent-field') === 'model'")
     assert field.input_value() == "gpt-manual"
     assert field.evaluate("e => e.selectionStart") == 3
     assert page.locator("#content").evaluate("e => e.scrollTop") == before
     capture(page, "role-source-refresh-focus")
 
 
-def test_scope_and_inline_deep_keep_native_delivery_and_auto_account(role_ui):
+def test_a_reviewer_row_names_its_delivery_cost_and_last_run(role_ui):
     ui = role_ui
     configure_mixed(ui)
-    slots = ui["fixture"]["preview"]["reviewer_slots"]
-    slots["scope"] = [{"slot_id": "scope_1", "route": {
-        "kind": "api_chat", "target_id": "claudexor::opaque-source=gpt-scope", "profile_id": "personal"}}]
-    slots["deep_review"] = {"route": {
-        "kind": "api_chat", "target_id": "claudexor::opaque-source=gpt-deep", "profile_id": "personal"}}
-    ui["settings"]["OUROBOROS_REVIEWER_SLOTS"] = json.dumps(slots)
+    api_lane(ui, "openai")
+    ui["backend"]["review_pool"] = {
+        "pool": [{"subagent_id": "native", "last_execution": {
+            "effective": {"route": "api_model", "model": "gpt-test", "credential_profile_id": "personal"},
+            "review_record_id": "rev_42"}}],
+        "excluded": [], "last_executions": {}, "config_error": "", "migration": None,
+        "row_costs": {"direct": {"usd_per_review": 0.42, "basis": "route_tariff"}},
+    }
     page = open_agents(ui)
-    scope = page.locator('[data-slot-id="scope_1"]')
-    scope.locator('[data-slot-profile]').select_option("")
-    scope.locator('[data-slot-custom-api]').fill("gpt-scope-next")
-    deep = page.locator('[data-deep-review-row]')
-    assert "Native inspection episode" in deep.inner_text()
-    assert "host read-only tools" in deep.inner_text()
-    deep.locator('[data-deep-review-profile]').select_option("work")
-    deep.locator('[data-deep-review-api-model]').fill("gpt-deep-next")
-    deep.scroll_into_view_if_needed()
-    capture(page, "role-inline-deep")
-    page.locator("#btn-save-settings").click()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    saved = json.loads(ui["settings"]["OUROBOROS_REVIEWER_SLOTS"])
-    assert saved["scope"][0]["route"] == {
-        "kind": "api_chat", "target_id": "claudexor::opaque-source=gpt-scope-next"}
-    assert saved["deep_review"] == {"route": {
-        "kind": "api_chat", "target_id": "claudexor::opaque-source=gpt-deep-next", "profile_id": "work"}}
-    open_agents(ui)
-    assert page.locator('[data-slot-id="scope_1"] [data-slot-profile]').input_value() == ""
-    assert page.locator('[data-deep-review-profile]').input_value() == "work"
-    assert "Native inspection episode" in page.locator('[data-deep-review-row]').inner_text()
-    assert "host read-only tools" in page.locator('[data-deep-review-row]').inner_text()
+    rows = page.locator("[data-subagent-row]")
+    native, direct, agent = rows.nth(0), rows.nth(1), rows.nth(2)
+    page.wait_for_function("() => document.querySelector('[data-subagent-review-notes]:not([hidden])')")
+    assert "uses a session seat and time" in native.locator("[data-subagent-review-facts]").inner_text()
+    assert native.locator("[data-subagent-review-notes]").inner_text() == (
+        "Last run as API model · gpt-test · account personal (record rev_42)")
+    facts = direct.locator("[data-subagent-review-facts]").inner_text()
+    assert "In the review pool" in facts and "≈$0.42 per full call (route tariff)" in facts
+    assert "reading reviewer" not in facts, "the several-calls clause belongs to a reading row"
+    assert agent.locator("[data-subagent-field=\"delivery\"]").count() == 0, "delivery is for API reviewers"
+    delivery = direct.locator('[data-subagent-field="delivery"]')
+    assert delivery.input_value() == "packet"
+    direct.scroll_into_view_if_needed()
+    capture(page, "role-reviewer-facts")
+    delivery.select_option("native")
+    # An edited route is priced only after it is saved: never its old price.
+    direct.locator('[data-subagent-field="model"]').fill("gpt-api-next")
+    assert "≈$0.42" not in direct.locator("[data-subagent-review-facts]").inner_text()
+    with page.expect_response("**/api/settings"):
+        page.locator("#btn-save-settings").click()
+    items = saved_catalog(ui)["items"]
+    assert "delivery" not in items[1] and items[1]["review_eligible"] is True
 
 
 def test_models_does_not_guess_a_credential_family_when_source_mapping_is_unread(role_ui):
@@ -243,11 +197,12 @@ def test_models_does_not_guess_a_credential_family_when_source_mapping_is_unread
     configure_mixed(ui)
     ui["settings"]["OUROBOROS_MODEL_ACCOUNTS"] = {"main": "personal"}
     ui["fixture"]["catalog"]["model_sources"] = []
-    page = open_agents(ui)
+    page = ui["page"]
+    page.goto(ui["url"] + "/#settings")
     page.locator('[data-settings-tab="models"]').click()
     main = page.locator('[data-model-role="main"]')
     account = main.locator('[data-model-role-account]')
-    assert account.input_value() == "personal"
+    page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-role-account]')?.value === 'personal'")
     assert "not checked" in account.locator('option[value="personal"]').inner_text()
     assert account.locator('option[value="work"]').count() == 0
     page.evaluate("""detail => document.dispatchEvent(new CustomEvent(
@@ -263,7 +218,7 @@ def test_models_does_not_guess_a_credential_family_when_source_mapping_is_unread
     assert saved["main"] == "personal"
 
 
-@pytest.mark.parametrize("consumer", ["Models", "Actor", "Triad", "Advisory"])
+@pytest.mark.parametrize("consumer", ["Models", "Actor"])
 def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draft(role_ui, consumer):
     ui = role_ui
     configure_mixed(ui)
@@ -273,8 +228,6 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
     selectors = {
         "Models": ('[data-model-role="main"]', '[data-model-role-source]', '[data-model-role-model]', '[data-model-role-account]'),
         "Actor": ('[data-subagent-row]', '[data-subagent-field="route"]', '[data-subagent-field="model"]', '[data-subagent-field="account"]'),
-        "Triad": ('[data-slot-id="triad_1"]', '[data-slot-route]', '[data-slot-custom-api]', '[data-slot-profile]'),
-        "Advisory": ('[data-advisory-row]', '[data-advisory-route]', '[data-advisory-api-model]', '[data-advisory-profile]'),
     }
     if consumer == "Models":
         page.locator('[data-settings-tab="models"]').click()
@@ -307,7 +260,6 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
             assert "catalog temporarily offline" in page.locator("#settings-model-catalog-status").text_content()
         else:
             assert "catalog temporarily offline" not in page.locator("#settings-model-catalog-status").text_content()
-    assert page.locator('[data-deep-review-route]').input_value() == "subagent:native"
     capture(page, f"catalog-recovery-draft-{consumer.lower()}")
     with page.expect_response("**/api/settings"):
         page.locator("#btn-save-settings").click()
@@ -315,11 +267,7 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
     if consumer == "Models":
         assert saved["OUROBOROS_MODEL"] == "claudexor::opaque-source=gpt-owner-unsaved"
         assert saved["OUROBOROS_MODEL_ACCOUNTS"]["main"] == "personal"
-    elif consumer == "Actor":
+    else:
         assert saved["OUROBOROS_SUBAGENTS"]["items"][0]["route"]["target_id"] == "claudexor::opaque-source=gpt-owner-unsaved"
         assert saved["OUROBOROS_SUBAGENTS"]["items"][0]["route"]["credential_profile_id"] == "personal"
-    else:
-        slots = json.loads(saved["OUROBOROS_REVIEWER_SLOTS"])
-        route = (slots["triad"][0] if consumer == "Triad" else slots["advisory"])["route"]
-        assert route["target_id"] == "claudexor::opaque-source=gpt-owner-unsaved"
-        assert route["profile_id"] == "personal"
+        assert saved["OUROBOROS_SUBAGENTS"]["items"][0]["review_eligible"] is True

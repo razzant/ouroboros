@@ -213,7 +213,7 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     mixed = [owner_wait, activity('independent', 'p-work', 'finalizing')]
     refresh(active_chat_activities=mixed)
     observe('p-work', 'working', True)
-    assert page.locator(WORK).get_attribute('aria-label').endswith('Finalizing · Waiting for your answer')
+    assert page.locator(WORK).get_attribute('aria-label').endswith('Finalizing… · Waiting for your answer')
     assert page.evaluate("""() => sidebarKept.row === document.querySelector('[data-project-id="p-work"]')
         && sidebarKept.menu === document.querySelector('.project-row-menu') && sidebarKept.focus === document.activeElement
         && sidebarKept.unread.isConnected && sidebarKept.marker.isConnected""")
@@ -231,7 +231,7 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     refresh(active_chat_activities=[activity('positive', 'p-queue', 'thinking')], active_chat_activities_complete=False)
     observe('p-work', 'unknown')
     observe('p-queue', 'working', True)
-    assert 'Activity status unavailable' in page.locator(WORK).get_attribute('title')
+    assert 'Activity unconfirmed' in page.locator(WORK).get_attribute('title')
     refresh(active_chat_activities=[], active_chat_activities_complete=True, supervisor_ready=False)
     observe('p-work', 'unknown')
     observe('p-queue', 'unknown')

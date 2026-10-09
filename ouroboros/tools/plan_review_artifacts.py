@@ -521,6 +521,13 @@ def _legacy_paid_slot(row: dict, wave: dict, state_root: pathlib.Path, task_id: 
         manifest = read_call_manifest_ref(state_root, ref, task_id=task_id)
         saved = read_blob_ref(state_root, manifest["full_payload_ref"])["slot"]
         saved = {**saved, "route": ReviewRouteKind(saved["route"])}
+        # A blob saved under the pre-pool rule carried no explicit delivery for
+        # a configured-subagent api row: THEN the actor id meant native reading.
+        # Legacy interpretation of a legacy record (as ``recorded_slot_rows``),
+        # not today's delivery rule, which never reads the id (F8).
+        if (saved.get("native_retrieval_override") is None and saved["route"] is ReviewRouteKind.API_CHAT
+                and str(saved.get("subagent_id") or "").strip()):
+            saved["native_retrieval_override"] = True
         exact = slot_row(ReviewSlot(**saved))
         if any(exact[key] != row[key] for key in (
                 "slot_id", "model", "effort", "route", "session_target", "session_profile")):

@@ -55,4 +55,7 @@ def test_legacy_actor_binding_comes_from_verified_paid_request(tmp_path, damage)
         frozen, = frozen_plan_slots(wave, state_root=tmp_path, task_id="task")
         assert frozen.native_retrieval and frozen.subagent_id == slot.subagent_id
         assert frozen.use_local and frozen.processing_preference == slot.processing_preference
-        assert plan_reviewer_config_fingerprint([frozen]) == plan_reviewer_config_fingerprint([slot])
+        # The lane-era actor-bound row retrieved natively; F8 states that as the
+        # slot's own delivery fact, so the restored identity carries it explicitly.
+        assert plan_reviewer_config_fingerprint([frozen]) == plan_reviewer_config_fingerprint([
+            dataclasses.replace(slot, native_retrieval_override=True)])

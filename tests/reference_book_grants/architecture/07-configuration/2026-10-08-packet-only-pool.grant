@@ -1,0 +1,2 @@
+652
+The Review pool section states what a switched-off row does (a marked row silently leaves the pool; only an explicitly named switched-off or unknown row is refused, as ARCH 03 and `_pool_rows`/`catalog_review_row` already do) instead of the false "a disabled or missing row refuses", and the consequence of a pool with no reading row under Blocking: every body commit ends NOT_PERFORMED; Save warns without refusing and `## Review` carries `coupling_unanswerable: true`.

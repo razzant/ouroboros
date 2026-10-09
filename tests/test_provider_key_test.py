@@ -735,3 +735,26 @@ def test_provider_test_and_active_model_enumeration_never_select_legacy_heavy():
     assert provider_api._provider_test_model("anthropic", {
         "OUROBOROS_MODEL_HEAVY": "anthropic::owner-legacy-heavy",
     }) == "anthropic::claude-opus-5"
+
+
+@pytest.mark.parametrize("retired_key", [
+    "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "OUROBOROS_REVIEW_MODELS",
+    "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+])
+def test_provider_test_and_declarations_ignore_retired_review_keys(retired_key):
+    from ouroboros.provider_models import ACTIVE_MODEL_SETTING_KEYS, declared_model_settings
+
+    settings = {retired_key: "anthropic::retired-review"}
+    default_model = provider_api._provider_test_model("anthropic", {})
+    assert default_model
+    assert provider_api._provider_test_model("anthropic", settings) == default_model
+    assert declared_model_settings(settings) == declared_model_settings({})
+    assert retired_key not in ACTIVE_MODEL_SETTING_KEYS
+
+    # An active fallback still participates in both consumers, even with stale
+    # review bytes present. The provider resolver preserves comma-chain order.
+    settings["OUROBOROS_MODEL_FALLBACKS"] = "openai::active-first,anthropic::active-fallback"
+    assert provider_api._provider_test_model("anthropic", settings) == "anthropic::active-fallback"
+    declared = declared_model_settings(settings)
+    assert declared["OUROBOROS_MODEL_FALLBACKS"] == settings["OUROBOROS_MODEL_FALLBACKS"]
+    assert retired_key not in declared

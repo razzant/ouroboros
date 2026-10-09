@@ -253,8 +253,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     else:
         result = (
             f"✅ Written {len(written)} file(s): {summary}\n"
-            "Files are on disk but NOT committed. Run commit_reviewed when ready.\n"
-            "⚠️ Advisory pre-review is now stale — run preflight_review before commit_reviewed."
+            "Files are on disk but NOT committed. Run commit_reviewed when ready."
         )
     result += f"\nResolved root: {binding_items[0].base_path}"
     if syntax_bypass_notes:
@@ -460,7 +459,7 @@ def _str_replace_editor(
         from ouroboros.tools.edit_ops import workspace_edit_note
         result += "\n" + workspace_edit_note(ctx)
     elif system_target:
-        result += "\nRun commit_reviewed when ready.\n⚠️ Advisory pre-review is now stale — run preflight_review before commit_reviewed."
+        result += "\nRun commit_reviewed when ready."
     elif data_skill_target is not None:
         result += "\nRun skill_review for this skill before enabling or declaring it ready."
     if system_target and pathlib.PurePosixPath(rel_path).parts[:1] == ("skills",):

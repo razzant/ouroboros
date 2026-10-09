@@ -1,6 +1,6 @@
 """Every Settings segmented control on the real page: equal columns derived from its choices.
 
-The one renderer (`page_header.renderSegmentedField`) feeds 13 call sites and 16
+The one renderer (`page_header.renderSegmentedField`) feeds 13 call sites and 15
 groups. On a real server in Chromium and WebKit, at a desktop and a phone width:
 up to four choices fill their row; the seven- and eight-step effort scales keep four
 equal columns with a partial last row whose buttons are not stretched; the five
@@ -24,7 +24,7 @@ pytest_plugins = ("tests.test_ui_smoke_playwright",)
 # Every group the renderer draws, with its number of choices.
 GROUPS = {
     "s-allow-mutative-subagents": 3, "s-effort-task": 7, "s-effort-evolution": 7,
-    "s-effort-deep-self-review": 7, "s-effort-consciousness": 8, "s-review-enforcement": 2,
+    "s-effort-consciousness": 8, "s-review-enforcement": 2,
     "s-task-review-mode": 3, "s-review-max-cycles": 5, "s-image-input-mode": 4, "s-context-mode": 3,
     "s-prompt-cache-ttl": 3, "s-safety-mode": 3, "s-update-channel": 3, "s-runtime-mode": 4,
     "s-post-task-evolution-mode": 3, "s-consciousness-autonomy": 3,

@@ -1,0 +1,2 @@
+390
+The configuration chapter's `Reviewer slots` section is replaced by `Review pool`: who the pool is (`review_eligible` rows of `OUROBOROS_SUBAGENTS`), effort and delivery as row properties, the shared save judge and the explicit empty-pool confirmation, the factory rows a never-configured install reads (direct provider / compatible-only / local-only / OpenRouter), the wizard's marking and minting, the Main re-route and the catalog ceiling.

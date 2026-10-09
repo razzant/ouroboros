@@ -122,17 +122,16 @@ def test_tier_one_rules_are_always_inline(repo):
         len(CHECKLIST_SECTION), len(SHARED_SECTION)]
 
 
-def test_a_skill_payload_keeps_the_constitution_without_the_shared_section(repo):
-    """A skill payload is judged under the constitution (body layer: BIBLE and the
-    standing disclosures arrive) but is not this repository's CODE: no shared
-    repository section — no row, no text (integrator decision R1)."""
-    context = _context(repo, repository_rules=False)
+def test_the_body_layer_has_no_switch_that_drops_the_shared_section():
+    """The only surface that ever opted out of `Shared Contract Ownership` (the
+    skill advisory prompt) is gone with PR-3; a body-layer reviewer of this
+    repository's code always carries the section, and nothing can ask otherwise."""
+    import inspect
 
-    assert SHARED_PATH not in _paths(context)
-    assert SHARED_CHECKLIST_SECTION not in context.stable_inline + context.navigation
-    assert _paths(context, "inline", tier=1) == [
-        "docs/CHECKLISTS.md", "BIBLE.md", "docs/CHECKLISTS_ARCHIVE.md"]
-    assert context.layer == "body"
+    from ouroboros.tools import governance_context as module
+
+    assert "repository_rules" not in inspect.signature(module.governance_context).parameters
+    assert "repository_rules" not in inspect.getsource(module)
 
 
 def test_a_non_body_subject_runs_the_core_layer_without_the_shared_section(repo):
@@ -210,9 +209,6 @@ def test_a_surface_with_no_checklist_section_says_so_instead_of_claiming_one(rep
     bare = _context(repo, checklist_section_text="", layer="core")
     assert "NO section of `docs/CHECKLISTS.md` is inlined for this review" in bare.navigation
     assert "is inlined above" not in bare.navigation
-    skill = _context(repo, checklist_section_text="", repository_rules=False)
-    assert "NO section of it is inlined for this review" in skill.navigation
-    assert "is inlined above" not in skill.navigation
     # A surface that does supply one keeps the inline row and the pointer.
     supplied = _context(repo)
     assert next(r for r in supplied.manifest
@@ -437,6 +433,7 @@ def test_a_panel_with_no_api_row_asks_for_no_packet_governance(repo):
 def test_retrieving_triad_receives_shared_tiers_in_its_actual_task(repo, monkeypatch):
     from ouroboros.review_records import ReviewSlot
     from ouroboros.tools import review
+    from ouroboros.tools.review_subject import build_triad_session_task
 
     monkeypatch.setattr(review, "reviewer_context_window", lambda *_a, **_k: 200_000)
     ctx = type("_Ctx", (), {"repo_dir": str(repo)})()
@@ -445,8 +442,9 @@ def test_retrieving_triad_receives_shared_tiers_in_its_actual_task(repo, monkeyp
     context = review._triad_governance_context(
         ctx, ["web/modules/chat.js"], checklist, ["openai/native"],
         [ReviewSlot(slot_id="triad_1", model="openai/native")], delivery="retrieving")
-    task = review._triad_session_task(
-        ctx, goal_section="goal", scope_section="scope", checklist_section=checklist,
+    # The builder the two-part brief calls (review_brief_coupling.build_retrieving_brief).
+    task = build_triad_session_task(
+        governance_repo_dir=repo, goal_section="goal", scope_section="scope", checklist_section=checklist,
         rebuttal_section="", review_history_section="", governance=context)
 
     assert task.count("P1 Continuity.") == 1

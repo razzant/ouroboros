@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -337,9 +338,8 @@ def bind_execution_receipts(
 ) -> tuple[list[dict], list[str], list[dict]]:
     """Bind configured, dispatched and observed facts for every reviewer slot."""
     requested: dict[tuple[str, str], dict] = {}
-    for surface, key in (("triad", "triad_slots"), ("scope", "scope_slots")):
-        for row in resolved_config.get(key) or []:
-            requested[(surface, str(row.get("slot_id") or ""))] = dict(row)
+    for row in resolved_config.get("pool_slots") or []:
+        requested[("pool", str(row.get("slot_id") or ""))] = dict(row)
 
     keys = [(surface, str(actor.get("slot_id") or "")) for surface, actor in actors]
     key_set = set(keys)
@@ -540,6 +540,26 @@ def _write_json(path: pathlib.Path, value) -> None:
     path.write_text(_json_text(value) + "\n", encoding="utf-8")
 
 
+_NATIVE_SEPARATORS = tuple(sep for sep in (os.sep, os.altsep) if sep)
+
+
+def _public_text(text: str, replacements: list[tuple[str, str]]) -> str:
+    """Machine-local roots become their placeholders. A value that IS a path under
+    one of them (one line, the root then a separator) also gets posix separators,
+    so the packet reads the same on every OS; other text keeps its characters."""
+    is_path = "\n" not in text and any(
+        raw and text.startswith(raw) and text[len(raw):len(raw) + 1] in ("", *_NATIVE_SEPARATORS)
+        for raw, _replacement in replacements
+    )
+    for raw, replacement in replacements:
+        if raw:
+            text = text.replace(raw, replacement)
+    if is_path:
+        for sep in _NATIVE_SEPARATORS:
+            text = text.replace(sep, "/")
+    return text
+
+
 def replace_public_paths(value, replacements: list[tuple[str, str]]):
     if isinstance(value, dict):
         return {
@@ -549,11 +569,7 @@ def replace_public_paths(value, replacements: list[tuple[str, str]]):
     if isinstance(value, (list, tuple)):
         return [replace_public_paths(item, replacements) for item in value]
     if isinstance(value, str):
-        result = value
-        for raw, replacement in replacements:
-            if raw:
-                result = result.replace(raw, replacement)
-        return result
+        return _public_text(value, replacements)
     return value
 
 
@@ -633,7 +649,7 @@ def write_contributor_packet(
             ),
         },
         "review_completeness": {
-            "contract": "production_triad_quorum_plus_authoritative_scope",
+            "contract": "production_pool_quorum_plus_coupling",
             "degraded_reasons": list(degraded_reasons),
         },
         "advisory": {
@@ -677,10 +693,7 @@ def write_contributor_packet(
         "elapsed_sec": round(elapsed_sec, 1),
     }
     public_evidence = public_projection(evidence, replacements=replacements)
-    public_triad = public_projection(
-        [seat for seat in seats if "coupling" not in (seat.get("parts") or [])], replacements=replacements)
-    public_scope = public_projection(
-        [seat for seat in seats if "coupling" in (seat.get("parts") or [])], replacements=replacements)
+    public_seats = public_projection(list(seats), replacements=replacements)
 
     evidence_path = output_dir / "review-evidence.json"
     outcome_path = output_dir / "outcome.json"
@@ -692,10 +705,8 @@ def write_contributor_packet(
     full_output = "\n".join([
         sep, "CONTRIBUTOR REVIEW EVIDENCE", sep,
         _json_text(public_evidence),
-        sep, "TRIAD SEAT RECORDS (ledger rows with retained answers, full, redacted)", sep,
-        _json_text(public_triad),
-        sep, "SCOPE SEAT RECORDS (ledger rows with retained answers, full, redacted)", sep,
-        _json_text(public_scope),
+        sep, "REVIEW POOL SEAT RECORDS (ledger rows with retained answers, full, redacted)", sep,
+        _json_text(public_seats),
         sep, "AGENT SESSION TRANSCRIPTS (full, redacted)", sep,
         _json_text(public_transcripts),
     ])

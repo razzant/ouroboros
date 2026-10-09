@@ -47,8 +47,8 @@ log = logging.getLogger(__name__)
 # v6.87.7, where they named a TOPOLOGY — "fan out across the configured reviewer
 # slots" — smuggled in through a strength parameter. Nothing in the product ever
 # asked for them: every review surface (commit, plan, acceptance, skill) reads its
-# slots straight from config through get_review_models/get_scope_review_models and
-# runs them on the review substrate, never through schedule_subagent. They are
+# seats from the review pool (reviewer_slot_config.review_pool_slots) and runs
+# them on the review substrate, never through schedule_subagent. They are
 # removed rather than kept as aliases (BIBLE P2: remove the class). Durable records
 # that still carry the old values stay readable — build_subagent_envelope already
 # coerces an unknown stored lane instead of raising.

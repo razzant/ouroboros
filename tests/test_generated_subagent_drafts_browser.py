@@ -76,7 +76,7 @@ def test_wizard_same_preview_keeps_live_row_handler_and_finish_payload(subscript
     field.fill("WIZARD EDIT 456")
     assert page.evaluate("() => window.__rowBefore === document.querySelector('#onboarding-available-subagents [data-subagent-row]')")
     page.click("#next-btn")
-    page.wait_for_selector("#reviewer-slots-section", state="attached")
+    page.wait_for_selector("[data-reviewers-note]", state="attached")
     page.click("#next-btn")
     page.wait_for_selector('[data-collapse="api-budget"]')
     page.click("#next-btn")
@@ -130,7 +130,7 @@ def test_session_access_is_visible_and_preserved_by_the_real_editor(subscription
         assert page.locator('[data-subagent-field="access"]').first.input_value() == "workspace_write"
         path = "/api/settings"
     else:
-        for selector in ("#reviewer-slots-section", '[data-collapse="api-budget"]', ".summary-card"):
+        for selector in ("[data-reviewers-note]", '[data-collapse="api-budget"]', ".summary-card"):
             page.click("#next-btn")
             page.wait_for_selector(selector, state="attached")
         with page.expect_response("**/api/onboarding/complete"):

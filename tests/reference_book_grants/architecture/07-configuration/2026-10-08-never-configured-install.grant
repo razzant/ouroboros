@@ -1,0 +1,2 @@
+331
+The configuration chapter's `Review pool` section defines the never-configured install precisely (neither the retired lanes key nor a catalog — `OUROBOROS_SUBAGENTS` absent or `""`, or no settings file at all — read through `review_pool_migration.migration_trigger`, never a structural catalog the owner saved) and says the factory rows are read at the read seam.

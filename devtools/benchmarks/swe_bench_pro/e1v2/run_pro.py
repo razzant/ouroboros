@@ -535,7 +535,9 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         "-e", f"OUROBOROS_MODEL={args.solve_model}",
         "-e", f"OUROBOROS_MODEL_LIGHT={args.solve_model}",
         "-e", f"OUROBOROS_MODEL_FALLBACKS={args.solve_model}",
-        "-e", f"OUROBOROS_SUBAGENTS={single_model_subagents_setting(args.solve_model)}",
+        "-e", "OUROBOROS_SUBAGENTS=" + single_model_subagents_setting(
+            args.solve_model, review_slots=args.review_slots, review_effort=args.review_effort,
+        ),
         # Runtime mode flows from the generated settings profile (seed settings.json);
         # only force it via env when --runtime-mode is explicitly set, so a profile's
         # mode is never silently overridden. Committed profiles all carry pro

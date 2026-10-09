@@ -1,0 +1,2 @@
+240
+The `## Review` block paragraph binds the migration facts to the document whose pool the block shows: `error` carries the refused migration of this very document (its snapshot still holds the refused lanes key), a repaired document or another task's snapshot wears no past refusal, and `migration_snapshot` names the receipt of the migration that decided this document.

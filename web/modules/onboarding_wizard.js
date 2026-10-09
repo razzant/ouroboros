@@ -12,10 +12,7 @@ import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindLanguageSettings, languageBlockHtml, saveLanguageChoice } from './settings_language.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './ui_helpers.js';
 import { createModelRolesEditor, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
-import { availableSubagentsEditorHost } from './subagents_settings.js';
-import { adoptSubagentRoster, applyReviewerSlotsDraft, collectReviewerSlots,
-    destroyReviewerSlots, initReviewerSlots, renderReviewerSlotsSection, setReviewerProcessingPreference,
-    setReviewerSourceContext } from './reviewer_slots.js';
+import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows } from './subagents_settings.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
     configuredApiProviders, apiProviderLabel } from './route_editor_primitives.js';
 import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
@@ -67,14 +64,11 @@ import { accountRowFacts } from './harness_accounts.js';
         error: '',
         saving: false,
         modelsDirty: false,
-        reviewerDraftDirty: false,
-        reviewerSlots: null,
         modelAccounts: {},
         modelContextWindows: {},
         apiAccessOpen: false,
         apiBudgetOpen: false,
         subagentsOpen: false,
-        reviewersOpen: false,
         localSourceOpen: Boolean(INITIAL_STATE.localSource),
         moreProvidersOpen: Boolean(INITIAL_STATE.cloudruKey || INITIAL_STATE.minimaxKey || INITIAL_STATE.deepseekKey
             || INITIAL_STATE.zaiKey || INITIAL_STATE.compatibleBaseUrl || INITIAL_STATE.compatibleApiKey),
@@ -133,7 +127,6 @@ import { accountRowFacts } from './harness_accounts.js';
         if (PROCESSING_PREFERENCE_KEY in settings) state.processingPreference = settings[PROCESSING_PREFERENCE_KEY];
         if (MODEL_PROCESSING_PREFERENCES_KEY in settings) state.modelProcessingPreferences = modelRoleMap(settings[MODEL_PROCESSING_PREFERENCES_KEY]);
         agentsStep?.setProcessingPreference(state.processingPreference);
-        setReviewerProcessingPreference(state.processingPreference, state.modelProcessingPreferences || {});
     }
 
     function hasApiAccess() {
@@ -185,20 +178,14 @@ import { accountRowFacts } from './harness_accounts.js';
         return request.promise;
     }
 
-    function applySetupPreview(response, { replaceReviewers = false } = {}) {
+    // The reviewers arrive inside the previewed catalog (rows marked Reviewer),
+    // which the Available subagents editor itself adopts.
+    function applySetupPreview(response) {
         if (!state.skipSubscriptionPresets) state.presetFailure = null;
         if (!state.modelsDirty && response.model_settings) {
             const previous = JSON.stringify(draftSettings());
             adoptModelSettings(response.model_settings);
             if (JSON.stringify(draftSettings()) !== previous) loadModelRoles();
-        }
-        if (response.reviewer_slots && (replaceReviewers || (!state.reviewerDraftDirty && !state.skipSubscriptionPresets))) {
-            state.reviewerSlots = typeof response.reviewer_slots === 'string'
-                ? JSON.parse(response.reviewer_slots) : response.reviewer_slots;
-            if (state.currentStep === 'review_mode') {
-                setReviewerSourceContext({ settings: draftSettings(), providerProfiles: PROVIDER_PROFILES });
-                applyReviewerSlotsDraft(state.reviewerSlots);
-            }
         }
         modelRoles.adoptCatalog(response);
         if (state.agentsConnected.length) void refreshModelSources();
@@ -620,11 +607,8 @@ import { accountRowFacts } from './harness_accounts.js';
             );
         }
         rows.push(['Agents', agentsSummaryValue()]);
-        for (const [key, label] of [['triad', 'Triad review'], ['scope', 'Scope review'],
-            ['advisory', 'Advisory review'], ['deep_review', 'Deep self-review']]) {
-            const value = state.reviewerSlots?.[key];
-            if (value) rows.push([label, (Array.isArray(value) ? value : [value]).map(reviewerSummary).join(' · ')]);
-        }
+        rows.push(['Reviewers', reviewPoolRows(catalogDraft()).map(reviewerSummary).join(' · ')
+            || 'None — reviews will report “not performed”']);
         if (trim(state.skillsRepoPath)) {
             rows.push(['Skills repo', trim(state.skillsRepoPath)]);
         }
@@ -646,14 +630,13 @@ import { accountRowFacts } from './harness_accounts.js';
         }).join(' → ') || 'None';
     }
 
+    function catalogDraft() { return agentsStep?.availableSubagents || state.availableSubagents; }
+
     function reviewerSummary(row) {
-        const actor = state.availableSubagents?.items?.find((item) => item.subagent_id === row.subagent_id);
-        const route = row.route || actor?.route;
-        const account = route?.profile_id || route?.credential_profile_id;
-        const effort = row.effort || actor?.effort;
-        return [row.enabled === false ? 'Disabled' : '', route?.target_id || row.subagent_id || 'Not configured',
-            account ? `Account: ${account}` : '', effort ? `Effort: ${effort}` : '',
-            `Processing: ${processingIntentLabel(row.subagent_id ? actor?.processing_preference : row.processing_preference, state.processingPreference)}`].filter(Boolean).join(' · ');
+        const account = row.route?.credential_profile_id;
+        return [row.route?.target_id || row.subagent_id, account ? `Account: ${account}` : '',
+            row.effort ? `Effort: ${row.effort}` : '',
+            `Processing: ${processingIntentLabel(row.processing_preference, state.processingPreference)}`].filter(Boolean).join(' · ');
     }
 
     function agentsSummaryValue() {
@@ -661,8 +644,7 @@ import { accountRowFacts } from './harness_accounts.js';
         const labels = familyLabels(state.agentsConnected, agentsStep?.snapshot, {
             catalogKnown: Boolean(agentsStep?.catalogKnown),
         });
-        const actorCount = (agentsStep?.availableSubagents?.items
-            || state.availableSubagents?.items || []).length;
+        const actorCount = (catalogDraft()?.items || []).length;
         const actors = `${actorCount} Available subagent${actorCount === 1 ? '' : 's'}`;
         if (!labels.length) return `${actors} · API/local access only`;
         if (state.skipSubscriptionPresets) return `${actors} · ${labels.join(', ')} connected · automatic subscription preset skipped`;
@@ -791,10 +773,9 @@ import { accountRowFacts } from './harness_accounts.js';
                     void refreshModelSources();
                     syncCurrentStepActionState();
                 },
-                previewPayload: () => ({ ...draftSettings(), ...(state.reviewerSlots
-                    ? { OUROBOROS_REVIEWER_SLOTS: JSON.stringify(state.reviewerSlots) } : {}) }),
+                previewPayload: draftSettings,
                 providerProfiles: PROVIDER_PROFILES,
-                onSubagentsChange: (setting) => { state.availableSubagents = setting; adoptSubagentRoster({ OUROBOROS_SUBAGENTS: setting }); },
+                onSubagentsChange: (setting) => { state.availableSubagents = setting; },
                 onSetupPreview: applySetupPreview,
                 onPreviewStatus: syncCurrentStepActionState,
                 onStatus: () => {
@@ -887,6 +868,14 @@ import { accountRowFacts } from './harness_accounts.js';
         `;
     }
 
+    function reviewersNote() {
+        const count = reviewPoolRows(catalogDraft()).length;
+        if (count) return `Reviewers: ${count} — the rows marked Reviewer under Models → Available subagents. Outside Cyber Pro each of them reviews every change to Ouroboros itself; in Cyber Pro the agent composes the panel from them.`;
+        if (agentsStep?.previewError) return 'Automatic reviewers are unavailable. Mark rows as Reviewer under Models → Available subagents, or use Main on the summary.';
+        return (catalogDraft()?.items || []).length ? 'No row is marked Reviewer, so reviews will report “not performed”. Mark rows under Models → Available subagents.'
+            : 'Reviewers will be prepared from your connected access.';
+    }
+
     function renderReviewModeStep() {
         const runtimeMode = trim(state.runtimeMode) || 'advanced';
         const runtimeModeCopy = HOST_MODE === 'desktop'
@@ -899,10 +888,7 @@ import { accountRowFacts } from './harness_accounts.js';
                     <p class="step-copy">${escapeHtml(STEP_META.review_mode.copy)}</p>
                 </div>
                 </div>
-                <div class="wizard-inline-note">${state.reviewerSlots ? 'Your reviewer assignments are ready below. You can change every reviewer, including deep self-review.' : agentsStep?.previewError ? 'Automatic reviewer assignments are unavailable. Configure them below, or use Main on the summary.' : 'Reviewer assignments will be prepared from your connected access.'}</div>
-                <details class="wizard-collapse" data-collapse="reviewers" ${state.reviewersOpen ? 'open' : ''}><summary>Reviewers</summary>
-                    <div class="wizard-collapse-body">${renderReviewerSlotsSection()}</div>
-                </details>
+                <div class="wizard-inline-note" data-reviewers-note>${escapeHtml(reviewersNote())}</div>
                 <div class="wizard-choice-grid">
                     ${REVIEW_MODES.map((mode) => `
                         <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${state.reviewEnforcement === mode.value ? 'active' : ''}" data-review-mode="${escapeHtml(mode.value)}" aria-pressed="${state.reviewEnforcement === mode.value}">
@@ -986,6 +972,8 @@ import { accountRowFacts } from './harness_accounts.js';
                 </div>
             </div>
             <div class="summary-card">${summaryRowsHtml()}</div>
+            ${state.reviewEnforcement === 'blocking' && trim(state.runtimeMode) !== 'cyber_pro' && packetOnlyReviewPool(catalogDraft())
+                ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
             ${languageBlockHtml({ onboarding: true })}
             ${state.recoveryPrepared ? `<div class="wizard-inline-note">Automatic subscription presets were skipped. ${state.recoveryMain === mainBinding() ? 'Reviewers were assigned to Main.' : 'Main changed; reviewers keep the assignments shown above. Use Main for reviewers again if you want to update them.'} Check the assignments, then Start Ouroboros to save this draft. Later changes in Settings are manual.</div>` : ''}
         `;
@@ -1038,7 +1026,6 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function render() {
-        destroyReviewerSlots();
         const meta = STEP_META[state.currentStep];
         const index = STEP_ORDER.indexOf(state.currentStep);
         // An UNKNOWN save (503 settings_save_timeout: the write may still be
@@ -1311,19 +1298,6 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function bindReviewModeStep() {
-        initReviewerSlots({ onChange: () => {
-            state.reviewerDraftDirty = true;
-            const value = collectReviewerSlots().OUROBOROS_REVIEWER_SLOTS;
-            if (value) state.reviewerSlots = JSON.parse(value);
-            markStepEdited();
-        } });
-        adoptSubagentRoster({ OUROBOROS_SUBAGENTS: state.availableSubagents });
-        // Keys typed on Accounts decide which providers these lanes may offer,
-        // so the list is derived from the CURRENT draft on every entry into
-        // this step rather than once at construction.
-        setReviewerSourceContext({ settings: draftSettings(), providerProfiles: PROVIDER_PROFILES });
-        setReviewerProcessingPreference(state.processingPreference, state.modelProcessingPreferences || {});
-        if (state.reviewerSlots) applyReviewerSlotsDraft(state.reviewerSlots);
         bindChoices('data-review-mode', 'reviewEnforcement');
         bindChoices('data-runtime-mode', 'runtimeMode');
         const skillsInput = document.getElementById('skills-repo-path');
@@ -1524,9 +1498,8 @@ import { accountRowFacts } from './harness_accounts.js';
             skipSubscriptionPresets: state.skipSubscriptionPresets,
             ...onboardingSettingsDraft({ state, providerFields: PROVIDER_FIELDS, budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim }),
             // Completion validates this visible draft and never replaces it.
-            OUROBOROS_SUBAGENTS: agentsStep?.availableSubagents
-                || state.availableSubagents,
-            ...(state.reviewerSlots ? { OUROBOROS_REVIEWER_SLOTS: JSON.stringify(state.reviewerSlots) } : {}),
+            OUROBOROS_SUBAGENTS: catalogDraft(),
+            ...(agentsStep?.allowEmptyReviewPool ? { [ALLOW_EMPTY_REVIEW_POOL]: true } : {}),
         };
         try {
             await saveWizardPayload(payload);
@@ -1557,7 +1530,7 @@ import { accountRowFacts } from './harness_accounts.js';
         const collapseStateKeys = {
             'api-access': 'apiAccessOpen', 'api-budget': 'apiBudgetOpen',
             'more-providers': 'moreProvidersOpen', 'local-model': 'localSourceOpen',
-            subagents: 'subagentsOpen', reviewers: 'reviewersOpen',
+            subagents: 'subagentsOpen',
         };
         root.querySelectorAll('[data-collapse]').forEach((details) => {
             const key = collapseStateKeys[details.dataset.collapse];
@@ -1593,7 +1566,6 @@ import { accountRowFacts } from './harness_accounts.js';
         catalogGeneration += 1;
         catalogRequest?.controller.abort();
         modelRoles.destroy();
-        destroyReviewerSlots();
     });
     render();
 })();

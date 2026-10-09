@@ -39,41 +39,65 @@ PROPOSAL_FILES = {
 }
 PROPOSAL_TITLE = "Proposal: faster build"
 
+# The golden's three seats as the wrapper resolves them from the review pool: t1
+# receives the packet; t2 (a session) and s1 (a natively retrieving api row) read the
+# subject themselves and are asked both parts of the brief.
 GOLDEN_CONFIG = {
     "profile": "external_pr_readiness",
     "provider": "configured_per_slot",
-    "slot_config_source": "settings",
-    "triad_slots": [
-        {"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-sol"}, "effort": "high"},
+    "slot_config_source": "review_pool",
+    "pool_slots": [
+        {"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-sol"}, "effort": "high",
+         "delivery": "packet"},
         {"slot_id": "t2", "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol",
                                     "profile_id": "pinned"}, "effort": "high"},
+        {"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-sol"}, "effort": "xhigh",
+         "delivery": "native"},
     ],
-    "scope_slots": [
-        {"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-sol"}, "effort": "xhigh"},
-    ],
-    "triad_models": ["openai/gpt-5.6-sol", "codex=gpt-5.6-sol"],
-    "triad_efforts": ["high", "high"],
-    "scope_models": ["openai/gpt-5.6-sol"],
-    "scope_efforts": ["xhigh"],
+    "pool_models": ["openai/gpt-5.6-sol", "codex=gpt-5.6-sol", "openai/gpt-5.6-sol"],
+    "pool_efforts": ["high", "high", "xhigh"],
     "review_enforcement": "blocking",
     "context_mode": "max",
     "runtime_mode": "pro",
 }
+
+
+def _coupling_matrix(reason: str) -> list:
+    """The whole Coupling questions answered PASS: a retrieving seat's
+    ``coupling`` block must cover every required item or the gate records it as
+    unanswered."""
+    return [{"item": item, "verdict": "PASS", "severity": "advisory", "reason": reason}
+            for item in ("intent_alignment", "forgotten_touchpoints", "cross_surface_consistency",
+                         "regression_surface", "prompt_doc_sync", "architecture_fit",
+                         "cross_module_bugs", "implicit_contracts")]
+
+
+# The packet seat (t1) answers contract A (the change array); the retrieving seats
+# (t2, a session; s1, a natively retrieving api row) are asked both parts of the
+# brief and answer contract B (one object: ``change`` + ``coupling``).
 ANSWERS = {
     "t1": json.dumps([{"item": "code_quality", "verdict": "PASS", "severity": "advisory",
                        "reason": "t1 read build.sh"}]),
-    "t2": json.dumps([{"item": "tests_affected", "verdict": "PASS", "severity": "advisory",
-                       "reason": "t2 session read the tests"}]),
-    # The scope seat answers the whole Intent / Scope Review Checklist: the REAL
-    # scope reviewer refuses a partial coverage as a contract failure.
-    "s1": json.dumps([{"item": item, "verdict": "PASS", "severity": "advisory",
-                       "reason": "s1 scope matches the title"}
-                      for item in ("intent_alignment", "forgotten_touchpoints", "cross_surface_consistency",
-                                   "regression_surface", "prompt_doc_sync", "architecture_fit",
-                                   "cross_module_bugs", "implicit_contracts")]),
+    "t2": json.dumps({"change": [{"item": "tests_affected", "verdict": "PASS", "severity": "advisory",
+                                  "reason": "t2 session read the tests"}],
+                      "coupling": _coupling_matrix("t2 session read the checkout")}),
+    "s1": json.dumps({"change": [], "change_clean": True,
+                      "coupling": _coupling_matrix("s1 scope matches the title")}),
 }
 SESSION_TRANSCRIPT = "full session transcript of t2\nEOF_SENTINEL"
 SESSION_RUN_ID = "run-golden"
+
+
+def golden_pool(*extra_rows: dict) -> str:
+    """``GOLDEN_CONFIG``'s seats as the review pool (``OUROBOROS_SUBAGENTS`` rows): ``t1``
+    reads the packet, ``t2`` (a session) and ``s1`` (a natively retrieving api row)
+    retrieve and are asked both parts of the brief. ``extra_rows`` are further catalog
+    rows (e.g. an unmarked row a lane names by id)."""
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    return pool_roster(pool_seat("t1", "openai/gpt-5.6-sol", effort="high"),
+                       pool_seat("t2", "codex=gpt-5.6-sol", kind="agent_session", profile_id="pinned", effort="high"),
+                       pool_seat("s1", "openai/gpt-5.6-sol", delivery="native", effort="xhigh"), *extra_rows)
 
 
 def git(repo: pathlib.Path, *args: str) -> str:

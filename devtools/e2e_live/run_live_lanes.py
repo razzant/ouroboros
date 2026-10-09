@@ -695,7 +695,7 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
             stub = stub_lane.routed_stub_model(scenario.stub_script(clone)).__enter__()
             child_model = stub_lane.STUB_CHILD_SLUG
             cfg = stub_lane.stub_settings(stub, template)
-        cfg.update(scenario.overrides(child_model))
+        cfg.update(scenario.overrides(child_model, cfg))
         if args.profile == "wiring":
             cfg["OUROBOROS_REVIEW_ENFORCEMENT"] = "advisory"
         # The lane's ceiling is its own reservation: disjoint from the other lanes', never the whole cap.

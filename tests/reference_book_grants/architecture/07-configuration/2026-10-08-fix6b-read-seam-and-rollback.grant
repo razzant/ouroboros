@@ -1,0 +1,2 @@
+2140
+FIX6b audit fixes (VD3-03, VD3-07, VD3-09): the settings read seam paragraph describes the review pool instead of the lane era (authored lanes become marked rows, retired comma lists drop, one factory source for a document without lanes, review keys set in the environment are announced and not read), and the retired lanes key row names the snapshot and how to roll back.

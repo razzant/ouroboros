@@ -33,9 +33,7 @@ system, architecture map and standing disclosures are recorded
 ``not_applicable`` (named, never silently dropped), and the navigation indexes
 the SUBJECT's own documents (``subject_root``) plus its required-source
 manifest. The shared-contract section is a rule of this repository's CODE and
-travels with the body layer only; a skill advisory stays on the body layer
-(constitution, disclosures) but judges a payload that is not this repository's
-code, so it receives no shared-contract section (``repository_rules=False``).
+travels with the body layer only.
 
 Choosing which reference chapter to inline from an exact file-name mention is
 context ASSEMBLY, not behaviour selection: no verdict, routing decision or
@@ -334,7 +332,6 @@ def governance_context(
     already_inline: Any = (),
     layer: str = BODY_LAYER,
     subject_root: Any = None,
-    repository_rules: bool = True,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -347,10 +344,7 @@ def governance_context(
     delivery carries in full (:func:`_carried_reasons` states the mechanism).
     ``layer`` is the ONE external switch: ``body`` (the subject is Ouroboros's
     body) runs the three tiers; ``core`` (any other subject) runs
-    :func:`_core_layer_context` over ``subject_root``. ``repository_rules`` is a
-    body-layer refinement for a surface whose subject is not this repository's
-    CODE but is judged under its constitution (a skill payload): it then
-    receives no :data:`SHARED_CHECKLIST_SECTION`."""
+    :func:`_core_layer_context` over ``subject_root``."""
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
 
     if layer not in GOVERNANCE_LAYERS:
@@ -379,18 +373,17 @@ def governance_context(
                          "this surface supplies no checklist section"))
     shared_path = f"{CHECKLISTS_PATH}#{SHARED_CHECKLIST_SECTION}"
     shared_inline = False
-    if repository_rules:
-        try:
-            # Read where every surface reads its own section: the executing
-            # review code's checklist, never the reviewed tree's copy, so a
-            # contributor proposal cannot rewrite the rule it is judged by.
-            shared = load_checklist_section(SHARED_CHECKLIST_SECTION)
-            shared_inline = True
-        except (OSError, ValueError) as exc:
-            shared = f"[⚠️ OMISSION: {shared_path} could not be loaded: {exc}]"
-        tier1.append((shared_path, shared))
-        rows.append(_row(shared_path, 1, "inline", len(shared),
-                         "tier 1: every reviewer of this repository's code carries it"))
+    try:
+        # Read where every surface reads its own section: the executing
+        # review code's checklist, never the reviewed tree's copy, so a
+        # contributor proposal cannot rewrite the rule it is judged by.
+        shared = load_checklist_section(SHARED_CHECKLIST_SECTION)
+        shared_inline = True
+    except (OSError, ValueError) as exc:
+        shared = f"[⚠️ OMISSION: {shared_path} could not be loaded: {exc}]"
+    tier1.append((shared_path, shared))
+    rows.append(_row(shared_path, 1, "inline", len(shared),
+                     "tier 1: every reviewer of this repository's code carries it"))
     for path in (BIBLE_PATH, CHECKLISTS_ARCHIVE_PATH):
         if path in carried:
             already = load_governance_doc(root, path, on_missing="silent")

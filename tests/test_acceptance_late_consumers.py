@@ -10,7 +10,7 @@ import pytest
 from ouroboros.agent_task_pipeline import _store_task_result
 from ouroboros.headless import copy_child_task_result
 from ouroboros.task_results import load_task_result, write_task_result
-from ouroboros.reviewer_slot_config import REVIEWER_SLOTS_ENV
+from tests.review_pool_rosters import pool_roster, pool_seat
 from supervisor import events_chat_delivery as chat
 from supervisor.terminal_delivery import delivery_id_for, register_pending_delivery
 from tests.test_acceptance_history import _fixture, _caller, _source, _request
@@ -32,9 +32,8 @@ def late(tmp_path, monkeypatch, fresh_sends):
                         {"openai/gpt-4.1-nano": (1.0, 1.0, 1.0, 1.0)}
                         if provider == "openrouter" and not model else {})
     monkeypatch.setenv('OUROBOROS_TASK_REVIEW_MODE', 'auto')
-    monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps({'triad': [
-        {'slot_id': str(i), 'route': {'kind': 'api_chat', 'target_id': 'openai/gpt-4.1-nano'}} for i in range(3)],
-        'scope': [{'slot_id': 'unused-scope', 'route': {'kind': 'api_chat', 'target_id': 'openai/gpt-4.1-nano'}}]}))
+    # The acceptance pool: three packet seats '0', '1', '2' on the synthetic tariff's model.
+    monkeypatch.setenv('OUROBOROS_SUBAGENTS', pool_roster(*(pool_seat(str(i), 'openai/gpt-4.1-nano') for i in range(3))))
     calls, gates = [], []
     config = SimpleNamespace(fail=False, verdict='PASS', slot_gates={}, slot_verdicts={})
 

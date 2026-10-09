@@ -1,79 +1,90 @@
 """Advisory permission never rewrites failed review evidence as a PASS."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.review_state import load_state
-from ouroboros.tools import claude_advisory_review as advisory
-from ouroboros.tools import git
-from ouroboros.tools.parallel_review import aggregate_review_verdict
-from ouroboros.tools.review_helpers import build_scope_actor_record
-from ouroboros.tools.scope_review import ScopeReviewResult
-from tests.test_advisory_inline_freshness import candidate  # noqa: F401
+from ouroboros.review_execution import ReviewRouteKind
+from ouroboros.tools import review as review_mod
+from tests.test_git_review_preflight_gate import candidate  # noqa: F401
+
+SOURCE = "review source\n" * 500
+PASS_ITEM = json.dumps([{"item": "bible_compliance", "verdict": "PASS", "severity": "critical", "reason": "ok"}])
 
 
-@pytest.mark.parametrize("phase", ["context", "delivery", "format", "window_authority"])
+def _prepared(candidate, parts):  # noqa: F811
+    """One wave of ``len(parts)`` api seats; a seat asked ``coupling`` retrieves."""
+    n = len(parts)
+    retrieves = ["coupling" in p for p in parts]
+    models = [f"m/{i + 1}" for i in range(n)]
+    from ouroboros.config import get_review_enforcement
+    from ouroboros.tools.review_helpers import review_enforcement_blocks
+
+    return {
+        "prompt": "PACKET", "stable_prefix_len": 0, "models": models, "routes": [ReviewRouteKind.API_CHAT] * n,
+        "target_repo": candidate.repo_dir, "blocking_review": review_enforcement_blocks(get_review_enforcement()),
+        "layer": "body", "task_evidence": None,
+        "row_plan": {"models": models, "routes": [ReviewRouteKind.API_CHAT] * n,
+                     "slot_ids": [f"slot_{i + 1}" for i in range(n)], "parts": [tuple(p) for p in parts],
+                     "retrieves": retrieves, "session_tasks": ["BRIEF" if r else "" for r in retrieves],
+                     "brief_shas": ["sha" if r else "" for r in retrieves]},
+        "governance_manifest": [], "governance_packet_slots": [], "retrieving_manifests": [], "brief_texts": {},
+    }
+
+
+def _dispatch(candidate, monkeypatch, results, parts):  # noqa: F811
+    monkeypatch.setattr(review_mod, "_handle_multi_model_review",
+                        lambda *a, **kw: json.dumps({"results": results}))
+    return review_mod._dispatch_unified_review(candidate, "candidate", _prepared(candidate, parts))
+
+
 @pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
-def test_technical_scope_failure_keeps_full_source_and_status(candidate, monkeypatch, phase, enforcement):  # noqa: F811
+def test_failed_coupling_seat_keeps_full_source_and_is_never_a_pass(candidate, monkeypatch, enforcement):  # noqa: F811
+    """The one seat asked the coupling question fails technically: its record
+    keeps the full raw output and the typed failure facts, Part 2 is never
+    read as answered, and advisory enforcement only waves the BLOCK through —
+    loudly — without rewriting the evidence."""
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
-    source = "review source\n" * 500
-    result = ScopeReviewResult(
-        blocked=True, status="error", failure_phase=phase, failure_code="test_failure",
-        block_message="mandatory source unavailable", raw_text=source,
-        advisory_findings=[{"item": "received_note", "reason": "keep this finding"}],
-    )
-    row = build_scope_actor_record(result, slot_id="scope-one")
-    candidate._last_scope_raw_results = [row]
-    blocked, _, _, _, findings = aggregate_review_verdict(
-        None, result, "", [], candidate, "candidate", 0, candidate.repo_dir,
-    )
-    assert blocked == (enforcement == "blocking")
-    assert result.blocked and result.status == "error"
-    assert row["raw_text"] == source and row["failure_phase"] == phase
-    assert findings[0]["reason"] == "keep this finding"
-    if enforcement == "advisory":
-        assert "not a PASS" in candidate._review_advisory[-1]
-
-
-@pytest.mark.parametrize("phase,state,token", [
-    ("authority", "settled", ""), ("admission", "not_dispatched", ""),
-    ("deadline", "not_dispatched", ""), ("", "settled", ""),
-    ("delivery", "in_flight", ""), ("delivery", "custody_lost", ""),
-    ("delivery", "settled", "pending-invocation"),
-])
-def test_independent_failures_remain_blocking(candidate, monkeypatch, phase, state, token):  # noqa: F811
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    result = ScopeReviewResult(blocked=True, status="error", block_message="independent refusal", failure_phase=phase, operation_state=state, pending_invocation_id=token)
-    assert aggregate_review_verdict(None, result, "", [], candidate, "candidate", 0, candidate.repo_dir)[0]
-
-
-def test_mixed_scope_panel_requires_every_failed_origin_to_be_technical(candidate, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    result = ScopeReviewResult(blocked=True, status="blocked", block_message="mixed failure")
-    candidate._last_scope_raw_results = [
-        {"status": "error", "failure_phase": "context"},
-        {"status": "error", "failure_phase": "authority"},
+    results = [
+        {"model": "m/1", "slot_id": "slot_1", "text": PASS_ITEM, "verdict": "UNKNOWN"},
+        {"model": "m/2", "slot_id": "slot_2", "verdict": "ERROR", "text": SOURCE,
+         "failure_code": "test_failure", "transport_status": "delivery"},
     ]
-    assert aggregate_review_verdict(None, result, "", [], candidate, "candidate", 0, candidate.repo_dir)[0]
+    review_err = _dispatch(candidate, monkeypatch, results, [("change",), ("change", "coupling")])
+    assert (review_err is not None) == (enforcement == "blocking")
+    row = candidate._last_triad_raw_results[1]
+    assert row["status"] == "error" and row["raw_text"] == SOURCE
+    assert row["failure_code"] == "test_failure" and row["transport_status"] == "delivery"
+    verdict = candidate._last_review_verdict
+    assert verdict["aggregate"] != "PASS" and verdict["per_question"]["coupling"] != "PASS"
+    assert candidate._last_coupling_result.status != "responded"
+    if enforcement == "advisory":
+        assert "explicit author decision is required" in candidate._review_advisory[-1]
 
 
-def test_scope_context_failure_is_distinct_from_invalid_subject(candidate, monkeypatch):  # noqa: F811
-    from ouroboros.tools import scope_review
-    from ouroboros.tools.review_admission import prepare_scope_review
-
-    monkeypatch.setattr(scope_review, "review_repo_dirs_for", lambda ctx: (ctx.repo_dir, ctx.repo_dir))
-    monkeypatch.setattr("ouroboros.tools.review_subject.managed_review_subject", lambda *a: None)
-    # Point the brief's canonical checklist reader at the absent fixture source.
-    from ouroboros.tools import scope_review_session
-    from ouroboros.tools.review_helpers import load_checklist_section
-    monkeypatch.setattr(scope_review_session, "load_checklist_section", lambda name: load_checklist_section(name, candidate.repo_dir / "docs" / "CHECKLISTS.md"))
-    prepared, failure = prepare_scope_review(candidate, "candidate", scope_model="test/model")
-    assert prepared is None and failure.failure_phase == "context"
-    assert failure.status == "error"
-    monkeypatch.setattr("ouroboros.tools.review_subject.managed_review_subject", lambda *a: (_ for _ in ()).throw(RuntimeError("unknown managed subject")))
-    _, failure = prepare_scope_review(candidate, "candidate", scope_model="test/model")
-    assert failure.failure_phase == "authority"
+@pytest.mark.parametrize("state,token", [("in_flight", ""), ("custody_lost", ""), ("settled", "pending-invocation")])
+@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
+def test_pending_seat_is_pending_not_pass_under_either_enforcement(candidate, monkeypatch, state, token, enforcement):  # noqa: F811
+    """A seat whose physical operation is unresolved keeps the wave PENDING:
+    blocking enforcement blocks on it, advisory records the pending signal and
+    the verdict is NOT_PERFORMED (``review_late_result_pending``) — never a PASS
+    the gate could settle or reuse."""
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    results = [
+        {"model": "m/1", "slot_id": "slot_1", "text": PASS_ITEM, "verdict": "UNKNOWN"},
+        {"model": "m/2", "slot_id": "slot_2", "verdict": "ERROR", "text": "", "operation_state": state,
+         "pending_invocation_id": token, "late_result_pending": bool(token)},
+    ]
+    review_err = _dispatch(candidate, monkeypatch, results, [("change",), ("change", "coupling")])
+    assert (review_err is not None) == (enforcement == "blocking")
+    if review_err:
+        assert "REVIEW_PENDING" in review_err
+    verdict = candidate._last_review_verdict
+    assert verdict["aggregate"] == "NOT_PERFORMED" and verdict["reason"] == "review_late_result_pending"
+    assert candidate._last_review_block_reason == "review_late_result_pending"
+    if enforcement == "advisory":
+        assert any("review is pending" in note for note in candidate._review_advisory)
 
 
 def test_actual_budget_exception_keeps_independent_origin():
@@ -83,18 +94,6 @@ def test_actual_budget_exception_keeps_independent_origin():
     usage, _, _, state, _ = _review_exception_projection(BudgetExceeded("no funds"), {}, _ReviewAttemptHistory(), {})
     assert usage["review_failure_phase"] == "admission"
     assert state == "not_dispatched"
-
-
-def test_preflight_parse_failure_remains_failed_under_advisory(candidate, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    monkeypatch.setattr(advisory, "_run_advisory_tests", lambda ctx: None)
-    monkeypatch.setattr(advisory, "_run_claude_advisory", lambda *a, **kw: ([], "unparsed complete review", "test/model", 20))
-    result = git._advisory_and_tests_gate(candidate, "candidate", 0, classification_paths=["change.py"], advisory_paths=["change.py"], skip_advisory_pre_review=False, skip_tests=False)
-    assert result is None
-    row = load_state(candidate.drive_root).advisory_runs[-1]
-    assert row.status == "parse_failure" and row.raw_result == "unparsed complete review"
-    assert row.execution["failure_phase"] == "format"
-    assert any("not a PASS" in str(item) for item in candidate._review_advisory)
 
 
 def test_frozen_failed_actor_with_raw_output_stays_failed():

@@ -3,8 +3,8 @@
 The sections are read from the shipped ``docs/CHECKLISTS.md`` through the same
 loader the surfaces use, so these tests pin DELIVERY — which actual builder
 carries which canonical section, where in its prompt and how often — not the
-rules' wording. Repository-change reviewers (triad packet and session, scope
-native and delegated, advisory, deep) carry the shared ownership section; plan
+rules' wording. Repository-change reviewers (triad packet and session, the
+preflight's one seat included; scope native and delegated; deep) carry the shared ownership section; plan
 and skill review do not; the plan prompt keeps its code copy of the blocking
 rule only as the named fallback for a missing checklist section. The reviewed
 tree is a proposal whose own CHECKLISTS copy rewrites those sections, as a
@@ -44,7 +44,7 @@ def candidate(tmp_path):
     (repo / "ouroboros").mkdir()
     checklists = (REPO / "docs" / "CHECKLISTS.md").read_text(encoding="utf-8")
     for name in (SHARED_CHECKLIST_SECTION, "Change Review Checklist", "Ouroboros Body Layer",
-                 "Intent / Scope Review Checklist"):
+                 "Coupling questions"):
         section = load_checklist_section(name)
         assert checklists.count(section) == 1
         checklists = checklists.replace(section, f"## {name}\n\n{PROPOSAL_RULE}\n")
@@ -82,55 +82,45 @@ def test_triad_packet_and_session_carry_the_shared_section_in_their_stable_head(
     prepared, early, exited = review._prepare_unified_review(ctx, "candidate", goal="g")
 
     assert not exited and early is None
-    packet, stable_len, session = prepared["prompt"], prepared["stable_prefix_len"], prepared["session_task"]
+    packet, stable_len = prepared["prompt"], prepared["stable_prefix_len"]
+    # The session seat's two-part brief is its own row of the one wave.
+    session = prepared["row_plan"]["session_tasks"][1]
     repo_commit = review._load_checklist_section()
     for text in (packet, session):
         assert text.count(SHARED) == 1 and PROPOSAL_RULE not in text
         assert text.count(CRITICAL_FINDING_CALIBRATION) == 1
         assert text.index(repo_commit) < text.index(SHARED)
     assert packet.index(SHARED) + len(SHARED) <= stable_len  # the cache-marked prefix
-    for manifest in (prepared["governance_manifest"], prepared["governance_retrieving_manifest"]):
+    retrieving = next(m for m in prepared["retrieving_manifests"] if m["slot_id"] == "triad-session")
+    for manifest in (prepared["governance_manifest"], retrieving["governance_manifest"]):
         row = next(row for row in manifest if row["path"] == SHARED_ROW)
         assert row["tier"] == 1 and row["disposition"] == "inline" and row["chars"] == len(SHARED)
 
 
 @pytest.mark.serial
 @pytest.mark.parametrize("delegated", [False, True], ids=["native", "session"])
-def test_scope_brief_carries_the_shared_section_beside_its_checklist(candidate, monkeypatch, delegated):
-    from ouroboros.tools import scope_review_session as session
+def test_two_part_brief_carries_the_shared_section_once_in_part_one(candidate, monkeypatch, delegated):
+    """One brief, two parts: the shared governance section rides Part 1 (the
+    change) exactly once, before the staged diff; Part 2 (the coupling
+    questions, with its own checklist) follows and does not repeat it."""
+    from ouroboros.tools import review_brief_coupling as brief_mod
 
-    monkeypatch.setattr(session, "scope_first_send_bound", lambda _brief: 900_000)
+    monkeypatch.setattr(brief_mod, "first_send_bound", lambda _brief: 900_000)
     # Without a system repository the governance root is the reviewed checkout
     # (review_substrate.review_repo_dirs_for), as in a contributor review.
-    task, manifest = session.build_scope_session_task(candidate, session.ScopeBriefInputs(
-        commit_message="candidate", governance_repo_dir=candidate, touched_paths=(TOUCHED,),
-        delegated=delegated, scope_model="fixture/scope"))
+    task, manifest = brief_mod.build_retrieving_brief(candidate, brief_mod.BriefInputs(
+        commit_message="candidate", intent=brief_mod.BriefIntent(goal="g", scope="s"),
+        governance_repo_dir=candidate, touched_paths=(TOUCHED,),
+        delegated=delegated, model="fixture/seat", slot_id="seat-1"))
 
-    scope_checklist = load_checklist_section("Intent / Scope Review Checklist")
+    coupling_checklist = load_checklist_section(brief_mod.COUPLING_CHECKLIST_SECTION)
     assert task.count(SHARED) == 1 and PROPOSAL_RULE not in task
     assert task.count(CRITICAL_FINDING_CALIBRATION) == 1
-    assert task.index(scope_checklist) < task.index(SHARED) < task.index("## Staged diff")
+    assert task.index(SHARED) < task.index("### Staged diff") < task.index("## Part 2 — Coupling questions")
+    assert task.index("## Part 2 — Coupling questions") < task.index(coupling_checklist)
+    assert manifest["parts"] == ["change", "coupling"]
     row = next(row for row in manifest["governance_manifest"] if row["path"] == SHARED_ROW)
     assert row["disposition"] == "inline" and row["chars"] == len(SHARED)
-
-
-@pytest.mark.serial
-def test_advisory_repository_brief_carries_it_and_skill_brief_does_not(candidate):
-    import ouroboros.tools.claude_advisory_review as advisory
-
-    repo_brief = advisory._build_advisory_prompt(
-        candidate, "candidate", goal="g", scope="s", resolved_paths=[TOUCHED],
-        prompt_context={"diff": "DIFF", "changed_files": f"M {TOUCHED}"})
-    assert repo_brief.count(SHARED) == 1 and PROPOSAL_RULE not in repo_brief
-    assert repo_brief.count(CRITICAL_FINDING_CALIBRATION) == 1
-    assert (repo_brief.index("## CHECKLISTS.md (What to review)") < repo_brief.index(SHARED)
-            < repo_brief.index("## Staged diff"))
-
-    skill_brief = advisory._build_advisory_prompt(
-        REPO, "skill advisory", scope="PAYLOAD", resolved_paths=[],
-        prompt_context={"diff": "(not included)", "changed_files": "(not included)",
-                        "review_surface": "skill"})
-    assert SHARED not in skill_brief
 
 
 def test_deep_review_carries_it_without_a_checklist_of_its_own(tmp_path):

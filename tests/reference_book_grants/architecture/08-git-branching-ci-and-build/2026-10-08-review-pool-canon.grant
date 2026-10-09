@@ -1,0 +1,2 @@
+89
+The deep-integration paragraph says how reviewer routing is pinned now: an `OUROBOROS_SUBAGENTS` catalog whose Reviewer-marked rows are the whole pool, because a never-configured catalog would read the factory rows.

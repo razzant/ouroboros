@@ -661,7 +661,7 @@ def _stamp_native_seed_trust(
 ) -> None:
     """Hash-pin a native-trust review verdict for a launcher-seeded skill.
 
-    The payload bytes shipped through the repo commit gate (triad+scope), so a
+    The payload bytes shipped through the repo commit gate (its review wave), so a
     launcher-written native skill gets ``status=clean`` bound to the payload
     hash computed AFTER seeding (control files excluded from the hash). Any
     later edit flips the verdict stale exactly like an ordinary review.

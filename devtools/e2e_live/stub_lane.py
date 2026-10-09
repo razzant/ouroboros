@@ -66,7 +66,7 @@ def routed_stub_model(script: dict):
 
 def stub_settings(stub, template: dict) -> dict:
     """The keyless lane settings: every slot the tree declares pinned (the loop slots to the
-    loopback stub, the rest empty), the review panel and the advisory row on the stub, then the
+    loopback stub, the rest empty), every reviewer of the review pool on the stub, then the
     run template's knobs (budget, workers, evolution) on top. Refuses a template that would
     smuggle a paid slot or a credential."""
     from tests.system_e2e import harness
@@ -75,7 +75,6 @@ def stub_settings(stub, template: dict) -> dict:
         raise RuntimeError("stub slug drifted from the harness MOCK_SLUG")
     cfg = harness.keyless_settings(
         stub,
-        OUROBOROS_REVIEWER_SLOTS=harness.keyless_reviewer_slots(advisory=True),
         OUROBOROS_RUNTIME_MODE="advanced",
         # The tree's default context mode, declared explicitly: the suite's keyless Low would
         # either be normalized to Max at boot (a persist the strict snapshot pin refuses) or,

@@ -21,9 +21,7 @@ from ouroboros.review_execution import (
 )
 from ouroboros.review_substrate import (
     ReviewSlot,
-    reviewer_slots,
     run_review_request,
-    scope_reviewer_slots,
 )
 from ouroboros.triad_review import empty_array_is_verified_clean
 
@@ -555,32 +553,18 @@ def test_mixed_panel_failed_agent_slot_does_not_shrink_n(tmp_path, fake_route, m
 def test_retired_route_envs_are_ignored(monkeypatch):
     """ABI-10: the phase-5 per-row route envs are RETIRED and IGNORED.
 
-    A row built from a plain model list is pinned api_chat even when a stale
-    environment still exports the retired spellings; delegated delivery is a
-    structured-SSOT fact (``OUROBOROS_REVIEWER_SLOTS`` rows) only.
+    A pool of api rows stays api_chat even when a stale environment still
+    exports the retired spellings; delegated delivery is a catalog-row fact
+    (``route.kind == agent_session``) only.
     """
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from tests.review_pool_rosters import set_review_pool
+
     monkeypatch.setenv("OUROBOROS_REVIEW_ROUTES", "agent_session,agent_session")
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_ROUTES", "agent_session")
-    rows = scope_reviewer_slots(["m1", "m2"])
+    set_review_pool(monkeypatch, ["m1", "m2"], prefix="slot")
+    rows = review_pool_slots(role_hint="commit review")
     assert all(row.route is ReviewRouteKind.API_CHAT for row in rows)
-    assert rows[0].slot_id == "scope_slot_1" and rows[1].slot_id == "scope_slot_2"
-    assert all(row.route is ReviewRouteKind.API_CHAT
-               for row in reviewer_slots(["m1", "m2"], role_hint="commit review"))
-
-
-def test_scope_rows_default_to_the_configured_scope_review_effort(monkeypatch):
-    """Regression (v6.89.0): with no structured reviewer slots, the legacy path took
-    this function's old literal default ("medium") instead of the owner's configured
-    OUROBOROS_EFFORT_SCOPE_REVIEW — the BLOCKING constitutional scope reviewer
-    silently ran below its configured reasoning strength on every stock install."""
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "some/model")
-    monkeypatch.delenv("OUROBOROS_EFFORT_SCOPE_REVIEW", raising=False)
-    assert [row.effort for row in scope_reviewer_slots()] == ["high"]  # config default
-    monkeypatch.setenv("OUROBOROS_EFFORT_SCOPE_REVIEW", "xhigh")
-    assert [row.effort for row in scope_reviewer_slots()] == ["xhigh"]
-    # An explicit effort still wins for callers that rebuild one positional row.
-    assert [row.effort for row in scope_reviewer_slots(["m"], effort="low")] == ["low"]
+    assert rows[0].slot_id == "slot-1" and rows[1].slot_id == "slot-2"
 
 
 def _persisted_response_payloads(drive_root):
@@ -639,29 +623,19 @@ def test_acceptance_rows_follow_the_configured_triad_delivery(monkeypatch):
     triad surface reads — a delegated row included — instead of an api-pinned
     projection of them. Upstream wrote this against the legacy comma-list plus its
     per-row route env; ABI-10 retired BOTH reads, so the configured rows come from
-    the structured SSOT, which is the only configuration surface that can carry a
-    session row at all. The generic model-list builder keeps its explicit pin for
-    callers that pass no route list (a caller's own statement, never a surface
-    default), and a stale retired route env still leaks into nothing."""
-    from ouroboros.reviewer_slot_config import REVIEWER_SLOTS_ENV, triad_delivery_slots
+    the catalog (the review pool), which is the only configuration surface that
+    can carry a session row at all; a stale retired route env still leaks into
+    nothing."""
+    from ouroboros.reviewer_slot_config import triad_delivery_slots
+    from tests.review_pool_rosters import pool_roster, pool_seat
 
     monkeypatch.setenv("OUROBOROS_REVIEW_ROUTES", "agent_session,agent_session")
-    monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps({
-        "triad": [
-            {"slot_id": "slot_1", "route": {"kind": "agent_session", "target_id": "codex"}},
-            {"slot_id": "slot_2", "route": {"kind": "api_chat", "target_id": "m2"}},
-        ],
-        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "m2"}}],
-        "advisory": {"enabled": False,
-                     "route": {"kind": "agent_session", "target_id": "codex"},
-                     "effort": "low"},
-    }))
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", pool_roster(
+        pool_seat("slot_1", "codex", kind="agent_session"), pool_seat("slot_2", "m2")))
     rows = triad_delivery_slots(role_hint="task acceptance")
     assert [row.route for row in rows] == [ReviewRouteKind.AGENT_SESSION, ReviewRouteKind.API_CHAT]
     assert [row.slot_id for row in rows] == ["slot_1", "slot_2"]
     assert all(row.role_hint == "task acceptance" for row in rows)
-    pinned = reviewer_slots(["m1", "m2"], effort="high", role_hint="task acceptance")
-    assert all(row.route is ReviewRouteKind.API_CHAT for row in pinned)
 
 
 def test_agent_slot_without_session_task_refuses_the_api_pack(tmp_path, fake_route):

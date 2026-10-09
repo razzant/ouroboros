@@ -205,16 +205,9 @@ class TestAliasProducerFanOutSweep:
         ("ouroboros/skill_review.py", "cost_usd", "_run_deterministic_preflight"): ("skill review preflight receipt", 1),
         ("ouroboros/skill_review.py", "cost_usd", "_persist_reviewed_outcome"): ("skill review outcome receipt", 1),
         ("ouroboros/skill_owner_attestation.py", "cost_usd", "run_owner_attestation"): ("owner attestation review receipt", 1),
-        ("ouroboros/tools/claude_advisory_review.py", "cost_usd", "_run_advisory_native"): ("advisory review receipt", 1),
         ("ouroboros/tools/delegate_terminal_evidence.py", "cost_usd", "_reported_cost"): ("delegate terminal evidence rows", 4),
-        ("ouroboros/tools/preflight_review_run.py", "cost_usd", "_llm_extract_advisory_items"): ("advisory preflight usage receipt", 1),
-        ("ouroboros/tools/preflight_review_run.py", "cost_usd", "_advisory_failure"): ("internal advisory failure adapter; physical charges remain in usage/custody, not gateway fields", 1),
-        ("ouroboros/tools/preflight_review_run.py", "cost_usd", "_run_advisory_delegated"): ("advisory preflight receipt", 1),
-        ("ouroboros/tools/preflight_review_run.py", "cost_usd", "_run_claude_advisory"): ("single advisory receipt cost reused by event projections", 1),
         ("ouroboros/tools/review_admission.py", "cost_usd", "triad_not_dispatched_records"): ("review admission receipt", 1),
-        ("ouroboros/tools/review_helpers.py", "cost_usd", "build_scope_actor_record"): ("review usage receipt", 1),
-        ("ouroboros/tools/scope_review.py", "cost_usd", "run_scope_review"): ("scope review receipt", 4),
-        ("ouroboros/tools/parallel_review.py", "cost_usd", "_run_scope"): ("scope review receipt", 1),
+        ("ouroboros/tools/review_change.py", "cost_usd", "run_system_review"): ("system review seat receipt, the ledger's triad_raw input; the record stores usd", 1),
         # evolution checkpoint plane (durable state files, never a gateway payload;
         # the campaign HISTORY row producer left this list in fix-round-3)
         ("ouroboros/evolution_checkpoints.py", "cost_usd", "build_solve_capability_digest"): ("evolution capability digest", 1),

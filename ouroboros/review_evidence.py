@@ -587,20 +587,6 @@ def capture_commit_review_evidence(ctx: Any) -> dict:
             "original_refs": copy.deepcopy(refs)}
 
 
-def restore_commit_review_evidence(ctx: Any, source_ref: dict) -> dict:
-    """Recover one preflight view from its recorded canonical source identity."""
-    from ouroboros.artifacts import read_actor_source_bytes
-    from ouroboros.tool_access import canonical_data_root
-
-    root = canonical_data_root(ctx)
-    raw = read_actor_source_bytes(root, ctx.task_id, source_ref)
-    text = raw.decode("utf-8")
-    return {"source_ref": dict(source_ref), "task_id": ctx.task_id, "data_root": str(root),
-            "source_chars": len(text), "source_status": "ready", "source_complete": None,
-            "selected_count": None, "gap_count": None,
-            "preview": truncate_within_limit(text, _ACCEPT_NOTES_CAP), "original_refs": []}
-
-
 def pending_commit_review_evidence(ctx: Any) -> dict:
     """Read the frozen request's evidence on reconciliation, never current trace."""
     attempt = getattr(ctx, "_pending_review_attempt", None)
@@ -747,7 +733,6 @@ def collect_review_evidence(
     """
     from ouroboros.review_state import (
         _LEGACY_CURRENT_REPO_KEY,
-        advisory_commit_ready,
         compute_snapshot_hash,
         load_state,
         make_repo_key,
@@ -801,11 +786,6 @@ def collect_review_evidence(
         "current_repo": {
             "snapshot_hash": snapshot_hash[:12] if snapshot_hash else "",
             "advisory_status": str(getattr(current_run, "status", "") or "missing"),
-            "repo_commit_ready": advisory_commit_ready(
-                current_run is not None and current_run.status in ("fresh", "bypassed", "skipped"),
-                open_obligations, open_debts,
-                matching_run=current_run if getattr(current_run, "repo_key", None) == repo_key and repo_key else None,
-            ),
             "bypass_reason": str(getattr(current_run, "bypass_reason", "") or ""),
             "stale_reason": str(getattr(state, "last_stale_reason", "") or "") if stale_matches_repo else "",
             "stale_ts": str(getattr(state, "last_stale_from_edit_ts", "") or "") if stale_matches_repo else "",

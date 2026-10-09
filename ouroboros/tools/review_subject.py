@@ -564,13 +564,16 @@ def build_triad_session_task(*, goal_section: str, scope_section: str,
                              governance: Optional[Any] = None,
                              subject: Optional[ManagedReviewSubject] = None,
                              layer: str = "body",
-                             subject_root: Optional[Any] = None) -> str:
+                             subject_root: Optional[Any] = None,
+                             subject_section: Optional[str] = None) -> str:
     """The commit-triad task in SESSION delivery (5.2/5.3): the SAME preamble,
     calibration, checklist and goal/scope/history the api pack carries — but no
     assembled evidence. The subject is a pointer (the session takes the staged
     diff itself) — except for a managed resolution, whose authoritative delta
-    artifact is inlined. Governance uses the same inline rules and navigation
-    tiers as the other review deliveries. ``layer`` is the checklist layer
+    artifact is inlined — unless the caller renders the subject slot itself
+    (``subject_section``: the two-part brief inlines or pages the change there).
+    Governance uses the same inline rules and navigation tiers as the other
+    review deliveries. ``layer`` is the checklist layer
     (`review_body_fact.layer_for`): the core layer carries no Ouroboros
     constitution, handbook or book maps — the subject (``subject_root``) is
     not the body."""
@@ -640,7 +643,7 @@ def build_triad_session_task(*, goal_section: str, scope_section: str,
         scope_section,
         rebuttal_section,
         review_history_section,
-        _session_subject_section(subject),
+        _session_subject_section(subject) if subject_section is None else subject_section,
         governance_fallback,
         *nav_maps,
     ] if str(part or "").strip())
@@ -741,10 +744,11 @@ class FrozenSubject:
         return _tree_delta_diff(self.spec.root, self.parent_sha, self.tree_sha, unified)
 
     def record_subject(self) -> Dict[str, Any]:
-        """The review ledger record's ``subject`` block."""
+        """The review ledger record's ``subject`` block: the subject's identities and the
+        root whose rules judged it (``governance_root``, the serving body)."""
         return {"root_kind": self.spec.root_kind, "root": self.spec.root, "kind": self.spec.kind,
                 "base": self.parent_sha, "head": self.spec.head, "tree_sha": self.tree_sha,
-                "diff_sha": self.diff_sha, "checkout": self.checkout}
+                "diff_sha": self.diff_sha, "checkout": self.checkout, "governance_root": self.spec.governance_root}
 
 
 def _rev_parse(root, rev: str) -> str:
@@ -757,12 +761,19 @@ def _rev_parse(root, rev: str) -> str:
 
 def _patch(root, *refs: str) -> Tuple[bytes, str]:
     """The binary patch between two tree-ish (or ``--cached``) and its identity:
-    sha256 of the patch TEXT, stripped — the digest ``_fingerprint_staged_diff``
-    binds (``run_cmd`` strips its text), so one subject has one identity."""
+    sha256 of the patch bytes decoded as UTF-8, stripped."""
     rc, raw, err = _git_bytes(root, ["diff", *_BINARY_PATCH_FLAGS, *refs])
     if rc != 0:
         raise StagedDiffUnavailable(f"binary patch capture failed (rc {rc}): {err or 'no detail'}")
     return raw, hashlib.sha256(raw.decode("utf-8", "replace").strip().encode("utf-8")).hexdigest()
+
+
+def staged_patch(root) -> Tuple[bytes, str]:
+    """The staged binary patch and its identity: ONE capture behind both the commit
+    gate's binding (``diff_sha256``) and a system ``index`` subject's ``diff_sha``,
+    so one subject has one identity. Bytes, never locale text: a text-mode capture
+    translates CRLF and decodes in the platform code page (cp1252 on Windows)."""
+    return _patch(root, "--cached")
 
 
 def _tree_parent(root, spec: ReviewSubjectSpec) -> Tuple[str, bool]:
@@ -845,7 +856,7 @@ def _frozen(ctx: Any, spec: ReviewSubjectSpec, checkout: str) -> FrozenSubject:
             tree_sha = managed.staged_tree if managed is not None else _real_index_tree(root)
             diff_text = (managed.render_prompt_diff() if managed is not None
                          else _rbc.capture_staged_diff(pathlib.Path(root)))
-            patch, diff_sha = _patch(root, "--cached")
+            patch, diff_sha = staged_patch(root)
             name_status = (managed.name_status if managed is not None
                            else _tree_delta_name_status(root, parent_sha, tree_sha))
         else:

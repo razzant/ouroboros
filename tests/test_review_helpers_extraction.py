@@ -41,6 +41,8 @@ _MOVED_OWNERS = {
     "REPO_ANTI_PATTERN_LOCK_GUARD": review_prompt_text,
     "REPO_ANTI_PATTERN_LOCK_GUARD_CORE": review_prompt_text,
     "anti_pattern_lock_guard": review_prompt_text,
+    "author_questions_block": review_prompt_text,
+    "goal_with_author_questions": review_prompt_text,
     "BODY_CHECKLIST_SECTION": review_checklist,
     "CHECKLIST_LAYERS": review_checklist,
     "CHECKLIST_RELATIVE_PATH": review_checklist,
@@ -104,7 +106,6 @@ _PARENT_OWNED = (
     "_run_review_preflight_tests",
     "build_blocking_findings_json_section",
     "build_goal_section",
-    "build_scope_actor_record",
     "build_scope_section",
     "build_skill_host_context",
     "cached_prompt_blocks",
@@ -117,6 +118,7 @@ _PARENT_OWNED = (
     "load_governance_doc",
     "resolve_intent",
     "review_drive_root",
+    "review_history_with_obligations",
     "review_wave_budget_gate",
 )
 

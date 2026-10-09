@@ -21,7 +21,7 @@ import test from 'node:test';
 
 import { accountRows } from '../modules/harness_accounts.js';
 import { accountName, nextUpAccount } from '../modules/claudexor_status_store.js';
-import { indexProfilesByHarness } from '../modules/reviewer_slots.js';
+import { indexProfilesByHarness } from '../modules/route_editor_primitives.js';
 
 // Source pins below delimit across line breaks; normalize CRLF so a Windows
 // checkout (core.autocrlf) reads the same bytes the delimiters were written for.
@@ -161,7 +161,7 @@ test('the live progress path forwards every progress field the endpoint emits an
 });
 
 test('both consumers of the credential-profiles wire read the SAME shape', () => {
-    // One golden body, two independent readers. The reviewer-slot index used to
+    // One golden body, two independent readers. The route editors' index used to
     // read flat camelCase off the `{profile,status,identity}` wrapper and matched
     // nothing, so every session row had an empty profile picker while the harness
     // account list beside it rendered the same accounts correctly.

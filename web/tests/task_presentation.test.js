@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { clearStickyCardState } from '../modules/chat_activity.js';
 
 import {
     OWNER_STOP_DETAIL_MARKER,
@@ -192,7 +193,7 @@ test('interrupted child stays retryable with a Working chip and inspectable deta
     );
     // #1110: an unfinished card's chip comes from the record's own state, so the
     // terminal phase is passed only when the card is finished.
-    assert.match(applyState, /desiredLiveCardPhase\(record, record\.finished \? summary\.phase \|\| 'done' : ''\)/);
+    assert.match(applyState, /desiredLiveCardPhase\(record, closedPhase \|\| \(record\.finished \? summary\.phase \|\| 'done' : ''\)\)/);
     assert.match(applyState, /setLiveCardPhase\(record, desiredPhase\.phase, desiredPhase\.text, desiredPhase\.className,\s*desiredPhase\.secondary\)/);
     assert.equal([...applyState.matchAll(/setLiveCardPhase\(/g)].length, 1);
     // The Failed-into-the-title workaround is gone: the name stays stable.
@@ -270,7 +271,11 @@ test('#1110 an observed outcome owns the chip while Finalizing states itself bes
     }).observedOutcome, undefined);
 
     // Recycling a card slot drops the outcome with the rest of the cycle state.
-    assert.match(activitySource, /record\.observedOutcome = '';/);
+    const recycled = { observedOutcome: 'error', finalizingHold: true, censusPhase: 'thinking' };
+    clearStickyCardState(recycled);
+    assert.equal(recycled.observedOutcome, '');
+    assert.equal(recycled.censusPhase, '');
+    assert.equal(desiredLiveCardPhase(recycled).text, 'Working');
     assert.match(chatSource, /record\.observedOutcome = summary\.observedOutcome;/);
 });
 
@@ -406,7 +411,7 @@ test('phase chips are contextual polite status regions without repeat announceme
     };
     const record = { phaseEl, isSubagent: true };
     assert.equal(setLiveCardPhase(record, 'working'), true);
-    assert.deepEqual({ ...phaseEl.dataset }, { phase: 'working' });
+    assert.deepEqual({ ...phaseEl.dataset }, { phase: 'working', motion: '1' });
     assert.equal(phaseEl.className, 'chat-live-phase working');
     assert.equal(textContent, 'Working');
     assert.equal(attrs.get('role'), 'status');
@@ -592,7 +597,7 @@ test('Batch4: the census phase parks and releases a live card chip', () => {
     const pausingCard = chipRecord({ parkedPhase: 'budget_pausing' });
     pausingCard.inlineTypingEl.style.display = 'none';
     setLiveCardTypingVisible(pausingCard, true);
-    assert.equal(pausingCard.inlineTypingEl.style.display, '', 'sent work still finishing keeps its activity');
+    assert.equal(pausingCard.inlineTypingEl.style.display, 'none', 'settling a Pause stays unfinished but static');
 });
 
 test('Batch4: chat feeds every census phase to its card', () => {
@@ -611,7 +616,7 @@ test('pause causes come only from current typed facts and update without a phase
     assert.equal(record.phaseEl.textContent, 'Paused', 'unknown cause stays generic');
     syncParkedPhase(record, 'budget_pausing', { pause_cause: 'owner' });
     assert.equal(record.phaseEl.textContent, 'Pausing… · owner pause');
-    assert.equal(record.inlineTypingEl.style.display, '', 'submitted work can still settle');
+    assert.equal(record.inlineTypingEl.style.display, 'none', 'submitted work can settle without a Working animation');
     const late = desiredLiveCardPhase({ finalizingHold: true, observedOutcome: 'error',
         parkedPhase: 'budget_paused', pauseCause: 'owner' });
     assert.equal(late.text, 'Failed');

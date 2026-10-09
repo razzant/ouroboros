@@ -1,8 +1,6 @@
 """Editable model chooser on real Settings/actor/reviewer consumers, no model calls."""
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from tests import test_subscription_role_routes_browser as roles
@@ -23,11 +21,6 @@ def select_model_field(ui, consumer):
     # The catalog above is unprefixed, so every consumer is put on the same
     # OpenRouter API lane the suggestions belong to.
     lane = roles.api_lane(ui)
-    if consumer in ['Scope', 'Deep']:
-        slots = ui['fixture']['preview']['reviewer_slots']
-        if consumer == 'Scope': slots['scope'] = [{'slot_id': 'scope_1', 'route': {'kind': 'api_chat', 'target_id': 'owner/model'}}]
-        else: slots['deep_review'] = {'route': {'kind': 'api_chat', 'target_id': 'owner/model'}}
-        ui['settings']['OUROBOROS_REVIEWER_SLOTS'] = json.dumps(slots)
     data = catalog(ui)
     page = roles.open_agents(ui)
     page.evaluate("""detail => document.dispatchEvent(new CustomEvent(
@@ -38,18 +31,13 @@ def select_model_field(ui, consumer):
         group = page.locator('[data-model-role="main"]') if consumer == 'Models' else page.locator('[data-model-role-group="fallback"] .model-role-row').first
         group.locator('[data-model-role-source]').select_option(lane)
         return page, group.locator('[data-model-role-model]')
-    if consumer == "Actor":
-        row = page.locator('[data-subagent-row]').nth(1)
-        row.locator('[data-subagent-field="route"]').select_option(lane)
-        return page, row.locator('[data-subagent-field="model"]')
-    if consumer == 'Scope': return page, page.locator('[data-slot-id="scope_1"] [data-slot-custom-api]')
-    if consumer == 'Deep': return page, page.locator('[data-deep-review-api-model]')
-    row = page.locator('[data-slot-id="triad_1"]') if consumer == "Triad" else page.locator('[data-advisory-row]')
-    row.locator('[data-slot-route], [data-advisory-route]').select_option(lane)
-    return page, row.locator('[data-slot-custom-api], [data-advisory-api-model]')
+    # Actor: a row marked Reviewer, so the reviewer chooser is this same field.
+    row = page.locator('[data-subagent-row]').nth(1)
+    row.locator('[data-subagent-field="route"]').select_option(lane)
+    return page, row.locator('[data-subagent-field="model"]')
 
 
-@pytest.mark.parametrize("consumer", ["Models", "Fallback", "Actor", "Triad", "Scope", "Advisory", "Deep"])
+@pytest.mark.parametrize("consumer", ["Models", "Fallback", "Actor"])
 def test_chooser_keyboard_free_values_and_catalog_identity(role_ui, consumer):
     page, field = select_model_field(role_ui, consumer)
     field.fill('choice')
@@ -94,14 +82,15 @@ def test_agent_session_uses_same_chooser_and_keeps_native_short_choices(role_ui)
         'settings-model-catalog:updated', {detail}))""", role_ui['fixture']['catalog'])
     assert model.input_value() == 'future-model'
     assert row.locator('[data-subagent-field="account"]').input_value() == 'personal'
-    assert page.locator('[data-deep-review-route]').input_value() == 'subagent:native'
     roles.capture(page, 'chooser-session-reference-preserved')
 
 
 def test_incomplete_reviewer_holds_whole_settings_save_until_corrected(role_ui):
     roles.configure_mixed(role_ui)
     page = roles.open_agents(role_ui)
-    model = page.locator('[data-slot-id="triad_1"] [data-slot-custom-api]')
+    reviewer = page.locator('[data-subagent-row]').first
+    assert reviewer.locator('[data-subagent-field="review_eligible"]').is_checked()
+    model = reviewer.locator('[data-subagent-field="model"]')
     model.fill('')
     page.locator('#btn-save-settings').click()
     assert not [path for path, _ in role_ui['posts'] if path == '/api/settings']
@@ -123,7 +112,7 @@ def touch_role_ui(monkeypatch, request):
 
 
 def test_chooser_touch_selection(touch_role_ui):
-    page, field = select_model_field(touch_role_ui, 'Triad')
+    page, field = select_model_field(touch_role_ui, 'Actor')
     page.set_viewport_size({'width': 390, 'height': 600})
     field.tap()
     field.fill('choice-')
@@ -182,7 +171,7 @@ def test_chooser_scrolls_with_mobile_keyboard_boundary(role_ui):
         Object.defineProperty(window,'visualViewport',{value:viewport,configurable:true});
         window.testViewport = viewport;
     })();""")
-    page, field = select_model_field(role_ui, 'Triad')
+    page, field = select_model_field(role_ui, 'Actor')
     field.click()
     field.fill('choice')
     popup = page.locator('[id="' + field.get_attribute('aria-controls') + '"]')
@@ -207,7 +196,7 @@ def test_chooser_scrolls_with_mobile_keyboard_boundary(role_ui):
 @pytest.mark.parametrize("width,height", [(320, 480), (390, 600), (640, 360), (641, 540),
     (760, 600), (768, 600), (980, 600), (981, 540), (1440, 900), (1920, 900)])
 def test_chooser_popup_reachable_in_narrow_short_view(role_ui, width, height):
-    page, field = select_model_field(role_ui, 'Triad')
+    page, field = select_model_field(role_ui, 'Actor')
     page.set_viewport_size({'width': width, 'height': height})
     field.click()
     field.fill('choice')
