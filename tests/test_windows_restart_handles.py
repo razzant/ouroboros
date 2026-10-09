@@ -121,16 +121,27 @@ def _windows_popen_consumer(api):
     return consumer
 
 
-@pytest.mark.parametrize("absent", [False, True], ids=["redirected", "absent-stdin-stderr"])
-def test_actual_popen_preserves_stdio_at_createprocess(monkeypatch, windows_handles, absent):
+@pytest.mark.parametrize("stdio_mode", ["redirected", "absent-stdin-stderr", "closed-os-fd"])
+def test_actual_popen_preserves_stdio_at_createprocess(monkeypatch, windows_handles, stdio_mode):
     calls, api = windows_handles
-    if absent:
+    absent = stdio_mode != "redirected"
+    if stdio_mode == "absent-stdin-stderr":
         monkeypatch.setattr(platform_layer.sys, "__stdin__", None)
 
         def closed():
             raise ValueError("I/O operation on closed file")
 
         monkeypatch.setattr(platform_layer.sys, "__stderr__", SimpleNamespace(fileno=closed))
+    elif stdio_mode == "closed-os-fd":
+        # An externally closed fd can leave the Python stream object present.
+        # CPython's _Py_get_osfhandle raises OSError for INVALID_HANDLE_VALUE:
+        # https://github.com/python/cpython/blob/f08d3c437bc5f41973ddd11f4cfc3d9fe04010f7/Python/fileutils.c#L2246-L2252
+        def get_osfhandle(fd):
+            if fd != 1:
+                raise OSError(9, "Bad file descriptor")
+            return 11
+
+        monkeypatch.setattr(sys.modules["msvcrt"], "get_osfhandle", get_osfhandle)
 
     created = []
 

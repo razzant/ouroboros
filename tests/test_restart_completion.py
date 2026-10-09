@@ -16,12 +16,14 @@ pytestmark = pytest.mark.serial
 
 @pytest.mark.parametrize("phase", ["publication", "custody", "success", "early-cleanup"])
 @pytest.mark.parametrize("uvicorn_returns", [True, False], ids=["returned", "held"])
-def test_actual_restart_watcher_leaves_termination_to_panic(tmp_path, phase, uvicorn_returns):
+@pytest.mark.parametrize("panic_entry", ["executor", "ingress"])
+def test_actual_restart_watcher_leaves_termination_to_panic(tmp_path, phase, uvicorn_returns, panic_entry):
     """Panic persists before physical exit 99, including when the watcher raises.
 
     Run the real main/watcher, spawn consumer and Panic owner in a disposable
     interpreter. Native child handles and unrelated stop owners are doubles;
-    the process exit, Panic flag and disabled state are real.
+    the process exit, Panic flag and disabled state are real. The ingress case
+    holds its callback before execute_panic_stop can claim termination itself.
     """
     script = tmp_path / "watcher_panic.py"
     ready, release = tmp_path / "watcher-ready", tmp_path / "release-panic"
@@ -35,8 +37,8 @@ from ouroboros import platform_layer, process_custody, server_control
 from ouroboros.startup_historical_audit import audit
 from supervisor import state
 
-phase, uvicorn_returns = sys.argv[1], sys.argv[2] == "returned"
-ready, release = map(pathlib.Path, sys.argv[3:])
+phase, uvicorn_returns, panic_entry = sys.argv[1], sys.argv[2] == "returned", sys.argv[3]
+ready, release = map(pathlib.Path, sys.argv[4:])
 panic_paused = threading.Event()
 
 def pause_panic():
@@ -53,11 +55,17 @@ def paused_flag(root):
     write_flag(root)
 
 def start_panic():
-    # Match live ingress: the caller is a daemon, so returning main could exit 0.
-    threading.Thread(target=server_control.execute_panic_stop, kwargs={
-        "consciousness": None, "kill_workers_fn": lambda: None,
-        "data_dir": server.DATA_DIR, "panic_exit_code": 99, "log": server.log,
-    }, daemon=True).start()
+    def stop():
+        if panic_entry == "ingress":
+            pause_panic()  # accepted, but the executor has not run even its first line
+        server_control.execute_panic_stop(None, lambda: None,
+            data_dir=server.DATA_DIR, panic_exit_code=99, log=server.log)
+
+    if panic_entry == "ingress":
+        assert server_control.PanicIngress(stop).request("/panic")
+    else:
+        # The emergency caller is a daemon, so returning main could exit 0.
+        threading.Thread(target=stop, daemon=True).start()
     assert panic_paused.wait(10)
 
 audit.stop = pause_panic if phase == "early-cleanup" else lambda: None
@@ -150,7 +158,7 @@ sys.exit(server.main())
     env["OUROBOROS_DATA_DIR"] = str(tmp_path / "data")
     env["OUROBOROS_SETTINGS_PATH"] = str(tmp_path / "data" / "settings.json")
     env.pop("OUROBOROS_PLANNED_RESTART_TRANSACTION_ID", None)
-    with subprocess.Popen([sys.executable, str(script), phase, "returned" if uvicorn_returns else "held",
+    with subprocess.Popen([sys.executable, str(script), phase, "returned" if uvicorn_returns else "held", panic_entry,
                            str(ready), str(release)], env=env, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True) as proc:
         try:

@@ -87,11 +87,13 @@ def _exercise(surface):
                 if surface.endswith("correlated"):
                     payload["client_message_id"] = "panic-correlated"
                 assert client.post("/chat/inject", json=payload).status_code == 403
+                assert not server_control._restart_stop_requested
                 for user, chat in [(0, 0), (99, 23), (17, 99)]:
                     response = client.post("/chat/inject", headers={"X-Skill-Token": "token"},
                                            json={"text": "/panic", "user_id": user, "chat_id": chat})
                     assert response.status_code == 202, response.text
                     assert not request_made.is_set()
+                    assert not server_control._restart_stop_requested
                 response = client.post("/chat/inject", headers={"X-Skill-Token": "token"}, json=payload)
                 assert response.status_code == 202
         else:
@@ -104,6 +106,7 @@ def _exercise(surface):
                     with client.websocket_connect("/ws"):
                         pass
                 assert not request_made.is_set()
+                assert not server_control._restart_stop_requested
                 headers = {"Authorization": "Bearer test-only-password"}
                 if surface == "http":
                     response = client.post("/api/command", headers=headers, json={"cmd": "/panic"})
@@ -171,6 +174,57 @@ def test_pinned_owner_needs_positive_identity_and_reset_cannot_rebind():
     cell[1] = (17, 23)  # even a late old reader can only publish into the retired cell
     door.observe_owner(known)
     assert door._owner == [False, None]
+
+
+@pytest.mark.parametrize("source", ["web", "telegram"])
+def test_accepted_panic_claims_termination_before_starting_callback(monkeypatch, source):
+    import threading
+    from types import SimpleNamespace
+
+    from ouroboros import server_control
+
+    started = []
+    stop = lambda: pytest.fail("callback must remain unscheduled in this test")
+    door = server_control.PanicIngress(stop)
+    door.observe_owner({"initialization_id": "i", "owner_external_id": 17, "owner_external_chat_id": 23})
+
+    def thread(*, target, name, daemon):
+        assert target is stop and name == "panic-ingress" and daemon is True
+
+        def start():
+            assert server_control._restart_stop_requested is True
+            started.append(True)
+
+        return SimpleNamespace(start=start)
+
+    monkeypatch.setattr(threading, "Thread", thread)
+    assert door.request(" /PaNiC ", source=source, user_id=17, chat_id=23)
+    assert started == [True] and server_control._restart_stop_requested is True
+
+
+@pytest.mark.parametrize("text,source,user_id,chat_id,owner,has_stop", [
+    ("/restart", "web", 0, 0, "known", True),
+    ("/status", "web", 0, 0, "known", True),
+    ("/panic", "web", 0, 0, "known", False),
+    ("/panic", "telegram", 99, 23, "known", True),
+    ("/panic", "telegram", 17, 99, "known", True),
+    ("/panic", "telegram", 17, 23, "unknown", True),
+    ("/panic", "telegram", 17, 23, "reset", True),
+])
+def test_rejected_panic_does_not_claim_termination(monkeypatch, text, source, user_id, chat_id, owner, has_stop):
+    import threading
+
+    from ouroboros import server_control
+
+    stop = lambda: pytest.fail("rejected request must not call the stop owner")
+    door = server_control.PanicIngress(stop if has_stop else None)
+    if owner != "unknown":
+        door.observe_owner({"initialization_id": "i", "owner_external_id": 17, "owner_external_chat_id": 23})
+    if owner == "reset":
+        door.invalidate_owner()
+    monkeypatch.setattr(threading, "Thread", lambda **_: pytest.fail("rejected request started a thread"))
+    assert not door.request(text, source=source, user_id=user_id, chat_id=chat_id)
+    assert server_control._restart_stop_requested is False
 
 
 if __name__ == "__main__":

@@ -96,6 +96,10 @@ class PanicIngress:
         pair = self._owner[1]
         if source != "web" and (pair is None or pair != (user_id, chat_id)):
             return False
+        global _restart_stop_requested
+        # Claim termination before the callback is scheduled: the restart
+        # watcher must leave Panic time to persist its stop even if it runs first.
+        _restart_stop_requested = True
         import threading
 
         # Do not wait for the supervisor, the chat ingress lock, a fresh state
