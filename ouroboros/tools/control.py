@@ -525,7 +525,6 @@ from ouroboros.tools.control_scheduling import (  # noqa: E402, F401 -- intentio
 # so this facade stays the single import surface for callers and tests.
 from ouroboros.tools.control_subagent_spec import (  # noqa: E402, F401 -- intentional public re-exports
     _INTERNAL_SCHEDULE_OPTIONS,
-    RETIRED_SCHEDULE_PARAMS,
     VALID_SUBTASK_MEMORY_MODES,
     requested_child_effort,
     _validated_schedule_fields,
