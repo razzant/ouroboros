@@ -207,7 +207,7 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 
 | Path | Writer | Marker | Retention | Reset |
 |---|---|---|---|---|
-| `task_results/artifacts/<task>/source_handles/tool_results/wait-handoff-*.json` | `tools/control_task_results.py` through `artifacts.store_actor_source_bytes`, before compact wait projection | exact UTF-8 JSON, size and SHA-256 task_source | immutable with the reader's task artifacts; existing copy-back/source custody, no new timer | compact index remains but exact evidence becomes unavailable; never substitute its preview for a full read |
+| `task_results/artifacts/<task>/wait-handoff-*.json`, `delegate-wake-*.json` | wait producers through `artifacts.store_actor_source_bytes(register=True)` before compact projection | exact UTF-8 JSON, size/SHA task_source with immutable artifact registration | normal artifact obligations/copy-back survive child-drive cleanup; no timer | lost source stays unavailable, never replaced by its preview |
 
 Always safe (pure caches, recreated): `state/pycache`, `state/code_intel`,
 `state/evolution_metrics_cache.json`, `playwright-browsers/`, `state/cx`,

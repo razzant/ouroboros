@@ -554,3 +554,67 @@ def test_beacon_fifo_survives_durable_cold_continuation_without_snapshot_consump
                                     data_root=tmp_path).startswith("OK")
     fresh = waits._wait_attention_poll(resumed, "", ["child"])({}, {})
     assert [r["text"] for r in fresh["beacons"]] == ["fresh"]
+
+
+@pytest.mark.parametrize("snapshot", [None, "{broken-json"])
+def test_default_wait_queue_io_gap_returns_exact_set_repair(tmp_path, snapshot):
+    from ouroboros.tools.registry import ToolRegistry
+
+    if snapshot is not None:
+        path = tmp_path / "state" / "queue_snapshot.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(snapshot)
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.task_attempt = "t-wait", 1
+    ctx.owner_wait_callback = lambda *_a: None
+    seed(tmp_path, "real")
+    view = json.loads(registry.execute("wait_tasks", {"task_ids": ["real", "unknown"]}))
+    assert set(view["tasks"]) == {"real", "unknown"}
+    assert view["unknown_task_ids"] == ["unknown"]
+    assert view["children_roster"][0]["task_id"] == "real"
+    assert "source" in view["tasks"]["unknown"]["note"]
+    assert not getattr(ctx, "_model_sleep", None)
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+def test_wait_source_survives_real_child_drive_settlement_and_fresh_registry(tmp_path, delegated):
+    from ouroboros import artifacts, headless, task_custody
+    from ouroboros.tools.registry import ToolRegistry
+
+    data = tmp_path / "canonical"
+    parent = "waiting-actor"
+    drive = headless.prepare_task_drive(data, parent, "empty")
+    text = "full child result\n" * 5000 + "LAST_PRIVATE_FACT"
+    write_task_result(data, "large", "completed", result=text, parent_task_id=parent,
+                      root_task_id=parent, delegation_role="subagent")
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=drive)
+    ctx = registry._ctx
+    ctx.task_id, ctx.budget_drive_root = parent, data
+    ctx.task_metadata = {"root_task_id": parent, "budget_drive_root": str(data)}
+    if delegated:
+        from ouroboros.delegate_supervision import supervised_wait
+        ctx.task_metadata["configured_subagent"] = {"config_fingerprint": "synthetic"}
+        view = json.loads(supervised_wait(ctx, "run-synthetic", wait_once=lambda *_a:
+            json.dumps({"status": "completed", "result": text, "run_id": "run-synthetic"})).text)
+        ref = view["wake_delivery"]["source"]
+    else:
+        view = json.loads(registry.execute("wait_tasks", {"task_ids": ["large"], "timeout_sec": 0}))
+        ref = view["complete_source"]
+    full = artifacts.read_actor_source_bytes(drive, parent, ref)
+    assert (json.loads(full)["result"] if delegated else json.loads(full)["tasks"]["large"]["result"]) == text
+    write_task_result(drive, parent, "running")
+    write_task_result(data, parent, "cancelled", result="ended", child_drive_root=str(drive))
+    outcome = task_custody.settle_child_drive(data, parent, drive, live=lambda _task: False)
+    assert outcome["status"] == "removed", outcome
+    assert not drive.exists()
+    assert artifacts.read_actor_source_bytes(data, parent, ref) == full
+    with pytest.raises(ValueError):
+        artifacts.read_actor_source_bytes(data, parent, {**ref, "sha256": "0" * 64})
+    with pytest.raises(ValueError):
+        artifacts.read_actor_source_bytes(data, parent, {**ref, "path": "../outside.json"})
+    fresh = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=data)
+    fresh._ctx.task_id = parent
+    args = {**ref["read"]["arguments"], "start_char": full.decode().index("LAST_PRIVATE_FACT") - 30,
+            "max_lines": 2000}
+    assert "LAST_PRIVATE_FACT" in fresh.execute("read_file", args)

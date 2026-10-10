@@ -659,7 +659,7 @@ def bounded_wait_response(ctx: Any, payload: Dict[str, Any], *, limit: int = WAI
         if not getattr(ctx, "task_id", None):
             raise ValueError("wait reader has no task source owner")
         source = store_actor_source_bytes(ctx.drive_root, str(ctx.task_id), category="tool_results",
-            source_id="wait-handoff", data=rendered.encode("utf-8"), extension="json")
+            source_id="wait-handoff", data=rendered.encode("utf-8"), extension="json", register=True)
     except (OSError, ValueError) as exc:
         source = {"status": "unavailable", "reason": type(exc).__name__,
                   "full_read": {"tool": "get_task_result", "note": "explicitly read the named tasks in full"}}
@@ -1082,7 +1082,9 @@ def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List
             if load_effective_task_result(status_drive_root, tid):
                 continue
             queue_status, _ = _queue_task_status(snapshot, tid)
-            if queue_status:  # running/scheduled row, or "unknown" on a missing snapshot (fail-soft)
+            if queue_status and (not require_waitable or queue_status != "unknown"):
+                # Unknown I/O is not a selectable source, but remains minted-ID
+                # uncertainty on the explicitly bounded compatibility path.
                 continue
             if tid in ledger_ids and not require_waitable:
                 continue

@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import stat
 import pathlib
 import re
 import shutil
+import stat
 import uuid
 import zipfile
 from contextlib import nullcontext
@@ -16,11 +16,11 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
 from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_custody import fence_publication
 from ouroboros.task_results import validate_task_id
+from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
 
 log = logging.getLogger(__name__)
 
@@ -681,6 +681,7 @@ def store_actor_source_bytes(
     source_id: str,
     data: bytes,
     extension: str,
+    register: bool = False,
 ) -> Dict[str, Any]:
     """Persist exact bytes inside this task's existing actor-readable artifact root."""
 
@@ -692,17 +693,18 @@ def store_actor_source_bytes(
     safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
     digest = sha256(data).hexdigest()
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
+    if register:
+        relative = f"{safe_id}-{digest}.{safe_extension}"
+        stored = store_task_artifact_bytes(drive_root, task_id, relative, data, kind="task_source")
+        return {**stored, "kind": "task_source", "size": len(data),
+                "read": {"tool": "read_file", "arguments": {"root": "artifact_store", "path": relative}}}
     relative = pathlib.PurePosixPath(
         _SOURCE_HANDLES_SUBDIR,
         normalized_category,
         f"{safe_id}-{digest}.{safe_extension}",
     )
     target = artifact_dir.joinpath(*relative.parts)
-    # WRITE-ONCE. The name carries the digest, so an existing file with exactly
-    # these bytes IS this handle: rewriting it would only republish identical
-    # content while racing another writer for the same path (on Windows an
-    # os.replace over a destination a concurrent reader holds open is a sharing
-    # violation, which is how a second copy-back of the same handle used to fail).
+    # WRITE-ONCE: identical digest bytes avoid racing another Windows reader.
     try:
         already_stored = not target.is_symlink() and target.read_bytes() == bytes(data)
     except OSError:
@@ -739,7 +741,8 @@ def read_actor_source_bytes(
     if ref.get("root") != "artifact_store":
         raise ValueError("actor source ref has an unexpected root")
     rel = pathlib.PurePosixPath(str(ref.get("path") or ""))
-    if not rel.parts or rel.parts[0] != _SOURCE_HANDLES_SUBDIR or rel.is_absolute():
+    # Root-level registered sources still require this actor's confinement/byte identity.
+    if not rel.parts or rel.is_absolute() or (rel.parts[0] != _SOURCE_HANDLES_SUBDIR and len(rel.parts) != 1):
         raise ValueError("actor source ref has an invalid path")
     base = task_artifact_dir_path(drive_root, task_id, create=False).resolve(strict=False)
     target = base.joinpath(*rel.parts)
@@ -863,7 +866,10 @@ def materialize_repo_diff_evidence(
     is what the packet and the actor-readable source handle carry.
     """
     from ouroboros.repo_diff_capture import (
-        capture_disclosure, capture_repo_diff, repo_diff_projection, retain_private_capture,
+        capture_disclosure,
+        capture_repo_diff,
+        repo_diff_projection,
+        retain_private_capture,
     )
     from ouroboros.utils import truncate_review_artifact
 
@@ -1266,13 +1272,7 @@ def store_task_artifact_bytes(
     *,
     kind: str = "task_artifact",
 ) -> Dict[str, Any]:
-    """Persist immutable task-owned bytes and register the actor-readable file.
-
-    This is the byte-oriented twin of ``copy_file_to_task_artifacts`` for
-    producers that already own canonical bytes. Existing-valid-content wins;
-    a name collision with different bytes is refused instead of rewriting a
-    durable authority ref.
-    """
+    """Persist/register owned immutable bytes; valid content wins, differing name collisions refuse (byte twin of copy_file_to_task_artifacts)."""
     safe_name = pathlib.Path(str(name or "")).name
     if not safe_name or safe_name in {".", ".."} or safe_name != str(name):
         raise ValueError("task artifact name must be one plain filename")

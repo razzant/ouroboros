@@ -615,6 +615,7 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any]) -> ToolResult:
             source_id=f"delegate-wake-{wake_id or uuid.uuid4().hex}",
             data=raw.encode("utf-8"),
             extension="json",
+            register=True,
         )
     except Exception:
         # Keep the exact wake pending and let the ordinary outer truncation fail
