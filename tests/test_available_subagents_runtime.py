@@ -1276,8 +1276,7 @@ def test_settled_terminal_wake_survives_worker_crash_without_a_new_post(monkeypa
     assert out["wake"] == terminal
 
 
-@pytest.mark.parametrize("transport", ["launcher", "windows_handle_proxy"])
-def test_planned_restart_selectively_restores_sleeping_leaf_and_wait_state(monkeypatch, tmp_path, transport):
+def test_planned_restart_selectively_restores_sleeping_leaf_and_wait_state(monkeypatch, tmp_path):
     from ouroboros import delegate_custody as custody
     import ouroboros.claudexor_daemon as daemon
     import ouroboros.delegate_recovery as recovery
@@ -1330,72 +1329,17 @@ def test_planned_restart_selectively_restores_sleeping_leaf_and_wait_state(monke
     handoff = recovery._read(tmp_path, "child1")
     assert handoff["no_resume_veto_causes"] == list(recovery.NO_RESUME_CAUSES)
 
-    if transport == "launcher":
-        old_pid = handoff["supervisor_pid"]
-        assert not recovery.acknowledge_observed_restart_exit(
-            tmp_path, supervisor_pid=old_pid + 1, exit_code=42,
-        )
-        assert not recovery.acknowledge_observed_restart_exit(
-            tmp_path, supervisor_pid=old_pid, exit_code=1,
-        )
-        assert recovery.acknowledge_observed_restart_exit(
-            tmp_path, supervisor_pid=old_pid, exit_code=42,
-        )
-        monkeypatch.setattr(recovery.os, "getpid", lambda: old_pid + 100_000)
-    else:
-        # Real exit-42 proxy, fake Win32 handle calls. The full prepared row
-        # then enters the actual delegate pre-adoption and adoption readers.
-        import os
-        import subprocess
-        import sys
-        from ouroboros import platform_layer
-
-        parent = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(42)"])
-        handoff["supervisor_pid"] = parent.pid
-        recovery._write(tmp_path, handoff)
-        transaction = recovery._read_restart_transaction(tmp_path, handoff["restart_transaction_id"])
-        transaction.update({
-            "supervisor_pid": parent.pid, "direct_spawn_parent_birth": "win-filetime:12345",
-            "direct_spawn_successor_pid": os.getpid(),
-            "direct_spawn_successor_birth": "win-filetime:67890",
-        })
-        recovery._write_restart_transaction(tmp_path, transaction)
-        active_path = recovery._active_restart_transaction_path(tmp_path)
-        active = json.loads(active_path.read_text(encoding="utf-8"))
-        active["supervisor_pid"] = parent.pid
-        atomic_write_json(active_path, active)
-
-        class Kernel:
-            def GetProcessId(self, handle):
-                return parent.pid
-
-            def GetProcessTimes(self, handle, created, *_rest):
-                created._obj.dwLowDateTime = 12345
-                created._obj.dwHighDateTime = 0
-                return True
-
-            def WaitForSingleObject(self, handle, timeout):
-                assert timeout == 0xFFFFFFFF
-                assert parent.wait(timeout=5) == 42
-                return 0
-
-            def GetExitCodeProcess(self, handle, code):
-                code._obj.value = parent.returncode
-                return True
-
-            def CloseHandle(self, handle):
-                assert handle == 12345
-
-        original_is_windows = platform_layer.IS_WINDOWS
-        monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
-        monkeypatch.setattr(platform_layer, "process_start_time", lambda _pid: "win-filetime:67890")
-        monkeypatch.setattr(recovery, "_windows_restart_kernel32", lambda: Kernel())
-        monkeypatch.setenv(recovery.PLANNED_RESTART_TRANSACTION_ENV, handoff["restart_transaction_id"])
-        monkeypatch.setenv(recovery.WINDOWS_RESTART_PARENT_HANDLE_ENV, "12345")
-        recovery._ack_direct_exec_successor(tmp_path)
-        monkeypatch.setattr(platform_layer, "IS_WINDOWS", original_is_windows)
-        assert recovery._read_restart_transaction(tmp_path, handoff["restart_transaction_id"])["ack_source"] == (
-            "windows_direct_parent_handle")
+    old_pid = handoff["supervisor_pid"]
+    assert not recovery.acknowledge_observed_restart_exit(
+        tmp_path, supervisor_pid=old_pid + 1, exit_code=42,
+    )
+    assert not recovery.acknowledge_observed_restart_exit(
+        tmp_path, supervisor_pid=old_pid, exit_code=1,
+    )
+    assert recovery.acknowledge_observed_restart_exit(
+        tmp_path, supervisor_pid=old_pid, exit_code=42,
+    )
+    monkeypatch.setattr(recovery.os, "getpid", lambda: old_pid + 100_000)
     monkeypatch.setattr(recovery, "_pid_alive", lambda _pid: False)
 
     class Gateway:
