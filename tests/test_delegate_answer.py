@@ -128,6 +128,54 @@ def test_answer_interaction_returns_typed_statuses_at_any_http_code(monkeypatch)
 # -- delegate_wait surfaces the question ----------------------------------------
 
 
+@pytest.mark.parametrize("status,code", [
+    ("not_found", 404), ("already_resolved", 409), ("rejected", 409),
+])
+def test_answer_interaction_decodes_the_engine_problem_envelope(status, code):
+    import httpx
+
+    from ouroboros.gateways import claudexor as cx
+
+    problem = {
+        "code": f"http_{code}", "message": "engine answer", "retryable": False,
+        "fieldErrors": {}, "requiredActions": [], "evidenceRefs": [],
+        "context": {"accepted": False, "status": status},
+    }
+    gateway = cx.ClaudexorGateway.__new__(cx.ClaudexorGateway)
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+            code, json=problem, headers={"Content-Type": "application/problem+json"})),
+            base_url="http://offline.invalid") as client:
+        gateway._client = client
+        assert gateway.answer_interaction("run-1", "int-1", []) == {
+            "accepted": False, "status": status, "message": "engine answer"}
+
+
+@pytest.mark.parametrize("context,problem_code,content_type", [
+    (None, "http_409", "application/problem+json"),
+    ([], "http_409", "application/problem+json"),
+    ({"accepted": False, "status": "unknown"}, "http_409", "application/problem+json"),
+    ({"accepted": False, "status": "delivered"}, "http_409", "application/problem+json"),
+    ({"status": "already_resolved"}, "http_409", "application/problem+json"),
+    ({"accepted": False, "status": "already_resolved"}, "idempotency_conflict", "application/problem+json"),
+    ({"accepted": False, "status": "already_resolved"}, "http_409", "application/json"),
+])
+def test_answer_interaction_does_not_promote_other_problem_context(context, problem_code, content_type):
+    import httpx
+
+    from ouroboros.gateways import claudexor as cx
+
+    problem = {"code": problem_code, "message": "ordinary refusal", "context": context}
+    gateway = cx.ClaudexorGateway.__new__(cx.ClaudexorGateway)
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+            409, json=problem, headers={"Content-Type": content_type})),
+            base_url="http://offline.invalid") as client:
+        gateway._client = client
+        with pytest.raises(cx.ClaudexorUnavailable) as exc:
+            gateway.answer_interaction("run-1", "int-1", [])
+    assert exc.value.code == problem_code
+    assert exc.value.status_code == 409
+
+
 def _wait_ctx(tmp_path):
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools.registry import ToolContext
@@ -302,6 +350,51 @@ def test_already_resolved_tells_the_nanny_not_to_repost(tmp_path, monkeypatch):
     delegate._CUSTODY.clear()
     assert out["status"] == "already_resolved"
     assert "do NOT re-post" in out["note"]
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("status,code,accepted", [
+    ("delivered", 200, True), ("already_resolved", 409, False),
+    ("not_found", 404, False), ("rejected", 409, False),
+])
+def test_wire_answer_outcome_reaches_the_nanny(tmp_path, monkeypatch, status, code, accepted):
+    import httpx
+    import ouroboros.tools.delegate as delegate
+    from ouroboros.gateways import claudexor as cx
+
+    answer = {"accepted": accepted, "status": status}
+    body = answer if accepted else {
+        "code": f"http_{code}", "message": "engine answer", "retryable": False,
+        "fieldErrors": {}, "requiredActions": [], "evidenceRefs": [], "context": answer,
+    }
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(code, json=body, headers={
+            "Content-Type": "application/json" if accepted else "application/problem+json"})
+
+    gateway = cx.ClaudexorGateway.__new__(cx.ClaudexorGateway)
+    monkeypatch.setattr(gateway, "handshake", lambda **kwargs: {})
+    monkeypatch.setattr(cx, "ClaudexorGateway", lambda *args, **kwargs: gateway)
+    ctx = _answer_ctx(tmp_path)
+    _own_run(delegate)
+    with httpx.Client(transport=httpx.MockTransport(respond), base_url="http://offline.invalid") as client:
+        gateway._client = client
+        out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
+            {"question_id": "q1", "free_text": "9090"},
+        ]).text)
+    delegate._CUSTODY.clear()
+    assert out["status"] == status and out["accepted"] is accepted
+    assert len(requests) == 1
+    assert requests[0].url.path == "/v2/runs/run-1/interactions/int-1/answer"
+    assert json.loads(requests[0].content) == {
+        "answers": [{"questionId": "q1", "selectedLabels": [], "freeText": "9090"}]}
+    if status == "already_resolved":
+        assert "do NOT re-post" in out["note"]
+        assert "fix the rows" not in out["note"]
+    if not accepted:
+        assert out["detail"] == "engine answer"
 
 
 def test_ambiguous_transport_becomes_delivery_unknown_with_a_reread(tmp_path, monkeypatch):
