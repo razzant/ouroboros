@@ -136,8 +136,10 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # the header naming the next cursor) and start_char's description names the
     # code-point basis and the partial-view address; no parameter changed type,
     # default or required status.
+    # Combined with the additive forward_to_worker attention_kind selector:
+    # wake priority is explicit, without changing sender authority.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "6d9ce17efdc2b5d637ef7b69b70956e8eed17f9ae5754f160058c517c6b3fee6"
+        "337c7052d32621a3c67b992ab21f08dd7a4fa87c0b6fff65e093780246e72711"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

@@ -28,8 +28,8 @@ from ouroboros.task_status import (
     wait_for_effective_tasks,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import truncate_review_artifact, utc_now_iso
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
+from ouroboros.utils import truncate_review_artifact, utc_now_iso
 
 
 def disclosable_capability_delta(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -38,11 +38,9 @@ def disclosable_capability_delta(data: Dict[str, Any]) -> Dict[str, Any]:
     THE terminal parent-facing disclosure, and since v6.87.28 the only parent-facing
     one: the reduction is not known until the child is dispatched, so no scheduling
     result can carry it. It is a predicate rather than an inline test because the
-    parent absorbs a child through TWO surfaces — `get_task_result`/`wait_task` read
-    one child in full, `wait_tasks` projects a batch compactly — and the batch one
-    is the surface a fan-out parent actually uses. It had the test in neither place
-    and the disclosure in one, so a parent that scheduled five children and absorbed
-    them in a burst was told nothing about any of them.
+    parent uses full `get_task_result` reads and bounded wait projections.
+    Both retain the same capability facts, including batched absorption;
+    omitting the delta from either surface conceals a child's actual limits.
 
     A delta that took nothing away and ignored nothing is noise in every payload.
     """
@@ -73,8 +71,8 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None)
     if isinstance(data.get("execution_observation"), dict):
         summary["execution_observation"] = dict(data["execution_observation"])
     # R5: CURRENT delegated-custody reconciliation state next to the historical
-    # axes, on the full single-child handoff surfaces only (get_task_result /
-    # wait_task — wait_tasks' batch projection is a pinned compact contract).
+    # axes in the explicit full get_task_result handoff. Wait projections retain
+    # their compact custody fields and an exact full-source reference.
     # The frozen delegated_runs_* counters are a historical snapshot (owner
     # Q2=B); the envelope's trigger + open_run_ids are the liveness surface a
     # parent can trust after a refresh/backfill healed the row. One bounded
@@ -336,6 +334,7 @@ def _get_task_result(
             "status": "available", "authority": authority,
             "source": {"tool": "get_task_result", "task_id": str(task_id)},
         }
+        payload["outcome"] = json.loads(_subtask_outcome_summary(data, receipts=_merged_task_receipts(status_drive_root, task_id, data)))
         if bool(include_work_order_source):
             from ouroboros.subagent_work_order import (
                 _source_task_from_context,
@@ -391,19 +390,11 @@ def _get_task_result(
     status = data.get("status", "unknown")
     result = data.get("result", "")
     trace = data.get("trace_summary", "")
-    try:
-        from ouroboros.outcomes import read_verification_receipts_from_roots
-        from ouroboros.task_status import _child_drive_candidates
-
-        # During the pre-copy-back window ordinary verification lives on the
-        # isolated child drive while a zero-run lifecycle receipt is already on
-        # the canonical root. Merge both replicas; a non-empty canonical file is
-        # not evidence that the local one contains nothing new.
-        receipts = read_verification_receipts_from_roots(
-            [*_child_drive_candidates(data), status_drive_root], task_id,
-        )
-    except Exception:
-        receipts = []
+    if str(status or "").lower() not in SETTLED_STATUSES:
+        projection = _compact_child_projection(str(task_id), data, known_result_sha256)
+        projection["delegated_runs"] = _delegated_run_facts(status_drive_root, str(task_id))
+        return bounded_wait_response(ctx, {"tasks": {str(task_id): projection}, "nonterminal": True})
+    receipts = _merged_task_receipts(status_drive_root, task_id, data)
     outcome_summary = _subtask_outcome_summary(data, receipts=receipts)
     debt = data.get("acceptance_debt")
     if isinstance(debt, dict) and debt.get("source_ref"):
@@ -474,24 +465,27 @@ def _get_task_result(
 
 
 def _wait_attention_poll(
-    ctx: ToolContext, after_ts: str, task_ids: List[str],
+    ctx: ToolContext, after_ts: str, task_ids: List[str], *, consume: bool = True,
 ) -> Callable[..., Any]:
     """on_poll hook: break a sliced wait for the actor's mailbox or a child attention beacon
     (blocker/question/interface_contract/review_requested/delegation_constraint).
 
-    The cursor is context-local and per child: a beacon written before this
+    The cursor is per child and retained by owner_wait.continuation_state: a beacon written before this
     particular tool call is still delivered, while a later wait in the same
-    actor context does not replay it.  Equal-timestamp rows use their stable
+    actor's warm or restored cold context does not replay it. Equal-timestamp rows use their stable
     content identity, so the five-row response bound cannot strand the rest.
     """
     # tree_note/tree_read live in ouroboros/tools/task_tree.py (extracted for module size).
-    from ouroboros.tools.task_tree import tree_root_id
     from ouroboros.owner_mailbox import OwnerMailboxPeek
+    from ouroboros.tools.task_tree import tree_root_id
 
     rid = tree_root_id(ctx)
     mailbox_peek = OwnerMailboxPeek()
 
     cursor_store = getattr(ctx, "_wait_attention_cursors", None)
+    if not consume:
+        import copy
+        cursor_store = copy.deepcopy(cursor_store) if isinstance(cursor_store, dict) else {}
     if not isinstance(cursor_store, dict):
         cursor_store = {}
         try:
@@ -516,14 +510,12 @@ def _wait_attention_poll(
         child_cursors[str(task_id)] = cursor
 
     def _hook(_results: Dict[str, Any], _terminal: Dict[str, bool]) -> Any:
-        from ouroboros.loop_transport import _owner_signal_pending
-
         # Reuse transport-wait's non-destructive peek. The ordinary round-top
         # drain still owns delivery and acknowledgement; child work stays live.
-        if _owner_signal_pending(
-            None, getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or ""),
-            getattr(ctx, "_loop_mailbox_seen_ids", None), getattr(ctx, "task_attempt", None) or 1,
-            mailbox_peek,
+        if getattr(ctx, "drive_root", None) and getattr(ctx, "task_id", None) and mailbox_peek.pending(
+            Path(ctx.drive_root), str(ctx.task_id),
+            set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()),
+            getattr(ctx, "task_attempt", None) or 1, actionable_only=True,
         ):
             return {"reason": "owner_mailbox_pending", "delivery": "pending_loop_drain"}
         if not rid:
@@ -534,7 +526,7 @@ def _wait_attention_poll(
                 tree_ledger_row_id,
             )
 
-            attention = tree_ledger_attention_after(rid, "", task_ids=set(task_ids))
+            attention = tree_ledger_attention_after(rid, "", task_ids=set(task_ids), data_root=_status_root(ctx))
         except Exception:
             return None
         pending: List[tuple[Dict[str, Any], str]] = []
@@ -590,10 +582,9 @@ def cache_horizon_note(ctx: Any, elapsed_sec: Any) -> str:
     (batch waits, longer single windows), while "~X tokens will re-write" is a
     counterfactual — the next send may reroute, compact, or still hit a live cache.
 
-    REACHABILITY, honestly: the root waits (``wait_task``, ``wait_tasks``) feed
-    their own elapsed window, a LOWER bound on cache age, so at the shipped ``1h``
-    tier only ``wait_tasks`` (7200s ceiling) can cross inside the window and
-    ``wait_task`` sits on the 3600s horizon; at ``5m`` both cross. ``delegate_wait``
+    REACHABILITY: root waits feed their elapsed interval, a LOWER bound on
+    cache age. Default warm sleep has no periodic timer and can cross either
+    applied tier; explicit waits retain their separate 3600/7200s ceilings. ``delegate_wait``
     feeds the time since the task's last recorded model response, once per wake, so
     its line is reachable at ANY tier and no longer depends on the 3 s tick. Pinned by
     tests/test_cache_optimization.py::test_cache_horizon_reachability_matches_the_wait_clamps
@@ -619,6 +610,16 @@ def cache_horizon_note(ctx: Any, elapsed_sec: Any) -> str:
     )
 
 
+def _merged_task_receipts(status_drive_root, task_id, data):
+    """Full explicit readers join canonical and not-yet-copied execution receipts."""
+    from ouroboros.outcomes import read_verification_receipts_from_roots
+    from ouroboros.task_status import _child_drive_candidates
+    try:
+        return read_verification_receipts_from_roots([*_child_drive_candidates(data), status_drive_root], task_id)
+    except Exception:
+        return []
+
+
 def _wait_early_return_note(early) -> str:
     if not early:
         return ""
@@ -627,87 +628,119 @@ def _wait_early_return_note(early) -> str:
     return "A child attention beacon interrupted this wait. Inspect early_return; the children keep running."
 
 
+def _status_root(ctx: Any) -> Path:
+    metadata = getattr(ctx, "task_metadata", {}) or {}
+    return Path(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", None) or ctx.drive_root)
+
+
+def _event_wait_window(ctx: Any) -> int:
+    """One finite transport envelope, not a periodic cognitive wake."""
+    from ouroboros.config import get_task_abs_ceiling_sec
+    from ouroboros.runtime_limits import operation_window_sec
+
+    return max(0, int(operation_window_sec(get_task_abs_ceiling_sec())) - NESTED_SETTLEMENT_MARGIN_SEC)
+
+
+WAIT_RESPONSE_CHARS = 15_000
+
+
+def bounded_wait_response(ctx: Any, payload: Dict[str, Any], *, limit: int = WAIT_RESPONSE_CHARS) -> str:
+    """Budget the WHOLE JSON response; retain exact bytes before shortening it.
+
+    A preview is not a semantic summary or an ACK. If identities/metadata alone
+    cannot fit, publish a source index, never a sliced JSON or apparent PASS.
+    """
+    rendered = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(rendered) <= limit:
+        return rendered
+    from ouroboros.artifacts import store_actor_source_bytes
+
+    try:
+        if not getattr(ctx, "task_id", None):
+            raise ValueError("wait reader has no task source owner")
+        source = store_actor_source_bytes(ctx.drive_root, str(ctx.task_id), category="tool_results",
+            source_id="wait-handoff", data=rendered.encode("utf-8"), extension="json", register=True)
+    except (OSError, ValueError) as exc:
+        source = {"status": "unavailable", "reason": type(exc).__name__,
+                  "full_read": {"tool": "get_task_result", "note": "explicitly read the named tasks in full"}}
+    view = json.loads(rendered)
+    view["complete_source"] = source
+    view["complete_chars"] = len(rendered)
+    view["preview_only"] = True
+    rows = view.get("tasks") or {}
+    if isinstance(rows, dict):
+        budget = min(3000, max(0, 8000 // max(1, len(rows))))
+        for row in rows.values():
+            if not isinstance(row, dict):
+                continue
+            for key in ("result", "trace_summary"):
+                text = row.get(key)
+                if isinstance(text, str) and len(text) > budget:
+                    row[key] = text[:budget]
+                    row[key + "_omitted_chars"] = len(text) - budget
+    preview = json.dumps(view, ensure_ascii=False)
+    if len(preview) <= limit:
+        return preview
+    # Metadata can itself be arbitrarily large. Its exact meaning stays in the
+    # retained source, not in a "compact" object with silently dropped warnings.
+    selected = dict(list(rows.items())[:20]) if isinstance(rows, dict) else {}
+    summary = {}
+    for tid, row in selected.items():
+        summary[tid] = {key: row[key] for key in ("task_id", "status", "child_result_sha256",
+            "accounted_upper_bound_usd", "cost_final", "cancel_state", "result_unchanged") if key in row}
+        notice = row.get("terminal_host_notice")
+        if notice:
+            summary[tid]["terminal_host_notice_preview"] = str(notice)[:160]
+            summary[tid]["terminal_host_notice_chars"] = len(str(notice))
+    return json.dumps({"preview_only": True, "complete_chars": len(rendered),
+        "complete_source": source, "reason": "wait_metadata_requires_source_read",
+        "all_terminal": payload.get("all_terminal"), "timed_out": payload.get("timed_out"),
+        "tasks": summary, "tasks_omitted": len(rows) - len(selected),
+        "task_count": len(rows)}, ensure_ascii=False)
+
+
+def wait_mail_preview(ctx: Any) -> Dict[str, Any]:
+    """Non-destructive informational exhibit; the next loop drain owns full delivery."""
+    from ouroboros.owner_mailbox import drain_owner_entries, wait_message_requires_attention
+
+    if not getattr(ctx, "task_id", None):
+        return {}
+    entries = drain_owner_entries(Path(ctx.drive_root), str(ctx.task_id),
+        set(getattr(ctx, "_loop_mailbox_seen_ids", ()) or ()), getattr(ctx, "task_attempt", None) or 1)
+    quiet = [entry for entry in entries if not wait_message_requires_attention(entry)]
+    return {"informational_mail": [{"msg_id": entry["msg_id"], "source_task_id": entry.get("source_task_id"),
+        "provenance": entry.get("provenance"),
+        "complete_chars": len(entry["text"])} for entry in quiet[:20]],
+        "mail_omitted": max(0, len(quiet) - 20), "mail_acknowledged": False,
+        "mail_delivery": "full round-top drain in the same resumed request; checkpoint precedes ACK"}
+
+
 def _wait_for_task(
-    ctx: ToolContext, task_id: str, timeout_sec: int = 180, known_result_sha256: str = "",
+    ctx: ToolContext, task_id: str, timeout_sec: int | None = None, known_result_sha256: str = "",
 ) -> str:
-    """Wait for a subtask to reach a terminal status."""
+    """Named child plus an entry snapshot of this parent's other live children."""
+    from ouroboros.task_status import find_child_tasks
+
     try:
         tid = validate_task_id(task_id)
     except ValueError as exc:
-        return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_ARG_ERROR",
-            text=f"⚠️ TOOL_ARG_ERROR (wait_task): {exc}",
-        ))
-    try:
-        requested = int(timeout_sec)
-    except (TypeError, ValueError):
-        requested = 180
-    timeout, bound = _wait_window(ctx, requested, clamp=_WAIT_TASK_CLAMP_SEC, minimum=0,
-                                  margin=NESTED_SETTLEMENT_MARGIN_SEC)
-    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
-    status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-    waited = wait_for_effective_tasks(
-        status_drive_root, [tid], timeout_sec=timeout,
-        on_poll=_wait_attention_poll(ctx, "", [tid]), poll_interval_sec=2.0,
-    )
-    early = waited.get("early_return")
-    if early and early.get("reason") == "owner_mailbox_pending":
-        header = "Task wait interrupted by an unread message for this task"
-        extra = "\n\n" + _wait_early_return_note(early)
-    elif early:
-        header = "Task wait interrupted by a child attention beacon"
-        extra = f"\n\n[CHILD_BEACONS]\n{json.dumps(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
-    else:
-        header = "Task wait completed" if waited.get("all_terminal") else "Task wait timed out"
-        extra = ""
-    # B2 advisory (never a gate): if ANY other child of THIS parent is still in flight
-    # while we block on this one, point at wait_tasks(any_terminal) so the agent absorbs
-    # whichever finishes first instead of blocking serially on one id at a time.
-    other_live = _count_live_sibling_children(ctx, status_drive_root, exclude_task_id=tid)
-    if other_live >= 1:
-        extra += (
-            f"\n\n[ADVISORY] {other_live} other child(ren) still running/scheduled — consider "
-            "wait_tasks(any_terminal) to absorb whichever finishes first instead of waiting one at a time."
-        )
-    horizon_note = cache_horizon_note(ctx, waited.get("elapsed_sec"))
-    if horizon_note:
-        extra += f"\n\n{horizon_note}"
-    if bound != "requested":
-        window = {"requested_sec": requested, "window_sec": timeout, "window_bound": bound}
-        extra += f"\n\n[WAIT_WINDOW] {json.dumps(window)}"
-    tasks = waited.get("tasks") if isinstance(waited.get("tasks"), dict) else {}
-    result = _unsettled_wait_body(status_drive_root, tid, tasks.get(tid), known_result_sha256)
-    if not result:
-        result = (_get_task_result(ctx, tid, known_result_sha256=known_result_sha256)
-                  if known_result_sha256 else _get_task_result(ctx, tid))
-    return f"{header} after {waited.get('elapsed_sec', 0):.1f}s.{extra}\n\n{result}"
-
-
-def _unsettled_wait_body(drive_root: Path, tid: str, data: Any, known_result_sha256: str) -> str:
-    """The compact body of a wait_task that returned BEFORE the child settled
-    (timeout, mailbox interrupt, attention beacon), or ``""`` when the full
-    single-child handoff is due: a settled child, an unknown or admission-pending
-    id, or a caller whose ``known_result_sha256`` no longer matches (the result
-    changed, so it gets the full body). The ``Task <id> [<status>]`` header of
-    the full read is kept; the full envelope stays one get_task_result away."""
-    from ouroboros.routing_wait import is_emitted_admission_stub
-    from ouroboros.tools.join_ledger import _child_result_sha256
-
-    if not isinstance(data, dict) or not data or is_emitted_admission_stub(data):
-        return ""
-    status = data.get("status", "unknown")
-    if str(status or "").strip().lower() in SETTLED_STATUSES:
-        return ""
-    sha = _child_result_sha256(data)
-    if known_result_sha256 and known_result_sha256 != sha:
-        return ""
-    projection = _compact_child_projection(tid, data, known_result_sha256 or None)
-    projection["delegated_runs"] = _delegated_run_facts(drive_root, projection["task_id"])
-    return (
-        f"Task {tid} [{status}]\nchild_result_sha256={sha}\n\n[CHILD_PROJECTION]\n"
-        f"{json.dumps(projection, ensure_ascii=False, indent=2, default=str)}\n[/CHILD_PROJECTION]\n"
-        f"Compact projection of an unsettled child; get_task_result({tid}) returns the full envelope."
-    )
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+            text=f"⚠️ TOOL_ARG_ERROR (wait_task): {exc}"))
+    ids = [tid]
+    # Do not expand waits on other roots (a plan/peer wait is not child absorption).
+    named = load_effective_task_result(_status_root(ctx), tid, materialize_artifacts=False)
+    parent_id = str(getattr(ctx, "task_id", "") or "")
+    children = find_child_tasks(
+        _status_root(ctx), parent_task_id=parent_id, scope="direct", materialize_artifacts=False,
+    ) if parent_id else []
+    if parent_id and (named.get("parent_task_id") == parent_id
+                      or any(str(row.get("task_id") or "") == tid for row in children)):
+        ids += [str(row["task_id"]) for row in children
+                if row.get("task_id") and str(row.get("status") or "") not in SETTLED_STATUSES
+                and str(row["task_id"]) != tid]
+    return _wait_for_tasks(ctx, ids, timeout_sec=timeout_sec, mode="any_terminal",
+                           known_result_sha256_by_task={tid: known_result_sha256} if known_result_sha256 else None,
+                           _explicit_clamp=_WAIT_TASK_CLAMP_SEC)
 
 
 def _age_sec(stamp: Any, now: float) -> Any:
@@ -819,14 +852,13 @@ def _wait_window(
     return window, bound
 
 
-def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot", senders: Any = None,
+def _await_messages(ctx: ToolContext, timeout_sec: int | None = None, mode: str = "warm", senders: Any = None,
                     tasks: Any = None, runs: Any = None, wake_at: Any = None, wake_after_sec: Any = None,
                     services: Any = None) -> str:
-    """Hold this task's worker slot until an unread mailbox entry exists or the
-    window elapses. Delivers nothing: the round-top drain owns delivery and
-    acknowledgement, exactly as after a wait_task early return. An owner Stop
-    is a mailbox control, so it ends the wait like any message; a cancel kills
-    the worker process; the window is bounded by ``_wait_window``.
+    """Default warm event sleep selects reply sources or live direct children;
+    owner/control and typed attention always wake it. Explicit in_slot holds
+    capacity for its bounded window. Neither mode delivers or acknowledges
+    mail: the resumed round drains originals, then checkpoint persistence ACKs.
 
     Idle rail, honestly: the supervisor stamps ``last_progress_at`` on completed
     model rounds, on narration and, when a tool's typed lease closes, on the
@@ -839,18 +871,52 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
     close of that lease is the progress stamp the next model round starts from —
     a full idle window even after a wait that spent the whole ceiling, so the
     supervisor tick between the finished wait and the next model call never
-    reaps the turn the wait was for. This tool therefore emits no lease of its
-    own and lends no slot; tests/test_await_messages.py drives the enforcer
-    through that lifecycle.
+    reaps the turn the wait was for. The in-slot path emits no separate lease
+    and lends no capacity; warm mode uses the existing owner-wait capacity
+    transfer. tests/test_await_messages.py exercises the in-slot lifecycle.
     """
-    from ouroboros.loop_transport import _owner_signal_pending
     from ouroboros.owner_mailbox import OwnerMailboxPeek
 
+    if mode not in ("in_slot", "warm", "cold"):
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+            text="⚠️ TOOL_ARG_ERROR (await_messages): mode must be in_slot, warm or cold."))
+    if timeout_sec is not None:
+        try:
+            timeout_sec = int(timeout_sec)
+        except (TypeError, ValueError):
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text="⚠️ TOOL_ARG_ERROR (await_messages): timeout_sec must be an integer."))
+    if timeout_sec == 0 or (mode != "in_slot" and timeout_sec is not None and timeout_sec < 0):
+        from ouroboros import model_sleep
+        try:
+            chosen = model_sleep.selectors(ctx, senders=senders, tasks=tasks, runs=runs,
+                services=services, wake_at=wake_at, wake_after_sec=wake_after_sec, allow_empty=True)
+            ready = model_sleep.wake_reason(ctx, chosen, consume_beacons=False)
+        except (TypeError, ValueError) as exc:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text=f"⚠️ TOOL_ARG_ERROR (await_messages): {exc}"))
+        return bounded_wait_response(ctx, {"reason": "snapshot", "slept": False, "mode": mode,
+            "ready": bool(ready), "woke_by": ready, "wake_beacons": chosen.get("wake_beacons"),
+            "tasks": {tid: _compact_child_projection(tid, load_effective_task_result(
+                _status_root(ctx), tid, materialize_artifacts=False), None) for tid in chosen["tasks"]},
+            **wait_mail_preview(ctx)})
     if mode != "in_slot" or senders or tasks or runs or services or wake_at or wake_after_sec:
+        if timeout_sec is not None:
+            try:
+                timeout_sec = int(timeout_sec)
+            except (TypeError, ValueError):
+                return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                    text="⚠️ TOOL_ARG_ERROR (await_messages): timeout_sec must be an integer."))
+            if wake_at or wake_after_sec:
+                return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                    text="⚠️ TOOL_ARG_ERROR (await_messages): give timeout_sec or a wake time, not both."))
+            if timeout_sec <= 0:
+                return json.dumps({"reason": "snapshot", "slept": False, "mode": mode})
+            wake_after_sec = timeout_sec
         return _await_as_sleep(ctx, mode, senders=senders, tasks=tasks, runs=runs, services=services,
                                wake_at=wake_at, wake_after_sec=wake_after_sec)
     try:
-        requested = int(timeout_sec)
+        requested = int(timeout_sec) if timeout_sec is not None else _event_wait_window(ctx)
     except (TypeError, ValueError):
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
@@ -869,7 +935,7 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: str = "in_slot
     while True:
         # The transport wait's non-destructive peek over a COPY of the seen
         # set; the mailbox and its acknowledgements are untouched.
-        pending = bool(_owner_signal_pending(None, drive_root, task_id, seen, attempt, peek))
+        pending = bool(peek.pending(Path(drive_root), task_id, set(seen or ()), attempt, actionable_only=True))
         elapsed = time.monotonic() - start
         if pending or elapsed >= window:
             break
@@ -921,34 +987,18 @@ def await_messages_entry() -> ToolEntry:
     return ToolEntry("await_messages", {
         "name": "await_messages",
         "description": (
-            "Wait, without spending model rounds, until an unread message for THIS task exists "
-            "in your mailbox (an addressed contribution from a peer task, a parent's steering, "
-            "an owner message, a child's escalation) or the window elapses. Use it when you have "
-            "asked a peer or your parent for its next turn and have nothing useful to do until "
-            "it arrives; you decide when waiting is worth it. The wait holds your worker slot "
-            "and releases nothing; the window is clamped to the per-call timeout ceiling and, "
-            "under a deadline, to the finalization emit window (the result names the bound); "
-            "while it runs, the ordinary in-flight tool lease keeps the supervisor's idle rail "
-            "off you and its completion counts as progress, so your next round starts inside a "
-            "full idle window — call again to keep waiting. It delivers nothing itself: the message "
-            "reaches you at the next round top, exactly as after a wait_task early return. The "
-            "result says when the applied prompt-cache horizon elapsed since the last model response. "
-            "mode=warm or mode=cold instead SLEEPS without holding your model slot, until what you select: "
-            "mail from `senders`, the terminal of `tasks` you can read, the terminal of delegated `runs` you "
-            "own, the exit of your own `services` (warm only: the start each has now; a replaced, stopped "
-            "or lost one wakes you as unknown, never as success), and/or `wake_at`/`wake_after_sec`; with "
-            "nothing selected any addressed mail wakes you. The "
-            "owner's messages and controls always wake you; unselected mail waits unread. Warm keeps your "
-            "process and browser (a pooled slot is lent meanwhile); you choose which fits. A source that is "
-            "already ready answers at once. Sleep does not count as execution time; an explicit deadline "
-            "still applies. A settled task is not a successful one: read its result when you wake."
+            "Sleep once until selected sender mail, task/run terminals, your service exit, a chosen time or "
+            "actionable input. Default warm keeps your stack/browser and lends pooled capacity; with no "
+            "selectors it snapshots your live direct children. Owner/control and typed escalations always "
+            "wake; informational mail waits for full delivery in the same resumed request. Explicit "
+            "in_slot holds capacity; cold requires settled writers. A missing continuation owner refuses "
+            "warm sleep. Terminal means settled, not success; compact handoffs keep full sources."
         ),
         "parameters": {"type": "object", "properties": {
             "timeout_sec": {"type": "integer", "description":
-                            "In-slot wait only: seconds to wait; clamped to the per-call timeout ceiling and to "
-                            "the deadline emit window (the bound is reported in the result)."},
+                            "Explicit short wait in seconds, or 0 for a snapshot; omitted warm sleep has no periodic timer."},
             "mode": {"type": "string", "enum": ["in_slot", "warm", "cold"],
-                     "description": "in_slot (default) holds your slot for timeout_sec; warm/cold is a sleep."},
+                     "default": "warm", "description": "warm (default) lends pooled capacity and keeps the stack; in_slot holds capacity; cold ends the process."},
             "senders": {"type": "array", "items": {"type": "string"},
                         "description": "Sleep: task ids whose mail wakes you (others' mail stays unread)."},
             "tasks": {"type": "array", "items": {"type": "string"},
@@ -996,7 +1046,8 @@ _WAIT_TASK_CLAMP_SEC = 3600
 _WAIT_TASKS_CLAMP_SEC = 7200
 
 
-def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List[str]) -> List[str]:
+def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List[str],
+                       require_waitable: bool = False) -> List[str]:
     """Ids with no trace on ANY surface this tree mints ids through: no task
     result, no queue-snapshot row, and no tree-ledger row naming them (v6.91).
 
@@ -1005,7 +1056,8 @@ def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List
     set. The typed marker (plus the actual children roster) lets the parent
     repair its wait set instead of starving on phantoms. Fail-soft per probe: an
     unreadable surface treats the id as KNOWN — a real child must never be
-    branded unknown on an I/O error."""
+    branded unknown on an I/O error. Event waits require a result/queue source:
+    a ledger mention alone proves an ID was minted, not a wakeable task."""
     from ouroboros.task_status import _load_queue_snapshot, _queue_task_status
 
     try:
@@ -1017,7 +1069,7 @@ def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List
         from ouroboros.task_tree_ledger import tree_ledger_rows
         from ouroboros.tools.task_tree import tree_root_id
 
-        for row in tree_ledger_rows(tree_root_id(ctx)):
+        for row in tree_ledger_rows(tree_root_id(ctx), data_root=status_drive_root):
             for key in ("task_id", "child_task_id", "parent_task_id"):
                 value = str(row.get(key) or "").strip()
                 if value:
@@ -1030,9 +1082,11 @@ def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List
             if load_effective_task_result(status_drive_root, tid):
                 continue
             queue_status, _ = _queue_task_status(snapshot, tid)
-            if queue_status:  # running/scheduled row, or "unknown" on a missing snapshot (fail-soft)
+            if queue_status and (not require_waitable or queue_status != "unknown"):
+                # Unknown I/O is not a selectable source, but remains minted-ID
+                # uncertainty on the explicitly bounded compatibility path.
                 continue
-            if tid in ledger_ids:
+            if tid in ledger_ids and not require_waitable:
                 continue
         except Exception:
             continue  # unreadable surface: treat as known
@@ -1108,6 +1162,12 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
         "result": data.get("result"),
         "trace_summary": data.get("trace_summary"),
     }
+    projected["result_chars"] = len(str(data.get("result") or ""))
+    projected["trace_summary_chars"] = len(str(data.get("trace_summary") or ""))
+    projected["result_source"] = {"tool": "get_task_result", "arguments": {
+        "task_id": str(tid), "include_authority": True}}
+    if isinstance(data.get("verification_ledger"), dict):
+        projected["verification_summary"] = data["verification_ledger"].get("summary") or {}
     if isinstance(data.get("execution_observation"), dict):
         projected["execution_observation"] = dict(data["execution_observation"])
     # The result hash binds this limitation too; keep its host authorship
@@ -1182,16 +1242,16 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
 def _wait_for_tasks(
     ctx: ToolContext,
     task_ids: List[str],
-    timeout_sec: int = 600,
+    timeout_sec: int | None = None,
     mode: str = "all_terminal",
     known_result_sha256_by_task: Dict[str, str] | None = None,
+    _explicit_clamp: int = _WAIT_TASKS_CLAMP_SEC,
 ) -> str:
     """Wait for multiple subtasks and return a compact structural projection per child.
 
-    A wait set whose ids were ALL unminted at entry ends after the registration
-    grace instead of the full requested window (disclosed as
-    ``wait_short_circuited``); any id that turns real during the grace makes it
-    an ordinary wait again, with the remaining window intact."""
+    Loop-owned default waits return an actionable snapshot for any unminted ID,
+    never a bounded slot hold or a silently narrowed subscription. Standalone
+    all-unminted sets retain the bounded registration grace."""
     if not isinstance(task_ids, list) or not task_ids:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
@@ -1222,10 +1282,12 @@ def _wait_for_tasks(
         # The normalized RAW request, kept before the clamp: an expiry that
         # reports the ceiling as the asked-for window hides the very fact the
         # model needs, that its request was cut down.
-        requested_timeout = float(max(0, int(timeout_sec)))
+        requested_timeout = float(max(0, int(timeout_sec))) if timeout_sec is not None else float(_event_wait_window(ctx))
     except (TypeError, ValueError):
-        requested_timeout = 600.0
-    timeout, bound = _wait_window(ctx, int(requested_timeout), clamp=_WAIT_TASKS_CLAMP_SEC, minimum=0,
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+            text="⚠️ TOOL_ARG_ERROR (wait_tasks): timeout_sec must be an integer."))
+    timeout, bound = _wait_window(ctx, int(requested_timeout),
+                                  clamp=_explicit_clamp if timeout_sec is not None else _event_wait_window(ctx), minimum=0,
                                   margin=NESTED_SETTLEMENT_MARGIN_SEC)
     normalized_mode = str(mode or "all_terminal").strip().lower()
     if normalized_mode not in {"all_terminal", "any_terminal"}:
@@ -1239,7 +1301,34 @@ def _wait_for_tasks(
     # registered" is a real state for a just-scheduled child — but a phantom id
     # is disclosed instead of silently starving the wait (wave2: three
     # hallucinated ids blocked 900s slices while the real lead went unwaited).
-    entry_unknown_ids = _unminted_wait_ids(ctx, status_drive_root, normalized_ids)
+    require_waitable = bool(timeout_sec is None and callable(getattr(ctx, "owner_wait_callback", None)))
+    entry_unknown_ids = (_unminted_wait_ids(ctx, status_drive_root, normalized_ids, True)
+                         if require_waitable else _unminted_wait_ids(ctx, status_drive_root, normalized_ids))
+    ready_attention = None
+    unknown_repair = bool(timeout_sec is None and entry_unknown_ids
+                          and callable(getattr(ctx, "owner_wait_callback", None)))
+    if unknown_repair:
+        # A phantom cannot satisfy all_terminal. Preserve the exact set and
+        # disclose repair now; the corrected known-ID set parks warm normally.
+        timeout = 0
+    if timeout_sec is None and timeout > 0 and not entry_unknown_ids and callable(getattr(ctx, "owner_wait_callback", None)):
+        from ouroboros import model_sleep
+
+        try:
+            chosen = model_sleep.selectors(ctx, tasks=normalized_ids,
+                wake_after_sec=timeout if bound == "deadline" else None)
+            chosen["terminal_mode"] = normalized_mode
+            chosen["known_result_sha256_by_task"] = known_result_sha256_by_task or {}
+            outcome = model_sleep.request_sleep(ctx, chosen, model_sleep.MODE_WARM)
+        except ValueError as exc:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text=f"⚠️ TOOL_ARG_ERROR (wait_tasks): {exc}"))
+        if outcome.get("reason") == "sleep_armed":
+            return bounded_wait_response(ctx, {**outcome, "task_ids": normalized_ids, **wait_mail_preview(ctx)})
+        # Already ready: read the complete snapshot, including simultaneous
+        # terminals and attention. No extra cognitive round is needed to fetch it.
+        ready_attention = outcome.get("wake_beacons")
+        timeout = 0
     # One beacon cursor for the whole wait, so a two-phase window cannot skip an
     # attention beacon emitted during its first phase.
     _wait_since = ""
@@ -1280,12 +1369,22 @@ def _wait_for_tasks(
                 ),
             }
     tasks = waited.get("tasks")
+    if unknown_repair:
+        waited["wait_short_circuited"] = {
+            "reason": "unknown_task_ids_require_repair",
+            "requested_timeout_sec": requested_timeout,
+            "waited_sec": float(waited.get("elapsed_sec") or 0),
+            "note": "Repair unknown_task_ids from children_roster; no IDs were silently removed from the wait set.",
+        }
+    if ready_attention:
+        waited["early_return"] = ready_attention
     if isinstance(tasks, dict):
         # Re-probe the entry-time unknowns once: an id minted mid-wait (queue
         # row or result appeared) is a real child, not a phantom.
         unknown_ids = [tid for tid in entry_unknown_ids if not tasks.get(tid)]
         if unknown_ids:
-            unknown_ids = _unminted_wait_ids(ctx, status_drive_root, unknown_ids)
+            unknown_ids = (_unminted_wait_ids(ctx, status_drive_root, unknown_ids, True)
+                           if require_waitable else _unminted_wait_ids(ctx, status_drive_root, unknown_ids))
 
         # Compact STRUCTURAL projection (v6.71.2): the full public_task_result
         # envelope duplicated forensics (trace_refs, loop_outcome internals,
@@ -1294,8 +1393,8 @@ def _wait_for_tasks(
         # stays on disk in task_results/<id>.json, addressable by
         # child_result_sha256 (the join-ledger SSOT hash), and is fetched with
         # get_task_result — a DISCLOSED omission (BIBLE P1), not silent
-        # truncation. get_task_result and a SETTLED wait_task stay full; an
-        # unsettled wait_task returns this same projection.
+        # truncation. get_task_result is the explicit full terminal reader;
+        # all wait handoffs are bounded with actor-readable complete sources.
         public_tasks: Dict[str, Any] = {}
         for tid, data in tasks.items():
             if str(tid) in unknown_ids:
@@ -1304,11 +1403,12 @@ def _wait_for_tasks(
                     "status": None,
                     "unknown_task_id": True,
                     "note": (
-                        "UNKNOWN_TASK_ID: not yet registered or never scheduled — no task "
-                        "result, no queue row, and no tree-ledger row names this id in this "
-                        "tree. Check it against your schedule_subagent results / the "
+                        "UNKNOWN_TASK_ID: no waitable result/queue source" if require_waitable else
+                        "UNKNOWN_TASK_ID: not yet registered or never scheduled — no result, queue row or tree-ledger mention"
+                    ) + (
+                        ". Check it against your schedule_subagent results / the "
                         "children_roster below; an all_terminal wait cannot complete while "
-                        "it stays unscheduled."
+                        "its result/queue source is unavailable."
                     ),
                 }
                 continue
@@ -1318,6 +1418,8 @@ def _wait_for_tasks(
             known = (known_result_sha256_by_task.get(str(tid))
                      if isinstance(known_result_sha256_by_task, dict) else None)
             public_tasks[str(tid)] = _compact_child_projection(str(tid), data, known)
+            if str(data.get("status") or "").lower() not in SETTLED_STATUSES:
+                public_tasks[str(tid)]["delegated_runs"] = _delegated_run_facts(status_drive_root, str(tid))
         waited["tasks"] = public_tasks
         waited["tasks_note"] = (
             "Compact per-child projection. The full result envelope (trace_refs, "
@@ -1339,7 +1441,7 @@ def _wait_for_tasks(
     # description the model reads BEFORE it chooses a window. An id this tree
     # never minted is disclosed as unknown, never counted as a live child.
     projected = waited.get("tasks")
-    if (waited.get("timed_out") and not waited.get("all_terminal")
+    if (not unknown_repair and waited.get("timed_out") and not waited.get("all_terminal")
             and isinstance(projected, dict) and projected):
         live_ids = [
             tid for tid in normalized_ids
@@ -1351,7 +1453,7 @@ def _wait_for_tasks(
             waited["wait_expired_with_live_children"] = {
                 "reason": "timeout_expired_before_terminal",
                 "requested_timeout_sec": requested_timeout,
-                "max_timeout_sec": float(_WAIT_TASKS_CLAMP_SEC),
+                "max_timeout_sec": float(_explicit_clamp if timeout_sec is not None else _event_wait_window(ctx)),
                 "live_task_ids": live_ids,
             }
     if bound != "requested":
@@ -1361,4 +1463,5 @@ def _wait_for_tasks(
     horizon_note = cache_horizon_note(ctx, waited.get("elapsed_sec"))
     if horizon_note:
         waited["cache_horizon_note"] = horizon_note
-    return json.dumps(waited, ensure_ascii=False, indent=2)
+    waited.update(wait_mail_preview(ctx))
+    return bounded_wait_response(ctx, waited)

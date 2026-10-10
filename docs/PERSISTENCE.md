@@ -205,6 +205,10 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 
 ## Reset ladder (summary)
 
+| Path | Writer | Marker | Retention | Reset |
+|---|---|---|---|---|
+| `task_results/artifacts/<task>/wait-handoff-*.json`, `delegate-wake-*.json` | wait producers through `artifacts.store_actor_source_bytes(register=True)` before compact projection | exact UTF-8 JSON, size/SHA task_source with immutable artifact registration | normal artifact obligations/copy-back survive child-drive cleanup; no timer | lost source stays unavailable, never replaced by its preview |
+
 Always safe (pure caches, recreated): `state/pycache`, `state/code_intel`,
 `state/evolution_metrics_cache.json`, `playwright-browsers/`, `state/cx`,
 `state/betterleaks`, lock files, `state/server_port`.

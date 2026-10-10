@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read, publish_no_effect
-
-from ouroboros.tools.arg_feedback import payload_item_feedback, with_argument_notes
-
 import copy
 import json
 import logging
@@ -17,41 +13,63 @@ import uuid
 from typing import Dict, List
 
 from ouroboros.artifacts import artifact_store_path_block_reason, copy_file_to_task_artifacts
-from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store  # noqa: F401
-from ouroboros.project_facts import project_store_access_block as _project_store_access_block
-from ouroboros.protected_artifacts import block_reason_for_path
-from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for  # noqa: F401
-from ouroboros.tool_access import (
-    ResolvedResourceBinding,
-    build_resolved_resource_binding,  # noqa: F401
-    canonical_data_root,
-    decide_tool_access,  # noqa: F401
-    active_tool_profile,  # noqa: F401
-    normalize_root,  # noqa: F401
-    normalize_runtime_data_path,  # noqa: F401
-    UserFilesPathBlockedError,
-    user_files_path_block_reason,
-)
-from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso, write_text_atomic  # noqa: F401
-from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
+    SKILL_OWNER_STATE_FILENAMES,  # noqa: F401
     SKILL_PAYLOAD_ALL_BUCKETS,
     SKILL_PAYLOAD_CONTROL_DIRNAMES,
     SKILL_PAYLOAD_CONTROL_FILENAMES,
-    SKILL_OWNER_STATE_FILENAMES,  # noqa: F401
     SkillPayloadPathError,
     SkillPayloadTarget,
     cross_skill_redirect_error,
     decide_payload_short_form,
-    is_skill_control_plane_path as _policy_is_skill_control_plane_path,
-    is_skill_owner_state_alias,
-    is_skill_owner_state_target as _policy_is_skill_owner_state_target,  # noqa: F401
     is_skill_create_typo,
+    is_skill_owner_state_alias,
     resolve_skill_payload_target,
 )
-from ouroboros.tools.core_secret_paths import is_restricted_subagent_profile  # noqa: F401
+from ouroboros.contracts.skill_payload_policy import (
+    is_skill_control_plane_path as _policy_is_skill_control_plane_path,
+)
+from ouroboros.contracts.skill_payload_policy import (
+    is_skill_owner_state_target as _policy_is_skill_owner_state_target,  # noqa: F401
+)
+from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
+from ouroboros.owner_mailbox import TASK_ATTENTION_KINDS
+from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store  # noqa: F401
+from ouroboros.project_facts import project_store_access_block as _project_store_access_block
+from ouroboros.protected_artifacts import block_reason_for_path
+from ouroboros.tool_access import (
+    ResolvedResourceBinding,
+    UserFilesPathBlockedError,
+    active_tool_profile,  # noqa: F401
+    build_resolved_resource_binding,  # noqa: F401
+    canonical_data_root,
+    decide_tool_access,  # noqa: F401
+    normalize_root,  # noqa: F401
+    normalize_runtime_data_path,  # noqa: F401
+    user_files_path_block_reason,
+)
+from ouroboros.tools.arg_feedback import payload_item_feedback, with_argument_notes
+from ouroboros.tools.core_artifacts import (  # noqa: F401
+    _MAX_DOCUMENT_FILE_BYTES,
+    _MAX_LINK_ACTIONS,
+    _MAX_PHOTO_FILE_BYTES,
+    _MAX_QUIZ_OPTIONS,
+    _MAX_VIDEO_FILE_BYTES,
+    ESCALATE_TOOL_SCHEMA,
+    LinkActionsValidationError,
+    QuizValidationError,
+    _detect_document_mime,
+    _detect_image_mime,
+    _detect_video_mime,
+    _escalate,
+    _send_file,
+    _send_links,
+    _send_photo,
+    _send_video,
+    validate_link_actions,
+    validate_quiz_payload,
+)
 from ouroboros.tools.core_file_tools import (  # noqa: F401
-    _ListingFailure,
     _MEMORY_AT_DRIVE_MEMORY,
     _SKILL_OWNER_STATE_FILENAMES,
     _access_or_block,
@@ -66,6 +84,7 @@ from ouroboros.tools.core_file_tools import (  # noqa: F401
     _list_dir,
     _list_files,
     _list_user_files_dir,
+    _ListingFailure,
     _normalize_data_read_path,
     _profile_roots_hint,
     _read_file,
@@ -75,26 +94,10 @@ from ouroboros.tools.core_file_tools import (  # noqa: F401
     _root_display_path,
     _runtime_data_read_check,
 )
-from ouroboros.tools.core_artifacts import (  # noqa: F401
-    _MAX_DOCUMENT_FILE_BYTES,
-    _MAX_PHOTO_FILE_BYTES,
-    _MAX_VIDEO_FILE_BYTES,
-    _detect_document_mime,
-    _detect_image_mime,
-    _detect_video_mime,
-    _send_file,
-    _send_photo,
-    _send_video,
-    LinkActionsValidationError,
-    QuizValidationError,
-    _MAX_LINK_ACTIONS,
-    _MAX_QUIZ_OPTIONS,
-    ESCALATE_TOOL_SCHEMA,
-    _escalate,
-    _send_links,
-    validate_link_actions,
-    validate_quiz_payload,
-)
+from ouroboros.tools.core_secret_paths import is_restricted_subagent_profile  # noqa: F401
+from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for  # noqa: F401
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read, publish_no_effect
+from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso, write_text_atomic  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -848,9 +851,16 @@ _MAX_SEARCH_RESULTS = 200
 # module SSOT); imported with the historical private names used by call sites.
 from ouroboros.code_search_rg import (  # noqa: E402
     MAX_SEARCH_FILES_SCANNED as _MAX_SEARCH_FILES_SCANNED,
+)
+from ouroboros.code_search_rg import (  # noqa: E402
     _search_wall_clock_sec,
+    matches_include,
+)
+from ouroboros.code_search_rg import (  # noqa: E402
     is_search_skippable as _is_search_skippable,  # noqa: F401 — re-exported for tests/call sites
-    search_skip_reason as _search_skip_reason, matches_include,
+)
+from ouroboros.code_search_rg import (  # noqa: E402
+    search_skip_reason as _search_skip_reason,
 )
 
 
@@ -1117,6 +1127,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
 
 def _forward_to_worker(
     ctx: ToolContext, task_id: str, message: str, relayed_from_task_id: str = "",
+    attention_kind: str = "",
 ) -> str:
     """Write task context to the recipient's mailbox, never owner text.
     Descendants receive ancestor/relayed context; contributions inside one tree
@@ -1124,11 +1135,17 @@ def _forward_to_worker(
     roots and inline Presence receive independent task context. Receipts prove
     persistence, not a read, in the recipient's drive."""
     from ouroboros.owner_mailbox import (
-        PEER_RELATION_LABELS, PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, TASK_MESSAGE_MAX_CHARS,
+        PEER_RELATION_LABELS,
+        PROVENANCE_INDEPENDENT_TASK,
+        PROVENANCE_PEER_TASK,
+        TASK_ATTENTION_KINDS,
+        TASK_MESSAGE_MAX_CHARS,
         write_task_message,
     )
     from ouroboros.peer_roster import (
-        durable_descendant_of, independent_message_target, peer_contribution_admission,
+        durable_descendant_of,
+        independent_message_target,
+        peer_contribution_admission,
     )
     from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, validate_task_id
     from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
@@ -1137,6 +1154,8 @@ def _forward_to_worker(
         tid = validate_task_id(task_id)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (forward_to_worker): {exc}"
+    if attention_kind and attention_kind not in TASK_ATTENTION_KINDS:
+        return f"⚠️ TOOL_ARG_ERROR (forward_to_worker): unknown attention_kind {attention_kind!r}."
     if len(str(message or "")) > TASK_MESSAGE_MAX_CHARS:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
             f"⚠️ TOOL_ARG_ERROR (forward_to_worker): message is {len(str(message))} chars; the "
@@ -1224,6 +1243,7 @@ def _forward_to_worker(
         relayed_from_task_id=relayed_from,
         msg_id=uuid.uuid4().hex,
         relation=relation,
+        attention_kind=attention_kind,
     )
     if not written:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR", text=(f"⚠️ TASK_MESSAGE_UNWRITTEN: message to task {tid} was not persisted.")))
@@ -1450,7 +1470,9 @@ def get_tools() -> List[ToolEntry]:
                 "is limited to 8000 chars (longer is refused, never truncated), and the "
                 "result says written, not read: a running task drains it at its next checkpoint, a queued "
                 "one when it starts, and a task that ends without reading it keeps it as unread mail in its "
-                "result. To wait for a reply without spending model rounds, call await_messages."
+                "result. Routine mail does not interrupt a wait; attention_kind explicitly marks a decision "
+                "request or changed contract, without granting authority. For a reply, choose "
+                "await_messages(senders=[recipient_id]); childless selector-free sleeps refuse."
             ),
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string", "description": "ID of the running or queued task to forward to"},
@@ -1458,6 +1480,8 @@ def get_tools() -> List[ToolEntry]:
                 "relayed_from_task_id": {"type": "string", "description":
                     "Optional sibling/descendant task whose output this ancestor relays. "
                     "The recipient sees both peer and ancestor provenance."},
+                "attention_kind": {"type": "string", "enum": list(TASK_ATTENTION_KINDS),
+                    "description": "Optional explicit decision/contract attention; omit for informational mail. Changes wake priority, never sender authority."},
             }, "required": ["task_id", "message"]},
         }, _forward_to_worker),
     ]

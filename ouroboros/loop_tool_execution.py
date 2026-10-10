@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from ouroboros.model_wait import execution_deadline_scope, future_result, monotonic_now
-
 import concurrent.futures
-import copy
 import contextlib
 import contextvars
+import copy
 import json
 import logging
 import os
@@ -24,6 +22,7 @@ from ouroboros.config import (
     load_settings,
 )
 from ouroboros.deadline_utils import deadline_remaining_sec
+from ouroboros.model_wait import execution_deadline_scope, future_result, monotonic_now
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
     CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement,
@@ -1168,12 +1167,11 @@ def handle_tool_calls(
     delivered under the measured frame. Without them results are delivered
     whole, best effort, and no cap is invented.
     """
+    from ouroboros.loop_delivery import completion_observation
     from ouroboros.openai_chat_dispatch import (
         custom_tool_argument_error,
         custom_validation_by_call_id,
     )
-
-    from ouroboros.loop_delivery import completion_observation
     if not isinstance(getattr(tools._ctx, "_completion_observation", None), dict):
         tools._ctx._completion_observation = completion_observation(tools._ctx, llm_trace)
     tools._ctx._completion_conflict = False
@@ -1455,8 +1453,9 @@ def process_tool_results(
         if ctx is not None and ((exec_result.get("result_meta") or {}).get("tool_result_meta") or {}).get("supervision_wake_id"):
             try:
                 from ouroboros.delegate_supervision import acknowledge_pending_wake
+                from ouroboros.working_checkpoint import defer_content_ack
 
-                acknowledge_pending_wake(ctx, truncated_result)
+                defer_content_ack(ctx, lambda body=truncated_result: acknowledge_pending_wake(ctx, body))
             except Exception:
                 log.debug("Failed to acknowledge injected delegate wake", exc_info=True)
 

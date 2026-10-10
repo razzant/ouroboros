@@ -251,13 +251,16 @@ def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, 
     evidence.mkdir()
     with WireModel(evidence, retry=True) as model:
         ep = _episode(tmp_path, monkeypatch, model, selection)
+        from ouroboros.owner_wait import direct_owner_wait
+        ep.tools._ctx.owner_wait_callback = direct_owner_wait
+        ep.tools._ctx.task_attempt = 1
         model.boundary = lambda: any(row["text"] == FIRST for row in _mail(ep.drive, "parent"))
         model.script = [
             {"tool": "read_file", "arguments": {"path": "evidence.txt", "root": "active_workspace"}},
             {"tool": "switch_model", "arguments": {"model": "openai-compatible::mock-model-rebound"}},
             {"tool": "read_file", "arguments": {"path": "evidence.txt", "root": "active_workspace"}},
             {"tool": "forward_to_worker", "arguments": {"task_id": "parent", "message": FIRST}},
-            {"tool": "await_messages", "arguments": {"timeout_sec": 1}},
+            {"tool": "await_messages", "arguments": {"timeout_sec": 1, "senders": ["sibling"]}},
             {"tool": "forward_to_worker", "arguments": {"task_id": "sibling", "message": REPLY}},
         ]
         def cooperate(_body):
@@ -270,7 +273,8 @@ def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, 
         assert not model.errors, model.errors
         assert final == "Cooperation complete.", (final, usage, trace)
         assert model.script_consumed()
-        assert all(not row["is_error"] for row in trace["tool_calls"]), trace["tool_calls"]
+        errors = [row for row in trace["tool_calls"] if row["is_error"]]
+        assert not errors, errors
         assert len(model.received) == 8
         assert model.first_retained_at == 6
         bodies = [json.loads(Path(row["path"]).read_bytes()) for row in model.received]
@@ -300,7 +304,7 @@ def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, 
         reply = [row for row in _mail(ep.drive, "sibling") if row["text"] == REPLY]
         assert len(reply) == 1 and reply[0]["source_task_id"] == ep.task["id"]
         assert "Message from peer task sibling (sibling)" in json.dumps(bodies[6])
-        assert "owner_mailbox_pending" in json.dumps(bodies[6])
+        assert "mail:sibling" in json.dumps(bodies[6])
         joined = _seals(ep, model)
         report = {"qualification": "host-wire only; scripted provider, not cognitive/vendor blindness",
                   "selection": selection, "first_position": first[0], "first_seen_retained_request": 6,

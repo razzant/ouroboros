@@ -15,6 +15,7 @@ from ouroboros.owner_mailbox import (
     KIND_HURRY,
     KIND_TASK_MESSAGE,
     drain_owner_entries,
+    wait_message_requires_attention,
 )
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import atomic_write_json, utc_now_iso
@@ -499,7 +500,7 @@ def _addressed_wakes(ctx: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
             "text": str(entry.get("text") or ""),
             "ts": str(entry.get("ts") or ""),
         }
-        for entry in entries
+        for entry in entries if wait_message_requires_attention(entry)
     ]
 
 
@@ -614,6 +615,7 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any]) -> ToolResult:
             source_id=f"delegate-wake-{wake_id or uuid.uuid4().hex}",
             data=raw.encode("utf-8"),
             extension="json",
+            register=True,
         )
     except Exception:
         # Keep the exact wake pending and let the ordinary outer truncation fail
@@ -1029,9 +1031,9 @@ def supervised_wait(
             from ouroboros.tools.delegate_terminal_evidence import retry_terminal_result
 
             return retry_terminal_result(ctx, run_id)
-        from ouroboros.tools.delegate import _delegate_wait
-
         from functools import partial
+
+        from ouroboros.tools.delegate import _delegate_wait
 
         wait_once = partial(_delegate_wait, observation_only=True)
     state = _load_state(ctx, run_id)

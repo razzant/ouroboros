@@ -51,7 +51,12 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     Precedence: control, this card's answer, owner words, hurry, mail.
     """
     from ouroboros.owner_mailbox import (
-        KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_TASK_MESSAGE,
+        KIND_FINALIZE_NOW,
+        KIND_HURRY,
+        KIND_OWNER_PAUSE,
+        KIND_OWNER_TEXT,
+        KIND_QUIZ_ANSWER,
+        KIND_TASK_MESSAGE,
     )
 
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
@@ -79,7 +84,7 @@ def _wait_entries(ctx: Any) -> list[dict]:
 
     return drain_owner_entries(
         pathlib.Path(ctx.drive_root), ctx.task_id,
-        set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()), ctx.task_attempt or 1,
+        set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()), getattr(ctx, "task_attempt", None) or 1,
     )
 
 
@@ -105,7 +110,8 @@ def set_owner_wait(root: Any, task_id: str, wait: dict,
     """Update only the existing continuation projection, preserving siblings."""
     from ouroboros.task_results import (
         require_writable_task_result_schema,
-        stamp_task_result_schema, task_result_path,
+        stamp_task_result_schema,
+        task_result_path,
     )
     from ouroboros.utils import update_json_locked
 
@@ -170,6 +176,12 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
             "_historical_author_inputs", "_pending_owner_dialogue",
         ) if getattr(ctx, key, None) is not None},
+        # A consumed beacon is cognition, not a process handle. Keep equal-time
+        # FIFO identities across cold continuation; snapshots never advance it.
+        "wait_attention_cursors": {key: {
+            "after_ts": cursor.get("after_ts", ""),
+            "seen_ids": sorted(cursor.get("seen_ids") or ()),
+        } for key, cursor in (getattr(ctx, "_wait_attention_cursors", None) or {}).items()},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
         "seen": sorted(seen), "owner_directives": getattr(ctx, "_owner_directives", []),
         "route": {key: getattr(ctx, key, None) for key in (
@@ -307,12 +319,17 @@ def load_owner_wait(ctx: Any, handoff: dict | None = None) -> dict:
 
 def restore_owner_wait_allowed(root: Any, task: dict, *, strict: bool = False) -> bool:
     """Current wait and acknowledged restart authorize a locator; strict preserves read failures."""
-    from ouroboros.cancel_intents import has_active_intent
-    from ouroboros.deadline_utils import parse_deadline_ts, utc_now
-    from ouroboros.delegate_recovery import _ack_direct_exec_successor, _read_restart_transaction, _restart_transaction_path
-    from ouroboros.config import get_task_abs_ceiling_sec
-    from ouroboros.model_wait import execution_elapsed_seconds
     import time
+
+    from ouroboros.cancel_intents import has_active_intent
+    from ouroboros.config import get_task_abs_ceiling_sec
+    from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+    from ouroboros.delegate_recovery import (
+        _ack_direct_exec_successor,
+        _read_restart_transaction,
+        _restart_transaction_path,
+    )
+    from ouroboros.model_wait import execution_elapsed_seconds
 
     handoff = task.get("_owner_wait_resume")
     if not isinstance(handoff, dict):
@@ -797,7 +814,7 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
             outcome = callback(ctx, checkpoint)
         finally:
             slept = model_sleep.end(ctx)  # through capacity reacquisition: the task runs again now
-        messages.append(model_sleep.wake_notice(sleep, str(outcome or ""), slept))
+        messages.append(model_sleep.wake_notice(sleep, str(outcome or ""), slept, ctx))
         ctx._model_sleep = None
     else:
         outcome = callback(ctx, checkpoint)
@@ -813,13 +830,17 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     same-ID continuation). Python handles (browser, executors, services) are
     NOT restored: they died with the previous process and stay invalidated."""
     from ouroboros.loop_delivery import DeliveryCandidate
-
     from ouroboros.model_wait import budget_paused_seconds
 
     ctx = tools._ctx
     for key, value in (state.get("context_observations") or {}).items():
         if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs", "_pending_owner_dialogue"}:
             setattr(ctx, key, value)
+    # Legacy sources without cursors keep their fresh first observation.
+    ctx._wait_attention_cursors = {key: {
+        "after_ts": cursor.get("after_ts", ""),
+        "seen_ids": set(cursor.get("seen_ids") or ()),
+    } for key, cursor in (state.get("wait_attention_cursors") or {}).items()}
     messages[:] = state["messages"]
     trace.update(state["trace"])
     usage.update(state["usage"])

@@ -60,6 +60,7 @@ def announce_released_settlement(
             f"({ok} ok, {len(settled_wave) - ok} failed); not yet collected "
             f"(review_fingerprint {fingerprint}).",
             task_id, source_task_id=task_id, provenance="system",
+            attention_kind="review_requested",
         )
     except Exception:
         log.warning("plan review settled-wave frame failed for %s", task_id, exc_info=True)
@@ -247,15 +248,19 @@ def attach_historical_results(
     known historical set after publishing a new current wave. No read projection
     writes state, and neither callback waits for a worker or re-enters its queue.
     """
-    from types import SimpleNamespace
     from dataclasses import asdict
+    from types import SimpleNamespace
+
     from ouroboros.observability import read_call_payload
     from ouroboros.review_custody import recover_review_producer
     from ouroboros.task_results import (
-        load_plan_review_state, plan_review_wave,
+        load_plan_review_state,
+        plan_review_wave,
     )
     from ouroboros.tools.plan_review_artifacts import (
-        authority_wave, persist_historical_result, record_plan_review_supplement,
+        authority_wave,
+        persist_historical_result,
+        record_plan_review_supplement,
     )
     from ouroboros.tools.plan_review_runtime import _plan_row_from_actor
 
