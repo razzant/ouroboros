@@ -14,8 +14,6 @@ upgraded with a recorded reason + lineage gate) live here too.
 
 from __future__ import annotations
 
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
-
 import hashlib
 import json
 import logging
@@ -24,16 +22,17 @@ from typing import Any, Dict
 
 from ouroboros.task_results import validate_task_id
 from ouroboros.task_status import load_effective_task_result, observe_cancellation_target
-from ouroboros.tool_access_paths import canonical_data_root as _status_drive_root
 from ouroboros.task_tree_ledger import (
-    CHILD_RESULT_DISPOSITIONS,
     CHILD_RESULT_DISPOSITION_TYPE,
+    CHILD_RESULT_DISPOSITIONS,
     child_result_disposition_row,
     child_result_disposition_violations,
     normalize_child_result_disposition_payload,
     tree_ledger_append,
 )
+from ouroboros.tool_access_paths import canonical_data_root as _status_drive_root
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger("ouroboros.tools.join_ledger")
@@ -483,8 +482,8 @@ def _peek_task(ctx: ToolContext, task_id: str, view: str = "summary") -> str:
     # Latest beacons this child posted to the shared ledger (partial_finding / blocker /
     # question / milestone), newest last.
     try:
-        from ouroboros.tools.task_tree import tree_root_id
         from ouroboros.task_tree_ledger import tree_ledger_rows
+        from ouroboros.tools.task_tree import tree_root_id
 
         rid = tree_root_id(ctx)
         if rid:
@@ -560,8 +559,8 @@ def _override_delegation_constraint(ctx: ToolContext, constraint_id: str, reason
     if not reason_text:
         return "⚠️ TOOL_ARG_ERROR (override_delegation_constraint): a non-empty reason is required."
     try:
-        from ouroboros.tools.task_tree import tree_root_id
         from ouroboros.task_tree_ledger import open_delegation_constraints, tree_ledger_append
+        from ouroboros.tools.task_tree import tree_root_id
 
         rid = tree_root_id(ctx)
         if not rid:
@@ -832,12 +831,9 @@ def get_tools() -> list[ToolEntry]:
         }, _cancel_task),
         ToolEntry("peek_task", {
             "name": "peek_task",
-            "description": "Look at a child task's CURRENT status, its latest coordination beacons "
-                           "(partial_finding/blocker/question/milestone) and a tail of its result — "
-                           "a PURE READ. Use this to check intermediate findings or decide whether to keep "
-                           "waiting / steer / cancel, without committing to a finalization decision. It "
-                           "changes no state: the pre-finalization reminder is change-based and is cleared "
-                           "only by discard_child_result / cancel_task, not by reading.",
+            "description": "One bounded diagnostic snapshot of a child's status, beacons and result tail; "
+                           "not a completion waiter. Normally await terminal/attention with wait_task(s). "
+                           "Reading changes no state, absorbs no result and proves no success.",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "view": {"type": "string", "enum": ["summary", "partials", "tail"], "default": "summary",

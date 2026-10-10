@@ -41,16 +41,17 @@ def test_wait_yields_mailbox_without_acknowledging_or_stopping_child(tmp_path, f
     assert _write_addressed(mailbox_root, "Use the blue version.", "parent", msg_id="answer",
                             kind=kind, provenance=provenance)
     result = _wait_for_tasks(ctx, ["child"], timeout_sec=0) if batch else _wait_for_task(ctx, "child", timeout_sec=0)
-    if batch:
-        decoded = json.loads(result)
+    decoded = json.loads(result)
+    if kind != "task_message":
         assert decoded["early_return"]["reason"] == "owner_mailbox_pending"
         assert "deliver and acknowledge" in decoded["early_return_note"]
         assert "does not stop the child" in decoded["early_return_note"]
         assert decoded["all_terminal"] is False
         assert decoded["tasks"]["child"]["status"] == "running"
     else:
-        assert "unread message for this task" in result
-        assert "child [running]" in result
+        assert "early_return" not in decoded
+        assert decoded["informational_mail"][0]["msg_id"] == "answer"
+    assert decoded["tasks"]["child"]["status"] == "running"
     assert acknowledged_task_message_ids(mailbox_root, "parent", attempt_key=1) == set()
     assert ctx._loop_mailbox_seen_ids == set()
     messages = []

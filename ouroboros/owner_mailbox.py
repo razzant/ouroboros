@@ -17,6 +17,23 @@ _MAILBOX_DIR = "memory/owner_mailbox"
 # are routed structurally (never shown as user prose).
 KIND_OWNER_TEXT = "owner_text"
 KIND_TASK_MESSAGE = "task_message"
+TASK_ATTENTION_KINDS = ("blocker", "question", "interface_contract", "review_requested", "delegation_constraint")
+
+
+def wait_message_requires_attention(entry: Dict[str, Any], senders: Any = ()) -> bool:
+    """Wake priority is not directive authority. Ordinary task mail stays queued.
+
+    Only the escalation writer supplies ``attention_kind``; selected senders are
+    the receiver's explicit subscription. Review feedback keeps its existing
+    typed wake, without making every informational system message urgent.
+    """
+    if str(entry.get("kind") or "owner_text") != KIND_TASK_MESSAGE:
+        return True
+    return bool(
+        str(entry.get("source_task_id") or "") in (senders or ())
+        or entry.get("attention_kind") in TASK_ATTENTION_KINDS
+        or (entry.get("provenance") == "system" and isinstance(entry.get("review_feedback"), dict))
+    )
 # Provenance of a task-tree message written by a task that is NOT in the
 # recipient's tree: a pooled, Swarm, project or headless root speaking for
 # itself (steer_task / forward_to_worker with a task issuer). It is context the
@@ -302,6 +319,7 @@ def write_task_message(
     review_feedback: Optional[Dict[str, Any]] = None,
     relation: str = "",
     sender_origin: Optional[Dict[str, Any]] = None,
+    attention_kind: str = "",
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance.
 
@@ -313,6 +331,8 @@ def write_task_message(
 
     if provenance not in TASK_MESSAGE_PROVENANCES:
         return False
+    if attention_kind and attention_kind not in TASK_ATTENTION_KINDS:
+        return False
     path = _mailbox_path(drive_root, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -323,6 +343,8 @@ def write_task_message(
         "provenance": provenance,
         "source_task_id": str(source_task_id or ""),
     }
+    if attention_kind:
+        entry["attention_kind"] = attention_kind
     if relayed_from_task_id:
         entry["relayed_from_task_id"] = str(relayed_from_task_id)
     if str(relation or ""):
@@ -734,6 +756,8 @@ def drain_owner_entries(
                     drained["_owner_attempt_key"] = attempt_key
                 if kind == KIND_TASK_MESSAGE:
                     drained["provenance"] = str(entry.get("provenance") or "ancestor_task")
+                    if entry.get("attention_kind") in TASK_ATTENTION_KINDS:
+                        drained["attention_kind"] = entry["attention_kind"]
                     if drained["provenance"] == "system" and isinstance(entry.get("review_feedback"), dict):
                         drained["review_feedback"] = dict(entry["review_feedback"])
                     drained["source_task_id"] = str(entry.get("source_task_id") or "")
@@ -770,9 +794,10 @@ class OwnerMailboxPeek:
                 files.append(None)
         return (str(root.resolve()), task_id, None if attempt is None else str(attempt), frozenset(seen), tuple(files))
 
-    def pending(self, root: pathlib.Path, task_id: str, seen: set, attempt: Any) -> bool:
+    def pending(self, root: pathlib.Path, task_id: str, seen: set, attempt: Any,
+                *, actionable_only: bool = False, senders: Any = ()) -> bool:
         try:
-            before = self._fingerprint(root, task_id, attempt, seen)
+            before = (self._fingerprint(root, task_id, attempt, seen), actionable_only, tuple(senders or ()))
         except OSError:
             before = None
         if before is not None and before == self._empty_key:
@@ -781,9 +806,11 @@ class OwnerMailboxPeek:
         status: Dict[str, bool] = {}
         # Drain changes only this private set; normal loop delivery owns the real one.
         entries = drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status)
+        if actionable_only:
+            entries = [entry for entry in entries if wait_message_requires_attention(entry, senders)]
         if not entries and before is not None and status.get("complete"):
             try:
-                if before == self._fingerprint(root, task_id, attempt, seen):
+                if before == (self._fingerprint(root, task_id, attempt, seen), actionable_only, tuple(senders or ())):
                     self._empty_key = before
             except OSError:
                 pass  # uncertainty never becomes a remembered empty mailbox

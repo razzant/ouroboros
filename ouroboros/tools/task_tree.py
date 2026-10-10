@@ -44,6 +44,7 @@ def _tree_note(
         return _record_child_result_disposition(ctx, payload, text)
 
     from ouroboros.task_tree_ledger import tree_ledger_append
+    from ouroboros.tool_access import canonical_data_root
 
     md = getattr(ctx, "task_metadata", {})
     role = str(md.get("role") or md.get("subagent_role") or "") if isinstance(md, dict) else ""
@@ -55,6 +56,7 @@ def _tree_note(
         role=role,
         needs_parent_attention=bool(needs_parent_attention),
         payload=payload if isinstance(payload, dict) else None,
+        data_root=canonical_data_root(ctx),
     )
 
 
@@ -87,8 +89,10 @@ def _tree_read(
 
 def get_tools() -> List[ToolEntry]:
     from ouroboros.task_tree_ledger import (
-        CHILD_RESULT_DISPOSITIONS, DELEGATION_CONSTRAINT_DIRECTIVES, LEDGER_KINDS,
         _MAX_TEXT_CHARS,
+        CHILD_RESULT_DISPOSITIONS,
+        DELEGATION_CONSTRAINT_DIRECTIVES,
+        LEDGER_KINDS,
     )
 
     # The schema is where the model learns WHEN to choose each value, so the
@@ -117,9 +121,9 @@ def get_tools() -> List[ToolEntry]:
                 "they run. kind: contract|decision|fact|note (coordination) or "
                 "milestone|partial_finding|blocker|question|interface_contract|review_requested|"
                 "delegation_constraint (child->parent beacon). blocker/question/interface_contract/"
-                "review_requested/delegation_constraint (or "
-                "needs_parent_attention=true) surface an early return "
-                "in the parent's wait. Domain-agnostic: 'contract' = code APIs OR "
+                "review_requested/delegation_constraint surface an early return "
+                "in the parent's wait. Partial findings and milestones never wake it, even with "
+                "needs_parent_attention=true. Domain-agnostic: 'contract' = code APIs OR "
                 "presentation section-ownership OR a research claim schema — the seam for "
                 "THIS task. Keep entries short; bulk detail belongs in artifacts."
             ),
@@ -129,7 +133,7 @@ def get_tools() -> List[ToolEntry]:
                 # constant keeps the schema from becoming a false promise on drift.
                 "text": {"type": "string", "maxLength": _MAX_TEXT_CHARS,
                          "description": f"Short coordination text (<={_MAX_TEXT_CHARS} chars)."},
-                "needs_parent_attention": {"type": "boolean", "default": False, "description": "Force a parent early-wait return (implied by blocker/question/interface_contract/review_requested)."},
+                "needs_parent_attention": {"type": "boolean", "default": False, "description": "Legacy intent annotation; only actionable kinds wake. Informational kinds cannot force a wake."},
                 "payload": {
                     "type": "object",
                     "description": (

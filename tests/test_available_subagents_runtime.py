@@ -174,8 +174,8 @@ def test_snapshot_is_immutable_across_queue_persistence(monkeypatch, tmp_path):
 
 
 def test_api_actor_dispatch_is_exact_recursive_route_without_slot_substitution(monkeypatch):
-    from ouroboros.subagents import resolve_subagent_dispatch
     import ouroboros.provider_models as provider_models
+    from ouroboros.subagents import resolve_subagent_dispatch
 
     monkeypatch.setattr(provider_models, "model_has_credentials", lambda _model: True)
     snapshot = _snapshot(_settings(_api_row(model="openai/exact-model", effort="xhigh")), "api-builder")
@@ -194,8 +194,8 @@ def test_api_actor_dispatch_is_exact_recursive_route_without_slot_substitution(m
 
 
 def test_session_dispatch_pins_exact_route_and_inherits_parent_cognition(monkeypatch):
-    import ouroboros.subagents as subagents
     import ouroboros.claudexor_daemon as daemon
+    import ouroboros.subagents as subagents
 
     class Gateway:
         def close(self):
@@ -304,10 +304,10 @@ def test_large_bootstrap_delivers_full_work_without_question_channel(monkeypatch
 def test_pending_over_budget_recovery_replays_compact_body_and_full_fingerprint(
     monkeypatch, tmp_path,
 ):
-    from ouroboros import delegate_custody as custody
     import ouroboros.delegate_recovery as recovery
     import ouroboros.subagent_work_order as work_order
     import ouroboros.tools.delegate as delegate
+    from ouroboros import delegate_custody as custody
     from ouroboros.tools.registry import ToolContext
 
     custody._CUSTODY.clear()
@@ -388,11 +388,11 @@ def test_pending_over_budget_recovery_replays_compact_body_and_full_fingerprint(
 
 
 def test_real_task_context_bootstraps_before_context_and_any_llm(monkeypatch, tmp_path):
-    from ouroboros import agent as agent_module
     import ouroboros.claudexor_daemon as daemon
     import ouroboros.delegate_supervision as supervision
     import ouroboros.subagent_runtime as runtime
     import ouroboros.subagents as subagents
+    from ouroboros import agent as agent_module
     from ouroboros.agent import Env, OuroborosAgent
 
     repo, drive = tmp_path / "repo", tmp_path / "drive"
@@ -718,8 +718,8 @@ def test_actor_first_delegate_start_rejects_alternate_snapshot(monkeypatch, tmp_
 
 
 def test_actor_first_retry_cannot_turn_coordination_prompt_into_work_order_prefix(monkeypatch, tmp_path):
-    import ouroboros.subagent_runtime as runtime
     import ouroboros.claudexor_daemon as daemon
+    import ouroboros.subagent_runtime as runtime
 
     class Gateway:
         def harnesses(self):
@@ -757,8 +757,8 @@ def test_actor_first_retry_cannot_turn_coordination_prompt_into_work_order_prefi
 
 
 def test_actor_first_legacy_retry_replays_recorded_partial_body(monkeypatch, tmp_path):
-    from ouroboros import delegate_custody as custody
     import ouroboros.subagent_runtime as runtime
+    from ouroboros import delegate_custody as custody
 
     starts = []
     monkeypatch.setattr(runtime, "exact_start", lambda _ctx, prompt, spec: (
@@ -863,7 +863,7 @@ def test_quiet_windows_renew_and_terminal_plus_mailbox_coalesce(tmp_path):
             return json.dumps({"status": "no_progress", "run_id": run_id, "last_seq": len(calls)})
         write_task_message(
             tmp_path, "new direction", "child1", source_task_id="parent1",
-            provenance="ancestor_task", msg_id="m1",
+            provenance="ancestor_task", msg_id="m1", attention_kind="interface_contract",
         )
         return json.dumps({"status": "completed", "run_id": run_id, "last_seq": 3})
 
@@ -890,7 +890,8 @@ def test_quiet_windows_renew_and_terminal_plus_mailbox_coalesce(tmp_path):
 def test_pending_wake_replays_until_post_injection_ack(tmp_path):
     from ouroboros.delegate_supervision import acknowledge_pending_wake, supervised_wait
     from ouroboros.owner_mailbox import (
-        acknowledged_task_message_ids, write_task_message,
+        acknowledged_task_message_ids,
+        write_task_message,
     )
     ctx = SimpleNamespace(
         task_id="child1", drive_root=tmp_path, budget_drive_root=str(tmp_path),
@@ -898,7 +899,7 @@ def test_pending_wake_replays_until_post_injection_ack(tmp_path):
     )
     assert write_task_message(
         tmp_path, "full durable direction", "child1", source_task_id="parent1",
-        provenance="ancestor_task", msg_id="m1",
+        provenance="ancestor_task", msg_id="m1", attention_kind="interface_contract",
     )
     first = json.loads(supervised_wait(
         ctx, "run-1",
@@ -920,10 +921,10 @@ def test_pending_wake_replays_until_post_injection_ack(tmp_path):
 
 
 def test_one_shot_checkpoint_is_reasoned_and_consumed(monkeypatch, tmp_path):
+    import ouroboros.delegate_supervision as supervision
     from ouroboros import delegate_custody as custody
     from ouroboros.contracts.task_contract import build_task_contract
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
-    import ouroboros.delegate_supervision as supervision
 
     now = [100.0]
     monkeypatch.setattr(supervision.time, "time", lambda: now[0])
@@ -1038,10 +1039,10 @@ def test_ancestor_can_relay_to_a_true_grandchild_without_owner_spoof(tmp_path):
 
 
 def test_replacement_is_refused_before_gateway_or_post(monkeypatch, tmp_path):
-    from ouroboros import delegate_custody as custody
-    import ouroboros.tools.delegate as delegate
-    from ouroboros.tools.registry import ToolContext
     import ouroboros.claudexor_daemon as daemon
+    import ouroboros.tools.delegate as delegate
+    from ouroboros import delegate_custody as custody
+    from ouroboros.tools.registry import ToolContext
 
     custody._CUSTODY.clear()
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "codex=gpt-5.6-sol:high")
@@ -1068,10 +1069,10 @@ def test_replacement_is_refused_before_gateway_or_post(monkeypatch, tmp_path):
 def test_replacement_refuses_unreadable_custody_before_fail_soft_scan(
     monkeypatch, tmp_path,
 ):
-    from ouroboros import delegate_custody as custody
-    from ouroboros import delegate_recovery
     import ouroboros.claudexor_daemon as daemon
     import ouroboros.tools.delegate as delegate
+    from ouroboros import delegate_custody as custody
+    from ouroboros import delegate_recovery
     from ouroboros.tools.registry import ToolContext
 
     monkeypatch.setattr(custody, "custody_log_unreadable", lambda _root: True)
@@ -1116,8 +1117,8 @@ def test_terminal_boundary_reaudits_durable_pending_starts(monkeypatch, tmp_path
 
 
 def test_worker_crash_mismatch_vetoes_without_post_and_cause_matrix(monkeypatch, tmp_path):
-    from ouroboros import delegate_custody as custody
     import ouroboros.delegate_recovery as recovery
+    from ouroboros import delegate_custody as custody
     from ouroboros.subagent_work_order import work_order_fingerprint
     from ouroboros.tools.registry import ToolContext
 
@@ -1163,10 +1164,10 @@ def test_worker_crash_mismatch_vetoes_without_post_and_cause_matrix(monkeypatch,
 
 
 def test_same_run_crash_adoption_uses_exact_binding_and_never_posts(monkeypatch, tmp_path):
-    from ouroboros import delegate_custody as custody
     import ouroboros.claudexor_daemon as daemon
     import ouroboros.delegate_recovery as recovery
     import ouroboros.tools.delegate as delegate
+    from ouroboros import delegate_custody as custody
     from ouroboros.contracts.task_constraint import normalize_task_constraint
     from ouroboros.subagent_work_order import work_order_fingerprint
     from ouroboros.tools.registry import ToolContext
@@ -1226,9 +1227,9 @@ def test_same_run_crash_adoption_uses_exact_binding_and_never_posts(monkeypatch,
 
 
 def test_settled_terminal_wake_survives_worker_crash_without_a_new_post(monkeypatch, tmp_path):
-    from ouroboros import delegate_custody as custody
     import ouroboros.delegate_recovery as recovery
     import ouroboros.tools.delegate as delegate
+    from ouroboros import delegate_custody as custody
     from ouroboros.subagent_work_order import work_order_fingerprint
     from ouroboros.tools.registry import ToolContext
     from ouroboros.utils import atomic_write_json
@@ -1277,11 +1278,11 @@ def test_settled_terminal_wake_survives_worker_crash_without_a_new_post(monkeypa
 
 
 def test_planned_restart_selectively_restores_sleeping_leaf_and_wait_state(monkeypatch, tmp_path):
-    from ouroboros import delegate_custody as custody
     import ouroboros.claudexor_daemon as daemon
-    import ouroboros.delegate_recovery as recovery
     import ouroboros.delegate_interactions as interactions
+    import ouroboros.delegate_recovery as recovery
     import ouroboros.tools.delegate as delegate
+    from ouroboros import delegate_custody as custody
     from ouroboros.contracts.task_constraint import normalize_task_constraint
     from ouroboros.subagent_work_order import work_order_fingerprint
     from ouroboros.tools.registry import ToolContext
@@ -1376,8 +1377,8 @@ def test_planned_restart_selectively_restores_sleeping_leaf_and_wait_state(monke
 
 
 def test_only_approved_restart_causes_reserve_and_abrupt_gap_vetoes(monkeypatch, tmp_path):
-    from ouroboros import delegate_custody as custody
     import ouroboros.delegate_recovery as recovery
+    from ouroboros import delegate_custody as custody
     from ouroboros.subagent_work_order import work_order_fingerprint
 
     custody._CUSTODY.clear()

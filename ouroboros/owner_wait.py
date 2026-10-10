@@ -51,7 +51,12 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     Precedence: control, this card's answer, owner words, hurry, mail.
     """
     from ouroboros.owner_mailbox import (
-        KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_TASK_MESSAGE,
+        KIND_FINALIZE_NOW,
+        KIND_HURRY,
+        KIND_OWNER_PAUSE,
+        KIND_OWNER_TEXT,
+        KIND_QUIZ_ANSWER,
+        KIND_TASK_MESSAGE,
     )
 
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
@@ -105,7 +110,8 @@ def set_owner_wait(root: Any, task_id: str, wait: dict,
     """Update only the existing continuation projection, preserving siblings."""
     from ouroboros.task_results import (
         require_writable_task_result_schema,
-        stamp_task_result_schema, task_result_path,
+        stamp_task_result_schema,
+        task_result_path,
     )
     from ouroboros.utils import update_json_locked
 
@@ -307,12 +313,17 @@ def load_owner_wait(ctx: Any, handoff: dict | None = None) -> dict:
 
 def restore_owner_wait_allowed(root: Any, task: dict, *, strict: bool = False) -> bool:
     """Current wait and acknowledged restart authorize a locator; strict preserves read failures."""
-    from ouroboros.cancel_intents import has_active_intent
-    from ouroboros.deadline_utils import parse_deadline_ts, utc_now
-    from ouroboros.delegate_recovery import _ack_direct_exec_successor, _read_restart_transaction, _restart_transaction_path
-    from ouroboros.config import get_task_abs_ceiling_sec
-    from ouroboros.model_wait import execution_elapsed_seconds
     import time
+
+    from ouroboros.cancel_intents import has_active_intent
+    from ouroboros.config import get_task_abs_ceiling_sec
+    from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+    from ouroboros.delegate_recovery import (
+        _ack_direct_exec_successor,
+        _read_restart_transaction,
+        _restart_transaction_path,
+    )
+    from ouroboros.model_wait import execution_elapsed_seconds
 
     handoff = task.get("_owner_wait_resume")
     if not isinstance(handoff, dict):
@@ -797,7 +808,7 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
             outcome = callback(ctx, checkpoint)
         finally:
             slept = model_sleep.end(ctx)  # through capacity reacquisition: the task runs again now
-        messages.append(model_sleep.wake_notice(sleep, str(outcome or ""), slept))
+        messages.append(model_sleep.wake_notice(sleep, str(outcome or ""), slept, ctx))
         ctx._model_sleep = None
     else:
         outcome = callback(ctx, checkpoint)
@@ -813,7 +824,6 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     same-ID continuation). Python handles (browser, executors, services) are
     NOT restored: they died with the previous process and stay invalidated."""
     from ouroboros.loop_delivery import DeliveryCandidate
-
     from ouroboros.model_wait import budget_paused_seconds
 
     ctx = tools._ctx

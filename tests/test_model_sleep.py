@@ -52,13 +52,16 @@ def _mail(tmp_path, task_id, text, *, sender="", kind="task_message", msg_id=Non
         path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
-def test_the_default_in_slot_wait_is_unchanged_and_selectors_need_a_sleep_mode(tmp_path):
+def test_warm_is_default_and_in_slot_is_an_explicit_choice(tmp_path):
     from ouroboros.tools.control_task_results import _await_messages
 
     ctx = _ctx(tmp_path)
-    out = json.loads(_await_messages(ctx, 1))
+    assert "no live children or selected source" in _await_messages(ctx)
+    _result(tmp_path, "live-child", parent_task_id="sleeper", root_task_id="sleeper", delegation_role="subagent")
+    assert json.loads(_await_messages(ctx))["mode"] == "warm"
+    out = json.loads(_await_messages(ctx, 1, mode="in_slot"))
     assert out["reason"] == "timeout" and out["slot"] == "held"
-    refused = _await_messages(ctx, 1, senders=["x"])
+    refused = _await_messages(ctx, 1, mode="in_slot", senders=["x"])
     assert "give mode warm or cold" in refused
 
 

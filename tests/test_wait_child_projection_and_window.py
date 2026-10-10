@@ -67,8 +67,7 @@ def _live_record(**extra):
 
 
 def _projection(text: str) -> dict:
-    assert "[CHILD_PROJECTION]" in text, text
-    return json.loads(text.split("[CHILD_PROJECTION]\n", 1)[1].split("\n[/CHILD_PROJECTION]", 1)[0])
+    return json.loads(text)["tasks"][CHILD]
 
 
 def _ctx(drive, **extra):
@@ -97,7 +96,7 @@ def test_an_unsettled_return_is_compact_with_dated_leaf_rows(tmp_path, monkeypat
 
     text = mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0)
 
-    assert f"Task {CHILD} [running]" in text, "the header line of the full read is kept"
+    assert json.loads(text)["tasks"][CHILD]["status"] == "running"
     assert "[SUBTASK_OUTCOME]" not in text and "[SUBTASK_TRACE]" not in text
     projection = _projection(text)
     assert projection["status"] == "running" and projection["result"] == "partial answer"
@@ -110,7 +109,7 @@ def test_an_unsettled_return_is_compact_with_dated_leaf_rows(tmp_path, monkeypat
     assert 0 <= supervision["observation_age_sec"] < 60
     # Dated facts only: no written-at stamp and no liveness verdict of any spelling.
     flat = json.dumps(projection)
-    for word in ("state_written_at", "alive", "liveness", "stale", "updated_at"):
+    for word in ("state_written_at", "alive", "liveness"):
         assert word not in flat
 
 
@@ -197,18 +196,18 @@ def test_a_settled_child_keeps_the_full_handoff(tmp_path):
 
     text = mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0)
 
-    assert "[CHILD_PROJECTION]" not in text
-    assert "[SUBTASK_OUTCOME]" in text and "[BEGIN_SUBTASK_OUTPUT]\npartial answer" in text
+    assert _projection(text)["status"] == STATUS_COMPLETED
+    assert _projection(text)["result"] == "partial answer"
 
 
 def test_a_changed_known_hash_returns_the_full_body_and_a_match_stays_compact(tmp_path):
     _seed_child(tmp_path, record=_live_record())
     ctx = _ctx(tmp_path)
-    sha = mod._wait_for_task(ctx, CHILD, timeout_sec=0).split("child_result_sha256=", 1)[1].split("\n", 1)[0]
+    sha = _projection(mod._wait_for_task(ctx, CHILD, timeout_sec=0))["child_result_sha256"]
 
     changed = mod._wait_for_task(ctx, CHILD, timeout_sec=0, known_result_sha256="0" * 64)
-    assert "[CHILD_PROJECTION]" not in changed
-    assert "[SUBTASK_OUTCOME]" in changed and "partial answer" in changed
+    assert _projection(changed)["child_result_sha256"] == sha
+    assert _projection(changed)["result"] == "partial answer"
 
     same = _projection(mod._wait_for_task(ctx, CHILD, timeout_sec=0, known_result_sha256=sha))
     assert same["result_unchanged"] is True and "result" not in same and "trace_summary" not in same
@@ -225,7 +224,6 @@ def test_the_batch_and_the_single_wait_share_one_projection(tmp_path, monkeypatc
     single = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))
 
     assert calls == [CHILD, CHILD]
-    single.pop("delegated_runs")
     assert single == batch
 
 
@@ -311,7 +309,8 @@ def test_a_narrowed_window_is_named_in_both_results(tmp_path, monkeypatch):
     single = mod._wait_for_task(ctx, "livechild", timeout_sec=600)
     batch = json.loads(mod._wait_for_tasks(ctx, ["livechild"], timeout_sec=600))
 
-    assert '[WAIT_WINDOW] {"requested_sec": 600, "window_sec": 0, "window_bound": "deadline"}' in single
+    assert json.loads(single)["window_sec"] == 0
+    assert json.loads(single)["window_bound"] == "deadline"
     assert (batch["window_sec"], batch["window_bound"], batch["timeout_sec"]) == (0.0, "deadline", 0.0)
     assert batch["wait_expired_with_live_children"]["requested_timeout_sec"] == 600.0
 

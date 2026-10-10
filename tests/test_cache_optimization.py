@@ -448,7 +448,7 @@ def test_wait_for_task_appends_cache_horizon_note(tmp_path, monkeypatch):
 
     monkeypatch.setattr(control_mod, "wait_for_effective_tasks", _instant_wait)
     ctx = SimpleNamespace(
-        drive_root=tmp_path,
+        drive_root=tmp_path, task_id="cache-parent",
         _accumulated_usage={"_last_prompt_cache_ttl": "5m"},
     )
     out = control_mod._wait_for_task(ctx, "child42", timeout_sec=0)

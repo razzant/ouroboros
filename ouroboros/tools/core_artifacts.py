@@ -21,7 +21,6 @@ from ouroboros.tools.arg_feedback import argument_refusal
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
-
 _MAX_PHOTO_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
@@ -159,6 +158,7 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     try:
         from types import SimpleNamespace
         from urllib.parse import quote
+
         from ouroboros.artifacts import copy_file_to_task_artifacts, task_id_for_artifacts
         from ouroboros.gateway.files import download_url_for_local_file
 
@@ -519,7 +519,8 @@ def _quiz_host_facts(ctx: ToolContext, canonical_root: pathlib.Path, task_id: st
     typed records only (the task record's ``run_origin`` provenance and the chat
     log tail), never from the question text; an unrecorded fact says unknown."""
     from ouroboros.consciousness_authority import CONSCIOUSNESS_INITIATOR
-    from ouroboros.deadline_utils import parse_deadline_ts as moment, utc_now
+    from ouroboros.deadline_utils import parse_deadline_ts as moment
+    from ouroboros.deadline_utils import utc_now
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.followup import FOLLOWUP_SOURCE
@@ -697,6 +698,7 @@ def _escalate(
             task_id=parent_task_id,
             source_task_id=task_id,
             provenance="descendant_task",
+            attention_kind="question",
         )
         if not written:
             return f"⚠️ ESCALATE_UNWRITTEN: the escalation to parent {parent_task_id} was not persisted."

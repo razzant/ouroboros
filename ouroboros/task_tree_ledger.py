@@ -42,10 +42,8 @@ LEDGER_KINDS = COORDINATION_KINDS + BEACON_KINDS
 # Beacons that ask the parent to look NOW (surface an early return from a sliced wait): a child is
 # stuck (blocker), needs an answer (question), or needs the shared seam/contract changed
 # (interface_contract) — each requires the parent to reconcile before the child can safely proceed.
-ATTENTION_KINDS = (
-    "blocker", "question", "interface_contract", REVIEW_REQUESTED_KIND,
-    DELEGATION_CONSTRAINT_KIND,
-)
+from ouroboros.owner_mailbox import TASK_ATTENTION_KINDS as ATTENTION_KINDS  # noqa: E402
+
 DELEGATION_CONSTRAINT_DIRECTIVES = ("halt_fanout", "cap_children", "require_lane", "block_surface")
 CHILD_RESULT_DISPOSITION_TYPE = "child_result_disposition"
 CHILD_RESULT_DISPOSITIONS = frozenset({"integrated", "irrelevant", "deferred"})
@@ -278,7 +276,9 @@ def tree_ledger_append(
     except OSError:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
-    attention = bool(needs_parent_attention) or kind_norm in ATTENTION_KINDS
+    # Informational milestones stay informational even when an older caller
+    # supplied the former blanket override. The kind is the typed contract.
+    attention = kind_norm in ATTENTION_KINDS
     row = {
         "ts": utc_now_iso(),
         "kind": kind_norm,
@@ -634,7 +634,7 @@ def tree_ledger_attention_after(
     allowed = {str(item) for item in task_ids} if task_ids is not None else None
     seen = {str(item) for item in seen_ids} if seen_ids is not None else set()
     for r in tree_ledger_rows(root_id, data_root=data_root):
-        if not r.get("needs_parent_attention"):
+        if r.get("kind") not in ATTENTION_KINDS:
             continue
         if allowed is not None and str(r.get("task_id") or "") not in allowed:
             continue

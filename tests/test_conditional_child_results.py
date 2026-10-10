@@ -11,6 +11,7 @@ from ouroboros.task_results import write_task_result
 from ouroboros.task_status import load_effective_task_result
 from ouroboros.tools import control_task_results as results
 from ouroboros.tools.join_ledger import _child_result_sha256
+from tests.wait_handoff_support import full_wait_payload
 
 BODY = "Complete child analysis.\n" * 1200
 TRACE = "Exact trace summary.\n" * 400
@@ -57,15 +58,16 @@ def test_condition_is_explicit_and_full_read_survives_a_new_context(tmp_path, su
     before = (tmp_path / "task_results" / "child1.json").read_bytes()
     first = read(ctx)
     unchanged = read(ctx, True)
-    assert BODY in (json.loads(first)["tasks"]["child1"]["result"] if surface == "batch" else first)
+    assert BODY in (first if surface == "get" else full_wait_payload(ctx, first)["tasks"]["child1"]["result"])
     assert known in first and known in unchanged
     assert "result_unchanged" in unchanged
     assert "Complete child analysis." not in unchanged
     assert "Exact trace summary." not in unchanged
-    assert len(unchanged) < len(first) / 5
+    full_chars = len(first) if surface == "get" else len(json.dumps(full_wait_payload(ctx, first)))
+    assert len(unchanged) < full_chars / 5
     # A result hash is neither "seen" nor proof of a current in-context copy.
     def result_view(text):
-        return json.loads(text)["tasks"] if surface == "batch" else text
+        return text if surface == "get" else full_wait_payload(ctx, text)["tasks"]
     assert result_view(read(ctx)) == result_view(first)
     assert result_view(read(_ctx(tmp_path))) == result_view(first)
     assert (tmp_path / "task_results" / "child1.json").read_bytes() == before
@@ -90,7 +92,7 @@ def test_semantic_change_returns_full_single_and_batch(tmp_path, monkeypatch, fi
         "tasks": {"child1": copy.deepcopy(data)}, "all_terminal": True, "elapsed_sec": 0,
     })
     single = results._get_task_result(_ctx(tmp_path), "child1", known_result_sha256=original)
-    batch = json.loads(results._wait_for_tasks(
+    batch = full_wait_payload(_ctx(tmp_path), results._wait_for_tasks(
         _ctx(tmp_path), ["child1"], timeout_sec=0,
         known_result_sha256_by_task={"child1": original},
     ))["tasks"]["child1"]
@@ -137,7 +139,7 @@ def test_accounting_and_current_handoff_facts_do_not_duplicate_body(tmp_path, mo
     assert "Source unavailable now" in shown and "run-a" in shown
     assert '"entry_count": 1' in shown
     assert BODY not in shown
-    batch = json.loads(results._wait_for_tasks(
+    batch = full_wait_payload(_ctx(tmp_path), results._wait_for_tasks(
         _ctx(tmp_path), ["child1"], timeout_sec=0,
         known_result_sha256_by_task={"child1": original},
     ))["tasks"]["child1"]

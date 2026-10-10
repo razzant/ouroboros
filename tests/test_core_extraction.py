@@ -132,7 +132,7 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # as any other task in the caller's tree (parent, sibling, any task sharing the
     # root) and says Presence observation gaps are disclosed inside the tree too.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "25ab2df2f9cc9c65e4971b7d4e2a5d1013041933aa070849639a01c9a4398e83"
+        "da66e9c980a13e396016d3d30dbba7854e652612760661355d71f16f3988198d"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

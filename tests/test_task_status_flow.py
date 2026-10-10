@@ -698,7 +698,7 @@ def test_child_finalization_publishes_receipts_to_canonical_root(tmp_path):
     import shutil as _shutil
 
     _shutil.rmtree(child_drive)
-    rows = _receipt_rows_of(_get_task_result(SimpleNamespace(drive_root=tmp_path), tid))
+    rows = json.loads(_get_task_result(SimpleNamespace(drive_root=tmp_path), tid, include_authority=True))["outcome"]["verification_receipts"]
     assert rows is not None and len(rows) == 3
     assert rows[0]["criterion_id"] == "claim_red"
     assert rows[0]["outstanding"] == "unreconciled_failed"
@@ -983,7 +983,7 @@ def test_get_task_result_merges_child_and_canonical_receipts(tmp_path):
         "zero_run": True, "zero_run_decision": "unknown",
     })
 
-    rows = _receipt_rows_of(_get_task_result(SimpleNamespace(drive_root=tmp_path), tid))
+    rows = json.loads(_get_task_result(SimpleNamespace(drive_root=tmp_path), tid, include_authority=True))["outcome"]["verification_receipts"]
     assert rows is not None and len(rows) == 2
     assert rows[0]["criterion_id"] == "claim_red"
     assert rows[0]["outstanding"] == "unreconciled_failed"
@@ -1272,8 +1272,8 @@ def test_wait_task_does_not_claim_completion_on_cancel_requested(tmp_path):
     write_task_result(tmp_path, "cancelling2", STATUS_CANCEL_REQUESTED, result="cancel pending")
 
     output = _wait_for_task(SimpleNamespace(drive_root=tmp_path), "cancelling2", timeout_sec=0)
-    assert output.startswith("Task wait timed out")
-    assert not output.startswith("Task wait completed")
+    assert json.loads(output)["timed_out"] is True
+    assert json.loads(output)["all_terminal"] is False
 
 
 def test_wait_tools_surface_preentry_beacons_once_per_actor_context(tmp_path, monkeypatch):
@@ -1298,17 +1298,16 @@ def test_wait_tools_surface_preentry_beacons_once_per_actor_context(tmp_path, mo
         task_metadata={"root_task_id": "waitparent2"},
     )
     single = _wait_for_task(ctx, "waitingchild1", timeout_sec=0)
-    assert single.startswith("Task wait interrupted by a child attention beacon")
+    assert json.loads(single)["early_return"]["reason"] == "child_attention_beacon"
     assert "preentry-waitingchild1" in single
 
     batch = json.loads(_wait_for_tasks(ctx, ["waitingchild2"], timeout_sec=0))
-    assert batch["early_return"]["reason"] == "child_attention_beacon"
-    assert [row["text"] for row in batch["early_return"]["beacons"]] == [
-        "preentry-waitingchild2"
-    ]
+    assert {row["text"] for row in json.loads(single)["early_return"]["beacons"]} == {
+        "preentry-waitingchild1", "preentry-waitingchild2"}
+    assert "early_return" not in batch
 
     # A later wait in this same actor context does not replay either row.
-    assert _wait_for_task(ctx, "waitingchild1", timeout_sec=0).startswith("Task wait timed out")
+    assert json.loads(_wait_for_task(ctx, "waitingchild1", timeout_sec=0))["timed_out"]
     assert "early_return" not in json.loads(
         _wait_for_tasks(ctx, ["waitingchild2"], timeout_sec=0)
     )
@@ -1334,11 +1333,9 @@ def test_wait_surfaces_preentry_beacon_before_terminal_fast_path(tmp_path, monke
         task_metadata={"root_task_id": "terminal-beacon-parent"},
     )
     first = _wait_for_task(ctx, "terminal-beacon-child", timeout_sec=0)
-    assert first.startswith("Task wait interrupted by a child attention beacon")
+    assert json.loads(first)["early_return"]["reason"] == "child_attention_beacon"
     assert "answer me before completion" in first
-    assert _wait_for_task(ctx, "terminal-beacon-child", timeout_sec=0).startswith(
-        "Task wait completed"
-    )
+    assert json.loads(_wait_for_task(ctx, "terminal-beacon-child", timeout_sec=0))["all_terminal"]
 
 
 # --- v6.91 wait_tasks typed unknown ids + children roster ---------------------
@@ -1913,8 +1910,8 @@ def test_wait_for_task_times_out_when_child_is_not_terminal(tmp_path):
     ctx = SimpleNamespace(drive_root=tmp_path)
     output = _wait_for_task(ctx, "stillrunning", timeout_sec=0)
 
-    assert "Task wait timed out" in output
-    assert "stillrunning [running]" in output
+    assert json.loads(output)["timed_out"]
+    assert json.loads(output)["tasks"]["stillrunning"]["status"] == "running"
 
 
 def test_wait_tools_reject_invalid_ids_and_cap_batch(tmp_path):
@@ -1947,7 +1944,7 @@ def test_wait_for_task_reports_rejected_duplicate(tmp_path):
     output = _wait_for_task(ctx, "dup123")
 
     assert "rejected_duplicate" in output
-    assert "duplicate_of=orig999" in output
+    assert json.loads(output)["tasks"]["dup123"]["duplicate_of"] == "orig999"
 
 
 def test_handle_schedule_task_admits_identical_siblings_without_semantic_veto(tmp_path, monkeypatch):
@@ -3386,5 +3383,5 @@ def test_wait_schemas_name_the_real_clamp(tmp_path):
     by_name = {t["function"]["name"]: t["function"] for t in registry.schemas()}
     one = by_name["wait_task"]["parameters"]["properties"]["timeout_sec"]["description"]
     many = by_name["wait_tasks"]["parameters"]["properties"]["timeout_sec"]["description"]
-    assert str(_WAIT_TASK_CLAMP_SEC) in one and "expected life" in one
-    assert str(_WAIT_TASKS_CLAMP_SEC) in many and "expected life" in many
+    assert str(_WAIT_TASK_CLAMP_SEC) in one and "explicit" in one
+    assert str(_WAIT_TASKS_CLAMP_SEC) in many and "explicit" in many

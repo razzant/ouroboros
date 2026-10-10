@@ -67,9 +67,9 @@ def test_pending_mail_returns_immediately_without_delivering_or_acknowledging(tm
     _install_clock(monkeypatch, clock)
     ctx = _ctx(tmp_path)
     assert write_task_message(tmp_path, "my next turn", "waiter", source_task_id="sib-1",
-                              provenance=PROVENANCE_PEER_TASK, relation="sibling", msg_id="turn-1")
+                              provenance=PROVENANCE_PEER_TASK, relation="sibling", msg_id="turn-1", attention_kind="question")
 
-    out = json.loads(_await_messages(ctx, 600))
+    out = json.loads(_await_messages(ctx, 600, mode="in_slot"))
 
     assert out == {
         "reason": "owner_mailbox_pending", "pending": True, "elapsed_sec": 0.0,
@@ -88,7 +88,7 @@ def test_empty_mailbox_times_out_after_the_ceiling_bounded_window(tmp_path, monk
     clock = _FakeClock()
     _install_clock(monkeypatch, clock)
 
-    out = json.loads(_await_messages(_ctx(tmp_path), 5000))
+    out = json.loads(_await_messages(_ctx(tmp_path), 5000, mode="in_slot"))
 
     assert out["reason"] == "timeout" and out["pending"] is False
     assert (out["requested_sec"], out["window_sec"], out["window_bound"]) == (5000, 1800, "ceiling")
@@ -105,7 +105,7 @@ def test_a_message_arriving_mid_wait_ends_it_early(tmp_path, monkeypatch):
     clock = _FakeClock(on_sleep=arrive)
     _install_clock(monkeypatch, clock)
 
-    out = json.loads(_await_messages(_ctx(tmp_path), 900))
+    out = json.loads(_await_messages(_ctx(tmp_path), 900, mode="in_slot"))
 
     assert out["reason"] == "owner_mailbox_pending" and out["pending"] is True
     assert out["elapsed_sec"] == 3 * _AWAIT_MESSAGES_POLL_SEC
@@ -122,7 +122,7 @@ def test_an_owner_stop_control_ends_the_wait_like_any_message(tmp_path, monkeypa
     clock = _FakeClock(on_sleep=stop)
     _install_clock(monkeypatch, clock)
 
-    out = json.loads(_await_messages(_ctx(tmp_path), 900))
+    out = json.loads(_await_messages(_ctx(tmp_path), 900, mode="in_slot"))
 
     assert out["reason"] == "owner_mailbox_pending" and out["pending"] is True
     assert out["elapsed_sec"] == 2 * _AWAIT_MESSAGES_POLL_SEC
@@ -136,7 +136,7 @@ def test_the_window_is_bounded_by_the_request_and_the_per_call_ceiling(tmp_path,
     clock = _FakeClock()
     _install_clock(monkeypatch, clock)
 
-    out = json.loads(_await_messages(_ctx(tmp_path), requested))
+    out = json.loads(_await_messages(_ctx(tmp_path), requested, mode="in_slot"))
 
     assert (out["requested_sec"], out["window_sec"], out["window_bound"]) == (requested, window, bound)
     assert out["elapsed_sec"] == float(window) and out["reason"] == "timeout"
@@ -157,7 +157,7 @@ def test_a_deadline_bounds_the_window_inside_the_executors_emit_window(tmp_path,
     ctx.task_metadata = {"deadline_at": (utc_now() + _dt.timedelta(seconds=400)).isoformat()}
     outer = _deadline_clamped_timeout(SimpleNamespace(_ctx=ctx), "await_messages", 1860)
 
-    out = json.loads(_await_messages(ctx, 1800))
+    out = json.loads(_await_messages(ctx, 1800, mode="in_slot"))
 
     assert out["window_bound"] == "deadline" and out["reason"] == "deadline" and out["pending"] is False
     assert outer - 2 <= out["window_sec"] <= outer - 1 < outer <= 340  # emit window ≈ 400 − 60
@@ -174,13 +174,13 @@ def test_a_spent_emit_window_peeks_once_and_returns_without_sleeping(tmp_path, m
     ctx = _ctx(tmp_path)
     ctx.task_metadata = {"deadline_at": (utc_now() + _dt.timedelta(seconds=30)).isoformat()}
 
-    out = json.loads(_await_messages(ctx, 600))
+    out = json.loads(_await_messages(ctx, 600, mode="in_slot"))
     assert (out["window_sec"], out["window_bound"], out["reason"]) == (0, "deadline", "deadline")
     assert out["elapsed_sec"] == 0.0 and clock.sleeps == []
 
     # The one peek still reports a message that is already there.
     write_owner_message(tmp_path, "answer", "waiter", msg_id="a1")
-    out = json.loads(_await_messages(ctx, 600))
+    out = json.loads(_await_messages(ctx, 600, mode="in_slot"))
     assert out["reason"] == "owner_mailbox_pending" and out["pending"] is True and clock.sleeps == []
 
 
@@ -190,14 +190,14 @@ def test_the_applied_cache_horizon_is_reported_from_the_recorded_fact(tmp_path, 
     ctx = _ctx(tmp_path)
     ctx._accumulated_usage = {"_last_prompt_cache_ttl": "5m"}
 
-    out = json.loads(_await_messages(ctx, 1800))
+    out = json.loads(_await_messages(ctx, 1800, mode="in_slot"))
 
     assert out["reason"] == "timeout"
     assert "5m" in out["cache_horizon"] and "300s" in out["cache_horizon"]
 
 
 def test_a_non_integer_window_is_an_argument_error(tmp_path):
-    out = _await_messages(_ctx(tmp_path), "soon")
+    out = _await_messages(_ctx(tmp_path), "soon", mode="in_slot")
     assert out.startswith("⚠️ TOOL_ARG_ERROR (await_messages)")
 
 
@@ -355,8 +355,8 @@ def test_registered_on_every_contract_surface_and_takes_no_lease_of_its_own():
     body = inspect.getsource(control_mod._await_messages).split('"""', 2)[2]  # past the docstring
     assert "lease" not in body and "emit" not in body and "event_queue" not in body
     description = entry.schema["description"]
-    assert "holds your worker slot" in description and "delivers nothing" in description
-    assert "never reaped" not in description and "in-flight tool lease" in description
+    assert "Default warm" in description and "in_slot holds capacity" in description
+    assert "never reaped" not in description and "informational mail" in description
 
 
 def test_unknown_or_replayed_completion_cannot_refresh_progress():

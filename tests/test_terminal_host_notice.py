@@ -259,7 +259,11 @@ def test_parent_readers_receive_full_notice_and_budget_the_complete_body(tmp_pat
     assert stored["result"] == answer and stored["terminal_host_notice"] == notice
     model_hash = hashlib.sha256(stored["result"].encode()).hexdigest()
     parent = _parent_ctx(tmp_path)
-    for output in (_get_task_result(parent, task["id"]), _wait_for_task(parent, task["id"], timeout_sec=0)):
+    from tests.wait_handoff_support import full_wait_payload
+    observed = full_wait_payload(parent, _wait_for_task(parent, task["id"], timeout_sec=0))
+    assert observed["tasks"][task["id"]]["result"] == answer
+    assert observed["tasks"][task["id"]]["terminal_host_notice"] == notice
+    for output in (_get_task_result(parent, task["id"]),):
         if answer:
             assert f"[BEGIN_SUBTASK_OUTPUT]\n{answer}\n[END_SUBTASK_OUTPUT]" in output
         else:
@@ -335,7 +339,8 @@ def test_batch_wait_delivers_notice_before_current_hash_disposition(tmp_path, mo
     args = {"task_ids": [task["id"]], "timeout_sec": 0, "mode": mode}
     result = tools.execute_result("wait_tasks", args)
     assert result.status == "ok"
-    batch = json.loads(result.text)
+    from tests.wait_handoff_support import full_wait_payload
+    batch = full_wait_payload(tools._ctx, result.text)
     assert batch["all_terminal"] is True
     shown = batch["tasks"][task["id"]]
     assert shown["result"] == answer
@@ -352,7 +357,7 @@ def test_batch_wait_delivers_notice_before_current_hash_disposition(tmp_path, mo
     assert disposition.startswith("OK:")
     assert _current_child_result_disposition(load_effective_task_result(tmp_path, task["id"])) == "integrated"
     assert loop._compute_subagent_handoff(tools, tmp_path, "parent1", "") == ""
-    assert json.loads(tools.execute("wait_tasks", args))["tasks"][task["id"]] == shown
+    assert full_wait_payload(tools._ctx, tools.execute("wait_tasks", args))["tasks"][task["id"]] == shown
     assert tools.execute("get_task_result", {"task_id": task["id"]}).endswith("[Host status]\n" + notice)
     assert load_task_result(tmp_path, task["id"]) == stored
 
@@ -377,6 +382,9 @@ def test_batch_wait_without_notice_keeps_the_original_projection(tmp_path, monke
         "outcome_axes": normalize_outcome_axes(current),
         "result": ANSWER, "trace_summary": current.get("trace_summary"),
         "execution_observation": current["execution_observation"],
+        "result_chars": len(ANSWER), "trace_summary_chars": len(current.get("trace_summary") or ""),
+        "result_source": {"tool": "get_task_result", "arguments": {"task_id": task["id"], "include_authority": True}},
+        "verification_summary": current["verification_ledger"].get("summary") or {},
     }
     assert load_task_result(tmp_path, task["id"]) == stored
 

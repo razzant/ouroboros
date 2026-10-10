@@ -283,9 +283,9 @@ def test_a_wait_that_embeds_the_unknown_read_keeps_the_wait_result(tmp_path):
     finally:
         _restore_tool_result_sidecar(token)
 
-    assert text.startswith("Task wait timed out after ")
-    assert text.endswith("Task 4f2a1c: unknown or not yet registered")
-    assert isinstance(published, ToolResult) and published.text != text
+    payload = __import__("json").loads(text)
+    assert payload["timed_out"] and payload["tasks"]["4f2a1c"]["status"] is None
+    assert published is sentinel  # pure compact reader did not publish a borrowed helper result
 
 
 def test_the_wait_set_cap_refusal_names_the_configured_cap(tmp_path):

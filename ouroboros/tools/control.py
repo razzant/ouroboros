@@ -21,13 +21,32 @@ from ouroboros.config import (
     load_settings,  # noqa: F401
     save_settings,  # noqa: F401
 )
-from ouroboros.depth_evidence import parse_task_depth  # noqa: F401
-from ouroboros.headless import prepare_task_drive, task_state_dir  # noqa: F401
 from ouroboros.contracts.task_contract import (
     build_task_contract,  # noqa: F401
     effective_acceptance_claims,  # noqa: F401
     normalize_allowed_resources,  # noqa: F401
 )
+from ouroboros.depth_evidence import parse_task_depth  # noqa: F401
+from ouroboros.headless import prepare_task_drive, task_state_dir  # noqa: F401
+from ouroboros.outcomes import normalize_outcome_axes  # noqa: F401
+from ouroboros.subagent_runtime import (
+    SubagentSelectionError,  # noqa: F401
+    effective_runtime_subagent_settings,  # noqa: F401
+    select_subagent_snapshot,  # noqa: F401
+)
+from ouroboros.subagents import (
+    LEGACY_SUBAGENT_FIELDS,  # noqa: F401
+    build_subagent_envelope,  # noqa: F401
+)
+from ouroboros.task_results import (
+    STATUS_COMPLETED,  # noqa: F401
+    STATUS_REJECTED_DUPLICATE,  # noqa: F401
+    STATUS_REQUESTED,  # noqa: F401
+    validate_task_id,  # noqa: F401
+    write_task_result,  # noqa: F401
+)
+from ouroboros.task_status import load_effective_task_result, wait_for_effective_tasks  # noqa: F401
+from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE  # noqa: F401
 from ouroboros.tools.control_delegation import (
     _ensure_project_scope,
     admitted_depth_cap,  # noqa: F401
@@ -38,28 +57,19 @@ from ouroboros.tools.control_delegation import (
     resolve_cooperative_write_root,  # noqa: F401
     schedule_delegation_refusal,  # noqa: F401
 )
-from ouroboros.tools.registry import active_repo_dir_for, system_repo_dir_for  # noqa: F401
-from ouroboros.outcomes import normalize_outcome_axes  # noqa: F401
-from ouroboros.task_results import (
-    STATUS_COMPLETED,  # noqa: F401
-    STATUS_REJECTED_DUPLICATE,  # noqa: F401
-    STATUS_REQUESTED,  # noqa: F401
-    validate_task_id,  # noqa: F401
-    write_task_result,  # noqa: F401
+from ouroboros.tools.registry import (  # noqa: F401  # noqa: F401
+    ToolContext,
+    ToolEntry,
+    active_repo_dir_for,
+    system_repo_dir_for,
 )
-from ouroboros.task_status import load_effective_task_result, wait_for_effective_tasks  # noqa: F401
-from ouroboros.subagents import (
-    LEGACY_SUBAGENT_FIELDS,  # noqa: F401
-    build_subagent_envelope,  # noqa: F401
+from ouroboros.utils import (  # noqa: F401
+    append_jsonl,
+    atomic_write_json,
+    run_cmd,
+    truncate_review_artifact,
+    utc_now_iso,
 )
-from ouroboros.subagent_runtime import (
-    SubagentSelectionError,  # noqa: F401
-    effective_runtime_subagent_settings,  # noqa: F401
-    select_subagent_snapshot,  # noqa: F401
-)
-from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE  # noqa: F401
-from ouroboros.tools.registry import ToolContext, ToolEntry  # noqa: F401
-from ouroboros.utils import append_jsonl, atomic_write_json, truncate_review_artifact, utc_now_iso, run_cmd  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -425,28 +435,23 @@ def get_tools() -> List[ToolEntry]:
         get_task_result_entry(),
         ToolEntry("wait_task", {
             "name": "wait_task",
-            "description": "Wait for ONE subtask to reach a terminal status and return its effective result: the full single-child handoff once it settled (or when your known_result_sha256 no longer matches); a return BEFORE it settled carries the compact wait_tasks projection plus delegated_runs (its open delegated runs with dated observation facts, no liveness verdict). May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon — the result then carries a [CHILD_BEACONS] block so you can steer, review, or override it. An unread message in your own mailbox also returns early so the ordinary loop can deliver and acknowledge it; the child keeps running. With SEVERAL children in flight, prefer wait_tasks(any_terminal) to absorb whichever finishes first rather than blocking serially on one id at a time.",
+            "description": "Wait once for the named child plus an entry snapshot of your live direct children, returning on the first terminal or actionable input; all snapshot results are compact and source-linked. Use wait_tasks([id]) for an exact dependency. The result is a compact JSON tasks envelope, not the former full single-child text. Informational mail stays queued for full delivery in the same resumed request; owner/control and typed escalations always wake. Omitted timeout parks warm when supported, otherwise holds one bounded operation; explicit 0 is a snapshot. A terminal is not success.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
                 "known_result_sha256": {"type": "string", "description": "Optional child_result_sha256 already obtained for this task. An exact match returns unchanged without repeating result/trace; current facts remain. Omit to return full text. This does not change when the wait ends."},
-                "timeout_sec": {"type": "integer", "default": 180, "description":
-                                "Maximum seconds to wait (default 180); a larger value is clamped to "
-                                f"{_WAIT_TASK_CLAMP_SEC}, and a deadline narrows it (named in the result). Size the window to the child's expected life."},
+                "timeout_sec": {"type": "integer", "description": f"Optional explicit wait clamped to {_WAIT_TASK_CLAMP_SEC}s; 0 is a snapshot. Omission is event-owned."},
             }},
-        }, _wait_for_task, timeout_sec=7200),
+        }, _wait_for_task, timeout_sec=_event_wait_window(None) + NESTED_SETTLEMENT_MARGIN_SEC),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for MULTIPLE subtasks at once and return a compact structural projection per child (task_id, status, accounted_upper_bound_usd, cost_final, child_result_sha256, outcome_axes, result, trace_summary, capability_delta when the child has something to disclose, duplicate_of) — the right tool to ABSORB a batch of independent children you scheduled in one burst. The full per-child envelope stays on disk in task_results/<task_id>.json (child_result_sha256 pins the exact result you saw; get_task_result returns the full result text plus trace/outcome summaries). With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon so you can steer, review, or override mid-flight, or on an unread message in your own mailbox (reason=owner_mailbox_pending); the ordinary loop then handles delivery and acknowledgement. An id no surface of this tree ever minted (no task result, no queue row, no tree-ledger row) is flagged unknown_task_id — 'not yet registered or never scheduled' — and unknown_task_ids + a compact children_roster of your ACTUAL direct children are attached so you can repair the wait set instead of re-polling phantoms.",
+            "description": "Wait once for an exact batch (all_terminal, or any_terminal for first completion), returning compact outcomes, hashes, accounted_upper_bound_usd/cost_final and retained full sources for every selected child. Owner/control and typed escalations wake; routine mail/progress do not. Omitted timeout parks warm when supported; explicit 0 is a snapshot. Unknown IDs are disclosed, not terminal. Read omitted detail explicitly before relying on it.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "known_result_sha256_by_task": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Optional task_id to previously obtained child_result_sha256 map. Matching children omit only result/trace and return result_unchanged plus a full-read reference. Missing or different hashes return the usual complete body/trace. Current status/cost/outcome/capability facts remain; wait timing is unchanged."},
-                "timeout_sec": {"type": "integer", "default": 600, "description":
-                                "Maximum seconds to wait (default 600); a larger value is clamped to "
-                                f"{_WAIT_TASKS_CLAMP_SEC}. Size the window to the children's expected life; "
-                                "an expired wait returns the still-live ids and this ceiling; a deadline narrows it (window_bound)."},
+                "timeout_sec": {"type": "integer", "description": f"Optional explicit wait clamped to {_WAIT_TASKS_CLAMP_SEC}s; 0 is a snapshot. Omission is event-owned."},
                 "mode": {"type": "string", "enum": ["all_terminal", "any_terminal"], "default": "all_terminal"},
             }},
-        }, _wait_for_tasks, timeout_sec=_WAIT_TASKS_CLAMP_SEC + NESTED_SETTLEMENT_MARGIN_SEC),
+        }, _wait_for_tasks, timeout_sec=_event_wait_window(None) + NESTED_SETTLEMENT_MARGIN_SEC),
         await_messages_entry(),
     ]
 
@@ -479,12 +484,11 @@ from ouroboros.tools.control_routing import (  # noqa: E402, F401 -- intentional
 from ouroboros.tools.control_runtime import (  # noqa: E402, F401 -- intentional public re-exports
     _chat_history,
     _evolution_restart_block_reason,
+    _finish_task,
     _prepare_self_change,
     _promote_to_stable,
-    self_change_tool_entries,
     _request_deep_self_review,
     _request_restart,
-    _finish_task,
     _send_user_message,
     _set_next_wakeup,
     _set_tool_timeout,
@@ -493,18 +497,7 @@ from ouroboros.tools.control_runtime import (  # noqa: E402, F401 -- intentional
     _toggle_evolution,
     _update_identity,
     _update_scratchpad,
-)
-
-
-# v7next F2 (D07): moved spans live in their owner leaves; re-exported here
-# so this facade stays the single import surface for callers and tests.
-from ouroboros.tools.control_subagent_spec import (  # noqa: E402, F401 -- intentional public re-exports
-    RETIRED_SCHEDULE_PARAMS,
-    VALID_SUBTASK_MEMORY_MODES,
-    _INTERNAL_SCHEDULE_OPTIONS,
-    _validated_schedule_fields,
-    schedule_subagent_param_names,
-    schedule_subagent_properties,
+    self_change_tool_entries,
 )
 from ouroboros.tools.control_scheduling import (  # noqa: E402, F401 -- intentional public re-exports
     HIDDEN_LEGACY_SCHEDULE_PARAMS,
@@ -526,24 +519,36 @@ from ouroboros.tools.control_scheduling import (  # noqa: E402, F401 -- intentio
     _subagent_slot_note,
     maybe_emit_delegated_run_fanout,
 )
+
+# v7next F2 (D07): moved spans live in their owner leaves; re-exported here
+# so this facade stays the single import surface for callers and tests.
+from ouroboros.tools.control_subagent_spec import (  # noqa: E402, F401 -- intentional public re-exports
+    _INTERNAL_SCHEDULE_OPTIONS,
+    RETIRED_SCHEDULE_PARAMS,
+    VALID_SUBTASK_MEMORY_MODES,
+    _validated_schedule_fields,
+    schedule_subagent_param_names,
+    schedule_subagent_properties,
+)
 from ouroboros.tools.control_task_results import (  # noqa: E402, F401 -- intentional public re-exports
-    NESTED_SETTLEMENT_MARGIN_SEC,
     _UNMINTED_WAIT_GRACE_SEC,
     _WAIT_TASK_CLAMP_SEC,
     _WAIT_TASKS_CLAMP_SEC,
+    NESTED_SETTLEMENT_MARGIN_SEC,
     _await_messages,
     _children_roster_projection,
-    await_messages_entry,
-    get_task_result_entry,
     _count_live_sibling_children,
+    _event_wait_window,
     _get_task_result,
     _subtask_outcome_summary,
     _unminted_wait_ids,
     _wait_attention_poll,
     _wait_for_task,
     _wait_for_tasks,
+    await_messages_entry,
     cache_horizon_note,
     disclosable_capability_delta,
+    get_task_result_entry,
 )
 
 # The D23 hidden-params handler attribute is stamped AFTER the re-exports bind

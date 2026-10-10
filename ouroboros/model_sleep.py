@@ -1,12 +1,11 @@
 """The model's own sleep: warm or cold, woken by what it chose, or at a time it chose.
 
-Owner Batch4 (6B): ``await_messages`` keeps its default bounded in-slot wait;
-``mode="warm"`` or ``"cold"`` is a SLEEP the model chooses itself — no minute
-threshold decides it. The model may select exact sources, and only those wake
+``await_messages`` defaults to warm event sleep; ``mode="in_slot"`` and
+``"cold"`` are explicit choices — no quiet-duration threshold decides it. The model may select exact sources, and only those wake
 it: mail from named senders, the terminal of named tasks it can read, the
 terminal of delegated runs it owns, the exit of its own named services (warm
-only), and an optional absolute wake time. With no source selected, any
-addressed mail wakes it (the default). Owner words and controls (Stop, Wrap
+only), and an optional absolute wake time. With no source or time selected, live direct children are captured; a
+childless request must choose a source. Owner words and controls (Stop, Wrap
 up, Hurry, Pause, a quiz answer) are never filtered.
 Unselected mail stays unread until the model is awake; nothing is acknowledged
 until the transcript delivered it.
@@ -32,11 +31,14 @@ An explicit calendar ``deadline_at`` never moves.
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import pathlib
 import time
 import uuid
 from typing import Any, Dict, List, Tuple
+
+from ouroboros.config import MAX_ACTIVE_SUBAGENTS_HARD_CAP
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +46,8 @@ MODE_IN_SLOT = "in_slot"
 MODE_WARM = "warm"
 MODE_COLD = "cold"
 MODES = (MODE_IN_SLOT, MODE_WARM, MODE_COLD)
-_MAX_SELECTED = 32
+
+_MAX_SELECTED = MAX_ACTIVE_SUBAGENTS_HARD_CAP
 
 
 def _ids(value: Any, name: str) -> List[str]:
@@ -90,16 +93,26 @@ def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = N
     runs must be delegated runs THIS task owns (its custody rows); services must be
     this task's own, each pinned to the start it has NOW (``_service_pins``).
     """
-    from ouroboros.task_results import load_task_result, validate_task_id
+    from ouroboros.task_results import validate_task_id
+    from ouroboros.task_status import load_effective_task_result
 
     chosen = {"senders": _ids(senders, "senders"), "tasks": _ids(tasks, "tasks"), "runs": _ids(runs, "runs"),
               "wake_at": _wake_at(wake_at, wake_after_sec)}
     root = _canonical_root(ctx)
+    queue_snapshot = None
     for key in ("senders", "tasks"):
         for task_id in chosen[key]:
             validate_task_id(task_id)
-            if not load_task_result(root, task_id, strict=True):
-                raise ValueError(f"{key}: task {task_id} is unknown")
+            if not load_effective_task_result(root, task_id, materialize_artifacts=False):
+                # Admission may be queued before a durable result exists. The
+                # SAME queue authority the task waiter accepts is enough to
+                # select it; absence of its result is not absence of the task.
+                from ouroboros.task_status import _load_queue_snapshot, _queue_task_status
+                if queue_snapshot is None:
+                    queue_snapshot = _load_queue_snapshot(root)
+                status, _row = _queue_task_status(queue_snapshot, task_id)
+                if status not in {"running", "scheduled", "requested"}:
+                    raise ValueError(f"{key}: task {task_id} is unknown")
     if chosen["runs"]:
         owned = {run_id for run_id, _settled in _owned_runs(ctx)}
         missing = [run_id for run_id in chosen["runs"] if run_id not in owned]
@@ -108,7 +121,17 @@ def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = N
     pins = _service_pins(ctx, _ids(services, "services"))
     if pins:  # absent otherwise: a sleep without services keeps its existing shape
         chosen["services"] = pins
-    chosen["any_mail"] = not (chosen["senders"] or chosen["tasks"] or chosen["runs"] or pins)
+    # With no explicit subscription, await our current live direct children.
+    # A frozen set, not a new topology policy: later children are chosen later.
+    if not (chosen["senders"] or chosen["tasks"] or chosen["runs"] or pins or chosen["wake_at"]):
+        from ouroboros.task_status import SETTLED_STATUSES, find_child_tasks
+
+        chosen["tasks"] = [str(row["task_id"]) for row in find_child_tasks(
+            root, parent_task_id=str(ctx.task_id), scope="direct", materialize_artifacts=False,
+        ) if row.get("task_id") and str(row.get("status") or "") not in SETTLED_STATUSES]
+    chosen["any_mail"] = False
+    if not (chosen["senders"] or chosen["tasks"] or chosen["runs"] or pins or chosen["wake_at"]):
+        raise ValueError("no live children or selected source: choose senders for a reply, tasks/runs/services, or a wake time")
     return chosen
 
 
@@ -169,7 +192,12 @@ def _owned_runs(ctx: Any) -> List[Tuple[str, bool]]:
 def wake_reason(ctx: Any, chosen: Dict[str, Any]) -> str:
     """Why the sleep is ready now (``""`` = not yet). Owner input is never filtered."""
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
-    from ouroboros.owner_mailbox import KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_TASK_MESSAGE
+    from ouroboros.owner_mailbox import (
+        KIND_OWNER_TEXT,
+        KIND_QUIZ_ANSWER,
+        KIND_TASK_MESSAGE,
+        wait_message_requires_attention,
+    )
     from ouroboros.owner_wait import _wait_entries
     from ouroboros.task_status import SETTLED_STATUSES
 
@@ -180,16 +208,26 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any]) -> str:
         if kind != KIND_TASK_MESSAGE:
             return f"control:{kind}"  # finalize_now, hurry, owner_pause, ... always wake
         source = str(entry.get("source_task_id") or "")
-        if chosen.get("any_mail") or source in chosen.get("senders", []):
+        if wait_message_requires_attention(entry, chosen.get("senders", [])):
             return f"mail:{source or 'unknown'}"
     if chosen.get("tasks"):
-        from ouroboros.task_results import load_task_result
+        from ouroboros.tools.control_task_results import _wait_attention_poll
+
+        attention = _wait_attention_poll(ctx, "", chosen["tasks"])({}, {})
+        if attention and attention.get("reason") == "child_attention_beacon":
+            chosen["wake_beacons"] = attention
+            return "child_attention_beacon"
+    if chosen.get("tasks"):
+        from ouroboros.task_status import load_effective_task_result
 
         root = _canonical_root(ctx)
+        terminal = []
         for task_id in chosen["tasks"]:
-            row = load_task_result(root, task_id, strict=False) or {}
+            row = load_effective_task_result(root, task_id, materialize_artifacts=False) or {}
             if str(row.get("status") or "") in SETTLED_STATUSES:
-                return f"task:{task_id}:{row.get('status')}"
+                terminal.append(f"task:{task_id}:{row.get('status')}")
+        if terminal and (chosen.get("terminal_mode") != "all_terminal" or len(terminal) == len(chosen["tasks"])):
+            return terminal[0]
     if chosen.get("runs"):
         settled = {run_id for run_id, done in _owned_runs(ctx) if done}
         for run_id in chosen["runs"]:
@@ -214,8 +252,8 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None) -> List[Dic
     sleep, waits for them, or stops them itself. An unreadable custody store
     is a blocker too (unknown is never settled).
     """
-    from ouroboros.budget_pause import observe_task_runs
     from ouroboros import delegate_custody as custody
+    from ouroboros.budget_pause import observe_task_runs
 
     blockers: List[Dict[str, str]] = []
     observed = observe_task_runs(custody.custody_root(ctx), str(ctx.task_id), reason="cold_sleep_check",
@@ -233,9 +271,9 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None) -> List[Dic
                     if record.proc.poll() is None)
     # Sleeping releases the root's project lease, so every member's retained
     # custody matters, including paused and terminal children.
-    from ouroboros.owner_pause import tree_member_results, current_tool_operation
-    from ouroboros.delegate_custody_memo import custody_rows_with_integrity
     from ouroboros import process_custody as pc
+    from ouroboros.delegate_custody_memo import custody_rows_with_integrity
+    from ouroboros.owner_pause import current_tool_operation, tree_member_results
     from ouroboros.platform_layer import pid_is_alive
 
     root = _canonical_root(ctx)
@@ -294,7 +332,8 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
         raise ValueError("services wake only a warm sleep: a cold sleep ends the process that holds them")
     ready = wake_reason(ctx, chosen)
     if ready:
-        return {"reason": "ready", "woke_by": ready, "slept": False, "mode": mode}
+        return {"reason": "ready", "woke_by": ready, "slept": False, "mode": mode,
+                **({"wake_beacons": chosen["wake_beacons"]} if chosen.get("wake_beacons") else {})}
     if mode == MODE_WARM:
         from ouroboros.task_results import load_task_result
 
@@ -345,7 +384,7 @@ def end(ctx: Any) -> float:
     return slept
 
 
-def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float) -> Dict[str, Any]:
+def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float, ctx: Any = None) -> Dict[str, Any]:
     """Host facts for the woken model: what woke it — a fact, never a verdict."""
     what = {
         "timeout": "the wake time you chose",
@@ -369,9 +408,32 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float) -> Dict[str,
             what = "the owner's message or control"
         else:
             what = outcome or "an unconfirmed input"
-    return {"role": "user", "content": (
+    notice = {"role": "user", "content": (
         f"[SYSTEM NOTICE]\nYou slept {slept:.0f}s ({chosen.get('mode') or 'warm'}) and were woken by {what}. "
         "Mail you did not select stayed unread and reaches you now with everything else pending. "
         "The sleep did not count as execution time; an explicit deadline did not move."
         + (" A cold sleep ended your previous process: its browser and task-local services are gone; "
            "re-read files before building on them." if chosen.get("mode") == "cold" else ""))}
+    if chosen.get("wake_beacons") and ctx is None:
+        notice["content"] += "\n" + json.dumps(chosen["wake_beacons"], ensure_ascii=False)
+    if ctx is not None:
+        from ouroboros.task_status import load_effective_task_result
+        from ouroboros.tools.control_task_results import (
+            _compact_child_projection,
+            bounded_wait_response,
+            cache_horizon_note,
+            wait_mail_preview,
+        )
+
+        known = chosen.get("known_result_sha256_by_task") or {}
+        payload = {"tasks": {tid: _compact_child_projection(tid,
+            load_effective_task_result(_canonical_root(ctx), tid), known.get(tid)) for tid in chosen.get("tasks", [])},
+            **wait_mail_preview(ctx)}
+        if chosen.get("wake_beacons"):
+            payload["wake_beacons"] = chosen["wake_beacons"]
+        if note := cache_horizon_note(ctx, slept):
+            payload["cache_horizon_note"] = note
+        # Bound the handoff including beacons; the ordinary notice itself is
+        # small, and the authoritative full-mail drain remains independent.
+        notice["content"] += "\n" + bounded_wait_response(ctx, payload, limit=15_000-len(notice["content"])-1)
+    return notice

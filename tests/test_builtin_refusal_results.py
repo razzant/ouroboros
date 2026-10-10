@@ -734,7 +734,11 @@ def test_the_wake_ack_is_keyed_on_the_published_wake_id(tmp_path, monkeypatch):
     # Truncated delivery with the id present: the ack still fails closed.
     assert _run(wake.text[:40], {"supervision_wake_id": wake_id})["pending_wake"]["wake_id"] == wake_id
     # The exact delivered transcript text acknowledges exactly this wake.
-    settled = _run(wake.text, {"supervision_wake_id": wake_id})
+    pending = _run(wake.text, {"supervision_wake_id": wake_id})
+    assert pending["pending_wake"]["wake_id"] == wake_id
+    from ouroboros.working_checkpoint import flush_content_acks
+    flush_content_acks(ctx)
+    settled = supervision.supervision_checkpoint(ctx)
     assert settled["pending_wake"] == {}
     assert settled["last_acknowledged_wake"]["wake_id"] == wake_id
 

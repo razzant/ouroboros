@@ -809,12 +809,12 @@ def test_escalate_walks_past_a_settled_parent_to_the_live_ancestor(tmp_path, mon
     written = []
     monkeypatch.setattr(
         om, "write_task_message",
-        lambda root, text, task_id="", source_task_id="", provenance="":
-            written.append((task_id, provenance)) or True)
+        lambda root, text, task_id="", source_task_id="", provenance="", attention_kind="":
+            written.append((task_id, provenance, attention_kind)) or True)
     ctx = _tool_ctx(tmp_path, task_id="child-9", parent="mid-1", role="subagent")
     out = _escalate(ctx, question="?", options=["a", "b"], assumption="a")
     assert out.startswith("OK: escalated to parent task root-1")
-    assert written == [("root-1", "descendant_task")]
+    assert written == [("root-1", "descendant_task", "question")]
     # A fully settled chain is the honest typed terminal.
     rows["root-1"] = {"status": "completed"}
     out = _escalate(ctx, question="?", options=["a", "b"], assumption="a")
