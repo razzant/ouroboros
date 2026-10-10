@@ -79,6 +79,7 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | POST | `/api/owner/runtime-mode` | |
 | POST | `/api/owner/auto-grant` | |
 | POST | `/api/owner/context-mode` | |
+| POST | `/api/owner/effort-range` | |
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/skills/{skill}/presence-runtime` | |
 | POST | `/api/owner/capability-ack` | |

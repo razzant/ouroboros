@@ -33,20 +33,20 @@ function mount(values, initial) {
         };
     });
     const group = {
-        dataset: { effortTarget: 's-effort-consciousness' }, attrs: {},
+        dataset: { effortTarget: 's-inherit-choice' }, attrs: {},
         setAttribute(key, value) { this.attrs[key] = value; },
         querySelectorAll: () => buttons,
     };
     const root = {
         querySelectorAll: () => [group],
-        querySelector: (selector) => (selector === '#s-effort-consciousness' ? input : null),
+        querySelector: (selector) => (selector === '#s-inherit-choice' ? input : null),
     };
     bindEffortSegments(root);
     const button = (value) => buttons.find((candidate) => candidate.dataset.effortValue === value);
     return { root, input, group, button, buttons };
 }
 
-test('the empty inherit choice is a real value: high -> Same as Task / Chat saves ""', () => {
+test('an empty inherit choice is a real value: high -> the empty choice saves ""', () => {
     const s = mount(['', 'none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'], 'high');
     assert.equal(s.button('high').attrs['aria-pressed'], 'true');
     s.button('').click();

@@ -318,9 +318,10 @@ export function splitSessionTarget(target) {
     return { harness: raw.slice(0, eq), model: raw.slice(eq + 1) };
 }
 
-/** Effort already encoded in a Cursor/Agy compound model slug, if any. */
+/** Effort already encoded in a Cursor/Agy compound model slug, if any: a session target
+ *  (`cursor=<slug>`) or the API-wrapped Claudexor model (`claudexor::cursor=<slug>`). */
 export function compoundSessionEffort(target) {
-    const { harness, model } = splitSessionTarget(target);
+    const { harness, model } = splitSessionTarget(String(target || '').replace(/^claudexor::/, ''));
     if (!['cursor', 'agy'].includes(String(harness || '')) || !model) return '';
     const compound = model.toLowerCase().endsWith('-fast') ? model.slice(0, -5) : model;
     const encoded = compound.slice(compound.lastIndexOf('-') + 1).toLowerCase();
@@ -605,7 +606,7 @@ export function selectHtml(attrs, groups, selected) {
     return `<select class="ui-control" ${attrs}>${options}</select>`;
 }
 
-export function effortSelectHtml(attrs, selected, surfaceDefault = 'route default', defaultLabel = 'Default effort') {
+export function effortSelectHtml(attrs, selected, surfaceDefault = 'the chat range', defaultLabel = 'Auto (chat range)') {
     const options = [
         { value: '', label: defaultLabel },
         ...EFFORT_CHOICES.map((effort) => ({ value: effort, label: effort })),

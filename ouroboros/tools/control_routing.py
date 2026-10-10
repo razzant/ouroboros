@@ -45,20 +45,31 @@ def _predecessor_selector_error(value: Any, tool_name: str) -> str:
     return ""
 
 
-def _root_effort_arg(value: Any, tool_name: str) -> tuple[Dict[str, str], str]:
-    """The new root's explicit starting effort as event fields, or the refusal.
+def _root_effort_arg(value: Any, tool_name: str) -> tuple[Dict[str, str], str, str]:
+    """``(event fields, refusal, note)`` for the new root's explicit starting effort.
 
-    Omitted (``None``) leaves the field absent, so the task type's configured
-    effort applies; a supplied value must name a tier, before any effect.
+    Omitted (``None``) leaves the field absent, so the root starts at the owner's
+    recommended level; a supplied value must name a tier, before any effect. Outside
+    Cyber Pro a root Ouroboros creates itself is not pinned by that value either: the
+    field stays absent and the note says so (owner ingress — the API, the CLI, owner
+    schedules, Continue — keeps pinning); in Cyber Pro it is applied.
     """
     if value is None:
-        return {}, ""
-    from ouroboros.settings_scales import requested_effort
+        return {}, "", ""
+    from ouroboros.runtime_mode_policy import effort_range_binds
+    from ouroboros.settings_scales import effort_range, requested_effort
+    from ouroboros.tools.arg_feedback import ignored_argument_note
 
     try:
-        return {"reasoning_effort": requested_effort(value)}, ""
+        tier = requested_effort(value)
     except ValueError as exc:
-        return {}, f"⚠️ TOOL_ARG_ERROR ({tool_name}): {exc}"
+        return {}, f"⚠️ TOOL_ARG_ERROR ({tool_name}): {exc}", ""
+    if effort_range_binds():
+        return {}, "", ignored_argument_note(
+            "reasoning_effort", tier,
+            f"outside Cyber Pro a root I create starts at my human's recommended level "
+            f"({effort_range()['recommended']}); deeper thinking is delegated with schedule_subagent(effort=...)")
+    return {"reasoning_effort": tier}, "", ""
 
 
 def _attach_origin_from_metadata(ctx: ToolContext, evt: Dict[str, Any]) -> None:
@@ -367,7 +378,7 @@ def _promote_chat_to_task(
     selector_error = _predecessor_selector_error(predecessor_task_id, "promote_chat_to_task")
     if selector_error:
         return selector_error
-    effort_fields, effort_error = _root_effort_arg(reasoning_effort, "promote_chat_to_task")
+    effort_fields, effort_error, effort_note = _root_effort_arg(reasoning_effort, "promote_chat_to_task")
     if effort_error:
         return effort_error
     goal = str(objective or "").strip()
@@ -537,6 +548,7 @@ def _promote_chat_to_task(
             + _second_project_note(ctx, already_bound, effective_pid)
             + _predecessor_notes(str(evt.get("predecessor_task_id") or ""), predecessor_facts, effective_pid)
             + _obligation_moved_note(ctx, tid, confirmation.get("force_plan_transfer"))
+            + (f"\n{effort_note}" if effort_note else "")
         )
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")
     if confirmation_status in {"rejected", "needs_manual_target"}:
@@ -668,7 +680,7 @@ def _route_to_project(
     selector_error = _predecessor_selector_error(predecessor_task_id, "route_to_project")
     if selector_error:
         return selector_error
-    effort_fields, effort_error = _root_effort_arg(reasoning_effort, "route_to_project")
+    effort_fields, effort_error, effort_note = _root_effort_arg(reasoning_effort, "route_to_project")
     if effort_error:
         return effort_error
     from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
@@ -778,6 +790,7 @@ def _route_to_project(
                 + (f" A New task picked from it starts on reasoning_effort={effort_fields['reasoning_effort']}; "
                    "picking an existing task delivers the message there and leaves that task's effort "
                    "unchanged." if effort_fields else "")
+                + (f" {effort_note}" if effort_note else "")
             )
         return (
             f"⚠️ ROUTING_UNCONFIRMED ({failure}, {mode}): no route was dispatched{_cause_words(failure)}, and "
@@ -828,6 +841,7 @@ def _route_to_project(
             + _predecessor_notes(str(evt.get("predecessor_task_id") or ""), predecessor_facts,
                                  str(receipt.get("effective_project_id") or pid))
             + _obligation_moved_note(ctx, tid, receipt.get("force_plan_transfer"))
+            + (f"\n{effort_note}" if effort_note else "")
         )
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")
     reason_text = str(receipt.get("reason") or "confirmation_timeout")

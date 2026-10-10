@@ -2,6 +2,7 @@
 // live-card presentation projections (moved verbatim from chat.js) plus the
 // in-flight direct/ephemeral turn status reducer and snapshot hydration.
 import { executorIdentityMarkup, joinMetaParts } from './harness_presentation.js';
+import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
 import { taskSourceDownloadUrl } from './api_client.js';
 import { compactModel, formatLogDuration, modelExecutionLabel } from './log_events.js';
@@ -829,6 +830,7 @@ export function clearStickyCardState(record) {
         record.activityEl.removeAttribute('title');
     }
     record.modelExecution = null;
+    record.effort = null;
     record.toolCalls = null;
     record.toolErrors = null;
     // The folded evidence is cycle state too: a recycled slot must not count
@@ -1536,7 +1538,7 @@ export function costMetaKeys(src) {
 const CARD_META_KEYS = [
     ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
     'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'cancel_origin',
-    'delegated_activity', 'outcome_axes', 'task_completion',
+    'delegated_activity', 'outcome_axes', 'task_completion', 'effort_level', 'effort_requested', 'effort_source',
 ];
 export function cardMetaKeys(src) {
     return Object.fromEntries(CARD_META_KEYS.map((key) => [key, src?.[key]]));
@@ -1552,6 +1554,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     // because only the flex gap separated them.
     const html = joinMetaParts([
         executorIdentityMarkup(record.executorChip, { agentModel: compactModel(agentModel) }),
+        effortChipMarkup(record.effort),
         ...[
             record.initiator === 'consciousness' ? 'Consciousness' : '',
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),

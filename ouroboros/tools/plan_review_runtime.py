@@ -41,16 +41,17 @@ from ouroboros.tools.plan_review_artifacts import (  # noqa: E402, F401 - compat
     read_wave as read_plan_review_wave_artifact,
 )
 # The one caller-facing strength axis of a review panel: the envelope's order for THIS
-# plan outranks each row's pinned effort (a compound Cursor/Agy route slug keeps its
-# encoded effort: the route's identity); the owner's setting is the default, Ouroboros
-# may order stronger or weaker, and every wave records the effective per-seat effort.
+# plan decides every Auto reviewer row, clamped into the owner's effort range; a pinned row
+# keeps its pin outside Cyber Pro and a level in a model name always stays; every wave
+# records the effective per-seat effort (``reviewer_slot_config.row_effort``).
 REVIEWER_EFFORT_SCHEMA = {
     "type": "string", "enum": list(EFFORT_SCALE),
     "description": (
-        "Optional reviewer-panel strength for THIS plan: it outranks each reviewer row's own "
-        "effort setting (a Cursor/Agy compound route slug keeps its encoded effort); omitted = "
-        "the owner's settings. The verdict names a panel ordered weaker than the owner's "
-        "setting. On an OPEN review a different strength re-dispatches a paid panel within "
+        "Optional reviewer-panel strength for THIS plan, applied to Auto reviewer rows and "
+        "clamped into my human's effort range (a pinned row keeps its pin outside Cyber Pro; a "
+        "level in a model name always stays); omitted = the owner's settings (Auto rows review at "
+        "the range's top). The verdict names a panel ordered weaker than the owner's setting. "
+        "On an OPEN review a different strength re-dispatches a paid panel within "
         "OUROBOROS_REVIEW_MAX_CYCLES; the same strength replays free; a CLOSED review stands "
         "for its envelope."
     ),
@@ -344,14 +345,13 @@ def plan_review_slots(default_effort: str = "") -> list:
     ``triad_delivery_slots`` builder (one reader of the pool for plan, skill
     and acceptance review) with plan review's own slot properties — timeout,
     output budget, temperature — and the envelope's ``reviewer_effort`` as the
-    ORDER for this plan: it outranks each row's own pinned effort, a compound
-    route slug keeps its encoded effort, and ``''`` leaves every row at its own
-    effort, else that compound effort, else the pool's
-    ``REVIEW_POOL_DEFAULT_EFFORT`` (never the retired ``OUROBOROS_EFFORT_REVIEW``
-    surface setting), exactly like the commit gate. The order is an ARGUMENT of this builder
-    only, never a contextvar: the commit gate, scope, acceptance and skill
-    review keep reading the untouched rows. Both delivery kinds ride; slot ids
-    are the rows' own.
+    ORDER for this plan under ``row_effort``'s rule: it decides every Auto row,
+    clamped into the owner's effort range, a pinned row keeps its pin outside
+    Cyber Pro, a level in a model name always stays, and ``''`` leaves every row
+    at its own level, else the range's top, exactly like the commit gate. The
+    order is an ARGUMENT of this builder only, never a contextvar: the commit
+    gate, scope, acceptance and skill review keep reading the untouched rows.
+    Both delivery kinds ride; slot ids are the rows' own.
     """
     from ouroboros.reviewer_slot_config import triad_delivery_slots
 
@@ -639,7 +639,7 @@ def synthesize_plan_review_wave(
         sid = str(row.get("slot_id") or "")
         slot = slots_by_id.get(sid)
         if reviewer_effort and slot is not None and not str(getattr(slot, "declared_effort", "") or ""):
-            disclosures.append("reviewer_effort_not_applied")  # a compound route slug kept its encoded effort
+            disclosures.append("reviewer_effort_not_applied")  # a model-named level or an owner pin kept its level
         if ok:
             parsed, parse_error = plan_spec.parse_findings(str(row.get("text") or ""))
             if parse_error:

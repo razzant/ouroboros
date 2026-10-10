@@ -355,14 +355,14 @@ def test_model_role_resolves_the_consciousness_slots_and_falls_back_to_main():
     meta = {"model_role": "consciousness"}
     assert task_model_binding({"metadata": meta})[0] == "consciousness"
     assert task_model_binding({"metadata": {}})[0] == "main"
-    with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "", "OUROBOROS_EFFORT_CONSCIOUSNESS": "low",
+    with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "", "OUROBOROS_EFFORT_MAX": "xhigh",
                                       "OUROBOROS_EFFORT_TASK": "medium", "USE_LOCAL_CONSCIOUSNESS": ""}):
         assert model_role_slot_override(meta) is None  # an empty slot is Main
-        assert _initial_effort_for({"metadata": meta}, "task") == "low"
+        # A wake starts at the top of the owner's effort range; an ordinary turn at its recommended level.
+        assert _initial_effort_for({"metadata": meta}, "task") == "xhigh"
         assert _initial_effort_for({"metadata": {}}, "task") == "medium"
-    # An empty EFFORT slot is Main's effort too (owner decision 16.09, 1=A): the wake shares
-    # Main's request shape; a set value is honored.
-    with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "", "OUROBOROS_EFFORT_CONSCIOUSNESS": "",
+    # The range's top is never below the recommended level (the tolerant read).
+    with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "", "OUROBOROS_EFFORT_MAX": "",
                                       "OUROBOROS_EFFORT_TASK": "xhigh"}):
         assert _initial_effort_for({"metadata": meta}, "task") == "xhigh"
     # An empty model slot still honors the role's OWN local flag when the owner set it and it

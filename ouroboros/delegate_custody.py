@@ -127,6 +127,7 @@ class RunCustody:
     profile_id: str = ""
     effort: Optional[str] = None
     processing_preference: Optional[str] = None
+    row_effort: Optional[str] = None  # the configured row's pin ('' = Auto); None on rows without one
     project_id: str = ""
     project_owned: bool = False
     # #362: a stable user-target registration outlives any single run.

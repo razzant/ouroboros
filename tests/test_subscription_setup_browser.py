@@ -293,7 +293,7 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     assert reviewer.locator('[data-subagent-field="review_eligible"]').is_checked()
     assert page.locator('[data-review-pool-count]').inner_text() == 'Reviewers: 1'
     default_effort = reviewer.locator('[data-subagent-field="effort"] option[value=""]')
-    assert default_effort.inner_text() == 'Default (reviews at high)'
+    assert default_effort.inner_text() == 'Auto (reviews at the top of the chat range)'
     reviewer.locator('[data-subagent-field="effort"]').select_option('high')
     assert reviewer.locator('[data-subagent-field="effort"]').input_value() == 'high'
     reviewer.scroll_into_view_if_needed()

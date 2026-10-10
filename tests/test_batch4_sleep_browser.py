@@ -79,6 +79,7 @@ def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_wi
     server['stop_server']()
     b4._seed_roots(root, (b4.ALPHA, b4.BRAVO))
     server['start_server']()
+    b4._resume_after_app_stop(url, b4.ALPHA, b4.BRAVO)  # the seeded Quit holds both (owner S1)
     record = {'mode': mode}
     try:
         with sync_playwright() as pw:

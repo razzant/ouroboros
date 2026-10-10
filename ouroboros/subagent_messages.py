@@ -23,6 +23,11 @@ SUBAGENT_MESSAGE_FIELDS: tuple[str, ...] = (
     "effective_model_lane",
     "model",
     "executor_route",
+    # The effort decision (``settings_scales.choose_effort``) as three scalars: the level the
+    # child (a session row: its leaf) runs at, the parent's request, who decided.
+    "effort_level",
+    "effort_requested",
+    "effort_source",
 )
 
 # The host's two named placements of a task-keyed row inside its task's card.
@@ -153,6 +158,9 @@ def subagent_message_meta(
         "effective_model_lane": first("effective_model_lane"),
         "model": first("model"),
         "executor_route": first("executor_route"),
+        "effort_level": first("effort_level"),
+        "effort_requested": first("effort_requested"),
+        "effort_source": first("effort_source"),
     }
     if event:
         meta["subagent_event"] = str(event)

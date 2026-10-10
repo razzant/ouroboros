@@ -39,7 +39,7 @@ process.stdout.write(JSON.stringify(summary || null));
 """
     result = subprocess.run(
         [NODE_BIN, "--input-type=module", "-e", script],
-        input=json.dumps(rows), text=True, capture_output=True, cwd=WEB_ROOT,
+        input=json.dumps(rows), text=True, encoding="utf-8", capture_output=True, cwd=WEB_ROOT,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -80,7 +80,7 @@ try {
 } finally {instance.destroy(); restoreDom(env.prior);}
 """
     result = subprocess.run([NODE_BIN, "--input-type=module", "-e", script], input=json.dumps(snapshots),
-                            text=True, capture_output=True, cwd=WEB_ROOT, timeout=30)
+                            text=True, encoding="utf-8", capture_output=True, cwd=WEB_ROOT, timeout=30)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 

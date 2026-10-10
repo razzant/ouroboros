@@ -99,18 +99,50 @@ def route_spec_dict(route: RouteSpec, *, api_kind: str, pin_key: str) -> dict[st
     return payload
 
 
+# Harnesses whose model slugs END with the reasoning tier (``grok-4.7-xhigh-fast``): the
+# level is the model's identity, in a session target and in a Claudexor-managed API model alike.
+_SLUG_EFFORT_HARNESSES = frozenset({"cursor", "agy"})
+
+
+def harness_model_named_effort(harness: str, model: str) -> str:
+    """THE detector: the tier a ``harness``'s model slug encodes (a trailing ``-fast``
+    stripped), '' for every other harness or slug."""
+    if str(harness or "").strip().lower() not in _SLUG_EFFORT_HARNESSES:
+        return ""
+    from ouroboros.settings_scales import EFFORT_SCALE
+
+    text = str(model or "").strip()
+    compound_model = text[:-5] if text.lower().endswith("-fast") else text
+    encoded = compound_model.rsplit("-", 1)[-1].lower()
+    return encoded if encoded in EFFORT_SCALE else ""
+
+
 def compound_session_effort(route: RouteSpec) -> str:
-    """Effort already encoded in a Cursor/Agy compound model slug, if any."""
+    """Effort already encoded in a Cursor/Agy compound session slug, if any."""
     if not route.is_session:
         return ""
     harness, separator, model = route.target_id.partition("=")
-    if not separator or harness not in {"cursor", "agy"}:
-        return ""
-    from ouroboros.config import EFFORT_SCALE
+    return harness_model_named_effort(harness, model) if separator else ""
 
-    compound_model = model[:-5] if model.lower().endswith("-fast") else model
-    encoded = compound_model.rsplit("-", 1)[-1].lower()
-    return encoded if encoded in EFFORT_SCALE else ""
+
+def api_model_named_effort(model: str) -> str:
+    """Effort encoded in a Claudexor-managed API model name (``claudexor::cursor=<slug>``), if any."""
+    from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+
+    if provider_for_model(model) != "claudexor":
+        return ""
+    try:
+        source, native = parse_claudexor_model(model)
+    except ValueError:
+        return ""
+    return harness_model_named_effort(source, native)
+
+
+def model_named_effort(route: RouteSpec) -> str:
+    """The level a route's model name carries — session target or API model — '' when none.
+    It wins over every pin, request and range (``settings_scales.choose_effort``); a stored
+    API row's contradicting pin is set aside at execution and disclosed, never a parse error."""
+    return compound_session_effort(route) if route.is_session else api_model_named_effort(route.target_id)
 
 
 def validate_compound_session_effort(
@@ -120,7 +152,8 @@ def validate_compound_session_effort(
     setting: str,
     where: str,
 ) -> None:
-    """Reject two contradictory effort authorities on Cursor/Agy routes."""
+    """Reject two contradictory effort authorities on Cursor/Agy session routes (the shared
+    parser runs on stored rows too, so this rule stays exactly as wide as it was)."""
     if not effort:
         return
     encoded = compound_session_effort(route)
@@ -131,7 +164,10 @@ def validate_compound_session_effort(
 
 
 __all__ = [
+    "api_model_named_effort",
     "compound_session_effort",
+    "harness_model_named_effort",
+    "model_named_effort",
     "ROUTE_KIND_AGENT_SESSION",
     "ROUTE_KIND_API_MODEL",
     "RouteSpec",

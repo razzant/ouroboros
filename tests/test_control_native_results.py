@@ -136,7 +136,7 @@ def test_a_direct_selector_call_without_an_invocation_still_returns_its_text(tmp
 @pytest.mark.parametrize(
     ("label", "prefix"),
     [
-        ("retired_param", "⚠️ TOOL_ARG_ERROR (schedule_subagent): effort was withdrawn: "),
+        ("effort_arg_error", "⚠️ TOOL_ARG_ERROR (schedule_subagent): effort must be auto or one of: "),
         ("unsupported_param", "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): bogus."),
         ("validator_refusal", "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required."),
         (
@@ -151,7 +151,8 @@ def test_schedule_argument_refusals_publish_their_adapter_code(tmp_path, monkeyp
     configure_test_subagent(monkeypatch)
     ctx = _ctx(tmp_path)
     calls = {
-        "retired_param": lambda: control_scheduling._schedule_task(ctx, effort="high"),
+        "effort_arg_error": lambda: control_scheduling._schedule_task(
+            ctx, subagent_id="api-scout", objective="o", expected_output="e", effort="turbo"),
         "unsupported_param": lambda: control_scheduling._schedule_task(ctx, bogus=1),
         "validator_refusal": lambda: control_scheduling._schedule_task(ctx, objective=""),
         "capability_arg_error": lambda: control_scheduling._schedule_task(

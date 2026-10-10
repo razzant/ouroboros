@@ -390,7 +390,7 @@ ouroboros/ — agent core and shared runtime (§6)
     logs.py — Read-only runtime log tail
     onboarding.py — `POST /api/onboarding/complete`: install-time latch, validation, live engine read, preset compile, one settings write under lock; a typed 503 persists nothing, except `settings_save_timeout`, the unknown outcome (§2)
     onboarding_host.py — GET /onboarding: side-effect-free wizard page served as ES modules
-    owner_settings.py — Settings-lock-as-precondition and `CommitBoundary` (Gateway Boundary v1 below)
+    owner_settings.py — Settings-lock-as-precondition and `CommitBoundary` (Gateway Boundary v1 below); owner_effort.py — the effort range
     settings_secrets.py — Explicit single-secret Settings reads; passive Settings responses stay masked (§3 Settings and onboarding)
     settings.py — /api/settings and /api/owner/*; `GET /api/review-pool`: the pool in catalog order, excluded rows with reasons, last runs, per-row cost, the migration receipt; an unreadable catalog is a typed `config_error`, never a 500 (§7 Review pool)
     presence_settings.py — Owner-facing runtime overrides and working-folder selection for reviewed Presence behavior skills

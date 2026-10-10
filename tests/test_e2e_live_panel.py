@@ -32,7 +32,7 @@ def test_the_stand_panel_is_a_pool_of_three_families_in_marked_catalog_rows():
     catalog = json.loads(document["OUROBOROS_SUBAGENTS"])["items"]
     advisory = [row for row in catalog if row["route"]["target_id"] == "anthropic/claude-sonnet-5"]
     assert len(advisory) == 1 and not advisory[0].get("review_eligible") and advisory[0]["effort"] == "low"
-    assert document["OUROBOROS_EFFORT_TASK"] == "medium" and document["OUROBOROS_EFFORT_EVOLUTION"] == "medium"
+    assert document["OUROBOROS_EFFORT_TASK"] == "medium" and document["OUROBOROS_EFFORT_MAX"] == "medium"
 
 
 def test_paid_lanes_carry_the_panel_unless_production_panel_or_stub(monkeypatch):

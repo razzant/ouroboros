@@ -407,6 +407,12 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         # block at the next attempt.
         "ui_language": {"tag": _ui_language_tag() or "en", "chosen": bool(_ui_language_tag())},
     }
+    # The owner's effort range as this task started (snapshot), and whether it bounds my own
+    # requests (every mode but Cyber Pro): the fact behind schedule_subagent(effort=…).
+    from ouroboros.runtime_mode_policy import effort_range_binds
+    from ouroboros.settings_scales import effort_range
+
+    runtime_data["effort_range"] = {**effort_range(), "binds": effort_range_binds(task.get("metadata"))}
     runtime_data.update(_task_authority_projection(env, task))
     if declared:
         runtime_data["task_constraint"] = task.get("task_constraint") or getattr(ctx, "task_constraint", {})

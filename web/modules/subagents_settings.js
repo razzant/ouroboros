@@ -21,13 +21,12 @@ import {
     harnessMap, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun, sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
+import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 export const MAX_AVAILABLE_SUBAGENTS = 26;
 export const SUBAGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 export const ALLOW_EMPTY_REVIEW_POOL = 'allow_empty_review_pool';
-// The effort a marked row reviews at when neither the row nor its compound route names one.
-export const REVIEW_POOL_DEFAULT_EFFORT = 'high';
 const MINTED_FROM = { review_lane: 'From a former review lane', factory_default: 'Factory reviewer' };
 
 const SETTING_KEYS = new Set(['enabled', 'items']);
@@ -205,6 +204,8 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
         errors.push('has an unsupported reasoning effort.');
     }
     if (row?.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push('needs Standard, Fast, Economy or inherited processing.');
+    // A session slug's level refuses a contradicting pin, as the server does. An API-wrapped
+    // `claudexor::cursor=…` row keeps a stored pin readable: the name wins when it runs.
     const encodedEffort = route.kind === ROUTE_KIND_AGENT_SESSION
         ? compoundSessionEffortConflict(route.target_id, row?.effort) : '';
     if (encodedEffort) {
@@ -297,12 +298,20 @@ function lastReview(row, state) {
         || pool.last_executions?.[row.subagent_id]);
 }
 
-// A marked row without its own effort reviews at the pool default, unless its compound route names one;
-// the effort select's Default option says so, where the owner reads the effort.
+// The effort select's empty option is Auto: the owner's chat range, whose top a marked row reviews at.
 function effortDefaultLabel(row) {
-    const session = row.route?.kind === ROUTE_KIND_AGENT_SESSION;
-    return row.review_eligible === true && !row.effort && !(session && compoundSessionEffort(row.route.target_id))
-        ? `Default (reviews at ${REVIEW_POOL_DEFAULT_EFFORT})` : 'Default effort';
+    return row.review_eligible === true ? 'Auto (reviews at the top of the chat range)' : 'Auto (chat range)';
+}
+
+// A level in the model name (`cursor=…-xhigh`, `claudexor::agy=…-high`) is the row's effort: the
+// facet reads it instead of offering a select, and the owner's pick of such a model clears a pin.
+const namedRowEffort = (row) => compoundSessionEffort(row?.route?.target_id);
+function effortFacetHtml(row, ordinal) {
+    const named = namedRowEffort(row);
+    if (named) {
+        return `<span class="ui-control available-subagent-readonly" data-subagent-effort-named="${escapeHtml(named)}" aria-label="Reasoning effort for Subagent ${ordinal}">${escapeHtml(effortLabel(named))} · in the model name</span>`;
+    }
+    return effortSelectHtml(`data-subagent-field="effort" aria-label="Reasoning effort for Subagent ${ordinal}"`, row.effort || '', 'the chat range', effortDefaultLabel(row));
 }
 
 /**
@@ -582,7 +591,7 @@ export function availableSubagentRowMarkup(row, state, index = 0) {
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
-                ${field('Reasoning effort', effortSelectHtml(`data-subagent-field="effort" aria-label="Reasoning effort for Subagent ${ordinal}"`, row.effort || '', 'route default', effortDefaultLabel(row)))}
+                ${field('Reasoning effort', `<span class="available-subagent-effort-facet" data-subagent-effort-facet data-named="${escapeHtml(namedRowEffort(row))}">${effortFacetHtml(row, ordinal)}</span>`)}
                 ${session ? field('Access', selectHtml(`id="actor-${escapeHtml(rowKey)}-access" data-subagent-field="access" aria-label="Access for Subagent ${ordinal}"`, [{ label: '', options: ACCESS_CHOICES }], row.access || 'full')) : ''}
                 ${reviewDeliveryHtml(row, state, index)}
             </div>
@@ -734,6 +743,32 @@ export function createAvailableSubagentsEditor({
 
     // Patch verdicts and inherited intent in place, preserving the caret.
     // Structural errors always show; row errors follow an attempted save.
+    // The effort facet follows the model in place (select <-> the named level), so a model edit
+    // keeps its caret and any open Details; a rebuilt select is bound like the first one.
+    function bindEffortFacet(rowElement, row) {
+        rowElement.querySelector('[data-subagent-effort-facet] [data-subagent-field="effort"]')?.addEventListener?.('change', (event) => {
+            const value = String(event.target.value || '');
+            if (value) row.effort = value;
+            else delete row.effort;
+            markDirty();
+        });
+    }
+    function syncEffortFacet(el, row, index) {
+        const facet = el.querySelector('[data-subagent-effort-facet]');
+        if (!facet) return;
+        const named = namedRowEffort(row);
+        const current = facet.dataset.named || '';
+        if (named === current && (named || facet.querySelector('[data-subagent-field="effort"]'))) {
+            const effortDefault = el.querySelector('[data-subagent-field="effort"] option[value=""]');
+            if (!named && effortDefault) effortDefault.textContent = effortDefaultLabel(row);
+            return;
+        }
+        facet.innerHTML = effortFacetHtml(row, index + 1);
+        if (named) facet.dataset.named = named;
+        else delete facet.dataset.named;
+        if (!named) bindEffortFacet(el, row);
+    }
+
     function renderValidation() {
         const container = host();
         if (!container) return;
@@ -777,8 +812,7 @@ export function createAvailableSubagentsEditor({
                 const node = el.querySelector(selector);
                 if (node) node.textContent = cost;
             }
-            const effortDefault = el.querySelector('[data-subagent-field="effort"] option[value=""]');
-            if (effortDefault) effortDefault.textContent = effortDefaultLabel(row);
+            syncEffortFacet(el, row, index);
             for (const [selector, text] of [['[data-subagent-last-review]', lastReview(row, state)],
                 ['[data-subagent-last-task]', rowTaskRun(row, state)],
                 ['[data-subagent-stored]', String(row.route.target_id || '').trim()]]) {
@@ -868,6 +902,7 @@ export function createAvailableSubagentsEditor({
             rowElement.querySelector('[data-subagent-field="route"]')?.addEventListener('change', (event) => {
                 row.route = changeRouteChoice(row.route, event.target.value);
                 if (row.route.kind !== ROUTE_KIND_AGENT_SESSION) delete row.access;
+                if (namedRowEffort(row)) delete row.effort;  // the owner's pick of a named model retires the pin
                 markDirty({ structural: true });
                 paint();
             });
@@ -876,6 +911,7 @@ export function createAvailableSubagentsEditor({
                 (event) => {
                     const previous = encodeRouteChoice(row);
                     row.route.target_id = routeTargetFromModel(row.route, event.target.value);
+                    if (namedRowEffort(row)) delete row.effort;  // the owner's pick of a named model retires the pin
                     const structural = previous !== encodeRouteChoice(row);
                     if (structural) delete row.route.credential_profile_id;
                     markDirty({ structural });
@@ -889,7 +925,7 @@ export function createAvailableSubagentsEditor({
                 markDirty({ structural: true });
                 paint();
             });
-            for (const field of ['effort', 'processing_preference', 'access']) {
+            for (const field of ['processing_preference', 'access']) {
                 rowElement.querySelector(`[data-subagent-field="${field}"]`)?.addEventListener('change', (event) => {
                     const value = String(event.target.value || '');
                     if (value) row[field] = value;
@@ -897,6 +933,7 @@ export function createAvailableSubagentsEditor({
                     markDirty();
                 });
             }
+            bindEffortFacet(rowElement, row);
             rowElement.querySelector('[data-subagent-duplicate]')?.addEventListener('click', () => {
                 if (state.setting.items.length >= MAX_AVAILABLE_SUBAGENTS) return;
                 // A copy IS the same engine, so it is born a judged draft: its card

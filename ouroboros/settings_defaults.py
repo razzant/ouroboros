@@ -304,11 +304,11 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # writes at the documented 2x-vs-1.25x ratio). Non-Anthropic wire formats are a NO-OP by construction
     # (Gemini documents no ttl field — the v5.30.0 outage class).
     "OUROBOROS_PROMPT_CACHE_TTL": "1h",
-    # Reasoning effort per task type: any EFFORT_SCALE tier (the ordered SSOT in settings_scales)
+    # The owner's effort range (settings_scales.effort_range): EFFORT_SCALE tiers, read tolerantly as
+    # MIN <= TASK (the recommended level: Main's) <= MAX; a reviewer row's effort is the row's own.
+    "OUROBOROS_EFFORT_MIN": "low",
     "OUROBOROS_EFFORT_TASK": "medium",
-    "OUROBOROS_EFFORT_EVOLUTION": "high",
-    # Review efforts are per reviewer row of the subagent catalog (the review pool), not surface keys.
-    "OUROBOROS_EFFORT_CONSCIOUSNESS": "",  # empty = the Task / Chat effort (a wake-up is an ordinary Main turn)
+    "OUROBOROS_EFFORT_MAX": "high",
     "OUROBOROS_RETURN_REASONING": True,
     "OUROBOROS_REASONING_SUMMARY": "auto",
     "GITHUB_TOKEN": "",
@@ -388,12 +388,12 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_HARD_TIMEOUT_SEC",
     "OUROBOROS_REVIEW_NATIVE_MAX_ROUNDS",  # a ceiling on rounds; bounds are transcript/deadline/ledger
     "OUROBOROS_BG_MAX_ROUNDS",  # a wake is an ordinary Main turn: the per-task cost cap (+ any OUROBOROS_MAX_ROUNDS) bounds it
-    # Review pool (PR-3): the review lanes and their surface keys. MIGRATED, not
-    # dropped: ``review_pool_migration`` runs at the read seam BEFORE this purge
-    # and turns what the lanes executed into reviewer rows of OUROBOROS_SUBAGENTS;
-    # only a document the migration could not finish (an error outcome keeps the
-    # keys for the owner's catalog save) or a stray effort key without lanes
-    # reaches the ordinary retired-key notice.
+    # The effort range: evolution tasks and consciousness wakes start at its top (EFFORT_RANGE_RETIRED_SETTING_KEYS).
+    "OUROBOROS_EFFORT_EVOLUTION", "OUROBOROS_EFFORT_CONSCIOUSNESS",
+    # Review pool (PR-3): the review lanes and their surface keys. MIGRATED, not dropped:
+    # ``review_pool_migration`` runs at the read seam BEFORE this purge and turns what the
+    # lanes executed into reviewer rows of OUROBOROS_SUBAGENTS; only a document the migration
+    # could not finish, or a stray effort key without lanes, reaches the retired-key notice.
     "OUROBOROS_REVIEWER_SLOTS",
     "OUROBOROS_EFFORT_REVIEW",
     "OUROBOROS_EFFORT_SCOPE_REVIEW",
@@ -419,13 +419,12 @@ RETIRED_COMMA_LIST_SETTING_KEYS: tuple[str, ...] = (
 )
 
 
-# The third classification INSIDE RETIRED_SETTING_KEYS (review pool, PR-3): the
-# former review-lane keys. Their migration is AUTOMATIC — the read seam
-# (``review_pool_migration.migrate_review_lanes``) turns what the lanes executed
-# into reviewer rows of OUROBOROS_SUBAGENTS before the purge — so the RC auditor
-# reports them as a note ("migrated on load; no action required"), never as an
-# incompatibility; membership in RETIRED_SETTING_KEYS is pinned fail-closed by the
-# auditor at runtime and by tests/test_rc_audit_fixture_suite.py.
+# The third classification INSIDE RETIRED_SETTING_KEYS (review pool, PR-3): the former
+# review-lane keys. Their migration is AUTOMATIC — the read seam
+# (``review_pool_migration.migrate_review_lanes``) turns what the lanes executed into
+# reviewer rows of OUROBOROS_SUBAGENTS before the purge — so the RC auditor reports them as
+# a note ("migrated on load; no action required"), never as an incompatibility; membership
+# in RETIRED_SETTING_KEYS is pinned fail-closed by the auditor and its fixture suite.
 REVIEW_POOL_MIGRATED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_REVIEWER_SLOTS",
     "OUROBOROS_EFFORT_REVIEW",
@@ -433,6 +432,9 @@ REVIEW_POOL_MIGRATED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
     "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
 )
+# The fourth classification: the role effort keys the owner's effort range replaced. No value is carried
+# (evolution and consciousness start at OUROBOROS_EFFORT_MAX): the RC auditor reports a stored one as a note.
+EFFORT_RANGE_RETIRED_SETTING_KEYS: tuple[str, ...] = ("OUROBOROS_EFFORT_EVOLUTION", "OUROBOROS_EFFORT_CONSCIOUSNESS")
 # The one sentence every surface uses for that class (the RC auditor's check text
 # and the settings read seam share it, so the two never describe the migration differently).
 REVIEW_POOL_MIGRATION_CLASS_LINE = (
@@ -441,22 +443,18 @@ REVIEW_POOL_MIGRATION_CLASS_LINE = (
 )
 
 
-# The second classification INSIDE RETIRED_SETTING_KEYS: retired keys whose
-# SUCCESSOR SETTING this retirement table states, so the first-boot notice can
-# name it instead of telling the owner there is none. Membership is a decision
-# recorded HERE, next to the retirement it explains — a retired key is absent
-# from this map when the table names no successor for it (the knob's effect
-# became fixed behavior, or the replacement is a surface rather than a setting),
-# and the notice then stays neutral instead of claiming either. The pair below
-# is stated twice over: by the comment above the keys in the tuple, and by the
-# ABI-5/D04 rows in docs/ARCHITECTURE.md.
-#
-# A key whose value the read seam CONSUMES before the purge normally never reaches
-# the notice (`OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES` -> `OUROBOROS_REVIEW_MAX_CYCLES`:
-# no loss to report, so no entry). The review-lane keys are the exception that
-# DOES belong here: their migration can finish later (an error outcome keeps them
-# until the owner's catalog save) and a stray effort key can survive without lanes,
-# so the notice must be able to name their successor when one of them is dropped.
+# The second classification INSIDE RETIRED_SETTING_KEYS: retired keys whose SUCCESSOR SETTING
+# this retirement table states, so the first-boot notice can name it instead of telling the
+# owner there is none. Membership is a decision recorded HERE, next to the retirement it
+# explains — a retired key is absent from this map when the table names no successor for it
+# (the knob's effect became fixed behavior, or the replacement is a surface rather than a
+# setting), and the notice then stays neutral instead of claiming either. The pair below is
+# stated twice over: by the comment above the keys in the tuple, and by the ABI-5/D04 rows in
+# docs/ARCHITECTURE.md. A key whose value the read seam CONSUMES before the purge normally never
+# reaches the notice (`OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES` -> `OUROBOROS_REVIEW_MAX_CYCLES`:
+# no loss to report, so no entry). The review-lane keys are the exception that DOES belong
+# here: their migration can finish later (an error outcome keeps them until the owner's catalog
+# save) and a stray effort key can survive without lanes, so the notice must name their successor.
 RETIRED_SETTING_SUCCESSORS: dict[str, tuple[str, ...]] = {
     # The flat wall-clock pair was superseded by the activity model.
     "OUROBOROS_SOFT_TIMEOUT_SEC": (
@@ -465,6 +463,8 @@ RETIRED_SETTING_SUCCESSORS: dict[str, tuple[str, ...]] = {
         "OUROBOROS_TASK_IDLE_TIMEOUT_SEC", "OUROBOROS_TASK_ABS_CEILING_SEC"),
     # The review lanes and their surface keys became rows of the subagent catalog.
     **{key: ("OUROBOROS_SUBAGENTS",) for key in REVIEW_POOL_MIGRATED_SETTING_KEYS},
+    # Evolution tasks and consciousness wakes start at the top of the owner's effort range.
+    **{key: ("OUROBOROS_EFFORT_MAX",) for key in EFFORT_RANGE_RETIRED_SETTING_KEYS},
 }
 
 

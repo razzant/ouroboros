@@ -43,14 +43,18 @@ def test_initial_effort_invalid_falls_back_to_medium(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_effort_defaults_in_config():
-    """All effort keys have correct defaults in SETTINGS_DEFAULTS."""
+    """The owner's effort range ships low / medium / high; the role keys are retired."""
+    from ouroboros.settings_defaults import EFFORT_RANGE_RETIRED_SETTING_KEYS, RETIRED_SETTING_KEYS
+
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_MIN") == "low"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_TASK") == "medium"
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_EVOLUTION") == "high"
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == ""  # empty = the Task / Chat effort
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_MAX") == "high"
     # The review surface efforts are retired settings (review pool: effort is a field of
-    # the reviewer row); the resolver keeps its own "high" default for callers.
-    for retired in ("OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_EFFORT_DEEP_SELF_REVIEW"):
-        assert retired not in SETTINGS_DEFAULTS
+    # the reviewer row); the evolution/consciousness keys retired with the range.
+    for retired in ("OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
+                    "OUROBOROS_EFFORT_EVOLUTION", "OUROBOROS_EFFORT_CONSCIOUSNESS"):
+        assert retired not in SETTINGS_DEFAULTS and retired in RETIRED_SETTING_KEYS
+    assert set(EFFORT_RANGE_RETIRED_SETTING_KEYS) == {"OUROBOROS_EFFORT_EVOLUTION", "OUROBOROS_EFFORT_CONSCIOUSNESS"}
 
 
 def test_review_effort_default_carriers_stay_in_sync():
@@ -64,17 +68,21 @@ def test_review_effort_default_carriers_stay_in_sync():
 
     root = pathlib.Path(__file__).resolve().parents[1]
     editor = (root / "web" / "modules" / "subagents_settings.js").read_text(encoding="utf-8")
-    assert "export const REVIEW_POOL_DEFAULT_EFFORT = 'high';" in editor
-    assert "Default (reviews at ${REVIEW_POOL_DEFAULT_EFFORT})" in editor
+    # The UI no longer mirrors the Python constant: a marked row's Auto option says it reviews
+    # at the top of the owner's chat range (DECISIONS v3 §2), and the JS twin is gone.
+    assert "REVIEW_POOL_DEFAULT_EFFORT" not in editor
+    assert "'Auto (reviews at the top of the chat range)'" in editor
     # The surface effort keys are retired (review pool: effort lives on the reviewer
     # row); the read seam migrates them, so they are no shipped default any more.
     assert "OUROBOROS_EFFORT_REVIEW" not in SETTINGS_DEFAULTS
     assert "OUROBOROS_EFFORT_SCOPE_REVIEW" not in SETTINGS_DEFAULTS
-    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
     from ouroboros.reviewer_slot_config import ConfiguredReviewerSlot, row_effort
+    from ouroboros.settings_scales import effort_range
 
+    # An Auto reviewer reviews at the top of the owner's range (High by default), not at the
+    # frozen REVIEW_POOL_DEFAULT_EFFORT literal the skill-review fingerprint keeps.
     bare = ConfiguredReviewerSlot(slot_id="r", kind="api", target_id="openai/gpt-5.6-terra")
-    assert row_effort(bare) == REVIEW_POOL_DEFAULT_EFFORT == "high"
+    assert row_effort(bare) == effort_range()["max"] == "high"
 
 
 _RETIRED_EFFORT_KEYS = ("OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_EFFORT_DEEP_SELF_REVIEW")
@@ -88,13 +96,12 @@ def test_an_exported_retired_review_effort_key_is_inert_for_the_deep_review(monk
     import inspect
 
     from ouroboros import settings_scales
-    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
     from ouroboros.deep_self_review import main_review_row
     from ouroboros.reviewer_slot_config import row_effort
 
     for key in _RETIRED_EFFORT_KEYS:
         monkeypatch.setenv(key, "low")
-    assert row_effort(main_review_row()) == REVIEW_POOL_DEFAULT_EFFORT
+    assert row_effort(main_review_row()) == settings_scales.effort_range()["max"]
     source = inspect.getsource(settings_scales.resolve_effort)
     assert not any(key in source for key in _RETIRED_EFFORT_KEYS)
     assert "deep_self_review" not in source and "scope_review" not in source
@@ -383,11 +390,14 @@ def test_apply_settings_to_env_includes_effort_keys(monkeypatch, tmp_path):
     """apply_settings_to_env propagates all effort keys."""
     settings = {
         "OUROBOROS_EFFORT_TASK": "low",
-        "OUROBOROS_EFFORT_EVOLUTION": "medium",
+        "OUROBOROS_EFFORT_MIN": "none",
+        "OUROBOROS_EFFORT_MAX": "max",
         # Retired review-lane efforts in a stale settings dict are ghosts too (the read
-        # seam migrates them into the reviewer rows): apply must NOT export them.
+        # seam migrates them into the reviewer rows): apply must NOT export them; the
+        # retired role keys neither.
         "OUROBOROS_EFFORT_REVIEW": "high",
         "OUROBOROS_EFFORT_SCOPE_REVIEW": "low",
+        "OUROBOROS_EFFORT_EVOLUTION": "medium",
         "OUROBOROS_EFFORT_CONSCIOUSNESS": "none",
         # ABI-10: retired comma keys in a stale settings dict are ghosts —
         # apply must NOT export them (asserted below).
@@ -400,10 +410,12 @@ def test_apply_settings_to_env_includes_effort_keys(monkeypatch, tmp_path):
     }
     apply_settings_to_env(settings)
     assert os.environ.get("OUROBOROS_EFFORT_TASK") == "low"
-    assert os.environ.get("OUROBOROS_EFFORT_EVOLUTION") == "medium"
+    assert os.environ.get("OUROBOROS_EFFORT_MIN") == "none"
+    assert os.environ.get("OUROBOROS_EFFORT_MAX") == "max"
     assert os.environ.get("OUROBOROS_EFFORT_REVIEW") is None
     assert os.environ.get("OUROBOROS_EFFORT_SCOPE_REVIEW") is None
-    assert os.environ.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "none"
+    assert os.environ.get("OUROBOROS_EFFORT_EVOLUTION") is None
+    assert os.environ.get("OUROBOROS_EFFORT_CONSCIOUSNESS") is None
     # ABI-10: the retired comma-list INPUT is ignored — the env carries neither the
     # retired value nor a projected floor (the lane projection left with the lanes).
     assert os.environ.get("OUROBOROS_REVIEW_MODELS") is None
@@ -413,9 +425,9 @@ def test_apply_settings_to_env_includes_effort_keys(monkeypatch, tmp_path):
     assert os.environ.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "true"
     assert os.environ.get("OUROBOROS_RETURN_REASONING") == ""
     # cleanup
-    for k in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
+    for k in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_MIN", "OUROBOROS_EFFORT_MAX",
               "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
-              "OUROBOROS_EFFORT_CONSCIOUSNESS",
+              "OUROBOROS_EFFORT_EVOLUTION", "OUROBOROS_EFFORT_CONSCIOUSNESS",
               "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
               "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_TASK_REVIEW_MODE",
               "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "OUROBOROS_RETURN_REASONING"):

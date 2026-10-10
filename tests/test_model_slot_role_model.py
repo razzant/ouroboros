@@ -410,61 +410,75 @@ def test_subagent_id_replaces_the_public_executor_axis(tmp_path, monkeypatch):
     assert "subagent_selector_conflict" in conflict
 
 
-def test_effort_is_not_an_owner_facing_axis(tmp_path, monkeypatch):
-    """There are THREE owner-facing axes and effort is not one of them (v6.87.28).
-
-    A parent declares the WORK: write_surface (what the child may do), model_lane
-    (how good the answer must be), executor (where it runs). A public `effort` broke
-    that twice — it was a second knob for the question `model_lane` already answers,
-    so `model_lane=light` with `effort=max` pinned the cheapest model to the
-    strongest reasoning with no rule to reconcile them; and a harness route carries
-    its own effort, so a parent asking `low` against a route pinned to `xhigh` had no
-    rule for who wins. The refusal names the withdrawal instead of calling a
-    parameter that was real for four releases 'unsupported'."""
+def test_effort_is_a_request_the_dispatch_decides_inside_the_range(tmp_path, monkeypatch):
+    """A parent may ask for a child's effort (`effort`, `auto` = omitted): scheduling records
+    the REQUEST and nothing more; the dispatch decides the level inside the owner's effort
+    range (`choose_effort`) and writes the decision beside it. An unknown tier is a typed
+    argument refusal; a pinned or model-named row is named in the queued result."""
+    from ouroboros.config import EFFORT_SCALE
     from ouroboros.tools.control import _schedule_task, schedule_subagent_properties
     from tests._shared import configure_test_subagent
 
-    subagent_id = configure_test_subagent(monkeypatch)
+    subagent_id = configure_test_subagent(monkeypatch, effort="")
+    props = schedule_subagent_properties()
+    assert props["effort"]["enum"] == ["auto", *EFFORT_SCALE] and props["effort"]["default"] == "auto"
 
-    assert "effort" not in schedule_subagent_properties()
-
-    ctx = _scheduling_ctx(tmp_path / "named")
-    out = _schedule_task(ctx, objective="o", expected_output="e", effort="xhigh")
-    assert "TOOL_ARG_ERROR" in out and "effort was withdrawn" in out
-    assert "model_lane" in out
+    ctx = _scheduling_ctx(tmp_path / "unknown")
+    out = _schedule_task(ctx, subagent_id=subagent_id, objective="o", expected_output="e", effort="turbo")
+    assert "TOOL_ARG_ERROR" in out and "effort must be auto or one of" in out
     assert ctx.event_queue.empty()
 
-    # The combination that had no answer is refused at the door, not ranked.
-    ctx = _scheduling_ctx(tmp_path / "conflict")
-    out = _schedule_task(ctx, objective="o", expected_output="e",
-                         model_lane="light", effort="max")
-    assert "TOOL_ARG_ERROR" in out
-    assert ctx.event_queue.empty()
+    # `auto` and omission are the same request: none.
+    for name, kwargs in (("auto", {"effort": "auto"}), ("omitted", {})):
+        ctx = _scheduling_ctx(tmp_path / name)
+        out = _schedule_task(ctx, subagent_id=subagent_id, objective="o", expected_output="e", **kwargs)
+        assert "TOOL_ARG_ERROR" not in out and "effort requested" not in out
+        event = ctx.event_queue.get_nowait()
+        assert event["requested_effort"] == "" and "reasoning_effort" not in event
 
-    # Scheduling states intent; nothing about effort is recorded there at all.
-    ctx = _scheduling_ctx(tmp_path / "omitted")
-    assert "TOOL_ARG_ERROR" not in _schedule_task(
-        ctx, subagent_id=subagent_id, objective="o", expected_output="e",
-    )
-    assert "reasoning_effort" not in ctx.event_queue.get_nowait()
+    ctx = _scheduling_ctx(tmp_path / "asked")
+    out = _schedule_task(ctx, subagent_id=subagent_id, objective="o", expected_output="e", effort="xhigh")
+    assert "effort requested: xhigh (decided at dispatch inside my human's range)" in out
+    assert ctx.event_queue.get_nowait()["requested_effort"] == "xhigh"
+
+    pinned = configure_test_subagent(monkeypatch, subagent_id="pinned", effort="low")
+    ctx = _scheduling_ctx(tmp_path / "pinned")
+    out = _schedule_task(ctx, subagent_id=pinned, objective="o", expected_output="e", effort="xhigh")
+    assert "effort requested: xhigh; my human pinned the row at low, which stands outside Cyber Pro" in out
+    # In Cyber Pro the request outranks the pin at dispatch, so the note says so instead.
+    monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")
+    ctx = _scheduling_ctx(tmp_path / "pinned-cyber")
+    out = _schedule_task(ctx, subagent_id=pinned, objective="o", expected_output="e", effort="xhigh")
+    assert "effort requested: xhigh (Cyber Pro: it outranks my human's pin low)" in out
+    # A consciousness-origin tree capped below Cyber Pro keeps the pin, as its dispatch does.
+    ctx = _scheduling_ctx(tmp_path / "pinned-capped")
+    ctx.task_metadata = {"runtime_mode_cap": "light"}
+    out = _schedule_task(ctx, subagent_id=pinned, objective="o", expected_output="e", effort="xhigh")
+    assert "effort requested: xhigh; my human pinned the row at low, which stands outside Cyber Pro" in out
 
 
-def test_effort_is_derived_from_the_owner_setting_at_dispatch(tmp_path, monkeypatch):
-    """Removing the knob did not remove the capability: the owner still controls
-    effort through `config.resolve_effort(task_type)`, exactly as they did whenever
-    the parameter was omitted — which was the normal case."""
+def test_effort_is_decided_at_dispatch_inside_the_owners_range(tmp_path, monkeypatch):
+    """With no request a child runs at the owner's recommended level; a request is clamped
+    into the range outside Cyber Pro; the decision is written onto the record as three
+    scalars beside the level the loop reads back."""
     from ouroboros.agent import resolve_dispatch_axes
 
+    monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "pro")
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "xhigh")
+    monkeypatch.setenv("OUROBOROS_EFFORT_MAX", "xhigh")
     task = {"id": "c1", "type": "task", "delegation_role": "subagent"}
     dispatch = resolve_dispatch_axes(task)
-    assert dispatch.effort == "xhigh"
-    assert task["reasoning_effort"] == "xhigh"
-    assert task["capability_delta"]["derived_effort"] == "xhigh"
+    assert dispatch.effort == task["reasoning_effort"] == task["capability_delta"]["derived_effort"] == "xhigh"
+    assert (task["effort_level"], task["effort_requested"], task["effort_source"]) == ("xhigh", "", "auto")
 
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "low")
-    assert resolve_dispatch_axes({"id": "c2", "type": "task",
-                                  "delegation_role": "subagent"}).effort == "low"
+    monkeypatch.setenv("OUROBOROS_EFFORT_MAX", "medium")
+    asked = {"id": "c2", "type": "task", "delegation_role": "subagent", "requested_effort": "ultra"}
+    assert resolve_dispatch_axes(asked).effort == "medium"
+    assert (asked["effort_level"], asked["effort_requested"], asked["effort_source"]) == ("medium", "ultra", "auto")
+    monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")
+    cyber = {"id": "c3", "type": "task", "delegation_role": "subagent", "requested_effort": "ultra"}
+    assert resolve_dispatch_axes(cyber).effort == "ultra" and cyber["effort_source"] == "cyber"
 
 
 def test_a_stored_legacy_effort_is_ignored_with_the_reason_stated(tmp_path):
@@ -485,7 +499,7 @@ def test_a_stored_legacy_effort_is_ignored_with_the_reason_stated(tmp_path):
     assert task["reasoning_effort"] == dispatch.effort
     # ...and not dropped in silence.
     note = task["capability_delta"]["legacy_note"]
-    assert "reasoning_effort='max'" in note and "derived" in note
+    assert "reasoning_effort='max'" in note and "requested_effort" in note
     assert "Ignored on your record" in capability_delta_prompt_block(dispatch)
     # An ignored field is not a REDUCTION — nothing was taken away.
     assert task["capability_delta"]["reduced"] is False
@@ -1420,6 +1434,7 @@ def test_one_resolution_writes_every_derived_field(tmp_path, monkeypatch):
     derived = dispatch.record_fields()
     assert set(derived) == {
         "effective_model_lane", "model", "use_local_model", "reasoning_effort",
+        "effort_level", "effort_requested", "effort_source",
         "effective_executor", "executor_route", "tool_profile", "capability_delta"}
     # Nothing derived leaks into the intent half, and nothing intended is rewritten.
     assert not set(derived) & set(SUBAGENT_INTENT_FIELDS)
@@ -1702,6 +1717,7 @@ def test_switch_model_refuses_an_unknown_effort_instead_of_coercing(monkeypatch,
         "ouroboros.llm.LLMClient.available_models",
         lambda self: ["provider::main"],
     )
+    monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")  # Main applies a switch here only
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
 
     out = _switch_model(ctx, model="provider::main", effort="enormous")

@@ -29,6 +29,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/owner/runtime-mode",
     "POST /api/owner/auto-grant",
     "POST /api/owner/context-mode",
+    "POST /api/owner/effort-range",
     "POST /api/owner/safety-mode",
     "POST /api/owner/capability-ack",
     "POST /api/owner/skills/{skill}/attest-review",

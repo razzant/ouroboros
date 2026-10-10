@@ -703,7 +703,7 @@ def _review_pool_costs(items: list, snapshot: Dict[str, Any]) -> Dict[str, Dict[
 def review_pool_rows(items: list, slots: list, handles: Dict[str, str],
                      last_executions: Dict[str, Any], costs: Dict[str, Dict[str, Any]]) -> tuple:
     """(pool, excluded) of ``GET /api/review-pool``: pool slots in catalog order, each joined with its row's facts."""
-    from ouroboros.route_spec import ROUTE_KIND_AGENT_SESSION, RouteSpec, compound_session_effort
+    from ouroboros.route_spec import ROUTE_KIND_AGENT_SESSION, ROUTE_KIND_API_MODEL, RouteSpec, model_named_effort
 
     by_id = {str(item.get("subagent_id") or ""): item for item in items}
     pool = []
@@ -713,13 +713,14 @@ def review_pool_rows(items: list, slots: list, handles: Dict[str, str],
         route = item.get("route") or {}
         target = str(route.get("target_id") or "")
         session = route.get("kind") == ROUTE_KIND_AGENT_SESSION
-        compound = session and compound_session_effort(RouteSpec(ROUTE_KIND_AGENT_SESSION, target))
+        named = model_named_effort(RouteSpec(ROUTE_KIND_AGENT_SESSION if session else ROUTE_KIND_API_MODEL, target))
         pool.append({
             "subagent_id": row_id, "handle": handles.get(row_id, row_id),
             "route": {"kind": str(route.get("kind") or ""), "target_id": target,
                       "credential_profile_id": str(route.get("credential_profile_id") or "")},
             "effort": str(getattr(slot, "effort", "") or ""),
-            "effort_source": "row" if item.get("effort") else ("compound" if compound else "default"),
+            # Who decides the level with no order: the model name, the owner's pin, or Auto (the range's top).
+            "effort_source": "model_name" if named else ("pin" if item.get("effort") else "auto"),
             "delivery": "session" if session else ("packet" if item.get("delivery") == "packet" else "native"),
             "processing_preference": str(item.get("processing_preference") or ""),
             "access": str(item.get("access") or ("full" if session else "")),
@@ -1209,6 +1210,21 @@ def _network_settings_error(request: Request, current: dict, old_settings: dict)
     return None
 
 
+def _effort_range_tiers(body: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+    """Lower-case each supplied effort-range key (benchmarks and Cyber write TASK here) and
+    name the first non-tier; order is not judged on this path, the read is tolerant
+    (`POST /api/owner/effort-range` is the strict writer)."""
+    from ouroboros.settings_scales import EFFORT_RANGE_KEYS, EFFORT_SCALE
+
+    for effort_key in (key for key in EFFORT_RANGE_KEYS if key in body):
+        tier = str(body.get(effort_key) or "").strip().lower()
+        if tier not in EFFORT_SCALE:
+            return body, f"{effort_key} must be one of: {', '.join(EFFORT_SCALE)}."
+        body = dict(body)
+        body[effort_key] = tier
+    return body, ""
+
+
 def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
     # Everything below the write is a POST-commit step. The broad handler at the
     # bottom used to answer a failure there with "400, nothing saved" while the
@@ -1265,6 +1281,9 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 return unsaved_error(f"{bound_key} must be a positive integer or 'unlimited'.", 400)
             body = dict(body)
             body[bound_key] = UNLIMITED if bound is None else bound
+        body, effort_error = _effort_range_tiers(body)
+        if effort_error:
+            return unsaved_error(effort_error, 400)
         # The catalog is judged as THIS save produces it: twins, then the review pool.
         subagents_key = "OUROBOROS_SUBAGENTS"
         catalog_saved = subagents_key in body and body.get(subagents_key) not in (None, "")

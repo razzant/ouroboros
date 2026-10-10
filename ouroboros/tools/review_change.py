@@ -268,13 +268,16 @@ class ComposedPanel:
 
 
 def _effort_facts(order: str, seats: Sequence[Any], own: Dict[str, str]) -> Dict[str, Any]:
-    """``reviewer_effort`` as this wave's ORDER (``plan_task``'s rule): it outranks every
-    seat's own effort but a compound route's, which keeps the effort it encodes
-    (``declared_effort`` names where the order applied)."""
+    """``reviewer_effort`` as this wave's ORDER (``plan_task``'s rule, ``row_effort``): it
+    decides every Auto seat, clamped into the owner's effort range; a pinned seat keeps its
+    pin outside Cyber Pro and a model-named seat always keeps its level (``declared_effort``
+    names where the order applied; ``weaker_than_configured`` compares the EFFECTIVE level)."""
+    by_id = {slot.slot_id: slot for slot, _parts, _extra in seats}
     applied = [slot.slot_id for slot, _parts, _extra in seats if order and slot.declared_effort]
     return {"order": order, "applied": applied,
             "not_applied": [slot.slot_id for slot, _parts, _extra in seats if order and not slot.declared_effort],
-            "weaker_than_configured": [seat for seat in applied if effort_rank(order) < effort_rank(own.get(seat, ""))]}
+            "weaker_than_configured": [seat for seat in applied
+                                       if effort_rank(by_id[seat].effort) < effort_rank(own.get(seat, ""))]}
 
 
 def compose_panel(request: ReviewChangeRequest, *, adds_only: bool) -> ComposedPanel:

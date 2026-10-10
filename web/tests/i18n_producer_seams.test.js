@@ -6,7 +6,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const PRODUCERS = ['task_phase_chip.js', 'chat_decision.js', 'chat_media.js', 'task_continue.js', 'chat_markdown.js', 'cancel_presentation.js'];
+// composer_owner_controls.js is not listed: the composer is overlay-translated chrome, and its
+// dynamic title and aria-valuetext already go through fmt()/tr().
+const PRODUCERS = ['task_phase_chip.js', 'chat_decision.js', 'chat_media.js', 'task_continue.js', 'chat_markdown.js', 'cancel_presentation.js',
+    'effort_chip.js'];
 // Literal owner-visible text handed straight to the DOM: an assignment or an attribute write.
 const PATTERNS = [
     /\.(?:textContent|title|placeholder|innerText)\s*=\s*(['"`])([A-Z][^'"`\n]{2,})\1/,

@@ -337,6 +337,13 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
         ("cache_affinity", "cacheKey"),
         ("service_tier", "serviceTier"),
     ) if parameters.get(key) is not None and parameters.get(key) != ""}
+    from ouroboros.route_spec import harness_model_named_effort
+
+    # A level in the model name is the route's identity: the wire never carries a
+    # different separate effort beside it (the host's request stays recorded as asked).
+    named_effort = harness_model_named_effort(target["source"], target["resolved_model"])
+    if named_effort:
+        options["reasoningEffort"] = named_effort
     processing = parameters.get("_processing_submission", target.get("processing_preference"))
     if processing and processing in target.get("processing_preferences", []):
         options["processingPreference"] = processing

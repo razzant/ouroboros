@@ -95,6 +95,17 @@ def runtime_environ() -> dict[str, str]:
     return env
 
 
+def live_effort_range() -> dict[str, str]:
+    """The owner's CURRENT effort range (``settings_scales.effort_range`` over the settings
+    document as it reads now), for a participant started INSIDE a running task — a review
+    wave, a direct ``delegate_start``: it reads this once at its start while the task that
+    started it keeps the range of its own snapshot (``runtime_setting``)."""
+    from ouroboros import config
+    from ouroboros.settings_scales import effort_range
+
+    return effort_range(config.load_settings())
+
+
 def runtime_settings(*, settings_reader=None) -> dict:
     """Runtime document view; owner writers continue using config.load_settings."""
     from ouroboros import config

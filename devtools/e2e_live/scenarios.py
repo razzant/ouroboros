@@ -159,7 +159,7 @@ STAND_REVIEW_PANEL = {"enabled": True, "items": [
     _ROW("stand-advisory", "anthropic/claude-sonnet-5"),  # unmarked: an author may still name it for a preflight
 ]}
 STAND_PANEL_SETTINGS = {"OUROBOROS_SUBAGENTS": json.dumps(STAND_REVIEW_PANEL), "OUROBOROS_EFFORT_TASK": "medium",
-                        "OUROBOROS_EFFORT_EVOLUTION": "medium"}
+                        "OUROBOROS_EFFORT_MAX": "medium"}  # the stand's evolution starts at the range's top: medium
 
 
 def _git(args: list[str], cwd: pathlib.Path) -> str:

@@ -34,9 +34,22 @@ _ADDED_OWNERS = {
     "RESTART_REQUIRED_SETTINGS": settings_scales,
     # An explicit root starting effort is validated against the effort scale it names.
     "requested_effort": settings_scales,
-    # The review pool's effort of last resort (PR-3): a marked row with no effort of
-    # its own and no compound slug reviews at this value, never the lane-era surface setting.
+    # The lane-era global review effort, frozen as the legacy skill-review fingerprint literal.
     "REVIEW_POOL_DEFAULT_EFFORT": settings_scales,
+    # The owner's effort range: its keys, the owner-facing tiers, the tolerant read, the Cyber
+    # Pro predicate, the clamp, the one effort decision and its recorded fact.
+    "EFFORT_RANGE_KEYS": settings_scales,
+    "OWNER_EFFORT_TIERS": settings_scales,
+    "EFFORT_SOURCES": settings_scales,
+    "_tier": settings_scales,
+    "effort_range": settings_scales,
+    "clamp_effort_into": settings_scales,
+    "choose_effort": settings_scales,
+    "effort_fact": settings_scales,
+    "effort_fact_says": settings_scales,
+    "effort_fact_phrase": settings_scales,
+    # The retired role effort keys the range replaced (the RC auditor's note class).
+    "EFFORT_RANGE_RETIRED_SETTING_KEYS": settings_defaults,
     "get_finalization_grace_sec": runtime_limits,
     "PROMOTE_CONFIRM_WAIT_SEC": runtime_limits,
     "get_promote_confirm_wait_sec": runtime_limits,

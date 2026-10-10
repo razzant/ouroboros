@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 import re
 from types import SimpleNamespace
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Tuple, Optional
 
 
 def _strict_int(value: Any) -> int | None:
@@ -297,6 +297,7 @@ def record_started_custody(
     baseline_sha: str, authority_source: str,
     resource_ref: Dict[str, Any], capture_mode: str, processing: Mapping[str, Any] | None = None,
     continuation_of: str = "", capture_id: str = "", snapshot_task_id: str = "", max_seconds_basis: str = "",
+    row_effort: Optional[str] = None,
 ) -> bool:
     """Write the one STARTED custody row, including the source binding.
 
@@ -356,6 +357,7 @@ def record_started_custody(
         entry,
         shape={
             "effort": route.effort, "access": access, "mode": authority.mode,
+            **({"row_effort": str(row_effort)} if row_effort is not None else {}),
             "isolation": authority.isolation, "delegated": authority.delegated,
             "root": root, "max_seconds": seconds, "max_seconds_basis": str(max_seconds_basis or ""),
             "capture_mode": capture_mode,

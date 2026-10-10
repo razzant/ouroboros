@@ -105,6 +105,7 @@ from ouroboros.contracts.skill_manifest import (  # noqa: E402
     parse_skill_manifest_text,
 )
 from ouroboros.settings_defaults import (  # noqa: E402
+    EFFORT_RANGE_RETIRED_SETTING_KEYS,
     RETIRED_COMMA_LIST_SETTING_KEYS,
     RETIRED_SETTING_KEYS,
     RETIRED_SETTING_SUCCESSORS,
@@ -290,8 +291,11 @@ def build_scope() -> Dict[str, Any]:
         checks.append({
             "id": "retired-setting",
             "key": key,
-            "since": ABI if key in RETIRED_IN_THIS_ABI else "pre-7.0",
-            "behavior": "stripped-on-load",
+            "since": ABI if key in RETIRED_IN_THIS_ABI else (
+                "effort-range" if key in EFFORT_RANGE_RETIRED_SETTING_KEYS else "pre-7.0"),
+            # The effort-range keys lose no value: their roles start at the range's top.
+            "behavior": ("stripped-on-load; the effort range's top replaces it"
+                         if key in EFFORT_RANGE_RETIRED_SETTING_KEYS else "stripped-on-load"),
             "migration": (
                 "remove the key; the successor settings are %s — move the value there "
                 "before upgrading" % ", ".join(RETIRED_SETTING_SUCCESSORS[key])
@@ -389,6 +393,16 @@ def _audit_settings(data_root: pathlib.Path, findings: List[Dict[str, str]]) -> 
                 "move the reviewer configuration to the review pool — reviewer rows "
                 "of the subagent catalog (OUROBOROS_SUBAGENTS, Settings → Agents) — "
                 "BEFORE upgrading; otherwise the install gets the shipped default panel",
+            ))
+        elif key in EFFORT_RANGE_RETIRED_SETTING_KEYS:
+            # A deliberate retirement with nothing to carry: the role reads the range's top.
+            findings.append(_finding(
+                "retired-setting", SEV_NOTE, f"settings.json:{key}",
+                "retired role effort key present; stripped on load after upgrade — evolution "
+                "tasks and consciousness wakes start at the top of the effort range "
+                "(OUROBOROS_EFFORT_MAX), so no value is lost",
+                "nothing to do before upgrading; raise OUROBOROS_EFFORT_MAX afterwards if those "
+                "roles should run stronger than the range's top",
             ))
         else:
             findings.append(_finding(

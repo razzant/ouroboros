@@ -338,7 +338,8 @@ def test_settings_js_reads_and_writes_phase2_keys():
 
 
 def test_chat_context_mode_toggle_reports_owner_endpoint_errors():
-    src = (REPO / "web" / "modules" / "chat.js").read_text(encoding="utf-8")
+    # The composer's owner controls (context mode, effort range) live in one module.
+    src = (REPO / "web" / "modules" / "composer_owner_controls.js").read_text(encoding="utf-8")
     assert "/api/owner/context-mode" in src
     assert "resp.json()" in src
     assert "showToast(message, 'error')" in src

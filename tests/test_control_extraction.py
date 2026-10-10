@@ -76,7 +76,7 @@ _MOVED_OWNERS = {
     "schedule_subagent_param_names": control_subagent_spec,
     "_INTERNAL_SCHEDULE_OPTIONS": control_subagent_spec,
     "_validated_schedule_fields": control_subagent_spec,
-    "RETIRED_SCHEDULE_PARAMS": control_subagent_spec,
+    "requested_child_effort": control_subagent_spec,
     "_record_scheduled_subagent": control_scheduling,
     "_emit_swarm_fanout": control_scheduling,
     "_subagent_slot_note": control_scheduling,

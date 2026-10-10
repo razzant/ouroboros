@@ -53,6 +53,8 @@ import {
 import { openConfirmDialog } from './confirm_dialog.js';
 import { chooseAndSendReview } from './review_command.js';
 import { bindEnterSubmit } from './ui_interactions.js';
+import { createComposerOwnerControls } from './composer_owner_controls.js';
+import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import {
     captureLiveCardPhaseState,
@@ -309,6 +311,7 @@ export function createChatInstance({
     const scrollActivityDot = scrollBottomBtn?.querySelector('.chat-scroll-activity-dot');
     let nestedSubagentsExpanded = false;
     let _remoteActivityDepth = 0;
+    let ownerControls = null;
 
     // Instance lifecycle (P3): destroy() flips this so rAF loops and late async
     // continuations become no-ops instead of touching a removed DOM subtree.
@@ -559,6 +562,7 @@ export function createChatInstance({
         if (ctxBtn && typeof data?.context_mode === 'string') {
             ctxBtn.dataset.contextMode = ['nano', 'low', 'max'].includes(data.context_mode) ? data.context_mode : 'max';
         }
+        ownerControls?.syncState(data);
         const budget = headerBudgetPresentation(data);
         const budgetText = byId('budget-text');
         const budgetFill = byId('budget-bar-fill');
@@ -1764,6 +1768,7 @@ export function createChatInstance({
             record.executorChip = summary.executorChip;
         }
         if (summary.modelExecution) record.modelExecution = summary.modelExecution;
+        if (summary.effort) record.effort = summary.effort;
         if (Number.isInteger(summary.toolCalls)) record.toolCalls = summary.toolCalls;
         record._lastFrameMeta = Array.isArray(summary.meta) ? summary.meta : [];
         if (rawTs) record.latestSourceTs = rawTs;
@@ -1934,7 +1939,8 @@ export function createChatInstance({
             model,
             ...overrides,
         });
-        return summary ? withTaskCostMeta(summary, evt, { rawTs }) : null;
+        // The child's effort fact rides every frame that states a level (live, terminal, replay).
+        return summary ? withTaskCostMeta({ ...summary, ...(evt.effort_level ? { effort: effortFact(evt) } : {}) }, evt, { rawTs }) : null;
     }
 
     // A child's title is its lineage identity plus, for twins (same displayed identity
@@ -2891,6 +2897,10 @@ export function createChatInstance({
 
     async function sendMessage(planMode = false) {
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
+        if (ownerControls.hasPendingSave()) {  // an effort change lands before the message it would govern
+            setSendBusy(true, 'Saving');
+            try { if (!(await ownerControls.pendingSave())) return; } finally { setSendBusy(false); }
+        }
         let text = input.value.trim();
         const hasAttachments = composer.count > 0;
         let uploadedAttachments = [];
@@ -2994,38 +3004,9 @@ export function createChatInstance({
 
     swarmBtn?.addEventListener('click', () => setSwarm(!swarmArmed()));
 
-    // Context-mode quick toggle: the owner endpoint hot-applies the setting
-    // without a restart; Max -> Low is accepted only while Ouroboros is idle.
-    const contextModeBtn = byId('context-mode');
-    contextModeBtn?.addEventListener('click', async (event) => {
-        const seg = event.target.closest('.chat-seg');
-        if (!seg || contextModeBtn.dataset.disabled === 'true') return;
-        const next = ['nano', 'low', 'max'].includes(seg.dataset.mode) ? seg.dataset.mode : 'max';
-        const current = ['nano', 'low', 'max'].includes(contextModeBtn.dataset.contextMode) ? contextModeBtn.dataset.contextMode : 'max';
-        if (next === current) return;
-        contextModeBtn.dataset.disabled = 'true';
-        const postMode = (mode) => apiFetch('/api/owner/context-mode', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode }),
-        });
-        try {
-            const resp = await postMode(next);
-            if (resp.ok) {
-                contextModeBtn.dataset.contextMode = next;
-            } else {
-                let message = 'Could not change context mode.';
-                try { const p = await resp.json(); if (p?.error) message = p.error; } catch {}
-                showToast(message, 'error');
-            }
-        } catch (e) {
-            showToast(`Could not change context mode: ${e.message || e}`, 'error');
-            /* leave the current value; /api/state refresh will resync */
-        } finally {
-            contextModeBtn.dataset.disabled = 'false';
-            refreshHeaderControlState(true);
-        }
-    });
+    // Nano/Low/Max and the effort range write global owner settings; one module owns them.
+    ownerControls = createComposerOwnerControls({ row: page.querySelector('.chat-toolbar-row'), byId, apiFetch, showToast,
+        saveEffortRange: apiClient.ownerEffortRange, refreshState: refreshHeaderControlState, onLayout: () => updateMessagesPadding() });
 
     // Arrow wrappers avoid MouseEvent leaking into sendMessage(planMode).
     sendBtn.addEventListener('click', () => sendMessage(swarmArmed()));
@@ -3889,6 +3870,7 @@ export function createChatInstance({
             if (destroyed) return;
             destroyed = true;
             composer.destroy();
+            ownerControls.destroy();
             unconfirmed.release();
             emptyWelcome?.dispose();
             readReceipt.cancel();

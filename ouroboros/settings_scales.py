@@ -10,7 +10,7 @@ of it, so an unknown value can never reach a consumer.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from ouroboros.settings_defaults import SETTINGS_DEFAULTS
 from ouroboros.settings_integrity import runtime_setting
@@ -20,9 +20,14 @@ from ouroboros.settings_integrity import runtime_setting
 # vendor tier above `max`; above-ceiling tiers adapt per route (API wire recovery / delegated).
 EFFORT_SCALE: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
-# A review-pool row saved with an empty effort reviews at this tier (the former
-# `OUROBOROS_EFFORT_REVIEW` shipped default). The row's own effort, when set, and
-# a wave's explicit order both outrank it; a compound route keeps its own tier.
+# The owner's effort range: three flat keys read as one ordered triple (``effort_range``).
+EFFORT_RANGE_KEYS: tuple[str, ...] = ("OUROBOROS_EFFORT_MIN", "OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_MAX")
+# The tiers the owner's range control offers; `minimal` stays a runtime tier a stored value may name.
+OWNER_EFFORT_TIERS: tuple[str, ...] = tuple(tier for tier in EFFORT_SCALE if tier != "minimal")
+# Who decided one actor's effort (``choose_effort``); task records and chat frames carry it verbatim.
+EFFORT_SOURCES: tuple[str, ...] = ("auto", "pin", "model_name", "cyber")
+# The lane-era global review effort, kept ONLY as the frozen legacy skill-review fingerprint
+# literal (``skill_review_cycles``): an empty reviewer row reviews at the range's top, never here.
 REVIEW_POOL_DEFAULT_EFFORT = "high"
 
 
@@ -58,31 +63,111 @@ def requested_effort(value: Any) -> str:
     return tier
 
 
-def resolve_effort(task_type: str) -> str:
-    """Return the configured reasoning effort for the given task type.
+def _tier(value: Any) -> str:
+    """``value`` as an EFFORT_SCALE tier, '' for blank or unknown."""
+    text = str(value or "").strip().lower()
+    return text if text in EFFORT_SCALE else ""
 
-    Review is not a task type here: a reviewer's effort is a field of its pool
-    row (``reviewer_slot_config.row_effort``, falling back to
-    ``REVIEW_POOL_DEFAULT_EFFORT``); the lane-era surface keys are retired and
-    an exported one is not read.
+
+def effort_range(settings: Optional[Mapping[str, Any]] = None) -> dict[str, str]:
+    """The owner's effort range ``{min, recommended, max}`` — THE tolerant read.
+
+    ``recommended`` is ``OUROBOROS_EFFORT_TASK``, the level Main works at. An unknown or
+    blank value takes its key's shipped default; ``min`` is never above and ``max`` never
+    below ``recommended`` (a document that carries only TASK=high reads low/high/high).
+    Snapshot-aware through ``runtime_setting`` (a running task keeps the range it started
+    with) unless a settings document is given (``settings_integrity.live_effort_range``
+    reads the owner's current one for a participant starting inside a running task). A
+    read never rewrites the document.
     """
-    t = (task_type or "").lower().strip()
+    def read(key: str) -> str:
+        default = str(SETTINGS_DEFAULTS[key])
+        raw = settings.get(key, default) if settings is not None else runtime_setting(key, default)
+        return _tier(raw) or default
 
-    if t == "evolution":
-        key = "OUROBOROS_EFFORT_EVOLUTION"
-        default = "high"
-    elif t == "consciousness":
-        # An empty slot is Main's effort (owner decision 16.09, 1=A): a wake-up is an
-        # ordinary Main turn and shares its request shape; a set value is honored (В25=B).
-        raw = str(runtime_setting("OUROBOROS_EFFORT_CONSCIOUSNESS", "") or "").strip().lower()
-        return raw if raw in EFFORT_SCALE else resolve_effort("task")
-    else:
-        # Legacy INITIAL_REASONING_EFFORT is retired; use EFFORT_TASK.
-        key = "OUROBOROS_EFFORT_TASK"
-        default = "medium"
+    low, recommended, high = (read(key) for key in EFFORT_RANGE_KEYS)
+    return {"min": min(low, recommended, key=effort_rank), "recommended": recommended,
+            "max": max(high, recommended, key=effort_rank)}
 
-    raw = runtime_setting(key, default)
-    return raw if raw in EFFORT_SCALE else default
+
+def clamp_effort_into(value: str, rng: Mapping[str, str]) -> str:
+    """``value`` at the nearest bound of ``rng`` when it lies outside; unknown passes through."""
+    rank = effort_rank(value)
+    if rank < 0:
+        return str(value or "").strip().lower()
+    if rank < effort_rank(rng["min"]):
+        return rng["min"]
+    if rank > effort_rank(rng["max"]):
+        return rng["max"]
+    return EFFORT_SCALE[rank]
+
+
+def choose_effort(
+    requested: Any = "", *, pin: Any = "", model_named: Any = "",
+    default_top: bool = False, binds: Optional[bool] = None,
+    rng: Optional[Mapping[str, str]] = None,
+) -> tuple[str, str]:
+    """THE effort decision for any actor: ``(level, source)``, ``source`` in EFFORT_SOURCES.
+
+    A level encoded in the model name wins in every mode. An owner pin — a row's ``effort``,
+    an explicit root effort — wins over ``requested`` while the range binds; in Cyber Pro an
+    explicit request beats the pin and silence still sits on it. Otherwise the request is
+    clamped into the range while it binds (``auto``) and applied as asked in Cyber Pro
+    (``cyber``); with no request the role default applies: the range's ``recommended``, or
+    its ``max`` for ``default_top`` roles (reviewers, evolution, consciousness). Blank or
+    unknown tiers read as absent; callers refuse an unknown request on their own surface.
+    ``binds`` defaults to the runtime mode (``runtime_mode_policy.effort_range_binds``);
+    ``rng`` to the task's snapshot read.
+    """
+    requested, pin, model_named = _tier(requested), _tier(pin), _tier(model_named)
+    if model_named:
+        return model_named, "model_name"
+    if binds is None:
+        from ouroboros.runtime_mode_policy import effort_range_binds
+
+        binds = effort_range_binds()
+    binding = bool(binds)
+    if pin and (binding or not requested):
+        return pin, "pin"
+    rng = dict(rng) if rng is not None else effort_range()
+    if requested:
+        return (clamp_effort_into(requested, rng), "auto") if binding else (requested, "cyber")
+    return (rng["max"] if default_top else rng["recommended"]), "auto"
+
+
+def effort_fact(requested: Any, level: str, source: str) -> dict[str, str]:
+    """One actor's recorded effort decision ``{requested, applied, source}``."""
+    return {"requested": _tier(requested), "applied": str(level or ""), "source": str(source or "")}
+
+
+def effort_fact_says(fact: Mapping[str, Any]) -> bool:
+    """Whether a decision is worth a line: a request that was moved into the range or set
+    aside by a pin or a model name. A request that simply applied, a pin or a name deciding
+    with nothing asked, and the plain default are noise (the fact's fields still ride)."""
+    requested = _tier(fact.get("requested"))
+    return bool(requested) and requested != str(fact.get("applied") or "")
+
+
+def effort_fact_phrase(fact: Mapping[str, Any], rng: Optional[Mapping[str, str]] = None) -> str:
+    """The one clause for a decision worth saying (``effort_fact_says``); '' otherwise."""
+    if not effort_fact_says(fact):
+        return ""
+    requested = _tier(fact.get("requested"))
+    applied, source = str(fact.get("applied") or ""), str(fact.get("source") or "")
+    if source == "model_name":
+        return f"effort {applied}: the level in the model name; requested {requested} not applied"
+    if source == "pin":
+        return f"effort {applied}: pinned by my human; requested {requested} not applied"
+    bounds = dict(rng) if rng is not None else effort_range()
+    return f"effort {applied}: your request {requested} moved into my human's range {bounds['min']}..{bounds['max']}"
+
+
+def resolve_effort(task_type: str) -> str:
+    """The effort a role starts on with no pin, request or model-named level: the range's
+    recommended level for ordinary work (a chat turn, a root task, a Light synthesis), its
+    top for an evolution task and a consciousness wake (``effort_range``)."""
+    rng = effort_range()
+    return rng["max"] if (task_type or "").strip().lower() in ("evolution", "consciousness") else rng["recommended"]
 
 
 # Prompt-cache TTL scale (owner decision 2026-08-08): 'default' = bare markers (provider default tier), '5m'/'1h' =

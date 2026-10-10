@@ -635,7 +635,7 @@ import { accountRowFacts } from './harness_accounts.js';
     function reviewerSummary(row) {
         const account = row.route?.credential_profile_id;
         return [row.route?.target_id || row.subagent_id, account ? `Account: ${account}` : '',
-            row.effort ? `Effort: ${row.effort}` : '',
+            `Effort: ${row.effort || 'Auto'}`,
             `Processing: ${processingIntentLabel(row.processing_preference, state.processingPreference)}`].filter(Boolean).join(' · ');
     }
 

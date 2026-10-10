@@ -205,29 +205,34 @@ def test_the_skill_fingerprint_names_native_delivery_only_where_a_row_reads(clea
 # --- effort -------------------------------------------------------------------------------
 
 
-def test_pool_effort_is_the_row_then_a_compound_slug_then_the_pool_default(clean_env):
-    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
-
+def test_pool_effort_is_the_model_name_then_the_pin_then_the_top_of_the_range(clean_env):
     clean_env.setenv("OUROBOROS_EFFORT_REVIEW", "low")  # the lane-era surface setting; not the pool's
+    clean_env.setenv("OUROBOROS_EFFORT_MAX", "xhigh")  # the range's top is the Auto reviewer's level
     clean_env.setenv(SUBAGENTS_SETTING, _roster(
         _row("pinned", "m/one", effort="medium"),
-        _row("cursor-row", "cursor=cursor-grok-4.6-xhigh-fast", kind="agent_session"),
+        _row("cursor-row", "cursor=cursor-grok-4.6-max-fast", kind="agent_session"),
         _row("bare", "m/two"),
         _row("plain-session", "codex=gpt-5.6-sol", kind="agent_session"),
+        _row("named-api", "claudexor::agy=gemini-3.1-pro-low"),
     ))
-    assert rsc.commit_triad_delivery()["efforts"] == ["medium", "xhigh", REVIEW_POOL_DEFAULT_EFFORT,
-                                                      REVIEW_POOL_DEFAULT_EFFORT]
-    assert REVIEW_POOL_DEFAULT_EFFORT == "high"
-    assert [s.declared_effort for s in rsc.review_pool_slots()] == ["", "", "", ""]
+    assert rsc.commit_triad_delivery()["efforts"] == ["medium", "max", "xhigh", "xhigh", "low"]
+    assert [s.declared_effort for s in rsc.review_pool_slots()] == ["", "", "", "", ""]
+    clean_env.setenv("OUROBOROS_EFFORT_MAX", "medium")
+    assert rsc.commit_triad_delivery()["efforts"] == ["medium", "max", "medium", "medium", "low"]
 
 
-def test_a_declared_plan_effort_outranks_row_pins_but_not_compound_slugs(clean_env):
-    """The envelope's reviewer_effort is an ORDER for this plan alone: the commit
-    gate, acceptance and skill-review identities are byte-identical around it."""
+def test_a_declared_plan_effort_decides_auto_rows_clamped_and_leaves_pins_and_names(clean_env, monkeypatch):
+    """The envelope's reviewer_effort is an ORDER for this plan alone: it decides the Auto
+    rows, clamped into the owner's range; a pinned row keeps its pin outside Cyber Pro and
+    a model-named row always keeps its level. In Cyber Pro the order beats the pin, not the
+    name, unclamped. The commit gate, acceptance and skill-review identities are
+    byte-identical around it."""
+    from ouroboros import config
     from ouroboros.skill_review_cycles import skill_review_contract_fingerprint
     from ouroboros.tools import plan_review_runtime
     from ouroboros.tools.commit_gate import commit_review_contract_fingerprint
 
+    clean_env.setenv("OUROBOROS_EFFORT_MAX", "high")
     clean_env.setenv(SUBAGENTS_SETTING, _roster(
         _row("cursor-row", "cursor=cursor-grok-4.6-xhigh-fast", kind="agent_session"),
         _row("plain-row", "codex=gpt-5.6-sol", kind="agent_session"),
@@ -236,13 +241,17 @@ def test_a_declared_plan_effort_outranks_row_pins_but_not_compound_slugs(clean_e
     before = (rsc.commit_triad_delivery(), commit_review_contract_fingerprint(),
               skill_review_contract_fingerprint(["m"], delivery=rsc.commit_triad_delivery()))
     declared = plan_review_runtime.plan_review_slots(default_effort="max")
-    assert [s.effort for s in declared] == ["xhigh", "max", "max"]  # the pinned `low` row runs the order
-    assert [s.declared_effort for s in declared] == ["", "max", "max"]
+    assert [s.effort for s in declared] == ["xhigh", "high", "low"]  # Auto row: the order clamped to the top
+    assert [s.declared_effort for s in declared] == ["", "max", ""]
+    assert [s.effort for s in plan_review_runtime.plan_review_slots(default_effort="none")] == ["xhigh", "low", "low"]
     assert [s.effort for s in plan_review_runtime.plan_review_slots()] == ["xhigh", "high", "low"]
     assert [s.slot_id for s in declared] == ["cursor-row", "plain-row", "pinned-row"]
     after = (rsc.commit_triad_delivery(), commit_review_contract_fingerprint(),
              skill_review_contract_fingerprint(["m"], delivery=rsc.commit_triad_delivery()))
     assert before == after and before[0]["efforts"] == ["xhigh", "high", "low"]
+    monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "cyber_pro")
+    cyber = plan_review_runtime.plan_review_slots(default_effort="max")
+    assert [s.effort for s in cyber] == ["xhigh", "max", "max"] and [s.declared_effort for s in cyber] == ["", "max", "max"]
 
 
 def test_compound_effort_stabilizes_replay_identity_against_global_drift(clean_env):
@@ -453,24 +462,25 @@ def test_a_persisted_reviewer_choice_for_a_row_that_is_gone_is_a_typed_refusal_n
                                   credential_profile_id="", use_local=False)
 
 
-def test_t3_plan_review_falls_back_to_the_pool_default_effort_and_the_canon_says_so(clean_env):
-    """F6: a bare pool row under a plan with no order runs at the pool's
-    ``REVIEW_POOL_DEFAULT_EFFORT`` — the lane-era ``OUROBOROS_EFFORT_REVIEW`` tunes
-    nothing — and the architecture plan-review section plus the
-    builder's own docstring name that fallback instead of the retired setting."""
+def test_t3_plan_review_auto_rows_run_at_the_range_top_and_the_canon_says_so(clean_env):
+    """F6: a bare pool row under a plan with no order runs at the top of the owner's
+    effort range — the lane-era ``OUROBOROS_EFFORT_REVIEW`` tunes nothing — and the
+    architecture plan-review section plus the builder's own docstring name the range,
+    never a hidden pool default."""
     import pathlib
 
-    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
     from ouroboros.reference_books import load_reference_book, read_book_section
     from ouroboros.tools.plan_review_runtime import plan_review_slots
 
     clean_env.setenv("OUROBOROS_EFFORT_REVIEW", "low")
+    clean_env.setenv("OUROBOROS_EFFORT_MAX", "xhigh")
     clean_env.setenv(SUBAGENTS_SETTING, _roster(_row("bare", "m/two"), _row("pinned", "m/one", effort="medium")))
-    assert [s.effort for s in plan_review_slots("")] == [REVIEW_POOL_DEFAULT_EFFORT, "medium"]
-    assert [s.effort for s in plan_review_slots("xhigh")] == ["xhigh", "xhigh"]
+    assert [s.effort for s in plan_review_slots("")] == ["xhigh", "medium"]
+    assert [s.effort for s in plan_review_slots("ultra")] == ["xhigh", "medium"]  # clamped; the pin stays
+    assert [s.effort for s in plan_review_slots("low")] == ["low", "medium"]
 
     book = load_reference_book(pathlib.Path(__file__).resolve().parents[1], "architecture")
     section = read_book_section(book, "Plan construction and review").text
-    assert "`REVIEW_POOL_DEFAULT_EFFORT`" in section
+    assert "effort range" in section and "REVIEW_POOL_DEFAULT_EFFORT" not in section
     assert "`reviewer_effort`" in section
-    assert "REVIEW_POOL_DEFAULT_EFFORT" in plan_review_slots.__doc__
+    assert "range" in plan_review_slots.__doc__ and "REVIEW_POOL_DEFAULT_EFFORT" not in plan_review_slots.__doc__

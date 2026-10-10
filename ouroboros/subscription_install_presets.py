@@ -548,13 +548,6 @@ def _actor(
     )
 
 
-def _task_effort(settings: Mapping[str, Any]) -> str:
-    effort = str(settings.get("OUROBOROS_EFFORT_TASK") or "medium").strip().lower()
-    from ouroboros.config import EFFORT_SCALE
-
-    return effort if effort in EFFORT_SCALE else "medium"
-
-
 def compile_available_subagents(
     session_rows: Sequence[Mapping[str, Any]],
     settings: Mapping[str, Any],
@@ -564,7 +557,9 @@ def compile_available_subagents(
     Install discovery leaves ``credential_profile_id`` absent so Claudexor can
     rotate accounts.  The bounded singleton migration may supply the same
     resolved row with its historical pin; both paths deliberately share this
-    one composition policy.
+    one composition policy. A minted ACTOR row carries no ``effort`` — Auto, so
+    the owner's effort range decides — unless its model id spells the level
+    (``_EFFORT_IN_MODEL_ID``); reviewer seats keep their explicit levels.
     """
     actors: list[ConfiguredSubagent] = []
     diagnostics: list[Dict[str, Any]] = []
@@ -588,34 +583,28 @@ def compile_available_subagents(
             row_id, recommendation = (
                 f"alternative-builder-{harness}", ALTERNATIVE_RECOMMENDATION,
             )
-        actors.append(_actor(row_id, recommendation, route, str(row["effort"])))
+        actors.append(_actor(row_id, recommendation, route,
+                             str(row["effort"]) if row.get("effort_in_model_id") else ""))
         seen.add(identity)
 
     main, light = _effective_api_models(settings)
-    main_effort = _task_effort(settings)
     if not actors and (main or light):
-        primary_api = main or light
-        route = RouteSpec(ROUTE_KIND_API_MODEL, primary_api)
-        actors.append(_actor(
-            "primary-builder", PRIMARY_RECOMMENDATION, route,
-            main_effort if main else "low",
-        ))
+        route = RouteSpec(ROUTE_KIND_API_MODEL, main or light)
+        actors.append(_actor("primary-builder", PRIMARY_RECOMMENDATION, route, ""))
         seen.add((route.kind, route.target_id, ""))
 
     if light:
         route = RouteSpec(ROUTE_KIND_API_MODEL, light)
         identity = (route.kind, route.target_id, "")
         if identity not in seen:
-            actors.append(_actor("fast-scout", SCOUT_RECOMMENDATION, route, "low"))
+            actors.append(_actor("fast-scout", SCOUT_RECOMMENDATION, route, ""))
             seen.add(identity)
 
     if len(session_rows) == 1 and main:
         route = RouteSpec(ROUTE_KIND_API_MODEL, main)
         identity = (route.kind, route.target_id, "")
         if identity not in seen:
-            actors.append(_actor(
-                "independent-perspective", INDEPENDENT_RECOMMENDATION, route, main_effort,
-            ))
+            actors.append(_actor("independent-perspective", INDEPENDENT_RECOMMENDATION, route, ""))
             seen.add(identity)
 
     if len(session_rows) == 1 and not (main or light):

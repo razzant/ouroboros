@@ -162,6 +162,8 @@ def _manual_picker(tmp_path, monkeypatch, **effort):
         _install_queue, _pool_ready, _supervisor_ctx, _tool_ctx,
     )
 
+    if "reasoning_effort" in effort:  # a root Ouroboros creates itself takes an explicit effort in Cyber Pro only
+        monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")
     q, _state, workers = _install_queue(tmp_path, monkeypatch)
     _pool_ready(monkeypatch, workers)
     workspace = tmp_path.with_name(tmp_path.name + "-project")

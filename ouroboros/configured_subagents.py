@@ -714,9 +714,9 @@ def _append_legacy_model_rows(
     if not str(settings.get(light_key) or "").strip():
         light_key, light_slot = "OUROBOROS_MODEL", "MAIN"
     light = _legacy_model_target(settings, light_slot, light_key)
-    for row_id, recommendation, model, effort in (
+    for row_id, recommendation, model, effort in (  # Auto rows: the owner's effort range decides
         ("legacy-heavy", PRIMARY_RECOMMENDATION, heavy, ""),
-        ("fast-scout", SCOUT_RECOMMENDATION, light, "low"),
+        ("fast-scout", SCOUT_RECOMMENDATION, light, ""),
     ):
         if include_ids is not None and row_id not in include_ids:
             continue

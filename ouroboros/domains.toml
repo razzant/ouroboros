@@ -247,6 +247,7 @@ D20 = "Presence"
 "ouroboros/gateway/models.py" = "D11"
 "ouroboros/gateway/onboarding.py" = "D11"
 "ouroboros/gateway/onboarding_host.py" = "D11"
+"ouroboros/gateway/owner_effort.py" = "D11"
 "ouroboros/gateway/owner_settings.py" = "D11"
 "ouroboros/gateway/presence_settings.py" = "D11"
 "ouroboros/gateway/desktop_autostart.py" = "D11"
@@ -961,6 +962,7 @@ lazy_only = [
   "D03->D09",
   "D03->D10",
   "D03->D11",
+  "D03->D13",
   "D03->D14",
   "D03->D16",
   "D03->D17",
@@ -991,6 +993,7 @@ lazy_only = [
   "D08->D02",
   "D08->D10",
   "D08->D11",
+  "D08->D13",
   "D09->D02",
   "D09->D04",
   "D09->D05",

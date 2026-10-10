@@ -42,7 +42,7 @@ def test_api_all_fields_form_queues_without_changing_write_surface(registry, acc
         "scope_paths": [], "protected_paths_grant": False, "external_tool_grants": [],
         "allowed_origins": [], "delegation_intent": "", "may_mutate": False,
         "may_fan_out": True, "max_children": 0, "requested_depth": 0,
-        "required_capabilities": [], "deadline_at": "", "acceptance_claims": [],
+        "required_capabilities": [], "deadline_at": "", "acceptance_claims": [], "effort": "auto",
     }
     schema = registry.get_schema_by_name("schedule_subagent")["function"]["parameters"]
     assert set(args) == set(schema["properties"])

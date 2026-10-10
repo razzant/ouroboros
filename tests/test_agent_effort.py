@@ -38,39 +38,32 @@ def test_task_effort_invalid_falls_back_to_medium():
 
 
 # ---------------------------------------------------------------------------
-# Evolution
+# Evolution and consciousness: the top of the owner's effort range
 # ---------------------------------------------------------------------------
 
-def test_evolution_effort_default_is_high():
-    """Default evolution effort is 'high'."""
+def test_evolution_effort_default_is_the_range_top():
+    """An evolution task starts at the top of the range: the shipped `high`."""
     with patch.dict(os.environ, {}, clear=True):
         assert resolve_effort("evolution") == "high"
 
 
-def test_evolution_effort_configurable():
-    """Evolution effort can be overridden via OUROBOROS_EFFORT_EVOLUTION."""
-    with patch.dict(os.environ, {"OUROBOROS_EFFORT_EVOLUTION": "medium"}, clear=True):
+def test_evolution_effort_follows_the_range_top_even_above_high():
+    """The top of the range decides, even above High; the retired role key is inert."""
+    with patch.dict(os.environ, {"OUROBOROS_EFFORT_MAX": "ultra", "OUROBOROS_EFFORT_EVOLUTION": "medium"}, clear=True):
+        assert resolve_effort("evolution") == "ultra"
+    with patch.dict(os.environ, {"OUROBOROS_EFFORT_MAX": "medium"}, clear=True):
         assert resolve_effort("evolution") == "medium"
 
 
-# ---------------------------------------------------------------------------
-# Consciousness
-# ---------------------------------------------------------------------------
-
-def test_consciousness_effort_default_inherits_task_effort():
-    """An empty consciousness slot is Main's effort: a wake-up is an ordinary Main turn."""
+def test_consciousness_effort_is_the_range_top_never_below_recommended():
+    """A wake-up starts at the top of the range; the tolerant read keeps that top at or
+    above the recommended level, and the retired role key changes nothing."""
     with patch.dict(os.environ, {}, clear=True):
-        assert resolve_effort("consciousness") == resolve_effort("task")
+        assert resolve_effort("consciousness") == "high"
     with patch.dict(os.environ, {"OUROBOROS_EFFORT_TASK": "xhigh"}, clear=True):
         assert resolve_effort("consciousness") == "xhigh"
-    with patch.dict(os.environ, {"OUROBOROS_EFFORT_TASK": "xhigh", "OUROBOROS_EFFORT_CONSCIOUSNESS": "bogus"}, clear=True):
-        assert resolve_effort("consciousness") == "xhigh"  # an invalid value is treated as empty
-
-
-def test_consciousness_effort_configurable():
-    """Consciousness effort can be overridden via OUROBOROS_EFFORT_CONSCIOUSNESS."""
-    with patch.dict(os.environ, {"OUROBOROS_EFFORT_CONSCIOUSNESS": "none"}, clear=True):
-        assert resolve_effort("consciousness") == "none"
+    with patch.dict(os.environ, {"OUROBOROS_EFFORT_MAX": "max", "OUROBOROS_EFFORT_CONSCIOUSNESS": "none"}, clear=True):
+        assert resolve_effort("consciousness") == "max"
 
 
 # ---------------------------------------------------------------------------
@@ -81,4 +74,4 @@ def test_task_type_is_case_insensitive():
     """Task type matching is case-insensitive."""
     with patch.dict(os.environ, {}, clear=True):
         assert resolve_effort("EVOLUTION") == "high"
-        assert resolve_effort("CONSCIOUSNESS") == resolve_effort("task")
+        assert resolve_effort("CONSCIOUSNESS") == "high"

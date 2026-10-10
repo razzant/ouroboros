@@ -360,11 +360,26 @@ def _initial_effort_for(task: Dict[str, Any], task_type: str) -> str:
     slot: the role owns its effort the way it owns its account binding.
     """
     stored = str(task.get("reasoning_effort") or "").strip().lower()
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if str(task.get("delegation_role") or "").lower() != "subagent":
+        # A level encoded in the model name wins over a pin and a default (``choose_effort``).
+        named = main_model_named_effort(metadata)
+        if named:
+            return named
     if stored in EFFORT_SCALE:
         return stored
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     role = str(metadata.get("model_role") or "").strip().lower()
     return resolve_effort(role or task_type)
+
+
+def main_model_named_effort(task_metadata: Dict[str, Any]) -> str:
+    """The level the task's own model name carries — the role slot's model or Main's
+    (``route_spec.api_model_named_effort``) — '' when the model names none."""
+    from ouroboros.route_spec import api_model_named_effort
+
+    override = model_role_slot_override(task_metadata if isinstance(task_metadata, dict) else {})
+    model = override[0] if override else str(runtime_setting("OUROBOROS_MODEL", "") or "")
+    return api_model_named_effort(model)
 
 
 def model_role_slot_override(task_metadata: Dict[str, Any]) -> Optional[Tuple[str, bool]]:
@@ -605,4 +620,12 @@ def capability_delta_prompt_block(dispatch: Optional[SubagentDispatch]) -> str:
         )
     if delta.get("legacy_note"):
         parts.append(f"Ignored on your record: {delta['legacy_note']}.")
+    # The effort decision, when it moved or set aside the parent's request or a pin/name decided.
+    from ouroboros.settings_scales import effort_fact_phrase
+
+    fact = getattr(dispatch, "effort_fact", None)
+    phrase = effort_fact_phrase(fact) if isinstance(fact, dict) and fact else ""
+    if phrase:
+        whose = "Your delegated run's" if delta.get("effective_executor") == "harness" else "Your"
+        parts.append(f"{whose} {phrase}.")
     return "[CAPABILITY DELTA]\n" + "\n".join(parts) if parts else ""

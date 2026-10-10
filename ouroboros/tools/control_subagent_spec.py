@@ -27,6 +27,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
     a returned schema cannot corrupt every later `get_tools()`."""
     from ouroboros.tool_access import SUBAGENT_CAPABILITIES
     from ouroboros.configured_subagents import SESSION_ACCESS_LOWERING
+    from ouroboros.settings_scales import EFFORT_SCALE
 
     return {
         "subagent_id": {
@@ -113,9 +114,16 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "items": {"type": "string", "enum": list(SUBAGENT_CAPABILITIES)},
             "description": "Required capabilities (e.g. shell/vcs/write/service), reconciled with the selected profile before spawning. Use this enum, not prose.",
         },
-        # Per-call effort is retired. The selected Available-subagent row owns its
-        # effort; a second request knob could contradict that immutable row or the
-        # compound session route it pins.
+        "effort": {
+            "type": "string", "enum": ["auto", *EFFORT_SCALE], "default": "auto",
+            # `auto` is the provider-safe spelling of omission (a strict schema may fill it).
+            "description": (
+                "This child's reasoning effort, inside my human's effort range: auto/omitted = the "
+                "recommended level; a request outside the range runs at its nearest bound. A row my "
+                "human pinned or a level in its model name keeps that level outside Cyber Pro; the "
+                "result says so. For a session row this is the delegated run's level."
+            ),
+        },
         "deadline_at": {
             "type": "string",
             "description": "ISO-8601 UTC instant after which this child's work is no longer useful. NARROWING ONLY: the earlier of this and the parent's deadline wins; omission inherits the parent's.",
@@ -200,6 +208,9 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
             f"⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_mode must be one of: {allowed}. "
             "memory_mode=shared is disabled for live local subagents until a sanitized shared-context mode exists."
         )
+    requested_effort, effort_error = requested_child_effort(params.get("effort"), "schedule_subagent")
+    if effort_error:
+        return {}, effort_error
     directory_options = {}
     if "directory_strategy" in params:
         strategy = params["directory_strategy"]
@@ -278,6 +289,7 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
         "context": str(params.get("context") or "").strip(),
         "constraints": str(params.get("constraints") or "").strip(),
         "memory_mode": memory_mode, "may_mutate": params.get("may_mutate", False),
+        "requested_effort": requested_effort,
         "acceptance_claims": acceptance_claims,
         "resource_policy": resource_policy,
         "parent_contract": parent,
@@ -286,4 +298,16 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
     }, ""
 
 
-RETIRED_SCHEDULE_PARAMS: Dict[str, str] = {"effort": "reasoning_effort"}
+def requested_child_effort(value: Any, tool_name: str) -> tuple[str, str]:
+    """``(tier, "")`` for a child's ``effort`` argument — ``auto``, blank and omission all mean
+    no request — or ``("", refusal)`` for an unknown tier (``settings_scales.choose_effort``
+    decides the level at dispatch; the schedule result and the child record carry the request)."""
+    from ouroboros.settings_scales import EFFORT_SCALE
+
+    text = str(value or "").strip().lower()
+    if text in ("", "auto"):
+        return "", ""
+    if text not in EFFORT_SCALE:
+        return "", (f"⚠️ TOOL_ARG_ERROR ({tool_name}): effort must be auto or one of: "
+                    f"{', '.join(EFFORT_SCALE)} (got {value!r}).")
+    return text, ""

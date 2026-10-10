@@ -268,12 +268,13 @@ def test_the_model_catalog_is_facts_only_and_keyed_by_handle():
     api, session = catalog["rows"]
     assert api == {
         "subagent_id": "google/gemini-3.8-flash", "route_class": "API model",
-        "requested_effort": "(not explicitly set)", "review_eligible": False, "recommended_use": verbatim,
+        "effort": "auto", "review_eligible": False, "recommended_use": verbatim,
     }
     assert list(session) == [
-        "subagent_id", "route_class", "requested_effort", "requested_target",
+        "subagent_id", "route_class", "effort", "requested_target",
         "mutating_access", "credential_profile_id", "review_eligible", "recommended_use",
     ], "facts lead, the owner's words ride last"
+    assert session["effort"] == "xhigh"
     assert session["subagent_id"] == "codex=gpt-6-astra/xhigh/@koshak"
     assert session["requested_target"] == "codex=gpt-6-astra"
     text = json.dumps(catalog)

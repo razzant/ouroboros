@@ -50,6 +50,21 @@ def disclosable_capability_delta(data: Dict[str, Any]) -> Dict[str, Any]:
     return delta if (delta.get("reduced") or delta.get("legacy_note")) else {}
 
 
+def disclosable_effort_fact(data: Dict[str, Any]) -> Dict[str, str]:
+    """The child's effort decision when it has something to SAY — the parent's request was
+    moved into the range or set aside by a pin or a model name (``effort_fact_says``) —
+    else ``{}``. The same predicate on both parent surfaces (``[SUBTASK_OUTCOME]`` and the
+    compact batch projection); a request that simply applied, or the plain default, is noise."""
+    from ouroboros.settings_scales import effort_fact_says
+
+    fact = {"requested": data.get("effort_requested"), "applied": data.get("effort_level"),
+            "source": data.get("effort_source")}
+    if not effort_fact_says(fact):
+        return {}
+    return {"level": str(fact["applied"] or ""), "requested": str(fact["requested"] or ""),
+            "source": str(fact["source"] or "")}
+
+
 def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None) -> str:
     ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
     summary: Dict[str, Any] = {
@@ -110,6 +125,8 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None)
     _delta = disclosable_capability_delta(data)
     if _delta:
         summary["capability_delta"] = _delta
+    if _effort := disclosable_effort_fact(data):
+        summary["effort"] = _effort
     if isinstance(data.get("artifact_bundle"), dict):
         summary["artifact_bundle"] = data.get("artifact_bundle")
     if ledger:
@@ -1135,6 +1152,8 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
     _delta = disclosable_capability_delta(data)
     if _delta:
         projected["capability_delta"] = _delta
+    if _effort := disclosable_effort_fact(data):
+        projected["effort"] = _effort
     # Delegation honesty (Q1A, 2026-08-10 amendments): whether a
     # harness-dispatched child ACTUALLY delegated is a handoff fact the
     # fan-out parent absorbs here — the e9108a09 incident hid nine

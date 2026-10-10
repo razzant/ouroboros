@@ -681,6 +681,11 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
     locality and account policy with the owner's live wait-card choice for that
     role; "wait" also keeps a refusal there on the primary's own wait instead of
     paid alternatives. Effort intent is untouched.
+
+    Effort follows the owner's range (``_effort_switch``): a Main focus — a chat turn,
+    an ordinary root — keeps the level it works at outside Cyber Pro and the reply says
+    where deeper thinking goes; a child, an evolution task or a consciousness wake moves
+    inside the range; a pinned or model-named focus keeps its level.
     """
     from ouroboros.config import EFFORT_SCALE
     from ouroboros.llm import LLMClient
@@ -730,15 +735,71 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         ctx.route_wait_on_primary, ctx.active_role_override = False, None  # an explicit route ends a declared wait
         changes.append(f"model={model}{' (local)' if use_local else ''}")
 
+    effort_note = ""
     if requested_effort:
-        ctx.active_effort_override = requested_effort
-        changes.append(f"effort={requested_effort}")
+        applied, effort_note = _effort_switch(ctx, requested_effort)
+        if applied:
+            ctx.active_effort_override = applied
+            changes.append(f"effort={applied}")
 
     if not changes:
+        if effort_note:
+            return effort_note
         return (f"Current available models: {', '.join(available)}. Pass model and/or effort to switch, "
                 "or primary='return'/'wait' to go back to this turn's primary route.")
 
-    return f"OK: switching to {', '.join(changes)} on next round."
+    return f"OK: switching to {', '.join(changes)} on next round." + (f" {effort_note}" if effort_note else "")
+
+
+def _effort_switch(ctx: ToolContext, requested: str) -> tuple[str, str]:
+    """``(level to apply or "", one sentence)`` for ``switch_model(effort=…)`` under the
+    owner's effort range (``settings_scales.choose_effort``). The decision never rewrites
+    the dispatch record or a session leaf's effort fact: it is this focus's next round."""
+    from ouroboros.route_spec import RouteSpec, model_named_effort
+    from ouroboros.runtime_mode_policy import effort_range_binds
+    from ouroboros.settings_scales import choose_effort, effort_range, resolve_effort
+
+    metadata = getattr(ctx, "task_metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    child = str(metadata.get("delegation_role") or "").lower() == "subagent"
+    task_type = str(getattr(ctx, "current_task_type", "") or metadata.get("type") or "").lower()
+    strong_role = task_type == "evolution" or str(metadata.get("model_role") or "").lower() == "consciousness"
+    binds = effort_range_binds(metadata)
+    rng = effort_range()
+    holding = str(getattr(ctx, "active_effort", "") or "")
+    if child:
+        snapshot = metadata.get("configured_subagent") if isinstance(metadata.get("configured_subagent"), dict) else {}
+        route = snapshot.get("route") if isinstance(snapshot.get("route"), dict) else {}
+        named = model_named_effort(RouteSpec(str(route.get("kind") or "api_model"), str(route.get("target_id") or "")))
+        pin = str(snapshot.get("effort") or "")
+        leaf = (" Your delegated run keeps the level it started at; this moves your own rounds."
+                if str(metadata.get("effective_executor") or metadata.get("requested_executor") or "") == "harness" else "")
+        level, source = choose_effort(requested, pin=pin, model_named=named, binds=binds, rng=rng)
+        if source == "model_name":
+            return "", f"effort={requested} not applied: your row's model name carries {level}, which holds in every mode.{leaf}"
+        if source == "pin":
+            return "", f"effort={requested} not applied: my human pinned your row at {level}; it holds outside Cyber Pro.{leaf}"
+        moved = f" (requested {requested}, moved into my human's range {rng['min']}..{rng['max']})" if level != requested else ""
+        return level, (moved + leaf).strip() if (moved or leaf) else ""
+    from ouroboros.agent_dispatch import main_model_named_effort
+
+    named = main_model_named_effort(metadata)
+    if named:
+        return "", f"effort={requested} not applied: the level in the model name ({named}) holds in every mode."
+    if strong_role:
+        level, source = choose_effort(requested, pin=str(metadata.get("reasoning_effort") or ""), binds=binds, rng=rng)
+        if source == "pin":
+            return "", f"effort={requested} not applied: my human pinned this task at {level}; it holds outside Cyber Pro."
+        moved = f" (requested {requested}, moved into my human's range {rng['min']}..{rng['max']})" if level != requested else ""
+        return level, moved.strip()
+    if not binds:
+        return requested, ""
+    pinned = str(metadata.get("reasoning_effort") or "")
+    holding = holding or pinned or resolve_effort("task")
+    where = (f"the level my human pinned for this task ({holding})" if pinned
+             else f"my human's recommended level ({holding})")
+    return "", (f"effort={requested} not applied: Main works at {where}; deeper thinking is "
+                "delegated — schedule_subagent(effort=…).")
 
 
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,

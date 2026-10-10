@@ -802,6 +802,11 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
     slots, slot_error = _plan_slots_for_wave(ctx, slots_fn, existing, resume_in_flight)
     if slot_error:
         return slot_error
+    # The owner baseline for `ordered_weaker`: the same builder with no order, read right beside
+    # the seats (no engine call between, so one owner range decides both) and reused on resume.
+    owner_efforts = None if not request.reviewer_effort else (
+        (existing or {}).get("owner_efforts") if resume_in_flight else
+        {str(s.slot_id): str(s.effort or "") for s in _plan_review_slots()})
     if not slots:
         return _plan_unavailable(
             ctx, "ERROR: No review models configured. Mark at least one catalog row "
@@ -903,11 +908,6 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
     # excluded slots stay configured rows: they count in the quorum denominator
     rows = list(rows) + oversize_rows + health_skip_rows + kept
     _attach_continuation_restart_delta(rows, {**continuation_restarted, **(delivery.get("continuation_restarted") or {})})
-    # The owner baseline for `ordered_weaker`: the same builder with no order, recorded at
-    # dispatch and reused on resume (never recomputed from the live setting at collection).
-    owner_efforts = None if not request.reviewer_effort else (
-        (existing or {}).get("owner_efforts") if resume_in_flight else
-        {str(s.slot_id): str(s.effort or "") for s in _plan_review_slots()})
     wave, seen_after, agg = _synthesize_plan_review_wave(
         rows, state=state, spec=spec, request_plan=request.plan, fingerprint=fingerprint,
         previous=previous, manifest=manifest, manifest_hash=manifest_hash,

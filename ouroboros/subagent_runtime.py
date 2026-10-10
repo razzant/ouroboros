@@ -31,8 +31,10 @@ from ouroboros.configured_subagents import (
     roster_handles,
 )
 from ouroboros.delegate_shared import delegate_payload
-from ouroboros.route_spec import route_spec_dict
-from ouroboros.settings_integrity import SETTINGS_ENV_LOCK, TaskSettingsSnapshot, runtime_setting
+from ouroboros.route_spec import RouteSpec, model_named_effort, route_spec_dict
+from ouroboros.runtime_mode_policy import effort_range_binds
+from ouroboros.settings_integrity import SETTINGS_ENV_LOCK, TaskSettingsSnapshot, live_effort_range, runtime_setting
+from ouroboros.settings_scales import choose_effort, effort_fact, effort_range
 from ouroboros.subagent_history import snapshot_handle
 from ouroboros.tools.tool_result import ToolResult, _replace_tool_result
 from ouroboros.utils import utc_now_iso
@@ -111,10 +113,14 @@ def model_visible_subagent_catalog(settings: Mapping[str, Any]) -> dict[str, Any
             continue
         session = row.route.is_session
         handle = handles[row.subagent_id]
+        # The row's effort as the mind may act on it: ``auto`` (the range decides, recommended by
+        # default), the owner's pin, or the level its model name carries (``effort_source``).
+        named = model_named_effort(row.route)
         projected: dict[str, Any] = {
             "subagent_id": handle,
             "route_class": "Agent session" if session else "API model",
-            "requested_effort": row.effort or "(not explicitly set)",
+            "effort": named or row.effort or "auto",
+            **({"effort_source": "model_name"} if named else {}),
         }
         if row.route.target_id != handle:  # a bare handle already IS the target
             projected["requested_target" if session else "requested_model"] = row.route.target_id
@@ -655,8 +661,14 @@ def resolve_configured_actor_dispatch(
     route_spec = snapshot["route"]
     route_kind = str(route_spec.get("kind") or "")
     route_target = str(route_spec.get("target_id") or "").strip()
-    selected_effort = str(snapshot.get("effort") or "").strip().lower()
-    derived_effort = selected_effort or resolve_effort(task_type or str(task.get("type") or "task"))
+    # THE effort decision for this child, from the row (the owner's pin, a level in the model
+    # name) and the parent's request, inside the range this task started with (``choose_effort``).
+    requested_effort = str(task.get("requested_effort") or "")
+    derived_effort, effort_source = choose_effort(
+        requested_effort, pin=snapshot.get("effort"),
+        model_named=model_named_effort(RouteSpec(route_kind, route_target)),
+        binds=effort_range_binds(task.get("metadata")), rng=effort_range())
+    fact = effort_fact(requested_effort, derived_effort, effort_source)
     constraint = task.get("task_constraint") if isinstance(task.get("task_constraint"), dict) else {}
     profile = profile_from_task_constraint(constraint)
     observed_at = utc_now_iso()
@@ -702,7 +714,7 @@ def resolve_configured_actor_dispatch(
             executor_resolution=SubagentExecutorResolution(
                 "native", executor, reason=unavailable or "requested_native",
             ),
-            availability=availability,
+            availability=availability, effort_fact=fact,
         )
 
     parsed = parse_subagent_harness(route_target)
@@ -710,9 +722,9 @@ def resolve_configured_actor_dispatch(
         unavailable, reset_at = "configured_session_route_invalid", ""
         exact_route = DelegationRoute(route_id="")
     else:
+        # The LEAF runs the decided level; the nanny below keeps the parent's.
         exact_route = dataclass_replace(
-            parsed,
-            effort=selected_effort or parsed.effort,
+            parsed, effort=derived_effort,
             profile_id=str(route_spec.get("credential_profile_id") or ""),
         )
         from ouroboros.contracts.task_constraint import normalize_task_constraint
@@ -777,6 +789,7 @@ def resolve_configured_actor_dispatch(
         lane=lane, effort=nanny_effort, executor=executor,
         route=route_target if executor == "harness" else "", profile=profile,
         delta=delta, executor_resolution=resolution, availability=availability,
+        effort_fact=fact,
     )
 
 
@@ -810,8 +823,9 @@ def current_subagent_alternatives(exclude_id: str = "") -> list[dict[str, Any]]:
     ]
 
 
-def exact_session_binding(raw_snapshot: Any) -> tuple[dict[str, Any], Any]:
-    """Validate one snapshotted session row and construct its exact route."""
+def exact_session_binding(raw_snapshot: Any, leaf_effort: Optional[str] = None) -> tuple[dict[str, Any], Any]:
+    """Validate one snapshotted session row and construct its exact route; ``leaf_effort``
+    is the decided level (``choose_effort``) the run starts at, else the row's own pin."""
 
     snapshot = validate_subagent_snapshot(raw_snapshot)
     route_spec = snapshot["route"]
@@ -830,7 +844,7 @@ def exact_session_binding(raw_snapshot: Any) -> tuple[dict[str, Any], Any]:
         )
     return snapshot, dataclass_replace(
         route,
-        effort=str(snapshot.get("effort") or route.effort),
+        effort=str(snapshot.get("effort") or route.effort) if leaf_effort is None else str(leaf_effort),
         profile_id=str(route_spec.get("credential_profile_id") or ""),
     )
 
@@ -877,7 +891,8 @@ def prepare_delegate_start_actor(
             "A fresh delegated start requires an explicit agent_session subagent_id. "
             "Only retry_of may replay a selectorless immutable invocation.",
         )
-    snapshot, route = exact_session_binding(selected_snapshot)
+    fact = selection.get("effort_fact") if isinstance(selection.get("effort_fact"), dict) else {}
+    snapshot, route = exact_session_binding(selected_snapshot, leaf_effort=fact.get("applied") if fact else None)
     selected_id = str(snapshot.get("selected_subagent_id") or "")
     config_fingerprint = str(snapshot.get("config_fingerprint") or "")
     if custody.custody_log_unreadable(drive_root):
@@ -913,6 +928,9 @@ def prepare_delegate_start_actor(
         "work_order_fingerprint": work_order_fingerprint,
         "authority_fingerprint": authority_fingerprint,
         "compiled_work_order": bool(selection.get("compiled_work_order")),
+        # The row's pin ("" = Auto) stays the receipt identity; the decided level is the fact.
+        "row_effort": str(snapshot.get("effort") or ""),
+        "effort_fact": dict(fact),
     }, None
 
 
@@ -984,6 +1002,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         )
     selected_id = str(options.pop("subagent_id", "") or "").strip()
     selected_snapshot = options.pop("snapshot", None)
+    effort_request = options.pop("effort", None)
+    effort_choice = options.pop("effort_fact", None)
     compiled_work_order = bool(options.pop("compiled_work_order", False))
     canonical_work_order_fingerprint = str(
         options.pop("work_order_fingerprint", "") or ""
@@ -1018,6 +1038,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             )
         if selected_snapshot is not None:
             selected_snapshot = validate_subagent_snapshot(selected_snapshot, access=access)
+        effort_choice = _leaf_effort_choice(ctx, selected_snapshot, effort_request, effort_choice, retry_token)
     except SubagentSelectionError as exc:
         from ouroboros.delegate_shared import _fail
 
@@ -1028,6 +1049,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
     token = _EXACT_START_SELECTION.set({
         "snapshot": selected_snapshot,
         "compiled_work_order": compiled_work_order,
+        "effort_fact": effort_choice,
     })
     try:
         from ouroboros.tools.delegate import _delegate_start
@@ -1068,6 +1090,44 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         return _fail("delegate_start", exc.code, exc.detail)
     finally:
         _EXACT_START_SELECTION.reset(token)
+
+
+def _leaf_effort_choice(ctx: Any, snapshot: Any, request: Any, choice: Any, retry_token: str) -> dict[str, Any]:
+    """The delegated LEAF's effort fact for this start, ONE carrier from the request to the
+    start body (``prepare_delegate_start_actor`` binds the route to its ``applied`` level).
+
+    A configured session hands over the fact its dispatch decided; a direct start decides
+    now (``choose_effort`` over the row's pin, its model-named level and the request, against
+    the owner's CURRENT range); a retry replays the stored body — ``auto``/omission is fine,
+    another concrete level is a typed conflict. An unknown tier is a typed argument refusal.
+    """
+    from ouroboros.tools.control_subagent_spec import requested_child_effort
+
+    requested, error = requested_child_effort(request, "delegate_start")
+    if error:
+        raise SubagentSelectionError("effort_invalid", error.split(": ", 1)[-1])
+    if retry_token:
+        if not requested:
+            return {}
+        from ouroboros import delegate_custody as custody
+
+        stored = custody.invocation_record(custody.custody_root(ctx), retry_token) or {}
+        body = stored.get("request") if isinstance(stored.get("request"), dict) else {}
+        if str(body.get("effort") or "") == requested:
+            return {}
+        raise SubagentSelectionError(
+            "retry_selector_conflict",
+            "retry_of replays its recorded effort; omit effort (or pass auto) to retry.")
+    if isinstance(choice, dict) and choice and not requested:
+        return dict(choice)
+    if not isinstance(snapshot, dict):
+        return {}
+    route = snapshot.get("route") if isinstance(snapshot.get("route"), dict) else {}
+    level, source = choose_effort(
+        requested, pin=snapshot.get("effort"),
+        model_named=model_named_effort(RouteSpec(str(route.get("kind") or ""), str(route.get("target_id") or ""))),
+        binds=effort_range_binds(getattr(ctx, "task_metadata", None)), rng=live_effort_range())
+    return effort_fact(requested, level, source)
 
 
 def _mark_actor_physical_start(ctx: Any, result: "ToolResult") -> None:
@@ -1180,6 +1240,8 @@ def delegate_start_entry(ctx: Any, prompt: str, _resolved_binding: Any = None, *
             "compiled_work_order": True,
             "work_order_fingerprint": str(bootstrap.get("work_order_fingerprint") or ""),
             "_coordination_context": str(prompt or ""),
+            # The dispatch's effort decision reaches the first physical start unchanged.
+            "effort_fact": dict(bootstrap.get("effort_fact") or {}),
             **{key: bootstrap[key] for key in ("directory_strategy", "scope_paths")
                if key in bootstrap},
         })

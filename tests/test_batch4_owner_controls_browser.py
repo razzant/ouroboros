@@ -3,36 +3,41 @@
 Each test runs the shared ``direct_server_with_data`` fixture (a copied candidate
 checkout, a disposable data root, the in-process mock model) with ONE worker and
 managed roots seeded as a queued snapshot, the way a previous server generation
-leaves them. The mock model is scripted per root, so every state below is
-produced by the product itself, never written as a result:
+leaves them when the application was quit. Accepted work survives that stop
+under its own id and waits for the owner's explicit Resume (owner S1, quiz
+a524d73f), so each test first resumes the roots it drives. The mock model is
+scripted per root, so every state below is produced by the product itself,
+never written as a result:
 
-``test_pause_warning_restart_retention_and_resume``
+``test_pause_restart_retention_and_resume``
   ALPHA runs with its first model call held (sent work); the owner presses
-  **Pause** in the chat card's menu and the tree is ``pausing``. BOTH Restart
-  buttons (chat header, Settings "Restart now") open the SAME confirmation, and
-  it warns that one task is still pausing. The held call returns; ALPHA parks and
-  the tree is saved; BRAVO starts, CHARLIE queues behind it. The confirmation no
-  longer warns; the owner confirms, and the real owner Restart re-executes the
-  server. ALPHA is STILL paused (not cancelled, not auto-resumed), never-started
-  CHARLIE is held under its own id, and the owner's Resume (chat card and
-  Activity row) runs each to completion.
+  **Pause** in the chat card's menu. Pause stops waiting for that call and saves
+  ALPHA at its last ready point (owner S1, quiz 9312a119): the tree is saved,
+  BRAVO starts and CHARLIE queues behind it while the provider still holds the
+  call, and its late answer runs no tool. BOTH Restart buttons (chat header,
+  Settings "Restart now") open the SAME confirmation; the owner confirms, and the
+  real owner Restart re-executes the server. Restart returns active work and the
+  runnable queue (owner S1, quiz d2f7532b): BRAVO continues from its saved state
+  under its own id and CHARLIE is admitted as ordinary queued work, both to
+  completion without a click, while ALPHA is STILL paused (not cancelled, not
+  auto-resumed) until the owner's Resume runs it to completion. Its card says
+  ``Paused · owner pause`` once saved, including after Restart.
 
-The cards say ``Pausing… · owner pause`` while sent work finishes and
-``Paused · owner pause`` once saved, including after Restart. A never-started
-root held by Restart says ``Paused · after restart``; the mixed header says ``Paused``.
-
-``test_continue_is_offered_after_an_owner_restart``
-  The owner Restart interrupts a running root; the Restart door records its
-  typed cause, so its card offers Continue, the successor runs to completion,
-  and after a reload the collapsed card points to it without being opened.
+``test_owner_restart_returns_running_work_under_its_own_id``
+  The owner Restart stops a running root whose working state is saved; the
+  restarted generation returns it under the SAME id (no Continue, no
+  successor), it finishes, and after a reload its card still says Done.
 
 ``test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload``
-  DELTA is running when the server process dies (SIGKILL); the next boot fences
-  it as a technical interruption. Continue with a LOST answer (the admission
-  lands, its response is dropped) says "not confirmed"; pressing again answers
-  the SAME successor; after a reload the collapsed card still points to it
-  (the history projection carries the offer; nothing has to be opened);
-  exactly one successor exists.
+  DELTA is running when the server process dies (SIGKILL): the next boot shows
+  its saved work held under its own id until the owner's Resume (owner S1:
+  after a crash, save and show, continue manually). Resumed, DELTA runs again
+  until its worker process dies (SIGKILL), which existing policy keeps
+  terminal as a technical interruption. Continue with a LOST answer (the
+  admission lands, its response is dropped) says "not confirmed"; pressing
+  again answers the SAME successor; after a reload the collapsed card still
+  points to it (the history projection carries the offer; nothing has to be
+  opened); exactly one successor exists.
 
 ``test_the_whole_tree_pause_is_offered_only_on_a_root``
   A root runs and a child of it is queued: the Activity row of the root offers
@@ -66,7 +71,6 @@ _TEXT = {ALPHA: "ALPHA-7Q: inventory the available tools, then report.",
          BRAVO: "BRAVO-7Q: draft the weekly summary.",
          CHARLIE: "CHARLIE-7Q: tidy the notes.",
          DELTA: "DELTA-7Q: collect the open questions."}
-PAUSING_LINE = "1 task is still pausing"
 _RESTART_SENDS = """(() => {
     const send = WebSocket.prototype.send;
     window.__restartSends = 0;
@@ -96,12 +100,13 @@ def _user_text(message):
 
 class _ScriptedModel:
     """The mock model's answers per root: a held first ALPHA call that returns a tool
-    call, BRAVO and DELTA calls held until teardown, and ``OK`` for everything else."""
+    call, BRAVO's first call and every DELTA call held until teardown, and ``OK`` for
+    everything else. ``returned_work`` makes BRAVO's returned attempt call a tool first."""
 
-    def __init__(self, monkeypatch, *, successor_work=False):
+    def __init__(self, monkeypatch, *, returned_work=False):
         from tests import fixtures_mock_llm
 
-        self.successor_work = successor_work
+        self.returned_work = returned_work
         self.alpha_sent, self.alpha_release = threading.Event(), threading.Event()
         self.bravo_sent, self.delta_sent, self.teardown = threading.Event(), threading.Event(), threading.Event()
         self.lock = threading.Lock()
@@ -133,11 +138,11 @@ class _ScriptedModel:
             message, finish = {"role": "assistant", "content": "", "tool_calls": [{
                 "id": "call_inventory", "type": "function",
                 "function": {"name": "list_available_tools", "arguments": "{}"}}]}, "tool_calls"
-        elif main and marker == "SUCCESSOR" and self.successor_work and ordinal == 1:
+        elif main and marker == "BRAVO" and self.returned_work and ordinal == 2:
             message, finish = {"role": "assistant", "content": "", "tool_calls": [{
-                "id": "call_successor_inventory", "type": "function",
+                "id": "call_returned_inventory", "type": "function",
                 "function": {"name": "list_available_tools", "arguments": "{}"}}]}, "tool_calls"
-        elif main and marker in {"BRAVO", "DELTA"}:
+        elif main and (marker == "DELTA" or marker == "BRAVO" and ordinal == 1):
             (self.bravo_sent if marker == "BRAVO" else self.delta_sent).set()
             self.teardown.wait(600)
         _reply(handler, payload, message, finish)
@@ -217,6 +222,27 @@ def _seed_roots(data_dir, task_ids, children=None, workspace=None):
         "".join(json.dumps(row) + "\n" for row in progress), encoding="utf-8")
 
 
+def _http(url, method, path):
+    import urllib.request
+
+    request = urllib.request.Request(url + path, method=method, data=b"{}" if method == "POST" else None,
+                                     headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read() or b"{}")
+
+
+def _resume_after_app_stop(url, *task_ids):
+    """The seeded snapshot is what a Quit leaves: accepted roots keep their ids under
+    ``saved_work_hold`` at any age, and nothing starts until the owner's explicit
+    Resume (owner S1, quiz a524d73f). Each Resume admits its row as ordinary queued
+    work, in the order given."""
+    for task_id in task_ids:
+        _wait(lambda: _http(url, "GET", f"/api/tasks/{task_id}").get("reason_code") == "saved_work_hold",
+              30, f"{task_id} held after the application stop")
+        answer = _http(url, "POST", f"/api/tasks/{task_id}/resume")
+        assert answer.get("ok"), answer
+
+
 def _get(page, url, path):
     response = page.request.get(url + path)
     assert response.ok, f"{path}: {response.status} {response.text()[:400]}"
@@ -253,6 +279,13 @@ def _events(data_dir, kind):
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] \
         if path.exists() else []
     return [row for row in rows if row.get("type") == kind]
+
+
+def _tool_names(data_dir, task_id):
+    path = data_dir / "logs" / "tools.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] \
+        if path.exists() else []
+    return [str(row.get("tool") or "") for row in rows if row.get("task_id") == task_id]
 
 
 def _fence(data_dir, task_id):
@@ -357,7 +390,7 @@ def _launch(pw):
     return browser, page, errors
 
 
-def test_pause_warning_restart_retention_and_resume(direct_server_with_data, monkeypatch):
+def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch):
     from playwright.sync_api import expect, sync_playwright
 
     server = direct_server_with_data
@@ -367,6 +400,7 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
     server["stop_server"]()
     _seed_roots(data_dir, (ALPHA, BRAVO, CHARLIE))
     server["start_server"]()
+    _resume_after_app_stop(url, ALPHA, BRAVO, CHARLIE)
     record: dict = {}
     try:
         with sync_playwright() as pw:
@@ -382,21 +416,41 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
                 _wait(lambda: _phase(page, url, ALPHA) == "working", 30, "ALPHA working")
                 actions = _menu_action(page, _card(page, ALPHA).locator("[data-cancel-run]"), "pause")
                 assert actions == ["finalize", "hurry", "pause", "stop_now"]
-                expect(page.locator(".toast").last).to_contain_text("Pausing", timeout=15_000)
-                assert _wait(lambda: _fence(data_dir, ALPHA), 15, "ALPHA's fence")["state"] == "requested"
-                _wait(lambda: _phase(page, url, ALPHA) == "budget_pausing", 30, "ALPHA pausing")
-                expect(_chip(page, ALPHA)).to_have_text("Pausing… · owner pause", timeout=30_000)
-                expect(_card(page, ALPHA).locator("[data-resume-run]")).to_have_count(0)
-                shot("01-pause-requested")
+                toast = page.locator(".toast").last
+                expect(toast).to_contain_text("Pausing", timeout=15_000)
+                # The toast never promises that work already sent finishes (owner S1, quiz 9312a119).
+                expect(toast).to_contain_text("running work stops at its last saved point")
+                expect(toast).not_to_contain_text("already sent")
+                shot("00-pause-toast")
+                # Owner S1 (quiz 9312a119): Pause stops waiting for the sent model call and
+                # saves ALPHA at its last ready point while the provider still holds that call.
+                _wait(lambda: _fence(data_dir, ALPHA).get("state") == "paused", 60, "ALPHA's tree saved")
+                assert not model.alpha_release.is_set()
+                assert model.bravo_sent.wait(60), "BRAVO never started after ALPHA parked"
+                _wait(lambda: _phase(page, url, ALPHA) == "budget_paused", 30, "ALPHA paused")
+                assert _phase(page, url, CHARLIE) == "queued"
+                expect(_chip(page, ALPHA)).to_have_text("Paused · owner pause", timeout=30_000)
+                expect(_card(page, ALPHA).locator("[data-resume-run]")).to_be_visible()
+                expect(_card(page, BRAVO).locator("[data-live-phase]")).to_have_text("Working", timeout=30_000)
+                shot("01-paused-while-its-call-was-sent")
 
-                # 2) The ONE shared Restart confirmation, from both surfaces, warns.
+                # 2) The abandoned call answers late: its tool call never runs and ALPHA stays saved.
+                model.alpha_release.set()
+                time.sleep(5)  # room for an unwanted late tool run or settlement
+                assert _fence(data_dir, ALPHA)["state"] == "paused" and _phase(page, url, ALPHA) == "budget_paused"
+                assert _task(page, url, ALPHA)["status"] == "scheduled"
+                assert "list_available_tools" not in _tool_names(data_dir, ALPHA)
+
+                # 3) The ONE shared Restart confirmation, from both surfaces.
                 dialog, title, body = _restart_dialog(page, page.locator('[data-chat-command="restart"]'))
-                assert title == "Restart agent" and PAUSING_LINE in body
-                assert "Tasks already paused stay paused" in body and "kept on hold" in body
-                shot("02-header-restart-confirm-pausing")
+                assert title == "Restart agent"
+                assert "Tasks already paused stay paused" in body
+                assert "Runnable queued tasks return to the queue" in body
+                assert "still pausing" not in body and "could not be read" not in body
+                shot("02-header-restart-confirm")
                 dialog.locator(".marketplace-modal-actions [data-confirm-cancel]").click()
                 expect(dialog).to_be_hidden()
-                record["header_body_pausing"] = body
+                record["header_body"] = body
                 page.locator('[data-nav-page="settings"]').click()
                 page.locator("#s-workers").evaluate(
                     "(node) => {node.value='2'; node.dispatchEvent(new Event('input',{bubbles:true}));}")
@@ -404,55 +458,48 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
                 expect(page.locator("#btn-restart-now")).to_be_visible(timeout=30_000)
                 dialog, s_title, s_body = _restart_dialog(page, page.locator("#btn-restart-now"))
                 assert (s_title, s_body) == (title, body), "header and Settings must open the SAME confirmation"
-                shot("03-settings-restart-confirm-pausing")
+                shot("03-settings-restart-confirm")
                 dialog.locator(".marketplace-modal-actions [data-confirm-cancel]").click()
                 expect(dialog).to_be_hidden()
                 assert page.evaluate("window.__restartSends") == 0, "a cancelled confirmation sent /restart"
-
-                # 3) The sent call returns: ALPHA saves its pause, BRAVO starts, CHARLIE waits.
-                model.alpha_release.set()
-                _wait(lambda: _fence(data_dir, ALPHA).get("state") == "paused", 60, "ALPHA's tree saved")
-                assert model.bravo_sent.wait(60), "BRAVO never started after ALPHA parked"
-                _wait(lambda: _phase(page, url, ALPHA) == "budget_paused", 30, "ALPHA paused")
-                assert _phase(page, url, CHARLIE) == "queued"
                 page.locator('[data-nav-page="chat"]').click()
-                expect(_chip(page, ALPHA)).to_have_text("Paused · owner pause", timeout=30_000)
-                expect(_card(page, ALPHA).locator("[data-resume-run]")).to_be_visible()
-                expect(_card(page, BRAVO).locator("[data-live-phase]")).to_have_text("Working", timeout=30_000)
-                shot("04-paused-card")
-                _dialog, _title, saved_body = _restart_dialog(page, page.locator('[data-chat-command="restart"]'))
-                assert "still pausing" not in saved_body and "could not be read" not in saved_body
-                shot("05-header-restart-confirm-saved")
-                record["header_body_saved"] = saved_body
+                _restart_dialog(page, page.locator('[data-chat-command="restart"]'))
 
                 # 4) The real owner Restart; the page stays open across the new generation.
+                # Restart returns active work and the runnable queue (owner S1, quiz
+                # d2f7532b): BRAVO continues from its saved state under its own id and
+                # CHARLIE is admitted as ordinary queued work; the owner's Pause still
+                # holds ALPHA (a Restart grants no execution authority).
                 _owner_restart(page, url, data_dir)
-                time.sleep(8)  # room for an unwanted automatic resume to dispatch
-                alpha, bravo, charlie = (_task(page, url, t) for t in (ALPHA, BRAVO, CHARLIE))
+                bravo, charlie = (_wait(lambda t=t: (lambda row: row if row["status"] == "completed" else None)(
+                    _task(page, url, t)), 120, f"{t} completed after the Restart") for t in (BRAVO, CHARLIE))
+                time.sleep(8)  # room for an unwanted automatic resume to dispatch on the idle worker
+                alpha = _task(page, url, ALPHA)
                 record["after_restart"] = {name: {
-                    key: t.get(key) for key in ("status", "reason_code", "cancel_origin", "continuation_offer")}
+                    key: t.get(key) for key in ("status", "reason_code", "cancel_origin", "continuation_offer",
+                                                "root_task_id", "continued_by")}
                     for name, t in (("alpha", alpha), ("bravo", bravo), ("charlie", charlie))}
                 assert alpha["status"] == "scheduled" and alpha["reason_code"] == "owner_paused", alpha["status"]
                 assert _fence(data_dir, ALPHA)["state"] == "paused"
                 assert _phase(page, url, ALPHA) == "budget_paused"
-                assert charlie["status"] == "scheduled" and charlie["reason_code"] == "owner_restart_hold"
-                assert _phase(page, url, CHARLIE) == "budget_paused"
-                assert bravo["status"] == "cancelled"
-                assert model.main_calls("ALPHA") == 1 and model.main_calls("CHARLIE") == 0, \
-                    "a paused or held root was resumed without the owner"
-                for task_id, label in ((ALPHA, "Paused · owner pause"), (CHARLIE, "Paused · after restart")):
-                    expect(_chip(page, task_id)).to_have_text(label, timeout=60_000)
-                    expect(_card(page, task_id).locator("[data-resume-run]")).to_be_visible()
-                expect(page.locator("#chat-status")).to_have_text("Paused", timeout=30_000)
-                record["bravo_offer_after_restart"] = bravo.get("continuation_offer")
+                assert model.main_calls("ALPHA") == 1, "a paused root was resumed without the owner"
+                assert bravo["root_task_id"] == BRAVO and not bravo.get("continued_by")
+                assert model.main_calls("BRAVO") == 2 and model.main_calls("SUCCESSOR") == 0, \
+                    "BRAVO returns under its own id, never as a Continue successor"
+                assert model.main_calls("CHARLIE") == 1
+                assert not _events(data_dir, "owner_continue_admitted")
+                expect(_chip(page, ALPHA)).to_have_text("Paused · owner pause", timeout=60_000)
+                expect(_card(page, ALPHA).locator("[data-resume-run]")).to_be_visible()
+                for task_id in (BRAVO, CHARLIE):
+                    expect(_chip(page, task_id)).to_have_text("Done", timeout=60_000)
+                expect(page.locator("#chat-status")).to_have_text("Paused · owner pause", timeout=30_000)
                 shot("06-after-restart-chat")
                 panel = _open_activity(page)
-                expect(panel.locator(".activity-row", has_text="Batch4 Charlie")).to_contain_text(
-                    "held after Restart", timeout=30_000)
-                expect(panel.locator(".activity-row", has_text="Batch4 Alpha")).to_contain_text("paused")
+                expect(panel.locator(".activity-row", has_text="Batch4 Alpha")).to_contain_text("paused", timeout=30_000)
+                expect(panel).not_to_contain_text("held after Restart")
                 shot("07-after-restart-activity")
 
-                # 5) The owner's Resume: ALPHA from its chat card, CHARLIE from its Activity row.
+                # 5) The owner's Resume from ALPHA's chat card.
                 page.locator('[data-nav-page="chat"]').click()
                 shot("08-paused-card-before-resume")
                 resume = _card(page, ALPHA).locator("[data-resume-run]")
@@ -463,15 +510,9 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
                 resume.click()
                 expect(page.locator(".toast").last).to_contain_text("Resuming", timeout=15_000)
                 _wait(lambda: _task(page, url, ALPHA)["status"] == "completed", 120, "ALPHA completed")
-                panel = _open_activity(page)
-                actions = _menu_action(
-                    page, panel.locator(f'[data-act="task-control"][data-id="{CHARLIE}"]'), "resume")
-                assert actions == ["resume", "stop_now"]
-                _wait(lambda: _task(page, url, CHARLIE)["status"] == "completed", 120, "CHARLIE completed")
-                assert model.main_calls("ALPHA") >= 2 and model.main_calls("CHARLIE") >= 1
+                assert model.main_calls("ALPHA") >= 2
                 page.locator('[data-nav-page="chat"]').click()
-                for task_id in (ALPHA, CHARLIE):
-                    expect(_card(page, task_id).locator("[data-live-phase]")).to_have_text("Done", timeout=60_000)
+                expect(_card(page, ALPHA).locator("[data-live-phase]")).to_have_text("Done", timeout=60_000)
                 shot("09-resumed-completed")
                 assert errors == []
             except Exception:
@@ -487,20 +528,23 @@ def test_pause_warning_restart_retention_and_resume(direct_server_with_data, mon
         (evidence / "record.json").write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
 
 
-@pytest.mark.parametrize("successor_work", [False, True], ids=["text-only", "tool-work"])
-def test_continue_is_offered_after_an_owner_restart(direct_server_with_data, monkeypatch, successor_work):
+@pytest.mark.parametrize("returned_work", [False, True], ids=["text-only", "tool-work"])
+def test_owner_restart_returns_running_work_under_its_own_id(direct_server_with_data, monkeypatch, returned_work):
+    """Owner S1 (quiz d2f7532b): the owner's Restart returns active work. A running root
+    with saved working state continues under its OWN id in the next generation,
+    in its own folder and chat: no Continue is offered and no successor exists."""
     from playwright.sync_api import expect, sync_playwright
-    from ouroboros.project_facts import resolve_project_id
 
     server = direct_server_with_data
     url, data_dir = server["url"], server["data_dir"]
-    evidence = _evidence_dir(data_dir, "continue-after-owner-restart-" + ("work" if successor_work else "text"))
-    model = _ScriptedModel(monkeypatch, successor_work=successor_work)
+    evidence = _evidence_dir(data_dir, "restart-returns-running-" + ("work" if returned_work else "text"))
+    model = _ScriptedModel(monkeypatch, returned_work=returned_work)
     server["stop_server"]()
-    workspace = data_dir.parent / "continued-work"
+    workspace = data_dir.parent / "returned-work"
     workspace.mkdir()
     _seed_roots(data_dir, (BRAVO,), workspace=workspace)
     server["start_server"]()
+    _resume_after_app_stop(url, BRAVO)
     record: dict = {}
     try:
         with sync_playwright() as pw:
@@ -513,74 +557,36 @@ def test_continue_is_offered_after_an_owner_restart(direct_server_with_data, mon
                 assert model.bravo_sent.wait(90), "BRAVO never reached its model call"
                 _open_chat(page, url)
                 _wait(lambda: _phase(page, url, BRAVO) == "working", 30, "BRAVO working")
+                before = _task(page, url, BRAVO)
                 _restart_dialog(page, page.locator('[data-chat-command="restart"]'))
                 _owner_restart(page, url, data_dir)
-                bravo = _wait(lambda: (lambda t: t if t["status"] == "cancelled" else None)(_task(page, url, BRAVO)),
-                              60, "BRAVO settled by the Restart")
-                record["bravo"] = {key: bravo.get(key) for key in (
-                    "status", "reason_code", "cancel_origin", "continuation_offer", "chat_id",
-                    "project_id", "workspace_root", "workspace_mode")}
-                assert (bravo.get("cancel_origin") or {}).get("source") == "owner_restart", bravo.get("cancel_origin")
-                assert (bravo.get("continuation_offer") or {}).get("eligible") is True, bravo.get("continuation_offer")
-                button = _card(page, BRAVO).locator("[data-continue-task]")
-                expect(button).to_have_text("Continue", timeout=60_000)
-                shot("01-continue-offered-after-owner-restart")
-
-                button.click()
-                expect(page.locator(".toast").last).to_contain_text("Continue accepted", timeout=15_000)
-                offer = _task(page, url, BRAVO).get("continuation_offer") or {}
-                successor = offer.get("successor_task_id")
-                assert successor and offer.get("refusal") == "already_continued", offer
-                expect(button).to_have_text("Continued", timeout=15_000)
-                expect(button).to_have_attribute("data-continue-successor", successor)
-                admitted = [row for row in _events(data_dir, "owner_continue_admitted")
-                            if row.get("predecessor_task_id") == BRAVO]
-                record["admitted"] = admitted
-                assert [row["task_id"] for row in admitted] == [successor]
                 done = _wait(lambda: (lambda t: t if t["status"] in {"completed", "failed", "cancelled"} else None)(
-                    _task(page, url, successor)), 180, "the successor settled")
-                record["successor"] = {key: done.get(key) for key in (
-                    "status", "reason_code", "chat_id", "root_task_id", "resource_limit",
-                    "project_id", "workspace_root", "workspace_mode", "continuation_admission")}
-                assert done["status"] == "completed" and done["root_task_id"] == successor
-                assert model.main_calls("SUCCESSOR") >= 1
-                assert done["chat_id"] == bravo["chat_id"] == 1
-                assert done["workspace_root"] == bravo["workspace_root"] == str(workspace)
-                assert done["workspace_mode"] == bravo["workspace_mode"] == "external"
-                binding = done["continuation_admission"]["binding"]
-                assert binding["project_id"] == (bravo.get("project_id") or "")
-                # Completion publishes the facts scope resolved from the folder;
-                # an interrupted legacy row can still have an empty raw project_id.
-                assert resolve_project_id(done) == resolve_project_id(bravo)
-                # DESIGN: actual tool work has a card; a text-only answer does not.
+                    _task(page, url, BRAVO)), 180, "BRAVO settled after the Restart")
+                record["bravo"] = {key: done.get(key) for key in (
+                    "status", "reason_code", "cancel_origin", "continuation_offer", "continued_by", "chat_id",
+                    "root_task_id", "workspace_root", "workspace_mode")}
+                assert done["status"] == "completed" and done["root_task_id"] == BRAVO, record["bravo"]
+                assert not done.get("cancel_origin") and not done.get("continued_by")
+                assert (done.get("continuation_offer") or {}).get("eligible") is not True
+                assert model.main_calls("BRAVO") >= 2 and model.main_calls("SUCCESSOR") == 0, model.calls
+                assert not _events(data_dir, "owner_continue_admitted")
+                # The returned attempt does its own work: its tool runs under BRAVO's id.
+                assert ("list_available_tools" in _tool_names(data_dir, BRAVO)) is returned_work
+                assert done["chat_id"] == before["chat_id"] == 1
+                assert done["workspace_root"] == before["workspace_root"] == str(workspace)
+                assert done["workspace_mode"] == before["workspace_mode"] == "external"
+                expect(_chip(page, BRAVO)).to_have_text("Done", timeout=60_000)
+                expect(_card(page, BRAVO).locator("[data-continue-task]")).to_have_count(0)
                 expect(page.locator(".chat-bubble").get_by_text("OK", exact=True).last).to_be_visible(timeout=60_000)
-                if successor_work:
-                    expect(_chip(page, successor)).to_have_text("Done", timeout=60_000)
-                else:
-                    expect(_card(page, successor)).to_have_count(0, timeout=60_000)
                 expect(page.locator("#chat-status")).not_to_contain_text("Working", timeout=60_000)
-                shot("02-successor-completed")
+                shot("01-returned-and-completed")
 
                 page.reload(wait_until="domcontentloaded")
                 page.wait_for_selector("#page-chat", timeout=30_000)
-                pointer = _card(page, BRAVO).locator("[data-continue-task]")
-                expect(pointer).to_have_text("Continued", timeout=30_000)
-                expect(pointer).to_have_attribute("data-continue-successor", successor)
-                expect(pointer).to_be_disabled()
-                assert _card(page, BRAVO).locator(":scope > [data-live-summary-button]").get_attribute(
-                    "aria-expanded") != "true", "the pointer is shown on the collapsed card"
-                if successor_work:
-                    expect(_chip(page, successor)).to_have_text("Done", timeout=30_000)
-                else:
-                    expect(_card(page, successor)).to_have_count(0, timeout=30_000)
+                expect(_chip(page, BRAVO)).to_have_text("Done", timeout=30_000)
+                expect(_card(page, BRAVO).locator("[data-continue-task]")).to_have_count(0)
                 expect(page.locator(".chat-bubble").get_by_text("OK", exact=True).last).to_be_visible()
-                # Even after completion, replaying the original action is the same admission.
-                nonce = page.evaluate(f"localStorage.getItem('ouro_continue_nonce:{BRAVO}')")
-                replay = page.request.post(f"{url}/api/tasks/{BRAVO}/continue", data={"action_nonce": nonce})
-                assert replay.ok and replay.json()["successor_task_id"] == successor
-                assert [row["task_id"] for row in _events(data_dir, "owner_continue_admitted")
-                        if row.get("predecessor_task_id") == BRAVO] == [successor]
-                shot("03-pointer-after-reload-unopened")
+                shot("02-done-after-reload")
                 assert errors == []
             except Exception:
                 shot("failure")
@@ -606,6 +612,7 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
     server["stop_server"]()
     _seed_roots(data_dir, (DELTA,))
     server["start_server"]()
+    _resume_after_app_stop(url, DELTA)
     record: dict = {}
     try:
         assert model.delta_sent.wait(90), "DELTA never reached its model call"
@@ -621,15 +628,51 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
 
             try:
                 _open_chat(page, url)
-                delta = _wait(lambda: (lambda t: t if t["status"] == "cancelled" else None)(_task(page, url, DELTA)),
-                              60, "DELTA settled as interrupted")
+                # Owner S1: after an application crash the saved work is shown and
+                # waits under its own id for the owner's Resume; nothing continues by itself.
+                held = _wait(lambda: (lambda t: t if t.get("reason_code") == "saved_work_hold" else None)(
+                    _task(page, url, DELTA)), 60, "DELTA's saved work held after the crash")
+                record["held"] = {key: held.get(key) for key in ("status", "reason_code", "cancel_origin",
+                                                                 "continuation_offer")}
+                assert held["status"] == "scheduled" and not held.get("cancel_origin")
+                card = _card(page, DELTA)
+                expect(_chip(page, DELTA)).to_contain_text("Paused", timeout=60_000)
+                expect(card.locator("[data-continue-task]")).to_have_count(0)
+                resume = card.locator("[data-resume-run]")
+                expect(resume).to_be_visible()
+                assert model.main_calls("DELTA") == 1, "an application crash never continues work by itself"
+                shot("01-held-after-crash")
+                # Activity names the same hold as held after the stop, never as a money pause.
+                held_row = _open_activity(page).locator(".activity-row", has_text="Batch4 Delta")
+                expect(held_row).to_contain_text("held after Restart", timeout=30_000)
+                expect(held_row).not_to_contain_text("budget")
+                shot("01b-held-after-crash-activity")
+                page.locator('[data-nav-page="chat"]').click()
+                expect(resume).to_be_visible(timeout=30_000)
+                resume.click()
+                expect(page.locator(".toast").last).to_contain_text("Resuming", timeout=15_000)
+                _wait(lambda: model.main_calls("DELTA") == 2, 90, "DELTA resumed under its own id")
+                assert _task(page, url, DELTA)["status"] == "running"
+
+                # Its worker process dies (SIGKILL) while the application stays up: the
+                # existing policy keeps a signal death terminal, so Continue is its manual path.
+                workers = json.loads((data_dir / "state" / "worker_pids.json").read_text(encoding="utf-8"))["workers"]
+                assert len(workers) == 1, workers
+                os.kill(int(workers[0]["pid"]), signal.SIGKILL)
+                delta = _wait(lambda: (lambda t: t if t["status"] == "failed" else None)(_task(page, url, DELTA)),
+                              120, "DELTA settled by its worker's death")
                 record["delta"] = {key: delta.get(key) for key in ("status", "reason_code", "cancel_origin",
                                                                    "continuation_offer")}
-                assert (delta.get("cancel_origin") or {}).get("source") == "snapshot_restore"
+                assert delta["reason_code"] == "worker_crash_signal", record["delta"]
                 assert (delta.get("continuation_offer") or {}).get("eligible") is True
-                button = _card(page, DELTA).locator("[data-continue-task]")
+                # Opened afresh, as after a reboot: the settled card is rebuilt from its
+                # history rows, which carry the offer.
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_selector("#page-chat", timeout=30_000)
+                card = _card(page, DELTA)
+                button = card.locator("[data-continue-task]")
                 expect(button).to_have_text("Continue", timeout=60_000)
-                shot("01-continue-offered")
+                shot("02-continue-offered")
 
                 dropped: list[int] = []
 
@@ -646,14 +689,14 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                 offer = _task(page, url, DELTA).get("continuation_offer") or {}
                 successor = offer.get("successor_task_id")
                 assert successor and offer.get("refusal") == "already_continued", offer
-                shot("02-continue-answer-lost")
+                shot("03-continue-answer-lost")
                 button.click()
                 expect(button).to_have_text("Continued", timeout=15_000)
                 expect(button).to_have_attribute("data-continue-successor", successor)
                 expect(page.locator(".toast").last).to_contain_text("Continue accepted.")
                 nonce = page.evaluate(f"localStorage.getItem('ouro_continue_nonce:{DELTA}')")
                 assert nonce
-                shot("03-continue-retry-same-successor")
+                shot("04-continue-retry-same-successor")
 
                 page.reload(wait_until="domcontentloaded")
                 page.wait_for_selector("#page-chat", timeout=30_000)
@@ -667,7 +710,7 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                 expect(button).to_be_disabled()
                 assert card.locator(":scope > [data-live-summary-button]").get_attribute("aria-expanded") != "true"
                 assert page.evaluate(f"localStorage.getItem('ouro_continue_nonce:{DELTA}')") == nonce
-                shot("04-continue-after-reload")
+                shot("05-continue-after-reload")
                 admitted = [row["task_id"] for row in _events(data_dir, "owner_continue_admitted")
                             if row.get("predecessor_task_id") == DELTA]
                 assert admitted == [successor], admitted
@@ -701,6 +744,7 @@ def test_the_whole_tree_pause_is_offered_only_on_a_root(direct_server_with_data,
     server["stop_server"]()
     _seed_roots(data_dir, (DELTA,), children={child: DELTA})
     server["start_server"]()
+    _resume_after_app_stop(url, DELTA, child)
     record: dict = {}
     try:
         with sync_playwright() as pw:

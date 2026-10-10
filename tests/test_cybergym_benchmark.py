@@ -84,15 +84,9 @@ def test_profile_records_safe_runtime_and_budget_defaults():
     assert settings["OUROBOROS_TASK_REVIEW_MODE"] == "off"
     assert settings["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
     assert settings["OUROBOROS_REVIEW_MAX_CYCLES"] == "2"
-    for key in (
-        "OUROBOROS_EFFORT_TASK",
-        "OUROBOROS_EFFORT_EVOLUTION",
-    ):
+    for key in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_MAX"):
         assert settings[key] == "high", key
-    for key in (
-        "OUROBOROS_EFFORT_CONSCIOUSNESS",
-    ):
-        assert settings[key] == "high", key
+    assert settings["OUROBOROS_EFFORT_MIN"] == "low"
     assert settings["OUROBOROS_POST_TASK_EVOLUTION"] == "false"
     assert settings["OUROBOROS_MAIN_WEB_SEARCH"] == "off"
     assert settings["OUROBOROS_MAIN_WEB_SEARCH_ENGINE"] == "auto"

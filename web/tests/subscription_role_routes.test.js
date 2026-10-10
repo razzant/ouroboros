@@ -77,7 +77,7 @@ test('a reviewer row on a subscription keeps its pin and is priced as a seat, no
     assert.equal(buildAvailableSubagentsSetting(parsed.setting).items[0].route.credential_profile_id, 'personal');
     const html = availableSubagentRowMarkup(reviewer, { catalogKnown: false, accountsKnown: false, modelSources: sources });
     assert.match(html, /data-subagent-review-facts>uses a session seat and time</);
-    assert.match(html, /<option value="" selected>Default \(reviews at high\)<\/option>/);
+    assert.match(html, /<option value="" selected>Auto \(reviews at the top of the chat range\)<\/option>/);
     // Delivery belongs to the route kind: a subscription model call is an API-model row.
     assert.match(html, /data-subagent-field="delivery"/);
 });

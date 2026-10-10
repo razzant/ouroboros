@@ -176,7 +176,10 @@ export async function pauseTaskAction(taskId, { pause = pauseTask, toast = showT
         }
         toast(ack.state === 'paused'
             ? 'Paused: the whole task tree is saved until you resume it.'
-            : 'Pausing: new work is stopped; work already sent finishes, then the tree is saved.', 'ok');
+            // Owner S1: running work stops at its last saved point (a model answer
+            // still awaited is abandoned, not awaited); started reviews finish apart.
+            : 'Pausing: new work is stopped; running work stops at its last saved point. '
+                + 'Reviews already started finish separately.', 'ok');
         return true;
     } catch (exc) {
         toast(`Pause refused: ${exc?.message || exc}`, 'error');

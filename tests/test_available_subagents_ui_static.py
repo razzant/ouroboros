@@ -181,12 +181,22 @@ def test_effort_choice_mirrors_track_the_python_scale() -> None:
     expected = "export const EFFORT_CHOICES = [" + ", ".join(f"'{tier}'" for tier in EFFORT_SCALE) + "];"
     assert expected in primitives
 
-    settings = _read(MODULES / "settings_ui.js")
-    block = re.search(r"const EFFORT_OPTIONS = \[(.*?)\];", settings, re.DOTALL)
-    assert block, "EFFORT_OPTIONS block not found in settings_ui.js"
+    # The web's effort vocabulary (the composer's range, the card chip, the Behavior line).
+    levels = _read(MODULES / "effort_levels.js")
+    assert "export const EFFORT_SCALE = [" + ", ".join(f"'{tier}'" for tier in EFFORT_SCALE) + "];" in levels
+    block = re.search(r"export const EFFORT_OPTIONS = \[(.*?)\];", levels, re.DOTALL)
+    assert block, "EFFORT_OPTIONS block not found in effort_levels.js"
     values = re.findall(r"value: '([a-z]+)'", block.group(1))
-    # `minimal` is deliberately not an owner-facing standing default (see EFFORT_OPTIONS).
+    # `minimal` is deliberately not an owner-facing standing level (see EFFORT_OPTIONS).
     assert values == [tier for tier in EFFORT_SCALE if tier != "minimal"]
+    labels = re.search(r"export const EFFORT_LABELS = Object\.freeze\(\{(.*?)\}\);", levels, re.DOTALL)
+    assert labels, "EFFORT_LABELS block not found in effort_levels.js"
+    assert re.findall(r"(\w+): '", labels.group(1)) == list(EFFORT_SCALE), "every runtime tier has a label"
+    # The composer's Reset target and its pre-/api/state value are the server's shipped range.
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+    shipped = {"min": "MIN", "recommended": "TASK", "max": "MAX"}
+    assert ("export const EFFORT_RANGE_DEFAULT = Object.freeze({ " + ", ".join(
+        f"{key}: '{SETTINGS_DEFAULTS['OUROBOROS_EFFORT_' + name]}'" for key, name in shipped.items()) + " });") in levels
 
 
 def test_every_status_tone_the_card_emits_has_a_shared_rule_in_both_documents() -> None:

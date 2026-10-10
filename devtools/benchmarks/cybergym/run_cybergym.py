@@ -951,9 +951,10 @@ def _prepare_applied_settings(
         "OUROBOROS_REASONING_SUMMARY": "auto",
         "MCP_ENABLED": False,
         "MCP_SERVERS": [],
+        # The effort range: Main works at high; evolution/consciousness would start at the top.
+        "OUROBOROS_EFFORT_MIN": "low",
         "OUROBOROS_EFFORT_TASK": "high",
-        "OUROBOROS_EFFORT_EVOLUTION": "high",
-        "OUROBOROS_EFFORT_CONSCIOUSNESS": "high",
+        "OUROBOROS_EFFORT_MAX": "high",
     }
     # Structured no-swarm/reviewer declarations are explicit overrides rather
     # than values accidentally inherited from the live settings file.  Keep a

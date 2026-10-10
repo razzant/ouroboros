@@ -777,8 +777,10 @@ test('the legacy-memory notice reads in the install language; other plain system
         assert.match(render(notice), /Memory: what Ouroboros remembered before this update/);
         sent.length = 0;
         await flushMisses();
-        // The bubble's own chrome (time, copy) reports its codes too; the notice is one text key.
-        const reported = sent.flatMap((payload) => payload.items).filter((item) => !item.key.startsWith('code:'));
+        // The bubble's own chrome (time, copy) reports its codes too, and the composer's effort
+        // button reports its fmt template at mount; the notice is one text key.
+        const reported = sent.flatMap((payload) => payload.items)
+            .filter((item) => !item.key.startsWith('code:') && !/\{\w+\}/.test(item.key));
         assert.deepEqual(reported.map((item) => item.key), [LEGACY_NOTICE]);
         assert.equal(reported[0].context.role, 'host-text');
     } finally {

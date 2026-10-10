@@ -557,14 +557,14 @@ def test_review_pool_endpoint_reports_the_pool_in_catalog_order(monkeypatch):
     assert [row["subagent_id"] for row in body["pool"]] == ["api-critic", "session-critic", "bare-critic"]
     api, session, bare = body["pool"]
     assert api["route"] == {"kind": "api_model", "target_id": "openai/gpt-5.6-luna", "credential_profile_id": ""}
-    assert (api["effort"], api["effort_source"], api["delivery"], api["minted_from"]) == ("high", "default", "packet", "review_lane")
+    assert (api["effort"], api["effort_source"], api["delivery"], api["minted_from"]) == ("high", "auto", "packet", "review_lane")
     assert api["cost"] == {"usd_per_review": 0.12, "basis": "route_tariff"}
     assert api["last_execution"]["record_id"] == "rec-1" and api["handle"]
     assert (session["effort"], session["effort_source"], session["delivery"], session["access"]) == (
-        "xhigh", "compound", "session", "full")
+        "xhigh", "model_name", "session", "full")
     assert session["cost"] == {"usd_per_review": None, "basis": "subscription_seat"}
     assert session["last_execution"] is None and session["minted_from"] == ""
-    assert (bare["effort"], bare["effort_source"], bare["delivery"]) == ("low", "row", "native")
+    assert (bare["effort"], bare["effort_source"], bare["delivery"]) == ("low", "pin", "native")
     assert all(row["review_eligible"] is True and row["enabled"] is True for row in body["pool"])
     assert body["excluded"] == [{"subagent_id": "paused", "reason": "row_disabled"}]
     assert body["row_costs"]["helper"] == {"usd_per_review": None, "basis": "unknown"}

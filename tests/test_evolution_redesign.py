@@ -651,7 +651,10 @@ def test_frontend_evolution_and_consciousness_controls_are_present():
     assert consciousness["settingsToggleId"] == "s-local-consciousness"
     assert "modelRolesHost('settings-model-roles')" in settings_ui
     assert "modelRoles.load(s," in settings
-    assert "OUROBOROS_EFFORT_CONSCIOUSNESS', ''" in settings  # empty = the Task / Chat effort
+    # The role effort keys are retired: evolution and wakes start at the top of the owner's
+    # effort range, which Settings shows read-only (the composer's control edits it).
+    assert "OUROBOROS_EFFORT_CONSCIOUSNESS" not in settings and "OUROBOROS_EFFORT_EVOLUTION" not in settings
+    assert "paintEffortRangeSummary" in settings
 
 
 def test_evolution_checkpoint_records_and_reads(tmp_path):

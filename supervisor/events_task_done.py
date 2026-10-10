@@ -508,6 +508,10 @@ def _finish_task_done_dispatch(
                 # rebuilt on replay, and the completion-seam EVIDENCE (below) so the chip
                 # upgrades from the neutral "dispatched" decision to what actually ran.
                 "executor_route": str(effective_result.get("executor_route") or ""),
+                # The effort decision survives the terminal card and its replay (empty = unknown).
+                "effort_level": str(effective_result.get("effort_level") or ""),
+                "effort_requested": str(effective_result.get("effort_requested") or ""),
+                "effort_source": str(effective_result.get("effort_source") or ""),
             }
             if isinstance(_envelope.get("execution_evidence"), dict):
                 progress_meta["execution_evidence"] = _envelope["execution_evidence"]

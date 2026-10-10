@@ -1,4 +1,7 @@
-"""Option A through real promotion, restore, serving supervisor and browser UI."""
+"""Option A through real promotion, restore, serving supervisor and browser UI.
+
+The restore models a Quit: the owner's Resume comes first (owner S1), then the
+Project verification hold alone keeps the same task until its authority heals."""
 from __future__ import annotations
 
 import copy
@@ -93,6 +96,14 @@ def test_project_hold_reload_reconnect_and_automatic_same_id_recovery(
             page = browser.new_page(viewport={"width": 1440, "height": 900})
             page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
             try:
+                # The restore above is what a Quit leaves: accepted work also waits for the
+                # owner's explicit Resume (owner S1, quiz a524d73f). Project verification is
+                # independent: after that Resume it still holds the task until it heals.
+                held = page.request.get(url + f"/api/tasks/{TASK}").json()
+                assert held["status"] == "scheduled" and held["reason_code"] == "saved_work_hold", held
+                resumed = page.request.post(url + f"/api/tasks/{TASK}/resume")
+                assert resumed.ok and resumed.json().get("ok"), resumed.text()
+                record("resumed", resumed.json())
                 page.goto(url, wait_until="domcontentloaded")
                 for label in ("waiting", "reload", "reconnect"):
                     if label == "reload":

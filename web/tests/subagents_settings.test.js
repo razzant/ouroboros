@@ -14,7 +14,6 @@ import {
 import {
     ALLOW_EMPTY_REVIEW_POOL,
     MAX_AVAILABLE_SUBAGENTS,
-    REVIEW_POOL_DEFAULT_EFFORT,
     availableSubagentsHasExplicitDraft,
     availableSubagentRowMarkup,
     availableSubagentsLoadValue,
@@ -1350,10 +1349,11 @@ test('every card carries the Reviewer box and its Review cost; a marked API row 
     assert.match(marked, /<option value="native" selected>Reads the work itself<\/option>[\s\S]*data-subagent-delivery-cost>price appears after saving</);
     assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, delivery: 'packet' }), QUIET_STATE, 0),
         /<option value="packet" selected>Packet — for models without tool calling<\/option>/);
-    // Effort left to the route reviews at the pool default, and its select says so.
+    // Effort left to Auto reviews at the top of the chat range, and its select says so.
     assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, effort: '' }), QUIET_STATE, 0),
-        new RegExp(`<option value="" selected>Default \\(reviews at ${REVIEW_POOL_DEFAULT_EFFORT}\\)</option>`));
-    assert.equal(REVIEW_POOL_DEFAULT_EFFORT, 'high');
+        /<option value="" selected>Auto \(reviews at the top of the chat range\)<\/option>/);
+    assert.match(availableSubagentRowMarkup(apiRow({ effort: '' }), QUIET_STATE, 0),
+        /<option value="" selected>Auto \(chat range\)<\/option>/);
     // A session is spoken as a seat and time, and has no packet delivery.
     const session = availableSubagentRowMarkup(sessionRow({ review_eligible: true }), QUIET_STATE, 0);
     assert.match(session, /data-subagent-review-facts>uses a session seat and time</);

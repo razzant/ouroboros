@@ -60,6 +60,7 @@ from ouroboros.subagents import (
     SubagentExecutorResolution,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     SUBAGENT_RESOLUTION_FIELDS,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     SubagentDispatch,
+    effort_result_fields,
     capability_delta_disclosures,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     envelope_from_task,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
     resolve_subagent_dispatch,  # noqa: F401 -- the agent module keeps its historical import surface for the dispatch leaf
@@ -128,6 +129,7 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
             trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),
+            **effort_result_fields(task),
         )
     except Exception:
         log.debug("Failed to persist task exception projection", exc_info=True)
@@ -493,6 +495,7 @@ class OuroborosAgent:
                 tool_profile=task.get("tool_profile"),
                 capability_delta=task.get("capability_delta"),
                 reasoning_effort=task.get("reasoning_effort"),
+                **effort_result_fields(task),
                 task_group_id=task.get("task_group_id"),
                 task_group=task.get("task_group"),
                 subagent_envelope=task.get("subagent_envelope"), configured_subagent=task.get("configured_subagent"), parent_cognitive_route=task.get("parent_cognitive_route"), subagent_availability=task.get("subagent_availability"),

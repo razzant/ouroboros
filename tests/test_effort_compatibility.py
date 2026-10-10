@@ -560,6 +560,7 @@ def test_switch_model_next_round_keeps_preference_after_native_projection(tmp_pa
 
     ctx = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)._ctx
     monkeypatch.setattr(LLMClient, "available_models", lambda *_: ["zai::future", "openai::future"])
+    monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")  # Main applies a switch here only
     assert "next round" in _switch_model(ctx, model="zai::future", effort="ultra")
     model, local, effort = _apply_runtime_overrides(ctx, "openai::future", False, "medium")
     assert (model, local, effort) == ("zai::future", False, "ultra")

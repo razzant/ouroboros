@@ -41,9 +41,13 @@ if TYPE_CHECKING:  # annotation-only; review_records imports this module's leave
 
 from ouroboros.route_spec import (
     ROUTE_KIND_AGENT_SESSION as SHARED_ROUTE_KIND_SESSION,
+    ROUTE_KIND_API_MODEL as SHARED_ROUTE_KIND_API,
     RouteSpec,
-    compound_session_effort,
+    model_named_effort,
 )
+from ouroboros.runtime_mode_policy import effort_range_binds
+from ouroboros.settings_integrity import live_effort_range
+from ouroboros.settings_scales import choose_effort
 
 ROUTE_KIND_API = "api_chat"
 ROUTE_KIND_SESSION = "agent_session"
@@ -61,8 +65,8 @@ class ConfiguredReviewerSlot:
     slot_id: str
     kind: str  # api_chat | agent_session
     target_id: str  # API model id, or opaque ``harness[=model]`` session spec
-    # Empty means a compound Cursor/Agy route's encoded effort when present,
-    # otherwise the surface's established default.
+    # The owner's pin. Empty is Auto: a level in the model name when present, else a
+    # wave's order clamped into the owner's effort range, else the range's top (``row_effort``).
     effort: str = ""
     # The opaque per-row session spec. Structured agent_session rows carry
     # their target here; api rows carry ''. Legacy session rows resolve the
@@ -309,9 +313,10 @@ def composed_pool_seats() -> Optional[Tuple[PoolSeat, ...]]:
 
 
 def row_at_effort_order(row: ConfiguredReviewerSlot, effort: str) -> Optional[ConfiguredReviewerSlot]:
-    """The row under a caller's effort order (``row_effort``'s rule): ``None`` for a
-    compound Cursor/Agy route, whose encoded effort is the route's identity."""
-    return None if _compound_effort(row) else replace(row, effort=effort)
+    """The row carrying the level a caller's order resolves to (``row_effort``'s rule):
+    ``None`` when the order does not apply — a level in the model name, or an owner pin
+    while the range binds."""
+    return replace(row, effort=row_effort(row, default=effort)) if _order_applies(row, effort) else None
 
 
 def reviewer_slot_config_error() -> str:
@@ -334,7 +339,7 @@ def reviewer_slot_config_error() -> str:
 
 def _delivery_slot(
     row: ConfiguredReviewerSlot, *, role_hint: str,
-    default_effort: str = "", effort_fallback: str = "", **slot_fields: Any,
+    default_effort: str = "", rng: Optional[Dict[str, str]] = None, **slot_fields: Any,
 ) -> Any:
     """ONE configured row as the substrate's ``ReviewSlot``, carrying its own
     delivery: the route kind, the opaque session target and credential pin, the
@@ -348,9 +353,9 @@ def _delivery_slot(
     return ReviewSlot(
         slot_id=row.slot_id,
         model=row.target_id,
-        effort=row_effort(row, default=default_effort, fallback=effort_fallback),
-        # "this row runs at the caller's order": every row but a compound route slug.
-        declared_effort=default_effort if default_effort and not _compound_effort(row) else "",
+        effort=row_effort(row, default=default_effort, rng=rng),
+        # "this row runs at the caller's order" (clamped into the range while it binds).
+        declared_effort=default_effort if _order_applies(row, default_effort) else "",
         role_hint=role_hint,
         use_local=(row.use_local if row.use_local is not None else resolved_review_model_target(row.target_id).provider_route == "local"),
         route=(ReviewRouteKind.AGENT_SESSION if row.is_session
@@ -382,26 +387,23 @@ def review_pool_slots(
     catalog order, read from ``snapshot`` (a task's frozen settings) or the
     applied runtime settings — never through the delegation resolver, and never
     gated by the catalog's global switch. Each row rides its own delivery and
-    identity (``slot_id == subagent_id``). Effort: a caller's ``default_effort``
-    (a wave's order) outranks everything but a compound Cursor/Agy route slug,
-    whose encoded effort is the route's identity; with no order it is the row's
-    own value, else that compound value, else ``REVIEW_POOL_DEFAULT_EFFORT``.
-    ``slot_fields`` are the caller's per-surface ReviewSlot properties (timeout,
-    output budget, temperature). A malformed catalog RAISES ValueError — every
-    surface turns that into its typed refusal; a valid catalog with no marked
-    row is ``[]`` (the surface reports ``pool_empty``, it does not fall back).
+    identity (``slot_id == subagent_id``). Effort is ``row_effort``'s rule under a
+    caller's ``default_effort`` (a wave's order). ``slot_fields`` are the caller's
+    per-surface ReviewSlot properties (timeout, output budget, temperature). A
+    malformed catalog RAISES ValueError — every surface turns that into its typed
+    refusal; a valid catalog with no marked row is ``[]`` (the surface reports
+    ``pool_empty``, it does not fall back).
     """
-    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
-
     composed = _COMPOSED_POOL.get()
     if composed is not None:
         extra = {**({"role_hint": role_hint} if role_hint else {}), **slot_fields}
         return [replace(seat.slot, **extra) if extra else seat.slot for seat in composed]
+    # A review wave starts inside a running task: its seats read the owner's CURRENT range
+    # once, together, so the decision, the roster fingerprint and the ordered-weaker
+    # baseline of one build agree (the parent task keeps the range it started with).
+    rng = live_effort_range()
     return [
-        _delivery_slot(
-            row, role_hint=role_hint,
-            default_effort=default_effort, effort_fallback=REVIEW_POOL_DEFAULT_EFFORT, **slot_fields,
-        )
+        _delivery_slot(row, role_hint=role_hint, default_effort=default_effort, rng=rng, **slot_fields)
         for row in _pool_rows(_catalog_settings(snapshot))
     ]
 
@@ -512,53 +514,43 @@ def row_plan_retrieves(row_plan: Dict[str, Any], index: int) -> bool:
 
 
 def _compound_effort(row: ConfiguredReviewerSlot) -> str:
-    """A Cursor/Agy compound route slug's encoded effort, '' for every other row.
-    That effort is the route's model identity: sending ``model=…-xhigh`` with
-    ``effort=low`` is the contradiction ``validate_compound_session_effort``
-    already refuses at save time, so no caller's order may override it."""
-    if row.is_session:
-        return compound_session_effort(RouteSpec(
-            kind=SHARED_ROUTE_KIND_SESSION,
-            target_id=row.session_target or row.target_id,
-            credential_profile_id=row.profile_id,
-        )) or ""
-    return ""
+    """The level the row's model NAME carries — a Cursor/Agy session slug's or a
+    Claudexor-managed API model's (``route_spec.model_named_effort``), '' otherwise.
+    It is the route's identity: ``validate_compound_session_effort`` refuses a
+    contradicting pin at save time, and no order or range moves it."""
+    kind = SHARED_ROUTE_KIND_SESSION if row.is_session else SHARED_ROUTE_KIND_API
+    return model_named_effort(RouteSpec(
+        kind=kind, target_id=(row.session_target or row.target_id) if row.is_session else row.target_id,
+        credential_profile_id=row.profile_id,
+    )) or ""
 
 
-def _row_own_effort(row: ConfiguredReviewerSlot) -> str:
-    """The effort the ROW itself carries: its explicit field, else a Cursor/Agy
-    compound slug's encoded effort; '' when the row leaves it to its caller."""
-    return row.effort or _compound_effort(row)
+def _order_applies(row: ConfiguredReviewerSlot, order: str) -> bool:
+    """Whether a wave's order decides this row: never a model-named row; a pinned row
+    only in Cyber Pro; an Auto row always (the order is clamped while the range binds)."""
+    if not order or _compound_effort(row):
+        return False
+    return not row.effort or not effort_range_binds()
 
 
-def row_effort(
-    row: ConfiguredReviewerSlot,
-    *,
-    default: str = "",
-    fallback: str = "",
-) -> str:
-    """Resolve one effort authority without contradicting a compound route.
+def row_effort(row: ConfiguredReviewerSlot, *, default: str = "", rng: Optional[Dict[str, str]] = None) -> str:
+    """ONE rule for a reviewer's effort (``settings_scales.choose_effort``): a level in the
+    model name; else the owner's pin (the row's ``effort``) — which a caller's ``default``
+    (a plan's or ``review_change``'s ``reviewer_effort`` order, a ``/review`` order) outranks
+    only in Cyber Pro; else that order, clamped into the owner's effort range while it binds;
+    else the top of the range — also for a caller-built row such as the deep review's Main
+    row. ``rng`` is the range a pool build captured once; a lone call reads the owner's
+    current range. No surface setting is read: the lane-era effort keys are retired and inert."""
+    level, _source = choose_effort(default, pin=row.effort, model_named=_compound_effort(row),
+                                   default_top=True, binds=effort_range_binds(),
+                                   rng=rng if rng is not None else live_effort_range())
+    return level
 
-    A caller's ``default`` is an ORDER for this run (a plan envelope's
-    ``reviewer_effort``): it outranks the owner's per-row pin on every row except
-    a Cursor/Agy compound slug, whose encoded effort is the route's identity and
-    stays. Only plan review passes an order; commit, skill, acceptance and deep
-    review call without one, and for them an explicit row field wins, then a
-    compound slug's encoded effort, then ``fallback`` — by default the pool's
-    ``REVIEW_POOL_DEFAULT_EFFORT``, also for a caller-built row such as the deep
-    review's Main row. No surface setting is read: the lane-era effort keys are
-    retired and an exported one is inert.
-    """
-    if default and not _compound_effort(row):
-        return default
-    own = _row_own_effort(row)
-    if own:
-        return own
-    if fallback:
-        return fallback
-    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
 
-    return REVIEW_POOL_DEFAULT_EFFORT
+def row_effort_source(row: ConfiguredReviewerSlot) -> str:
+    """How the row's effort with no order is decided: ``model_name``, ``pin`` or ``auto``."""
+    return choose_effort("", pin=row.effort, model_named=_compound_effort(row), default_top=True,
+                         binds=effort_range_binds(), rng=live_effort_range())[1]
 
 
 # ---------------------------------------------------------------------------

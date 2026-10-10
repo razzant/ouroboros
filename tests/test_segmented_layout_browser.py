@@ -1,13 +1,12 @@
 """Every Settings segmented control on the real page: equal columns derived from its choices.
 
-The one renderer (`page_header.renderSegmentedField`) feeds 13 call sites and 15
-groups. On a real server in Chromium and WebKit, at a desktop and a phone width:
-up to four choices fill their row; the seven- and eight-step effort scales keep four
-equal columns with a partial last row whose buttons are not stretched; the five
-one-glyph cycle values stay one row; a narrow card stacks two equal columns; no
-label leaves its button. Then the keyboard: Enter and Space choose, focus wears the
-one DESIGN ring (not the hover paint), the draft turns dirty, and Same as Task / Chat
-— the empty value — survives Save and reload where `high` stood before.
+The one renderer (`page_header.renderSegmentedField`) feeds 12 groups. On a real
+server in Chromium and WebKit, at a desktop and a phone width: up to four choices fill
+their row (the effort scales left Behavior with the effort range: the composer's one
+control edits it now); the five one-glyph cycle values stay one row; a narrow card
+stacks two equal columns; no label leaves its button. Then the keyboard: Enter and
+Space choose, focus wears the one DESIGN ring (not the hover paint), the draft turns
+dirty, and the chosen value survives Save and reload where the old one stood before.
 """
 
 from __future__ import annotations
@@ -23,8 +22,7 @@ pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
 # Every group the renderer draws, with its number of choices.
 GROUPS = {
-    "s-allow-mutative-subagents": 3, "s-effort-task": 7, "s-effort-evolution": 7,
-    "s-effort-consciousness": 8, "s-review-enforcement": 2,
+    "s-allow-mutative-subagents": 3, "s-review-enforcement": 2,
     "s-task-review-mode": 3, "s-review-max-cycles": 5, "s-image-input-mode": 4, "s-context-mode": 3,
     "s-prompt-cache-ttl": 3, "s-safety-mode": 3, "s-update-channel": 3, "s-runtime-mode": 4,
     "s-post-task-evolution-mode": 3, "s-consciousness-autonomy": 3,
@@ -117,12 +115,12 @@ def test_every_segmented_group_lays_out_from_its_own_choices(direct_server_with_
 @pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_keyboard_choice_focus_ring_and_the_empty_inherit_value_survive_save(direct_server_with_data, engine):
+def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_server_with_data, engine):
     from playwright.sync_api import expect, sync_playwright
 
     fixture = direct_server_with_data
     settings_path = fixture["data_dir"] / "settings.json"
-    group = '[data-effort-target="s-effort-consciousness"]'
+    group = '[data-effort-target="s-task-review-mode"]'
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
         try:
@@ -144,8 +142,8 @@ def test_keyboard_choice_focus_ring_and_the_empty_inherit_value_survive_save(dir
                 return json.loads(settings_path.read_text(encoding="utf-8"))
 
             open_behavior()
-            press("high", "Enter")
-            assert page.locator("#s-effort-consciousness").input_value() == "high"
+            press("required", "Enter")
+            assert page.locator("#s-task-review-mode").input_value() == "required"
             expect(page.locator("#settings-unsaved-indicator")).to_have_class(__import__("re").compile("is-visible"))
             ring = page.evaluate("""(selector) => {
                 const focused = document.activeElement;
@@ -158,23 +156,23 @@ def test_keyboard_choice_focus_ring_and_the_empty_inherit_value_survive_save(dir
                 return {visible: focused.matches(':focus-visible'), value: focused.dataset.effortValue, token,
                         outline: [style.outlineStyle, style.outlineWidth, style.outlineOffset, style.outlineColor]};
             }""", group)
-            assert ring["visible"] and ring["value"] == "high", ring
+            assert ring["visible"] and ring["value"] == "required", ring
             assert ring["outline"] == ["solid", "2px", "2px", ring["token"]], ring
             # Hover paints the button; it never draws the focus ring.
-            hovered = page.locator(f'{group} [data-effort-value="low"]')
+            hovered = page.locator(f'{group} [data-effort-value="off"]')
             hovered.hover()
             assert hovered.evaluate("(node) => getComputedStyle(node).outlineStyle") == "none"
-            assert save()["OUROBOROS_EFFORT_CONSCIOUSNESS"] == "high"
+            assert save()["OUROBOROS_TASK_REVIEW_MODE"] == "required"
 
             open_behavior()
-            assert page.locator(f'{group} [data-effort-value="high"]').get_attribute("aria-pressed") == "true"
-            press("", " ")  # Space on Same as Task / Chat
-            assert page.locator("#s-effort-consciousness").input_value() == ""
-            assert save()["OUROBOROS_EFFORT_CONSCIOUSNESS"] == ""
+            assert page.locator(f'{group} [data-effort-value="required"]').get_attribute("aria-pressed") == "true"
+            press("off", " ")  # Space chooses too
+            assert page.locator("#s-task-review-mode").input_value() == "off"
+            assert save()["OUROBOROS_TASK_REVIEW_MODE"] == "off"
 
             open_behavior()
-            inherit = page.locator(f'{group} [data-effort-value=""]')
-            assert inherit.get_attribute("aria-pressed") == "true" and "Same as Task" in inherit.inner_text()
-            assert page.locator(f'{group} [data-effort-value="high"]').get_attribute("aria-pressed") == "false"
+            chosen = page.locator(f'{group} [data-effort-value="off"]')
+            assert chosen.get_attribute("aria-pressed") == "true" and "Off" in chosen.inner_text()
+            assert page.locator(f'{group} [data-effort-value="required"]').get_attribute("aria-pressed") == "false"
         finally:
             browser.close()

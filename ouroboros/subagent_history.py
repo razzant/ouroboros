@@ -6,7 +6,7 @@ import json
 import logging
 import pathlib
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 from ouroboros.utils import utc_now_iso, write_text_atomic
 
@@ -212,12 +212,16 @@ def _api_observed_facts(call: Mapping[str, Any], *, failed: bool = False) -> dic
 
 
 def session_request_facts(request: Mapping[str, Any], *, selected_subagent_id: str,
-                          task_id: str, route: str, processing: Mapping[str, Any]) -> dict:
-    """Compact original intent for existing custody rows, without copying the work order."""
+                          task_id: str, route: str, processing: Mapping[str, Any],
+                          row_effort: Optional[str] = None) -> dict:
+    """Compact original intent for existing custody rows, without copying the work order.
+    ``row_effort`` is the configured row's pin ('' = Auto): a start failure's receipt
+    identity, like a settled run's, never the level the leaf was started at."""
     return {"selected_subagent_id": selected_subagent_id, "task_id": task_id, "route": route,
             "model": str(request.get("model") or ""), "profile_id": str(request.get("credentialProfileId") or ""),
             "access": str(request.get("access") or ""),
             **({"effort": request["effort"]} if isinstance(request.get("effort"), str) else {}),
+            **({"row_effort": row_effort} if isinstance(row_effort, str) else {}),
             **({"processing_preference": processing["requested"]}
                if isinstance(processing.get("requested"), str) else {})}
 
@@ -229,12 +233,16 @@ def record_session_execution(drive_root, custody, detail: Mapping[str, Any], obs
     from ouroboros.delegate_custody import summary_of
     summary = summary_of(detail)
     failure = summary.get("failure") if isinstance(summary.get("failure"), dict) else {}
+    # Identity is the CONFIGURED row (its pin, '' for Auto), never the level the leaf ran at —
+    # that is the effort fact; a row without the pin keeps the leaf level as it always did.
+    effort = custody.row_effort if custody.row_effort is not None else custody.effort
     identity = {"kind": "agent_session",
                 "target_id": custody.route_id + ("=" + custody.model if custody.model else ""),
                 "credential_profile_id": custody.profile_id,
                 "access": custody.access,
-                **{key: getattr(custody, key) for key in ("effort", "processing_preference")
-                   if getattr(custody, key) is not None}}
+                **({"effort": effort} if effort is not None else {}),
+                **({"processing_preference": custody.processing_preference}
+                   if custody.processing_preference is not None else {})}
     record_last_delegation(
         route=custody.route_id, requested_model=custody.model,
         applied_model=str(observed.get("model") or ""), run_id=custody.run_id,
@@ -261,4 +269,6 @@ def record_session_start_failure(drive_root, event: Mapping[str, Any]) -> None:
         failure_code=str(event.get("reason") or ""), identity={
             "kind": "agent_session", "target_id": route + ("=" + model if model else ""),
             "access": str(event.get("access") or ""), "credential_profile_id": pin,
-            **{key: event[key] for key in ("effort", "processing_preference") if key in event}})
+            **({"effort": event["row_effort"]} if isinstance(event.get("row_effort"), str)
+               else {"effort": event["effort"]} if "effort" in event else {}),
+            **({"processing_preference": event["processing_preference"]} if "processing_preference" in event else {})})

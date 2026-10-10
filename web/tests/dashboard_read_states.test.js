@@ -488,6 +488,28 @@ test('Activity unites live direct turns with queue identities and preserves queu
     assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl], 'reuse the existing state read');
 });
 
+test('Activity names work held by an application stop as held, never as a money pause', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    routes.set(queueUrl, response({ queue: { running: [], pending: [
+        { task: { id: 'saved-1', title: 'Saved before Quit', _budget_pause_hold: { reason: 'saved_work_hold' } } },
+        { task: { id: 'restart-1', title: 'Held by Restart', _budget_pause_hold: { reason: 'owner_restart_hold' } } },
+        { task: { id: 'released-1', title: 'Resumed already',
+            _budget_pause_hold: { reason: 'saved_work_hold', selected: true } } },
+    ] } }));
+    await initActivity({ mount, ws }).refresh();
+    const rows = section(mount, 'queue').querySelectorAll('.activity-row');
+    assert.equal(rows.length, 3);
+    for (const row of rows.slice(0, 2)) {
+        assert.match(row.textContent, /held after Restart/);
+        assert.doesNotMatch(row.textContent, /budget/);
+        assert.equal(row.querySelector('button').dataset.budgetPaused, '1', 'the same Resume is offered');
+    }
+    // The owner's Resume released this hold: it is neither held nor paused any more.
+    assert.doesNotMatch(rows[2].textContent, /held after Restart|paused/);
+    assert.equal(rows[2].querySelector('button').dataset.budgetPaused, undefined);
+});
+
 test('Activity complete empty census differs from unknown and failed state preserves queue facts', async (t) => {
     const { mount, routes, ws } = setup(t);
     emptyActivity(routes);

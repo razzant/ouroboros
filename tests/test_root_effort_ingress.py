@@ -63,10 +63,13 @@ def _tool_ctx(root, sup_ctx, **metadata):
 
 
 def _promoted(tmp_path, monkeypatch, **promote_kwargs):
-    """Promote through the tool, the event, the supervisor admission and its receipt."""
+    """Promote through the tool, the event, the supervisor admission and its receipt.
+    A root Ouroboros creates itself takes an explicit effort in Cyber Pro only."""
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.control import _promote_chat_to_task
 
+    if "reasoning_effort" in promote_kwargs:
+        monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")
     _q, _state, workers = _install_queue(tmp_path, monkeypatch)
     _pool_ready(monkeypatch, workers)
     sup = _supervisor_ctx(tmp_path, workers)
@@ -170,6 +173,7 @@ def test_route_to_project_carries_it_and_the_picker_discloses_new_vs_existing_be
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.control import _route_to_project
 
+    monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")  # applied in Cyber Pro only
     _q, _state, workers = _install_queue(tmp_path, monkeypatch)
     _pool_ready(monkeypatch, workers)
     create_project(tmp_path, "racer", name="Racer")
@@ -328,6 +332,7 @@ def test_a_followup_fires_its_explicit_effort_through_the_real_occurrence(tmp_pa
     from ouroboros.tools import followup
     from supervisor import queue_schedules
 
+    monkeypatch.setattr("ouroboros.config._BOOT_RUNTIME_MODE", "cyber_pro")  # applied in Cyber Pro only
     _q, _state, workers = _install_queue(tmp_path, monkeypatch)
     _pool_ready(monkeypatch, workers)
     monkeypatch.setattr(followup, "_is_delegated_subagent", lambda _ctx: False)
@@ -454,16 +459,19 @@ def test_a_control_seeding_an_absent_row_keeps_the_queued_explicit_effort(tmp_pa
     assert not ensure_control_task_result("queued-2").get("reasoning_effort")
 
 
-def test_configured_children_keep_their_profile_and_the_root_effort_is_not_a_child_axis():
+def test_configured_children_keep_their_profile_and_ask_for_effort_through_their_own_argument():
     from ouroboros.subagents import LEGACY_SUBAGENT_FIELDS
     from ouroboros.tools.control import get_tools
 
     schemas = {entry.name: entry.schema for entry in get_tools()}
     assert "reasoning_effort" in schemas["promote_chat_to_task"]["parameters"]["properties"]
     assert "reasoning_effort" in schemas["route_to_project"]["parameters"]["properties"]
-    assert "reasoning_effort" not in schemas["schedule_subagent"]["parameters"]["properties"]
-    assert "reasoning_effort" in LEGACY_SUBAGENT_FIELDS  # a stored child value stays ignored
+    child = schemas["schedule_subagent"]["parameters"]["properties"]
+    assert "reasoning_effort" not in child and child["effort"]["default"] == "auto"
+    assert "reasoning_effort" in LEGACY_SUBAGENT_FIELDS  # a pre-record stored child value stays ignored
     from ouroboros.config import EFFORT_SCALE
+
+    assert child["effort"]["enum"] == ["auto", *EFFORT_SCALE]
 
     assert schemas["promote_chat_to_task"]["parameters"]["properties"]["reasoning_effort"]["enum"] == \
         list(EFFORT_SCALE)

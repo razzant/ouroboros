@@ -13,6 +13,7 @@ import logging
 import os
 from typing import Any, Optional, TYPE_CHECKING
 
+from ouroboros.settings_integrity import live_effort_range
 from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS
 from ouroboros.review_substrate import SLOT_ID_PREFIX
 
@@ -251,7 +252,7 @@ async def _query_model(
             slot = ReviewSlot(
                 slot_id=slot_id,
                 model=model,
-                effort=effort or _rev()._cfg.REVIEW_POOL_DEFAULT_EFFORT,
+                effort=effort or live_effort_range()["max"],  # an absent vector tail: an Auto reviewer's level
                 max_tokens=_out_budget,
                 default_temperature=0.2,
                 role_hint=TRIAD_ROLE_HINT,

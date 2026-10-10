@@ -5,6 +5,7 @@ import { renderSubagentsSection } from './subagents_settings.js';
 import { languageBlockHtml } from './settings_language.js';
 import { modelRolesHost } from './model_roles.js';
 import { bindSecretReveal } from './settings_secrets.js';
+import { EFFORT_RANGE_SUMMARY_TEMPLATE } from './effort_levels.js';
 
 // Reads as a sequence: keys → secrets → which API models → who among the agents
 // does what → behavior → technical. "Agents", not "Coding agents" (D-10): the
@@ -21,14 +22,6 @@ const SETTINGS_TABS = [
     { value: 'about', label: 'About' },
 ];
 // Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
-
-// Review effort, Deep Self-Review's included, is a property of the catalog row
-// that runs it (Agents → Available subagents). Behavior keeps the surface-level lanes.
-const EFFORT_FIELDS = [
-    ['s-effort-task', 'Task / Chat', 'medium'],
-    ['s-effort-evolution', 'Evolution', 'high'],
-    ['s-effort-consciousness', 'Consciousness', ''],  // '' = the Task / Chat effort (a wake-up is a Main turn)
-];
 
 // Runtime mode is one axis of the owner policy contract. Keep the Settings
 // presentation in the same vocabulary as the onboarding setup contract; the
@@ -202,32 +195,6 @@ function providerSettingsCard(spec) {
         open: spec.open,
         body: `<div class="form-row">${fields}</div>${test}${spec.note ? `<div class="settings-inline-note">${spec.note}</div>` : ''}`,
     });
-}
-
-// The owner-facing subset of ouroboros/config.py EFFORT_SCALE: `minimal` is a
-// valid runtime tier (bench adapters / agent-side switch_model use it) but is
-// deliberately NOT offered as an owner slot default — sub-`low` thinking is a
-// per-call tactical choice, not a standing configuration. xhigh/max/ultra adapt
-// down to each route's real ceiling (exact-route request-wire recovery on API
-// routes, per-model resolution on delegated ones); the adaptation is disclosed
-// in usage, and a cold route whose provider rejects without naming supported
-// tiers remains the PR-disclosed limit of the two-send recovery rail.
-const EFFORT_OPTIONS = [
-    { value: 'none', label: 'None' }, { value: 'low', label: 'Low' },
-    { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' },
-    { value: 'xhigh', label: 'X-High' }, { value: 'max', label: 'Max' }, { value: 'ultra', label: 'Ultra' },
-];
-
-function effortField({ id, label, defaultValue }) {
-    // Consciousness may inherit the Task / Chat effort ('' — a wake-up is a Main turn).
-    const options = id === 's-effort-consciousness' ? [{ value: '', label: 'Same as Task / Chat' }, ...EFFORT_OPTIONS] : EFFORT_OPTIONS;
-    return `
-        <div class="settings-effort-card">
-            <label for="${id}">${label}</label>
-            <input id="${id}" type="hidden" value="${defaultValue}">
-            ${renderSegmentedField({ target: id, options })}
-        </div>
-    `;
 }
 
 export const SECRET_KEYS = [
@@ -435,10 +402,8 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Reasoning Effort</h3>
-                        <div class="settings-section-copy">Preferred reasoning effort per task type. Unsupported levels adapt to the route; native mappings, required minimums or provider defaults may apply. Requested, sent and reported effort are recorded in Logs.</div>
-                        <div class="settings-effort-grid">
-                            ${EFFORT_FIELDS.map(([id, label, defaultValue]) => effortField({ id, label, defaultValue })).join('')}
-                        </div>
+                        <!-- The range is edited in the chat alone (the round Effort button next to Swarm); this line reads the saved document. -->
+                        <div class="settings-section-copy" data-effort-range-summary>${EFFORT_RANGE_SUMMARY_TEMPLATE}</div>
                     </div>
 
                     <div class="form-section">

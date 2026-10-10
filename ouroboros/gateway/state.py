@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros import get_version
+from ouroboros.settings_scales import effort_range
 from ouroboros.gateway._helpers import json_exception, request_drive_root
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 
@@ -395,9 +396,11 @@ def _finishing_reviews(drive_root: Any, row: Dict[str, Any], task_id: str) -> bo
 def _activity_pause_cause(row: dict, fence: dict) -> str:
     """Explain a parked census row from its existing typed control, never its phase name."""
     hold = row.get("_budget_pause_hold") or {}
-    if isinstance(hold, dict) and hold.get("reason") in {"owner_restart_hold", "saved_work_hold"}:
+    if isinstance(hold, dict) and hold.get("reason") in {"owner_restart_hold", "saved_work_hold"} \
+            and not hold.get("selected"):
         # saved_work_hold: work saved before the application stopped waits for Resume
         # after it started again (#1563); the published cause vocabulary is unchanged.
+        # A hold the owner's Resume already released explains no later pause.
         return "restart"
     if fence.get("cause") == "owner_pause":
         return "owner"
@@ -697,6 +700,7 @@ async def api_state(request: Request) -> JSONResponse:
             "context_mode": get_context_mode(),
             # Frozen one-window compatibility field. Persistent auto-Low is retired.
             "context_mode_auto_low": False,
+            "effort_range": effort_range(),  # the owner's range, the tolerant read
             "safety_mode": get_safety_mode(),
             "skills_repo_configured": bool(get_skills_repo_path()),
             "github_token_configured": snap["github_token_configured"],

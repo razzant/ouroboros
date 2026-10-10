@@ -219,8 +219,9 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "reasoning_effort": {
                             "type": "string", "enum": list(EFFORT_SCALE),
-                            "description": "Optional: the reasoning effort each future task starts on, chosen for "
-                                           "that work. Omit for its configured default. A request the route may adapt.",
+                            "description": "Optional: the reasoning effort each future task starts on; applied in "
+                                           "Cyber Pro only — otherwise the task starts at my human's recommended "
+                                           "level and the result says so. Omit for that level.",
                         },
                     },
                     "required": ["objective", "relation"],
@@ -408,6 +409,15 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
         except ValueError as exc:
             return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
                 f"ERROR: FOLLOWUP_EFFORT_INVALID: {exc}. Nothing was scheduled.")))
+        from ouroboros.runtime_mode_policy import effort_range_binds
+        from ouroboros.settings_scales import effort_range
+
+        if effort_range_binds():  # a root Ouroboros creates itself starts at the recommended level
+            timezone_note += " " + ignored_argument_note(
+                "reasoning_effort", effort,
+                "outside Cyber Pro a future task I schedule starts at my human's recommended level "
+                f"({effort_range()['recommended']})") + "."
+            effort = ""
     from ouroboros.tool_access import canonical_data_root
     from supervisor.queue import schedule_transaction
 

@@ -335,7 +335,9 @@ def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_wit
                 tinted.scroll_into_view_if_needed()
                 capture(page, "wizard-roster-invalid")
 
-                tinted.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-luna")
+                # A model the generated roster does not run yet: its own Auto actor rows (no effort)
+                # would make the same model on another Auto row their twin.
+                tinted.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-sol")
                 page.wait_for_function(
                     "() => document.querySelector('#onboarding-available-subagents [data-subagents-validation]').hidden"
                     " && !document.querySelector('#onboarding-available-subagents .available-subagent-row[data-invalid]')",

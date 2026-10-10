@@ -250,7 +250,10 @@ export function initActivity({ mount, ws } = {}) {
             const paused = rowBudgetPaused(q, t, kind);
             // The owner's Restart holds never-started work under the same
             // hold carrier (restart_retention.py): same Resume, its own words.
-            const restartHeld = heldRow(t) && t._budget_pause_hold.reason === 'owner_restart_hold';
+            // Work saved before an application stop (saved_work_hold, #1563) has
+            // the census's same "after restart" cause; it is never a money pause.
+            const restartHeld = heldRow(t)
+                && ['owner_restart_hold', 'saved_work_hold'].includes(t._budget_pause_hold.reason);
             const waiting = q.owner_wait;
             const warmSleeping = kind === 'running' && waiting?.state === 'waiting'
                 && waiting.reason === 'sleep' && waiting.sleep?.mode === 'warm';

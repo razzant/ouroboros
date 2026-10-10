@@ -156,8 +156,8 @@ def browser_request_block_reason(
     if mode_has_unrestricted_agency(runtime_mode):
         return ""
     if any(predicate(request) for predicate in (
-        _is_context_mode_owner_post, _is_review_enforcement_post, _is_safety_mode_owner_post,
-        _is_owner_skill_attest_post, _is_owner_settings_self_elevation_post,
+        _is_context_mode_owner_post, _is_effort_range_owner_post, _is_review_enforcement_post,
+        _is_safety_mode_owner_post, _is_owner_skill_attest_post, _is_owner_settings_self_elevation_post,
     )) and runtime_service_kind(request.url, ctx):
         return "BROWSER_OWNER_CONTROL_BLOCKED: this operation belongs to the owner"
     return ""
@@ -226,6 +226,19 @@ def _is_context_mode_owner_post(request: Any) -> bool:
         return False
     return method == "POST" and parsed.path.rstrip("/") == "/api/owner/context-mode"
 
+
+
+def _is_effort_range_owner_post(request: Any) -> bool:
+    """POST to the owner effort-range endpoint (the chat composer's control), decoded like safety-mode."""
+    import urllib.parse
+
+    try:
+        parsed = urlparse(str(request.url or ""))
+        method = str(request.method or "").upper()
+    except Exception:
+        return False
+    path = urllib.parse.unquote(urllib.parse.unquote(parsed.path)).rstrip("/")
+    return method == "POST" and path == "/api/owner/effort-range"
 
 
 def _is_safety_mode_owner_post(request: Any) -> bool:

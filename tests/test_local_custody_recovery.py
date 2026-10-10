@@ -75,8 +75,11 @@ def test_a_live_unknown_or_unattributable_owner_stays_held(tmp_path, monkeypatch
     write_task_result(tmp_path, "root", "failed", root_task_id="root")
     write_task_result(tmp_path, "helper", "cancelled", root_task_id="root")
     own = platform_layer.process_start_time(os.getpid())
+    # Exercise a DIFFERENT identity kind on Windows as well as POSIX; another
+    # valid Windows FILETIME would correctly prove that the recorded owner ended.
+    foreign_birth = "812" if own.startswith("win-filetime:") else "win-filetime:1234567"
     pid, birth = {"live_self": (os.getpid(), own), "unreadable_birth": (os.getpid(), ""),
-                  "other_format_birth": (os.getpid(), "win-filetime:1234567"),
+                  "other_format_birth": (os.getpid(), foreign_birth),
                   "no_identity": (0, own)}[case]
     _claim(tmp_path, "helper", pid, birth)
     assert repair.owner_ended(pid, birth) is False

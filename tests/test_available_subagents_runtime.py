@@ -490,6 +490,7 @@ def test_actor_first_delegate_start_binds_snapshot_and_canonical_work_order(monk
             "compiled_work_order": True,
             "work_order_fingerprint": "full-work-order-sha",
             "_coordination_context": "",
+            "effort_fact": {},
             **geometry,
         },
     )]

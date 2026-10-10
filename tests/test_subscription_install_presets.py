@@ -128,7 +128,8 @@ def test_every_combination_follows_the_declarative_policy(connected):
     subagent_target, subagent_effort = _target(primary, "subagent")
     first_actor = json.loads(preset.available_subagents)["items"][0]
     assert first_actor["route"]["target_id"] == subagent_target
-    assert first_actor["effort"] == subagent_effort
+    # An actor row is Auto (the owner's range decides) unless its model id spells the level.
+    assert first_actor.get("effort", "") == (subagent_effort if primary == "cursor" else "")
 
     assert sorted(_pool_rows(preset)) == sorted(_expected_pool(connected))
     assert all(row.is_session for row in _pool(preset))
@@ -297,7 +298,8 @@ def test_receipt_records_what_was_resolved_and_from_where():
     assert receipt["capability"]["claude"]["status"] == "ok"
     assert receipt["surfaces"]["advisory"]["model"] == "claude-sonnet-5"
     assert len(receipt["surfaces"]["triad"]) == 2
-    assert receipt["review_pool"] == ["primary-builder", "independent-perspective"]
+    # Reviewer seats keep their explicit levels on rows of their own; the Auto actors stay actors.
+    assert receipt["review_pool"] == ["review-claude", "review-codex"]
     # The receipt must be JSON-serializable — it rides an API response.
     json.dumps(receipt)
 
@@ -481,19 +483,20 @@ def test_one_harness_plus_distinct_main_and_light_normally_yields_three_real_act
     })
 
     items = json.loads(preset.available_subagents)["items"]
-    # 4=A, now literally one list: the first triad seat marks the task actor
-    # whose session route it shares; the two remaining identical seats are
-    # minted twins; the scope seat merges. The advisory seat mints nothing.
+    # One list: the actors are Auto rows (no effort), so the three identical triad seats
+    # mint their own pinned reviewer rows and the scope seat merges. The advisory seat mints nothing.
     assert [row["subagent_id"] for row in items] == [
-        "primary-builder", "fast-scout", "independent-perspective", "review-claude", "review-claude-2",
+        "primary-builder", "fast-scout", "independent-perspective",
+        "review-claude", "review-claude-2", "review-claude-3",
     ]
-    assert all("name" not in row for row in items)  # retired field (1=A)
-    assert [row.slot_id for row in _pool(preset)] == ["primary-builder", "review-claude", "review-claude-2"]
+    assert all("name" not in row and "effort" not in row for row in items[:3])  # retired field; Auto actors
+    assert [row.slot_id for row in _pool(preset)] == ["review-claude", "review-claude-2", "review-claude-3"]
+    assert [row.effort for row in _pool(preset)] == ["medium"] * 3
     assert [row["route"]["target_id"] for row in items] == [
         "claude=claude-opus-5", "openai/gpt-5.6-luna", "openai/gpt-5.6-sol",
-        "claude=claude-opus-5", "claude=claude-opus-5",  # the minted twins' own session route
+        "claude=claude-opus-5", "claude=claude-opus-5", "claude=claude-opus-5",
     ]
-    assert [row.get("minted_from") for row in items] == [None, None, None, "factory_default", "factory_default"]
+    assert [row.get("minted_from") for row in items] == [None, None, None] + ["factory_default"] * 3
 
 
 def test_roster_cap_overflow_omits_the_seat_with_a_diagnostic():

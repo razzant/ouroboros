@@ -178,16 +178,19 @@ def test_fresh_install_applies_the_preset_in_one_write(onboarding):
     assert saved[PRESET_MARKER_KEY] == "3"
     assert saved["OUROBOROS_SUBAGENT_HARNESS"] == ""
     available = json.loads(saved[SUBAGENTS_SETTING])
-    # 4=A, one list: the review seats MARK the roster rows that already run
-    # them (the scope seat merges into the codex row); the advisory seat mints
-    # nothing, and no lane key is written.
+    # One list: the actors are Auto rows (the owner's effort range decides), so the
+    # review seats keep their pinned levels on minted rows of their own (the scope
+    # seat merges into the codex reviewer row); the advisory seat mints nothing,
+    # and no lane key is written.
     assert [(row["route"]["target_id"], row.get("review_eligible", False)) for row in available["items"]] == [
-        ("claude=claude-opus-5", True), ("codex=gpt-5.6-sol", True), ("openai/gpt-5.6-luna", False),
+        ("claude=claude-opus-5", False), ("codex=gpt-5.6-sol", False), ("openai/gpt-5.6-luna", False),
+        ("claude=claude-opus-5", True), ("codex=gpt-5.6-sol", True),
     ]
     assert all("name" not in row for row in available["items"])  # retired (1=A)
+    assert [row.get("effort") for row in available["items"]] == [None, None, None, "medium", "medium"]
     receipt = json.loads(saved[SUBAGENTS_RECEIPT_KEY])
     assert receipt["available_subagents_fingerprint"]
-    assert receipt["review_pool"] == [row["subagent_id"] for row in available["items"][:2]]
+    assert receipt["review_pool"] == [row["subagent_id"] for row in available["items"][3:]]
     assert "OUROBOROS_REVIEWER_SLOTS" not in saved
     # Everything else of the transaction landed in the SAME file.
     assert saved["OUROBOROS_RUNTIME_MODE"] == "advanced"

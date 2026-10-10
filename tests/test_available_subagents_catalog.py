@@ -76,12 +76,12 @@ def test_catalog_projects_every_saved_row_in_owner_order_verbatim():
     assert list(catalog["rows"][0])[-1] == "recommended_use"
     assert catalog["rows"][0]["route_class"] == "API model"
     assert catalog["rows"][0]["requested_model"] == "google/gemini-3.7-flash"
-    assert catalog["rows"][0]["requested_effort"] == "low"
+    assert catalog["rows"][0]["effort"] == "low" and "effort_source" not in catalog["rows"][0]
     assert catalog["rows"][1]["route_class"] == "Agent session"
     assert catalog["rows"][1]["requested_target"] == "claude=claude-fable-5"
     assert catalog["rows"][1]["mutating_access"] == "full"
     assert "credential_profile_id" not in catalog["rows"][1]
-    assert catalog["rows"][2]["requested_effort"] == "(not explicitly set)"
+    assert catalog["rows"][2]["effort"] == "high" and catalog["rows"][2]["effort_source"] == "model_name"
     assert catalog["rows"][2]["credential_profile_id"] == "cursor-owner"
     assert not any("account_policy" in row for row in catalog["rows"])
 

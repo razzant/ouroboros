@@ -58,7 +58,9 @@ test('Pause retries an unknown answer with the same id, then a new action gets a
     assert.equal(calls[0][1], calls[1][1], 'a retry reuses the SAME request id');
     assert.notEqual(calls[1][1], calls[2][1], 'a new owner Pause after Resume is a NEW action');
     assert.match(calls[0][1], /^pause-/);
-    assert.match(toasts[1][0], /^Pausing: .*work already sent finishes/);
+    // Owner S1: Pause abandons a model answer still awaited; it never promises sent work finishes.
+    assert.match(toasts[1][0], /^Pausing: new work is stopped; running work stops at its last saved point\. Reviews already started finish separately\.$/);
+    assert.doesNotMatch(toasts[1][0], /already sent|then the tree is saved/);
     assert.match(toasts[3][0], /^Paused: the whole task tree is saved/);
     assert.equal(await pauseTaskAction('root-2', { pause: async () => { throw new Error('cancel_pending'); }, toast }), false);
     assert.match(toasts.at(-1)[0], /^Pause refused: cancel_pending/);
@@ -113,7 +115,7 @@ test('a durable Pause with a pending queue latch is never reported refused; the 
     assert.equal(await pauseTaskAction('latch-1', { pause: completes, toast, wait }), true);
     assert.equal(ids.length, 3);
     assert.equal(new Set(ids).size, 1, 'every completion retry reuses the SAME request id');
-    assert.match(toasts.at(-1)[0], /^Pausing: .*work already sent finishes/);
+    assert.match(toasts.at(-1)[0], /^Pausing: new work is stopped; running work stops at its last saved point/);
     assert.equal(toasts.length, 1);
     // Never confirmed within the bound: still accepted and truthful; the id is kept.
     const stuck = [];

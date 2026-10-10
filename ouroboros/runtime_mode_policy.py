@@ -31,6 +31,17 @@ def runtime_mode_at_least(runtime_mode: str, minimum: str) -> bool:
     return mode_rank >= 0 and minimum_rank >= 0 and mode_rank >= minimum_rank
 
 
+def effort_range_binds(task_metadata=None) -> bool:
+    """Whether the owner's effort range bounds Ouroboros's own requests: everywhere but
+    Cyber Pro. Reads the effective runtime mode (a consciousness-origin task's cap included
+    when its metadata is given); the mode is restart-bound, so a task keeps one answer."""
+    from ouroboros.config import get_runtime_mode
+    from ouroboros.consciousness_authority import effective_runtime_mode
+
+    mode = effective_runtime_mode(get_runtime_mode(), task_metadata) if task_metadata else get_runtime_mode()
+    return not runtime_mode_at_least(mode, "cyber_pro")
+
+
 def mode_has_unrestricted_agency(runtime_mode: str) -> bool:
     """Whether internal permission and review decisions are advisory only.
 

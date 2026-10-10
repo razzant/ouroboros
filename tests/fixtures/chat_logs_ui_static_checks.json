@@ -871,7 +871,7 @@
   },
   {
     "id": "test_context_segment_click_handler",
-    "path": "web/modules/chat.js",
+    "path": "web/modules/composer_owner_controls.js",
     "kind": "contains",
     "value": "event.target.closest('.chat-seg')"
   },

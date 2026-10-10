@@ -65,7 +65,7 @@ test('a Reviewer mark and a row switch patch the card in place, never rebuilding
     one.querySelector('[data-subagent-field="review_eligible"]').listeners.change({ target: { checked: true } });
     assert.equal(dom.rebuilds(), 1, 'the box under the pointer is never replaced');
     assert.equal(one.querySelector('[data-subagent-delivery-field]').hidden, false);
-    assert.equal(one.querySelector('[data-subagent-field="effort"] option[value=""]').textContent, 'Default (reviews at high)');
+    assert.equal(one.querySelector('[data-subagent-field="effort"] option[value=""]').textContent, 'Auto (reviews at the top of the chat range)');
     assert.equal(intent.textContent, 'Unsaved changes');
     // The twin of a marked row hears it in place too: one engine marked twice is a repeat.
     two.querySelector('[data-subagent-field="review_eligible"]').listeners.change({ target: { checked: true } });
@@ -76,7 +76,7 @@ test('a Reviewer mark and a row switch patch the card in place, never rebuilding
     one.querySelector('[data-subagent-field="review_eligible"]').listeners.change({ target: { checked: false } });
     assert.deepEqual([one.querySelector('[data-subagent-delivery-field]').hidden,
         one.querySelector('[data-subagent-review-exception]').hidden, dom.rebuilds()], [true, true, 1]);
-    assert.equal(one.querySelector('[data-subagent-field="effort"] option[value=""]').textContent, 'Default effort');
+    assert.equal(one.querySelector('[data-subagent-field="effort"] option[value=""]').textContent, 'Auto (chat range)');
     assert.equal(editor.setting.items[0].enabled, false);
     assert.equal('review_eligible' in editor.setting.items[0], false);
     editor.destroy();

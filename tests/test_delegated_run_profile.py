@@ -145,11 +145,14 @@ def test_the_model_has_no_argument_that_could_widen_the_profile():
     # `continue_from` names a settled run of this task's line (custody-checked; access
     # never wider) and `continue_carrier` only how the engine re-briefs it;
     # root/bucket/skill_name are a SELECTOR resolved through the same
-    # ResolvedResourceBinding authorizer as ordinary writes (R1 item 9).
+    # ResolvedResourceBinding authorizer as ordinary writes (R1 item 9); `effort` is reasoning
+    # depth inside the owner's effort range (a pin or a level in the model name keeps its own).
     assert properties == {
         "prompt", "subagent_id", "max_seconds", "retry_of", "continue_from", "continue_carrier", "root",
-        "bucket", "skill_name", "directory_strategy", "scope_paths", "access",
+        "bucket", "skill_name", "directory_strategy", "scope_paths", "access", "effort",
     }
+    from ouroboros.settings_scales import EFFORT_SCALE
+    assert entry.schema["parameters"]["properties"]["effort"]["enum"] == ["auto", *EFFORT_SCALE]
     assert entry.schema["parameters"]["properties"]["continue_carrier"]["enum"] == ["auto", "packet"]
     assert entry.schema["parameters"]["properties"]["root"]["enum"] == ["active_workspace", "skill_payload"]
     assert entry.schema["parameters"]["properties"]["access"]["enum"] == ["readonly", "workspace_write"]

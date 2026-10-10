@@ -23,6 +23,7 @@ import { initHarnessAccounts } from './harness_accounts.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { confirmAndSendRestart } from './chat_activity.js';
 import { PROVIDER_TEST_INPUTS, SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
+import { paintEffortRangeSummary } from './effort_levels.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
@@ -59,9 +60,7 @@ const INPUT_FIELDS = [
     ['s-max-rounds', 'OUROBOROS_MAX_ROUNDS', 'unlimited'], ['s-task-lifetime', 'OUROBOROS_TASK_ABS_CEILING_SEC', 'unlimited'],
 ];
 const VALUE_FIELDS = [
-    // A review's effort is its catalog row's effort; no global review effort is UI-authored.
-    ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'],
-    ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', ''],
+    // Effort is not a Settings draft: the range is read-only here and edited in the chat composer.
     ['s-consciousness-autonomy', 'OUROBOROS_CONSCIOUSNESS_AUTONOMY', 'act'],
     ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
     // Shared paid-review-cycle cap (plan review / task acceptance / commit gate);
@@ -679,6 +678,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         INPUT_FIELDS.forEach(([id, key, fallback = '']) => applyInputValue(id, storedOrFallback(s[key], fallback)));
         searchSelectionEdited = false;
         VALUE_FIELDS.forEach(([id, key, fallback]) => { byId(id).value = s[key] || fallback; });
+        paintEffortRangeSummary(page.querySelector('[data-effort-range-summary]'), s);
         modelRoles.load(s, { ...setupContract, modelSlots: setupModelSlots().map((slot) => ({
             ...slot, inputId: slot.settingsInputId,
         })) });

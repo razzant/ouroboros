@@ -32,6 +32,7 @@
  * @property {string} runtime_mode
  * @property {string} context_mode
  * @property {boolean} context_mode_auto_low  // frozen compatibility field; always false
+ * @property {EffortRange} effort_range  // the owner's effort range (POST /api/owner/effort-range), the tolerant read
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
@@ -311,6 +312,9 @@
  * @property {string=} model_lane
  * @property {string=} requested_model_lane
  * @property {string=} effective_model_lane
+ * @property {string=} effort_level  The effort decided at dispatch (a session row: its leaf's); empty = unknown, no chip.
+ * @property {string=} effort_requested  The parent's request when it made one.
+ * @property {string=} effort_source  auto | pin | model_name | cyber.
  * @property {string=} executor_route
  *   Phase 6: the OPAQUE harness route RESOLVED AT DISPATCH for this bubble /
  *   subagent (delegated routes only) — the route it was sent to, not a receipt
@@ -832,6 +836,15 @@
  */
 
 /**
+ * @typedef {Object} EffortRange  min ≤ recommended ≤ max, each an EFFORT_SCALE tier (the tolerant read)
+ * @property {string} min
+ * @property {string} recommended
+ * @property {string} max
+ *
+ * @typedef {Object} OwnerEffortRangeResponse
+ * @property {boolean} ok
+ * @property {EffortRange} effort_range
+ *
  * @typedef {Object} OwnerSafetyModeResponse
  * @property {boolean} ok
  * @property {string} safety_mode  // full | light | off (v6.54.3)

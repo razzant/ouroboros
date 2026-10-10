@@ -71,12 +71,12 @@ def test_settings_secrets_are_generic_and_integrations_tab_removed():
 
 def test_settings_review_effort_round_trips():
     """A reviewer's effort is its catalog row's own effort, edited beside the
-    route: a row marked Reviewer with neither a row effort nor a compound session
-    effort says in its effort select's Default option that it reviews at the pool
-    default. The mode-guard filter in settings.js is unchanged."""
+    route: a row marked Reviewer with no effort of its own says in its effort
+    select's Auto option that it reviews at the top of the chat range. The
+    mode-guard filter in settings.js is unchanged."""
     editor = _read("web/modules/subagents_settings.js")
     settings = _read("web/modules/settings.js")
-    assert "`Default (reviews at ${REVIEW_POOL_DEFAULT_EFFORT})`" in editor
+    assert "'Auto (reviews at the top of the chat range)' : 'Auto (chat range)'" in editor
     assert "key !== 'OUROBOROS_RUNTIME_MODE' && key !== 'OUROBOROS_CONTEXT_MODE'" in settings
 
 

@@ -37,10 +37,7 @@ from ouroboros.subagent_runtime import (
     effective_runtime_subagent_settings,
     select_subagent_snapshot,
 )
-from ouroboros.subagents import (
-    LEGACY_SUBAGENT_FIELDS,
-    build_subagent_envelope,
-)
+from ouroboros.subagents import build_subagent_envelope
 from ouroboros.task_results import STATUS_REQUESTED, write_task_result
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.tools.control_delegation import (
@@ -54,7 +51,6 @@ from ouroboros.tools.control_delegation import (
 )
 from ouroboros.tools.control_events import _SCHEDULE_EMIT_LOCK, _emit_control_event
 from ouroboros.tools.control_subagent_spec import (
-    RETIRED_SCHEDULE_PARAMS,
     _INTERNAL_SCHEDULE_OPTIONS,
     _validated_schedule_fields,
     schedule_subagent_param_names,
@@ -331,7 +327,31 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         f"Subagent request queued {task_ids[0]}: {objective} "
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
         f"{worker_note}{slot_note}{profile_note}{coop_note}{legacy_note}{access_note}"
+        f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
     )
+
+
+def _effort_request_note(configured: Dict[str, Any], requested: str, task_metadata: Any = None) -> str:
+    """What the parent can be told about its effort request BEFORE dispatch decides: the
+    request itself and, when the selected row is pinned or model-named, that outside Cyber
+    Pro the row's level stands (the dispatched level reaches the parent in the outcome)."""
+    if not requested:
+        return ""
+    from ouroboros.route_spec import RouteSpec, model_named_effort
+
+    route = configured.get("route") if isinstance(configured.get("route"), dict) else {}
+    named = model_named_effort(RouteSpec(str(route.get("kind") or "api_model"), str(route.get("target_id") or "")))
+    pin = str(configured.get("effort") or "")
+    if named:
+        return f"\neffort requested: {requested}; the row's model name carries {named}, which stands in every mode"
+    if not pin:
+        return f"\neffort requested: {requested} (decided at dispatch inside my human's range)"
+    from ouroboros.runtime_mode_policy import effort_range_binds
+
+    # The parent's effective mode (a consciousness-origin tree's cap included), as dispatch reads it.
+    if not effort_range_binds(task_metadata if isinstance(task_metadata, dict) else None):
+        return f"\neffort requested: {requested} (Cyber Pro: it outranks my human's pin {pin})"
+    return f"\neffort requested: {requested}; my human pinned the row at {pin}, which stands outside Cyber Pro"
 
 
 def _build_acting_constraint(
@@ -703,20 +723,13 @@ def child_copies_serving_body(ctx, params) -> bool:
 
 def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, **params: Any) -> str:
     allowed_params = schedule_subagent_param_names() | HIDDEN_LEGACY_SCHEDULE_PARAMS
-    retired = sorted(str(key) for key in params if key in RETIRED_SCHEDULE_PARAMS)
-    if retired:
-        return _publish_scheduling_refusal(
-            ctx, "error", "TOOL_ARG_ERROR", "⚠️ TOOL_ARG_ERROR (schedule_subagent): " + " ".join(
-                f"{name} was withdrawn: {LEGACY_SUBAGENT_FIELDS[RETIRED_SCHEDULE_PARAMS[name]]}. "
-                "Drop it — the owner's configured effort applies, exactly as it did when "
-                f"{name} was omitted." for name in retired))
     unsupported = sorted(str(key) for key in params if key not in allowed_params)
     if unsupported:
         bad = ", ".join(unsupported)
         return _publish_scheduling_refusal(
             ctx, "error", "TOOL_ARG_ERROR", "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): "
             f"{bad}. Use the strict schema: subagent_id, objective, expected_output, "
-            "optional role/context/constraints/memory_mode/workspace_root and (for mutative children) "
+            "optional role/context/constraints/memory_mode/workspace_root/effort and (for mutative children) "
             "write_surface/write_root/protected_paths_grant/external_tool_grants.")
     internal = dict(internal or {})
     if set(internal) - _INTERNAL_SCHEDULE_OPTIONS:
@@ -903,6 +916,9 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "requested_model_lane": requested_model_lane,
         "parent_model_lane": str(metadata.get("effective_model_lane") or ""),
         "requested_executor": requested_executor,
+        # The parent's effort REQUEST (``""`` = none); dispatch decides the level inside the
+        # owner's range and records the fact beside it (``SubagentDispatch.effort_fact``).
+        "requested_effort": fields["requested_effort"],
         "configured_subagent": configured_subagent,
         "parent_cognitive_route": parent_cognitive_route,
         **{key: fields[key] for key in ("directory_strategy", "scope_paths") if key in fields},
@@ -989,6 +1005,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "configured_subagent": configured_subagent,
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),
+        "requested_effort": fields["requested_effort"],
         # Host-minted shared coop tree only (a caller-supplied write_root is the
         # parent's own knowledge already).
         "coop_shared_tree": (

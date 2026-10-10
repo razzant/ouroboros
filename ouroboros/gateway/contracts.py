@@ -35,8 +35,7 @@ class ChatInbound(TypedDict):
     client_message_id: NotRequired[str]
     force_plan: NotRequired[bool]
     attachments: NotRequired[list]  # list[ChatAttachmentInbound] (additive, v6.26.0)
-    # Multi-project (additive, v6.32.0): per-project chat routing. The owner
-    # stays user_id 1; chat_id selects the thread, project_id scopes memory.
+    # Multi-project chat routing: the owner stays user_id 1; chat_id selects the thread, project_id scopes memory.
     chat_id: NotRequired[int]
     project_id: NotRequired[str]
     # Per-message sending-surface observables (additive-optional): raw facts the SPA measures at send
@@ -130,14 +129,12 @@ class ChatOutbound(TypedDict):
     # A cancellation fault names the PHYSICAL task it could not settle when it differs from the logical task id.
     cancel_physical_task_id: NotRequired[str]
     toast_once: NotRequired[str]
-    # #628: the one-shot toast's valence (warn/ok/error; the reaper's rail ``warning``
-    # is normalizeTone's existing ``warn`` alias, no new tone), stamped by the producer
-    # that knows wait/recovery/exhaustion; absent = the browser keeps its alarm tone.
+    # The one-shot toast's valence (warn/ok/error; the reaper's rail ``warning`` is normalizeTone's ``warn``
+    # alias), stamped by the producer that knows wait/recovery/exhaustion; absent = the browser's alarm tone.
     toast_tone: NotRequired[str]
     lifecycle: NotRequired[Dict[str, Any]]
-    # C4 multi-chat dedupe: a duplicate lifecycle initiator's typed pointer to
-    # the job that already owns the routing ({job_id, kind, target, status,
-    # chat_id}); the first initiator's chat keeps the progress stream.
+    # C4 multi-chat dedupe: a duplicate lifecycle initiator's typed pointer to the job that already owns the
+    # routing ({job_id, kind, target, status, chat_id}); the first initiator's chat keeps the progress stream.
     lifecycle_pointer: NotRequired[Dict[str, Any]]
     subagent_event: NotRequired[str]
     subagent_task_id: NotRequired[str]
@@ -154,41 +151,43 @@ class ChatOutbound(TypedDict):
     model_lane: NotRequired[str]
     requested_model_lane: NotRequired[str]
     effective_model_lane: NotRequired[str]
-    # Opaque delegated route stamped once by resolve_subagent_dispatch; absent/empty = native/no chip.
-    # Dispatch intent is not a landing receipt: a reduction belongs in capability_delta, never rewrites this route.
+    # Opaque delegated route stamped once by resolve_subagent_dispatch; absent/empty = native/no chip. Dispatch
+    # intent is not a landing receipt: a reduction belongs in capability_delta, never rewrites this route.
     executor_route: NotRequired[str]
+    # The effort decision at dispatch (a session row: its leaf's): level, the parent's request, source
+    # auto|pin|model_name|cyber. Empty/absent = unknown, no chip.
+    effort_level: NotRequired[str]
+    effort_requested: NotRequired[str]
+    effort_source: NotRequired[str]
     # Latest observed progress actor, NOT terminal evidence or current liveness. Own task_id/task_attempt/run_id/
     # attempt_id, harness_id, phase, revision; optional model has explicit model_source (requested or observed).
     executor_observation: NotRequired[Dict[str, Any]]
-    # Host observation: v/task_id/run_id/after_seq/through_seq, source (run_events|timeline_window,
-    # read_through/ref/provisional), typed parts/technical/gaps/omitted/latest_message. Part cuts count
-    # Unicode code points. (run_id, seq) is identity; cuts_truncated/seqs_truncated disclose its preview loss.
-    # source.ref = redacted JSONL via confined task-file ?source= (503 if unsupported). Never narration,
-    # terminal evidence or a complete-journal claim; full shape is mirrored in web/modules/api_types.js.
+    # Host observation: v/task_id/run_id/after_seq/through_seq, source (run_events|timeline_window, read_through/ref/
+    # provisional), typed parts/technical/gaps/omitted/latest_message; (run_id, seq) is identity, cuts count Unicode
+    # code points and cuts_truncated/seqs_truncated disclose preview loss; source.ref = redacted JSONL via confined
+    # task-file ?source= (503 if unsupported). Never narration or terminal evidence; full shape in api_types.js.
     delegated_activity: NotRequired[Dict[str, Any]]
     # Terminal evidence from subagents.envelope_from_task: run started/settled/succeeded counts, failure states,
-    # disclosed spend/estimated flag, engine models, nanny_nudge_recorded (durable nonempty finalization nudge),
-    # delegate_start_attempted (durable start or refusal). Absence = no evidence yet, never native execution.
+    # disclosed spend/estimated flag, engine models, nanny_nudge_recorded, delegate_start_attempted. Absence = no
+    # evidence yet, never native execution.
     execution_evidence: NotRequired[Dict[str, Any]]
-    # Custody fact beside executor_route: "harness_used" | "harness_attempted" | "native_only". Terminal only; absent =
-    # no substrate claim.
+    # Custody fact beside executor_route: "harness_used" | "harness_attempted" | "native_only". Terminal only;
+    # absent = no substrate claim.
     actual_substrate: NotRequired[str]
     model: NotRequired[str]
     task_group_id: NotRequired[str]
     task_event: NotRequired[str]
     status: NotRequired[str]
-    # v6.82 (P5): host-attested marker, stamped by the supervisor's delivery seam ONLY for a task POST /api/tasks/{id}/cancel
-    # will actually stop — a lineage-resolved pooled ROOT (its RUNNING row) or the live in-process direct-chat turn (resolved
-    # through the same ownership reader the endpoint uses, supervisor.workers.direct_chat_turn); never a subagent frame, never
-    # an ephemeral decision turn. Gates the UI "Cancel run" action.
+    # Host-attested marker (P5), stamped by the supervisor's delivery seam ONLY for a task POST /api/tasks/{id}/cancel
+    # will actually stop — a lineage-resolved pooled ROOT or the live in-process direct-chat turn (the endpoint's own
+    # ownership reader, supervisor.workers.direct_chat_turn); never a subagent or ephemeral decision frame. Gates "Cancel run".
     cancelable: NotRequired[bool]
     _is_direct_chat: NotRequired[bool]  # lane fact stamped on a direct turn's own frames
     narration: NotRequired[bool]  # progress VOICE: the model's own round narration (true) vs a host note (false); absent = legacy
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
-    # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is
-    # distinct from a confirmed $0. These are the honest names (accounted upper bounds, not settled
-    # receipts) and the only outbound spellings since ABI 7.0 dropped the ``cost_usd[_with_children]``
-    # aliases; ouroboros/cost_projection.py is the one author, ``resolve_cost_pair`` reads legacy records.
+    # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
+    # confirmed $0. The honest names (accounted upper bounds, not settled receipts), the only outbound spellings since
+    # ABI 7.0 dropped the ``cost_usd[_with_children]`` aliases; cost_projection.py is the one author.
     accounted_upper_bound_usd: NotRequired[Optional[float]]
     accounted_upper_bound_usd_with_children: NotRequired[Optional[float]]
     cost_accounting_status: NotRequired[Literal["available", "unavailable"]]
@@ -198,8 +197,7 @@ class ChatOutbound(TypedDict):
     reserved_usd: NotRequired[Optional[float]]
     unresolved_upper_bound_usd: NotRequired[Optional[float]]
     unknown_unmetered: NotRequired[Optional[int]]
-    # v6.87.48: count of OPEN ledger rows — the disclosed cause of
-    # ``cost_final: false``, which can hold with every dollar bucket at zero.
+    # Count of OPEN ledger rows — the disclosed cause of ``cost_final: false``, which can hold at zero dollars.
     non_final_rows: NotRequired[Optional[int]]
     # C12: the ledger's own INTEGRITY marker from the cost authority (`reconstruct_task_cost`), carried so an
     # amount computed over a degraded ledger never reaches a surface looking like one over a sound ledger.
@@ -243,8 +241,7 @@ class ChatOutbound(TypedDict):
     scheduled_for: NotRequired[str]  # the due point it was written for
     delivered_at: NotRequired[str]  # when the host showed it (later than due after downtime)
     chat_id: NotRequired[int]  # present on some transport re-broadcast paths
-    # Server-stamped when chat_id is a reserved Project thread: Main never
-    # adopts it, even before the browser has learned the project.
+    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
     project_thread: NotRequired[bool]
 
 
@@ -274,8 +271,7 @@ class PhotoOutbound(TypedDict):
     transport: NotRequired[TransportMetadata]
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    # Server-stamped when chat_id is a reserved Project thread: Main never
-    # adopts it, even before the browser has learned the project.
+    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
     project_thread: NotRequired[bool]
 
 
@@ -328,8 +324,7 @@ class DocumentOutbound(TypedDict):
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
     size_bytes: NotRequired[int]
-    # Server-stamped when chat_id is a reserved Project thread: Main never
-    # adopts it, even before the browser has learned the project.
+    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
     project_thread: NotRequired[bool]
 
 
@@ -418,8 +413,7 @@ class TypingOutbound(TypedDict):
     # Multi-project: stamps the thread so the client fan-out routes a project
     # task's typing indicator to its panel instead of defaulting to main.
     chat_id: NotRequired[int]
-    # Server-stamped when chat_id is a reserved Project thread: Main never
-    # adopts it, even before the browser has learned the project.
+    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
     project_thread: NotRequired[bool]
     activity_id: NotRequired[str]
     client_message_id: NotRequired[str]
@@ -438,8 +432,7 @@ class LogOutbound(TypedDict):
     # Multi-project: surfaced at top level so live task progress routes to
     # its own thread (Main admits only unstamped non-project frames).
     chat_id: NotRequired[int]
-    # Server-stamped when chat_id is a reserved Project thread: Main never
-    # adopts it, even before the browser has learned the project.
+    # Server-stamped when chat_id is a reserved Project thread: Main never adopts it, even before the browser learns it.
     project_thread: NotRequired[bool]
 
 
@@ -721,6 +714,17 @@ class ActiveChatActivity(ActiveDirectTurn):
     pause_cause: NotRequired[str]  # budget | owner | restart | sleep | unknown; display only
     finishing_reviews: NotRequired[bool]  # review work an owner Pause lets finish runs on; display only, no count
 
+class EffortRange(TypedDict):  # min ≤ recommended ≤ max, each an EFFORT_SCALE tier (the tolerant read)
+    min: str
+    recommended: str
+    max: str
+
+
+class OwnerEffortRangeResponse(TypedDict):
+    ok: bool
+    effort_range: EffortRange
+
+
 class StateResponse(TypedDict):
     """Shape of ``GET /api/state`` (happy path)."""
 
@@ -746,15 +750,14 @@ class StateResponse(TypedDict):
     runtime_mode: str
     context_mode: str
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
+    effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
     accounting: Dict[str, Any]
-    # Multi-project sidebar feed (additive, v6.32.0): compact registered
-    # projects [{id, name, chat_id, working_dir, last_active_at, has_thread_activity}].
+    # Multi-project sidebar feed: compact registered projects [{id, name, chat_id, working_dir, last_active_at, ...}].
     projects: list
-    # COMPLETE (uncapped) registered project chat_ids — the live WS fan-out
-    # isolation SSOT, distinct from the capped/filtered `projects` list.
+    # COMPLETE (uncapped) registered project chat_ids — the live WS fan-out isolation SSOT, unlike `projects`.
     project_chat_ids: list
     # Task->project bindings ({task_id: {project_id, chat_id}}) so the frontend
     # can recognise a project-scoped task card: suppress the stray "turn into
@@ -1590,6 +1593,7 @@ __all__ = [
     "TaskHurryRequest",
     "TaskHurryResponse",
     "OwnerHurryProjection",
+    "EffortRange", "OwnerEffortRangeResponse",
     "LogTailResponse",
     "HTTP_ENDPOINTS",
     "WS_MESSAGE_TYPES",
