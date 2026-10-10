@@ -245,11 +245,11 @@ Children coordinate through `tree_note` and `tree_read`; only the parent may use
 
 #### Child handoffs and task waits
 
-**Waiting on children.** Default `wait_task`/`wait_tasks` park warm; IDs without result/queue wake sources return a repair snapshot (a ledger mention alone is insufficient). Single waits capture named+LIVE direct siblings; batches are exact. Standalone waits keep minted-ID discovery and hold one operation window minus `NESTED_SETTLEMENT_MARGIN_SEC`, with all-unminted registration grace. Explicit timeouts are bounded; zero snapshots. `owner_wait.continuation_state` retains consumed beacon cursors, including same-timestamp FIFO identities; snapshots do not advance them. Existing hard rails remain.
+**Child waits.** `wait_task`/`wait_tasks` default warm: result/queue authority or repair. Single: named+live direct siblings; batch: exact. Standalone retains ledger discovery, operation window minus `NESTED_SETTLEMENT_MARGIN_SEC`, unminted grace. Explicit timeouts bounded; zero observes. `owner_wait.continuation_state` preserves beacon timestamps/FIFO IDs; snapshots consume none. Hard rails unchanged.
 
-`control_task_results._compact_child_projection` retains outcomes, cost, hashes, `capability_delta` and verification/custody. `bounded_wait_response` caps whole JSON at 15,000 chars with exact actor-readable sources; retention failures stay unavailable. `get_task_result` explicitly reads full terminals, authority and sources; nonterminals stay compact. Known hashes omit result/trace, never current facts. `peek_task` diagnoses; `scripts/measure_wait_rounds.py` audits explicit task/round JSONL, never implicitly scans stores.
+`control_task_results._compact_child_projection` retains outcome/cost/hash/`capability_delta`/verification/custody; `bounded_wait_response` caps JSON at 15k with registered exact sources, unavailable on failure. `get_task_result`: full terminals/authority/sources, compact nonterminals; known hash omits result/trace, not facts. `peek_task`: diagnosis. `scripts/measure_wait_rounds.py`: explicit JSONL only, usage+tool inventory for every observed round or unknown.
 
-`owner_mailbox.wait_message_requires_attention` wakes owner/control, typed attention/feedback and selected senders, not routine mail or milestone/partial beacons. `forward_to_worker(attention_kind=...)` grants no authority. Waits preview mail identity/provenance/size, not text or ACK; resumed round-top drain delivers originals before checkpoint-backed ACK, delegated wakes included.
+`owner_mailbox.wait_message_requires_attention`: owner/control, typed attention/feedback, selected senders wake; routine mail/milestones/partials do not. `forward_to_worker(attention_kind=...)` grants no authority. Previews carry identity/provenance/size, no text/ACK. Resumed drain: originals before checkpoint-backed ACK (delegates too).
 
 #### Delegated spend and token reads
 

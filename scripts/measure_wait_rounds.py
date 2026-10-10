@@ -18,7 +18,7 @@ WAIT_TOOLS = frozenset({"wait_task", "wait_tasks", "delegate_wait", "peek_task",
 
 def measure(rows: list[dict]) -> dict:
     tools, usage, terminals, conflicts, gaps = {}, {}, set(), set(), []
-    expected, call_ids = {}, {}
+    expected, call_ids, observed = {}, {}, set()
     for i, row in enumerate(rows):
         task, round_id = row.get("task_id"), row.get("round_id")
         if row.get("type") == "task_done" and task:
@@ -39,6 +39,7 @@ def measure(rows: list[dict]) -> dict:
             gaps.append({"row": i, "reason": "join_identity_missing"})
             continue
         key = (str(task), str(round_id))
+        observed.add(key)
         if inventory_row and "tool_call_count" in row:
             count = row["tool_call_count"]
             if type(count) is not int or count < 0:
@@ -59,14 +60,16 @@ def measure(rows: list[dict]) -> dict:
                 calls[call_id] = str(name)
         elif usage_row:
             counts = (row.get("prompt_tokens"), row.get("cached_tokens"))
+            if any(type(v) is not int or v < 0 for v in counts):
+                gaps.append({"row": i, "reason": "invalid_round_usage"})
             if key in usage and usage[key] != counts:
                 conflicts.add(key)
                 gaps.append({"row": i, "reason": "conflicting_round_usage"})
             usage.setdefault(key, counts)
     if not usage:
         gaps.append({"reason": "task_usage_empty"})
-    for key in sorted(tools.keys() - usage.keys()):
-        gaps.append({"key": list(key), "reason": "tool_round_usage_missing"})
+    for key in sorted(observed - usage.keys()):
+        gaps.append({"key": list(key), "reason": "observed_round_usage_missing"})
     for key in sorted(usage):
         if key not in expected:
             gaps.append({"key": list(key), "reason": "tool_inventory_missing"})

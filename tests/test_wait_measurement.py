@@ -91,3 +91,21 @@ def test_other_categories_and_missing_task_category_do_not_certify_task_targets(
     _unknown([_usage(category=None), _tool(), _DONE])
     report = _unknown([_usage(category="review"), _DONE])
     assert report["usage_rounds"] == 0
+
+
+def test_every_observed_round_requires_usage_even_without_tool_rows():
+    for count in (0, 1):
+        report = _unknown([_usage(count=0), {
+            "type": "llm_round_finished", "task_id": "parent", "round_id": 2,
+            "tool_call_count": count}, _DONE])
+        assert {"key": ["parent", "2"], "reason": "observed_round_usage_missing"} in report["coverage_gaps"]
+
+
+def test_invalid_token_evidence_never_marks_global_coverage_complete():
+    for key in ("prompt_tokens", "cached_tokens"):
+        for value in (None, -1, True, "100"):
+            report = _unknown([_usage(count=0, **{key: value}), _DONE])
+            assert any(g["reason"] == "invalid_round_usage" for g in report["coverage_gaps"])
+        row = _usage(count=0)
+        del row[key]
+        _unknown([row, _DONE])
