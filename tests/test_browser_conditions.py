@@ -12,6 +12,8 @@ CI browser lane, ``tests/test_browser_tools_smoke.py``.
 """
 from __future__ import annotations
 
+from tests._tool_result_delivery_shared import measured_fit
+
 import base64
 import json
 import threading
@@ -580,7 +582,8 @@ def test_the_note_survives_loop_truncation_of_a_large_page(sticky, tmp_path, mon
         tmp_path / "logs", "root")
     messages, trace = [], {"tool_calls": []}
     execution.process_tool_results([row], messages, trace, lambda *a, **k: None,
-                                   types.SimpleNamespace(_ctx=ctx))
+                                   types.SimpleNamespace(_ctx=ctx),
+                                   fit_candidate=measured_fit(window=16_000, reserve=4_000))
     content = messages[0]["content"]
     assert len(content) < 29000 and CONDITIONS in content
     assert trace["tool_calls"][0]["host_annotations"] == [CONDITIONS]

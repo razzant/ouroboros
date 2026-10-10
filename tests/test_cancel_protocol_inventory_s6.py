@@ -52,6 +52,9 @@ _TERMINAL_TOKENS = (
 # constant from the sticky set; "dynamic" is a variable or expression that can
 # carry one, which counts because the reducer, not the caller, decides.
 TERMINAL_WRITERS = {
+    # Selects an already retained actor account; its locked projector preserves
+    # CURRENT lifecycle, including terminal state, and compares the prior pointer.
+    ('ouroboros/review_history_view.py::publish_review_history_view', '"running"'): 'dynamic',
     # Create-only pooled control admission seeds running/scheduled authority;
     # an existing row is returned unchanged, including any terminal status.
     ('supervisor/queue.py::ensure_control_task_result', 'status'): 'dynamic',

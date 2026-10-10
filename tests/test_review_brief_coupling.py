@@ -378,23 +378,25 @@ class TestCouplingPromptMatrixContract:
         assert "bare" in prompt.lower()
         assert "reviewer failure" in prompt.lower()
 
-    def test_one_anti_pattern_lock_guard_per_brief(self, tmp_path):
+    def test_one_behavioral_countercheck_per_brief(self, tmp_path):
+        from ouroboros.tools.review_helpers import anti_pattern_lock_guard
+
         prompt = _brief(tmp_path)
-        # The guard's own text, not a heading: Part 1 carries it once, and no doc pointer stands in for it.
-        assert prompt.count("deliberate SECOND pass") == 1
+        # Count the complete instruction, not its heading or a documentation pointer.
+        countercheck = anti_pattern_lock_guard("body").strip()
+        assert prompt.count(countercheck) == 1
         assert "exactly one FAIL" not in prompt
         flat = re.sub(r"\s+", " ", prompt)
-        assert "zero or one FAIL is valid" in flat
-        assert "numeric finding quota" in flat
-        assert "SECOND pass" in flat
-        assert "DIFFERENT concern class" in flat
+        assert "including connections between changed modules" in flat
+        assert "Coupling affects only unchanged code outside the diff" not in flat
+        assert "deliberate SECOND pass" not in prompt
         # Still one guard when the seat is asked Part 2 alone.
-        assert _brief(tmp_path / "only", ("coupling",)).count("deliberate SECOND pass") == 1
+        assert _brief(tmp_path / "only", ("coupling",)).count(countercheck) == 1
 
-    def test_anti_pattern_lock_pairings_cover_coupling_items(self, tmp_path):
+    def test_coupling_questions_remain_in_the_brief(self, tmp_path):
         prompt = _brief(tmp_path)
         for item in ("intent_alignment", "forgotten_touchpoints", "cross_surface_consistency", "regression_surface"):
-            assert item in prompt, f"Anti-pattern-lock pairing for `{item}` missing"
+            assert item in prompt, f"Coupling question `{item}` missing"
 
     def test_brief_loads_the_coupling_checklist(self):
         import inspect

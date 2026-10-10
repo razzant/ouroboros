@@ -712,11 +712,14 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``context_input_selection._historical_anchor`` in
 # ``task_results/artifacts/*/source_handles/context_checkpoints/historical-author-input-*.json``
 # (one section-7 row; evidence, not current task authority).
-# 349 -> 351 (#1563 saved work): the rolling per-attempt working checkpoint,
+# 349 -> 351: review_history_view retains the selected authored capsule and the
+# transfer-only checkpoint as review-history-view / review-transfer files in the
+# existing context_checkpoints CAS (two section-7 rows; retention is unchanged).
+# 351 -> 353 (#1563 saved work): the rolling per-attempt working checkpoint,
 # ``task_results/artifacts/<task>/source_handles/working`` and its ``*.json`` file
 # (``ouroboros/working_checkpoint.py``; one row beside the source-handle rows).
 # Event waits add one exact immutable wait-handoff source family below.
-EXPECTED_SCAN_PATHS = 352
+EXPECTED_SCAN_PATHS = 354
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

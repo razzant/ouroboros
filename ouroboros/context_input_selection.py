@@ -301,9 +301,11 @@ def _capture_declared_context_core(
     canonical_root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
     same_drive = canonical_root.resolve(strict=False) == memory.drive_root.resolve(strict=False)
     process_memory = memory if same_drive else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
+    supplementary_messages: list = []
     parts = [
         "## Input source selection\n\n" + json.dumps(input_source_selection_receipt(task), ensure_ascii=False, sort_keys=True),
-        runtime_builder(env, task, ctx=ctx, captured_at=sources["captured_at"]),
+        runtime_builder(env, task, ctx=ctx, captured_at=sources["captured_at"],
+                        supplementary_messages_out=supplementary_messages),
     ]
     parts.extend(snapshot_labelled(section, sources["captured_at"]) for section in
                  process_memory.recent_activity_sections(str(task["id"]), own_drive=None if same_drive else memory))
@@ -329,4 +331,5 @@ def _capture_declared_context_core(
         docs_need_development=_task_requires_self_body_docs(task),
         reference_books=tuple(sources["books"]), reference_book_errors=tuple(sources["book_errors"]),
         compact_reference_docs=True,
+        supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
     )

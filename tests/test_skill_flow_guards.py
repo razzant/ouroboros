@@ -8,6 +8,7 @@ from ouroboros import loop as loop_mod
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint
 from ouroboros.tool_access import active_tool_profile
 from ouroboros.utils import sanitize_tool_args_for_log
+from tests.test_subscription_main_wait import _without_context_facts
 from tests.test_completion_selection import finish
 
 
@@ -267,9 +268,9 @@ def test_skill_action_and_effect_round_cannot_erase_complete_candidate(monkeypat
     )
     assert any(row.get("role") == "tool" and row.get("content") == "OK" for row in seen_messages[2])
     assert seen_messages[3][:len(seen_messages[2])] == seen_messages[2]
-    assert seen_messages[3][-2] == {"role": "assistant", "content": "Skill review completed."}
-    assert seen_messages[3][-1]["role"] == "user"
-    assert "No completion selection" in seen_messages[3][-1]["content"]
+    assert _without_context_facts(seen_messages[3])[-2] == {"role": "assistant", "content": "Skill review completed."}
+    assert _without_context_facts(seen_messages[3])[-1]["role"] == "user"
+    assert "No completion selection" in _without_context_facts(seen_messages[3])[-1]["content"]
 
 
 def test_skill_finalization_empty_text_preserves_canonical_response_and_user_tail(monkeypatch, tmp_path):
@@ -325,8 +326,8 @@ def test_skill_finalization_empty_text_preserves_canonical_response_and_user_tai
 
     assert result == "final"
     assert len(seen_messages) == 2
-    assert seen_messages[1][-1]["role"] == "user"
+    assert _without_context_facts(seen_messages[1])[-1]["role"] == "user"
     assert seen_messages[1][:len(seen_messages[0])] == seen_messages[0]
-    assert seen_messages[1][-2] == {"role": "assistant", "content": ""}
-    assert "No completion selection" in seen_messages[1][-1]["content"]
-    assert hashlib.sha256(b"").hexdigest() in seen_messages[1][-1]["content"]
+    assert _without_context_facts(seen_messages[1])[-2] == {"role": "assistant", "content": ""}
+    assert "No completion selection" in _without_context_facts(seen_messages[1])[-1]["content"]
+    assert hashlib.sha256(b"").hexdigest() in _without_context_facts(seen_messages[1])[-1]["content"]

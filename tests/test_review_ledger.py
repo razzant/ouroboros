@@ -499,8 +499,11 @@ def test_late_settle_raises_revision_and_a_stale_snapshot_never_overwrites(tmp_p
     assert [json.loads(line)["revision"] for line in lines] == [1, 2]
     assert rl.revise_record(tmp_path, "rl-absent", lambda p: p) is None
     noted = rl.note_author_decision(tmp_path, record.record_id, {"disposition": "accepted", "rationale": "ok"})
-    assert noted["revision"] == 3 and noted["author_decision"] == {
+    decision = dict(noted["author_decision"])
+    source = decision.pop("source_ref")
+    assert noted["revision"] == 3 and decision == {
         "disposition": "accepted", "rationale": "ok", "reused_record_id": record.record_id}
+    assert json.loads(rl.read_source(tmp_path, "task-1", source))["decision"] == decision
 
 
 def test_tests_evidence_lands_only_on_the_record_of_the_tested_tree(tmp_path):

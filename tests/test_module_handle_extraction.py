@@ -365,6 +365,10 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/loop_messages.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_record_owner_directive",
+        # context-attention 5A: the per-round facts line measures through the
+        # loop's fit wrapper so the measurement is the one the round records.
+        "_measure_round_main_fit",
+        "_wrapup_global_remaining",
     })),
     "ouroboros/loop_model_call.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_RoundModelCallContext", "_account_compaction_usage", "_append_or_merge_user_message",
@@ -436,13 +440,16 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_emit_checkpoint_event", "_finalize_forced_services",
         "_forced_fallback_result", "_forced_final_answer",
         "_handle_forced_finalization", "_last_assistant_text", "_owner_marked_content",
-        "_measure_main_context_view",
+        "_measure_main_context_view", "_measure_round_main_fit",
         "_provider_unavailable_result", "_record_owner_directive",
         "_soft_land_exhausted_ceiling", "_task_deadline_epoch", "compact_tool_history_llm",
         "provider_no_call_source", "utc_now",
         # #1196: a budget-pause HOLD ended by control rejoins the model-wait rails and
         # merges its forced trace like every other controlled exit.
         "_merge_finalization_trace",
+        # context-attention 7A: the model-free refusal rungs publish their rebuilt
+        # transcript through the same seal every other sanctioned rewrite uses.
+        "seal_task_transcript",
     })),
 }
 

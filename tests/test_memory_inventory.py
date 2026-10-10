@@ -204,6 +204,36 @@ def test_the_readers_publish_nothing(tmp_path):
     assert sorted(path.name for path in chronicle.iterdir()) == files
 
 
+# --- an account's period --------------------------------------------------------------------------
+
+def test_an_accounts_period_is_the_union_of_its_sources_and_it_seals_no_row(tmp_path):
+    """An account over records of two rooms is dated and placed by its sources' rows (never a stream span of its
+    own, which it does not have), stays open to a missing source as an incomplete period, and leaves every
+    room's open rows, sealed set and open segments as they were."""
+    rooms = shared.world(tmp_path)
+    alpha = str(rooms["alpha"])
+    store = ChronicleStore(tmp_path)
+    a1, b1 = _page(tmp_path, alpha, 13, 13), _page(tmp_path, "1", 10, 12)
+    open_before = {room: _positions(mi.open_room_rows(tmp_path, room)) for room in ("1", alpha)}
+    sealed_before = {room: store.sealed_row_refs(room) for room in ("1", alpha)}
+    account = store.publish_account(room_id="1", text="Both rooms, once.", sources=[a1["id"], b1["id"], "legacy-b01-r1"],
+                                    author=shared.MIND).record
+    assert "covers" not in account and "stream_span" not in account
+    period = mi.record_period(store, account, _units(tmp_path))
+    assert period == mi.Period({"start": "2026-09-02T00:00:00+00:00", "end": "2026-09-03T00:03:00+00:00",
+                                "incomplete": False}, 6, "mixed")  # Main's quiet block gives its block period
+    assert period.note() == " (partly block period)"
+    assert {room: _positions(mi.open_room_rows(tmp_path, room)) for room in ("1", alpha)} == open_before
+    assert {room: store.sealed_row_refs(room) for room in ("1", alpha)} == sealed_before
+    assert _positions(_segment(tmp_path, "1").rows) == [15, 16, 18, 19]
+    assert mi.story_counts(store) == {"pages_by_me": 2, "latest_by_me": str(a1["ts"])[:10], "helper_pages": 0, "parts": 0}
+    # A source that is not in this copy of the journal leaves the period incomplete and the place of the rest.
+    partial = {**account, "sources": [{**account["sources"][0], "id": "gone"}, account["sources"][1]]}
+    missing = mi.record_period(store, partial, _units(tmp_path))
+    assert missing.span["incomplete"] is True and missing.first == 10
+    assert mi.record_period(store, {**account, "sources": []}, _units(tmp_path)) == mi.Period(None, -1, "rows")
+
+
 # --- open segments --------------------------------------------------------------------------------
 
 def _shas(entries):

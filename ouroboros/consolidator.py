@@ -122,7 +122,7 @@ class KnowledgeReadContext:
 
         function = call.get("function") or {}
         name = function.get("name")
-        meta, status = {}, "error"
+        meta, status, typed_result = {}, "error", None
         try:
             arguments = function.get("arguments") or "{}"
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
@@ -132,10 +132,13 @@ class KnowledgeReadContext:
                 try:
                     if name == "read_file":
                         from ouroboros.tools.core_file_tools import _read_file
-                        text = _read_file(self.context, **args)
+                        from ouroboros.delegate_output import staged_read_delivery_scope
+                        with staged_read_delivery_scope():
+                            text = _read_file(self.context, **args)
                     else:
                         text = _knowledge_read(self.context, **args)
                     result = _published_tool_result(self.context, sentinel)
+                    typed_result = result if name == "read_file" else None
                     meta = dict(getattr(result, "meta", {}))
                     status = getattr(result, "status", "")
                     if name == "read_file" and self.context.last_read_view:
@@ -153,13 +156,20 @@ class KnowledgeReadContext:
         except (ValueError, KeyError, TypeError, OSError) as exc:
             text = f"Knowledge read unavailable: {type(exc).__name__}: {exc}"
         return {"tool_call_id": str(call.get("id") or ""), "fn_name": name,
-                "result": text, "result_meta": meta, "status": status}
+                "result": text, "result_meta": meta, "status": status, "tool_result": typed_result}
 
     def accept_delivery(self) -> None:
         """Credit only source characters in the request the model answered."""
         for row in self.pending_delivery:
             if row.get("status") != "ok":
                 continue
+            from ouroboros.delegate_output import acknowledge_staged_output_delivery
+
+            original = row.get("_original_result", row["result"])
+            shown = ((row.get("result_source_view") or {}).get("delivered_range")
+                     if row.get("result_partial") else [0, len(original)])
+            if isinstance(shown, list):
+                acknowledge_staged_output_delivery(self.context, {**row, "result": original}, row, shown_ranges=[shown])
             meta = row.get("result_meta") or {}
             source = meta.get("knowledge_source") or {}
             try:
@@ -256,7 +266,8 @@ class KnowledgeReadContext:
         projected, projection = project_tool_result_batch(
             rows, before, values["tools"], drive_root=self.context.drive_root,
             task_id=str(self.context.task_id or "consolidation"), fit_candidate=fit_candidate)
-        self.pending_delivery = projected
+        self.pending_delivery = [{**view, "_original_result": row["result"]}
+                                 for row, view in zip(rows, projected)]
         if projection["status"] == "minimum_view_unfit":
             raise SummarizerContextOverflow("Memory tool-result source locators exceed the current working window")
         return [*before, *tool_messages(projected)]

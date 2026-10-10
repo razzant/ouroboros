@@ -34,6 +34,13 @@ def _large_unit(call_id: str, marker: str = "x") -> list[dict]:
     )
 
 
+def _stamp_trace(messages, ref):
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
+    row = messages[-1]
+    row[TOOL_RESULT_RECORD_KEY] = make_tool_result_record(
+        {"tool_call_id": row["tool_call_id"], "invocation_id": "fixture-invocation", "trace_ref": ref}, row["content"])
+
+
 def _request(messages: list[dict], *, goal: int = 1_000_000) -> ContextReclaimRequest:
     return ContextReclaimRequest(
         route_fp="main-route",
@@ -120,6 +127,7 @@ def test_malformed_tool_call_set_stays_raw_without_crashing(malformed_call):
 def test_atomic_source_keeps_complete_arguments_results_and_trace_ref():
     messages = _large_unit("call-complete", "z")
     trace_ref = {"path": "calls/tool.json", "sha256": "d" * 64}
+    _stamp_trace(messages, trace_ref)
 
     unit = cc._atomic_units(
         messages,
@@ -163,6 +171,7 @@ def test_checkpoint_is_after_selection_and_before_summarizer(monkeypatch, tmp_pa
     events: list[str] = []
     _install_successful_materializer(monkeypatch, events)
     messages = _large_unit("ordered")
+    _stamp_trace(messages, {"path": "calls/ordered.json", "sha256": "d" * 64})
 
     rebuilt, receipt, usage = cc.compact_tool_history_llm(
         messages,

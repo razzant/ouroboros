@@ -181,7 +181,8 @@ def test_actor_truncation_marker_survives_into_acceptance_packet():
     from ouroboros.loop_tool_execution import _truncate_tool_result
 
     dr = Path(tempfile.mkdtemp())
-    actor_view = _truncate_tool_result("Z" * 500_000, "run_command")
+    # The actor's view under a measured allowance (the loop's head+tail projection).
+    actor_view = _truncate_tool_result("Z" * 500_000, "run_command", allowance_chars=60_000)
     assert "truncated from 500000" in actor_view          # the actor's own marker
     trace = {"tool_calls": [{"tool": "run_command", "status": "ok", "result": actor_view}]}
     ev = build_task_acceptance_evidence(_acc_ctx(dr), llm_trace=trace, drive_root=dr, task_id="acc")

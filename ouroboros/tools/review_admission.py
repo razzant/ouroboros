@@ -548,7 +548,7 @@ def prepare_retrieving_seats(ctx: Any, row_plan: dict, models: list, row_routes:
     retrieving_manifests: list = []
     path_subject = subject if subject is not None else (frozen if frozen is not None and not frozen.is_system_index else None)
     intent = BriefIntent(goal=goal, scope=scope, review_rebuttal=review_rebuttal,
-                         review_history=list(ctx._review_history or []),
+                         review_history=getattr(ctx, "_review_dispute_history", None) or list(ctx._review_history or []),
                          coupling_history=list(getattr(ctx, "_coupling_review_history_rounds", None) or []),
                          owner_words=owner_words)
     for i in range(len(models)):
@@ -620,6 +620,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     )
     from ouroboros.tools.review_multi_model import TRIAD_USER_TURN, triad_api_messages
     from ouroboros.review_records import ReviewSlot
+    from ouroboros.review_history import review_dispute_history
 
     def _field(name: str, default: Any = "") -> Any:
         if isinstance(seat, dict):
@@ -637,8 +638,10 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     goal_section = build_goal_section(goal_text, scope, commit_message, owner_words)
     scope_section = build_scope_section(scope)
     rebuttal_section = build_rebuttal_section(review_rebuttal)
+    review_history = review_dispute_history(review_history, drive_root=drive_root, repo_root=frozen_subject.spec.root,
+                                            task_id=task_id)
     history_section = review_history_with_obligations(review_history, drive_root=drive_root,
-                                                      repo_root=frozen_subject.spec.root)
+                                                      repo_root=frozen_subject.spec.root, task_id=task_id)
     model, slot_id = str(_field("model") or ""), str(_field("slot_id") or "")
     route = _field("route", None)
     delegated = str(getattr(route, "value", route) or "") == "agent_session"
@@ -647,7 +650,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     # trees and diff to the manifest (the same rule as ``prepare_retrieving_seats``).
     path_subject = frozen_subject.managed if frozen_subject.managed is not None else (
         frozen_subject if not frozen_subject.is_system_index else None)
-    intent = BriefIntent(goal=goal_text, scope=scope, review_rebuttal=review_rebuttal, review_history=list(review_history or []),
+    intent = BriefIntent(goal=goal_text, scope=scope, review_rebuttal=review_rebuttal, review_history=review_history,
                          coupling_history=list(coupling_history or []), owner_words=owner_words)
     if "coupling" in parts:
         text, manifest = retrieving_brief_for_seat(

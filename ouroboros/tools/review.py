@@ -1015,15 +1015,14 @@ def _subject_changed_paths(frozen: Any, target_repo) -> tuple[str, str]:
     return changed, _build_preflight_staged(target_repo, fallback=changed)
 
 
-def _review_history_with_open_obligations(ctx: ToolContext, frozen: Any) -> str:
-    """The prior-rounds section with the subject root's durable open obligations
-    (``review_helpers.review_history_with_obligations``, the one owner the public
-    brief builder shares)."""
+def _review_history_with_open_obligations(ctx: ToolContext, frozen: Any, rebuttal: str = "") -> str:
+    """Bind the shared cold dispute before any seat is prepared."""
+    from ouroboros.review_history import prepare_history
     from ouroboros.tools.review_helpers import review_history_with_obligations
 
     return review_history_with_obligations(
-        ctx._review_history, drive_root=getattr(ctx, "drive_root", None),
-        repo_root=frozen.spec.root if frozen is not None else getattr(ctx, "repo_dir", None))
+        prepare_history(ctx, frozen, rebuttal), drive_root=getattr(ctx, "drive_root", None),
+        repo_root=frozen.spec.root if frozen is not None else getattr(ctx, "repo_dir", None), task_id=str(ctx.task_id or ""))
 
 
 def _gate_governance_root(ctx: ToolContext) -> pathlib.Path:
@@ -1116,7 +1115,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
             "Review enforcement=Advisory: review checklist failed to load; commit proceeding anyway. ",
         ), True
 
-    review_history_section = _review_history_with_open_obligations(ctx, frozen)
+    review_history_section = _review_history_with_open_obligations(ctx, frozen, review_rebuttal)
 
     touched_paths = [f.strip() for f in review_changed.strip().splitlines() if f.strip()]
 
@@ -1572,18 +1571,18 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
                         repo_dir=None,
                         goal: str = "",
                         scope: str = "") -> Optional[str]:
-    """Run triad pre-commit review; return a block message or ``None``.
-
-    Assembly and dispatch are two phases (Q25=A): callers that need admission
-    (``run_parallel_review``) prepare BOTH gate packets before dispatching
-    either; this wrapper keeps the single-call contract for everyone else."""
+    """Prepare both question packets before dispatch; return a block or ``None``."""
     prepared, early_result, exited = _prepare_unified_review(
         ctx, commit_message, review_rebuttal=review_rebuttal,
         repo_dir=repo_dir, goal=goal, scope=scope,
     )
     if exited:
         return early_result
-    return _dispatch_unified_review(ctx, commit_message, prepared)
+    from ouroboros.review_history_view import queue_review_history_context
+    try:
+        return _dispatch_unified_review(ctx, commit_message, prepared)
+    finally:
+        queue_review_history_context(ctx, family="commit", repo_root=repo_dir or ctx.repo_dir)
 
 
 # v7next F2.3a (D06): moved spans live in their owner leaves; re-exported

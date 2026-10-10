@@ -413,13 +413,16 @@ def test_a_routing_act_recorded_during_the_turn_rides_the_next_real_request(main
     answer, _cost, _mode = loop._call_round_model(ctx)
     assert answer and len(gateway.uploads) == 1
     sent = gateway.uploads[0][0]
-    texts = [json.dumps(message["content"], ensure_ascii=False) for message in sent["messages"]]
+    from tests.test_subscription_main_wait import _without_context_facts
+
+    protocol = _without_context_facts(sent["messages"], physical=True)
+    texts = [json.dumps(message["content"], ensure_ascii=False) for message in protocol]
     assert ROUTING_RECEIPTS_HEADER in texts[-2] and "steer_task → Build (root-b): delivered" in texts[-2]
     assert sent["messages"][-1]["content"].startswith(sc.CLOCK_NOTE_PREFIX)
     settled = [row for row in ledger(ctx.drive_root) if row["state"] == "settled"][-1]
     assert settled["candidate_raw_sha256"] == _digest(sent)
     # Canonical history (the loop appends the answer next): the note, then the consumed clock line.
-    assert ctx.messages[-2]["content"].startswith(ROUTING_RECEIPTS_HEADER)
+    assert _without_context_facts(ctx.messages)[-2]["content"].startswith(ROUTING_RECEIPTS_HEADER)
     assert ctx.messages[-1]["content"] == sent["messages"][-1]["content"]
 
 

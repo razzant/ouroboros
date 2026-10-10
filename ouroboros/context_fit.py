@@ -16,10 +16,12 @@ import pathlib
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Tuple
-from copy import deepcopy
 
 from ouroboros.context_layout import reference_doc_sections
 from ouroboros.reference_books import ReferenceBook
+# Tool-result delivery (the whole-batch projection under the measured frame)
+# lives in ``tool_result_delivery``; the consolidator imports its contract here.
+from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
 
 log = logging.getLogger(__name__)
@@ -41,73 +43,6 @@ ContextProfile = Literal["owner_max", "owner_low", "owner_nano", "task_local_low
 MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
 
 
-def project_tool_result_batch(
-    results: List[Dict[str, Any]], messages: List[Dict[str, Any]], tool_schemas: list,
-    *, drive_root: pathlib.Path, task_id: str,
-    fit_candidate: Callable[[list, list], Mapping[str, Any]],
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Retain full results before constructing a fitting multi-result view.
-
-    The caller supplies one completed call batch and its actual prospective
-    send measurement. No result is appended to the live transcript here;
-    source persistence, projection and callback failures never imply full read.
-    """
-    from ouroboros.artifacts import store_actor_source_bytes
-
-    rows = deepcopy(results)
-    full = [str(row["result"]) for row in rows]
-
-    def fit() -> Dict[str, Any]:
-        candidate = [*messages, *({"role": "tool", "tool_call_id": row["tool_call_id"],
-                                  "content": str(row["result"])} for row in rows)]
-        return dict(fit_candidate(deepcopy(candidate), deepcopy(tool_schemas)))
-
-    initial = fit()
-    if initial.get("accepted") is True:
-        return rows, {"status": "complete", "fit": initial}
-    sources = []
-    for row, text in zip(rows, full):
-        try:
-            source = store_actor_source_bytes(drive_root, task_id, category="tool_results",
-                source_id=str(row["tool_call_id"]), data=text.encode("utf-8"), extension="txt")
-        except (OSError, ValueError):
-            source = {}
-        sources.append(source)
-
-    def render(index: int, shown: int) -> None:
-        row, text, source = rows[index], full[index], sources[index]
-        info = {"source_ref": source, "source_status": "ready" if source else "source_unavailable",
-                "complete_chars": len(text), "complete_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "requested_range": [0, len(text)], "delivered_range": [0, shown], "text_chars": shown,
-                "text_sha256": hashlib.sha256(text[:shown].encode("utf-8")).hexdigest()}
-        row["result"] = text[:shown] + "\n[Tool result source view]\n" + json.dumps(info, ensure_ascii=False, separators=(",", ":"))
-        row.update(result_partial=shown < len(text), result_source_ref=source,
-                   result_source_status=info["source_status"], result_source_view=info)
-        if shown < len(text) and isinstance(row.get("result_meta"), dict):
-            if "knowledge_source_complete" in row["result_meta"]:
-                row["result_meta"]["knowledge_source_complete"] = False
-
-    # Reserve every call's result envelope and source locator before allocating
-    # body text. A later result can never disappear because an earlier one grew.
-    for index in range(len(rows)):
-        render(index, 0)
-    minimum = fit()
-    if minimum.get("accepted") is not True:
-        return rows, {"status": "minimum_view_unfit", "fit": minimum}
-    for index, text in enumerate(full):
-        low, high = 0, len(text)
-        while low < high:
-            mid = (low + high + 1) // 2
-            render(index, mid)
-            if fit().get("accepted") is True:
-                low = mid
-            else:
-                high = mid - 1
-        render(index, low)
-    final = fit()
-    return rows, {"status": "projected" if final.get("accepted") is True else "minimum_view_unfit", "fit": final}
-
-
 @dataclass(frozen=True)
 class ContextFitProjection:
     """One deterministic Low/Max rendering of a shared immutable context core."""
@@ -121,6 +56,8 @@ class ContextFitProjection:
     # The memory view's fact of this projection (``memory_floor.view_receipt``): role,
     # room, floor steps and boundaries, block sizes; empty without a view (declared input).
     memory_facts: Mapping[str, Any] = field(default_factory=dict)
+    # A route rebind may measure the actual shortened transcript, not the initial tail.
+    continuation_messages_json: Optional[str] = None
 
     def system_message(self) -> Dict[str, Any]:
         from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
@@ -202,29 +139,43 @@ class ContextFitPlan:
     core: Optional["ContextCore"] = None  # the capture a new route re-renders the memory view from
 
     def reproject_for_route(self, *, window_tokens: int, known_window: bool, ratio: float, output_reserve: int,
-                            tool_schemas: Optional[List[Dict[str, Any]]], start_mode: Optional[str] = None) -> "ContextFitPlan":
+                            tool_schemas: Optional[List[Dict[str, Any]]], start_mode: Optional[str] = None,
+                            current_messages: Optional[List[Dict[str, Any]]] = None) -> "ContextFitPlan":
         """This plan on another route's window: each mode's view, fit and starting mode measured anew.
 
         The view is re-rendered from ``core.memory_view_json`` (chronicle and chat not read again), from
-        ``start_mode`` (the task's mode; default ``preferred_mode``), lowered only if the shortest memory view
-        cannot fit the window; the owner's ``preferred_mode`` alone carries a target. Without a core texts are re-measured.
+        ``start_mode`` (the task's mode; default ``preferred_mode``). Current Max books stay full until
+        actual refusal recovery selects another mode; memory granularity still fits the known window.
+        Lower starts retain their sizing behavior. Only the owner's mode carries a target.
         """
         from dataclasses import replace
 
         contents, start, books = {}, start_mode or self.preferred_mode, ("max", "low")
+        if current_messages is None:
+            retained = self.projection(start).continuation_messages_json
+            if retained is not None:
+                current_messages = [self.projection(start).system_message(), *json.loads(retained)]
+        tail_json = (json.dumps(_request_tail(current_messages), ensure_ascii=False, sort_keys=True)
+                     if current_messages is not None else None)
         if self.core is not None:
             contents, start = _view_projections(
                 self.core, {form: _governance_blocks(None, self.core, mode=form) for form in books},
                 self.user_content_json, preferred=self.preferred_mode, start=start_mode, tool_schemas=tool_schemas,
                 window_tokens=window_tokens, known_window=known_window, output_reserve=output_reserve, ratio=ratio,
-                resident=True)  # a running task's list, enable_tools additions included
+                resident=True, current_messages=current_messages)  # actual running tail, enable_tools included
 
         def project(projection: Optional[ContextFitProjection]) -> Optional[ContextFitProjection]:
             if projection is not None and projection.mode in contents:
                 system, facts = contents[projection.mode]
                 projection = replace(projection, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
-                                     memory_facts=facts, estimated_tokens=_request_tokens(
-                                         system, projection.user_content_json or self.user_content_json))
+                                     memory_facts=facts, continuation_messages_json=tail_json,
+                                     estimated_tokens=_request_tokens(system, projection.user_content_json or self.user_content_json,
+                                         supplementary_messages_json=self.core.supplementary_messages_json,
+                                         current_messages=current_messages))
+            elif projection is not None and current_messages is not None:
+                projection = replace(projection, continuation_messages_json=tail_json,
+                    estimated_tokens=_request_tokens(json.loads(projection.system_content_json),
+                        projection.user_content_json or self.user_content_json, current_messages=current_messages))
             calibrated = int(int(projection.estimated_tokens or 0) * ratio) if projection is not None else 0
             return projection and replace(projection, calibrated_tokens=calibrated, calibration_ratio=ratio)
 
@@ -239,9 +190,12 @@ class ContextFitPlan:
 
     def messages_for(self, mode: str) -> List[Dict[str, Any]]:
         projection = self.projection(mode)
+        if projection.continuation_messages_json is not None:
+            return [projection.system_message(), *json.loads(projection.continuation_messages_json)]
         return [
             projection.system_message(),
             {"role": "user", "content": json.loads(projection.user_content_json or self.user_content_json)},
+            *json.loads(self.core.supplementary_messages_json if self.core is not None else "[]"),
         ]
 
     def reproject_transcript(
@@ -308,6 +262,8 @@ class ContextCore:
     # The captured memory view (``memory_view.snapshot_json``); each projection renders
     # it for its own mode and window. Empty: no memory view (a declared-input child).
     memory_view_json: str = ""
+    # Captured source rows follow the assignment, outside the immutable system view.
+    supplementary_messages_json: str = "[]"
 
 
 def _render_context_system_content(
@@ -372,13 +328,15 @@ def seal_task_transcript(
     B and this one. The finalizer marks schemas only if a slot remains; keeping
     both message boundaries could exceed the cap and lose the rolling seal.
     """
+    from ouroboros.tool_result_record import logical_tool_result_text
+
     for msg in messages:
         if msg.get("role") != "tool":
             continue
         content = msg.get("content")
-        if isinstance(content, list):
+        if isinstance(content, list) and (plain := logical_tool_result_text(content)) is not None:
             # Flatten the old sealed boundary before choosing a new one.
-            msg["content"] = extract_plain_text_from_content(content)
+            msg["content"] = plain
     first_user = next((m for m in messages if m.get("role") == "user"), None)
     if isinstance(first_user, dict) and isinstance(first_user.get("content"), list):
         # Drop this function's own previous task-message marker, so exactly one
@@ -395,7 +353,11 @@ def seal_task_transcript(
         _mark_task_message(first_user)
         return
 
-    seal_candidate_idx = tool_indices[-(keep_active + 1)]
+    seal_candidate_idx = next((i for i in reversed(tool_indices[:len(tool_indices) - keep_active])
+                               if (logical_tool_result_text(messages[i].get("content")) or "").strip()), None)
+    if seal_candidate_idx is None:
+        _mark_task_message(first_user)
+        return
 
     prefix_text_len = sum(
         len(extract_plain_text_from_content(m.get("content", "")))
@@ -409,11 +371,8 @@ def seal_task_transcript(
         return
 
     candidate = messages[seal_candidate_idx]
-    plain_text = str(candidate.get("content", ""))
-    if not plain_text.strip():
-        # Anthropic 400s on cache_control attached to an empty text block; never seal
-        # an empty tool output as the cache anchor (turns the whole task unanswerable).
-        plain_text = "(no tool output)"
+    # An empty output remains exact; provider-only padding belongs to the send copy.
+    plain_text = logical_tool_result_text(candidate.get("content"))
     candidate["content"] = [
         {
             "type": "text",
@@ -508,7 +467,7 @@ def estimate_context_prompt_tokens(
         context_custody_proxy,
         custody_private_key,
     )
-    from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
     from ouroboros.openai_chat_dispatch import direct_openai_context_projections
 
     def project(value: Any) -> Any:
@@ -529,6 +488,13 @@ def estimate_context_prompt_tokens(
             return [project(item) for item in value]
         return value
 
+    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+
+    # These top-level host receipts remain canonical but are absent from sends.
+    # Do not strip same-named keys inside native payloads or user/tool arguments.
+    hidden = {HOST_CONTEXT_KIND_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY, TOOL_RESULT_RECORD_KEY}
+    messages = [{key: value for key, value in message.items() if key not in hidden} for message in messages]
     projections = direct_openai_context_projections(
         messages, tools, provider=provider, reasoning_effort=reasoning_effort,
     )
@@ -759,14 +725,21 @@ def main_output_reserve_tokens(*, use_local: bool, evidence=None) -> int:
     return ResponseLimit(**(getattr(evidence, "response_limit", {}) or {})).ceiling(requested)
 
 
-def _request_tokens(system_content: List[Dict[str, Any]], user_content_json: str) -> int:
-    return estimate_context_prompt_tokens([{"role": "system", "content": system_content},
-                                           {"role": "user", "content": json.loads(user_content_json)}])
+def _request_tail(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return messages[1:] if messages and messages[0].get("role") == "system" else messages
+
+
+def _request_tokens(system_content: List[Dict[str, Any]], user_content_json: str, *,
+                    supplementary_messages_json: str = "[]", current_messages: Optional[List[Dict[str, Any]]] = None) -> int:
+    tail = (_request_tail(current_messages) if current_messages is not None else
+            [{"role": "user", "content": json.loads(user_content_json)}, *json.loads(supplementary_messages_json)])
+    return estimate_context_prompt_tokens([{"role": "system", "content": system_content}, *tail])
 
 
 def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[str, ...]], user_content_json: str, *, preferred: str,
                       tool_schemas: Optional[List[Dict[str, Any]]], window_tokens: int, known_window: bool, output_reserve: int,
                       ratio: float, start: Optional[str] = None, resident: bool = False,
+                      current_messages: Optional[List[Dict[str, Any]]] = None,
                       ) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
     """Each mode's ``(system content, view receipt)`` and the mode the task starts in.
 
@@ -784,11 +757,13 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[str, ...
     from ouroboros.tool_policy import select_tool_schemas
     names = [schema["function"]["name"] for schema in tool_schemas or []] if resident else None
     sent = {mode: select_tool_schemas(tool_schemas or [], context_mode=mode, schema_names=names) for mode in form}
-    fixed = {mode: _request_tokens(_system_blocks(core, governance[form[mode]]), user_content_json)
+    fixed = {mode: _request_tokens(_system_blocks(core, governance[form[mode]]), user_content_json,
+                supplementary_messages_json=core.supplementary_messages_json, current_messages=current_messages)
              + tool_schema_tokens(list(sent[mode].schemas)) for mode in form}
     views, start = memory_floor.mode_views(snapshot_from_json(core.memory_view_json), preferred=preferred, start=start,
         fixed_tokens_by_mode=fixed, tool_names=None if tool_schemas is None else {m: sent[m].chosen for m in form},
-        window_tokens=window_tokens, known_window=known_window, output_reserve=output_reserve, ratio=ratio)
+        window_tokens=window_tokens, known_window=known_window, output_reserve=output_reserve, ratio=ratio,
+        allow_mode_lowering=preferred != "max" or start in {"low", "nano"})
     return {mode: (_system_blocks(core, governance[form[mode]], story, room), receipt)
             for mode, (story, room, receipt) in views.items()}, start
 
@@ -856,7 +831,8 @@ def build_context_fit_plan(
 
         system_content, memory_facts = contents[mode]
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
-        estimated = _request_tokens(system_content, core.user_content_json)
+        estimated = _request_tokens(system_content, core.user_content_json,
+                                    supplementary_messages_json=core.supplementary_messages_json)
         user_projection = None
         target = OWNER_NANO_TARGET_TOKENS if mode == "nano" else None
         if preferred == "nano" and target is not None and math.ceil((estimated + nano_sent_tokens) * ratio) + nano_reserve > target:
@@ -877,7 +853,7 @@ def build_context_fit_plan(
                 )
                 source_estimate = estimate_context_prompt_tokens([
                     {"role": "system", "content": json.loads(system_content_json)},
-                    {"role": "user", "content": source_content}])
+                    {"role": "user", "content": source_content}, *json.loads(core.supplementary_messages_json)])
                 if source_estimate < estimated:
                     user_projection = json.dumps(source_content, ensure_ascii=False)
                     estimated = source_estimate
@@ -896,10 +872,9 @@ def build_context_fit_plan(
     max_projection = _projection("max")
     low_projection = _projection("low")
     nano_projection = _projection("nano")
-    # Prediction may request mutable-history reclaim but never changes the owner's document
-    # projection, with one physical exception: a known window that cannot hold the preferred
-    # mode with even the shortest view of my memory (``initial_mode``).
-    # Otherwise task-local Low is authorized only after a real provider overflow on this route.
+    # Prediction fits memory granularity but never removes current Max books, even when
+    # the shortest estimated view misses the window. Actual refusal recovery selects Low;
+    # owner Low/Nano and already-lowered starts retain their existing sizing behavior.
 
     core_payload = json.dumps(
         {
@@ -911,6 +886,8 @@ def build_context_fit_plan(
             "dynamic_head_text": core.dynamic_head_text,
             "dynamic_text": core.dynamic_text,
             "memory_view_json": core.memory_view_json,
+            **({"supplementary_messages": json.loads(core.supplementary_messages_json)}
+               if json.loads(core.supplementary_messages_json) else {}),
             "user_content": user_content,
             "docs_need_development": core.docs_need_development,
             "compact_reference_docs": core.compact_reference_docs,

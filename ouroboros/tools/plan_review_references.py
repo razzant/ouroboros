@@ -40,6 +40,9 @@ def _emit_plan_review_reference(
             log.debug("Failed to reload plan-review state reference", exc_info=True)
             return
     attempt = state.get("current_attempt") if isinstance(state, dict) else {}
+    if str(getattr(ctx, "task_id", "") or "") == str(task_id):
+        from ouroboros.review_history_view import queue_review_history_context
+        queue_review_history_context(ctx, family="plan")
     _emit_review_reference(ctx, task_id, state, surface="plan_review", state_root=state_root,
                            fingerprint=str((attempt or {}).get("fingerprint") or ""))
 

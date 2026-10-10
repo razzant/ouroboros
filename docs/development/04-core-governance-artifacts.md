@@ -1,6 +1,6 @@
 # Core Governance Artifacts
 
-The **core governance artifacts** — `BIBLE.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md` — ground constitution, architecture and procedure. This chapter owns their delivery to every reasoning flow (one registry row per flow), the exact-premise and earned-compaction rules for planning context, and the rules against silent truncation. Full availability means inline text or complete navigable sources; absence never counts as full context (BIBLE P1).
+BIBLE, Architecture and Development ground identity, structure and procedure. This chapter governs their delivery, exact premises, earned compaction and disclosed views. Full availability is inline text or complete navigable sources; absence is never full context.
 
 ### Invariant: Full availability in reasoning flows
 
@@ -24,13 +24,13 @@ The context-delivery registry:
 | Plan review (`tools/plan_review.py`) | full for a self-modification plan (`api_chat` inline, `agent_session` mandatory full read); otherwise a navigation map plus a named on-demand pointer, never a copy | as BIBLE | not delivered or pointed at; reachable only through a generic `need_evidence` locator |
 | Deep self-review (`deep_self_review.py`) | full tier 1 on both deliveries | tier 3 navigation | tier 2 within the row's share (ARCHITECTURE §6 "Deep self-review") |
 
-The coupling question's change-relative required-source manifest (`tools/scope_required_sources.py`) is a reading minimum, not a sufficiency claim: a reviewer may read any part of the body. Every rule in it names a body file, so the core layer's manifest is empty by rule and the staged diff is the complete change evidence. Coverage stays diagnostic on every route — it changes no finding, quorum or commit permission and buys no paid repeat; the author judges whether a gap warrants more reading. The window sizes delivery, never its authority.
+`tools/scope_required_sources.py` sets minimum body reading; reviewers may read more. Body-only rules leave the core manifest empty and the staged diff complete. Reading coverage is diagnostic: it changes no findings, quorum or permission and buys no repeat. The author decides further reads. The window sizes delivery, never its authority.
 
 Planning resolves targets and evidence against `active_repo_dir_for(ctx)` and governance against the system repository; never fall back to reviewing the Ouroboros repository for an external plan. Exact user-managed installed-skill payload paths are the one data-plane exception, for classification only: never a self-modification, never attachable evidence (`denied_path`).
 
-A disposition-only `plan_task(review_disposition=...)` closes `need_evidence` at $0. Force-plan is an LLM-first pre-implementation obligation on the admitted managed root, not a mechanical permission check; every submitted envelope reaching `plan_task` supersedes prior authority, so no newer attempt falls back to an older GREEN, and effective Cyber authority never rewrites an old wave to GREEN. Closure table, merge semantics and the shared paid-cycle cap: ARCHITECTURE §6 "Plan construction and review".
+Review history keeps the operative contract, current author/critic statuses and open/deferred/pending facts explicit. Actor `review_notes` may shorten individual reasons or group exact historical decisions, retaining membership and lineage in the existing selected view. No grouping by age or terminal status. Producers project decisions once with mirror references; unknown legacy content stays full. Recheck versions through publication, cold context, new packets and Continue; source gaps preserve recoverable bodies. Invalid optional transfers leave their own attachments full. Unchanged views retain their prefix; all surviving accounts cross continuations. Notes grant no verdict and rewrite no paid replay. Enforcement: `tests/test_review_local_accounts.py`, `tests/test_review_cold_history.py`, `tests/test_review_view_integration.py`. Closure/cycles: ARCHITECTURE §6 "Plan construction and review".
 
-**Context mode (Nano / Low / Max).** The Main row is each mode's projection of the two books (ARCHITECTURE §6 "Context fitting, retry, and compaction"). Max binds `DEVELOPMENT.md` to the active repository — a path fact, never a guess from message text — and tier-0 identity and constitutional context stays full in every mode. Predicted Max pressure never swaps in Low documents. Physical impossibility (`memory_floor.physical_mode`, the known route window cannot hold even the shortest memory view with the books, tools and reply reserve) may lower the starting mode to Low or Nano; an actual provider overflow may project Max to Low for one reclaim and one strictly smaller same-route retry. Neither changes the owner's mode or P3 commit review. An overflow after that retry ends the task as the typed `context_overflow` infra failure, never a provider outage.
+**Context mode (Nano / Low / Max).** Follow the Main registry row. Max binds Development to the active repository, never inferred intent, and retains its books at startup and rebind despite predicted pressure. Only actual size-refusal recovery may lower that document projection, after earlier recovery steps. Preserve owner Low/Nano sizing, current lower starts, tier-0 and P3; an estimate is neither a refusal nor permission to reduce quality. Mechanism: ARCHITECTURE §6 "Context fitting, retry, and compaction".
 
 ### Invariant: Exact premises with explicit source ownership
 
@@ -38,19 +38,21 @@ Plan from the complete retained room — both speakers, options and answers exac
 
 ### Invariant: Compaction must earn its rewrite
 
-Helper compaction is deficit-triggered and low-water-sized: a positive deficit against the binding boundary requests at most one pass per route and round, sized deficit plus ceil(boundary / `context_budget.RECLAIM_LOW_WATER_DIVISOR`) — a structural constant, not a setting — so the pass lands below the boundary and the next round's growth does not re-arm it; requested margin and achieved headroom stay separate checkpoint facts. The materializer publishes only completely covered, bound units with provenance and a strictly smaller ContextFit size, and adds no threshold, timer, route or retry policy of its own (trigger and sizing: ARCHITECTURE §6 "Context fitting, retry, and compaction"). Authored views reuse that custody but follow the actor's note/source selection, so they need not shrink; preserve complete units, the owner/new tail and schema residency, and add no new Main admission gate. Enforcement: `tests/test_compaction.py`, `tests/test_main_authored_context.py` (real loop wiring, not seeded observations), `tests/test_context_budget_ssot.py`.
+Treat the task's dated focus as data, not owner instructions. Strictly read its canonical result, distinguishing absence/failure; update same-round facts and remeasure (`tests/test_self_focus_context.py`).
+
+Predicted pressure buys no helper. Actual refusal follows ARCHITECTURE §6’s recovery order; unseen bodies have a separate late source-only rescue. Checkpoint originals first; helpers replace only fully covered units with smaller signed views. Actor notes may fold completed working prose/tools without shrinking, preserving governing human words, recorded outward speech, newer arrivals and opaque protocol. Local notes keep positions unless selected for merging; exposure uses physical evidence, not call IDs. Test final sealed requests, cold restoration and both sides of dialogue: `tests/test_compaction.py`, `tests/test_main_authored_context.py`, `tests/test_context_source_view.py`, `tests/test_delivery_dialogue_context.py`.
 
 ### Invariant: No silent truncation
 
 When a core governance artifact does not fit the available budget:
 
 - Where the flow requires inline delivery, inability to fit is an assembly failure, not a smaller pack (BIBLE P3): a typed entry names the artifact and the reason, the review does not proceed on the remainder, and the disclosure accompanies the refusal rather than replacing it. Elsewhere the omission is named where the reader sees it (`Reference book source unavailable: …`, `⚠️ OMISSION NOTE`), never silent; a reviewer without ARCHITECTURE.md is not operating with full context.
-- Tools that return multi-model review findings (`commit_reviewed`, `skill_review`, `preflight_review`, `review_change`) are listed in `UNTRUNCATED_TOOL_RESULTS` or carry an explicit per-tool limit; the default `DEFAULT_TOOL_RESULT_LIMIT` (`ouroboros/tool_capabilities.py`) is not acceptable for review verdicts.
+- Retain exact tool sources before projecting the complete Main batch; preserve outcomes, requested ranges and source gaps. Producer pages are separate from this frame, and no tool/path exemption applies. Read receipts count the actual consumer projection, not a predicted head cut.
 - Book navigation (`context_layout.book_navigation`), a single-document navigation map and a named on-demand pointer are lossless representations, not truncation; Low and Nano use them and never apply `[:N]` to a document.
 - Bound strings through `utils.truncate_review_artifact` (display previews) or `utils.truncate_within_limit` (a strict wire/prompt bound), never a hand-rolled `text[:cap] + marker`, which loses the anti-waste floor and can return a value longer than its input.
 - A list obeys the same rule: a `[:N]` slice carries the omitted count and, where downstream compares an identity, a durable hash or reference for the full set (`_outcome_receipts.receipt_identity_projection`). Bounding a set is allowed; hiding that it was bounded is the P1 violation.
 
-Enforcement: `tests/test_tool_capabilities.py` (the `UNTRUNCATED_TOOL_RESULTS` roster) and `tests/test_owner_facing_honesty.py` (the truncation floor).
+Enforcement: `tests/test_tool_result_delivery.py`, `tests/test_delegated_result_delivery.py` and `tests/test_owner_facing_honesty.py`.
 
 ### Invariant: Owner-facing surfaces show the full text
 

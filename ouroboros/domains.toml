@@ -35,6 +35,9 @@
 # operations reuse the existing file/source reader (D15 -> D05) rather than
 # inventing a second parser, source resolver or review-coverage store.
 
+# Canonical working-view metadata/projections belong to D03. Plan author-source
+# retention belongs to the D06 review stack and reaches D05's source store lazily.
+
 [meta]
 reference_tree = "ouroboros_v7_wip @ 9f691656e7e756c483f72ef549418c0e7a1b8054 (frozen)"
 population_rule = "git-tracked *.py under ouroboros/ and supervisor/, plus server.py and launcher.py"
@@ -153,6 +156,7 @@ D20 = "Presence"
 "ouroboros/context_runtime_facts.py" = "D03"
 "ouroboros/context_budget.py" = "D03"
 "ouroboros/context_compaction.py" = "D03"
+"ouroboros/context_source_view.py" = "D03"
 "ouroboros/context_fit.py" = "D03"
 "ouroboros/context_health.py" = "D03"
 "ouroboros/context_layout.py" = "D03"
@@ -160,6 +164,7 @@ D20 = "Presence"
 "ouroboros/memory_view.py" = "D03"  # the acting mind's resident memory view: roles, capture, story and live part
 "ouroboros/memory_floor.py" = "D03"  # the memory view's physical floor: what a window shows only by address
 "ouroboros/memory_view_legacy.py" = "D03"  # how my story names a retold old record: what its address holds
+"ouroboros/memory_view_account.py" = "D03"  # common-view account rendering and retained source addresses
 "ouroboros/contracts/__init__.py" = "D19"
 "ouroboros/contracts/chat_id_policy.py" = "D19"
 "ouroboros/contracts/plugin_api.py" = "D19"
@@ -436,6 +441,8 @@ D20 = "Presence"
 "ouroboros/review_session_usage.py" = "D06"
 "ouroboros/review_slot_cancel.py" = "D06"
 "ouroboros/review_state.py" = "D06"
+"ouroboros/review_history.py" = "D06"
+"ouroboros/review_history_view.py" = "D03"
 "ouroboros/review_state_custody.py" = "D06"
 "ouroboros/review_state_model.py" = "D06"
 "ouroboros/review_state_records.py" = "D06"
@@ -526,6 +533,8 @@ D20 = "Presence"
 "ouroboros/tool_access_types.py" = "D04"
 "ouroboros/tool_access_user_files.py" = "D04"
 "ouroboros/tool_capabilities.py" = "D04"
+"ouroboros/tool_result_delivery.py" = "D01"
+"ouroboros/tool_result_record.py" = "D03"
 "ouroboros/tool_policy.py" = "D04"
 "ouroboros/tools/__init__.py" = "D04"
 "ouroboros/tools/arg_feedback.py" = "D04"
@@ -578,6 +587,7 @@ D20 = "Presence"
 "ouroboros/tools/plan_packet.py" = "D06"
 "ouroboros/tools/plan_render.py" = "D06"
 "ouroboros/tools/plan_review.py" = "D06"
+"ouroboros/tools/plan_author_history.py" = "D06"
 "ouroboros/tools/plan_review_artifacts.py" = "D06"
 "ouroboros/tools/plan_review_collect.py" = "D06"
 "ouroboros/tools/plan_review_references.py" = "D06"
@@ -978,6 +988,7 @@ lazy_only = [
   "D04->D15",
   "D04->D16",
   "D04->D20",
+  "D05->D03",
   "D05->D06",
   "D05->D07",
   "D05->D08",

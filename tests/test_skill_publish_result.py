@@ -450,8 +450,10 @@ def test_metadata_is_extracted_from_full_result_before_visible_head_truncation()
     payload["receipt"] = receipt
     full = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-    visible = _truncate_tool_result(full, tool_name="submit_skill_to_hub")
-    assert receipt["url"] not in visible
+    # The actor's bounded view under a measured allowance omits most of the padding;
+    # the metadata is read from the FULL result, never from the view.
+    visible = _truncate_tool_result(full, tool_name="submit_skill_to_hub", allowance_chars=4_000)
+    assert len(visible) < len(full) and "x" * 10_000 not in visible
     metadata = _extract_result_metadata("submit_skill_to_hub", full, False)
     assert metadata["skill_publish_receipt"]["url"] == receipt["url"]
     assert metadata["skill_publish_attempt"]["completed_stage"] == "pr_opened"
@@ -489,7 +491,9 @@ def test_typed_failed_publish_is_delivered_to_the_next_llm_turn():
     )
 
     assert errors == 1
-    assert messages == [{"role": "tool", "tool_call_id": "publish-1", "content": result}]
+    assert [{k: v for k, v in row.items() if k != "_tool_result_record"} for row in messages] == [
+        {"role": "tool", "tool_call_id": "publish-1", "content": result}]
+    assert messages[0]["_tool_result_record"]["facts"]["is_error"] is True
     assert trace["tool_calls"][0]["status"] == "tool_reported_failure"
     assert trace["tool_calls"][0]["skill_publish_attempt"]["status"] == "scanner_blocked"
 

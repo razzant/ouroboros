@@ -445,6 +445,7 @@ _CTX_FIELDS = (
     "_review_paid_stamp", "_review_reserved_roster", "_review_reserved_operations",
     "_review_pending_invocation_checkpoint", "_last_review_slot_executions", "_pending_review_attempt",
     "_commit_preflight", "_commit_review_panel",
+    "_review_dispute_history", "_review_dispute_input",
 )
 
 
@@ -462,6 +463,7 @@ def _wave_context(ctx: ToolContext, wave: _Wave) -> Iterator[None]:
         ctx._current_review_rebuttal_sha256 = wave.rebuttal_sha
         ctx._current_review_contract_fingerprint = wave.contract_fp
         ctx._review_history, ctx._review_iteration_count, ctx._coupling_review_history = [], 0, {}
+        ctx._review_dispute_history, ctx._review_dispute_input = None, None
         yield
     finally:
         for name, value in saved.items():
@@ -502,6 +504,7 @@ def _dispatch(ctx: ToolContext, wave: _Wave) -> Dict[str, Any]:
 
 def _forensic(ctx: ToolContext) -> Dict[str, Any]:
     return {
+        "dispute_input": getattr(ctx, "_review_dispute_input", None),
         "structured": dict(getattr(ctx, "_last_review_structured", {}) or {}),
         "triad_raw": [row for row in (getattr(ctx, "_last_triad_raw_results", []) or []) if isinstance(row, dict)],
         "degraded_reasons": [str(item) for item in (getattr(ctx, "_review_degraded_reasons", []) or [])],
@@ -598,6 +601,7 @@ def wave_facts(ctx: ToolContext, wave: _Wave, *, outcome: Dict[str, Any], forens
         "goal": wave.request.goal, "scope": wave.request.scope, "author_questions": list(wave.request.author_questions),
         "binding_fingerprint": str(wave.frozen.diff_sha), "review_contract_fingerprint": wave.contract_fp,
         "rebuttal_sha256": wave.rebuttal_sha, "enforcement": wave.enforcement, "mode": mode,
+        "dispute_input": forensic.get("dispute_input"),
         "enforcement_blocks": wave.layer == "body" and bool(review_enforcement_blocks(wave.enforcement)),
         "structured": structured, "slot_executions": executions, "triad_raw": triad_raw,
         "blocked": bool(outcome.get("blocked")), "block_reason": str(outcome.get("block_reason") or ""),
@@ -696,6 +700,8 @@ def _settle(ctx: ToolContext, wave: _Wave, facts: Dict[str, Any], outcome: Dict[
     settle_attempt(ctx, wave, outcome, payload, facts)
     result = review_result(payload, reused=False)
     result["durable"] = durable
+    from ouroboros.review_history_view import queue_review_history_context
+    queue_review_history_context(ctx, family="commit", repo_root=wave.root)
     return result
 
 

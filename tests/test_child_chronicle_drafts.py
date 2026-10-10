@@ -148,6 +148,39 @@ def test_a_child_whose_contract_withholds_chronicle_write_drafts_nothing(data, m
     assert drafted["ok"] and status_of(data, drafted["node_id"]) == "draft"
 
 
+@pytest.mark.parametrize("mode", [READONLY, ACTING])
+def test_a_childs_account_and_selection_are_refused_and_the_mind_writes_them(data, monkeypatch, mode):
+    """An account across rooms and its selection are the integrating mind's: a child's or nanny's is refused
+    ``not_integrator`` through the real registry and nothing lands; the root publishes both and the child reads
+    the selected account in its story."""
+    rows = chat(data)
+    root = registry_for(data, "root0001")
+    first = call(root, kind="page", text="The first arc.", covers={"from": addr(rows[0]), "to": addr(rows[1])})
+    second = call(root, kind="page", text="The second arc.", covers={"from": addr(rows[2]), "to": addr(rows[3])})
+    assert first["ok"] and second["ok"]
+    before = journal(data)
+    for meta in (CHILD_META, NANNY_META):
+        kid = registry_for(data, "kid00001", meta, mode, monkeypatch)
+        for args in ({"kind": "account", "text": "Both arcs, as I see them.", "sources": [first["node_id"], second["node_id"]]},
+                     {"kind": "selection", "target_id": first["node_id"], "replaces": [], "reason": "mine"}):
+            refused = call(kid, **args)
+            assert refused["ok"] is False and refused["reason"] == "not_integrator", (meta, args)
+            assert args["kind"] in refused["detail"] and "Nothing was written" in refused["detail"]
+    assert journal(data) == before
+    account = call(root, kind="account", text="Both arcs, as I see them.", sources=[first["node_id"], second["node_id"]])
+    assert account["ok"] and account["kind"] == "account" and account["sources"] == 2
+    chosen = call(root, kind="selection", target_id=account["node_id"], replaces=[first["node_id"]], reason="through it")
+    assert chosen["ok"] and chosen["replaces"] == 1
+    kid = {"id": "kid00001", "chat_id": 1, "delegation_role": "subagent", "root_task_id": "root0001"}
+    story = mv.render_story(mv.capture_memory_view(data, kid, mv.view_spec_for_task(kid, data)))
+    assert "Both arcs, as I see them." in story and "The first arc." not in story and "The second arc." in story
+    assert "1 story records told through this account (including nested selections); 2026-10-01 00:00 → 2026-10-01 00:00" in story
+    assert f"memory_read(node_id='{account['node_id']}')" in story
+    reader = registry_for(data, "kid00001", CHILD_META, mode, monkeypatch)
+    exact = reader.execute("memory_read", {"node_id": account["node_id"]})
+    assert f"replaces 1: {first['node_id']};" in exact and f"revision {first['node_id']} used" in exact
+
+
 def test_a_childs_refused_note_does_not_activate_the_chronicle(data, monkeypatch):
     kid = registry_for(data, "kid00001", CHILD_META, READONLY, monkeypatch)
     assert call(kid, kind="note", text="nothing")["reason"] == "not_integrator"

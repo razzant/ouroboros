@@ -19,6 +19,8 @@ from typing import Any, Dict, List
 from ouroboros.anthropic_native_custody import custody_private_key, scrub_native_custody
 from ouroboros.llm_attempt import _VALID_CACHE_TTLS
 from ouroboros.provider_models import normalize_model_identity
+from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
 
 # The Main context builder's declaration on its leading system message: how many leading
 # text blocks are byte-stable across conversations (governance and books; with a memory
@@ -212,7 +214,7 @@ class _MessageShapingMixin:
         cleaned = scrub_native_custody(messages)
         for msg in cleaned:
             for key in ("acceptance_observation", "_acceptance_observation", "review_feedback",
-                        STABLE_PREFIX_BLOCKS_KEY):
+                        STABLE_PREFIX_BLOCKS_KEY, TOOL_RESULT_RECORD_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY):
                 msg.pop(key, None)
             msg.pop("nativeContinuation", None)
             content = msg.get("content")

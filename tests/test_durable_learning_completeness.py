@@ -464,8 +464,8 @@ def test_wake_context_carries_a_complete_dialogue_block_without_a_gap(tmp_path):
     _legacy_memory(tmp_path, {"content": "Complete consolidated biography block."})
     _write_schedules(tmp_path, 8)
     story = _story(_wake_context(tmp_path))
-    # The wake integrates my life (its room is Main): the retold first block (no rooms: an
-    # old mixed record) is whole in my story, headed by its id and provenance, never a gap.
+    # The wake integrates my life (its room is Main): this unfolded mixed retelling
+    # stays whole in my story, headed by its id and provenance, never a gap.
     assert "#### legacy-b00-rlegacy — " in story and " — Unknown provenance [legacy mixed record] — " in story
     assert "\n  Complete consolidated biography block." in story
     assert "memory gap" not in story and "[MEMORY GAP]" not in story

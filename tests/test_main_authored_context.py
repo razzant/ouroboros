@@ -240,13 +240,19 @@ def test_main_fit_reports_known_pressure_without_rejecting_useful_shrink(tmp_pat
         "cold_estimate", 1.0, 0, working_note="I understood the source.",
         expected_view_revision=context_compaction.context_reclaim_transcript_sha256(observed), keep_unit_ids=())
     fit = lambda messages, tools: _measure_main_context_view(plan, messages, tools, "max", "high", "1")
+    owner_words = ("Full owner requirement. " * 200,)  # what the loop passes from the typed owner corpus
     candidate, receipt, usage = context_compaction.compact_tool_history_llm(
         observed, request=request, observed_messages=observed, tool_schemas=[], fit_candidate=fit,
-        drive_root=tmp_path, task_id="large-main")
+        drive_root=tmp_path, task_id="large-main", protected_texts=owner_words)
     assert receipt.status == "applied" and receipt.reclaimed_tokens > 0 and usage is None
     assert receipt.fit["accepted"] and receipt.fit["predicted_capacity_miss"]
     assert receipt.fit["strict_bound_proven"] is False
-    assert candidate[:3] == observed[:3]
+    assert candidate[:3] == observed[:3]  # the owner's words stay whole under keep_unit_ids=()
+    untyped, untyped_receipt, _ = context_compaction.compact_tool_history_llm(
+        observed, request=request, observed_messages=observed, tool_schemas=[], fit_candidate=fit,
+        drive_root=tmp_path, task_id="large-main")
+    assert untyped_receipt.status == "applied" and untyped[:2] == observed[:2]
+    assert untyped[2] != observed[2]  # an untyped host prose row is an addressable dialogue unit (3A)
     unknown = _measure_main_context_view(replace(plan, status="unknown"), candidate, [], "max", "high", "1")
     assert unknown["accepted"] and unknown["capacity_total_tokens"] is None
     unbound = _measure_main_context_view(None, candidate, [], "max", "high", "1")

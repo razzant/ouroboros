@@ -156,3 +156,64 @@ def test_exact_source_identity_keeps_the_complete_opened_path(tmp_path):
     assert len(relative) > 300
     assert extent["opened_path"] == relative
     assert extent["source_revision"] == _sha(b"source\n")
+
+
+def test_staged_output_is_credited_only_after_native_projected_delivery(tmp_path):
+    from types import SimpleNamespace
+    from ouroboros import delegate_output as output
+    from tests.test_delegated_result_delivery import _staged_for_main
+
+    executor = _executor(tmp_path)
+    registry, schemas = executor._inspection_registry(str(tmp_path), tmp_path / "data")
+    target, entry = _staged_for_main(SimpleNamespace(ctx=executor._inspection_ctx), ("Ж🙂" * 4000 + "\r\n").encode())
+    content = target.read_text(encoding="utf-8")
+    request = {"id": "read-staged", "function": {"name": "read_file", "arguments": json.dumps({
+        "root": "task_drive", "path": entry.output_artifact})}}
+    message = executor._execute_inspection_call(registry, request, {}, round_idx=1, room=3000)
+    assert not entry.output_consumed and not output._READ_COVERAGE
+    end = executor._tool_receipts[-1]["source_end_char"]
+    assert 0 < end < len(content)
+    assert content[:end] in message["content"]
+    executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, message], schemas)
+    assert output._READ_COVERAGE[f"{target.resolve()}|{entry.output_sha}"] == [[0, end]]
+    assert not entry.output_consumed
+    request["function"]["arguments"] = json.dumps({"root": "task_drive", "path": entry.output_artifact,
+                                                  "start_char": end})
+    second = executor._execute_inspection_call(registry, request, {}, round_idx=2, room=100_000)
+    assert not entry.output_consumed
+    executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, second], schemas)
+    assert entry.output_consumed
+
+
+def test_abandoned_native_reader_cannot_ack_when_its_worker_finishes(tmp_path, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from ouroboros import delegate_output as output, loop_tool_execution
+    from ouroboros.tools import core_file_tools
+    from tests.test_delegated_result_delivery import _staged_for_main
+
+    executor = _executor(tmp_path)
+    registry, schemas = executor._inspection_registry(str(tmp_path), tmp_path / "data")
+    _, entry = _staged_for_main(SimpleNamespace(ctx=executor._inspection_ctx), b"small full result\n")
+    release, completed = threading.Event(), threading.Event()
+    original = core_file_tools._stamp_read_view
+
+    def held_stamp(*args, **kwargs):
+        release.wait(5)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            completed.set()
+
+    monkeypatch.setattr(core_file_tools, "_stamp_read_view", held_stamp)
+    monkeypatch.setattr(loop_tool_execution, "_get_tool_timeout", lambda *args: 0.05)
+    request = {"id": "late-read", "function": {"name": "read_file", "arguments": json.dumps({
+        "root": "task_drive", "path": entry.output_artifact})}}
+    try:
+        message = executor._execute_inspection_call(registry, request, {}, round_idx=1, room=10_000)
+        assert executor._tool_receipts[-1]["outcome"] == "error"
+    finally:
+        release.set()
+        assert completed.wait(5)
+    executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, message], schemas)
+    assert not output._READ_COVERAGE and not entry.output_consumed

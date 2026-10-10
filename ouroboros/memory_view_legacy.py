@@ -1,14 +1,14 @@
 """How my story shows the old memory a helper retold before the update, and how the floor shortens it.
 
-A retold record of the first block (the retelling of the time before rooms had memory of
-their own, one record per room) is whole in the story of a focus that integrates my life
-(``memory_view.INTEGRATING``): its id, period, room and length as a header, then its
-words. Every other retold record is one line that says what its address holds: the room,
-the period, how many of that room's chat rows it retells (where none is established, the
-old writer's own message count) and the length of the retelling, then the ``memory_read``
-call that reads it. A journal gap is named with its detail. Under the physical floor (F3)
-a room's records, whole ones included, are one line: the room, its whole period, their
-total length and every id.
+An unfolded retold record is whole in the story, whatever its block and whoever reads it:
+its id, period, room and length as a header, then its words. A record whose words the
+capture did not keep is one line that says what its address holds: the room, the period,
+how many of that room's chat rows it retells (where none is established, the old writer's
+own message count) and the length of the retelling, then the ``memory_read`` call that
+reads it. A journal gap is named with its detail. Under the physical floor (F3) a room's
+records, whole ones included, are one line: the room, its whole period, their total length
+and every id. A record a selected account tells in its place (``told_by``) is not among
+these lines: it stands under the account (``memory_view_account``).
 
 Only facts of the record, never a reason to read it. Nothing here reads a file.
 """
@@ -56,9 +56,10 @@ def retold_record(entry: Mapping[str, Any]) -> str:
 
 
 def pointer_rooms(story: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """The retold records the story shows itself, by room (a gap and a record told by an account stay out)."""
     rooms: Dict[str, List[Dict[str, Any]]] = {}
     for entry in story:
-        if entry.get("kind") == "legacy" and not entry.get("gap"):
+        if entry.get("kind") == "legacy" and not entry.get("gap") and not entry.get("told_by"):
             rooms.setdefault(str(entry["room_id"]), []).append(entry)
     return rooms
 

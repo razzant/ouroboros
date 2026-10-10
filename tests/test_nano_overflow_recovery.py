@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import replace
 from types import SimpleNamespace
 
-from tests.test_loop_compaction import _candidate_request, _ctx, _failed_capture, _fit
+from tests.test_loop_compaction import _applied, _candidate_request, _ctx, _failed_capture, _fit, _measure_cycle
 
 
 def test_a_nano_overflow_stays_nano_and_the_retry_carries_the_failed_allowance(tmp_path, monkeypatch):
@@ -18,17 +18,12 @@ def test_a_nano_overflow_stays_nano_and_the_retry_carries_the_failed_allowance(t
     from ouroboros import loop
 
     context = _ctx(tmp_path, preferred="nano", mode="nano")
-    fits = iter([_fit(profile="owner_nano", mode="nano"), _fit(profile="owner_nano", mode="nano"),
-                 _fit(profile="owner_nano", mode="nano", used=True)])
     events, ceilings = [], []
-
-    def measure(ctx, **_kwargs):
-        disposition = next(fits)
-        loop._remember_main_fit(ctx, disposition)
-        return disposition
+    measure = _measure_cycle([_fit(profile="owner_nano", mode="nano")])
 
     def reclaim(ctx, _disposition, **_kwargs):
         ctx.tools._ctx._context_reclaim_passes.add(("route-a", "exec:round:1"))
+        return _applied()
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, max_tokens=None, **_kwargs):
         ceilings.append(max_tokens)
@@ -85,8 +80,7 @@ def test_a_local_pre_dispatch_refusal_is_compared_with_its_own_candidate_facts(t
     from ouroboros.usage_accounting import PhysicalAttemptContext
 
     context = _ctx(tmp_path, preferred="nano", mode="nano")
-    fits = iter([_fit(profile="owner_nano", mode="nano"), _fit(profile="owner_nano", mode="nano"),
-                 _fit(profile="owner_nano", mode="nano", used=True)])
+    measure = _measure_cycle([_fit(profile="owner_nano", mode="nano")])
     refused = {"model": "same-model", "provider": "local", "max_completion_tokens": 4_096,
                "candidate_measurement_kind": "canonical_json_v1", "candidate_raw_sha256": "refused",
                "candidate_raw_size_bytes": 1_100, "candidate_context_sha256": "refused-context",
@@ -99,13 +93,9 @@ def test_a_local_pre_dispatch_refusal_is_compared_with_its_own_candidate_facts(t
     stale = replace(stale, physical_context=replace(stale.physical_context, round_id="exec:round:0"))
     checked = []
 
-    def measure(ctx, **_kwargs):
-        disposition = next(fits)
-        loop._remember_main_fit(ctx, disposition)
-        return disposition
-
     def reclaim(ctx, _disposition, **_kwargs):
         ctx.tools._ctx._context_reclaim_passes.add(("route-a", "exec:round:1"))
+        return _applied()
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, max_tokens=None, **_kwargs):
         if candidate_predicate is None:

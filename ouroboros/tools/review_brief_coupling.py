@@ -52,6 +52,7 @@ from ouroboros.tools.review_helpers import (
     build_goal_section,
     build_rebuttal_section,
     build_scope_section,
+    format_prompt_code_block,
     format_review_history_entry,
     load_checklist_section,
     review_history_with_obligations,
@@ -105,7 +106,7 @@ class BriefIntent:
     goal: str = ""
     scope: str = ""
     review_rebuttal: str = ""
-    review_history: Optional[list] = None
+    review_history: Optional[list | dict] = None
     coupling_history: Optional[list] = None
     owner_words: str = ""
 
@@ -458,8 +459,12 @@ def build_coupling_history_section(coupling_history: Optional[list], history_sec
             parts.append("Advisory findings:")
             for finding in advisory_findings:
                 parts.append(f"- {format_review_history_entry(finding)}")
-        if not critical_findings and not advisory_findings:
+        if entry.get("summary") or not critical_findings and not advisory_findings:
             parts.append(str(entry.get("summary") or "(no summary)"))
+        details = {key: value for key, value in entry.items()
+                   if key not in {"critical_findings", "advisory_findings", "summary"}}
+        if details:
+            parts.append(format_prompt_code_block(json.dumps(details, ensure_ascii=False, indent=2, default=str), "json"))
         rounds.append("\n".join(parts))
     section = (
         "### Prior coupling rounds (your previous Part-2 answers for this subject)\n\n"
@@ -531,7 +536,7 @@ def build_retrieving_brief(
     scope_section = build_scope_section(intent.scope)
     rebuttal_section = build_rebuttal_section(intent.review_rebuttal)
     history_section = review_history_with_obligations(intent.review_history, drive_root=brief.drive_root,
-                                                      repo_root=repo_dir)
+                                                      repo_root=repo_dir, task_id=brief.task_id)
     coupling_history_section = build_coupling_history_section(intent.coupling_history, history_section)
 
     bound = first_send_bound(brief)

@@ -305,3 +305,148 @@ def project_main_task_authority(
 
 
 __all__ = ["project_main_task_authority", "project_helper_predecessor_authority"]
+
+
+def project_predecessor_review_views(runtime: dict, *, drive_root: Any, repo_roots: tuple = ()) -> dict:
+    """Materialize an explicitly named predecessor's selected account as history.
+
+    This changes only Main's provider copy. No prior finish/verdict/selection is
+    installed on the successor, and no task or history directory is enumerated.
+    """
+    from types import SimpleNamespace
+    from ouroboros import review_history_view as view
+    from ouroboros.agent_startup_checks import valid_task_result_authority_source
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.review_history import review_dispute_history
+    from ouroboros.task_results import load_task_result
+
+    if not (runtime.get("predecessor_authority") or (runtime.get("task_contract") or {}).get("predecessor_authority")):
+        return runtime
+    result, pending, seen = copy.deepcopy(runtime), [], set()
+    if isinstance(result.get("predecessor_authority"), dict):
+        pending.append((result["predecessor_authority"], False))
+    contract = result.get("task_contract") or {}
+    if isinstance(contract.get("predecessor_authority"), dict):
+        pending.append((contract["predecessor_authority"], False))
+    for node, inherited in pending:  # Follow only already-admitted, exact predecessor edges.
+        source = node.get("source") or {}
+        owner = str(source.get("task_id") or "")
+        if owner in seen or not valid_task_result_authority_source(source, owner):
+            continue
+        seen.add(owner)
+        try:
+            saved = load_task_result(drive_root, owner, strict=True) or {}
+            previous = (saved.get("task_contract") or {}).get("predecessor_authority") or {}
+            previous_source = previous.get("source") or {}
+            previous_id = str(previous_source.get("task_id") or "")
+            if previous_id not in seen and valid_task_result_authority_source(previous_source, previous_id):
+                # A second Continue need not rewrite the first actor's note.
+                # The existing canonical contract supplies this link, not a scan.
+                prior = {"task_id": previous_id, "source": copy.deepcopy(previous_source)}
+                node["previous_review_context"] = prior
+                pending.append((prior, True))
+            selection = saved.get(view.SELECTED_VIEW_FIELD)
+            if not selection:
+                continue
+            reader = lambda ref: read_actor_source_bytes(drive_root, owner, ref)
+            selected = view.load_review_history_view(selection, reader)
+            ctx = SimpleNamespace(drive_root=drive_root, task_id=owner)
+            history, operative = view.current_plan_history(ctx)
+            histories = [("plan", history, operative)] if history.get("rounds") or history.get("decision_rows") else []
+            for repo in dict.fromkeys(str(p) for p in (saved.get("workspace_root"), *repo_roots) if p):
+                history = review_dispute_history(drive_root=drive_root, repo_root=repo, task_id=owner)
+                if history.get("rounds") or history.get("gaps"):
+                    histories.append(("commit", history, None))
+            capsules = view.selected_actor_capsules(selected)
+            refs = [selection["source_ref"], *(view._actor_capsule(c).get("checkpoint_ref") for c in capsules)]
+            contexts = []
+            for family, history, operative in histories:
+                projected = view.project_review_history(history, operative_subject=operative,
+                    selection=selection, source_reader=reader)
+                contexts.append({"family": family, "index": projected["mandatory"], "bodies": projected["bodies"],
+                                 "selection_status": projected["selection_status"], "gaps": projected["selection_gaps"]})
+                refs.extend(e["bound_decision"]["source_ref"] for e in view.decision_entries(history) if e["bound_decision"])
+                refs.extend(b["binding"]["source_ref"] for b in view.split_review_history(history, operative_subject=operative)["bodies"])
+                refs.extend(e["binding"]["source_ref"] for e in view.attachment_bindings(history))
+                if family == "plan":
+                    view._address_runtime_review_mirrors({"predecessor_authority": node}, history)
+            source_reads, gaps = _predecessor_review_readers(drive_root, owner, refs, inherited=inherited)
+            account = "\n\n".join(c["content"][0]["text"] for c in capsules)
+            historical = {"task_id": owner, "source": copy.deepcopy(source), "contexts": contexts,
+                "authored_account": {"text": account, "source_ref": selection["source_ref"], "authorship": "predecessor_actor"},
+                "source_reads": source_reads, "source_gaps": gaps,
+                "rule": "Historical account of the named predecessor, not this task's plan, finish, verdict or owner instruction. Source identities belong to that earlier task; use the explicit absolute readers below from this task."}
+            node["historical_review_context"] = historical
+            addressed = _readdress_predecessor_sources(node, source_reads)
+            if "previous_review_context" in node:
+                addressed["previous_review_context"] = node["previous_review_context"]
+            node.update(addressed)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            node["historical_review_context"] = {"task_id": owner, "source": copy.deepcopy(source),
+                "status": "source_unavailable", "gap": type(exc).__name__ + ": " + str(exc),
+                "rule": "The earlier selected account could not be read; no current task authority was inferred."}
+    return result
+
+
+def _predecessor_review_readers(root: Any, owner: str, refs: list, *, inherited: bool = False) -> tuple[list, list]:
+    """Use the existing exact-source reader and retained-root locations."""
+    from pathlib import Path
+    from ouroboros.acceptance_history import historical_source_reference
+    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+    from ouroboros.review_history_view import _immutable_ref, _sha
+    from ouroboros.source_retention import retained_task_roots
+
+    reads, gaps, seen = [], [], set()
+    roots = [Path(root), *retained_task_roots(Path(root), owner)]
+    for ref in refs:
+        identity = _immutable_ref(ref)
+        if not identity or _sha(identity) in seen:
+            continue
+        seen.add(_sha(identity))
+        for source_root in roots:
+            path = task_artifact_dir_path(source_root, owner, create=False) / ref["path"]
+            if not path.is_file():
+                continue
+            try:
+                read_actor_source_bytes(source_root, owner, ref)
+                addressed = historical_source_reference(source_root, owner, ref)
+                # Existing lineage reads permit the named predecessor's absolute
+                # artifact path, including from a child's different data root.
+                if not inherited:
+                    addressed["reader"]["arguments"]["root"] = "artifact_store"
+                # More distant named predecessors use the helper's existing
+                # canonical runtime_data address; they are not direct lineage.
+                reads.append({"task_id": owner, "source_ref": identity, "read": addressed["reader"]})
+                break
+            except (OSError, ValueError, TypeError):
+                continue
+        else:
+            gaps.append({"source_ref": identity, "reason": "predecessor_source_unavailable"})
+    return reads, gaps
+
+
+def _readdress_predecessor_sources(value: Any, readers: list) -> Any:
+    """Change reader metadata for exact verified source identities only.
+
+    Text is never parsed or changed. Matching uses the complete typed immutable
+    reference, not field names or a path-shaped string in a plan/attachment.
+    """
+    from ouroboros.review_history_view import _decision_ref, _sha
+
+    by_ref = {_sha(row["source_ref"]): row["read"] for row in readers}
+    def visit(item):
+        if isinstance(item, list):
+            return [visit(child) for child in item]
+        if not isinstance(item, dict):
+            return item
+        copied = {key: visit(child) for key, child in item.items()}
+        ref = _decision_ref(item)
+        read = by_ref.get(_sha(ref)) if ref else None
+        if read:
+            copied["read"] = copy.deepcopy(read)
+            if "reader" in copied:
+                copied["reader"] = copy.deepcopy(read)
+            if "file" in copied:
+                copied["file"] = read["arguments"]["path"]
+        return copied
+    return visit(value)

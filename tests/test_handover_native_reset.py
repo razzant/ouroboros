@@ -13,7 +13,7 @@ from ouroboros.loop_model_call import _reprepare_waiting_main
 from tests.test_llm_claudexor import EARLIER, MODEL, ROUTE, TURN, ledger, result
 from tests.test_llm_claudexor import setup as gateway_fixture, turn_engine as engine_fixture
 from tests.test_model_wait import live_wait as wait_fixture
-from tests.test_subscription_main_wait import ROUTE_B, main_call as main_fixture
+from tests.test_subscription_main_wait import ROUTE_B, _without_context_facts, main_call as main_fixture
 
 setup = gateway_fixture
 turn_engine = engine_fixture
@@ -60,10 +60,10 @@ def test_main_dual_token_reset_survives_wait_reprepare_and_adopts_new_envelope(
         message.pop("nativeContinuation", None)
     # A synchronous Main round seals one clock line into the repaired send and, once it
     # answers, appends exactly that line to the canonical transcript (``send_clock``).
-    sent = gateway.uploads[-1][0]["messages"]
+    sent = _without_context_facts(gateway.uploads[-1][0]["messages"], physical=True)
     clock = [] if asynchronous else [sent[-1]]
     assert not clock or clock[0]["content"].startswith(CLOCK_NOTE_PREFIX)
-    assert ctx.messages == expected + clock
+    assert _without_context_facts(ctx.messages) == expected + clock
     # The canonical system message carries the builder's host-only stable-prefix
     # declaration; the Codex send copy pops it (llm_claudexor._request).
     wire_expected = deepcopy(expected)

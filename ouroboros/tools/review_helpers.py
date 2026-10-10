@@ -648,22 +648,10 @@ def build_goal_section(
     return "\n".join(sections)
 
 
-def review_history_with_obligations(history: Any, *, drive_root: Any, repo_root: Any) -> str:
-    """The prior-rounds section with the repository's durable open obligations
-    (anti-thrashing across restarts) — the ONE owner for every brief that carries
-    history: the gate's packet, the retrieving seats' brief and the public builder,
-    so a brief rebuilt outside the gate reads the history the seat was sent.
-    Best-effort: unreadable state states the history it has, never fails."""
-    open_obligations: list = []
-    if drive_root is not None and repo_root is not None:
-        try:
-            from ouroboros.review_state import load_state, make_repo_key
-
-            state = load_state(pathlib.Path(drive_root))
-            open_obligations = state.get_open_obligations(repo_key=make_repo_key(pathlib.Path(repo_root)))
-        except Exception:
-            open_obligations = []
-    return build_review_history_section(list(history or []), open_obligations=open_obligations)
+def review_history_with_obligations(history: Any, *, drive_root: Any, repo_root: Any, task_id: str = "") -> str:
+    """Public brief facade; the dispute owner joins its sources and obligations."""
+    from ouroboros.review_history import render_history_with_obligations
+    return render_history_with_obligations(history, drive_root=drive_root, repo_root=repo_root, task_id=task_id)
 
 
 def build_scope_section(scope: str = "") -> str:

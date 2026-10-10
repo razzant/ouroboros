@@ -128,7 +128,7 @@ def _session_task_text(system_prompt: str, user_content: str, session_root: str)
 def build_plan_review_packet(
     ctx: ToolContext, *, spec: dict, request: Any, manifest: dict, constitutional: bool,
     system_root: pathlib.Path, active_root: pathlib.Path, cycle_index: int,
-    enforcement: str, previous: Optional[dict],
+    enforcement: str, previous: Optional[dict], state: Optional[dict] = None,
 ) -> tuple[str, str, str]:
     """Build the api packet and route-owned retrieving-session task."""
     from ouroboros.context_layout import generate_doc_nav_map
@@ -137,6 +137,7 @@ def build_plan_review_packet(
         build_plan_review_system_prompt, build_plan_review_user_content,
     )
     from ouroboros.tools.review_helpers import load_checklist_section
+    from ouroboros.tools.plan_review_artifacts import plan_review_dispute_history
 
     try:
         checklist = load_checklist_section("Plan Review Checklist")
@@ -171,8 +172,15 @@ def build_plan_review_packet(
         )
 
     system_prompt = system(False)
-    prior = ([{"cycle_index": previous.get("cycle_index"), "aggregate": previous.get("aggregate"),
-               "findings": list(previous.get("findings") or [])}] if previous else [])
+    history = plan_review_dispute_history(
+        getattr(ctx, "budget_drive_root", None) or ctx.drive_root, str(ctx.task_id),
+        state if state is not None else {"waves": [previous] if previous else []},
+    )
+    from ouroboros.review_history_view import selected_review_history
+
+    history = selected_review_history(history,
+        drive_root=getattr(ctx, "budget_drive_root", None) or ctx.drive_root, task_id=str(ctx.task_id),
+        operative_subject={"spec": spec, "plan_prose": request.plan})["history"]
     delta = (
         {"unavailable": "previous frozen spec body truncated to fit the durable state; hashes name the original"}
         if previous and previous.get("spec_body_truncated")
@@ -180,10 +188,10 @@ def build_plan_review_packet(
     )
     user_content = build_plan_review_user_content(
         manifest=manifest, objective=_task_objective(ctx), goal=spec["goal"],
-        plan_prose=request.plan, spec=spec, prior_cycles=prior,
+        plan_prose=request.plan, spec=spec, prior_cycles=history["rounds"],
         dispositions=list((previous or {}).get("dispositions") or []), spec_delta=delta,
         root_exploration_log=root_exploration_log(ctx),
-        **_packet_kwargs(build_plan_review_user_content, cycle_index=cycle_index),
+        **_packet_kwargs(build_plan_review_user_content, cycle_index=cycle_index, dispute_history=history),
     )
     return system_prompt, user_content, _session_task_text(system(True), user_content, str(active_root))
 
@@ -202,6 +210,9 @@ def publish_plan_review_projection(
         raise ValueError("plan review closed state must be boolean")
     if (aggregate == "GREEN" and not closed) or (aggregate in {"REVISE_PLAN", "DEGRADED"} and closed):
         raise ValueError(f"invalid plan review control state: outcome={aggregate}, closed={closed}")
+    from ouroboros.review_history_view import queue_review_history_context
+
+    queue_review_history_context(ctx, family="plan")
     return _publish_tool_result(
         ctx,
         ToolResult(
@@ -1469,7 +1480,9 @@ def plan_slot_fit(slots: list, *, prompt_chars: int, quorum: int, slot_prompt_ch
             "slots (" + ", ".join(f"{slot.slot_id}:{slot.model}<={int(limits[slot.slot_id]):,}" for slot in api_slots)
             + "), so fewer than the review quorum remain callable and NO reviewer was called. "
             "A constitutional plan carries BIBLE.md and ARCHITECTURE.md in full (W3): configure "
-            "reviewer slots with a larger context window, or shrink the declared evidence."
+            "reviewer slots with a larger context window, or shrink the declared evidence. "
+            "If earlier review history is the excess, compact_context can retain your own source-bound working_note "
+            "before you submit this plan again; the current spec and decision index remain full."
         )
     return callable_slots, oversize, error
 

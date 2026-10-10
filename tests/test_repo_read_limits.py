@@ -43,11 +43,26 @@ def test_repo_read_max_lines_slice(tmp_path):
     assert "line11" not in result
 
 
-def test_data_read_memory_file_never_truncated():
+def test_no_tool_name_or_path_is_exempt_from_the_measured_first_show():
+    """Owner Q4: the retired bypass exempted memory/prompt reads and review
+    verdicts from any delivery bound. Under a measured allowance every one of
+    them is a head+tail view with its exact ranges and facts; without a measured
+    allowance the compat renderer returns the whole text and invents no cap."""
     from ouroboros.loop_tool_execution import _truncate_tool_result
-    big = "m" * 70000
-    result = _truncate_tool_result(big, "read_file", {"path": "memory/scratchpad.md"})
-    assert result == big
+    from ouroboros.tool_result_delivery import FULL_SOURCE_UNAVAILABLE, RESULT_VIEW_MARKER
+
+    big = "m" * 70_000 + "\nTAIL"
+    for tool, args in (("read_file", {"path": "memory/scratchpad.md", "root": "runtime_data"}),
+                       ("read_file", {"path": "prompts/SYSTEM.md"}),
+                       ("commit_reviewed", None), ("task_acceptance_review", None), ("skill_review", None),
+                       ("advisory_review", None), ("review_status", None),
+                       ("get_task_result", None), ("wait_task", None), ("wait_tasks", None)):
+        assert _truncate_tool_result(big, tool, args) == big, tool
+        view = _truncate_tool_result(big, tool, args, allowance_chars=2_000)
+        assert len(view) < len(big) and "TAIL" in view, tool  # the tail is delivered, the bulk is not
+        assert view.startswith("m" * 1_000 + "\n... (truncated from 70005 chars"), tool
+        assert RESULT_VIEW_MARKER in view and "omitted 1000\u201369005" in view, tool
+        assert FULL_SOURCE_UNAVAILABLE in view, tool  # no source was given: no readability claim
 
 
 def test_data_read_cold_start_returns_sentinel(tmp_path):
@@ -135,22 +150,6 @@ def test_data_read_sentinel_narrower_for_non_memory_paths(tmp_path):
     assert "not guaranteed" in non_mem_result
 
 
-def test_repo_read_prompt_file_never_truncated():
-    from ouroboros.loop_tool_execution import _truncate_tool_result
-    big = "p" * 90000
-    result = _truncate_tool_result(big, "read_file", {"path": "prompts/SYSTEM.md"})
-    assert result == big
-
-
-def test_repo_commit_results_never_truncated():
-    from ouroboros.loop_tool_execution import _truncate_tool_result
-    big = "r" * 90000
-    assert _truncate_tool_result(big, "commit_reviewed") == big
-    assert _truncate_tool_result(big, "commit_reviewed") == big
-    assert _truncate_tool_result(big, "task_acceptance_review") == big
-    assert _truncate_tool_result(big, "skill_review") == big
-
-
 def test_self_check_returns_bool_and_interval_15():
     from ouroboros.loop import _maybe_inject_self_check
     messages = []
@@ -159,29 +158,6 @@ def test_self_check_returns_bool_and_interval_15():
     assert _maybe_inject_self_check(14, 200, messages, usage, progress_calls.append) is False
     assert _maybe_inject_self_check(15, 200, messages, usage, progress_calls.append) is True
     assert "CHECKPOINT" in messages[0]["content"]
-
-
-def test_advisory_pre_review_results_never_truncated():
-    """advisory_pre_review results must not be truncated (full JSON needed)."""
-    from ouroboros.loop_tool_execution import _truncate_tool_result
-    big = "a" * 90000
-    assert _truncate_tool_result(big, "advisory_review") == big
-
-
-def test_review_status_results_never_truncated():
-    """review_status results must not be truncated (full JSON needed)."""
-    from ouroboros.loop_tool_execution import _truncate_tool_result
-    big = "b" * 90000
-    assert _truncate_tool_result(big, "review_status") == big
-
-
-def test_child_task_handoff_results_never_truncated():
-    """Child-task handoff tools must return the full result to the parent."""
-    from ouroboros.loop_tool_execution import _truncate_tool_result
-    big = "c" * 90000
-    assert _truncate_tool_result(big, "get_task_result") == big
-    assert _truncate_tool_result(big, "wait_task") == big
-    assert _truncate_tool_result(big, "wait_tasks") == big
 
 
 # ---------------------------------------------------------------------------

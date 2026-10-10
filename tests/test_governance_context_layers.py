@@ -156,6 +156,15 @@ def _native_prompt(governance_root, *, layer: str, subject_root=None, explicit: 
 DELIVERIES = {"packet": _packet_prompt, "session": _session_prompt, "native": _native_prompt}
 
 
+@pytest.mark.parametrize("layer", ["body", "core"])
+@pytest.mark.parametrize("delivery", sorted(DELIVERIES))
+def test_countercheck_reaches_each_layer_and_delivery_once(delivery, layer, governance_root, subject_root):
+    prompt = DELIVERIES[delivery](governance_root, layer=layer, subject_root=subject_root)
+
+    assert prompt.count(anti_pattern_lock_guard(layer).strip()) == 1
+    assert "deliberate SECOND pass" not in prompt
+
+
 @pytest.fixture(autouse=True)
 def _wide_window(monkeypatch):
     monkeypatch.setattr(review, "reviewer_context_window", lambda *_a, **_k: 200_000)

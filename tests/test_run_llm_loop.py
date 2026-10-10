@@ -50,7 +50,8 @@ def test_run_llm_loop_preserves_assistant_tool_call_metadata(tmp_path, monkeypat
         seen_second_request["messages"] = [dict(item) for item in request_messages]
         return {"role": "assistant", "content": "done"}, 0.0
 
-    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, _trace, _progress):
+    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, _trace, _progress,
+                               *, fit_candidate=None, tool_schemas=None):
         request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "file"})
         return 0
 
@@ -222,7 +223,8 @@ def test_run_llm_loop_narrates_reasoning_to_bubble_not_trace(tmp_path, monkeypat
             return dict(tool_round), 0.0
         return {"role": "assistant", "content": "final answer"}, 0.0
 
-    def fake_handle_tool_calls(tool_calls, _tools, _dl, _tid, _ex, request_messages, _tr, _pg):
+    def fake_handle_tool_calls(tool_calls, _tools, _dl, _tid, _ex, request_messages, _tr, _pg,
+               *, fit_candidate=None, tool_schemas=None):
         request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "file body"})
         return 0
 
@@ -332,7 +334,8 @@ def test_run_llm_loop_keeps_task_model_override_across_tool_rounds(tmp_path, mon
             }, 0.0
         return {"role": "assistant", "content": "done"}, 0.0
 
-    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, _trace, _progress):
+    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, _trace, _progress,
+                               *, fit_candidate=None, tool_schemas=None):
         request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "file"})
         return 0
 
@@ -388,9 +391,11 @@ def test_run_llm_loop_enforces_swarm_force_plan_before_final(tmp_path, monkeypat
 
     real_handle_tool_calls = loop_mod.handle_tool_calls
 
-    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress):
+    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress,
+                               *, fit_candidate=None, tool_schemas=None):
         if tool_calls[0]["function"]["name"] != "plan_task":
-            return real_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress)
+            return real_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress,
+                                          fit_candidate=fit_candidate, tool_schemas=tool_schemas)
         from ouroboros.task_results import STATUS_RUNNING, record_plan_review_wave, write_task_result
 
         fingerprint = "a" * 64
@@ -484,9 +489,11 @@ def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_
 
     real_handle_tool_calls = loop_mod.handle_tool_calls
 
-    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress):
+    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress,
+                               *, fit_candidate=None, tool_schemas=None):
         if tool_calls[0]["function"]["name"] != "plan_task":
-            return real_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress)
+            return real_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress,
+                                          fit_candidate=fit_candidate, tool_schemas=tool_schemas)
         from ouroboros.task_results import STATUS_RUNNING, record_plan_review_attempt, write_task_result
 
         write_task_result(tmp_path, "task1", STATUS_RUNNING, result="running")

@@ -879,8 +879,7 @@ def test_user_content_sections_in_order_with_omissions_and_prior_cycles(tmp_path
     assert "PLAN_REVIEW_CONTROL_JSON" not in second
 
 
-def test_prior_blocking_findings_survive_the_section_bound(monkeypatch):
-    monkeypatch.setattr(plan_packet, "PACKET_PRIOR_CYCLES_CHARS", 20_000)  # 96 compact rows do not fit
+def test_prior_findings_and_recommendations_are_complete_for_route_measurement():
     long_summary, long_rec = "S" * 1500, "R" * 1000
     prior = [{"cycle_index": 1, "aggregate": "REVISE_PLAN", "findings": [
         {"finding_id": f"{slot}:f{i}", "class": "blocking" if i == 31 else "note", "breaks": "claim_1" if i == 31 else "",
@@ -896,8 +895,9 @@ def test_prior_blocking_findings_survive_the_section_bound(monkeypatch):
     prior_section = packet[packet.index("## PRIOR CYCLES"):]
     for fid in ('"1:f31"', '"2:f31"', '"3:f31"'):
         assert fid in prior_section  # blocking first: never behind the bound
-    assert "OMISSION NOTE (structural)" in prior_section and "kept " in prior_section and "full-set sha256=" in prior_section
-    assert '"finding_id"' in prior_section and long_rec not in prior_section  # compact projection, no recommendation
+    assert "OMISSION NOTE" not in prior_section
+    assert long_summary in prior_section and long_rec in prior_section
+    assert prior_section.count('"finding_id"') == 96
     assert prior_section.count("```json") == prior_section.count("```\n") or prior_section.count("```") % 2 == 0
     empty_cycle2 = plan_packet.build_plan_review_user_content(
         objective="o", goal="g", plan_prose="p", spec=spec, manifest={"declared": [], "attached": [], "omissions": []},

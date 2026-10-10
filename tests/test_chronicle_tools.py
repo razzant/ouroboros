@@ -738,6 +738,17 @@ def test_tools_module_imports_no_retired_memory_machinery_and_lazy_domains_stay_
     assert lazy <= nested and not lazy & top
 
 
+def test_the_write_and_read_schemas_carry_account_selection_and_revision():
+    from ouroboros.tools.chronicle import chronicle_tools
+
+    schemas = {entry.name: entry.schema["parameters"]["properties"] for entry in chronicle_tools()}
+    assert schemas["chronicle_write"]["kind"]["enum"] == ["page", "part", "note", "correction", "decision", "account", "selection"]
+    assert {"sources", "replaces", "shown"} <= set(schemas["chronicle_write"])
+    assert schemas["chronicle_write"]["sources"]["type"] == "array" and schemas["chronicle_write"]["shown"]["type"] == "boolean"
+    assert schemas["memory_read"]["revision"]["type"] == "string"
+    assert "author" not in schemas["chronicle_write"] and "told_by" not in schemas["chronicle_write"]
+
+
 # --- through the registry (root task) --------------------------------------------------------------
 
 def test_registry_root_writes_to_the_canonical_data_root_and_reads_back(tmp_path):

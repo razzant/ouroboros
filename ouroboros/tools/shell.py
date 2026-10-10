@@ -21,6 +21,7 @@ import uuid
 from typing import Dict, List  # noqa: F401
 
 from ouroboros.owner_pause import OwnerPauseRefused
+from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
 from ouroboros.tools.tool_result import launch_refusal_result, _publish_tool_result
 from ouroboros.artifacts import copy_directory_to_task_artifacts, copy_file_to_task_artifacts, record_task_scratch  # noqa: F401
 from ouroboros.platform_layer import bootstrap_process_path, kill_process_tree, scrub_repo_from_pythonpath, subprocess_new_group_kwargs  # noqa: F401
@@ -745,6 +746,7 @@ def get_tools() -> List[ToolEntry]:
 	                        "Clamped to the remaining task-deadline budget. Omit for the default (deadline-capped)."
 	                    ),
 	                },
+	                **RESULT_VIEW_PARAMS,
 	            }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC, mutates_worktree=True),
         ToolEntry("run_script", {
@@ -789,6 +791,7 @@ def get_tools() -> List[ToolEntry]:
 	                        "Clamped to the remaining task-deadline budget. Omit for the default (deadline-capped)."
 	                    ),
 	                },
+	                **RESULT_VIEW_PARAMS,
 	            }, "required": ["script"]},
         }, _run_script, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC, mutates_worktree=True),
     ]

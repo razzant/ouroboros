@@ -221,6 +221,8 @@ def get_task_result_entry() -> ToolEntry:
             "source_start_char": {"type": "integer", "description": "Inclusive character offset for the requested canonical source range."},
             "source_end_char": {"type": "integer", "description": "Exclusive character offset for the requested canonical source range. A range outside the source returns no text: the answer names complete_chars and the range received, and is an argument error."},
             "presence_scope": {"type": "string", "enum": ["own_binding"], "description": "Presence tasks only: read just independent work started from this Presence binding (any of its conversations) or this task's own tree."},
+            "view_head_chars": {"type": "integer", "minimum": 0, "description": "Chars of this answer's head to show in this turn when the complete answer cannot be delivered whole (pair with view_tail_chars). The complete answer is kept as an exact, readable source either way; this only shapes the first view and never changes source_start_char/source_end_char selection."},
+            "view_tail_chars": {"type": "integer", "minimum": 0, "description": "Chars of this answer's tail to show in this turn (see view_head_chars)."},
         }},
     }, _get_task_result)
 
@@ -233,8 +235,14 @@ def _get_task_result(
     known_result_sha256: str = "", include_focus_source: bool = False, focus_source_sha256: str = "",
     presence_scope: str = "", review_source_sha256: str = "",
     presence_reentry_sha256: str = "", presence_reentry_offset: Any = None,
+    view_head_chars: Any = None, view_tail_chars: Any = None,
 ) -> str:
-    """Read a task result, or a bounded canonical work-order/completion source range."""
+    """Read a task result, or a bounded canonical work-order/completion source range.
+
+    ``view_head_chars``/``view_tail_chars`` are accepted here so the declared
+    parameters bind; the loop's delivery honors them when it shapes the first
+    view of this answer. They select nothing in the source arithmetic below.
+    """
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     scoped = bool(str(presence_scope or "").strip())

@@ -1050,12 +1050,14 @@ def _validated_plan_review_state(value: Any) -> Dict[str, Any]:
     if not isinstance(attempt, dict):
         raise ValueError("PLAN_REVIEW_STATE_INVALID: current_attempt must be an object")
     if attempt:
-        if set(attempt) - {"fingerprint", "status", "reason", "author_subject"} or not {"fingerprint", "status", "reason"} <= set(attempt):
+        if set(attempt) - {"fingerprint", "status", "reason", "author_subject", "submitted_subject"} or not {"fingerprint", "status", "reason"} <= set(attempt):
             raise ValueError("PLAN_REVIEW_STATE_INVALID: current_attempt shape is invalid")
         if not _PLAN_REVIEW_HASH_RE.fullmatch(str(attempt.get("fingerprint") or "")):
             raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt fingerprint is invalid")
         if str(attempt.get("status") or "") not in _PLAN_REVIEW_ATTEMPT_STATUSES:
             raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt status is invalid")
+        if "submitted_subject" in attempt and not isinstance(attempt["submitted_subject"], dict):
+            raise ValueError("PLAN_REVIEW_STATE_INVALID: submitted subject source is invalid")
         if "author_subject" in attempt:
             subject = attempt["author_subject"]
             if (not isinstance(subject, dict) or not isinstance(subject.get("source_ref"), dict)
@@ -1268,24 +1270,13 @@ def record_plan_review_attempt(
     status: str = "open",
     reason: str = "",
     author_subject: Optional[Dict[str, Any]] = None,
+    submitted_subject: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Select one canonical plan fingerprint as current (open | unavailable | rail_degraded)."""
-    if not _PLAN_REVIEW_HASH_RE.fullmatch(str(fingerprint or "")):
-        raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt fingerprint is invalid")
-    if status not in _PLAN_REVIEW_ATTEMPT_STATUSES:
-        raise ValueError("PLAN_REVIEW_STATE_INVALID: current attempt status is invalid")
+    from ouroboros.tools.plan_author_history import record_attempt
 
-    def _record(state: Dict[str, Any]) -> Dict[str, Any]:
-        state["current_attempt"] = {
-            "fingerprint": fingerprint,
-            "status": status,
-            "reason": str(reason or "")[:_PLAN_REVIEW_REASON_MAX_CHARS],
-        }
-        if author_subject is not None:
-            state["current_attempt"]["author_subject"] = copy.deepcopy(author_subject)
-        return state
-
-    return _update_plan_review_state(results_drive_root, task_id, _record)
+    return record_attempt(results_drive_root, task_id, fingerprint=fingerprint, status=status,
+                          reason=reason, author_subject=author_subject, submitted_subject=submitted_subject)
 
 
 def mark_current_plan_review_unavailable(
@@ -1450,6 +1441,9 @@ def record_plan_review_wave(
         raise ValueError("PLAN_REVIEW_STATE_INVALID: wave fingerprint is invalid")
 
     def _record(state: Dict[str, Any]) -> Dict[str, Any]:
+        from ouroboros.tools.plan_author_history import retain_previous_selection
+
+        retain_previous_selection(results_drive_root, task_id, state)
         selected = state.get("current_attempt") or {}
         retained_author = (selected.get("author_subject") or {}).get("review_fingerprint") == fingerprint
         previous = [w for w in state.get("waves") or [] if str(w.get("request_fingerprint") or "") == fingerprint]

@@ -730,7 +730,8 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
         return _typed_refusal(ctx, "TOOL_ERROR", f"ERROR: PLAN_REVIEW_IN_FLIGHT: {hold}")
     # C-01: the hold above is the ONE exit before the supersede; every other cap/rail exit follows it.
     try:
-        _record_plan_review_attempt_with_reference(ctx, state_root, task_id, fingerprint=fingerprint)
+        _record_plan_review_attempt_with_reference(ctx, state_root, task_id, fingerprint=fingerprint,
+            submitted_subject={"spec": spec, "plan_prose": request.plan} if plan_review_wave(state, fingerprint) is None else None)
     except (OSError, TimeoutError, ValueError) as exc:
         return _typed_refusal(ctx, "TOOL_ERROR", f"ERROR: PLAN_REVIEW_STATE_PERSIST_FAILED: {exc}")
     previous_override: Optional[dict] = None
@@ -838,7 +839,7 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest, *, col
     system_prompt, user_content, session_task = _build_packet(
         ctx, spec=spec, request=request, manifest=manifest, constitutional=constitutional,
         system_root=system_root, active_root=active_root, cycle_index=cycle_index,
-        enforcement=enforcement, previous=previous,
+        enforcement=enforcement, previous=previous, state=state,
     )
     slots, slot_messages, session_threads, continuation_restarted = _continuation_inputs(
         state_root, task_id, previous, slots, user_content=user_content,
@@ -1199,7 +1200,9 @@ def _apply_author_subject(ctx: ToolContext, disposition: dict, envelope: Optiona
         exhausted = cap is not None and int(state.get("cycles_paid") or 0) >= cap
         state = _record_plan_review_attempt_with_reference(ctx, root, task_id, fingerprint=fingerprint,
             status="cycles_exhausted" if exhausted else "open", reason="author_stop" if action == "stop" else "author_current_plan",
-            author_subject={"source_ref": ref, "review_fingerprint": critic_fp, "author_disposition": author})
+            author_subject={"source_ref": ref, "review_fingerprint": critic_fp, "author_disposition": author,
+                            "review_wave_artifact": (wave or {}).get("wave_artifact") or {}})
+        ref = state["current_attempt"]["author_subject"]["source_ref"]
     except (OSError, TimeoutError, ValueError) as exc:
         return _typed_refusal(ctx, "TOOL_ARG_ERROR", f"ERROR: PLAN_AUTHOR_SUBJECT_INVALID: {exc}; "
             + _argument_values(disposition, ("author_action", "review_fingerprint", "items", "author_disposition")))
@@ -1234,10 +1237,12 @@ def _disposition_items(wave: dict, raw_items: Any) -> tuple[List[dict], str]:
     for index, item in enumerate(raw_items):
         if not isinstance(item, dict):
             return [], f"ERROR: PLAN_REVIEW_DISPOSITION_INVALID: items[{index}] must be an object"
+        if "rationale" in item and not isinstance(item["rationale"], str):
+            return [], f"ERROR: PLAN_REVIEW_DISPOSITION_INVALID: items[{index}].rationale must be text"
         items.append({
-            "finding_id": str(item.get("finding_id") or "").strip()[:plan_spec.MAX_ID_CHARS * 2],
-            "decision": str(item.get("decision") or "").strip().lower()[:40],  # enum-like, bounded
-            "rationale": plan_spec.bounded_text(item.get("rationale"), plan_spec.MAX_FINDING_TEXT_CHARS),
+            "finding_id": str(item.get("finding_id") or "").strip(),
+            "decision": str(item.get("decision") or "").strip().lower(),
+            "rationale": str(item.get("rationale") or ""),
         })
     known = {str(f.get("finding_id") or "") for f in wave.get("findings") or []}
     unknown_ids = sorted({i["finding_id"] for i in items if i["finding_id"] not in known})

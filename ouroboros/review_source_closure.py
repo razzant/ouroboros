@@ -82,7 +82,7 @@ def source_carrier(value: dict, key: str, carrier: str) -> str:
     if carrier == 'plan_state':
         return {'waves': 'plan_wave', 'current_attempt': 'plan_attempt'}.get(key, '')
     if carrier == 'plan_attempt':
-        return 'metadata' if key == 'author_subject' else ''
+        return 'metadata' if key in {'author_subject', 'submitted_subject'} else ''
     if carrier == 'plan_wave':
         return {'wave_artifact': 'metadata', 'previous_wave_artifact': 'metadata',
                 'supersedes_wave_artifact': 'metadata', 'spec_source_ref': 'metadata',

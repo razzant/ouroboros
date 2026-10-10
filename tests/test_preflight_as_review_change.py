@@ -22,6 +22,7 @@ from ouroboros.tools import preflight_review as pr
 from ouroboros.tools import review_change as rc
 from tests.test_git_review_preflight_gate import _roster
 from tests.test_review_change_tool import Harness, _pool, h  # noqa: F401
+from tests.test_review_change_end_to_end import staged_body  # noqa: F401
 
 
 def _edit(harness: Harness, text: str = "preflight edit\n") -> None:
@@ -46,6 +47,31 @@ def test_one_named_row_is_the_whole_panel(h: Harness, monkeypatch, member) -> No
     assert record["surface"] == "preflight"
     assert [seat["seat_id"] for seat in record["rows"]] == [reviewer]
     assert (result["panel"]["composition"], result["panel"]["chosen_by"]) == ("composed", "author")
+
+
+@pytest.mark.parametrize("reviewer, aggregate", [("t1", "NOT_PERFORMED"), ("t2", "PASS"), ("s1", "PASS")])
+@pytest.mark.serial
+def test_preflight_delivers_one_countercheck_through_the_real_review_wave(
+        staged_body, tmp_path, monkeypatch, reviewer, aggregate):  # noqa: F811
+    from ouroboros.tools.review_helpers import anti_pattern_lock_guard
+    from ouroboros.tools.registry import ToolContext
+    from tests.test_review_change_end_to_end import GOAL, SCOPE, _brief_text, shared, substrate
+
+    sent: list[dict] = []
+    monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(sent))
+    ctx = ToolContext(repo_dir=staged_body["repo"], drive_root=tmp_path / "preflight-drive")
+    result = rc.run_review_change(ctx, root="system_repo", surface="preflight", subject="worktree",
+                               reviewers=[reviewer], goal=GOAL, scope=SCOPE)
+
+    # A packet-only row receives the countercheck but cannot answer coupling.
+    assert result["aggregate"] == aggregate and result["state"] == "settled", result
+    assert result["per_question"]["change"] == "PASS"
+    [given] = sent
+    assert given["slot_id"] == reviewer
+    text = _brief_text(given)
+    assert text.count(anti_pattern_lock_guard("body").strip()) == 1
+    assert "deliberate SECOND pass" not in text
+    assert "Coupling affects only unchanged code outside the diff" not in " ".join(text.split())
 
 
 def test_the_preflight_record_never_answers_a_change_wave_over_the_same_subject(h: Harness, monkeypatch) -> None:  # noqa: F811

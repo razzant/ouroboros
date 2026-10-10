@@ -9,7 +9,8 @@ self-modification plan, their navigation maps otherwise); the user content carri
 TASK OBJECTIVE · OWNER WORDS · SPEC · PLAN PROSE · EVIDENCE · OWN ROOM DIALOGUE ·
 RELATED ROOM POINTERS · ROOT EXPLORATION LOG · PRIOR CYCLES in that order. The full
 redacted dialogue uses task source custody and route-sized projections; only
-exploration and prior-cycle summaries retain independent display bounds. The
+exploration retains an independent display bound. The complete dispute is
+measured with the operative inputs by the delivery layer. The
 ``PLAN_REVIEW_CONTROL_JSON`` control line is NOT emitted here (Phase C owns it).
 """
 
@@ -21,8 +22,6 @@ from typing import Any, Mapping, Optional
 from ouroboros.tools.plan_spec import (
     PACKET_EXPLORATION_CHARS,
     bounded_json,
-    PACKET_PRIOR_CYCLES_CHARS,
-    PACKET_PRIOR_FINDING_SUMMARY_CHARS,
     PLAN_FINDINGS_ARRAY_CONTRACT,
     bounded_text,
     spec_with_ids,
@@ -61,7 +60,8 @@ _BLOCKING_RULE = (
 )
 
 _CONVERGENCE_RULE = (
-    "CONVERGENCE RULE (cycle ≥2) — adjudicate your OWN earlier findings first. They are the rows "
+    "CONVERGENCE RULE (cycle ≥2) — read the complete dispute, including earlier rejected "
+    "alternatives and their rationale even if you are a new reviewer. Then adjudicate your OWN earlier findings first. They are the rows "
     "below whose finding_id starts with your panel seat (named at the end of this packet). Read the "
     "author's dispositions and the Spec delta as the author's argument, and for each `blocking` "
     "finding and `need_evidence` you raised decide: RESOLVED — the delta or the rationale answers "
@@ -214,33 +214,22 @@ def _cell(value: Any) -> str:
     return str(value or "").replace("|", "\\|").replace("\n", " ")
 
 
-def _prior_findings_projection(cycle: Mapping[str, Any]) -> list[dict]:
-    """Compact, blocking-FIRST projection of one prior cycle's findings so a prior blocking
-    finding can never fall behind the section bound (B-03)."""
-    rows = [f for f in (cycle.get("findings") or []) if isinstance(f, Mapping)]
-    rows.sort(key=lambda f: 0 if f.get("class") == "blocking" else 1)
-    return [{
-        "finding_id": f.get("finding_id") or f.get("id") or "", "class": f.get("class") or "",
-        "breaks": f.get("breaks") or "", "locator": f.get("locator") or "",
-        "summary": bounded_text(f.get("summary"), PACKET_PRIOR_FINDING_SUMMARY_CHARS),
-    } for f in rows]
+def _render_prior_cycles(prior_cycles: list[dict], dispositions: list[dict], spec_delta: Optional[dict],
+                         dispute_history: Optional[dict] = None) -> str:
+    from ouroboros.tools.plan_review_artifacts import DISPUTE_HISTORY_RULE
 
-
-def _render_prior_cycles(prior_cycles: list[dict], dispositions: list[dict], spec_delta: Optional[dict]) -> str:
     lines = [
-        "## PRIOR CYCLES (all reviewers' findings from the previous cycle, the agent's "
-        "dispositions, and the spec delta)\n",
+        ("## PRIOR CYCLES (selected author view plus exact current index; original verdicts unchanged)\n"
+         if (dispute_history or {}).get("authored_view") else
+         "## PRIOR CYCLES (complete recorded dispute; original subjects and verdicts)\n"),
         f"### Convergence rule\n\n{_CONVERGENCE_RULE}\n",
+        DISPUTE_HISTORY_RULE + "\n",
     ]
-    for cycle in prior_cycles:
-        cycle = cycle if isinstance(cycle, Mapping) else {}
-        lines.append(
-            f"### Cycle {cycle.get('cycle_index', '?')} — aggregate {cycle.get('aggregate', '?')}: "
-            f"findings (blocking first; summaries bounded to {PACKET_PRIOR_FINDING_SUMMARY_CHARS} chars)\n\n"
-            + _json_block(_prior_findings_projection(cycle), PACKET_PRIOR_CYCLES_CHARS) + "\n"
-        )
-    lines.append("### Agent dispositions\n\n" + _json_block(dispositions or [], PACKET_PRIOR_CYCLES_CHARS) + "\n")
-    lines.append("### Spec delta\n\n" + _json_block(spec_delta or {}, PACKET_PRIOR_CYCLES_CHARS) + "\n")
+    lines.append("### Dispute history\n\n" + _json_block(
+        dispute_history if dispute_history is not None else {"rounds": prior_cycles}) + "\n")
+    if dispute_history is None:
+        lines.append("### Agent dispositions\n\n" + _json_block(dispositions or []) + "\n")
+    lines.append("### Spec delta\n\n" + _json_block(spec_delta or {}) + "\n")
     # ONE host fact from the delta the host already computed: `still-open` holds only while the
     # goal is unchanged. `unknown` when the previous frozen spec body was truncated (no delta).
     goal_changed = (spec_delta or {}).get("goal_changed")
@@ -313,12 +302,14 @@ def build_plan_review_user_content(
     spec_delta: Optional[dict],
     root_exploration_log: Optional[str],
     cycle_index: int = 1,
+    dispute_history: Optional[dict] = None,
 ) -> str:
     """Keep operative inputs complete and attach the exact recorded room source.
 
     The delivery layer selects a newest source range only when the actual route
     cannot fit the complete dialogue beside governance and the operative plan.
-    Exploration and prior cycles retain their existing disclosed display bounds.
+    The full dispute travels through the same route measurement as the spec;
+    it has no independent summary, count or character cap.
     The owner's words that caused the work (``manifest["owner_words"]``) follow
     the objective whole, in the cache-stable prefix; no key, no section.
     """
@@ -338,8 +329,8 @@ def build_plan_review_user_content(
         "## ROOT EXPLORATION LOG\n\n"
         + (bounded_text(root_exploration_log, PACKET_EXPLORATION_CHARS) or "(not provided by host)") + "\n",
     ]
-    if prior_cycles:
-        sections.append(_render_prior_cycles(prior_cycles, dispositions, spec_delta))
+    if prior_cycles or (dispute_history and (dispute_history.get("gaps") or dispute_history.get("current_author_plan"))):
+        sections.append(_render_prior_cycles(prior_cycles, dispositions, spec_delta, dispute_history))
     elif int(cycle_index or 1) >= 2:
         sections.append(f"## PRIOR CYCLES\n\nCycle {int(cycle_index)}: no prior findings recorded by the host.\n")
     else:

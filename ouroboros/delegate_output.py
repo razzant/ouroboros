@@ -15,11 +15,12 @@ import json
 import logging
 import pathlib
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_custody import RunCustody as _RunCustody
-from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import truncate_review_artifact
 
@@ -192,61 +193,110 @@ def _covered_whole(key: str, start: int, end: int, total: int) -> bool:
     return bool(intervals) and intervals[0][0] <= 0 and intervals[0][1] >= total
 
 
-def acknowledge_staged_output_read(ctx: ToolContext, target: Any, content: str,
-                                   start_line: Any, max_lines: Any,
-                                   start_char: Any = 0, rendered: str = "") -> None:
-    """D7's canonical acknowledgement, hooked where the reading actually happens.
+_DEFERRED_READ_DELIVERY: ContextVar[bool] = ContextVar("staged_read_delivery_deferred", default=False)
 
-    Called by ``read_file`` for every successful ``task_drive`` read, WITH the rendered
-    view it is about to return. Coverage is credited in CHARACTERS OF THE FILE and
-    bound to what the delivery layer will actually hand the model: the outer truncator
-    cuts the result at ``tool_result_limit("read_file")``, so a window whose rendering
-    exceeds that budget is credited only for the prefix that survives the cut — a line
-    the delivery layer cut is NOT covered, whatever the line range said. (The reader
-    reaches the cut-off remainder through ``start_char``, the sub-line cursor.) The
-    durable ``delegate_run_output_consumed`` row is written per reader/content when
-    the delivered ranges have covered every character, contiguously. It carries the
-    byte length and content hash of what was staged, measured from the bytes on disk,
-    which ARE what was staged because the file is written atomically and never
-    appended. An artifact staged from an UNVERIFIED engine preview is never
-    acknowledgeable at all (``record_output_consumed`` refuses it).
 
-    Disclosure, not a gate: this function never blocks a read, never raises, and its
-    absence blocks nothing. It exists so "result received" and "result fully read" are
-    different durable facts, instead of relying on ledger discipline to notice a
-    delegated run that was launched and never collected.
+@contextmanager
+def staged_read_delivery_scope():
+    """Defer receipts only inside this executor invocation's pending projection."""
+    token = _DEFERRED_READ_DELIVERY.set(True)
+    try:
+        yield
+    finally:
+        _DEFERRED_READ_DELIVERY.reset(token)
+
+
+def acknowledge_staged_output_read(ctx: ToolContext, read_view: Dict[str, Any], rendered: str) -> None:
+    """A direct reader delivers this exact window; a scoped executor credits later."""
+    if not _DEFERRED_READ_DELIVERY.get():
+        _acknowledge_staged_output(ctx, read_view, rendered, {"result": rendered})
+
+
+def _delivered_source_ranges(read_view: Dict[str, Any], original: str,
+                             projected: Dict[str, Any], content: str,
+                             shown_ranges: Optional[List[List[int]]] = None) -> Optional[List[List[int]]]:
+    """Intersect the host's delivered result ranges with this reader's file body."""
+    from ouroboros.tool_result_delivery import RESULT_VIEW_BASIS, reader_text
+
+    original = reader_text(original)
+    if (read_view.get("range_basis") != RESULT_VIEW_BASIS
+            or read_view.get("source_masked") is not False
+            or read_view.get("complete_chars") != len(content)
+            or read_view.get("complete_sha256") != hashlib.sha256(content.encode("utf-8")).hexdigest()):
+        return None
+    start, end = read_view.get("source_start_char"), read_view.get("source_end_char")
+    body_start, body_chars = read_view.get("body_start"), read_view.get("body_chars")
+    if (not all(isinstance(n, int) for n in (start, end, body_start, body_chars))
+            or not 0 <= start <= end <= len(content) or body_start < 0
+            or body_chars != end - start
+            or original[body_start:body_start + body_chars] != content[start:end]):
+        return None
+    if shown_ranges is not None:
+        shown = shown_ranges
+    elif projected.get("result_partial"):
+        view = projected.get("result_source_view")
+        if (not isinstance(view, dict) or view.get("range_basis") != RESULT_VIEW_BASIS
+                or view.get("complete_chars") != len(original)
+                or view.get("complete_sha256") != hashlib.sha256(original.encode("utf-8")).hexdigest()
+                or not isinstance(view.get("shown_ranges"), list)):
+            return None
+        shown = view["shown_ranges"]
+    elif reader_text(projected.get("result")) == original:
+        shown = [[0, len(original)]]
+    else:
+        return None
+    ranges = []
+    for span in shown:
+        if (not isinstance(span, (list, tuple)) or len(span) != 2
+                or not all(isinstance(n, int) for n in span)
+                or not 0 <= span[0] <= span[1] <= len(original)):
+            return None
+        lo, hi = max(span[0], body_start), min(span[1], body_start + body_chars)
+        if lo < hi:
+            ranges.append([start + lo - body_start, start + hi - body_start])
+    return ranges
+
+
+def acknowledge_staged_output_delivery(ctx: ToolContext, exec_result: Dict[str, Any],
+                                       projected: Dict[str, Any], *,
+                                       shown_ranges: Optional[List[List[int]]] = None) -> None:
+    """Credit exactly the source ranges in this invocation's final Main projection.
+
+    read_view comes from the reader's invocation-local ToolResult, never the
+    shared last_read_view slot. An outer reader with its own projection may pass
+    its known shown_ranges explicitly. Coordinates are Unicode characters after universal
+    newline decoding; the durable receipt still names the original staged BYTES.
+    Unknown/mismatched views credit nothing and never block the read. Whole reads
+    have no fixed cap; a head+tail projection credits both pieces, never its gap.
     """
+    from ouroboros.tools.tool_result import ToolResult
+
+    typed = exec_result.get("tool_result")
+    read_view = typed.meta.get("read_view") if isinstance(typed, ToolResult) else None
+    _acknowledge_staged_output(ctx, read_view, exec_result.get("result", ""), projected, shown_ranges)
+
+
+def _acknowledge_staged_output(ctx: ToolContext, read_view: Any, original: str,
+                              projected: Dict[str, Any],
+                              shown_ranges: Optional[List[List[int]]] = None) -> None:
     try:
         from ouroboros.tool_access import resource_root_path
-        from ouroboros.tools.core import _coerce_line_window, _coerce_start_char
 
-        path = pathlib.Path(target)
+        if not isinstance(read_view, dict) or read_view.get("opened_root") != "task_drive":
+            return
+        path = pathlib.Path(read_view["target"])
         artifact_dir = (resource_root_path(ctx, "task_drive") / _ARTIFACT_SUBDIR).resolve(strict=False)
         resolved = path.resolve(strict=False)
         if resolved.parent != artifact_dir:
             return
-        # The same window math as the read tool's renderer — a served window here must
-        # mean exactly what the reader was shown.
-        start_raw, max_raw = _coerce_line_window(start_line, max_lines)
-        max_raw = max(1, max_raw)
-        lines = content.splitlines(keepends=True)
-        total_lines = len(lines)
-        start = max(1, min(start_raw, total_lines + 1))
-        end = min(start + max_raw - 1, total_lines)
-        offset = _coerce_start_char(start_char)
-        # Char range of the rendered BODY within the file, and the part of it the
-        # OUTER truncator will actually deliver (same budget, same head-cut rule).
-        window_start = sum(len(line) for line in lines[:start - 1])
-        body_full = max(0, sum(len(line) for line in lines[start - 1:end]) - offset)
-        header_len = len(rendered) - body_full if rendered else 0
-        budget = tool_result_limit("read_file")
-        if rendered and len(rendered) > budget:
-            delivered_body = max(0, budget - header_len)
-        else:
-            delivered_body = body_full
-        abs_start = window_start + offset
-        abs_end = abs_start + min(body_full, delivered_body)
-        total = len(content)
+        raw = path.read_bytes()
+        source_sha = hashlib.sha256(raw).hexdigest()
+        if read_view.get("source_revision") != source_sha:
+            return  # A replacement is not the source this invocation opened.
+        content = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        ranges = _delivered_source_ranges(read_view, original, projected, content, shown_ranges)
+        if ranges is None or (not ranges and content):
+            return
         task_id = str(getattr(ctx, "task_id", "") or "")
         wanted = path.name
         drive = custody.custody_root(ctx)
@@ -255,8 +305,6 @@ def acknowledge_staged_output_read(ctx: ToolContext, target: Any, content: str,
             return next((c for c in candidates
                          if _safe_run_filename(c.run_id) + ".json" == wanted), None)
 
-        # Memo first; a restarted worker (empty or unrelated memo) falls through to the
-        # durable replay, the same authority every other custody question consults.
         entry = _match(list(custody._CUSTODY.values())) or _match(custody.replay(drive).values())
         if entry is None:
             return
@@ -267,24 +315,18 @@ def acknowledge_staged_output_read(ctx: ToolContext, target: Any, content: str,
             status, entry, predecessor = retry_result_status(ctx, drive, entry.run_id)
             if status != custody.OWNED or entry is None or not predecessor:
                 return
-        identity = f"{resolved}|{hashlib.sha256(content.encode('utf-8', 'replace')).hexdigest()}"
+        identity = f"{resolved}|{source_sha}"
         if successor:
             identity += f"|reader:{task_id}"
-        if not _covered_whole(identity, abs_start, abs_end, total):
+        complete = not content
+        for start, end in ranges:
+            complete = _covered_whole(identity, start, end, len(content))
+        if not complete or output_consumed_by_reader(entry, task_id):
             return
-        if output_consumed_by_reader(entry, task_id):
-            return
-        raw = path.read_bytes()
-        if raw != content.encode("utf-8", "replace"):
-            return  # A concurrent replacement is not the body this call delivered.
         custody.record_output_consumed(
-            drive, entry,
-            artifact=f"{_ARTIFACT_SUBDIR}/{wanted}",
-            byte_length=len(raw),
-            sha256=hashlib.sha256(raw).hexdigest(),
-            chars=len(content),
-            lines=total_lines,
-            reader_task_id=task_id,
+            drive, entry, artifact=f"{_ARTIFACT_SUBDIR}/{wanted}",
+            byte_length=len(raw), sha256=source_sha, chars=len(content),
+            lines=len(content.splitlines(keepends=True)), reader_task_id=task_id,
         )
     except Exception:
         log.warning("coverage acknowledgement for a staged delegated output failed", exc_info=True)

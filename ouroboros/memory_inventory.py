@@ -19,7 +19,9 @@ them a second time:
 - A **period** (a block of the old memory) is folded when every unit of it is.
 - A **story record's period and place** (``record_period``) are read from its room's own rows:
   a page's covers, a retold record's rows (without rows, its block's recorded period, labelled),
-  a part's union over its members. The aggregate a part records is historical and not shown.
+  a part's union over its members, an account's union over its sources (several rooms: their
+  rows' span, which is not every event between and seals no row). The aggregate a part
+  records is historical and not shown.
 - The **standing facts** every reader prints are counted here once: the story's pages and parts
   (``story_counts``) and one room's open rows by lane, their size and times, its unsealed notes,
   its pages and the last row they cover (``room_facts``).
@@ -544,12 +546,17 @@ def record_period(store: ChronicleStore, record: Mapping[str, Any], units: Mappi
     A page: its own covers. A retold record: its unit's rows (``units``: the ready legacy map of one reader);
     without rows, its block's recorded period and position, labelled ``block``. A part: the union over its
     members, recursively, so a room that takes the tail of a block is dated and ordered by its own rows; the
-    ``covers.ts_span`` the part recorded (its members' block aggregate) is not read.
+    ``covers.ts_span`` the part recorded (its members' block aggregate) is not read. An account: the union
+    over its sources the same way, whatever their rooms (a missing source adds nothing and leaves it incomplete).
     """
     covers = record.get("covers") if isinstance(record.get("covers"), Mapping) else {}
-    if record.get("kind") == "part":
-        members = [record_period(store, member, units) for member_id in covers.get("member_ids") or ()
+    if record.get("kind") in ("part", "account"):
+        ids = covers.get("member_ids") if record.get("kind") == "part" else [
+            (ref.get("id") if isinstance(ref, Mapping) else ref) for ref in record.get("sources") or ()]
+        members = [record_period(store, member, units) for member_id in ids or ()
                    if (member := store.get(str(member_id))) is not None]
+        if len(members) != len(ids or ()):
+            members.append(Period(None, -1, "rows"))  # a source not in this chronicle: an incomplete period
         spans = [period.span for period in members if period.span]
         sources = {period.source for period in members if period.span}
         span = source_time_span([span[key] for span in spans for key in ("start", "end") if span.get(key)],
@@ -749,7 +756,7 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
 # any mark, a global one too. The import's legacy sections, gaps and activation receipt
 # are standing inventory (the view's pointers), and a mark's view only changes how much of an
 # observed mark is shown.
-CHANGE_KINDS = ("page", "part", "note", "correction", "decision", "mark", "mark_release")
+CHANGE_KINDS = ("page", "part", "note", "correction", "decision", "mark", "mark_release", "account", "selection")
 
 
 def _read_call(record_id: Any) -> str:
@@ -777,8 +784,12 @@ def _change_line(record: Mapping[str, Any], released: Optional[Mapping[str, Any]
     scoped = record if kind == "mark" else released if isinstance(released, Mapping) else {}
     where = "global" if scoped.get("scope") == "global" else f"in room {record.get('room_id')}"
     rows, members = covers.get("count", len(covers.get("rows") or ())), len(covers.get("member_ids") or ())
+    sources, replaced = len(record.get("sources") or ()), len(record.get("replaces") or ())
     what = {"page": f"seals {rows} row{'' if rows == 1 else 's'}",
             "part": f"folds {members} record{'' if members == 1 else 's'}",
+            "account": f"is based on {sources} source{'' if sources == 1 else 's'} (nothing sealed or folded)",
+            "selection": (f"shows the account in the common view in place of {replaced} record{'' if replaced == 1 else 's'}"
+                          if record.get("shown") else "withdraws the account from the common view"),
             "decision": "accepts the draft" if record.get("accepted") else "rejects the draft",
             "correction": "corrects its target", "mark_release": "releases its target mark"}.get(kind, "")
     target = record.get("target_id")

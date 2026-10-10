@@ -218,7 +218,8 @@ def test_loop_retains_continuation_and_delivers_only_final_content(isolated, mon
     monkeypatch.setattr(client, "default_model", lambda: "minimax::MiniMax-M3.1")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
 
-    def handle(calls, _tools, _logs, _task, _executor, messages, _trace, _progress):
+    def handle(calls, _tools, _logs, _task, _executor, messages, _trace, _progress,
+               *, fit_candidate=None, tool_schemas=None):
         messages.append({"role": "tool", "tool_call_id": calls[0]["id"], "content": "Sunny"})
         return 0
 

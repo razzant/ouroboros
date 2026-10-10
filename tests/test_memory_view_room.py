@@ -485,11 +485,12 @@ def test_this_room_has_its_head_retold_records_origin_words_and_notes(tmp_path):
     assert f"note {note.record['id']} by root on " in _section(noted, "### My notes not yet sealed")
 
 
-def test_main_room_page_shows_the_room_less_retellings_whole_to_its_integrator_and_a_pointer_elsewhere(tmp_path):
-    """The flat summary and a room-less era predate rooms and were Main's memory: whole in
-    Main's room page, under their own label, for Main's integrator and for a child that starts with the top
-    level of the life account; a pointer in the story, and nothing more, for another room; a wake reads Main
-    as its integrator does; nothing at all for a nanny in Main, which carries no story."""
+def test_main_room_page_shows_the_room_less_retellings_whole_to_a_nanny_and_the_story_to_everyone_else(tmp_path):
+    """The flat summary and a room-less era predate rooms and were Main's memory: whole in the story of every
+    focus that carries one (Main's integrator, a root bound elsewhere, a wake, a child), under their own label,
+    and never repeated on Main's room page; a nanny in Main carries no life account, so it gets neither their
+    text nor a pointer, while Main's own retold records stand on its room page, where the floor (F4) addresses
+    one by what it holds."""
     import json
 
     rooms = shared.world(tmp_path, flat="The retired flat summary of everything.", activate=False)
@@ -499,41 +500,35 @@ def test_main_room_page_shows_the_room_less_retellings_whole_to_its_integrator_a
                     encoding="utf-8")
     assert ChronicleStore(tmp_path).ensure_activated()["kind"] == "activation"
     main = mv.capture_memory_view(tmp_path, MAIN_TASK, mv.view_spec_for_task(MAIN_TASK, tmp_path))
-    retold = _section(mv.render_room(main), "### Retold before the update (helper retelling, not lived)")
-    for words in ("  The retired flat summary of everything.", "  A room-less era."):
-        assert retold.index(words) < retold.index("  Main was quiet.")  # older than the rooms: first
-    era = "#### legacy-b02-rlegacy — period known from the retelling text only — Unknown provenance [legacy mixed record]"
-    assert era + "\n  A room-less era." in retold
-    assert "#### legacy-b01-r1 — 2026-09-02 00:00 → 2026-09-02 00:03 (block period)\n" in retold  # Main's own: no label
-    assert "Main talk." not in retold  # the first block is whole in the story, not repeated here
-    # By address (F4) the line says what it holds.
-    short = mv.render_room(main, mv.FloorLevel(addressed=(("F4", ("legacy-b02-rlegacy",)),)))
-    assert era + " — 16 chars — memory_read(node_id='legacy-b02-rlegacy')" in short and "  A room-less era." not in short
     story = mv.render_story(main)
-    assert "The retired flat summary" not in story and "memory_read(node_id='legacy-flat-" in story
-    assert "memory_read(node_id='legacy-b02-rlegacy')" in story and "A room-less era." not in story
-    others = {"bound": {"id": "bound", "chat_id": 1},  # bound to alpha
-              "nanny": {"id": "n1", "chat_id": 1, "delegation_role": "subagent", "root_task_id": "root1", **NANNY_ROUTE}}
-    for name, task in others.items():
-        snapshot = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
-        room = mv.render_room(snapshot)
-        assert "A room-less era." not in room and "The retired flat summary" not in room, name
-        story = mv.render_story(snapshot)
-        if name == "nanny":  # a nanny carries no story at all, so not even the pointer
-            assert story == "" and "legacy-b02-rlegacy" not in room, name
-        else:
-            assert "memory_read(node_id='legacy-b02-rlegacy')" in story, name
-        assert snapshot.spec.room_id == {"bound": str(rooms["alpha"]), "nanny": "1"}[name]
+    era = "#### legacy-b02-rlegacy — period known from the retelling text only — Unknown provenance [legacy mixed record]"
+    assert era + " — no row of this room in that period; retold in 16 chars\n  A room-less era." in story
+    assert "  The retired flat summary of everything." in story and "  Main talk." in story and "  Main was quiet." in story
+    assert "### Retold before the update" not in mv.render_room(main)  # nothing to repeat: the story shows it all
+    nanny_task = {"id": "n1", "chat_id": 1, "delegation_role": "subagent", "root_task_id": "root1", **NANNY_ROUTE}
+    nanny = mv.capture_memory_view(tmp_path, nanny_task, mv.view_spec_for_task(nanny_task, tmp_path))
+    assert mv.render_story(nanny) == "" and nanny.spec.room_id == "1"
+    retold = _section(mv.render_room(nanny), "### Retold before the update (helper retelling, not lived)")
+    assert "A room-less era." not in retold and "The retired flat summary" not in retold and "legacy-b02-rlegacy" not in retold
+    assert "#### legacy-b00-r1 — 2026-09-01 00:00 → 2026-09-01 00:05\n  Main talk." in retold
+    assert "#### legacy-b01-r1 — 2026-09-02 00:00 → 2026-09-02 00:03 (block period)\n  Main was quiet." in retold  # Main's own: no label
+    # By address (F4) the line says what it holds.
+    short = mv.render_room(nanny, mv.FloorLevel(addressed=(("F4", ("legacy-b01-r1",)),)))
+    assert ("#### legacy-b01-r1 — 2026-09-02 00:00 → 2026-09-02 00:03 (block period) — 15 chars — "
+            "memory_read(node_id='legacy-b01-r1')") in short and "  Main was quiet." not in short
+    bound_task = {"id": "bound", "chat_id": 1}  # bound to alpha
+    bound = mv.capture_memory_view(tmp_path, bound_task, mv.view_spec_for_task(bound_task, tmp_path))
+    assert bound.spec.room_id == str(rooms["alpha"]) and mv.render_story(bound) == story
+    assert "A room-less era." not in mv.render_room(bound) and "The retired flat summary" not in mv.render_room(bound)
     wake_task = {"id": "w1", "chat_id": 1, "metadata": {"usage_category": "consciousness"}}
     wake = mv.capture_memory_view(tmp_path, wake_task, mv.view_spec_for_task(wake_task, tmp_path))
     assert wake.spec.room_id == "1" and wake.room == main.room  # the wake's Main is Main's integrator's
-    assert mv.render_story(wake) == mv.render_story(main) and "The retired flat summary" in mv.render_room(wake)
-    # A child starts with the top level of the life account, so Main's room-less retellings stand whole on its page.
+    assert mv.render_story(wake) == story
+    # A child starts with the top level of the life account: the same story, and a room page that repeats none of it.
     kid = {"id": "kid1", "chat_id": 1, "delegation_role": "subagent", "root_task_id": "root1"}
     child = mv.capture_memory_view(tmp_path, kid, mv.view_spec_for_task(kid, tmp_path))
-    room = mv.render_room(child)
-    assert "## This room (Main)" in room and "  Main talk." in room
-    assert "  A room-less era." in room and "  The retired flat summary of everything." in room
+    assert mv.render_story(child) == story and "## This room (Main)" in mv.render_room(child)
+    assert "Main talk." not in mv.render_room(child) and "A room-less era." not in mv.render_room(child)
 
 
 def test_each_role_sees_its_parts_of_the_live_view(tmp_path):
@@ -559,7 +554,8 @@ def test_each_role_sees_its_parts_of_the_live_view(tmp_path):
                   "metadata": words}
     child, child_text = _view(tmp_path, child_task)
     assert mv.render_story(child).startswith("## My story\n") and "## This room (Main) — head " in child_text
-    assert "### Retold before the update" in child_text and "### Open conversation" not in child_text
+    assert "  Old Main talk." in mv.render_story(child)  # the retold record is in its story, whole, as in Main's
+    assert "### Retold before the update" not in child_text and "### Open conversation" not in child_text
     assert "## Live rooms" not in child_text and "Watch alpha" not in child_text and "Watch root1" in child_text
     assert child_text.startswith("## Words of my human that caused this work (verbatim)\n")
     assert "Find the cause" in child_text and "Find the cause" not in main_text

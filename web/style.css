@@ -398,15 +398,6 @@ body.resizing-panels { user-select: none; }
     display: none;
 }
 
-/* P3 — a converted card becomes a calm "project identity" chip. The whole card
-   recolors from the red task accent to the project fuchsia over ~250ms; the live
-   timeline is gone (the project panel owns it now), so the main chat is freed. */
-.chat-live-card.is-project {
-    border-color: var(--project-18);
-    background: var(--project-08);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(240, 171, 252, 0.05);
-}
-
 .chat-live-project-card-btn {
     display: flex;
     align-items: center;
@@ -473,38 +464,6 @@ body.resizing-panels { user-select: none; }
     font-weight: 500;
     color: var(--text-meta);
 }
-
-.project-handoff-heading {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-3);
-}
-
-.project-handoff-phase { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-2); }
-.project-handoff .chat-quiz-project { margin-top: var(--space-3); }
-
-.project-handoff-title {
-    min-width: 0;
-    overflow-wrap: anywhere;
-    font-size: var(--type-section);
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.chat-bubble.system.project-handoff {
-    border-color: var(--project-18);
-    background: var(--project-08);
-}
-
-/* A converted card whose Main history receipt is not durable: the binding
-   holds, the anchor does not survive a reload — say so with the border. */
-.chat-bubble.system.project-handoff--unsaved,
-.project-handoff--unsaved { border-style: dashed; }
-
-.project-handoff > .sender { display: none; }
-.project-handoff .message { padding: 0; }
-.chat-bubble.system.project-handoff .msg-time { color: var(--text-meta); }
 
 .nav-section {
     display: flex;
@@ -1821,7 +1780,7 @@ body.resizing-panels { user-select: none; }
     overflow: hidden;
     container-type: inline-size;
     container-name: livecard;
-    /* So the convert-to-project recolor (.is-project) fades in calmly (P3). */
+    /* Conversion to the shared Project entry fades in calmly (P3). */
     transition: border-color 250ms ease, background-color 250ms ease, box-shadow 250ms ease;
 }
 
@@ -8293,6 +8252,67 @@ textarea.chat-input {
 /* Reserve a gutter so the timestamp never sits under the always-visible icon
    (the button spans ~30px from the bubble's right edge). */
 .chat-bubble.has-copy .msg-time { margin-right: 28px; }
+
+/* One Project entry surface, independent of the task or history shell it
+   replaced. This follows the base shells and their copy/time recipes. */
+.chat-live-card.project-handoff,
+.chat-bubble.project-handoff {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    align-self: flex-start;
+    width: min(100%, 760px);
+    max-width: max(80%, min(100%, 620px));
+    min-width: 0;
+    margin: 0;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--project-18);
+    border-radius: var(--radius-lg);
+    background: var(--project-08);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 var(--project-08);
+    backdrop-filter: blur(12px);
+    overflow: hidden;
+    container-type: inline-size;
+    container-name: projectcard;
+    transition: border-color 250ms ease, background-color 250ms ease, box-shadow 250ms ease;
+}
+
+.project-handoff-heading {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+    white-space: normal;
+}
+.project-handoff-title {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: var(--type-section);
+    line-height: var(--line-title);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.project-handoff-phase {
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    max-width: 100%;
+    line-height: var(--line-meta);
+}
+.project-handoff .chat-quiz-project { align-self: flex-start; max-width: 100%; margin: 0; }
+.project-handoff-footer { display: flex; align-items: center; gap: var(--space-2); min-height: var(--space-5); }
+.project-handoff .project-handoff-footer .msg-time { margin: 0; opacity: 1; color: var(--text-meta); }
+.project-handoff .chat-message-copy { position: static; margin-inline-start: auto; flex: 0 0 auto; }
+
+/* A saved binding with no durable Main receipt retains its visible gap mark. */
+.project-handoff.project-handoff--unsaved { border-style: dashed; }
+
+@container projectcard (max-width: 560px) {
+    .project-handoff-heading { flex-direction: column; align-items: flex-start; }
+    .project-handoff-phase { order: -1; justify-content: flex-start; }
+}
 
 .chat-copy-fallback {
     position: fixed;

@@ -393,7 +393,14 @@ def test_route_rebind_preserves_nano_on_model_account_fallback(monkeypatch, tmp_
     assert mode == "nano"
     assert rebound.preferred_mode == rebound.initial_mode == "nano"
     assert rebound.nano_projection is not None
-    assert rebound.nano_projection.calibrated_tokens == estimated * 2
+    # This fixture's system_message also carries a private cache-split hint;
+    # count the visible role/content plus actual preserved tail, not that hint.
+    rows = rebound.messages_for("nano")
+    measured = context_fit.estimate_context_prompt_tokens([
+        {"role": "system", "content": rows[0]["content"]}, *rows[1:]])
+    assert rebound.nano_projection.estimated_tokens == measured
+    assert rebound.nano_projection.calibrated_tokens == measured * 2
+    assert measured != estimated  # rebind measures the actual current messages, not stale stored size
     assert rebound.window_tokens == window
     assert messages[0] == rebound.nano_projection.system_message()
     assert rebound.model == "claudexor::codex=fallback-model"

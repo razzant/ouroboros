@@ -23,7 +23,7 @@ from ouroboros.tools.review_multi_model import TRIAD_USER_TURN
 from ouroboros.tools.review_subject import ReviewSubjectSpec, freeze_subject
 from ouroboros.triad_review import REVIEW_JSON_ARRAY_CONTRACT, REVIEW_TWO_PART_OBJECT_CONTRACT
 
-GUARD_HEADING = "Before returning, do a deliberate SECOND pass"
+GUARD_HEADING = "Before returning, challenge the behavior promised"
 
 
 def _git(repo, *args):

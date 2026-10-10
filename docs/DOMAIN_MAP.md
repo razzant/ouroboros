@@ -8,12 +8,12 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 
 | domain | name | modules | proposed |
 |---|---|---:|---:|
-| D01 | Agent core & main loop | 47 | 0 |
+| D01 | Agent core & main loop | 48 | 0 |
 | D02 | LLM client, routing & providers | 42 | 0 |
-| D03 | Context assembly, fit & compaction | 16 | 0 |
+| D03 | Context assembly, fit & compaction | 20 | 0 |
 | D04 | Tool execution: registry, access & typed results | 22 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 33 | 0 |
-| D06 | Review stack | 77 | 0 |
+| D06 | Review stack | 79 | 0 |
 | D07 | Delegation, subagents & Claudexor | 64 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 59 | 0 |
 | D09 | Cancellation, owner control & process custody | 16 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 23 | 0 |
 | D19 | Frozen contracts (ABI) | 11 | 0 |
 | D20 | Presence | 12 | 0 |
-| **total** | | **690** | **0** |
+| **total** | | **697** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **123**
+- lazy-only cross-domain pairs: **124**
   - D01->D08
   - D01->D10
   - D01->D11
@@ -92,6 +92,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D04->D15
   - D04->D16
   - D04->D20
+  - D05->D03
   - D05->D06
   - D05->D07
   - D05->D08
@@ -246,6 +247,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/task_pacing.py`
 - `ouroboros/tool_call_log.py`
 - `ouroboros/tool_custody.py`
+- `ouroboros/tool_result_delivery.py`
 - `ouroboros/transcript_prefix.py`
 - `ouroboros/working_checkpoint.py`
 
@@ -306,11 +308,15 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/context_layout.py`
 - `ouroboros/context_mode_compat.py`
 - `ouroboros/context_runtime_facts.py`
+- `ouroboros/context_source_view.py`
 - `ouroboros/main_context_authority.py`
 - `ouroboros/memory_floor.py`
 - `ouroboros/memory_view.py`
+- `ouroboros/memory_view_account.py`
 - `ouroboros/memory_view_legacy.py`
 - `ouroboros/response_limits.py`
+- `ouroboros/review_history_view.py`
+- `ouroboros/tool_result_record.py`
 - `ouroboros/tools/compact_context.py`
 
 ### D04 — Tool execution: registry, access & typed results
@@ -393,6 +399,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/review_evidence_sections.py`
 - `ouroboros/review_execution.py`
 - `ouroboros/review_execution_projection.py`
+- `ouroboros/review_history.py`
 - `ouroboros/review_ledger.py`
 - `ouroboros/review_native_episode.py`
 - `ouroboros/review_operation.py`
@@ -423,6 +430,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/test_environment.py`
 - `ouroboros/tools/governance_context.py`
 - `ouroboros/tools/parallel_review.py`
+- `ouroboros/tools/plan_author_history.py`
 - `ouroboros/tools/plan_dialogue.py`
 - `ouroboros/tools/plan_evidence.py`
 - `ouroboros/tools/plan_packet.py`

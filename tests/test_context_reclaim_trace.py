@@ -34,28 +34,29 @@ def test_tool_trace_row_carries_exact_tool_call_id_beside_trace_ref():
     assert row["trace_ref"] is trace_ref
 
 
-def test_process_tool_results_accumulates_trace_refs_for_reclaim():
-    """Production wiring: appending a tool result retains its pre-truncation
-    trace ref per tool_call_id on the tool context, and the loop accessor
-    exposes exactly that mapping to compact_tool_history_llm."""
+def test_process_tool_results_accumulates_trace_refs_for_reclaim(tmp_path):
+    """The result row owns its invocation-bound trace; the context map stays a diagnostic."""
     from types import SimpleNamespace
 
     from ouroboros.loop_tool_execution import reclaim_trace_refs
 
     trace_ref = {"manifest_ref": {"path": "calls/tool.json", "sha256": "b" * 64}}
-    tools = SimpleNamespace(_ctx=SimpleNamespace())
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tool_result_record import read_tool_result_record
+    tools = SimpleNamespace(_ctx=ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="trace-task"))
+    messages = []
 
     errors = process_tool_results(
         [{
             "fn_name": "read_file",
-            "tool_call_id": "call-retained",
+            "tool_call_id": "call-retained", "invocation_id": "invocation-retained",
             "result": "result body",
             "is_error": False,
             "args_for_log": {"path": "README.md"},
             "tool_args": {"path": "README.md"},
             "trace_ref": trace_ref,
         }],
-        [],
+        messages,
         {"tool_calls": []},
         emit_progress=lambda _message, *, incident=None: None,
         tools=tools,
@@ -63,6 +64,9 @@ def test_process_tool_results_accumulates_trace_refs_for_reclaim():
 
     assert errors == 0
     assert reclaim_trace_refs(tools._ctx) == {"call-retained": trace_ref}
+    record = read_tool_result_record(messages[0])
+    assert record["state"] == "recorded" and record["trace_ref"] == trace_ref
+    assert record["invocation"]["invocation_id"] == "invocation-retained"
     # No tools context: still no crash, accessor stays empty.
     assert reclaim_trace_refs(SimpleNamespace()) == {}
 
@@ -93,7 +97,7 @@ def test_prune_reclaim_trace_refs_drops_ids_absent_from_transcript():
     prune_reclaim_trace_refs(SimpleNamespace(), messages)
 
 
-def test_materializer_resolves_only_matching_tool_call_trace_refs():
+def test_materializer_resolves_only_this_invocations_bound_trace_refs():
     messages = [
         {
             "role": "assistant",
@@ -109,10 +113,17 @@ def test_materializer_resolves_only_matching_tool_call_trace_refs():
     ref_b = {"path": "calls/b.json", "sha256": "b" * 64}
     unrelated = {"path": "calls/other.json", "sha256": "f" * 64}
 
+    # An old call-ID map cannot prove which occurrence supplied these results.
+    assert cc._atomic_units(messages, trace_refs_by_tool_call_id={"call-a": ref_a, "call-b": ref_b})[0].source_refs == ()
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
+    for index, ref in ((1, ref_a), (2, ref_b)):
+        row = messages[index]
+        row[TOOL_RESULT_RECORD_KEY] = make_tool_result_record(
+            {"tool_call_id": row["tool_call_id"], "invocation_id": f"invoke-{index}", "trace_ref": ref}, row["content"])
     unit = cc._atomic_units(
         messages,
         trace_refs_by_tool_call_id={
-            "call-a": ref_a,
+            "call-a": unrelated,
             "call-b": ref_b,
             "call-other": unrelated,
         },

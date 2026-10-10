@@ -303,15 +303,17 @@ def test_manual_compaction_is_recorded_as_a_sanctioned_break_on_its_round(full_l
     _assert_one_sanctioned_rewrite_at_round_three(f, usage)
 
 
-def test_automatic_reclaim_inside_the_model_call_is_a_sanctioned_break_on_its_round(full_loop, monkeypatch):  # noqa: F811 -- imported pytest fixture
+def test_predicted_pressure_keeps_the_append_only_prefix_without_automatic_reclaim(full_loop, monkeypatch):  # noqa: F811 -- imported pytest fixture
     f = full_loop
     monkeypatch.setattr(loop, "call_llm_with_retry", _four_tool_rounds(f))
-    monkeypatch.setattr(loop, "compact_tool_history_llm", _fake_compaction)
+    def no_automatic_summary(*args, **kwargs):
+        raise AssertionError("Prediction must not buy helper compaction")
+    monkeypatch.setattr(loop, "compact_tool_history_llm", no_automatic_summary)
     fired = []
 
     def measure(ctx, *, automatic_pass_used):
-        # ContextFit decides "reclaim_once" exactly once, at round 3, the way the
-        # automatic reclaim runs inside _call_round_model after the round began.
+        # The measurement reports pressure at round 3; it is a fact rather
+        # than authorization to rewrite the already-sent transcript.
         if ctx.round_idx != 3 or fired or automatic_pass_used:
             return None
         fired.append(True)
@@ -333,5 +335,7 @@ def test_automatic_reclaim_inside_the_model_call_is_a_sanctioned_break_on_its_ro
     result, usage, _trace = f.run()
 
     assert result == ANSWER, (result, f.progress)
-    assert fired, "the automatic reclaim did not run"
-    _assert_one_sanctioned_rewrite_at_round_three(f, usage)
+    assert fired, "the pressure measurement did not run"
+    assert not _prefix_breaks(f.events)
+    assert "prompt_prefix_breaks" not in usage
+    _assert_prefix_chain(f.model_inputs)

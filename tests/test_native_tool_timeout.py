@@ -69,15 +69,16 @@ class _SlowRegistry:
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
-    def execute(self, name, args):
+    def execute_result(self, name, args):
         if name != "read_file":
-            return self._inner.execute(name, args)
+            return self._inner.execute_result(name, args)
         self._release.wait(self._hold_sec)
         # A late worker stamps the shared reader view exactly as the real
         # reader would: the episode must not credit that stamp to anything.
         self._inner._ctx.last_read_view = dict(_STAMP)
         self.returned.set()
-        return _LATE_BODY
+        from ouroboros.tools.tool_result import ToolResult
+        return ToolResult(status="ok", code="OK", text=_LATE_BODY)
 
 
 def _install_registry(monkeypatch, *, hold_sec):

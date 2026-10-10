@@ -363,7 +363,9 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     window = (10_000_000 - roomy.projection("nano").memory_facts["floor"]["physical_allowance_tokens"]
               + minimal_view_tokens(snapshot_from_json(core.memory_view_json), window_tokens=10_000_000) + 50)
     built = plan(window)
-    assert built.initial_mode == "nano"
+    # Prediction keeps owner-Max books. The Nano projection is available only
+    # after an actual refusal; its tool/memory routing still must agree.
+    assert built.initial_mode == ("max" if owner == "max" else "nano")
     floor = section(built.messages_for("nano")[0]["content"][-1]["text"], "### Physical floor")
     sent = select_tool_schemas(schemas, context_mode="nano").chosen
     assert "memory_read" not in sent and ("enable_tools" in floor) == ("enable_tools" in sent), (sent, floor)

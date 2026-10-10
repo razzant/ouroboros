@@ -59,14 +59,14 @@ def test_split_child_reads_its_produced_source_through_the_published_tool_addres
     assert long_text in result, result
     assert '"seq": 2' in result
 
-    # The relative handle must not redirect writes, other source categories or
-    # another task's store to canonical authority.
+    # Own retained sources stay readable without redirecting writes or another
+    # task's store to canonical authority.
     from ouroboros.tool_access import build_resolved_resource_binding
     child_store = artifacts.task_artifact_dir_path(drive, TASK, create=False)
     write = build_resolved_resource_binding(ctx, root="artifact_store", path=ref["path"], operation="write")
     assert write.target_path == child_store / ref["path"]
-    other = artifacts.store_actor_source_bytes(data, TASK, category="tool_results", source_id="private", data=b"NOT_ACTIVITY", extension="txt")
-    assert "NOT_ACTIVITY" not in _read_file(ctx, other["path"], root="artifact_store")
+    own_result = artifacts.store_actor_source_bytes(data, TASK, category="tool_results", source_id="own-result", data=b"OWN_RESULT", extension="txt")
+    assert "OWN_RESULT" in _read_file(ctx, own_result["path"], root="artifact_store")
     foreign = ToolContext(repo_dir=tmp_path, drive_root=drive, task_id="other-child",
                           task_metadata={"budget_drive_root": str(data)})
     assert long_text not in _read_file(foreign, ref["path"], root=ref["root"])

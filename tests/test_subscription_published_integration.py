@@ -28,7 +28,7 @@ def test_primary_dispatch_retains_explicit_role_and_published_stop_callback(tmp_
                           active_effort="high", max_retries=3, drive_logs=tmp_path / "logs",
                           task_id="task", round_idx=1, event_queue=None, accumulated_usage={},
                           task_type="task", active_use_local=False, tools=SimpleNamespace(_ctx=tool_ctx),
-                          model_role="light", context_fit_plan=None)
+                          model_role="light", context_fit_plan=None, active_context_mode="max", drive_root=tmp_path)
     calls = []
     monkeypatch.setattr(loop, "_task_deadline_epoch", lambda _tools: None)
     monkeypatch.setattr(loop, "_server_web_allowed_by_task", lambda _ctx: False)

@@ -3,6 +3,7 @@ import { projectReference } from './project_reference.js';
 import { activeModelWaits, mergeModelWaits } from './model_wait.js';
 import { isTerminalTaskDetail } from './log_events.js';
 import { censusTaskPhase, paintTaskPhase } from './task_phase_chip.js';
+import { formatMsgTime } from './chat_activity.js';
 
 // The gateway's typed receipt word (ouroboros/project_handoff.py RECEIPT_STATES).
 // The binding is committed under every word; only these two prove that the Main
@@ -34,7 +35,7 @@ export function handoffPhase(activity, detail, connected = true) {
 // evicted anchor hands over instead of dropping the transfer from the feed.
 // A creation entry retains its own identity and subject. Matching transfers
 // fold it visually; they never turn creation into a transfer or lend it status.
-export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
+export function createProjectHandoffs({ feed, fetchDetail, mutate, attachCopy }) {
     const rows = new Map();  // Converted task, transfer receipt, or creation entry.
     let connected = true, destroyed = false, complete = false;
     let activities = new Map();
@@ -43,6 +44,14 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
     const visibleAnchor = id => [...rows.values()].find(row => row.id === id && inFeed(row.node));
     const matching = (taskId, projectId) => [...rows.values()].find(row =>
         row.projectId === projectId && row.subjects.has(taskId) && inFeed(row.node));
+    function stampTime(row, ts) {
+        const time = formatMsgTime(ts);
+        if (!time) return;
+        row.ts = ts;
+        row.time.textContent = time.short;
+        row.time.title = time.full;
+        row.time.hidden = false;
+    }
     function paint(row) {
         const activity = activities.get(row.taskId);
         // Keep already observed result facts when connectivity or a partial
@@ -70,6 +79,11 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
         shadow.node.hidden = true;
         under.shadows.push(shadow, ...shadow.shadows.splice(0));
         for (const taskId of shadow.subjects) under.subjects.add(taskId);
+        // The receipt owns the transfer time. Conversion supplies no invented
+        // date while its durable row is still in flight; ordering stays intact.
+        if (shadow.kind === 'receipt') for (const row of rows.values()) {
+            if (row.id === shadow.id && row.kind === 'card') stampTime(row, shadow.ts);
+        }
         if (shadow.kind === 'receipt' && under.node.dataset.receipt) {
             delete under.node.dataset.receipt;
             under.node.classList.remove('project-handoff--unsaved');
@@ -157,18 +171,17 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
             if (current(row) && row.taskId !== taskId) resolve(row);
         });
     }
-    function mount(node, { taskId, projectId, projectName, title, handoffId, kind = 'receipt', receipt = '' }) {
+    function mount(node, { taskId, projectId, projectName, title, handoffId, kind = 'receipt', receipt = '', ts = '' }) {
         if (!taskId || !projectId || destroyed) return node;
         const id = kind === 'started' ? `started:${projectId}` : handoffId || `legacy:${JSON.stringify([taskId, projectId])}`;
         sweep();
         const anchor = visibleAnchor(id);
-        if (anchor && anchor.node === node) { anchor.subjects.add(taskId); return node; }
+        if (anchor && anchor.node === node) { anchor.subjects.add(taskId); stampTime(anchor, ts); return node; }
         node.dataset.projectId = projectId;
         node.dataset.taskId = taskId;
         if (kind !== 'started') node.dataset.handoffId = id;
         node.dataset.systemType = kind === 'started' ? 'project_started' : 'project_handoff';
         node.classList.add('project-handoff');
-        const body = node.querySelector('.message') || node;
         const line = document.createElement('div');
         line.className = 'project-handoff-heading';
         const status = document.createElement('span');
@@ -182,7 +195,14 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
         const phases = document.createElement('div');
         phases.className = 'project-handoff-phase';
         phases.append(status, secondary);
-        line.append(phases, name);
+        line.append(name, phases);
+        const reference = projectReference({ id: projectId, name: projectName }, { layout: 'inline', taskId });
+        const footer = document.createElement('div');
+        footer.className = 'project-handoff-footer';
+        const time = document.createElement('div');
+        time.className = 'msg-time';
+        time.hidden = true;
+        footer.append(time);
         // A converted card whose receipt is not durable is an honest live chip,
         // never a claim that Main history holds this transfer (it will not
         // survive a reload as an anchor; the binding and the pointer do).
@@ -190,9 +210,14 @@ export function createProjectHandoffs({ feed, fetchDetail, mutate }) {
             node.dataset.receipt = receipt;
             node.classList.add('project-handoff--unsaved');
         }
-        body.replaceChildren(line, projectReference({ id: projectId, name: projectName }, { layout: 'inline', taskId }));
+        // One composition for conversion, creation and replay, independent of
+        // the old task-card or message shell. Copy keeps the shared chat control.
+        node.replaceChildren(line, reference, footer);
+        const copy = attachCopy?.(node, `${name.textContent}\n${reference.querySelector('.chat-live-project-name').textContent}`);
+        if (copy) footer.append(copy);
         const row = { key: kind === 'card' ? `card:${taskId}` : id, id, node, status, secondary, kind, taskId, projectId,
-            subjects: new Set([taskId]), followed: new Set([taskId]), shadows: [], detail: null, pending: false, checked: false, epoch: 0 };
+            time, ts: '', subjects: new Set([taskId]), followed: new Set([taskId]), shadows: [], detail: null, pending: false, checked: false, epoch: 0 };
+        stampTime(row, ts || (kind === 'card' ? anchor?.ts : ''));
         if (kind === 'receipt' && anchor) {
             // Duplicate delivery is not evidence that a differently named
             // execution supersedes its subject: one receipt, the rest shadowed.

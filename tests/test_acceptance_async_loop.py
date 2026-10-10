@@ -114,7 +114,9 @@ def full_loop(tmp_path, monkeypatch):
             fixture.entered.set()
             with fixture.condition:
                 fixture.condition.notify_all()
-            assert fixture.release.wait(10), "fixture did not release review"
+            # The real park/teardown owns release; elapsed host preparation
+            # must not fabricate a reviewer failure or trigger a retry.
+            fixture.release.wait()
             from ouroboros.review_evidence_refs import acceptance_evidence_ref_vocabulary
             vocabulary = acceptance_evidence_ref_vocabulary(request.evidence)
             reference = next(key for key, basis in vocabulary.items() if basis in {"tool_record", "packet_section"})
@@ -165,10 +167,12 @@ def full_loop(tmp_path, monkeypatch):
             patcher.setattr(loop, "call_llm_with_retry", observed)
             return loop.run_llm_loop(**fixture.run_args)
     fixture.run = run
-    yield fixture
-    fixture.release.set()
-    if fixture.entered.is_set():
-        assert fixture.settled.wait(10)
+    try:
+        yield fixture
+    finally:
+        fixture.release.set()
+        if fixture.entered.is_set():
+            assert fixture.settled.wait(10)
 
 
 def select_completion(f, answer=None, **options):
@@ -527,7 +531,7 @@ def test_a_panel_that_settles_after_the_loop_exited_is_attached_through_the_reme
                              emitted={"text": ANSWER, "chat_id": 1, "task_id": f.ctx.task_id})
     f.release.set()
     with f.condition:
-        assert f.condition.wait_for(lambda: f.settled_count >= 1, timeout=10)
+        assert f.condition.wait_for(lambda: f.settled_count >= 1)
     events = list(f.events.queue)
     rows = [e for e in events if e.get("system_type") == "acceptance_late_settlement"]
     assert len(rows) == 1, [e.get("type") for e in events]

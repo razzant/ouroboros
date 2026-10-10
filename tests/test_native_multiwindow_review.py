@@ -71,10 +71,15 @@ class ContractReviewer:
                             "recommendation": "Use matching producer and consumer units."})
                 return {"content": json.dumps(self.findings)}, {"cost": 0.0}
         if self.stage == "inspect":
-            inspected = json.loads(response)
+            # This actor only needs the revision to replace all completed units.
+            # The richer unit/source inventory may be a disclosed partial JSON
+            # view under this deliberately tiny 8K result cap. Decode the exact
+            # visible revision field, not the incomplete object or unseen units.
+            revision, _ = json.JSONDecoder().raw_decode(
+                response.split('"view_revision":', 1)[1].lstrip())
             self.stage = "apply"
             note, self.note = self.note, None
-            return self._call("compact_context", {"expected_view_revision": inspected["view_revision"],
+            return self._call("compact_context", {"expected_view_revision": revision,
                                                     "working_note": note, "keep_unit_ids": []})
         if self.stage == "apply":
             # No producer source, table or witness remains in the fake model.

@@ -177,7 +177,7 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                         f'.chat-live-card[data-task-id="{task_id}"][data-project-created="1"]')
                     converted.wait_for(timeout=30000)
                     page.wait_for_selector(
-                        f'.chat-live-card[data-task-id="{task_id}"].is-project', timeout=30000)
+                        f'.chat-live-card[data-task-id="{task_id}"].project-handoff', timeout=30000)
                     assert converted.get_attribute("data-project-id") == project["id"]
                     assert converted.get_attribute("data-handoff-id") == payload["handoff_id"]
                     assert converted.get_attribute("data-receipt") is None, "a durable receipt is not marked as a gap"

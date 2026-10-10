@@ -461,26 +461,23 @@ class TestSharedLLMRouting:
         assert "emit_review_event" in helper
 
 
-class TestTriadPromptAntiPatternLock:
-    """v4.34.0: triad pre-commit review prompt now also carries the
-    Anti pattern-lock guard. Scope and triad must stay symmetric so
-    semantic breadth is guarded without pressuring either surface to invent findings.
-    """
+class TestTriadPromptCountercheck:
+    """The existing template delivers one shared, layer-neutral countercheck."""
 
     def test_triad_template_has_anti_pattern_lock_guard(self):
         mod = _get_module("ouroboros.tools.review")
         tpl = mod._REVIEW_PROMPT_TEMPLATE_STABLE + mod._REVIEW_PROMPT_TEMPLATE_DYNAMIC
         assert "Anti pattern-lock guard" in tpl
         assert "exactly one FAIL" not in tpl
-        guard = _get_module("ouroboros.tools.review_helpers").anti_pattern_lock_guard("body")
+        helper = _get_module("ouroboros.tools.review_helpers")
+        guard = helper.anti_pattern_lock_guard("body")
+        assert guard == helper.anti_pattern_lock_guard("core")
         # Normalize whitespace so prompt reflow doesn't break the contract.
         import re
         flat = re.sub(r"\s+", " ", f"{tpl}\n{guard}")
-        assert "zero or one FAIL is valid" in flat
-        assert "numeric finding quota" in flat
-        # Accept any casing — "different concern class" / "DIFFERENT concern class"
-        assert "concern class" in flat.lower()
-        assert "second pass" in flat.lower()
+        assert "proposed fixes with a realistic supported counterexample or event sequence" in flat
+        assert "the checklist's existing evidence requirements still apply" in flat
+        assert "DIFFERENT concern class" not in flat
 
 
 def test_default_context_mode_is_max_and_generic_settings_merge_preserves_it(monkeypatch):

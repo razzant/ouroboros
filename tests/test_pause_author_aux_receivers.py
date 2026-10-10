@@ -53,6 +53,8 @@ def author(tmp_path, monkeypatch):
     registry = _registry(tmp_path, monkeypatch, "t-wait", 1)
     monkeypatch.setattr(loop, "_forced_fallback_result", lambda *_a, **_k: pytest.fail("Pause published a fallback final"))
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *_a, **_k: pytest.fail("no provider"))
+    monkeypatch.setattr("ouroboros.loop_llm_call.estimate_cost_optional",
+                        lambda *_a, **_k: pytest.fail("fake chat must return known usage without pricing fallback"))
     yield registry
     budget_pause.end_dispatch_fence("t-wait")
 
@@ -225,7 +227,9 @@ def test_warm_resume_restarts_author_wait_while_the_original_review_still_runs(t
                     {"source_id": row["source_id"], "summary": "retained short source"} for row in payload]})}
             return {"role": "assistant", "content": "resumed forced answer", "tool_calls": []}
 
-        return ua.execute_physical_attempt(_request(), send, extractor=_extract), {}
+        response = ua.execute_physical_attempt(_request(), send, extractor=_extract)
+        usage, cost, cost_final = _extract(response)
+        return response, {**usage, "cost": cost, "cost_final": cost_final}
 
     if surface == "forced":
         monkeypatch.setattr(loop, "_resolve_loop_max_rounds", lambda *_a: 0)

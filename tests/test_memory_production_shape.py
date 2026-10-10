@@ -145,7 +145,7 @@ def test_a_correction_of_a_page_folded_twice_stands_once_under_the_acting_part_t
     beyond = shape.part(tmp_path, "1", [made.outer], text="Main, folded a third time.")
     later = _story(tmp_path)
     assert later.count(fix) == 1 and fix in _block(later, beyond) and f" {made.outer}\n" not in later
-    # The child's story shows the same block (an integrator and a child differ only in the retold first block).
+    # The child's story shows the same block (an integrator and a child carry the same common story).
     assert fix in _story(tmp_path, {"id": "kid00001", "chat_id": 1, "delegation_role": "subagent"})
 
 

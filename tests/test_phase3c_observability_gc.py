@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from ouroboros.headless import retry_child_task_refs
+from tests._tool_result_delivery_shared import measured_fit
+
 import gzip
 import json
 import pathlib
@@ -231,6 +233,7 @@ def test_real_truncated_tool_source_envelope_remains_actor_readable_after_gc(tmp
         trace,
         emit_progress=lambda _message, *, incident=None: None,
         tools=SimpleNamespace(_ctx=ctx),
+        fit_candidate=measured_fit(window=16_000, reserve=4_000),
     )
     produced_ref = _source_ref_from_visible_result(messages[0]["content"])
     request = persist_call(

@@ -27,6 +27,8 @@ def test_last_assistant_salvage_keeps_bytes_and_skips_empty_nonassistant_message
 
     raw = "  Retained intermediate work.  \n\n"
     empty = [{"role": "assistant", "content": value} for value in (None, "", " \n", [])]
+    empty.append({"role": "assistant", "_host_context_kind": "owner_dialogue",
+                  "content": "[Owner-directed dialogue]\nRetained delivery metadata"})
     other = [{"role": "user", "content": "New owner input"},
              {"role": "tool", "content": "Tool result"}]
     assert last_assistant_text(empty + other) == ""
@@ -63,6 +65,12 @@ def test_host_admitted_swarm_root_has_one_live_and_rebuilt_provider_disclosure(h
         loop._replace_delivery_candidate(registry, ctx, trace, raw, control="replace")
     else:
         ctx.messages.append({"role": "assistant", "content": raw})
+    from ouroboros.tools.owner_delivery import _retain_dialogue, publish_pending_owner_dialogue
+    registry._ctx.messages = ctx.messages
+    _retain_dialogue(registry._ctx, {"type": "send_message", "text": "Progress sent to the owner",
+                                   "task_id": case.task_id, "chat_id": case.chat_id}, "deferred")
+    publish_pending_owner_dialogue(registry._ctx, ctx.messages)
+    assert ctx.messages[-1].get("_host_context_kind") == "owner_dialogue"
     text, usage, trace = loop._handle_provider_unavailable(
         ctx, error_kind="provider_outcome_unknown",
         wait_cause="transport_unavailable", waited_sec=125.0,

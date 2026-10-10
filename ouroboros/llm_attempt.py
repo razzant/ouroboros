@@ -23,10 +23,12 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set
 
 from ouroboros.anthropic_native_custody import is_replayed_native_content
-from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES
+from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, HOST_CONTEXT_KIND_KEY
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
 from ouroboros.transport_custody import ProviderNotDispatched, is_loopback_base_url
+from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
 from ouroboros.usage_accounting import (
     AttemptRequest,
     PhysicalAttemptPreconditionFailed,
@@ -498,8 +500,14 @@ def _attempt_request(
 
 
 def _physical_candidate(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the send copy with capsule metadata removed only from context turns."""
+    """Remove host context metadata from the send copy, preserving native payloads."""
     candidate = copy.deepcopy(payload)
+    for message in candidate.get("messages") or []:
+        if isinstance(message, dict):
+            message.pop(HOST_CONTEXT_KIND_KEY, None)
+            message.pop(TOOL_RESULT_RECORD_KEY, None)
+            message.pop(REVIEW_HISTORY_MESSAGE_KEY, None)
+            message.pop(REVIEW_CONTEXT_INDEX_KEY, None)
 
     def _strip(value: Any) -> None:
         if isinstance(value, dict):

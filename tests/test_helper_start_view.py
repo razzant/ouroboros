@@ -2,7 +2,7 @@
 
 Children are scheduled by the real ``schedule_subagent`` and their first request is built
 by ``context.build_llm_messages``, as their worker builds it. Two children of different
-trees read one story: block B is the same bytes for both, and its story is the mind's.
+trees read one story: block B is the same bytes for both, and for Main: its story is the mind's.
 Two siblings of one parent read one room page and one block of the owner's words; a
 child of another tree reads its own. Before the chronicle can be read a child still
 starts, with a visible gap and no model call. A forked child's own drive holds only its
@@ -88,12 +88,12 @@ def test_children_of_two_trees_share_block_b_and_siblings_share_the_room_page_an
     views = {name: _start(env, payload) for name, payload in (("first", first), ("second", second), ("cousin", cousin))}
     _a_main, b_main, _c_main, _cap = blocks(env, memory, MAIN)
 
-    # B: one story whatever the tree, the mind's own, and no fact of the child in it; it names by pointer the
-    # first block of the old retelling that Main reads whole.
+    # B: one story whatever the tree, the mind's own, and no fact of the child in it: the same bytes Main reads,
+    # the old retelling whole (no block is privileged, for a child either).
     assert views["first"][1] == views["second"][1] == views["cousin"][1]
     story, main_story = section(views["first"][1], "## My story"), section(b_main, "## My story")
-    assert story.startswith("## My story\n") and "memory_read(node_id='legacy-b00-r1')" in story
-    assert "  Main talk." in main_story and "Main talk." not in story
+    assert story.startswith("## My story\n") and story == main_story
+    assert "  Main talk." in story and "  Alpha began." in story and "memory_read(node_id='legacy-" not in story
     assert views["first"][0] == views["second"][0] == views["cousin"][0]  # A: governance and the books' maps
     for payload in (first, second, cousin):
         assert payload["id"] not in views["first"][1] and payload["id"] in _start(env, payload)[2]
@@ -103,7 +103,8 @@ def test_children_of_two_trees_share_block_b_and_siblings_share_the_room_page_an
     beta = f"## This room (Project Beta [chat_id={rooms['beta']}])"
     page = {name: section(views[name][2], alpha if name != "cousin" else beta) for name in views}
     words = {name: section(views[name][2], WORDS) for name in views}
-    assert page["first"] == page["second"] and "### Retold before the update" in page["first"]
+    assert page["first"] == page["second"] and page["first"].startswith(alpha + " — head ")
+    assert "### Retold before the update" not in page["first"]  # its room's retold records are whole in the story
     assert words["first"] == words["second"]
     assert "\n  Count the alpha inventory\n  and name what is missing" in words["first"]
     assert "Count shelf" not in words["first"]  # the assignment is not the owner's words
@@ -153,7 +154,7 @@ def test_a_child_starts_with_a_visible_gap_when_its_chronicle_cannot_be_read(tmp
     assert "read_file(root='runtime_data', path='memory/dialogue_blocks.json')" in b
     assert (f"## This room (Project Alpha [chat_id={rooms['alpha']}])\n\nOpen conversation unavailable until my "
             f"memory is activated ({reason}); read it: chat_history(count=100)") in c
-    assert "### Retold before the update" not in c and "## Marks I keep in view" not in c
+    assert "Alpha began." not in b + c and "## Marks I keep in view" not in c
     # What does not come from the chronicle is whole: the owner's words and the role line.
     assert "\n  Count the alpha inventory\n  and name what is missing" in section(c, WORDS)
     loaded, missing = section(c, "## Working sources").split("Loaded above: ", 1)[1].split(" Not loaded: ", 1)
@@ -164,7 +165,7 @@ def test_a_child_starts_with_a_visible_gap_when_its_chronicle_cannot_be_read(tmp
     monkeypatch.setattr(ChronicleStore, "ensure_activated", readable)
     _a, healthy_b, healthy_c, _cap = _start(env, child)
     assert section(healthy_b, "## My story").startswith("## My story\n") and "unavailable now" not in healthy_b
-    assert "### Retold before the update" in healthy_c and "not activated yet" not in healthy_c
+    assert "  Alpha began." in section(healthy_b, "## My story") and "not activated yet" not in healthy_c
 
 
 # --- a forked child reads its story and its room page from the canonical root -------------------------
@@ -192,7 +193,7 @@ def test_a_forked_child_reads_its_story_and_room_page_canonically_not_from_its_o
     spec = mv.view_spec_for_task(child, canonical)
     assert spec.room_id == str(rooms["alpha"])
     own = mv.capture_memory_view(fork, child, spec)  # read from the fork, the same room would show this memory
-    assert "FORK DRIVE ALPHA PAGE" in mv.render_room(own)
+    assert "FORK DRIVE ALPHA PAGE" in mv.render_story(own)
     before = _files(fork / "memory" / "chronicle")
 
     a, b, c, _cap = _start(env, child)
@@ -201,9 +202,9 @@ def test_a_forked_child_reads_its_story_and_room_page_canonically_not_from_its_o
     alpha = f"## This room (Project Alpha [chat_id={rooms['alpha']}])"
     canonical_view = mv.capture_memory_view(canonical, child, spec)
     assert section(b, "## My story").rstrip("\n") == mv.render_story(canonical_view)  # the mind's story, canonically
-    assert section(b, "## My story") != section(b_main, "## My story")  # a child's: the first block by pointer
+    assert section(b, "## My story") == section(b_main, "## My story")  # a child's story is Main's, byte for byte
     assert section(c, alpha).rstrip("\n") == section(mv.render_room(canonical_view), alpha)
-    assert "Alpha began." in section(c, alpha)  # the canonical retelling of the room
+    assert "Alpha began." in section(b, "## My story")  # the canonical retelling of the room, whole in the story
     assert _files(fork / "memory" / "chronicle") == before  # the fork's own memory is untouched
 
 

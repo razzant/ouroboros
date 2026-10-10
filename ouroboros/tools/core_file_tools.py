@@ -101,7 +101,8 @@ def _direct_resource_binding(
 
 
 def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_line: int = 1,
-                       start_char: int = 0, extent: Optional[Dict[str, Any]] = None) -> str:
+                       start_char: int = 0, extent: Optional[Dict[str, Any]] = None,
+                       max_chars: Optional[int] = None) -> str:
     """Return a line-ranged file view with the shared read-tool header.
 
     ``extent`` (when a dict is passed) receives the DELIVERED window as FACTS,
@@ -122,10 +123,15 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
     header text back.
 
     ``start_char`` is a SUB-LINE cursor: it skips that many characters of the selected
-    window's body before rendering. It exists because delivery is char-bounded (the
-    outer tool-result truncator cuts at ``tool_result_limit``): a single line longer
-    than the budget can never be delivered whole by any line window, so the reader
-    advances WITHIN it by re-reading the same window with a growing ``start_char``.
+    window's body before rendering. Delivery is char-bounded (the loop shows a
+    result the measured frame cannot hold as head+tail with its exact source), so
+    a single line longer than the room can never be delivered whole by any line
+    window: the reader advances WITHIN it by re-reading the same window with a
+    growing ``start_char``. ``max_chars`` bounds THIS view's body (after the cursor)
+    to an exact character count, so the piece is chosen rather than cut from
+    outside; the header then names the next ``start_char``. Both cursors count
+    Unicode code points of the universal-newline text. ``end_line`` is the last
+    COMPLETE line delivered and ``partial_tail`` says the body ends mid-line.
     Disclosed in the header, so the view never silently masquerades as the whole line.
     """
     start_raw, max_raw = _coerce_line_window(start_line, max_lines)
@@ -146,23 +152,33 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
     for line in window_lines:
         ends.append((ends[-1] if ends else 0) + len(line))
     offset = _coerce_start_char(start_char)
-    if offset:
-        body = window[offset:]
-        header = f"# {path} — lines {start}\u2013{end} of {total} (from char {offset} of this window)\n"
-        whole = bisect.bisect_right(ends, offset)  # lines ending at or before the cursor: skipped whole
-        partial_head = bool(body) and not (whole and ends[whole - 1] == offset)  # landed mid-line: that line is partial
-        first_line = start + whole + (1 if partial_head else 0)
-        line_ends = tuple(e - offset for e in ends[whole + (1 if partial_head else 0):])
+    budget = _coerce_max_chars(max_chars)
+    body = window[offset:] if offset else window
+    cut = budget is not None and len(body) > budget
+    if cut:
+        body = body[:budget]
+    delivered_end = offset + len(body)  # window offset right after the body
+    span = f"# {path} — lines {start}\u2013{end} of {total}"
+    if cut:
+        header = f"{span} (from char {offset} of this window, {len(body)} chars; next start_char={delivered_end})\n"
+    elif offset:
+        header = f"{span} (from char {offset} of this window)\n"
     else:
-        body, header, partial_head, first_line = window, f"# {path} — lines {start}\u2013{end} of {total}\n", False, start
-        line_ends = tuple(ends)
+        header = f"{span}\n"
+    whole = bisect.bisect_right(ends, offset)  # lines ending at or before the cursor: skipped whole
+    partial_head = bool(body) and bool(offset) and not (whole and ends[whole - 1] == offset)  # landed mid-line
+    first_line = start + whole + (1 if partial_head else 0)
+    complete_through = bisect.bisect_right(ends, delivered_end)  # lines whose end the body reaches
+    partial_tail = bool(body) and delivered_end < len(window) and not (complete_through and ends[complete_through - 1] == delivered_end)
+    line_ends = tuple(e - offset for e in ends[whole + (1 if partial_head else 0):complete_through])
+    end_line = start + complete_through - 1 if cut else end  # a cut view ends at its last COMPLETE line
     if not body:
         first_line, line_ends = end + 1, ()  # nothing complete was delivered: an EMPTY range, never an inverted one
     if extent is not None:
         source_start = sum(len(line) for line in lines[:start - 1]) + min(offset, len(window))
-        extent.update({"start_line": start, "end_line": end, "total_lines": total, "start_char": offset,
+        extent.update({"start_line": start, "end_line": end_line, "total_lines": total, "start_char": offset,
                        "first_line": first_line, "body_start": len(header), "body_chars": len(body),
-                       "partial_head": partial_head, "line_ends": line_ends,
+                       "partial_head": partial_head, "partial_tail": partial_tail, "line_ends": line_ends,
                        "complete_chars": len(content),
                        "complete_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                        "source_start_char": source_start, "source_end_char": source_start + len(body),
@@ -190,6 +206,15 @@ def _coerce_start_char(start_char: Any = 0) -> int:
         return max(0, int(start_char))
     except (TypeError, ValueError):
         return 0
+
+
+def _coerce_max_chars(max_chars: Any = None) -> Optional[int]:
+    """A positive character budget for one view; anything else means unbounded."""
+    try:
+        value = int(max_chars) if max_chars is not None else None
+    except (TypeError, ValueError):
+        return None
+    return value if value is not None and value > 0 else None
 
 
 def _coerce_line_window(start_line: Any = 1, max_lines: Any = 2000) -> tuple[int, int]:
@@ -313,6 +338,7 @@ def _repo_read(
     display_path: str | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
     extent: Optional[Dict[str, Any]] = None,
+    max_chars: Optional[int] = None,
 ) -> str:
     """Read a repo file; root-level memory names return a runtime_data read hint."""
     target = _resolved_binding.target_path if _resolved_binding is not None else ctx.repo_path(path)
@@ -341,7 +367,7 @@ def _repo_read(
             text=f"⚠️ NOT_FOUND: file does not exist: {target}",
         ))
     return _render_line_slice(display_path or path, content, max_lines=max_lines, start_line=start_line,
-                              start_char=start_char, extent=extent)
+                              start_char=start_char, extent=extent, max_chars=max_chars)
 
 
 def _repo_list(
@@ -382,6 +408,7 @@ def _data_read(
     display_path: str | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
     extent: Optional[Dict[str, Any]] = None,
+    max_chars: Optional[int] = None,
 ) -> str:
     """Read a drive text file; duplicate drive_root prefixes are stripped."""
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
@@ -420,14 +447,15 @@ def _data_read(
         content = _read_source_text(target, extent)
         start_raw, max_raw = _coerce_line_window(start_line, max_lines)
         # The cognitive full-read shortcut only applies to a DEFAULT read: an explicit
-        # start_char is a sub-line cursor request and must be honored, not swallowed.
-        if _is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000 and not _coerce_start_char(start_char):
+        # start_char or max_chars is a bounded-view request and must be honored, not swallowed.
+        if (_is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000
+                and not _coerce_start_char(start_char) and _coerce_max_chars(max_chars) is None):
             if display_path is None:
                 return content
             full_line_count = max(1, len(content.splitlines()))
             return _render_line_slice(display_path, content, max_lines=full_line_count, start_line=1, extent=extent)
         return _render_line_slice(display_path or norm, content, max_lines=max_raw, start_line=start_raw,
-                                  start_char=start_char, extent=extent)
+                                  start_char=start_char, extent=extent, max_chars=max_chars)
     except FileNotFoundError:
         if norm.replace("\\", "/").startswith("memory/"):
             explanation = (
@@ -533,7 +561,7 @@ def _root_display_path(root: str, path: str) -> str:
 
 
 def _annotate_reread(ctx: ToolContext, target: Any, start_line: int, max_lines: int, result: str,
-                     start_char: int = 0) -> str:
+                     start_char: int = 0, max_chars: Optional[int] = None) -> str:
     """Append an advisory hint when the SAME file slice is re-read unchanged.
 
     Per-task, key on (resolved path, slice); the change signal is (size, mtime).
@@ -547,7 +575,7 @@ def _annotate_reread(ctx: ToolContext, target: Any, start_line: int, max_lines: 
         return result
     if not isinstance(result, str) or result.startswith("⚠️"):
         return result
-    key = f"{resolved}|{int(start_line)}|{int(max_lines)}|{_coerce_start_char(start_char)}"
+    key = f"{resolved}|{int(start_line)}|{int(max_lines)}|{_coerce_start_char(start_char)}|{_coerce_max_chars(max_chars)}"
     sig = (st.st_size, st.st_mtime_ns)
     seen = getattr(ctx, "_read_file_seen", None)
     if not isinstance(seen, dict):
@@ -579,8 +607,20 @@ def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: st
     before every dispatch (these are the ONLY writers — a static test pins the
     writer set). Disclosure only — never gates or alters the read."""
     if "body_start" in extent:
-        ctx.last_read_view = {"target": str(target), "opened_path": str(opened),
-                              "opened_root": str(opened_root), **extent}
+        view = {"target": str(target), "opened_path": str(opened), "opened_root": str(opened_root), **extent}
+        ctx.last_read_view = view
+        from ouroboros.delegate_output import acknowledge_staged_output_read
+        from ouroboros.tools.tool_result import _published_tool_result, _replace_tool_result
+
+        compact = {key: view[key] for key in (
+            "target", "opened_root", "body_start", "body_chars", "source_start_char", "source_end_char",
+            "complete_chars", "complete_sha256", "source_revision", "range_basis", "source_masked") if key in view}
+        prior = _published_tool_result(ctx, None)
+        result = (_replace_tool_result(prior, meta_updates={"read_view": compact})
+                  if isinstance(prior, ToolResult) and prior.text == rendered else
+                  ToolResult(status="ok", code="OK", text=rendered, meta={"read_view": compact}))
+        rendered = _publish_tool_result(ctx, result)
+        acknowledge_staged_output_read(ctx, compact, rendered)
     return rendered
 
 
@@ -595,6 +635,7 @@ def _read_file(
     bucket: str = "",
     skill_name: str = "",
     _resolved_binding: ResolvedResourceBinding | None = None,
+    max_chars: Optional[int] = None,
 ) -> str:
     # Reset first: a blocked or missing read must never inherit the previous
     # read's extent (the renderer fills `extent` only when it rendered).
@@ -646,7 +687,8 @@ def _read_file(
             display_path=display_path,
             _resolved_binding=binding,
             extent=extent,
-        ), start_char=start_char))
+            max_chars=max_chars,
+        ), start_char=start_char, max_chars=max_chars))
     if normalized == "runtime_data":
         return _stamp_read_view(ctx, target, opened, opened_root, extent, _annotate_reread(ctx, target, start_line, max_lines, _data_read(
             ctx,
@@ -657,26 +699,16 @@ def _read_file(
             display_path=_root_display_path(normalized, path),
             _resolved_binding=binding,
             extent=extent,
-        ), start_char=start_char))
+            max_chars=max_chars,
+        ), start_char=start_char, max_chars=max_chars))
     try:
         content = _read_source_text(target, extent)
         rendered = _render_line_slice(_root_display_path(normalized, path), content,
                                       max_lines=max_lines, start_line=start_line,
-                                      start_char=start_char, extent=extent)
-        if normalized == "task_drive":
-            # D7 coverage acknowledgement: what counts as read is what the DELIVERY
-            # layer will actually hand the model, so the hook receives the rendered
-            # view and applies the same char budget the outer truncator applies.
-            # Disclosure only — nothing on this path may ever block or fail the read.
-            try:
-                from ouroboros.tools.delegate import acknowledge_staged_output_read
-
-                acknowledge_staged_output_read(ctx, target, content, start_line, max_lines,
-                                               start_char=start_char, rendered=rendered)
-            except Exception:
-                log.warning("staged-output coverage acknowledgement hook failed", exc_info=True)
+                                      start_char=start_char, extent=extent, max_chars=max_chars)
         return _stamp_read_view(ctx, target, opened, opened_root, extent,
-                                _annotate_reread(ctx, target, start_line, max_lines, rendered, start_char=start_char))
+                                _annotate_reread(ctx, target, start_line, max_lines, rendered,
+                                                 start_char=start_char, max_chars=max_chars))
     except FileNotFoundError:
         return _publish_tool_result(ctx, ToolResult(
             status="ok",

@@ -358,11 +358,13 @@ def test_latched_wait_cause_outranks_the_overflow_a_failed_local_pass_left(tmp_p
 
 def test_context_overflow_with_no_episode_keeps_the_overflow_salvage(tmp_path, monkeypatch):
     """Control for the precedence: a primary dispatch rejected as a context
-    overflow with NO wait episode never walks the chain (a local fallback being
-    configured changes nothing) and keeps the overflow terminal unchanged —
-    source ``context_overflow_local_salvage``, ``llm_api_error``, the window
-    wording."""
-    monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", _no_chain)
+    overflow with NO wait episode walks the configured routes exactly once after
+    the primary's own recovery ladder (owner decision 7A, rung f: the candidates
+    inherit the view the ladder left) and, when that walk finds no answer, keeps
+    the overflow terminal unchanged — source ``context_overflow_local_salvage``,
+    ``llm_api_error``, the window wording."""
+    walks = []
+    monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", _failing_walk(walks))
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "local/candidate")
     monkeypatch.setenv("USE_LOCAL_FALLBACK", "1")
@@ -370,7 +372,7 @@ def test_context_overflow_with_no_episode_keeps_the_overflow_salvage(tmp_path, m
     notes = []
     result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, notes))
 
-    assert llm.calls == 1
+    assert llm.calls == 1 and walks == ["context_overflow"]  # one walk, entered with the refusal's own kind
     assert _events(tmp_path, "network_wait") == []
     assert usage["_last_llm_error_kind"] == "context_overflow"
     assert usage["execution_status"] == "infra_failed"

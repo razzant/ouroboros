@@ -501,7 +501,10 @@ def test_owner_selected_account_rebinds_fallback_before_physical_send(main_call,
     assert dispatched[-1]["physical_context"]["capacity_total_tokens"] == 240_000
     assert plan.route_fp == "capacity-account-b" and plan.window_tokens == 240_000
     # completed tools are not replayed; the answered send's clock line follows them
-    assert ctx.messages[-3:-1] == original[-2:] and ctx.messages[-1]["content"].startswith(CLOCK_NOTE_PREFIX)
+    from tests.test_subscription_main_wait import _without_context_facts
+
+    canonical = _without_context_facts(ctx.messages)
+    assert canonical[-3:-1] == original[-2:] and canonical[-1]["content"].startswith(CLOCK_NOTE_PREFIX)
     assert len(gateway.accepted_operations) == 2
 
 

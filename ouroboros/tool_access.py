@@ -1,10 +1,4 @@
-"""Tool API v2 access matrix.
-
-This is the single policy shape for LLM-visible tools: a profile asks to run an
-operation against a resource root and receives an allow/block decision. The
-legacy per-tool checks still provide defense-in-depth while the public API is
-migrated to neutral tool names.
-"""
+"""Tool API v2 access policy and historical facade surface (ARCHITECTURE §6)."""
 
 from __future__ import annotations
 
@@ -14,8 +8,7 @@ import re  # noqa: F401 — historical facade surface
 from dataclasses import dataclass  # noqa: F401 — historical facade surface
 from typing import Any, Iterable, Literal, Optional  # noqa: F401 — historical facade surface
 
-from ouroboros.artifacts import (delegated_capture_read_target,
-                                 task_artifact_dir_path, task_id_for_artifacts)
+from ouroboros.artifacts import delegated_capture_read_target, task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.headless import task_state_dir
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE  # noqa: F401 — historical facade surface
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES, normalize_task_constraint  # noqa: F401 — historical facade surface
@@ -28,9 +21,7 @@ _deliverables_root_lexical = _deliverables_paths._deliverables_root_lexical
 _deliverables_root_lexical_alias = _deliverables_paths._deliverables_root_lexical_alias
 _lexical_path_is_relative_to_casefold = _deliverables_paths._lexical_path_is_relative_to_casefold
 
-# v7 D04 split: the owners below were extracted VERBATIM from this module
-# (see each leaf's header); re-exported here so historical imports and
-# monkeypatch targets keep working unchanged.
+# These owners preserve historical imports and monkeypatch targets unchanged.
 from ouroboros.tool_access_types import (  # noqa: F401 — re-exported moved surface
     Operation,
     ResolvedResourceBinding,
@@ -701,6 +692,15 @@ def _resolve_target_in_selected_base(
         anchored = delegated_capture_read_target(
             canonical_data_root(ctx), task_id_for_artifacts(ctx),
             safe_relpath(path_text), resolved_base)
+        if anchored is not None and anchored.exists():
+            return anchored
+        if anchored is not None or not (resolved_base / safe_relpath(path_text)).exists():
+            from ouroboros.source_retention import retained_actor_source_read_target
+
+            retained = retained_actor_source_read_target(
+                canonical_data_root(ctx), task_id_for_artifacts(ctx), safe_relpath(path_text))
+            if retained is not None:
+                return retained
         if anchored is not None:
             return anchored
     resolved = (resolved_base / safe_relpath(path_text)).resolve(strict=False)

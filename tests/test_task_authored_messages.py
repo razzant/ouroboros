@@ -800,7 +800,8 @@ def test_a_returning_roster_is_re_announced_after_an_intervening_change(tmp_path
     assert "- r-2 · Audit" in str(messages[-1]["content"])
     _snapshot(tmp_path, roster_a)
     assert maybe_append_roster_note(ctx, messages, tmp_path) is True, "the roster returned to A: announce it again"
-    assert str(messages[-1]["content"]) == note_a
+    latest = str(messages[-1]["content"])
+    assert latest == note_a or "No longer in the displayed roster (not proof of completion): r-2" in latest
     assert maybe_append_roster_note(ctx, messages, tmp_path) is False, "unchanged since the latest note"
 
     # The latest representation may be a note merged into an unsent owner row

@@ -376,21 +376,13 @@ def _resolve_loop_max_rounds(ctx: Any = None) -> Optional[int]:
 
 def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
                               event_queue, task_id, drive_logs, tool_schemas) -> None:
-    """Observe the usable Main source for prefix continuity and authored views.
+    """Observe the usable Main source after fallback/reclaim, before its reply.
 
-    Called once per successful dispatch, after the model call and the fallback
-    chain and before the assistant row is appended, so an in-call reclaim,
-    an overflow reprojection or a fallback adoption is part of what the next
-    round must extend.  Between the sends of ONE execution the transcript is append-only:
-    OpenAI-family caches reuse a previous request only when that whole request
-    is a byte-prefix of the next, so a transient trailing message or an
-    in-place rewrite of an already-sent message discards the entire
-    conversation cache (#906).  The compaction seams stamp their sanction
-    (``transcript_prefix.sanction_rewrite``); every other break (a context-fit
-    reprojection after a real overflow, a replaced tail) is counted in
-    ``prompt_prefix_breaks``.  It records and never blocks a send.
-    The same boundary owns the canonical compaction snapshot; physical
-    vision/provider projections remain in the existing request artifacts.
+    This boundary captures canonical authored-view exposure; physical provider
+    projections stay in request artifacts. Within one execution, whole-request
+    prefixes enable cache reuse (#906). Compaction sanctions its rewrite via
+    ``transcript_prefix.sanction_rewrite``; other prefix breaks (including actual
+    overflow reprojections) are recorded in ``prompt_prefix_breaks``, never gated.
     """
     from ouroboros.tools.compact_context import record_context_view
 
@@ -404,6 +396,14 @@ def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
     _emit_checkpoint_event(event_queue, task_id, drive_logs, fact)
     if not fact["sanctioned_by"]:
         accumulated_usage["prompt_prefix_breaks"] = int(accumulated_usage.get("prompt_prefix_breaks") or 0) + 1
+
+
+def _measure_tool_result_batch(ctx, messages, schemas, *, round_id):
+    """Measure on the adopted route, including a same-round fallback or rebind."""
+    return _measure_main_context_view(
+        getattr(ctx, "context_fit_plan", None), messages, schemas,
+        getattr(ctx, "active_context_mode", "max"),
+        getattr(ctx, "active_effort", "medium"), round_id)
 
 
 def _reset_turn_state(ctx: Any) -> None:
@@ -474,11 +474,7 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
 
 
 def _load_working_recovery(ctx: Any, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """This start's frozen working checkpoint, or ``{}``; an unusable one is disclosed.
-
-    The retry or restart that carried it keeps its existing eligibility; only
-    the starting point is lost, never the honesty about it.
-    """
+    """Load this start's frozen checkpoint; disclose unusable sources without changing retry eligibility."""
     from ouroboros.working_checkpoint import consume_recovery, load_recovery
 
     try:
@@ -498,9 +494,7 @@ def _load_working_recovery(ctx: Any, messages: List[Dict[str, Any]]) -> Dict[str
 
 @task_timing_scope(reuse=True)
 def run_llm_loop(
-    messages: List[Dict[str, Any]],
-    tools: ToolRegistry,
-    llm: LLMClient,
+    messages: List[Dict[str, Any]], tools: ToolRegistry, llm: LLMClient,
     drive_logs: pathlib.Path,
     emit_progress: Callable[..., None],
     incoming_messages: queue.Queue,
@@ -534,8 +528,7 @@ def run_llm_loop(
         _emit_physical_mode(event_queue, task_id, drive_logs, context_fit_plan, active_context_mode)
     cost_ceiling = _resolve_task_cost_ceiling(ctx, budget_remaining_usd)
     if cost_ceiling.root_cap_usd is not None:
-        # A resumed/late-started tree member must see tree spend before its
-        # first pacing surface, not a process-local empty stash.
+        # Resumed/late-started members see tree spend before their first pacing surface.
         _loop_tree_accounting(refresh=True, max_age_sec=0.0)
     continuation = saved or saved_pause or saved_working
     tool_schemas = continuation["tool_schemas"] if continuation else initial_tool_schemas(tools, context_mode=active_context_mode)
@@ -712,6 +705,7 @@ def run_llm_loop(
             # Delivery/finalization in the same round must use that applied route.
             limit_ctx.active_model = ctx.active_model = active_model
             limit_ctx.active_use_local = ctx.active_use_local = active_use_local
+            ctx.context_fit_plan, ctx.active_context_mode = context_fit_plan, active_context_mode
             if (msg is None and str(accumulated_usage.get("_last_llm_error_kind") or "") == "llm_output_exhausted"
                     and not provider_no_call_source(accumulated_usage, False)[0]):
                 # Output exhaustion is no outage, the primary's (no route walk) or a configured
@@ -768,7 +762,9 @@ def run_llm_loop(
             working_checkpoint.save_before_effects(limit_ctx)  # no tool starts over an unsaved batch
             handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,
-                messages, llm_trace, emit_progress
+                messages, llm_trace, emit_progress, tool_schemas=tool_schemas,
+                fit_candidate=functools.partial(_measure_tool_result_batch, ctx,
+                    round_id=f"{accumulated_usage.setdefault('execution_id', new_execution_id())}:round:{round_idx}")
             )
             working_checkpoint.save_or_log(limit_ctx, "post_batch")  # BEFORE any acceptance/owner-wait park
             from ouroboros.loop_delivery import finish_completed_stop
@@ -933,6 +929,7 @@ from ouroboros.loop_budget import (  # noqa: E402, F401 -- intentional public re
     _finish_tool_round_budget,
     _check_budget_limits,
     _resolve_task_cost_ceiling,
+    _wrapup_global_remaining,
     _TREE_ACCOUNTING_MAX_STALE_SEC,
     _loop_tree_accounting,
     _soft_land_exhausted_ceiling,

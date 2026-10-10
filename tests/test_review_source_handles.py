@@ -503,3 +503,31 @@ def test_plan_dialogue_promotion_never_reads_a_foreign_source(tmp_path, monkeypa
     with pytest.raises(AssertionError, match='foreign bytes'):
         artifacts.read_actor_source_bytes(child, 'sibling', sibling_ref)
     assert opened[-1] == foreign
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_submitted_plan_source_survives_promotion_and_gates_child_cleanup(tmp_path, missing):
+    from ouroboros.task_results import record_plan_review_attempt, load_plan_review_state
+    from ouroboros.tools.plan_author_history import current_submitted_plan
+    parent = tmp_path / "canonical"
+    child = prepare_task_drive(parent, "submitted", "empty")
+    proposed = {"spec": {"goal": "Keep exact submitted material"}, "plan_prose": "Current unreviewed proposal"}
+    state = record_plan_review_attempt(child, "submitted", fingerprint="b" * 64, submitted_subject=proposed)
+    ref = state["current_attempt"]["submitted_subject"]
+    path = artifacts.task_artifact_dir_path(child, "submitted") / ref["path"]
+    raw = path.read_bytes()
+    write_task_result(child, "submitted", "completed", result="No reviewer was dispatched")
+    if missing:
+        path.unlink()
+        copy_child_task_result(parent, {"id": "submitted", "drive_root": str(child)})
+        assert not remove_subagent_task_drive(parent, "submitted", live=lambda _: False)
+        assert child.exists()
+        path.write_bytes(raw)
+    copy_child_task_result(parent, {"id": "submitted", "drive_root": str(child)})
+    promoted = retry_child_task_refs(parent, child, "submitted")
+    assert promoted["child_ref_promotion"]["status"] == "complete"
+    assert remove_subagent_task_drive(parent, "submitted", live=lambda _: False)
+    assert not child.exists()
+    assert artifacts.read_actor_source_bytes(parent, "submitted", ref) == raw
+    current = current_submitted_plan(parent, "submitted", load_plan_review_state(parent, "submitted"))
+    assert current["spec"] == proposed["spec"] and current["plan_prose"] == proposed["plan_prose"]

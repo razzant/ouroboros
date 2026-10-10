@@ -30,12 +30,16 @@ from ouroboros.tool_call_log import (
 )
 from ouroboros.tool_capabilities import (
     FOREGROUND_MUTATIVE_TOOLS, PARALLEL_SAFE_ENQUEUE_TOOLS,
-    READ_ONLY_PARALLEL_TOOLS, REVIEWED_MUTATIVE_TOOLS, STATEFUL_BROWSER_TOOLS,
-    UNTRUNCATED_REPO_READ_PATHS as _UNTRUNCATED_REPO_READ_PATHS,
-    UNTRUNCATED_REPO_READ_PREFIXES as _UNTRUNCATED_REPO_READ_PREFIXES,
-    UNTRUNCATED_TOOL_RESULTS as _UNTRUNCATED_TOOL_RESULTS,
-    routing_action_for_tool, completion_control_call, substantive_tool_calls, tool_result_limit as _tool_result_limit,
+    READ_ONLY_PARALLEL_TOOLS,
+    REVIEWED_MUTATIVE_TOOLS,
+    STATEFUL_BROWSER_TOOLS,
+    requested_result_view, routing_action_for_tool, completion_control_call, substantive_tool_calls,
 )
+from ouroboros.tool_result_delivery import (
+    FitCandidate, prepare_producer_sources, project_tool_result_batch, reader_text, render_result_view,
+    split_allowance, typed_result_facts, with_producer_source,
+)
+from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tools.tool_result import (
     TOOL_CODE_SPECS,
@@ -327,110 +331,67 @@ def _deadline_clamped_timeout(tools: ToolRegistry, tool_name: str, base_timeout:
     return int(max(1.0, min(float(base_timeout), window)))
 
 
-def _path_is_cognitive_artifact(tool_name: str, tool_args: Optional[Dict[str, Any]]) -> bool:
-    """Return whether a read target must stay whole."""
-    if not tool_args:
-        return False
-
-    raw_path = str(tool_args.get("path") or "").strip()
-    if not raw_path:
-        return False
-
-    normalized = raw_path.replace("\\", "/").lstrip("./")
-
-    if tool_name == "read_file" and str((tool_args or {}).get("root") or "active_workspace") == "runtime_data":
-        return normalized.startswith("memory/") and "/_backup/" not in normalized
-
-    if tool_name == "read_file":
-        return (normalized.startswith(_UNTRUNCATED_REPO_READ_PREFIXES)
-                or normalized in _UNTRUNCATED_REPO_READ_PATHS)
-
-    return False
-
-
-def _should_skip_tool_result_truncation(
-    tool_name: str,
-    tool_args: Optional[Dict[str, Any]] = None,
-) -> bool:
-    """Canonical/cognitive reads must remain whole."""
-    return tool_name in _UNTRUNCATED_TOOL_RESULTS or _path_is_cognitive_artifact(tool_name, tool_args)
-
-
 def _truncate_tool_result(
     result: Any,
     tool_name: str = "",
     tool_args: Optional[Dict[str, Any]] = None,
     source_ref: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Cap tool result unless it is an untruncated artifact."""
-    limit = _tool_result_limit(tool_name)
-    s = str(result)
-    if _should_skip_tool_result_truncation(tool_name, tool_args):
-        return s
-    if len(s) <= limit:
-        return s
-    marker = f"\n... (truncated from {len(s)} chars, limit={limit})"
-    if isinstance(source_ref, dict) and source_ref:
-        recover = (
-            "Read the exact source above, or page this tool (offset/limit) for the omitted range."
-            if tool_name in _PAGEABLE_TOOL_RESULTS
-            else "Do not rerun this tool to recover omitted output. Read the exact source above."
-        )
-        marker += (
-            "\nFULL_RESULT_SOURCE_JSON="
-            + json.dumps(source_ref, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            + "\n" + recover
-        )
-    else:
-        marker += (
-            "\nFULL_RESULT_SOURCE_UNAVAILABLE=true"
-            "\nDo not treat this partial result as complete; exact source persistence failed."
-        )
-    return s[:limit] + marker
-
-
-# Tools whose own affordance IS paging. This selects the marker WORDING only: it
-# no longer exempts the result from source persistence, because the acceptance
-# decider has no way to page a tool the agent ran — it can only read the exact
-# bytes the host persisted.
-_PAGEABLE_TOOL_RESULTS = frozenset({
-    "read_file", "chat_history", "journal_read", "tree_read", "recent_tasks", "query_code",
-})
-
-
-def _persist_truncated_tool_source(
-    ctx: Any,
-    tool_name: str,
-    tool_call_id: str,
-    result: Any,
-    tool_args: Optional[Dict[str, Any]] = None,
     *,
-    force: bool = False,
-) -> Dict[str, Any]:
-    """Write a generic over-limit result to this actor's existing artifact root."""
+    allowance_chars: Optional[int] = None,
+) -> str:
+    """Compatibility renderer: the whole text unless a measured allowance is given.
 
-    text = str(result)
-    if not force and (
-        _should_skip_tool_result_truncation(tool_name, tool_args)
-        or len(text) <= _tool_result_limit(tool_name)
-    ):
-        return {}
-    try:
-        from ouroboros.artifacts import store_actor_source_bytes, task_id_for_artifacts
-
-        return store_actor_source_bytes(
-            pathlib.Path(ctx.drive_root),
-            task_id_for_artifacts(ctx),
-            category="tool_results",
-            source_id=str(tool_call_id or new_call_id("tool_result")),
-            data=text.encode("utf-8"),
-            extension="txt",
-        )
-    except Exception:
-        log.warning("Failed to persist actor-readable tool result source", exc_info=True)
-        return {}
+    The per-name cap and the name/path exemptions are retired: what a result may
+    occupy is decided per batch from the measured frame (``tool_result_delivery``).
+    A caller holding only text and the chars this result may show renders the
+    same head+tail view Main delivers, with ``source_ref`` as its exact source
+    (``{}``/``None`` discloses a failed persistence); the call's own head/tail
+    request in ``tool_args`` shapes the split.
+    """
+    if allowance_chars is None:
+        return str(result)
+    text = reader_text(result)
+    head, tail = split_allowance(int(allowance_chars), requested_result_view(tool_args), len(text))
+    return render_result_view(text, head_chars=head, tail_chars=tail, tool_name=tool_name, source_ref=source_ref)[0]
 
 
+def _deliver_tool_results(
+    ctx: Any,
+    results: List[Dict[str, Any]],
+    messages: List[Dict[str, Any]],
+    tool_schemas: Optional[list],
+    fit_candidate: Optional[FitCandidate],
+    llm_trace: Dict[str, Any],
+    pending_messages: Optional[list] = None,
+) -> List[Dict[str, Any]]:
+    """First-show views for one batch: measured when the caller supplied the
+    frame, whole (truthful best effort, no invented cap) when it did not.
+
+    The delivery receipt of a batch that was not delivered whole is recorded
+    under ``llm_trace["tool_result_delivery"]`` (status, bounds, partial rows).
+    """
+    if ctx is None or fit_candidate is None or not results:
+        return results
+    from ouroboros.artifacts import task_id_for_artifacts
+
+    def complete_fit(candidate: list, schemas: list) -> Dict[str, Any]:
+        # Producer source locators and host notes are part of the delivered
+        # candidate, including the zero-body minimum. Never add them after fit.
+        shaped = list(candidate)
+        for index, row in enumerate(results, len(candidate) - len(results)):
+            shaped[index] = {**candidate[index], "content": with_producer_source(row, candidate[index]["content"])}
+        return fit_candidate([*shaped, *(pending_messages or [])], schemas)
+
+    rows, receipt = project_tool_result_batch(
+        results, messages, list(tool_schemas or []),
+        drive_root=pathlib.Path(ctx.drive_root), task_id=task_id_for_artifacts(ctx),
+        fit_candidate=complete_fit, policy="measured_frame",
+    )
+    if receipt.get("status") != "complete":
+        llm_trace.setdefault("tool_result_delivery", []).append({
+            key: value for key, value in receipt.items() if key != "fit"
+        } | {"round_id": next((r.get("round_id") for r in results if r.get("round_id")), None)})
+    return rows
 
 
 def _typed_execution_failure(tool_ok: bool, tool_result: ToolResult | None) -> bool:
@@ -694,7 +655,10 @@ def _execute_single_tool(
 
     tool_ok = True
     try:
-        tool_result = host_refusal if host_refusal is not None else tools.execute_result(fn_name, args)
+        from ouroboros.delegate_output import staged_read_delivery_scope
+
+        with staged_read_delivery_scope():
+            tool_result = host_refusal if host_refusal is not None else tools.execute_result(fn_name, args)
         result = tool_result.text
     except UsageAccountingError:
         raise
@@ -965,6 +929,7 @@ def _make_timeout_result(
         "args_for_log": args_for_log,
         "is_code_tool": is_code_tool,
         "trace_ref": trace_ref, "round_id": corr.get("round_id"),
+        **invocation_fields(invocation),
         "result_meta": result_meta,
         "tool_result": tool_result,
     }
@@ -973,6 +938,7 @@ def _make_timeout_result(
 def _emit_finished(tools: ToolRegistry, live: Dict[str, Any], result: Dict[str, Any],
                    started_at: float, **extra: Any) -> Dict[str, Any]:
     """The live ``tool_call_finished`` frame of one call (every branch shares it)."""
+    result.update(invocation_fields(live))
     result_meta = result.get("result_meta") or {}
     _emit_live_log(tools, {
         **{key: value for key, value in live.items() if key not in {"ts", "timeout_sec", "terminal_wait"}},
@@ -1189,8 +1155,18 @@ def handle_tool_calls(
     messages: List[Dict[str, Any]],
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
+    *,
+    fit_candidate: Optional[FitCandidate] = None,
+    tool_schemas: Optional[list] = None,
 ) -> int:
-    """Execute tool calls, append results, and return error count."""
+    """Execute tool calls, append results, and return error count.
+
+    ``fit_candidate(messages, schemas)`` is the round's Main measurement (the
+    existing ``_measure_main_context_view`` fields) and ``tool_schemas`` the
+    schemas the next send carries: together they let the result batch be
+    delivered under the measured frame. Without them results are delivered
+    whole, best effort, and no cap is invented.
+    """
     from ouroboros.loop_delivery import completion_observation
     from ouroboros.openai_chat_dispatch import (
         custom_tool_argument_error,
@@ -1296,7 +1272,8 @@ def handle_tool_calls(
             # started ones (each bounded by its own tool timeout) (#1196, Astra #4).
             executor.shutdown(wait=batch_raised, cancel_futures=True)
 
-    errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools)
+    errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
+                                  fit_candidate=fit_candidate, tool_schemas=tool_schemas)
     if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
         tools._ctx._skill_finalization_injected = False
     return errors
@@ -1305,6 +1282,7 @@ def handle_tool_calls(
 def _maybe_auto_attach_image(
     exec_result: Dict[str, Any],
     tools: Optional[ToolRegistry],
+    *, staged_messages: Optional[list] = None,
 ) -> Optional[Dict[str, str]]:
     """Same-round image attachment for tool results that explicitly offer one.
 
@@ -1356,6 +1334,9 @@ def _maybe_auto_attach_image(
         ctx = getattr(tools, "_ctx", None)
         if ctx is None:
             return
+        if staged_messages is not None:
+            ctx = copy.copy(ctx)
+            ctx.messages = staged_messages  # Never rebind the shared live context.
         observation = {"status": "unavailable"}
         from ouroboros.tools.vision import attach_local_image_to_context
 
@@ -1369,7 +1350,7 @@ def _maybe_auto_attach_image(
 
 
 def reclaim_trace_refs(tool_ctx: Any) -> Dict[str, Any]:
-    """Per-task {tool_call_id: trace_ref} accumulated as tool results append."""
+    """Legacy diagnostic map; exact compaction custody belongs to each result row."""
     refs = getattr(tool_ctx, "_tool_trace_refs", None)
     return refs if isinstance(refs, dict) else {}
 
@@ -1403,62 +1384,70 @@ def process_tool_results(
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
     tools: Optional[ToolRegistry] = None,
+    *,
+    fit_candidate: Optional[FitCandidate] = None,
+    tool_schemas: Optional[list] = None,
 ) -> int:
-    """Append tool results to messages/trace and return error count."""
+    """Append tool results to messages/trace and return error count.
+
+    The batch is first projected as a whole under the measured frame
+    (``fit_candidate``/``tool_schemas``, see ``handle_tool_calls``); each
+    delivered view carries its typed facts and exact source when partial.
+    """
     error_count = 0
+    ctx = getattr(tools, "_ctx", None) if tools is not None else None
+    from ouroboros.task_pacing import record_tool_activity
 
     for exec_result in results:
+        record_tool_activity(ctx, exec_result)
+    from ouroboros.artifacts import task_id_for_artifacts
+
+    results = prepare_producer_sources(results, getattr(ctx, "drive_root", None),
+                                       task_id_for_artifacts(ctx) if ctx is not None else "")
+    review_updates, review_pending = [], {}
+    if ctx is not None and getattr(ctx, "_pending_review_context", None):
+        from ouroboros.review_history_view import review_context_updates
+        review_pending = dict(ctx._pending_review_context)
+        review_updates, _ = review_context_updates(ctx, families=review_pending, messages=messages)
+    from ouroboros.tools.owner_delivery import pending_owner_dialogue, acknowledge_owner_dialogue
+    dialogue_updates = pending_owner_dialogue(ctx)
+    # Eviction sees old + new images on one private candidate. Adopt that exact
+    # projection only after fitting, with new images after the whole tool block.
+    # Eviction replaces content-list entries; the rest of each old row is reused.
+    image_history = [{**row, "content": list(row["content"])} if isinstance(row.get("content"), list)
+                     else row for row in messages]
+    history_count = len(messages)
+    image_observations = [_maybe_auto_attach_image(row, tools, staged_messages=image_history) for row in results]
+    image_messages = image_history[history_count:]
+    views = _deliver_tool_results(ctx, results, image_history[:history_count], tool_schemas, fit_candidate, llm_trace,
+                                  [*review_updates, *dialogue_updates, *image_messages])
+    messages[:] = image_history[:history_count]
+
+    for exec_result, view in zip(results, views):
+        if ctx is not None:
+            from ouroboros.delegate_output import acknowledge_staged_output_delivery
+
+            acknowledge_staged_output_delivery(ctx, exec_result, view)
         fn_name = exec_result["fn_name"]
         is_error = exec_result["is_error"]
 
         if is_error:
             error_count += 1
 
-        ctx = getattr(tools, "_ctx", None) if tools is not None else None
-        from ouroboros.task_pacing import record_tool_activity
-
-        record_tool_activity(ctx, exec_result)
-        result_source_ref = (
-            _persist_truncated_tool_source(
-                ctx, fn_name, str(exec_result["tool_call_id"]), exec_result["result"],
-                exec_result.get("tool_args"),
-            )
-            if ctx is not None else {}
-        )
-        result_partial = (
-            not _should_skip_tool_result_truncation(fn_name, exec_result.get("tool_args"))
-            and len(str(exec_result["result"])) > _tool_result_limit(fn_name)
-        )
-        truncated_result = _truncate_tool_result(
-            exec_result["result"],
-            tool_name=fn_name,
-            tool_args=exec_result.get("tool_args"),
-            source_ref=result_source_ref,
-        )
+        truncated_result = str(view["result"])
+        result_partial = bool(view.get("result_partial"))
+        result_source_ref = view.get("result_source_ref") if isinstance(view.get("result_source_ref"), dict) else {}
         typed = exec_result.get("tool_result")
-        producer_ref = {}
-        if isinstance(typed, ToolResult) and typed.producer_text is not None:
-            if ctx is not None:
-                producer_ref = _persist_truncated_tool_source(
-                    ctx, fn_name, str(exec_result["tool_call_id"]) + ".producer",
-                    typed.producer_text, force=True,
-                )
-            # The complete annotated source above remains review evidence. This
-            # separate source is for parsers; neither bytes nor notes live in meta.
-            if result_partial and typed.host_annotations:
-                truncated_result += "\n\n" + "\n\n".join(typed.host_annotations)
-            truncated_result += (
-                "\nPRODUCER_RESULT_SOURCE_JSON=" + json.dumps(producer_ref, ensure_ascii=False)
-                + "\nUnannotated tool data for programmatic reading; host notes and outcome still apply."
-                if producer_ref else
-                "\nPRODUCER_RESULT_SOURCE_UNAVAILABLE=true"
-                "\nHost notes remain in the result; no clean producer file was retained."
-            )
+        producer_ref = exec_result.get("producer_source_ref") or {}
+        truncated_result = with_producer_source(exec_result, truncated_result)
 
         messages.append({
             "role": "tool",
             "tool_call_id": exec_result["tool_call_id"],
-            "content": truncated_result
+            "content": truncated_result,
+            TOOL_RESULT_RECORD_KEY: make_tool_result_record(
+                exec_result, truncated_result, facts=typed_result_facts(exec_result),
+                source_ref=result_source_ref),
         })
         # Keyed on the wake the RESULT published, not on a tool name: a call that published none has nothing to ack.
         if ctx is not None and ((exec_result.get("result_meta") or {}).get("tool_result_meta") or {}).get("supervision_wake_id"):
@@ -1470,8 +1459,8 @@ def process_tool_results(
             except Exception:
                 log.debug("Failed to acknowledge injected delegate wake", exc_info=True)
 
-        # Retain the pre-truncation trace ref per tool_call_id so the context
-        # reclaim materializer can bind exact tool CAS refs into its capsules.
+        # Keep the call-ID map for diagnostic callers. Compaction takes exact
+        # provenance from the occurrence-bound record on the canonical row.
         trace_ref = exec_result.get("trace_ref")
         if ctx is not None and isinstance(trace_ref, dict) and trace_ref:
             refs = getattr(ctx, "_tool_trace_refs", None)
@@ -1498,9 +1487,8 @@ def process_tool_results(
             **({
                 "result_partial": True,
                 "result_source_ref": result_source_ref,
-                "result_source_status": (
-                    "ready" if result_source_ref else "source_unavailable"
-                ),
+                "result_source_status": str(view.get("result_source_status") or ("ready" if result_source_ref else "source_unavailable")),
+                "result_source_view": view.get("result_source_view") or {},
             } if result_partial else {}),
             **(exec_result.get("result_meta") or {}),
             **({"producer_source_ref": producer_ref,
@@ -1581,15 +1569,25 @@ def process_tool_results(
             except Exception:
                 log.debug("Failed to parse task_acceptance_review tool result", exc_info=True)
 
+    # These resident facts and exact bodies were included before allocation. Append
+    # only after the complete assistant/tool block, before an owner-wait can park.
+    messages.extend(review_updates)
+    messages.extend(dialogue_updates)
+    acknowledge_owner_dialogue(ctx, dialogue_updates)
+    if ctx is not None:
+        pending = dict(getattr(ctx, "_pending_review_context", {}) or {})
+        for key, value in review_pending.items():
+            if pending.get(key) == value:
+                pending.pop(key)
+        ctx._pending_review_context = pending
     # Auto-attach AFTER the round's complete tool-message block, never between two
     # tool messages answering the same assistant turn: the user(image) injection
     # then preserves tool-result contiguity BY CONSTRUCTION instead of relying on
     # the transport's adjacency repair to fix an interleaving we created ourselves.
-    by_call = {row["tool_call_id"]: row for row in llm_trace["tool_calls"][-len(results):]}
-    for exec_result in results:
-        observation = _maybe_auto_attach_image(exec_result, tools)
+    messages.extend(image_messages)
+    for row, observation in zip(llm_trace["tool_calls"][-len(results):], image_observations):
         if observation:
-            by_call[exec_result["tool_call_id"]]["image_attachment"] = observation
+            row["image_attachment"] = observation
 
     return error_count
 

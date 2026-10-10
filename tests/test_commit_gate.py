@@ -768,7 +768,9 @@ def test_development_compliance_checklist_expanded():
         "PascalCase",
         "Gateway",
         "LLMClient",
-        "[:N]",
+        "record/view contract",
+        "retain exact sources",
+        "required resident core",
         "ToolEntry",
     ]
     for term in required_terms:

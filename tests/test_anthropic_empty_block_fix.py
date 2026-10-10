@@ -24,17 +24,17 @@ def _build(n_tools: int, empty_idx: int) -> list:
     return msgs
 
 
-def test_seal_empty_tool_output_uses_placeholder():
-    # keep_active=2, 4 tools -> sealed candidate is tool index 1 (the empty one).
+def test_seal_empty_tool_output_keeps_exact_empty_bytes_and_uses_an_earlier_anchor():
+    # keep_active=2, 4 tools -> prefer tool 1, but it is empty, so tool 0 seals.
     msgs = _build(4, empty_idx=1)
     seal_task_transcript(msgs, keep_active=2, min_prefix_tokens=0)
     sealed = [m for m in msgs if m.get("role") == "tool" and isinstance(m.get("content"), list)]
     assert len(sealed) == 1, "exactly one cache boundary expected"
     blk = sealed[0]["content"][0]
     assert blk["cache_control"] == {"type": "ephemeral"}
-    # the bug: text=="" with cache_control -> Anthropic 400. Must be a non-empty placeholder.
     assert blk["text"].strip(), "sealed cache anchor must never be an empty text block"
-    assert blk["text"] == "(no tool output)"
+    assert blk["text"] == "x" * 50
+    assert next(m for m in msgs if m.get("tool_call_id") == "t1")["content"] == ""
 
 
 def test_seal_nonempty_tool_output_preserved():

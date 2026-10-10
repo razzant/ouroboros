@@ -729,11 +729,12 @@ def test_loop_dispatches_typed_result_once_and_reads_the_published_code(
     )
 
     assert errors == 1
-    assert messages == [{
+    assert [{k: v for k, v in row.items() if k != "_tool_result_record"} for row in messages] == [{
         "role": "tool",
         "tool_call_id": "call-typed",
         "content": typed.text,
     }]
+    assert messages[0]["_tool_result_record"]["facts"]["code"] == "TOOL_REPORTED_FAILURE"
     assert trace["tool_calls"] == [{
         "tool": "ext_fixture",
         "tool_call_id": "call-typed",

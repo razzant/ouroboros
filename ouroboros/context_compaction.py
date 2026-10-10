@@ -24,6 +24,7 @@ from collections import Counter
 from typing import Any, Callable, Dict, List, Literal, Mapping, MutableSet, Optional, Sequence, Tuple
 
 from ouroboros.context_budget import (
+    HOST_CONTEXT_KIND_KEY,
     CONTEXT_OVERFLOW_CODES as _TYPED_CONTEXT_OVERFLOW_CODES,
     context_overflow_message as _context_overflow_message,
     ContextReclaimReceipt,
@@ -39,6 +40,8 @@ from ouroboros.context_budget import (
 )
 from ouroboros.anthropic_native_custody import anthropic_tool_unit_active, custody_private_key
 from ouroboros.config import runtime_setting
+from ouroboros.tool_result_record import read_tool_result_record
+from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY
 
 log = logging.getLogger(__name__)
 
@@ -267,10 +270,11 @@ def _unit_from_slice(
     if capsule_meta:
         refs.append(capsule_meta.get("checkpoint_ref"))
     for message in raw_messages:
-        for call in message.get("tool_calls") or []:
-            call_id = str((call or {}).get("id") or "")
-            if call_id:
-                refs.append(trace_refs_by_tool_call_id.get(call_id))
+        if message.get("role") == "tool":
+            record = read_tool_result_record(message)
+            refs.extend((record.get("trace_ref"), record.get("source_ref")))
+        if review_ref := _review_source_ref(message):
+            refs.append(review_ref)
     lineage_hashes.extend((raw_sha, source_sha))
     context_size_tokens = _context_tokens_for_messages(raw_messages, measurement_density)
     capsule_floor = _reclaim_tokens_for_byte_delta(_MIN_CAPSULE_BYTES, measurement_density)
@@ -356,6 +360,106 @@ def _atomic_units(
     return tuple(units)
 
 
+# Keys a plain dialogue row may carry and still be a complete prose unit. Any other
+# key marks a host-typed row (acceptance observation, review feedback, native
+# continuation, custody) that stays raw: typed meaning never gets flattened to prose.
+_PLAIN_ROW_KEYS = frozenset({"role", "content", "name", "cache_control", HOST_CONTEXT_KIND_KEY})
+_ASSISTANT_PROSE_KEYS = _PLAIN_ROW_KEYS | {"reasoning_content", "reasoning_details", "refusal", "annotations"}
+UnitScope = Literal["tool", "dialogue"]
+UnitKind = Literal["capsule", "tool", "assistant", "user"]
+
+
+def _plain_text(content: Any) -> Optional[str]:
+    """Text of a text-only content; ``None`` for native, image, capsule or opaque blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and content and all(
+            isinstance(block, Mapping) and block.get("type") == "text" and isinstance(block.get("text"), str)
+            and "_context_capsule" not in block and not any(custody_private_key(key) for key in block)
+            for block in content):
+        return "".join(block["text"] for block in content)
+    return None
+
+
+def _is_dialogue_prose_row(message: Any) -> bool:
+    """A completed single prose row: the assistant's own reply or a host prose row. Never a
+    row with tool protocol, native or non-text blocks, or host-typed keys. ``role=user`` is
+    not authorship: owner words are excluded by callers through typed provenance."""
+    if not isinstance(message, Mapping):
+        return False
+    role = str(message.get("role") or "")
+    allowed = _ASSISTANT_PROSE_KEYS if role == "assistant" else _PLAIN_ROW_KEYS if role == "user" else frozenset()
+    if _review_source_ref(message):
+        allowed = allowed | {REVIEW_HISTORY_MESSAGE_KEY}
+    if any(key not in allowed for key in message) or message.get("tool_calls") or message.get("function_call"):
+        return False
+    text = _plain_text(message.get("content"))
+    return text is not None and bool(text.strip())
+
+
+def _review_source_ref(message: Mapping[str, Any]) -> Optional[dict]:
+    """A typed captured source, bound to the exact visible text of this row."""
+    from ouroboros.review_history_view import _binding
+
+    meta, text = message.get(REVIEW_HISTORY_MESSAGE_KEY), message.get("content")
+    if (message.get("role") != "user" or not isinstance(meta, Mapping) or meta.get("version") != 1
+            or not isinstance(text, str) or not meta.get("task_id") or meta.get("visible_sha256") != _sha256(text)):
+        return None
+    try:
+        return _binding(meta.get("binding"))
+    except (TypeError, ValueError):
+        return None
+
+
+def context_units(
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    scope: UnitScope = "tool",
+    trace_refs_by_tool_call_id: Optional[Mapping[str, Any]] = None,
+    measurement_density: float = 1.0,
+) -> Tuple[_AtomicUnit, ...]:
+    """Units a view may address, in transcript order: ``tool`` is the automatic and
+    count-only reader (complete tool units and capsules); ``dialogue`` adds completed
+    assistant and host prose rows for the explicit view, inspection, exposure and
+    restore. Ids are positional and hash-bound, identical in both scopes."""
+    trace_refs = trace_refs_by_tool_call_id or {}
+    units = list(_atomic_units(messages, trace_refs_by_tool_call_id=trace_refs,
+                               measurement_density=measurement_density))
+    if scope == "dialogue":
+        covered = {index for unit in units for index in range(unit.start, unit.end + 1)}
+        # The system row and the assignment (first user row) are never units.
+        covered.add(next((i for i, m in enumerate(messages) if str(m.get("role") or "") == "user"), -1))
+        units.extend(unit for unit in (
+            _unit_from_slice(messages, idx, idx, trace_refs_by_tool_call_id=trace_refs,
+                             measurement_density=measurement_density)
+            for idx, message in enumerate(messages) if idx not in covered and _is_dialogue_prose_row(message))
+            if unit is not None)
+        units.sort(key=lambda unit: unit.start)
+    return tuple(units)
+
+
+def unit_kind(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit) -> UnitKind:
+    message = messages[unit.start] if 0 <= unit.start < len(messages) else {}
+    if _capsule_metadata(message)[0]:
+        return "capsule"
+    if message.get("tool_calls"):
+        return "tool"
+    return "assistant" if str(message.get("role") or "") == "assistant" else "user"
+
+
+def owner_protected_unit_ids(
+    messages: Sequence[Mapping[str, Any]], units: Sequence[_AtomicUnit], protected_texts: Sequence[str],
+) -> frozenset:
+    """Keep governing words and typed outward dialogue whole, without promoting
+    the actor's speech to owner authority. A mixed owner row stays whole."""
+    texts = [text for text in protected_texts if text]
+    return frozenset(
+        unit.unit_id for unit in units
+        if messages[unit.start].get(HOST_CONTEXT_KIND_KEY) == "owner_dialogue"
+        or (texts and unit_kind(messages, unit) == "user"
+            and any(text in (_plain_text(messages[unit.start].get("content")) or "") for text in texts)))
+
+
 def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
     """Content identities across function/custom and native tool-result syntax.
 
@@ -432,12 +536,21 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
 
 def exposed_context_units(messages: list, physical_messages: list) -> Tuple[Dict[str, str], ...]:
     """Exact canonical source identities whose complete contents reached the wire."""
-    remaining = _source_atoms(physical_messages)
+    return exposed_context_units_from_atoms(messages, _source_atoms(physical_messages))
+
+
+def exposed_context_units_from_atoms(
+    messages: Sequence[Mapping[str, Any]], atoms: Mapping[str, int],
+) -> Tuple[Dict[str, str], ...]:
+    """Exposure against the prepared candidate's content identities (``_source_atoms``),
+    recorded by the send path BEFORE observability redaction (hashes and counts only), so a
+    unit whose result carries a redacted secret is still recognized. Dialogue scope."""
+    remaining: Counter = Counter({str(key): int(count) for key, count in dict(atoms).items()})
     exposed = []
-    for unit in _atomic_units(messages):
-        atoms = _source_atoms(messages[unit.start:unit.end + 1])
-        if atoms and all(remaining[key] >= count for key, count in atoms.items()):
-            remaining.subtract(atoms)
+    for unit in context_units(messages, scope="dialogue"):
+        unit_atoms = _source_atoms(messages[unit.start:unit.end + 1])
+        if unit_atoms and all(remaining[key] >= count for key, count in unit_atoms.items()):
+            remaining.subtract(unit_atoms)
             exposed.append({"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256})
     return tuple(exposed)
 
@@ -922,18 +1035,20 @@ def _capsule_message(
     parts: Sequence[_Part],
     checkpoint_ref: Mapping[str, Any],
     request: ContextReclaimRequest,
-    *, retention: str = "summarized",
+    *, retention: str = "summarized", label: Optional[str] = None,
+    address: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     unit = selected.unit
     generation = unit.generation + 1
-    label = ("Historical source: read-only projection, not live assistant/tool turns; "
-             "private transport data omitted; exact original retained by checkpoint"
-             if retention == "source_view" else
-             f"Host memory record from a summarization helper, generation {generation}; exact source retained by checkpoint")
-    text = f"[{label}]\n" + str(summary or "").strip()
     if retention == "source_view":
-        address = {"checkpoint_ref": dict(checkpoint_ref), "unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}
+        label = label or ("Historical source: read-only projection, not live assistant/tool turns; "
+                          "private transport data omitted; exact original retained by checkpoint")
+        address = dict(address) if address is not None else {
+            "checkpoint_ref": dict(checkpoint_ref), "unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}
         text = f"[{label}]\nSource reference: {_canonical_json(address)}\n" + str(summary or "").strip()
+    else:
+        label = label or f"Host memory record from a summarization helper, generation {generation}; exact source retained by checkpoint"
+        text = f"[{label}]\n" + str(summary or "").strip()
     source_hashes = _unique_strings([
         *unit.lineage_hashes, unit.raw_sha256, unit.source_sha256,
         *(part.sha256 for part in parts),
@@ -1051,7 +1166,7 @@ def _restored_source_views(refs: Sequence[Mapping[str, Any]], *, drive_root: pat
         original = payload.get("messages") if isinstance(payload, Mapping) else None
         if not isinstance(original, list) or not all(isinstance(m, Mapping) for m in original):
             raise ValueError("checkpoint has no complete message source")
-        unit = next((u for u in _atomic_units(original)
+        unit = next((u for u in context_units(original, scope="dialogue")
                      if u.unit_id == ref.get("unit_id") and u.raw_sha256 == ref.get("raw_sha256")), None)
         if unit is None:
             raise ValueError("checkpoint unit identity or full raw hash does not match")
@@ -1070,8 +1185,11 @@ def _authored_view(
     tool_schemas: Sequence[Mapping[str, Any]], fit_candidate: Optional[Callable[[list, list], Mapping[str, Any]]],
     drive_root: pathlib.Path, task_id: str, trace_refs: Mapping[str, Any],
     exposed_units: Optional[Sequence[Mapping[str, Any]]] = None,
+    protected_texts: Sequence[str] = (),
 ) -> Tuple[list, ContextReclaimReceipt, None]:
-    """Materialize one actor's selection through the existing unit/checkpoint/capsule engine."""
+    """Materialize one actor's selection through the existing unit/checkpoint/capsule engine
+    over the dialogue scope (tool units, capsules, the actor's own completed replies, host
+    prose). Rows carrying the owner's typed words (``protected_texts``) stay whole."""
     restore_refs = []
     for ref in request.restore_unit_refs:
         checkpoint = ref.get("checkpoint_ref") if isinstance(ref, Mapping) else None
@@ -1097,13 +1215,14 @@ def _authored_view(
     if not callable(fit_candidate):
         return messages, _receipt("fit_rejected", before_sha=before_sha,
                                   fit={"accepted": False, "reason": "fit_callback_missing"}, **facts), None
-    units = _atomic_units(observed, trace_refs_by_tool_call_id=trace_refs,
+    units = context_units(observed, scope="dialogue", trace_refs_by_tool_call_id=trace_refs,
                           measurement_density=request.measurement_density)
     keep = set(request.keep_unit_ids) if request.keep_unit_ids is not None else {u.unit_id for u in units}
     if not keep <= {u.unit_id for u in units}:
         return messages, _receipt("binding_mismatch", before_sha=before_sha, **facts), None
+    protected = owner_protected_unit_ids(observed, units, protected_texts)
     authored = [u for u in units if (_capsule_metadata(observed[u.start])[1] or {}).get("authorship") == "actor"]
-    removed = [u for u in units if u.unit_id not in keep or u in authored]
+    removed = [u for u in units if u.unit_id not in keep and u.unit_id not in protected]
     if exposed_units is not None:
         exposed = {(ref.get("unit_id"), ref.get("raw_sha256")) for ref in exposed_units}
         removed = [u for u in removed if (u.unit_id, u.raw_sha256) in exposed]
@@ -1113,15 +1232,21 @@ def _authored_view(
     restore = [ref for ref in facts["restored_unit_refs"] if not any(
         meta["unit_id"] == ref.get("unit_id") and meta["source_unit_sha256"] == ref.get("raw_sha256")
         and meta["checkpoint_ref"] == ref.get("checkpoint_ref") for meta in visible_sources)]
-    same_note = (len(authored) == 1 and removed == authored
-                 and observed[authored[0].start]["content"][0]["text"].partition("\n")[2] == request.working_note.strip())
-    messages_unchanged = not restore and (same_note or not removed and not request.working_note.strip())
+    same_note = next((u for u in reversed(authored)
+        if (not removed or removed == [u])
+        and observed[u.start]["content"][0]["text"].partition("\n")[2] == request.working_note.strip()), None)
+    messages_unchanged = not restore and (same_note is not None or not removed and not request.working_note.strip())
     schemas_unchanged = (list(observed_tool_schemas) == list(tool_schemas) if observed_tool_schemas is not None
                          else request.schema_names is None)
     no_op = messages_unchanged and schemas_unchanged
     if messages_unchanged:
         facts["retained_unit_ids"] = tuple(u.unit_id for u in units)
     checkpoint_ref, selection, capsule_refs = None, None, []
+    if same_note is not None and messages_unchanged:
+        # A transfer-only request names this exact observed account, never the
+        # first of several notes. No new source or actor text is manufactured.
+        meta = _capsule_metadata(observed[same_note.start])[1]
+        selection = _Selection((), meta["unit_id"].removeprefix("view:"), 0)
     candidate = messages
     if not messages_unchanged:
         try:
@@ -1129,33 +1254,40 @@ def _authored_view(
                 restore, drive_root=drive_root, task_id=task_id, request=request)
         except (OSError, ValueError, TypeError, KeyError):
             return messages, _receipt("source_unavailable", before_sha=before_sha, **facts), None
-        fingerprint = _sha256(_canonical_bytes({"observed": observed_sha, "removed": [u.unit_id for u in removed],
-                                               "working_note": request.working_note, "restore": restore}))
-        selection = _Selection(tuple(_SelectedUnit(u, 0, "") for u in removed), fingerprint, 0)
-        checkpoint_ref = _persist_reclaim_checkpoint(observed, request, selection,
-                                                     drive_root=drive_root, task_id=task_id)
-        if checkpoint_ref is None:
-            return messages, _receipt("checkpoint_failed", before_sha=before_sha, selection=selection, **facts), None
-        source_refs = _unique_refs([ref for u in removed for ref in (*u.source_refs, {
-            "checkpoint_ref": checkpoint_ref, "unit_id": u.unit_id, "raw_sha256": u.raw_sha256})])
-        source = [m for u in removed for m in observed[u.start:u.end + 1]]
-        combined = _unit_from_slice(source, 0, len(source) - 1, trace_refs_by_tool_call_id=trace_refs,
-                                    measurement_density=request.measurement_density)
-        combined = replace(combined, unit_id=f"view:{fingerprint}", generation=max((u.generation for u in removed), default=0),
-                           lineage_hashes=_unique_strings([h for u in removed for h in u.lineage_hashes]),
-                           source_refs=source_refs)
-        note, note_ref = _capsule_message(_SelectedUnit(combined, 0, ""), request.working_note,
-                                         [_part(combined.unit_id, combined.source_text)], checkpoint_ref, request)
-        note["content"][0]["_context_capsule"]["authorship"] = "actor"
-        note["role"] = "assistant"
-        note["content"][0]["text"] = "[Actor-authored working view; exact source retained by checkpoint]\n" + request.working_note.strip()
-        note["content"][0]["_context_capsule"]["visible_sha256"] = _sha256(note["content"][0]["text"])
-        replacements = {u.start: (u.end, [], []) for u in removed}
-        at = removed[0].start if removed else len(observed)
-        replacements[at] = (removed[0].end if removed else at - 1,
-                            [*restored, note], [*restored_capsules, note_ref])
-        candidate, capsule_refs = _materialize_replacements(messages, replacements)
-        facts["source_refs"] = _unique_refs([*source_refs, checkpoint_ref, *facts["restored_unit_refs"]])
+        if not removed and not request.working_note.strip():
+            # Append after the complete current turn, including arrivals after an
+            # older inspected view. No prior prefix, account or checkpoint changes.
+            at = len(messages)
+            candidate, capsule_refs = _materialize_replacements(messages, {at: (at - 1, restored, restored_capsules)})
+            facts["source_refs"] = facts["restored_unit_refs"]
+        else:
+            fingerprint = _sha256(_canonical_bytes({"observed": observed_sha, "removed": [u.unit_id for u in removed],
+                                                   "working_note": request.working_note, "restore": restore}))
+            selection = _Selection(tuple(_SelectedUnit(u, 0, "") for u in removed), fingerprint, 0)
+            checkpoint_ref = _persist_reclaim_checkpoint(observed, request, selection,
+                                                         drive_root=drive_root, task_id=task_id)
+            if checkpoint_ref is None:
+                return messages, _receipt("checkpoint_failed", before_sha=before_sha, selection=selection, **facts), None
+            source_refs = _unique_refs([ref for u in removed for ref in (*u.source_refs, {
+                "checkpoint_ref": checkpoint_ref, "unit_id": u.unit_id, "raw_sha256": u.raw_sha256})])
+            source = [m for u in removed for m in observed[u.start:u.end + 1]]
+            combined = _unit_from_slice(source, 0, len(source) - 1, trace_refs_by_tool_call_id=trace_refs,
+                                        measurement_density=request.measurement_density)
+            combined = replace(combined, unit_id=f"view:{fingerprint}", generation=max((u.generation for u in removed), default=0),
+                               lineage_hashes=_unique_strings([h for u in removed for h in u.lineage_hashes]),
+                               source_refs=source_refs)
+            note, note_ref = _capsule_message(_SelectedUnit(combined, 0, ""), request.working_note,
+                                             [_part(combined.unit_id, combined.source_text)], checkpoint_ref, request)
+            note["content"][0]["_context_capsule"]["authorship"] = "actor"
+            note["role"] = "assistant"
+            note["content"][0]["text"] = "[Actor-authored working view; exact source retained by checkpoint]\n" + request.working_note.strip()
+            note["content"][0]["_context_capsule"]["visible_sha256"] = _sha256(note["content"][0]["text"])
+            replacements = {u.start: (u.end, [], []) for u in removed}
+            at = removed[0].start if removed else len(observed)
+            replacements[at] = (removed[0].end if removed else at - 1,
+                                [*restored, note], [*restored_capsules, note_ref])
+            candidate, capsule_refs = _materialize_replacements(messages, replacements)
+            facts["source_refs"] = _unique_refs([*source_refs, checkpoint_ref, *facts["restored_unit_refs"]])
     try:
         fit = dict(fit_candidate(copy.deepcopy(candidate), copy.deepcopy(list(tool_schemas))))
     except Exception as exc:
@@ -1177,6 +1309,10 @@ def _authored_view(
                                **facts), None
 
 
+# Emergency representation shares this materializer but never writes a summary.
+from ouroboros.context_source_view import emergency_address_view  # noqa: E402,F401
+
+
 def compact_tool_history_llm(
     messages: list,
     keep_recent: int = 0,
@@ -1193,6 +1329,7 @@ def compact_tool_history_llm(
     exposed_units: Optional[Sequence[Mapping[str, Any]]] = None,
     automatic_deficit_tokens: Optional[int] = None,
     provider_refused: bool = False,
+    protected_texts: Sequence[str] = (),
 ) -> Tuple[list, ContextReclaimReceipt, Optional[Dict[str, Any]]]:
     """Return a candidate and receipt; the caller owns atomic view publication.
 
@@ -1209,7 +1346,8 @@ def compact_tool_history_llm(
     admits earlier capsules, after every raw unit, as the last resort; a re-folded
     capsule is one generation up and keeps its lineage. Adjacent replaced units of an
     automatic pass merge into one record without another paid fold, each original
-    still restorable.
+    still restorable. ``protected_texts`` keeps governing source rows whole in an
+    explicit authored view; automatic and count-only passes never touch dialogue rows.
     """
 
     before_sha = context_reclaim_transcript_sha256(messages)
@@ -1231,7 +1369,7 @@ def compact_tool_history_llm(
                               observed_tool_schemas=observed_tool_schemas,
                               tool_schemas=tool_schemas, fit_candidate=fit_candidate, drive_root=root,
                               task_id=str(task_id or "context_compaction"), trace_refs=trace_refs_by_tool_call_id or {},
-                              exposed_units=exposed_units)
+                              exposed_units=exposed_units, protected_texts=protected_texts)
 
     memo = negative_memo if negative_memo is not None else set()
     trace_refs = trace_refs_by_tool_call_id or {}

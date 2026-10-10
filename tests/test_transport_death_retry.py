@@ -670,10 +670,13 @@ def test_forced_final_call_never_repeats_a_transport_death(tmp_path, no_sleep):
 def test_round_dispatcher_opts_in_only_the_primary(tmp_path, no_sleep, attempt_cap, expected_calls):
     """attempt_cap is set only for fallback-chain candidates (the primary passes
     None): candidates get zero paid repeats, an inline Presence primary its bounded two."""
+    from copy import deepcopy
+
     llm = _ScriptedLLM(_death, _death)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     ctx = SimpleNamespace(
-        llm=llm, messages=MESSAGES, tools=registry, active_model="test-model", tool_schemas=None,
+        llm=llm, messages=deepcopy(MESSAGES), tools=registry, active_model="test-model", tool_schemas=[],
+        context_fit_plan=None, active_context_mode="max", drive_root=tmp_path,
         active_effort="low", max_retries=3, drive_logs=tmp_path, task_id="t-cand", round_idx=1,
         event_queue=None, accumulated_usage={}, task_type="presence", active_use_local=False,
     )

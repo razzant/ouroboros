@@ -38,9 +38,10 @@ from ouroboros import memory_view_legacy as legacy
 from ouroboros.utils import estimate_tokens
 
 # The ladder, old before new and people last: host fact lines of this room's tasks
-# (F1), other live rooms without notes (F1b), retold records, the whole first block too, as one line per room
-# (F3), my oldest pages and parts (F5), this room's retold page (F4), my longest replies
-# (F2), then people's words: other rooms' (F6, only when the view shows them) and this room's (F7).
+# (F1), other live rooms without notes (F1b), retold records, whole or not, as one line per room
+# (F3), my oldest pages, parts and accounts (F5; a record an account tells stays its address line), this
+# room's retold page (F4), my longest replies (F2), then people's words: other rooms' (F6, only when the
+# view shows them) and this room's (F7).
 LADDER = ("F1", "F1b", "F3", "F5", "F4", "F2", "F6", "F7")
 # The only steps an owner-selected Low or Nano target takes: facts, headers,
 # pointers and old retold memory; my replies and people's words answer to the window alone.
@@ -52,7 +53,7 @@ MODES = ("max", "low", "nano")  # the starting-mode order the window may lower t
 _COLLAPSING = ("F1", "F1b")  # many elements, one line: the first element carries it
 _SHOWN = (("F2", "{} of my replies"), ("F7", "{} lines of people in this room"),
           ("F6", "{} lines of people in other rooms"), ("F4", "{} records of this room's page"),
-          ("F5", "{} pages or parts of my story"), ("F3", "the retold records of {} rooms (one line per room)"),
+          ("F5", "{} pages, parts or accounts of my story"), ("F3", "the retold records of {} rooms (one line per room)"),
           ("F1", "{} task fact lines"), ("F1b", "{} other open rooms"))
 # One name set per closing ``floor_note`` can print (``memory_read_path``, with or without the
 # chronicle_write sentence): the shortest view takes the longest.
@@ -88,7 +89,7 @@ def floor_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str,
         "F3": [(room_id, "\n".join(map(legacy.retold_record, group)), legacy.room_pointer(group))
                for room_id, group in legacy.pointer_rooms(snapshot.story).items()],
         "F5": [(entry["id"], "\n".join(mv._page_lines(entry)), mv._page_pointer(entry))
-               for entry in snapshot.story if entry.get("kind") != "legacy"],
+               for entry in snapshot.story if entry.get("kind") != "legacy" and not entry.get("told_by")],
         "F4": [(item["id"], mv._retold(item), mv._retold(item, True))
                for item in [*room.get("legacy", ()), *room.get("under_parts", ())]],
         "F2": [(item["address"], item["line"], mv._row_pointer(item, "my reply")) for item in mine],
@@ -296,21 +297,26 @@ def physical_mode(preferred: str, fixed_tokens_by_mode: Mapping[str, int], minim
 def mode_views(snapshot: mv.MemoryViewSnapshot, *, preferred: str, fixed_tokens_by_mode: Mapping[str, int],
                window_tokens: Optional[int], known_window: bool, output_reserve: Optional[int], ratio: float,
                start: Optional[str] = None, tool_names: Optional[Mapping[str, Iterable[str]]] = None,
+               allow_mode_lowering: bool = True,
                ) -> Tuple[Dict[str, Tuple[str, str, Dict[str, Any]]], str]:
     """Every mode's ``(story text, room text, view receipt)`` and the mode the task starts in.
 
     The starting mode is ``physical_mode`` of the owner's ``preferred`` one, or ``start`` (the
     mode a task already runs in, on a new route) when that is lower: a route switch never raises
-    a mode, and only the owner's mode carries a target. The projection of a mode this window
+    a mode, and only the owner's mode carries a target. A caller that keeps current Max books
+    until actual refusal sets ``allow_mode_lowering=False``: memory views still fit their
+    ordinary allowances, but estimated pressure cannot select another mode or report a switch.
+    The projection of a mode this window
     chose names the change in its ``### Physical floor`` (and its fact, ``mode_switch``), never
     in the runtime facts, which are captured before any mode is chosen. ``tool_names`` maps a
     mode to the schemas its request sends (``None``: not known, so its floor claims no path).
     """
     window = int(window_tokens) if known_window and window_tokens else None
-    physical = physical_mode(preferred, fixed_tokens_by_mode, minimal_view_tokens(snapshot, window_tokens=window),
-                             window_tokens=window, known_window=known_window, calibration_ratio=ratio,
-                             reserve_by_mode={mode: context_budget.context_mode_limits(mode, preferred, output_reserve)[1]
-                                              for mode in MODES})
+    physical = (physical_mode(preferred, fixed_tokens_by_mode, minimal_view_tokens(snapshot, window_tokens=window),
+                              window_tokens=window, known_window=known_window, calibration_ratio=ratio,
+                              reserve_by_mode={mode: context_budget.context_mode_limits(mode, preferred, output_reserve)[1]
+                                               for mode in MODES})
+                if allow_mode_lowering else preferred)
     begin = start if start in MODES and MODES.index(start) > MODES.index(physical) else physical
     views = {}
     for mode in MODES:

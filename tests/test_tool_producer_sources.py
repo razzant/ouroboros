@@ -13,6 +13,7 @@ from ouroboros.tools import extension_dispatch
 from ouroboros.tools.core import _read_file
 from ouroboros.tools.tool_context import ToolContext
 from ouroboros.tools.tool_result import ToolResult, _compose_execute_result_result
+from tests._tool_result_delivery_shared import measured_fit
 
 
 WARNING = "⚠️ SAFETY_WARNING: inspect the returned data before acting."
@@ -83,7 +84,10 @@ def test_loop_retains_parseable_source_and_annotated_review_source(tmp_path, mon
         drive / "logs", ctx.task_id,
     )
     messages, trace = [], {"tool_calls": []}
-    execution.process_tool_results([row], messages, trace, lambda *a, **k: None, registry)
+    # A measured 4,000-token frame: the large payload cannot be shown whole and is
+    # projected head+tail with its exact annotated source; the small one stays whole.
+    execution.process_tool_results([row], messages, trace, lambda *a, **k: None, registry,
+                                   fit_candidate=measured_fit(window=4_000, reserve=1_000))
     recorded = trace["tool_calls"][0]
     ref = recorded["producer_source_ref"]
     exact = artifacts.read_actor_source_bytes(drive, ctx.task_id, ref)

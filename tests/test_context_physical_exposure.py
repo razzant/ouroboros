@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import context_compaction as cc
+from ouroboros.model_send_seal import EXPOSURE_ATOMS_BASIS
 from tests.test_context_reclaim_materializer import _SPEC, _request
 
 
@@ -78,6 +79,43 @@ def test_result_bytes_do_not_prove_the_wrong_call_received_them():
     assert cc.exposed_context_units(canonical, physical) == ()
 
 
+@pytest.mark.parametrize("manifest_has_atoms", [True, False])
+def test_exposure_recognizes_a_sent_unit_whose_stored_projection_was_redacted(tmp_path, monkeypatch, manifest_has_atoms):
+    """The sent bytes carried a credential; observability stores a redacted projection. The
+    manifest's pre-redaction content identities (hashes and counts, never the bytes) still
+    recognize the unit as sent; an older manifest without them falls back to the redacted
+    projection and, by construction, cannot (the trap this fixes)."""
+    from ouroboros import model_send_seal
+    from ouroboros.model_send_seal import persist_physical_candidate
+    from ouroboros.observability import read_blob_ref, read_call_manifest_ref
+    from ouroboros.tools.compact_context import record_context_view
+
+    secret = "api_key = sk-live-ABCDEF1234567890abcdef1234567890XYZ"
+    canonical = source("dump", f"config dump\n{secret}\n" + "exact evidence " * 300)
+    if not manifest_has_atoms:
+        monkeypatch.setattr(model_send_seal, "_exposure_atoms_manifest", lambda _candidate: {})
+    persisted = persist_physical_candidate(tmp_path, task_id="exposure", attempt_id="attempt-secret",
+        candidate={"messages": canonical}, candidate_facts={})
+    manifest = read_call_manifest_ref(tmp_path, persisted["manifest_ref"], task_id="exposure")
+    stored = json.dumps(read_blob_ref(tmp_path, manifest["full_payload_ref"]))
+    assert secret not in stored and json.dumps(manifest).count(secret) == 0  # the stored custody is redacted
+    if manifest_has_atoms:
+        assert set(manifest["exposure_atoms"]) and all(len(key) == 64 for key in manifest["exposure_atoms"])
+        assert "exact evidence" not in json.dumps(manifest["exposure_atoms"])  # identities only
+    capture = SimpleNamespace(candidate_manifest_ref=persisted["manifest_ref"], attempt_id="attempt-secret")
+    ctx = SimpleNamespace(task_id="exposure", drive_root=tmp_path, budget_drive_root=tmp_path)
+    record_context_view(ctx, canonical, [], physical_capture=capture)
+    observed = ctx._last_context_observation
+    unit = cc._atomic_units(canonical)[0]
+    if manifest_has_atoms:
+        assert observed["exposure_basis"] == EXPOSURE_ATOMS_BASIS
+        assert observed["exposed_units"] == [{"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}]
+    else:
+        assert observed["exposure_basis"] == "redacted_projection"
+        assert observed["exposed_units"] == []  # the legacy projection cannot prove the redacted bytes were sent
+    assert observed["physical_source_status"] == "observed_projection"
+
+
 def test_observation_reads_exact_physical_source_and_inspection_restores_it(tmp_path):
     from ouroboros.model_send_seal import persist_physical_candidate
     from ouroboros.tools.compact_context import record_context_view, _compact_context
@@ -90,6 +128,7 @@ def test_observation_reads_exact_physical_source_and_inspection_restores_it(tmp_
     record_context_view(ctx, canonical, [], physical_capture=capture)
     observed = ctx._last_context_observation
     assert observed["physical_source_status"] == "observed_projection"
+    assert observed["exposure_basis"] == EXPOSURE_ATOMS_BASIS
     assert len(observed["exposed_units"]) == 1
     inspected = json.loads(_compact_context(ctx, inspect=True))
     assert [unit["physically_exposed"] for unit in inspected["units"]] == [True, False]

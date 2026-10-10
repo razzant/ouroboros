@@ -212,7 +212,7 @@ function restoreDom(prior) {
     Object.assign(globalThis, prior);
 }
 
-function makeInstance(mount) {
+function makeInstance(mount, options = {}) {
     const handlers = new Map();
     const ws = {
         on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
@@ -234,6 +234,7 @@ function makeInstance(mount) {
         idPrefix: 'chat',
         mountEl: mount,
         asPanel: true,
+        ...options,
     });
     return { instance, handlers };
 }
@@ -265,6 +266,34 @@ const referenceShape = (node) => ({
     spoken: node?.getAttribute?.('aria-label'),
 });
 const LAUNCH_REFERENCE = { intent: 'open-project', pill: true, parts: ['', 'Launch', '↗'], spoken: 'Open project Launch' };
+
+for (const systemType of ['project_handoff', 'project_started']) {
+    for (const missing of ['task_id', 'project_id']) {
+        test(`an incomplete ${systemType} without ${missing} keeps plain text and Copy`, () => {
+            const { prior, mount } = installHistoryDom();
+            let instance;
+            try {
+                const made = makeInstance(mount, { chatId: 1, asPanel: false });
+                instance = made.instance;
+                const row = { chat_id: 1, role: 'system', system_type: systemType,
+                    task_id: 'legacy-task', project_id: 'launch', project_name: 'Launch',
+                    content: 'Retained entry **as written**', ts: '2026-10-08T13:58:00Z' };
+                delete row[missing];
+                made.handlers.get('chat')(row);
+                const bubble = findBubble('system');
+                assert.ok(bubble);
+                assert.equal(bubble.classList.contains('project-handoff'), false);
+                assert.match(bubble.innerHTML, /Retained entry \*\*as written\*\*/);
+                const copy = bubble.querySelector('.chat-message-copy');
+                assert.ok(copy, 'declining compact rendering does not remove plain-message Copy');
+                assert.equal(copy.listeners.get('click').length, 1);
+            } finally {
+                instance?.destroy();
+                restoreDom(prior);
+            }
+        });
+    }
+}
 
 test('plain project row renders escaped text with the Project reference and no markdown machinery', async () => {
     const { prior, mount } = installDom();

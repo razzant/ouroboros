@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests._tool_result_delivery_shared import measured_fit
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +41,7 @@ def test_clean_source_in_model_request_survives_child_copyback_and_pruning(tmp_p
         [{"fn_name": "ext_fixture", "tool_call_id": "fixture-call", "result": typed.text,
           "tool_result": typed, "is_error": True, "tool_args": {}, "args_for_log": {}}],
         messages, trace, lambda *a, **kw: None, SimpleNamespace(_ctx=ctx),
+        fit_candidate=measured_fit(window=16_000, reserve=4_000),
     )
     source = _marker_ref(messages[0]["content"], "PRODUCER_RESULT_SOURCE_JSON=")
     request = persist_call(child, task_id=task_id, call_id="producer-request", call_type="llm_request",

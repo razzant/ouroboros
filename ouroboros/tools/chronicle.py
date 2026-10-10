@@ -12,11 +12,21 @@ counts each row's source class, stamps every covered task with the host's own
 facts and verifies the quotes the writer chose. A refusal names the current
 revision or room head and the conflicting ids, never their text.
 
+An ``account`` is the mind's own text connecting experience of several rooms,
+based on exact source versions (``sources``: each ``{id, revision?}``; the host
+freezes the revision read, the body's sha256 and a draft's status then); it seals
+no row, folds nothing and moves no head. A ``selection`` is the mind's separate
+choice of the common view: show the account (``shown``) in place of the records it
+names (``replaces``), or withdraw it. ``memory_read`` of an account names who wrote
+it, which versions informed it, what changed in a source since (a later correction,
+a decision, a local fold, a missing record) and how to read each original;
+``revision`` reads a record as of one of its revisions.
+
 A delegated child or nanny is not the integrating mind: the host signs its
 page or part as a helper's draft carrying its own focus, which acts at once until
-the mind's ``decision``; its note, correction or decision is refused
-``not_integrator`` before anything is read or written, and so is its part over
-records other than legacy sections and its own drafts.
+the mind's ``decision``; its note, correction, decision, account or selection is
+refused ``not_integrator`` before anything is read or written, and so is its part
+over records other than legacy sections and its own drafts.
 
 ``memory_read`` answers in text, one header line per record or row, and never
 JSON. Every mode bounds itself at the source to ``tool_result_limit`` and names
@@ -45,10 +55,11 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
-from ouroboros.chronicle_store import (SPEAKERS, ChronicleStore, PublishResult, draft_signer, source_time_span,
-                                       verify_quotes)
+from ouroboros.chronicle_store import (SPEAKERS, ChronicleStore, PublishResult, correction_line, draft_signer,
+                                       source_time_span, verify_quotes)
 from ouroboros.dialogue_provenance import memory_row_header, render_row_text, row_author
 from ouroboros.knowledge import focus_signature
+from ouroboros.memory_view_account import source_change_lines
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.registry import ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
@@ -378,8 +389,30 @@ def _write_decision(ctx: Any, root: Path, store: ChronicleStore, author: Dict[st
     return _published(ctx, store.decide(str(a["target_id"]), a["accepted"], author, str(a["reason"] or "")))
 
 
+def _write_account(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
+    sources = a["sources"]
+    if not isinstance(sources, list) or not sources:
+        return _arg_error(ctx, "an account needs sources: the records it is based on, each {id, revision?} or an id")
+    result = store.publish_account(room_id=_room(ctx, root, a["room_id"]), text=a["text"], sources=sources, author=author)
+    return _published(ctx, result, sources=len(sources) if result.ok else None)
+
+
+def _write_selection(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
+    if not a["target_id"]:
+        return _arg_error(ctx, "a selection needs target_id (an account), replaces (record ids, may be empty), "
+                              "shown (default true) and a reason")
+    replaces = a["replaces"] if a["replaces"] is not None else []
+    if not isinstance(replaces, list):
+        return _arg_error(ctx, "replaces is a list of record ids the account tells in its place")
+    shown = True if a["shown"] is None else a["shown"]
+    result = store.select_account(str(a["target_id"]), replaces=[str(r) for r in replaces], author=author,
+                                  reason=str(a["reason"] or ""), shown=shown)
+    return _published(ctx, result, replaces=len(replaces) if result.ok else None, shown=shown if result.ok else None)
+
+
 _WRITERS = {"page": _write_page, "part": _write_part, "note": _write_note,
-            "correction": _write_correction, "decision": _write_decision}
+            "correction": _write_correction, "decision": _write_decision,
+            "account": _write_account, "selection": _write_selection}
 # A delegated focus is not the integrating mind: it drafts pages and parts under its own
 # signature (a part over legacy sections and its own drafts only, ``_write_part``), and the mind
 # accepts or rejects them; notes, corrections and decisions stay the mind's.
@@ -406,10 +439,11 @@ def _signed_author(ctx: Any, kind: str) -> Tuple[Optional[Dict[str, Any]], str]:
 def _chronicle_write(ctx: Any, kind: str = "", room_id: Any = None, text: str = "", covers: Any = None,
                      member_ids: Any = None, quotes: Any = None, task_id: str = "", target_id: str = "",
                      expected_revision: Optional[str] = None, expected_sequence: Optional[int] = None,
-                     accepted: Optional[bool] = None, reason: str = "") -> str:
+                     accepted: Optional[bool] = None, reason: str = "", sources: Any = None, replaces: Any = None,
+                     shown: Optional[bool] = None) -> str:
     writer = _WRITERS.get(str(kind or ""))
     if writer is None:
-        return _arg_error(ctx, "kind is page, part, note, correction or decision")
+        return _arg_error(ctx, "kind is page, part, note, correction, decision, account or selection")
     author, role = _signed_author(ctx, str(kind))
     if author is None:
         return _refused(ctx, "not_integrator",
@@ -418,7 +452,8 @@ def _chronicle_write(ctx: Any, kind: str = "", room_id: Any = None, text: str = 
                         "it in your report. Nothing was written")
     args = {"room_id": room_id, "text": text, "covers": covers, "member_ids": member_ids, "quotes": quotes,
             "task_id": task_id, "target_id": target_id, "expected_revision": expected_revision,
-            "expected_sequence": expected_sequence, "accepted": accepted, "reason": reason}
+            "expected_sequence": expected_sequence, "accepted": accepted, "reason": reason, "sources": sources,
+            "replaces": replaces, "shown": shown}
     try:
         root = _root(ctx)
         return writer(ctx, root, _activated(root), author, args)
@@ -452,8 +487,8 @@ def _span(span: Any) -> str:
 
 
 def _periods(store: ChronicleStore, root: Path, records: List[Dict[str, Any]]) -> Dict[str, memory_inventory.Period]:
-    """Each listed part's period as read from its members' rooms (``memory_inventory.record_period``)."""
-    parts = [record for record in records if record.get("kind") == "part"]
+    """Each listed part's or account's period as read from its members' rooms (``memory_inventory.record_period``)."""
+    parts = [record for record in records if record.get("kind") in ("part", "account")]
     units = {unit.record_id: unit for unit in memory_inventory.legacy_units(store, root)} if parts else {}
     return {record["id"]: memory_inventory.record_period(store, record, units) for record in parts}
 
@@ -468,6 +503,16 @@ def _covers_summary(record: Dict[str, Any], period: Optional[memory_inventory.Pe
     if kind == "part":  # the period its members' rows give, the same the view prints; never the recorded aggregate
         dated = _span(period.span) + period.note() if period is not None else "period unknown"
         return f"folds {len(covers.get('member_ids') or [])} records, {dated}"
+    if kind == "account":  # the sources' span (not every event in it); how many changed since the account was written
+        dated = _span(period.span) + period.note() if period is not None else "period unknown"
+        sources = record.get("sources") or []
+        changed = sum(1 for src in sources if isinstance(src, dict) and (
+            src.get("missing") or src.get("later_corrections") or src.get("folded_into")
+            or (src.get("status_now") and src.get("status_now") != src.get("status"))))
+        return f"based on {len(sources)} sources, {dated}" + (f"; {changed} changed since" if changed else "")
+    if kind == "selection":
+        return (f"replaces {len(record.get('replaces') or [])}; " + ("shown in the common view" if record.get("shown")
+                                                                     else "withdrawn from the common view"))
     if kind in ("legacy", "gap"):
         raw = covers.get("raw_range") if isinstance(covers.get("raw_range"), dict) else {}
         meta = record.get("metadata") or {}
@@ -663,12 +708,49 @@ def _read_rows(root: Path, room: str, bounds: Dict[str, Any], start: int, limit:
     return f"{head}\n{cont}\n{header} (chars {begin}–{end} of {len(words)}) {words[begin:end]}"
 
 
-def _node_document(store: ChronicleStore, record: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
-    """The record as it acts (interpreted when it is a story record) and its full text document."""
+def _source_section(src: Dict[str, Any]) -> str:
+    """One source of an account: the version it read, what changed since, and how to read the original."""
+    head = f"source {src.get('kind')} {src.get('id')} (room {src.get('room_id')}): revision {src.get('revision')} used"
+    if src.get("status") and src.get("status") != "final":  # a draft's state then; my own record has none to tell
+        head += f", {src['status']} then"
+    if src.get("missing"):
+        return head + "; NOT in this chronicle: its words cannot be read here"
+    facts = []
+    if not src.get("revision_known"):
+        facts.append(f"that revision is not in this chronicle; current revision {src.get('current_revision')}")
+    if src.get("later_corrections"):
+        facts.append("later corrections not in this account: " + ", ".join(src["later_corrections"]))
+    if src.get("status_now") and src.get("status_now") != src.get("status"):
+        facts.append(f"now {src['status_now']}")
+    if src.get("folded_into"):
+        facts.append(f"since folded into part {src['folded_into']}")
+    read = f"memory_read(node_id={src.get('id')}, revision={src.get('revision')}) reads that version; without revision, as it acts now"
+    return "\n".join(["; ".join([head, *facts, read]), *source_change_lines(src)])
+
+
+def _as_of(store: ChronicleStore, record: Dict[str, Any], revision: str) -> Tuple[Dict[str, Any], List[str]]:
+    """The record as of one of its revisions: its words plus the corrections up to it; the later ones named."""
+    fixes = [r for r in store.records(record["room_id"], kinds=["correction"], after_seq=record["sequence"])
+             if r.get("target_id") == record["id"]]
+    revisions = [record["id"], *(fix["id"] for fix in fixes)]
+    if revision not in revisions:
+        raise ValueError(f"{revision} is not a revision of {record['id']}; its revisions: " + ", ".join(revisions))
+    kept = fixes[:revisions.index(revision)]
+    text = "\n\n".join([str(record.get("text", "")), *(f"{correction_line(fix)}\n{fix.get('text', '')}" for fix in kept)])
+    later = revisions[revisions.index(revision) + 1:]
+    return {**record, "current_text": text, "revision": revision, "corrections": [
+        {"id": fix["id"], "author": fix.get("author"), "ts": fix.get("ts")} for fix in kept]}, later
+
+
+def _node_document(store: ChronicleStore, record: Dict[str, Any], revision: str = "") -> Tuple[Dict[str, Any], str]:
+    """The record as it acts (interpreted when it is a story record), or as of ``revision``, and its full text document."""
     room, kind = record["room_id"], record["kind"]
     acting = next((r for r in store.room_records(room, after_seq=record["sequence"] - 1) if r["id"] == record["id"]),
                   None)
     shown = acting or record
+    later: List[str] = []
+    if revision:
+        shown, later = _as_of(store, shown, revision)
     if kind == "mark":
         shown = next((m for m in store.active_marks(room) if m["id"] == record["id"]), None) or record
         shown = {**shown, "sequence": record["sequence"]}
@@ -681,6 +763,14 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any]) -> Tuple[Dict[
                         f"notes: {', '.join(covers.get('note_ids') or []) or 'none'}")
     elif kind == "part":
         sections.append("members: " + ", ".join(covers.get("member_ids") or []))
+    elif kind == "account":
+        sections.append(f"written {str(record.get('ts') or '')[:10]} by {_author_label(record.get('author'))} over "
+                        f"{len(record.get('sources') or [])} sources; nothing sealed or folded; shown in the common view "
+                        "only by my selection (chronicle_write kind=selection)")
+        sections += [_source_section(src) for src in (shown.get("sources") or record.get("sources") or [])]
+    elif kind == "selection":
+        sections.append(f"account: memory_read(node_id={record.get('target_id')}); replaces: "
+                        + (", ".join(record.get("replaces") or []) or "nothing") + f"; shown={record.get('shown')}")
     elif covers.get("raw_range"):
         raw = covers["raw_range"]
         sections.append(f"raw_range {raw.get('status')}: positions {raw.get('pos')}; rows: memory_read(rows=true, "
@@ -703,14 +793,28 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any]) -> Tuple[Dict[
         sections.append(f"target: {json.dumps(record.get('target_ref'), ensure_ascii=False, sort_keys=True)}")
         if record.get("quote"):
             sections.append(f"quote: {record['quote']}")
+    if revision:
+        sections.append(f"as of revision {revision}: " + ("the original alone" if revision == record["id"]
+                                                          else "the original and its corrections up to that one")
+                        + (f"; later corrections not shown: {', '.join(later)}" if later else "; none later"))
     sections.append("text:\n" + str(record.get("text") if record.get("text") is not None else record.get("reason") or ""))
-    related = store.records(room, kinds=["correction", "decision", "mark_view", "mark_release"],
+    related = store.records(room, kinds=["correction", "decision", "mark_view", "mark_release", "selection"],
                             after_seq=record["sequence"])
     for other in (r for r in related if r.get("target_id") == record["id"]):
+        if revision and other["kind"] == "correction" and other["id"] not in (fix["id"] for fix in shown.get("corrections") or ()):
+            continue  # a later correction is named above, not shown as that version
         body = other.get("text") if other["kind"] == "correction" else (
-            f"accepted={other.get('accepted')}; " if other["kind"] == "decision" else "") + str(other.get("reason") or "")
+            f"accepted={other.get('accepted')}; " if other["kind"] == "decision" else
+            f"shown={other.get('shown')}; replaces {len(other.get('replaces') or [])}: "
+            + (", ".join(other.get("replaces") or []) or "nothing") + "; " if other["kind"] == "selection"
+            else "") + str(other.get("reason") or "")
         sections.append(f"{other['kind']} {other['id']} by {_author_label(other.get('author'))} (seq {other['sequence']}):\n"
                         f"{body}")
+    for account in store.accounts():  # the accounts this record informs, with the version each one read
+        for src in account.get("sources") or ():
+            if src.get("id") == record["id"]:
+                sections.append(f"informs account {account['id']} (revision {src.get('revision')} read; seq {account['sequence']}): "
+                                f"memory_read(node_id={account['id']})")
     return shown, "\n".join(sections)
 
 
@@ -721,14 +825,15 @@ def _address_text(address: Any) -> str:
         return "?"
 
 
-def _read_node(root: Path, node_id: str, start: int, limit: int) -> str:
+def _read_node(root: Path, node_id: str, start: int, limit: int, revision: str = "") -> str:
     store = _existing_store(root)
     record = store.get(node_id) if store is not None else None
     if record is None:
         raise ValueError(f"memory node {node_id} not found")
-    shown, document = _node_document(store, record)
+    shown, document = _node_document(store, record, revision)
     header = _record_header(shown, _periods(store, root, [shown]).get(shown["id"]))
-    return _window(header, document, start, limit, lambda end: f"memory_read(node_id={node_id}, start={end})")
+    at = f", revision={revision}" if revision else ""
+    return _window(header, document, start, limit, lambda end: f"memory_read(node_id={node_id}{at}, start={end})")
 
 
 def _read_source(root: Path, ref: Any, start: int, limit: int) -> str:
@@ -746,12 +851,15 @@ def _read_source(root: Path, ref: Any, start: int, limit: int) -> str:
 
 @completed_local_read
 def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: int = 0, rows: bool = False,
-                 task_id: str = "", period: Any = None, source_ref: Any = None, start: int = 0, **bounds: Any) -> str:
+                 task_id: str = "", period: Any = None, source_ref: Any = None, start: int = 0, revision: str = "",
+                 **bounds: Any) -> str:
     unknown = sorted(set(bounds) - {"from", "to"})
     if unknown:
         return _arg_error(ctx, f"unknown argument(s): {', '.join(unknown)}")
     if sum(bool(mode) for mode in (node_id, source_ref, rows)) > 1:
         return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, or a room's records")
+    if revision and not node_id:
+        return _arg_error(ctx, "revision reads one record (node_id) as of that revision")
     if type(after_seq) is not int or after_seq < 0 or type(start) is not int or start < 0:
         return _arg_error(ctx, "after_seq and start are non-negative integers")
     limit = tool_result_limit("memory_read")
@@ -761,7 +869,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
         if source_ref:
             text = _read_source(root, source_ref, start, limit)
         elif node_id:
-            text = _read_node(root, str(node_id), start, limit)
+            text = _read_node(root, str(node_id), start, limit, str(revision or ""))
         elif rows:
             text = _read_rows(root, _room(ctx, root, room_id), {**bounds, "task_id": task_id, "period": period},
                               start, limit)
@@ -889,8 +997,8 @@ def chronicle_tools() -> List[ToolEntry]:
                         "properties": {"address": address, "text": string,
                                        "speaker": {"type": "string", "enum": sorted(SPEAKERS)}}}}
     write = {
-        "kind": {"type": "string", "enum": ["page", "part", "note", "correction", "decision"],
-                 "description": "page seals one or more closed arcs of a room; part folds adjacent records of one lower level (pages, legacy sections or parts); note is a separate record for my future self; correction stands under the record's words wherever the record is shown, signed and dated — it adds and never replaces them, so to say a record anew I fold it into a part over it; decision accepts or rejects a helper's draft."},
+        "kind": {"type": "string", "enum": ["page", "part", "note", "correction", "decision", "account", "selection"],
+                 "description": "page seals one or more closed arcs of a room; part folds adjacent records of one lower level (pages, legacy sections or parts); note is a separate record for my future self; correction stands under the record's words wherever the record is shown, signed and dated — it adds and never replaces them, so to say a record anew I fold it into a part over it; decision accepts or rejects a helper's draft; account is my own text connecting experience of several rooms, based on the exact versions I read (sources) — it seals no row, folds nothing and leaves every source free to be folded or read anew; selection chooses the common view: show an account (shown) in place of the records it names (replaces), or withdraw it."},
         "room_id": room,
         "text": {"type": "string", "description": "The record in my own words. No length limit; it is read back through memory_read pages."},
         "covers": {"type": "object", "additionalProperties": False,
@@ -899,11 +1007,16 @@ def chronicle_tools() -> List[ToolEntry]:
         "member_ids": {"type": "array", "items": string, "description": "part: adjacent unfolded records of one kind in one room; default room is theirs."},
         "quotes": quotes,
         "task_id": {"type": "string", "description": "note: the task it belongs to (default: this task)."},
-        "target_id": {"type": "string", "description": "correction: the record corrected; decision: the helper's draft page or part."},
+        "target_id": {"type": "string", "description": "correction: the record corrected; decision: the helper's draft page or part; selection: the account."},
+        "sources": {"type": "array", "description": "account: the records it is based on, each {id, revision?} (revision: the one I read, as memory_read shows it; default the current one) or a bare id. Any page, part, note, legacy record, gap or account, of any room; citing one neither seals nor folds it. To incorporate later source corrections, write a new account citing the corrected direct source revisions, then select it; correcting or reselecting an old account leaves its source versions unchanged, and citing it retains its older nested edges.",
+                    "items": {"anyOf": [string, {"type": "object", "additionalProperties": False, "required": ["id"],
+                                                 "properties": {"id": string, "revision": string}}]}},
+        "replaces": {"type": "array", "items": string, "description": "selection: the records of my story the account tells in its place. Their count and period stay visible, their exact IDs remain in the account's memory_read composition and selections, and each room keeps its detail. To supersede an earlier account, include its ID here or withdraw it. Empty shows the account beside everything."},
+        "shown": {"type": "boolean", "description": "selection: true (default) shows the account in the common view, false withdraws it; the latest selection of an account acts."},
         "expected_revision": {"type": "string", "description": "correction: the target's current revision when it already has a correction (memory_read node_id shows it)."},
         "expected_sequence": {"type": "integer", "minimum": 0, "description": "The room head your text is based on (memory_read room's first line). Required for a part; optional for a page or correction. A newer head is refused with the current head and the newer record ids."},
         "accepted": {"type": "boolean", "description": "decision: accept (true) or reject (false) the draft."},
-        "reason": {"type": "string", "description": "decision: why."},
+        "reason": {"type": "string", "description": "decision or selection: why."},
     }
     read = {
         "node_id": {"type": "string", "description": "One record: as it acts now, its host stamp, coverage, original text, corrections and decisions."},
@@ -916,6 +1029,7 @@ def chronicle_tools() -> List[ToolEntry]:
                    "properties": {"from": string, "to": string}},
         "source_ref": source,
         "start": {"type": "integer", "minimum": 0, "description": "Character position to continue a record, source or long row from (the previous page's next_start or start)."},
+        "revision": {"type": "string", "description": "node_id: read the record as of this revision (its own id, or one of its correction ids, as an account's sources name them): the original and the corrections up to it; later ones are named, not shown."},
     }
     mark = {
         "text": {"type": "string", "description": "What matters, in my own words."},
@@ -940,11 +1054,11 @@ def chronicle_tools() -> List[ToolEntry]:
     return [
         ToolEntry("chronicle_write", schema(
             "chronicle_write",
-            "Write my own chronicle record: seal a page over a room's closed arcs (the host expands covers into the exact row set, stamps each covered task with its recorded outcome and checks quotes), fold adjacent records into a part, keep a note for my future self, correct a record (a signed revision under its own words wherever it is shown; to say it anew, fold it into a part), or accept/reject a helper's draft. A delegated child or nanny publishes pages and parts only as drafts signed in its own name for the integrating mind to accept or reject; its part folds only legacy sections and its own drafts (its note, correction or decision, or a part over other records, is refused: not_integrator). Records are never rewritten. A refusal returns the current revision or room head and the conflicting ids; read them with memory_read.",
+            "Write my own chronicle record: seal a page over a room's closed arcs (the host expands covers into the exact row set, stamps each covered task with its recorded outcome and checks quotes), fold adjacent records into a part, keep a note for my future self, correct a record (a signed revision under its own words wherever it is shown; to say it anew, fold it into a part), accept/reject a helper's draft, write an account connecting experience of several rooms over the exact source versions I read (sources; nothing sealed or folded), or select an account for the common view in place of the records it names (replaces; the latest selection acts, shown=false withdraws). A delegated child or nanny publishes pages and parts only as drafts signed in its own name for the integrating mind to accept or reject; its part folds only legacy sections and its own drafts (its note, correction, decision, account or selection, or a part over other records, is refused: not_integrator). Records are never rewritten. A refusal returns the current revision or room head and the conflicting ids; read them with memory_read.",
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",
-            "Read memory by address, as text: a room's records and active marks (first line: room and head), one record with its stamp and corrections (node_id), a room's chat rows verbatim (rows=true with from/to, task_id or period), or a retained source (source_ref). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer. Choose the depth yourself.",
+            "Read memory by address, as text: a room's records and active marks (first line: room and head), one record with its stamp and corrections (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), or a retained source (source_ref). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer. Choose the depth yourself.",
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",

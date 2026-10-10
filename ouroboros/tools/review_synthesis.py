@@ -407,8 +407,7 @@ A missing entry means the question was not reviewed.
 - Do not return duplicate PASS entries, and never PASS a question that also has a
   FAIL — the concrete FAIL is authoritative.
 - Severity: critical requires a concrete current artifact and a required change to
-  this diff; otherwise advisory. Coupling affects only unchanged code outside the
-  diff. {body_note}
+  this diff; otherwise advisory. {body_note}
 - If an open obligation in the coupling history below already names an
   `obligation_id` for a root cause, reuse that exact id; never invent a new id for
   the same root cause.

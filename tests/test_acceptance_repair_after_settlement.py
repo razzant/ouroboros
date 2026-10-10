@@ -6,6 +6,7 @@ import copy
 import pytest
 
 from ouroboros import loop
+from tests.test_subscription_main_wait import _without_context_facts
 from tests.test_acceptance_async_loop import ANSWER, call, keep, select_completion
 from tests.test_acceptance_async_loop import full_loop as _full_loop
 
@@ -48,7 +49,7 @@ def test_prose_after_settlement_requires_selection_without_another_review_park(
                 assert followup in str(messages)
             return {"content": reauthored}, 0.0
         if f.model_step == 4:
-            assert "No completion selection was made" in str(messages[-1].get("content"))
+            assert "No completion selection was made" in str(_without_context_facts(messages)[-1].get("content"))
             assert f.ctx._delivery_candidate.full_text == ANSWER
             return select_completion(f, reauthored), 0.0
         assert f.model_step < 7, f.progress

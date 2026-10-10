@@ -506,10 +506,8 @@ def test_project_activity_stays_out_of_main_static_contract():
 
 
 def test_project_lifecycle_rows_render_design_system_action_static_contract():
-    """B2 static guard (sol item 4 UI / fable 4.3): BOTH host-stamped Project
-    lifecycle rows render their action through the shared design-system helper
-    inside a `.system-message-actions` container; the custom pill class and its
-    bare `<br>` spacing are structurally gone from chat.js AND style.css."""
+    """Project lifecycle rows delegate their Project door to its owning renderer;
+    the custom pill and bare line-break spacing stay retired."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
@@ -523,9 +521,10 @@ def test_project_lifecycle_rows_render_design_system_action_static_contract():
         "const PROJECT_ROW_TYPES = new Set(['project_started', 'project_handoff', 'project_completion_summary']);"
         in chat
     )
-    # chat.js only delegates; the lifecycle-row module puts the one Project reference
-    # (web/modules/project_reference.js) into the shared action composition.
-    assert "if (PROJECT_ROW_TYPES.has(systemType)) decorateProjectRow(bubble, { role, projectId, projectName," in chat
+    # Compact Main entries own their shell; the remaining lifecycle rows use the
+    # shared action composition. Both renderers reuse the one Project reference.
+    assert "if (projectEntry) handoffs.mount(bubble, {" in chat
+    assert "if (!projectEntry && PROJECT_ROW_TYPES.has(systemType)) decorateProjectRow(bubble, { role, projectId, projectName," in chat
     assert "terminalTime: opts.terminalTime, addedAt: ts, completion: systemType === 'project_completion_summary'" in chat
     render = (root / "web" / "modules" / "project_answer.js").read_text(encoding="utf-8")
     assert "createSystemMessageActions(projectReference(" in render

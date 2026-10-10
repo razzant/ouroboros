@@ -114,9 +114,12 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # refused, a background child stalls the call and is never tracked after it
     # (tests/test_run_command_schema_truth.py). Rolled once more: the sentence no
     # longer says the child is never STOPPED, which is false where the timeout kill
-    # still reaches the exited shell's process group (Linux).
+    # still reaches the exited shell's process group (Linux). Rolled again for
+    # source-addressed delivery (owner Q4): both tools gain the additive
+    # `view_head_chars`/`view_tail_chars` first-view request (the complete output
+    # stays an exact readable source either way); the handlers' **kwargs bind them.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "7d7a07b763cec4e8fc95bdfb733c2b8362bb8c0f0648b33825b56e52dccda4ce"
+        "47e5051938e513c9798291e8d24224d0a9f8825cd9554bbc7ed16721772bc72f"
     )
     original = json.loads(schema_bytes)
     for schema in original:
@@ -131,7 +134,7 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     )
     assert hashlib.sha256(json.dumps(original, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":")).encode()).hexdigest() == (
-        "c6504272bceed19cc138a9cc8ee98a04db2f6ac3b41d70fdacbc4fa4022542bc"
+        "13ade213656361e8faae67439a364d8629d076fe3f27e72e4dfb03f48094889b"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

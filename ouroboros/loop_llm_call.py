@@ -1134,6 +1134,8 @@ def _record_round_cache_facts(
     *,
     round_idx: int,
     round_id: str = "",
+    model: str = "",
+    provider: str = "",
 ) -> tuple:
     """Cold-restart telemetry — FACTS of this round only (no dollar counterfactuals).
 
@@ -1164,6 +1166,10 @@ def _record_round_cache_facts(
     )
     accumulated_usage["_last_llm_round_finished_monotonic"] = now
     accumulated_usage["_last_prompt_cache_ttl"] = prompt_cache_ttl
+    accumulated_usage["_last_round_cache_usage"] = {
+        "round": round_idx, "model": model, "provider": provider,
+        **{key: usage.get(key) for key in ("prompt_tokens", "cached_tokens", "cache_write_tokens")},
+    }
     return prompt_cache_ttl, cache_hit_rate, cache_cold_restart, gap_since_prev_round_sec, duration_ms
 
 
@@ -1526,7 +1532,8 @@ def call_llm_with_retry(
             accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
             cached_tokens = int(usage.get("cached_tokens") or 0)
             prompt_cache_ttl, cache_hit_rate, cache_cold_restart, gap_since_prev_round_sec, duration_ms = (
-                _record_round_cache_facts(accumulated_usage, usage, round_idx=round_idx, round_id=round_id))
+                _record_round_cache_facts(accumulated_usage, usage, round_idx=round_idx, round_id=round_id,
+                                          model=display_model, provider=provider))
             ledger_ids = list(usage.get("ledger_attempt_ids") or [])  # the last one carried this response (#807)
             _round_event = {
                 "ts": utc_now_iso(), "type": "llm_round",

@@ -24,6 +24,9 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional, Tuple
 
+# Canonical host-row classification; physical requests omit this top-level metadata.
+HOST_CONTEXT_KIND_KEY = "_host_context_kind"
+
 # Owner-selected Low's total-context economy/short-window target. This is an
 # elastic target, not a provider admission ceiling: Phase 2 measures the sealed
 # Main input plus its unchanged response reserve against T and the selected

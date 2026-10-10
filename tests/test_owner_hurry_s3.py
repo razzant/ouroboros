@@ -741,7 +741,7 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
                 drive_logs=tmp_path / "logs", task_id=task_id, round_idx=1,
                 event_queue=None, accumulated_usage={}, task_type="task",
                 active_use_local=False, tools=SimpleNamespace(_ctx=first_ctx),
-                drive_root=tmp_path,
+                drive_root=tmp_path, context_fit_plan=None, active_context_mode="max",
             ),
             None,
             attempt_cap=1,
@@ -755,7 +755,7 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
             def __init__(self):
                 self.calls = []
                 self._ctx = SimpleNamespace(
-                    task_metadata={}, _request_wire_custom_receipts=(),
+                    task_metadata={}, _request_wire_custom_receipts=(), drive_root=tmp_path,
                 )
 
             def get_timeout(self, _name):
@@ -807,7 +807,7 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
             drive_logs=tmp_path / "logs", task_id=task_id, round_idx=1,
             event_queue=None, accumulated_usage={}, task_type="task",
             active_use_local=False, tools=SimpleNamespace(_ctx=successor_ctx),
-            drive_root=tmp_path,
+            drive_root=tmp_path, context_fit_plan=None, active_context_mode="max",
         ),
         None,
         attempt_cap=1,

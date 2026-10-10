@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any, Optional
 
 OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
     "send_user_message", "send_photo", "send_video", "send_file", "send_links",
@@ -224,7 +225,11 @@ STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
     "browse_page", "browser_action",
 })
 
-# Full outputs are semantic (review verdicts, advisory findings, status).
+# Results whose complete text is semantic (review verdicts, advisory findings,
+# status). CLASSIFICATION ONLY: the Main loop no longer exempts any tool name or
+# path from the measured first-show projection (`tool_result_delivery`) -- a
+# verdict the frame cannot hold is delivered head+tail with its exact source,
+# never silently whole. Readers of these sets are tests and documentation.
 UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "commit_reviewed",
     "vcs_commit_reviewed",
@@ -244,7 +249,8 @@ UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "memory_mark",
 })
 
-# Cognitive artifacts must not be truncated.
+# Governance sources (the required-resident books stay whole in the system
+# prompt; a tool READ of one is an ordinary result under the measured frame).
 UNTRUNCATED_REPO_READ_PATHS: frozenset[str] = frozenset({
     "BIBLE.md",
     "README.md",
@@ -253,19 +259,22 @@ UNTRUNCATED_REPO_READ_PATHS: frozenset[str] = frozenset({
     "docs/DEVELOPMENT.md",
 })
 
-# Whole DIRECTORIES whose repository reads keep the same guarantee: the runtime
-# prompts, and the two reference books' chapters. A prefix rather than a list
-# of the current chapter filenames, because a hand-maintained population is
-# exactly what goes stale when a book gains, splits or renames a chapter -- and
-# a silently capped chapter read is a partial governance source that reads like
-# a complete one. Four chapters exceed the 80,000-char `read_file` result cap.
+# Whole DIRECTORIES of the same class: the runtime prompts and the two reference
+# books' chapters. A prefix rather than a list of the current chapter filenames,
+# because a hand-maintained population is exactly what goes stale when a book
+# gains, splits or renames a chapter. Several chapters exceed 80,000 chars; a
+# chapter read the frame cannot hold is a range with an exact source, which is
+# disclosed, not a silently capped source that reads like a complete one.
 UNTRUNCATED_REPO_READ_PREFIXES: tuple[str, ...] = (
     "prompts/",
     "docs/architecture/",
     "docs/development/",
 )
 
-# Per-tool char caps; omitted tools use DEFAULT_TOOL_RESULT_LIMIT.
+# Per-tool PRODUCER page sizes; omitted tools use DEFAULT_TOOL_RESULT_LIMIT.
+# These bound what a self-paging producer emits per call (JSON pages that must
+# stay parseable, continuation cursors). They are NOT an outer cap on what Main
+# receives: the loop's first-show projection is measured per batch.
 TOOL_RESULT_LIMITS: dict[str, int] = {
     "inspect_harness": 80_000,
     "maintain_harness": 80_000,
@@ -307,14 +316,72 @@ DEFAULT_TOOL_RESULT_LIMIT: int = 15_000
 
 
 def tool_result_limit(tool_name: str) -> int:
-    """The char budget a tool's result is delivered under.
+    """The chars a self-paging producer emits per call (always a positive int).
 
-    Read by the truncator AND by producers that must fit inside it: a tool whose payload
-    is structured JSON has to bound itself, because outer head-truncation cuts mid-string
-    and destroys the document. Both sides asking the same function is what keeps a
-    producer's idea of "small enough" from drifting away from the cap actually applied.
+    Read by producers that page themselves at the source (chat history, journal,
+    memory, delegated output, catalog pages): a structured JSON page bounds itself
+    here so its continuation cursor stays truthful. The Main loop's own delivery
+    no longer cuts at this number -- a result the measured frame cannot hold is
+    shown head+tail with its exact source by ``tool_result_delivery`` -- so a
+    producer that emits more than this is not cut mid-document by its name.
     """
     return TOOL_RESULT_LIMITS.get(str(tool_name or ""), DEFAULT_TOOL_RESULT_LIMIT)
+
+
+# Explicit first-view request a call may carry: how many chars of the head and
+# of the tail to show when the complete result cannot be delivered whole. The
+# complete result is kept as an exact source either way; these only shape the
+# first view, so every handler accepts them and none reinterprets them.
+RESULT_VIEW_HEAD_ARG = "view_head_chars"
+RESULT_VIEW_TAIL_ARG = "view_tail_chars"
+# The one schema fragment the process tools splice into their parameters.
+RESULT_VIEW_PARAMS: dict[str, dict[str, Any]] = {
+    RESULT_VIEW_HEAD_ARG: {"type": "integer", "minimum": 0, "description": (
+        "Chars of the output's head to show in this turn when the complete output cannot be "
+        "delivered whole (pair with view_tail_chars). The complete output is kept as an exact, "
+        "readable source either way; this only shapes the first view.")},
+    RESULT_VIEW_TAIL_ARG: {"type": "integer", "minimum": 0,
+                           "description": "Chars of the output's tail to show in this turn (see view_head_chars)."},
+}
+
+# Declared range parameters whose presence means the caller chose the result's
+# form (a page, a window, a cursor): such a result is a REQUESTED form that may
+# use the free room of the frame, not an unsolicited body sharing the eighth.
+EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
+    RESULT_VIEW_HEAD_ARG, RESULT_VIEW_TAIL_ARG,
+    "max_chars", "max_lines", "start_char", "start_line",
+    "source_start_char", "source_end_char", "offset", "limit",
+})
+
+# Tools whose own affordance IS paging: selects the recovery WORDING of a
+# partial view only; it exempts nothing from source persistence.
+PAGEABLE_TOOL_RESULTS: frozenset[str] = frozenset({
+    "read_file", "chat_history", "journal_read", "tree_read", "recent_tasks", "query_code",
+})
+
+
+def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
+    """What form the call asked its result to take: ``None`` when unsolicited.
+
+    ``(head, tail)`` when the call named a head/tail view (either may be 0);
+    ``(None, None)`` when it chose a range or page through other declared range
+    parameters, so the produced form itself is the requested one.
+    """
+    if not isinstance(tool_args, dict):
+        return None
+    head, tail = tool_args.get(RESULT_VIEW_HEAD_ARG), tool_args.get(RESULT_VIEW_TAIL_ARG)
+    if head is not None or tail is not None:
+        return (_view_chars(head), _view_chars(tail))
+    if EXPLICIT_RANGE_ARGS & {str(key) for key in tool_args}:
+        return (None, None)
+    return None
+
+
+def _view_chars(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 # Reviewed mutative tools must not end with ambiguous executor timeouts.

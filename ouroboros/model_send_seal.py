@@ -115,6 +115,27 @@ def build_model_send_seal(
     }
 
 
+EXPOSURE_ATOMS_BASIS = "source_atoms_v1_pre_redaction"
+
+
+def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Hash/count identities of the prepared messages; empty when the candidate has none."""
+    messages = candidate.get("messages") if isinstance(candidate, dict) else None
+    if not isinstance(messages, list) or not messages:
+        return {}
+    from ouroboros.context_compaction import _source_atoms
+
+    try:
+        atoms = _source_atoms([m for m in messages if isinstance(m, dict)])
+    except Exception:  # exposure evidence is additive: never fail the send record over it
+        log.debug("exposure atoms unavailable for the prepared candidate", exc_info=True)
+        return {}
+    if not atoms:
+        return {}
+    return {"exposure_atoms": {str(key): int(count) for key, count in atoms.items()},
+            "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
+
+
 def persist_physical_candidate(
     drive_root: pathlib.Path,
     *,
@@ -135,6 +156,12 @@ def persist_physical_candidate(
     accounting row it lands on names its attempt as seam-sealed — the join key
     the reverse reconciliation sweep enforces. ``observability.py`` keeps the
     compatibility export so existing callers use this same implementation.
+
+    ``exposure_atoms`` records the content identities (``context_compaction._source_atoms``:
+    sha256 of each call/result/text atom with its count) of the exact prepared bytes,
+    computed BEFORE redaction and custody projection. The context view's exposure check
+    reads these hashes instead of the redacted blob, so a unit whose result carries a
+    redacted secret still counts as sent; the manifest never stores the raw text.
     """
     from ouroboros.anthropic_native_custody import physical_custody_projection
     from ouroboros.observability import persist_call
@@ -153,6 +180,7 @@ def persist_physical_candidate(
             "candidate_raw_digest_basis": "canonical_json_v1_pre_redaction",
             "redacted_projection_digest_basis": "observability_json_v1_post_default_redaction_cas",
             "anthropic_native_custody_projected": custody_projected,
+            **_exposure_atoms_manifest(candidate),
             **dict(candidate_facts),
         },
         finalize_manifest=lambda redacted: {

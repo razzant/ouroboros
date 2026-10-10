@@ -174,36 +174,45 @@ def test_the_new_module_gate_takes_the_chapter_that_documents_the_module():
     ) is not None, "a docs file outside the book documents no module"
 
 
-# --- the untruncated-read guarantee ---------------------------------------
+# --- chapter reads under the measured first show ---------------------------
 
-def test_a_chapter_read_keeps_the_untruncated_guarantee_the_monolith_had():
-    from ouroboros.loop_tool_execution import _path_is_cognitive_artifact, _truncate_tool_result
-    from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS
+def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
+    """Owner Q4: the monolith exempted book chapters from any delivery bound; the
+    books stay whole where they are REQUIRED (the system prompt), while a tool
+    READ of a chapter is a result like any other -- whole when the measured frame
+    holds it, a head+tail range with its exact source when it does not. No path
+    class decides that; the compat renderer invents no cap without a measurement."""
+    from ouroboros.loop_tool_execution import _truncate_tool_result
+    from ouroboros.tool_capabilities import UNTRUNCATED_REPO_READ_PREFIXES, requested_result_view
+    from ouroboros.tool_result_delivery import RESULT_VIEW_MARKER
 
-    limit = TOOL_RESULT_LIMITS["read_file"]
-    oversized = "x" * (limit + 5_000)
-    for rel in ("docs/architecture/06-agent-core.md", "docs/development/06-rules-by-change-class.md"):
-        assert _path_is_cognitive_artifact("read_file", {"path": rel}), rel
-        assert _truncate_tool_result(oversized, "read_file", {"path": rel}) == oversized, rel
-    # The guarantee is a book-source class, not every markdown file under docs/.
-    assert not _path_is_cognitive_artifact("read_file", {"path": "docs/reference-books-migration.md"})
-    assert len(_truncate_tool_result(oversized, "read_file",
-                                     {"path": "docs/reference-books-migration.md"})) < len(oversized)
+    oversized = "x" * 85_000 + "\nLAST LINE"
+    for rel in ("docs/architecture/06-agent-core.md", "docs/development/06-rules-by-change-class.md",
+                "docs/reference-books-migration.md"):
+        args = {"path": rel}
+        assert requested_result_view(args) is None  # a plain read asks for no particular form
+        assert _truncate_tool_result(oversized, "read_file", args) == oversized, rel
+        view = _truncate_tool_result(oversized, "read_file", args, allowance_chars=6_000)
+        assert len(view) < len(oversized) and "LAST LINE" in view and RESULT_VIEW_MARKER in view, rel
+        assert "or page this tool (offset/limit) for the omitted range" in view or "FULL_RESULT_SOURCE_UNAVAILABLE" in view
+    # The book-source class still exists as classification (prompts, both books).
+    assert "docs/architecture/" in UNTRUNCATED_REPO_READ_PREFIXES
 
 
-def test_every_chapter_over_the_read_cap_is_covered_by_the_prefix_guarantee():
-    """The chapters that actually need it, measured rather than assumed."""
-    from ouroboros.loop_tool_execution import _path_is_cognitive_artifact
+def test_chapters_exceed_a_single_turn_so_range_delivery_is_load_bearing():
+    """Measured rather than assumed: some chapters are longer than the retired
+    80,000-char read page, so a chapter read can only ever be whole under a frame
+    that actually holds it."""
     from ouroboros.reference_books import load_reference_book
-    from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS
+    from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS, UNTRUNCATED_REPO_READ_PREFIXES
 
     oversized = []
     for book_id in BOOK_ENTRYPOINTS:
         for chapter in load_reference_book(REPO, book_id).chapters:
-            assert _path_is_cognitive_artifact("read_file", {"path": chapter.source_path})
+            assert chapter.source_path.startswith(UNTRUNCATED_REPO_READ_PREFIXES)
             if len(chapter.raw) > TOOL_RESULT_LIMITS["read_file"]:
                 oversized.append(chapter.source_path)
-    assert oversized, "if no chapter exceeds the cap, this guarantee needs a different proof"
+    assert oversized, "if no chapter exceeds the page, range delivery needs a different proof"
 
 
 # --- the mandatory-read corpus --------------------------------------------

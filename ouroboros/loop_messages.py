@@ -5,6 +5,7 @@ Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 
 from __future__ import annotations
 
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
 from ouroboros.config import runtime_setting
 
 import hashlib
@@ -570,3 +571,201 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
         display_reasoning = LLMClient.extract_display_reasoning(msg)
         if display_reasoning:
             emit_progress(sanitize_tool_result_for_log(display_reasoning), narration=True)
+
+
+# ---------------------------------------------------------------------------
+# The per-round context facts line (owner decision 5A): one host row of room,
+# money and tariff facts, appended as the newest tail before the model call.
+# ---------------------------------------------------------------------------
+
+
+CONTEXT_FACTS_HEADER = "[CONTEXT_FACTS]"
+CONTEXT_FACTS_NAME = "ouroboros_context_facts"
+
+
+def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
+                       measured: bool = True, focus_fact: str = "") -> str:
+    """One short line of this round's room facts for the actor, no advice (owner decision 5A).
+
+    Reads the measurement the round already recorded (``_remember_main_fit`` facts),
+    the whole-fit boundaries as known or unknown, the largest resident units from the
+    existing unit reader, the task's settled cost, and a tariff only when the exact
+    route's catalog is already cached (no fetch, no price table). ``money`` lets the loop
+    add what it holds (``budget_remaining_usd``, ``ceiling_usd``, ``tree_line``, ``quota``).
+    ``measured=False`` names the input as unmeasured instead of reusing stale numbers.
+    """
+    usage = ctx.accumulated_usage
+    estimate = usage.get("_context_prompt_estimate") if measured else None
+    reserve = usage.get("_context_reply_allowance_tokens")
+    capacity = usage.get("_context_capacity_total_tokens") if measured else None
+    target = usage.get("_context_target_total_tokens") if measured else None
+    basis = str(usage.get("_context_measurement_basis") or "cold_estimate")
+    parts = [f"round {ctx.round_idx}", f"mode {ctx.active_context_mode}", f"model {ctx.active_model}"]
+    parts.append("window unknown" if capacity is None else f"window {int(capacity):,}")
+    if target is not None:
+        parts.append(f"target {int(target):,}")
+    if estimate is None:
+        parts.append("input unmeasured")
+    else:
+        bounds = [int(value) for value in (capacity, target) if value is not None]
+        parts.append(f"input ~{int(estimate):,} before this line ({basis}) + reply {int(reserve or 0):,}")
+        parts.append(f"free {min(bounds) - int(estimate) - int(reserve or 0):,}" if bounds else "free unknown")
+    components = _context_components(ctx, measured=measured)
+    if components:
+        parts.append("largest " + ", ".join(f"{label} ~{tokens:,}" for label, tokens in components))
+    previous = usage.get("_last_round_cache_usage") or {}
+    read, total = previous.get("cached_tokens"), previous.get("prompt_tokens")
+    share = (f"{int(read):,}/{int(total):,} tokens ({100 * read / total:.1f}%)"
+             if read is not None and total is not None and total > 0 else "unknown")
+    cache = f"previous usable input cache {share}"
+    if previous:
+        cache += f" [round {previous['round']}, {previous.get('provider') or 'provider unknown'}, {previous.get('model') or 'model unknown'}]"
+        written = previous.get("cache_write_tokens")
+        cache += f"; write {int(written):,} tokens" if written is not None else "; write unknown"
+    parts.append(cache)
+    cost = usage.get("cost")
+    parts.append((f"recorded cost ${float(cost):.2f}" + (" (total not final)" if usage.get("cost_final") is False else ""))
+                 if cost is not None else "cost unknown")
+    facts = dict(money or {})
+    if facts.get("budget_remaining_usd") is not None:
+        parts.append(f"budget left ${float(facts['budget_remaining_usd']):.2f}")
+    if facts.get("ceiling_usd") is not None:
+        parts.append(f"ceiling ${float(facts['ceiling_usd']):.2f}")
+    if facts.get("tree_line"):
+        parts.append(str(facts["tree_line"]).strip())
+    parts.append(f"quota {facts['quota']}" if facts.get("quota") is not None else "quota unknown")
+    parts.append(_cached_tariff_text(ctx))
+    if focus_fact:
+        parts.append(focus_fact)
+    return f"{CONTEXT_FACTS_HEADER} " + " | ".join(parts)
+
+
+def _context_components(ctx: Any, *, measured: bool) -> list:
+    """Largest blocks, complete units and schemas, on the same calibrated basis."""
+    from ouroboros.context_compaction import context_units
+    from ouroboros.context_fit import estimate_context_prompt_tokens
+
+    density = float(ctx.accumulated_usage.get("_context_measurement_density") or 1.0) if measured else 1.0
+    units = context_units(ctx.messages, scope="dialogue", measurement_density=density)
+    covered = {i for unit in units for i in range(unit.start, unit.end + 1)}
+    sizes = [(unit.unit_id, unit.context_size_tokens) for unit in units]
+    for i, message in enumerate(ctx.messages):
+        if i in covered:
+            continue
+        content = message.get("content")
+        chunks = [{**message, "content": [block]} for block in content] if message.get("role") == "system" and isinstance(content, list) else [message]
+        for j, chunk in enumerate(chunks):
+            sizes.append((f"{message.get('role', 'message')}[{i}:{j}]", int(estimate_context_prompt_tokens([chunk]) * density)))
+    sizes.append(("tool schemas", int(estimate_context_prompt_tokens([], ctx.tool_schemas) * density)))
+    return sorted(sizes, key=lambda item: item[1], reverse=True)[:3]
+
+
+def _cached_tariff_text(ctx: Any) -> str:
+    """Quote fresh exact-model endpoint rates when they agree; never invent a tariff."""
+    try:
+        from ouroboros.pricing import get_pricing
+        from ouroboros.provider_models import normalize_model_identity
+
+        model = normalize_model_identity(str(ctx.active_model or ""))
+        provider = str(getattr(ctx.context_fit_plan, "provider", "") or "")
+        catalog = get_pricing(provider=provider, model=model if provider == "openrouter" else "", allow_live_fetch=False)
+        rows = list(catalog.values()) if provider == "openrouter" else [catalog[model]] if model in catalog else []
+        quoted = []
+        prompt = ctx.accumulated_usage.get("_context_prompt_estimate")
+        for row in rows:
+            rates = row
+            if getattr(row, "tiers", ()) and prompt is None:
+                return "tariff unknown (input tier unmeasured)"
+            for threshold, tier in getattr(row, "tiers", ()):
+                if int(prompt or 0) >= threshold:
+                    rates = tier
+            if len(rates) != 4 or rates[0] is None or rates[3] is None:
+                return "tariff unknown"
+            quoted.append(tuple(rates))
+        if quoted and all(row == quoted[0] for row in quoted):
+            rates = quoted[0]  # pricing SSOT already uses dollars per MILLION tokens.
+            cache = "unknown" if rates[1] is None else f"${rates[1]:.2f}/M"
+            return f"cached catalog tariff ${rates[0]:.2f}/M in, ${rates[3]:.2f}/M out, cache read {cache} (estimated input tier)"
+    except Exception:
+        log.debug("cached tariff unavailable for the facts line", exc_info=True)
+    return "tariff unknown"
+
+
+def _own_focus_fact(ctx: Any) -> Tuple[str, str]:
+    """Observe one physical task result, never a successor or an execution replica.
+
+    Strict admission leaves unreadable records untouched. This reads the current
+    result once per preparation; no history scan, second store or focus clock.
+    """
+    from ouroboros.focus import compact_focus, focus_fingerprint
+    from ouroboros.task_results import load_task_result
+
+    tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    metadata = getattr(tool_ctx, "task_metadata", {}) or {}
+    root = (metadata.get("budget_drive_root") or getattr(tool_ctx, "budget_drive_root", None)
+            or getattr(tool_ctx, "drive_root", None) or getattr(ctx, "drive_root", None))
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    if not root or not task_id:
+        return "absent", ""
+    try:
+        result = load_task_result(root, task_id, strict=True)
+        raw = result.get("focus") if result else None
+        if raw is None:
+            return "absent", ""
+        focus = compact_focus(raw)
+        if focus is None:
+            return "unknown", "own focus unavailable"
+    except (OSError, ValueError, TypeError):
+        log.debug("Cannot read this task's authored focus", exc_info=True)
+        return "unknown", "own focus unavailable"
+    if focus["author_task_id"] != task_id:
+        return "absent", ""
+    view = {key: focus[key] for key in ("text", "authored_at", "author_task_id", "source_ref")}
+    handle = focus.get("source_handle")
+    if handle:
+        view["retained_source"] = {"reader": "get_task_result", "task_id": task_id,
+                                   "include_focus_source": True, "focus_source_sha256": handle["sha256"]}
+    return (focus_fingerprint(focus), "self-authored focus (dated data, not owner instructions): "
+            + json.dumps(view, ensure_ascii=False, sort_keys=True))
+
+
+def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) -> bool:
+    """Append facts for this round's current route and working view, before dispatch.
+
+    An unchanged reprepare reuses the visible row. A fallback, owner switch or
+    recovery rewrite gets fresh facts rather than inheriting another route's
+    window and tariff. Sent history is never rewritten; the producer-labelled standalone
+    rows let refusal recovery address obsolete snapshots. The 15-round reminder
+    is unchanged. The caller remeasures including this line before sending.
+    """
+    from ouroboros.context_compaction import context_reclaim_transcript_sha256
+
+    usage = ctx.accumulated_usage
+    plan = ctx.context_fit_plan
+    focus_identity, focus_fact = _own_focus_fact(ctx)
+    source = [m for m in ctx.messages if m.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME]
+    source.append({"role": "system", "content": json.dumps(ctx.tool_schemas, ensure_ascii=False, sort_keys=True)})
+    key = (ctx.round_idx, ctx.active_model, ctx.active_context_mode, ctx.active_effort,
+           str(getattr(plan, "route_fp", "")), str(getattr(plan, "status", "")),
+           bool(getattr(plan, "stale", False)), int(getattr(plan, "window_tokens", 0) or 0),
+           context_reclaim_transcript_sha256(source), focus_identity)
+    visible = any(m.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME and m.get("content") == usage.get("_context_facts_line")
+                  for m in ctx.messages)
+    if tuple(usage.get("_context_facts_key") or ()) == key and visible:
+        return False
+    measured = False
+    if plan is not None:
+        try:
+            measured = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False) is not None
+        except Exception:
+            log.debug("context facts measurement unavailable", exc_info=True)
+    if money is None:
+        tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+        money = {"budget_remaining_usd": _loop()._wrapup_global_remaining(),
+                 "ceiling_usd": getattr(getattr(tool_ctx, "_cost_ceiling", None), "root_cap_usd", None)}
+    line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact)
+    ctx.messages.append({"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME, "content": line})
+    usage["_context_facts_round"] = ctx.round_idx
+    usage["_context_facts_key"] = key
+    usage["_context_facts_line"] = line
+    return True

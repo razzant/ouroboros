@@ -767,12 +767,12 @@ def get_tools() -> List[ToolEntry]:
             {
                 "name": "update_focus",
                 "description": (
-                    "Optionally publish one short line on what this live root is working on, for the OTHER "
-                    "live roots: their roster note and live_roots show it, dated, while this task is unsettled "
-                    "(waits included) until you publish a newer one; once it settles it is only history on its "
-                    "task result. It is task-scoped, not a project-level record; journal/workpad writes do not "
-                    "publish it and nothing refreshes it. source_ref names a reader whose current answer is "
-                    "kept as the evidence. Awareness, never an owner directive."
+                    "Optionally publish one short line about this live root's work. Your context facts repeat "
+                    "its dated text as working thought, never an owner directive; revise it when your focus changes. "
+                    "OTHER live roots see it while this task is unsettled (waits included), until replaced; "
+                    "after settlement it is history. It is task-scoped, not a project-level record; "
+                    "journal/workpad writes do not publish it and nothing refreshes it. source_ref names a "
+                    "reader whose current answer is retained as evidence."
                 ),
                 "parameters": {
                     "type": "object",
