@@ -33,6 +33,13 @@ function resizeHarness({
     const styleWrites = { set: 0, remove: 0 };
     let observerCallback = null;
     let observerDisconnects = 0;
+    let frameId = 0;
+    const frames = new Map();
+    const flushFrame = () => {
+        const pending = [...frames.values()];
+        frames.clear();
+        pending.forEach((callback) => callback());
+    };
     const createStyle = (label, initial = {}) => {
         const declarations = new Map();
         if (initial.value) declarations.set('overflow-y', initial);
@@ -77,6 +84,8 @@ function resizeHarness({
     );
     const window = {
         innerHeight: 768,
+        requestAnimationFrame(callback) { frames.set(++frameId, callback); return frameId; },
+        cancelAnimationFrame(id) { frames.delete(id); },
         parent: {
             postMessage(message) {
                 messages.push(message);
@@ -116,13 +125,38 @@ function resizeHarness({
         styleWrites,
         listeners,
         observerDisconnects: () => observerDisconnects,
+        pendingFrames: () => frames.size,
+        flushFrame,
+        notify(height) { state.height = height; observerCallback(); },
         resize(height) {
             state.height = height;
             observerCallback();
+            flushFrame();
         },
         dispose() { disposeCallbacks.forEach((callback) => callback()); },
     };
 }
+
+test('resize observer defers layout writes, coalesces updates, and cancels on dispose', () => {
+    const harness = resizeHarness();
+    harness.notify(1200);
+    harness.notify(1300);
+    assert.equal(harness.pendingFrames(), 1);
+    assert.deepEqual(harness.styleWrites, { set: 2, remove: 0 });
+    assert.deepEqual(harness.messages.map((item) => item.height), [616]);
+    harness.flushFrame();
+    assert.deepEqual(harness.messages.map((item) => item.height), [616, 1316]);
+    assert.deepEqual(harness.styleWrites, { set: 2, remove: 2 });
+    harness.notify(500);
+    assert.equal(harness.pendingFrames(), 1);
+    harness.dispose();
+    assert.equal(harness.pendingFrames(), 0);
+    harness.flushFrame();
+    harness.notify(400);
+    assert.equal(harness.pendingFrames(), 0);
+    assert.deepEqual(harness.messages.map((item) => item.height), [616, 1316]);
+    assert.deepEqual(harness.styleWrites, { set: 2, remove: 2 });
+});
 
 test('widget frame contract keeps the bounded host geometry', () => {
     assert.equal(WIDGET_FRAME_DEFAULT_HEIGHT, 320);

@@ -27,7 +27,7 @@ def render_review_session_prompt(request: Any, slot: Any, task: str) -> str:
 
 def prepare_review_session_request(invocation: Any, route: Any, *,
                                    prompt: str, root: str, thread_id: str,
-                                   schema_asked: bool) -> Dict[str, Any]:
+                                   schema_asked: bool, ephemeral: bool = False) -> Dict[str, Any]:
     """Prepare and measure the exact wire request; no start, wait or recovery effects."""
     from ouroboros.review_execution import ReviewRouteUnavailable, _CLAUDEXOR_MAX_SECONDS
     from ouroboros.subagents import delegated_run_shape
@@ -40,7 +40,7 @@ def prepare_review_session_request(invocation: Any, route: Any, *,
         "authPreference": "subscription",
         "mode": shape.mode,
         "access": shape.access,
-        "scope": {"kind": "project", "root": root},
+        "scope": {"kind": "project", "root": root, **({"ephemeral": True} if ephemeral else {})},
         # A one-element explicit pool is the pin; primaryHarness is only preference.
         "harnesses": [route.route_id],
         "primaryHarness": route.route_id,

@@ -60,7 +60,7 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | POST | `/api/settings` | |
 | POST | `/api/settings/secret` | |
 | GET | `/api/review-pool` | |
-| GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog read evidence (§3); never wakes |
+| GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog evidence (§3); `?view=quota`: roster/quota only; never wakes |
 | POST | `/api/claudexor/quota/refresh` | full or exact account (§3) |
 | POST | `/api/claudexor/account-resets` | exact request and Idempotency-Key (§3) |
 | GET | `/api/claudexor/account-resets/{operation_id}` | receipt inspection (§3) |

@@ -84,7 +84,9 @@ its non-persistent siblings. Durable records written before the marker existed f
 to the immutable stored request (`execution.workspaceRoot` + `access`) at recovery time
 (`record_persistent`); rows that carry the key are authoritative and are never
 recomputed from a live engine. Older engines keep the legacy snapshot-in-`scope.root`
-shape and retire their one-shot registration as before.
+shape: that host-minted snapshot declares `scope.ephemeral` and registers nothing where
+the engine accepts the field (`CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION`), and otherwise
+retires its one-shot registration as before.
 
 ## 3. What Ouroboros actually controls
 

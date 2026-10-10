@@ -486,7 +486,8 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
             facetReads[facet] === READ_FAILED || facetReads[facet] === READ_TRANSPORT);
         if (refused.length) {
             const names = joinSubjects(refused.map((facet) => FACET_SUBJECT[facet] || facet));
-            return { tone: 'warn', text: `Claudexor is running, but ${names} were not read${daemon.last_error ? `: ${daemon.last_error}` : ''}. What those cover is unknown.` };
+            const detail = [...new Set(refused.map((facet) => payload?.facets?.[facet]?.error).filter(Boolean))].join('; ') || daemon.last_error;
+            return { tone: 'warn', text: `Claudexor is running, but ${names} were not read${detail ? `: ${detail}` : ''}. What those cover is unknown.` };
         }
         return { tone: 'ok', text: `Claudexor ready (engine ${daemon.engine_version || '?'}) · home ${payload.config_dir || ''}` };
     }

@@ -14,13 +14,23 @@ settle_run, pending invocations, retry binding, the orphan sweep), so a
 user's own project vanished when a delegated run finished. A registration
 marked persistent survives every retirement path; only ownership of the
 one-shot snapshot registrations is discharged.
+
+A root Ouroboros mints for one task, run or review (a registry checkout, a
+folderless read-only scratch, a review checkout or input view without a sticky
+thread) is not an identity at all: it declares ``scope.ephemeral`` and registers
+nothing, so it never becomes a permanent engine project or a ghost later.
 """
 
 from __future__ import annotations
 
-from typing import Any, Tuple
+from typing import Any, Dict, Tuple
 
 from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
+
+# Does this engine's ``POST /v2/projects`` answer carry ``created``? Learned per engine
+# identity (version, build) from the answers themselves: the field's presence decides,
+# never a version. Unobserved or absent keeps the previous GET-then-POST flow.
+_CREATED_REPORTED: Dict[Tuple[str, str], bool] = {}
 
 
 def review_owned_source(source: Any) -> bool:
@@ -69,18 +79,44 @@ def record_persistent(record) -> bool:
     return persistent_registration(str(workspace_root or ""), str(request.get("access") or ""))
 
 
-def resolve_registration(gateway, scope_root: str, execution_root: str, access: str):
-    """Register (or adopt) the scope root and decide the marker in one step.
+def resolve_registration(gateway, scope_root: str, execution_root: str, access: str, *, minted: bool = False):
+    """Register (or adopt) the scope root and decide the markers in one step.
 
-    Returns ``(project_id, owned_project_id, project_persistent)``: an
-    existing registration is adopted unowned; a fresh one is owned by this
-    start; #362 marks the stable-target case persistent so no retire path
-    deletes the user's own project.
+    Returns ``(project_id, owned_project_id, project_persistent, ephemeral)``. A
+    ``minted`` root on an engine that accepts ``scope.ephemeral``
+    (``config.CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION``) registers nothing: ``("",
+    "", False, True)``. Otherwise an existing registration is adopted unowned; a
+    fresh one is owned by this start; #362 marks the stable-target case
+    persistent so no retire path deletes the user's own project. Ownership comes
+    from the engine's ``created`` once its answers carry it (one POST, no
+    ``GET /v2/projects`` over every project); until then the previous flow runs,
+    and on an unobserved engine one optional POST beside a found root learns it.
+    A gateway without ``project_registration`` (an older client or a test double)
+    keeps the previous flow exactly.
     """
-    existing_project = gateway.find_project_id(scope_root)
-    project_id = existing_project or gateway.register_project(scope_root)
-    owned_project_id = "" if existing_project else project_id
-    return project_id, owned_project_id, persistent_registration(execution_root, access)
+    from ouroboros.config import CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable, engine_at_least
+
+    version = str(getattr(gateway, "engine_version", "") or "")
+    if minted and engine_at_least(version, CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION):
+        return "", "", False, True
+    persistent = persistent_registration(execution_root, access)
+    register = getattr(gateway, "project_registration", None)
+    identity = (version, str(getattr(gateway, "engine_build_sha", "") or ""))
+    reported = _CREATED_REPORTED.get(identity) if register is not None else False
+    existing = "" if reported else gateway.find_project_id(scope_root)
+    if register is None or (existing and reported is False):
+        project_id = existing or gateway.register_project(scope_root)
+        return project_id, ("" if existing else project_id), persistent, False
+    try:
+        project_id, created = register(scope_root)
+    except ClaudexorUnavailable:
+        if not existing:
+            raise
+        return existing, "", persistent, False  # the previous flow needed no POST here
+    _CREATED_REPORTED[identity] = created is not None
+    owned = created if created is not None else not (existing or reported)
+    return project_id, (project_id if owned else ""), persistent, False
 
 
 # How a run's ``maxSeconds`` was decided (#1196), recorded on the START_REQUESTED

@@ -609,7 +609,13 @@ export function createClaudexorStatusStore({
         if (!payload) return;
         const held = inner.snapshot;
         if (held && facetReadState(payload, FACET_QUOTA) !== READ_OK) {
-            payload = { ...payload, quota: held.quota, quota_absences: held.quota_absences, resources: held.resources };
+            // This client's own last value stands in (it may already carry a foreground refresh
+            // the server's memory never saw), dated by this client's own last stamp: a stamp
+            // the server took for a different value must never date it.
+            const facets = payload.facets && { ...payload.facets, [FACET_QUOTA]: { ...payload.facets[FACET_QUOTA],
+                observed_at: held.facets?.[FACET_QUOTA]?.observed_at ?? null, stale: true } };
+            payload = { ...payload, quota: held.quota, quota_absences: held.quota_absences, resources: held.resources,
+                ...(facets ? { facets } : {}) };
         }
         // Agent discovery (reads.catalog) is independent of the operations catalog.
         if (held && resourceCapabilitiesRead(payload) !== READ_OK) {
@@ -1083,10 +1089,13 @@ export function createClaudexorStatusStore({
             // the detail resolution above — a banner that assembled the sentence
             // itself printed "could not be read" over an `unreachable` daemon
             // and silently dropped the one explanation the owner had.
+            // A failed facet's own typed error (`facets.<name>.error`) is the exact detail;
+            // a backend without it leaves the daemon's last_error as before.
             const state = facet(name);
             const daemonError = String(inner.snapshot?.daemon?.last_error || '');
+            const own = String(inner.snapshot?.facets?.[name]?.error || '');
             const detail = inner.error
-                || (state === READ_FAILED || state === READ_INDETERMINATE ? daemonError : '');
+                || (state === READ_FAILED ? own || daemonError : state === READ_INDETERMINATE ? daemonError : '');
             return statusUnavailableNote(state, { error: detail, facet: name, subject });
         },
         refresh,

@@ -18,8 +18,8 @@ Lifecycle belongs to the installation, not the process that first needed it:
   worker's death nor a server generation change ends the daemon's paid runs;
 * ATTACH-IF-ALIVE: a live daemon serving our config dir is attached to. A
   custodied startup without a reachable control endpoint is joined across
-  managers/processes; caller wait expiry reports ``daemon_starting`` and never
-  kills it. Engine writer election owns the concurrent first-launch race;
+  managers/processes; caller wait expiry (``daemon_starting``; a silent live listener:
+  ``daemon_not_answering``) never kills it. Engine writer election owns the first-launch race;
 * ATTACH-ONLY (``review_run_isolation.attach_home``, the isolated contributor
   review, which starts no engine unattached): another data plane's running engine,
   by marker, loopback descriptor and handshake — never started, prepared, rotated,
@@ -371,6 +371,7 @@ class OwnedClaudexorDaemon:
         # successful handshake writes it, so a failed probe cannot retract it.
         self._proven_engine_version = ""
         self._engine_build_sha = ""
+        self._silent_listener = False  # last probe: a listener accepted, then sent no answer
         self._generation = 0
         self._stopping = False
         self._panic_requested = False
@@ -409,9 +410,9 @@ class OwnedClaudexorDaemon:
         )
         import httpx
 
+        self._silent_listener = False
         if not owned_daemon_provisioned():
-            self._engine_version = ""
-            self._engine_build_sha = ""
+            self._engine_version = self._engine_build_sha = ""
             return None, "not_provisioned", ""
         try:
             endpoint = discover_daemon_at(owned_config_dir())
@@ -433,8 +434,8 @@ class OwnedClaudexorDaemon:
                 # question answered by `ensure_owned_gateway`'s own handshakes.
             return endpoint, "running", ""
         except ClaudexorUnavailable as exc:
-            self._engine_version = ""
-            self._engine_build_sha = ""
+            self._engine_version = self._engine_build_sha = ""
+            self._silent_listener = isinstance(exc.__cause__, (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError))
             status = int(getattr(exc, "status_code", 0) or 0)
             if status in (401, 403):
                 return None, "foreign_daemon", (
@@ -778,12 +779,11 @@ class OwnedClaudexorDaemon:
         self._check_start_generation(generation)
         pids = self._startup_pids()
         detail = self._startup_diagnostic(pids)
-        if pids:
-            self._last_error = f"daemon_starting: {detail}"
-            raise ClaudexorUnavailable(
-                "daemon_starting", f"owned daemon is still starting after this {wait:.1f}s wait; "
-                f"retry joins the same startup; {detail}", status_code=503,
-            )
+        if pids:  # a live listener that accepted and stayed silent is not answering, not starting
+            code, said = (("daemon_not_answering", f"process is alive but did not answer in this {wait:.1f}s wait; retry joins the same daemon")
+                          if self._silent_listener else ("daemon_starting", f"is still starting after this {wait:.1f}s wait; retry joins the same startup"))
+            self._last_error = f"{code}: {detail}"
+            raise ClaudexorUnavailable(code, f"owned daemon {said}; {detail}", status_code=503)
         with self._lock:
             self._check_start_generation(generation)
         failure = self._settle_exited_child()
@@ -1288,8 +1288,8 @@ def ensure_owned_gateway(*, admission_wait_sec: Optional[float] = None,
     recovering daemon is an immediate typed refusal there, and the initial
     handshake below is read-bounded by the same small window. The wait bounds
     admission only. ``startup_wait_sec`` separately narrows the caller's control
-    readiness wait, whose default lives in ``config.CLAUDEXOR_STARTUP_WAIT_SEC``;
-    its expiry retains live startup custody and returns ``daemon_starting``.
+    readiness wait (default ``config.CLAUDEXOR_STARTUP_WAIT_SEC``); its expiry keeps
+    live startup custody: ``daemon_starting``, or ``daemon_not_answering`` for a silent listener.
     Ordinary attach probes retain their transport ceiling; runtime preparation
     is separate from both waits. Neither zero-wait parameter promises zero
     total latency or permission to stop the process.

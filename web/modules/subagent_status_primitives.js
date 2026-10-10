@@ -143,10 +143,10 @@ export function sessionRouteVerdict(row, state, nowMs = Date.now()) {
         return available(`${harness} · available now`);
     }
 
-    if (harnessEntry.enabled === false
-        || (harnessEntry.status && String(harnessEntry.status) !== 'ok')) {
-        return verdict(UNAVAILABLE, `${harness} · currently unavailable`);
-    }
+    // The owner's switch refuses, exactly as dispatch reads it; the aggregate doctor
+    // `status` describes only the default credential store and dispatch ignores it
+    // (`subagent_route_health.route_health`), so it never paints a card Unavailable.
+    if (harnessEntry.enabled === false) return verdict(UNAVAILABLE, `${harness} · currently unavailable`);
     const usable = rows.filter((account) => account.enabled !== false
         && String(account?.status?.verification || '') === 'passed');
     if (!usable.length) return verdict(NO_ACCOUNT, `${harness} · no usable account currently`);

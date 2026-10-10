@@ -368,6 +368,8 @@ export function moduleResizeScript(nonce, frameFloor, maxHeight, borderReserve) 
                 }));
             let suppressingVerticalOverflow = false;
             let lastHeight = 0;
+            let resizeFrame = null;
+            let disposed = false;
             const setVerticalOverflowSuppressed = (suppressed) => {
                 if (suppressed === suppressingVerticalOverflow) return;
                 suppressingVerticalOverflow = suppressed;
@@ -379,7 +381,7 @@ export function moduleResizeScript(nonce, frameFloor, maxHeight, borderReserve) 
             };
             setVerticalOverflowSuppressed(true);
             const report = () => {
-                if (!root) return;
+                if (!root || disposed) return;
                 const box = root.getBoundingClientRect();
                 const body = document.body;
                 const bodyTop = body?.getBoundingClientRect().top || 0;
@@ -422,11 +424,28 @@ export function moduleResizeScript(nonce, frameFloor, maxHeight, borderReserve) 
                     height,
                 }, '*');
             };
-            const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(report) : null;
+            // report() toggles overflow-y, which can resize the observed root.
+            // Inside ResizeObserver delivery that resize goes undelivered and the
+            // browser fires a loop error on window, which the bridge's fault
+            // channel reports as a widget script error. A microtask would still
+            // run inside delivery; an animation frame runs before the next
+            // observation pass, coalesces bursts into one measurement and is
+            // cancelled on dispose. Hidden pages pause both alike.
+            const scheduleReport = () => {
+                if (disposed || resizeFrame !== null) return;
+                resizeFrame = window.requestAnimationFrame(() => {
+                    resizeFrame = null;
+                    report();
+                });
+            };
+            const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleReport) : null;
             if (observer && root) observer.observe(root);
             const onLoad = () => report();
             window.addEventListener('load', onLoad, { once: true });
             window.__ouroWidgetOnDispose?.(() => {
+                disposed = true;
+                if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+                resizeFrame = null;
                 observer?.disconnect();
                 window.removeEventListener('load', onLoad);
                 setVerticalOverflowSuppressed(false);

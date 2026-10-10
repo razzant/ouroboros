@@ -1321,3 +1321,12 @@ def prune_orphans(
 def list_worktrees(data_dir: Optional[Any] = None) -> List[Dict[str, Any]]:
     """Return registered worktree records (for UI / inspection)."""
     return _load_registry(data_dir)
+
+
+def registered_checkout(path: Any, data_dir: Optional[Any] = None) -> bool:
+    """Is ``path`` one of this registry's own checkouts (a child's copy, a delegated
+    execution snapshot, a body candidate)? A soft read: an unreadable registry answers no."""
+    target = Path(str(path or "")).resolve()
+    return bool(str(path or "").strip()) and any(
+        Path(str(entry.get("path"))).resolve() == target
+        for entry in _load_registry(data_dir) if entry.get("path"))

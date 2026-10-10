@@ -27,7 +27,7 @@ import pathlib
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -82,6 +82,12 @@ _OBSERVATION_RETRYABLE_ERRORS = (
 # all key on ``daemon_unreachable`` for reasons that have nothing to do with an
 # observation.
 _OBSERVATION_READ_TIMEOUT = "observation_read_timeout"
+# The engine's typed 503 answers that it cannot serve now (its local RPC timed out or is
+# down, or it serves recovery only). For a GET they are the same retryable observation
+# hole, under the engine's own code: never an outage line or a model wake. A POST keeps
+# the refusal, since a lost answer never proves a mutation was not accepted.
+DAEMON_BUSY_CODES = frozenset({"daemon_busy", "daemon_unavailable", "daemon_recovery_only",
+                               "daemon_unreachable"})
 
 
 def _observation_reason(exc: BaseException) -> str:
@@ -102,6 +108,7 @@ class ClaudexorUnavailable(RuntimeError):
     # What the engine reported about a failed run or request; diagnostic, never policy.
     reported_cause = ""
     retry_after = ""  # The received HTTP Retry-After header, never a local backoff.
+    observation_answered = False  # The engine itself answered the read (a typed 503): the transport is intact.
 
     def __init__(self, code: str, message: str, *, status_code: int = 0,
                  required_actions: tuple[str, ...] = (), observation_timeout: bool = False,
@@ -110,8 +117,8 @@ class ClaudexorUnavailable(RuntimeError):
         self.code = str(code or "claudexor_unavailable")
         self.status_code = int(status_code or 0)
         self.required_actions = tuple(required_actions or ())
-        # Read-only observers may retry this exact HTTP read without claiming
-        # anything about the worker. A received HTTP refusal still wins.
+        # Read-only observers may retry this exact HTTP read without claiming anything
+        # about the worker. A received refusal still wins, except a GET's DAEMON_BUSY_CODES.
         self.observation_timeout = bool(observation_timeout)
         # Which hole it was, for the observer only (``_observation_reason``):
         # a read bound that expired against a live daemon is not the same fact
@@ -501,7 +508,7 @@ class ClaudexorGateway(ClaudexorMaintenanceGateway):
                 observation_reason=_observation_reason(exc) if retryable else "",
             ) from exc
         if response.status_code >= 400:
-            raise self._problem(response)
+            raise self._problem(response, method)
         if raw_bytes:
             return response.content
         if not response.content:
@@ -514,7 +521,7 @@ class ClaudexorGateway(ClaudexorMaintenanceGateway):
                 f"Claudexor returned a non-JSON body for {method} {path}: {exc}",
             ) from exc
 
-    def _problem(self, response: httpx.Response) -> ClaudexorUnavailable:
+    def _problem(self, response: httpx.Response, method: str = "") -> ClaudexorUnavailable:
         """Keep ControlProblem authority; nested lookup causes are diagnostics only."""
         code = f"http_{response.status_code}"
         message = response.text[:500]
@@ -556,6 +563,8 @@ class ClaudexorGateway(ClaudexorMaintenanceGateway):
                                         required_actions=required_actions))
         error.problem = body if isinstance(body, dict) else {"code": code, "message": message}
         error.retry_after = response.headers.get("Retry-After", "")
+        if method == "GET" and response.status_code == 503 and code in DAEMON_BUSY_CODES:
+            error.observation_timeout, error.observation_reason, error.observation_answered = True, code, True
         if isinstance(context.get("cause"), dict):
             facts = {key: context[key] for key in ("stage", "cause", "preflight") if key in context}
             error.reported_cause = run_failure_cause({"safeMessage": json.dumps(facts, ensure_ascii=False)})
@@ -796,9 +805,14 @@ class ClaudexorGateway(ClaudexorMaintenanceGateway):
         rows = body.get("harnesses") if isinstance(body, dict) else None
         return [row for row in (rows or []) if isinstance(row, dict)]
 
-    def quota_state(self, *, view: str = "") -> Dict[str, Any]:
-        """GET /v2/quota once, retaining its one-epoch evidence envelope."""
-        body = self._request("GET", "/v2/quota" + ("?view=resources" if view == "resources" else ""))
+    def quota_state(self, *, view: Optional[str] = None) -> Dict[str, Any]:
+        """GET one quota epoch; pass resource or freshness selectors to the engine.
+
+        Old engines may ignore/refuse a selector; claudexor_passive owns fallback.
+        """
+        from urllib.parse import urlencode
+
+        body = self._request("GET", "/v2/quota" + (f"?{urlencode({'view': view})}" if view else ""))
         return body if isinstance(body, dict) else {}
 
     def refresh_quota(self, *, target: Optional[Dict[str, str]] = None,
@@ -843,6 +857,12 @@ class ClaudexorGateway(ClaudexorMaintenanceGateway):
         404 ``project_not_registered``, so registration is a required step, not an
         optimization. Re-registering an existing root returns the existing id.
         """
+        return self.project_registration(root)[0]
+
+    def project_registration(self, root: str) -> Tuple[str, Optional[bool]]:
+        """One keyed ``POST /v2/projects``: ``(project_id, created)``. ``created`` is the
+        engine's own answer whether THIS request registered the root, ``None`` when the
+        answer carries no such field (an engine that predates it): presence decides."""
         body = self._request(
             "POST", "/v2/projects",
             json_body={"root": str(root)},
@@ -851,7 +871,8 @@ class ClaudexorGateway(ClaudexorMaintenanceGateway):
         project_id = str((body or {}).get("id") or "") if isinstance(body, dict) else ""
         if not project_id:
             raise ClaudexorUnavailable("malformed_response", "project registration returned no id")
-        return project_id
+        created = body.get("created")
+        return project_id, created if isinstance(created, bool) else None
 
     def remove_project(self, project_id: str) -> Dict[str, Any]:
         """Retire a project registration. Non-destructive: artifacts are retained."""

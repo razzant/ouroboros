@@ -112,6 +112,7 @@ from ouroboros.delegate_interactions import (  # noqa: F401
 from ouroboros.deadline_utils import deadline_expired
 from ouroboros.delegate_directory import blocked_geometry_refusal
 from ouroboros.delegate_registration_policy import resolve_registration
+from ouroboros.subagent_worktrees import registered_checkout
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
@@ -251,7 +252,7 @@ def _presence_delegate_read_refusal(ctx: ToolContext) -> Optional[ToolResult]:
 def _start_request(ctx: ToolContext, route: "DelegationRoute", authority: "DelegatedRunShape",
                    root: str, text: str, seconds: int, instructions: str, execution_root: str = "",
                    *, directory_options: Optional[Dict[str, Any]] = None,
-                   continuation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   continuation: Optional[Dict[str, Any]] = None, ephemeral: bool = False) -> Dict[str, Any]:
     """The POST body for one delegated run, built from the derived SHAPE.
 
     Extracted so the caller stays inside the method-size gate, and so the body has ONE
@@ -283,7 +284,7 @@ def _start_request(ctx: ToolContext, route: "DelegationRoute", authority: "Deleg
         # The run SHAPE comes from the derived authority, not from re-deriving it
         # here: one predicate decides what this child may do, and the mode follows it.
         "mode": authority.mode,
-        "scope": {"kind": "project", "root": root},
+        "scope": {"kind": "project", "root": root, **({"ephemeral": True} if ephemeral else {})},
         # PIN, not preference: `primaryHarness` only fronts the engine's
         # auto-pool, which still holds every other doctor-OK harness — the run
         # could fail over onto a route the owner never configured. The
@@ -409,7 +410,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         seconds_basis = bound.basis
 
     drive = custody.custody_root(ctx)
-    owned_project_id, project_persistent = "", False
+    owned_project_id, project_persistent, readonly_root = "", False, ""
     invocation_id = snapshot_id = baseline_sha = target_root = authority_source = ""
     binding_fingerprint = ""
     processing_info: Dict[str, Any] = {}
@@ -564,15 +565,15 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             elif directory_options and directory_options.get("isolation") == "envelope":
                 binding_fingerprint = execution_binding_fingerprint("", target_root, "directory_copy")
                 instructions += directory_copy_binding_instruction(target_root, binding_fingerprint)
-            (project_id, owned_project_id, project_persistent) = resolve_registration(
-                gateway, scope_root, execution_root, getattr(authority, "access", ""))
+            project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(
+                gateway, scope_root, execution_root, authority.access, minted=bool(readonly_root) or registered_checkout(scope_root))
             if directory_options:
                 project_persistent = True
             if authority.access == "full":
                 gateway.ensure_full_access(scope_root)
             seconds = bound.seconds
             request_body = _start_request(ctx, route, authority, scope_root, continuation.prompt or text,
-                                          seconds, instructions, execution_root, continuation=continuation.request,
+                                          seconds, instructions, execution_root, continuation=continuation.request, ephemeral=ephemeral,
                                           **({"directory_options": directory_options} if directory_options else {}))
             request_body, processing_info = _processing_start_request(request_body, actor, gateway, route)
             history_facts["access"] = request_body["access"]
@@ -1042,8 +1043,8 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     the real task deadline; its three-second beat is not a network deadline. A transport
     failure that delivered no daemon answer there (typed per class:
     ``observation_read_timeout`` for our own bound expiring, ``daemon_unreachable`` for a
-    socket that carried nothing) retains unknown observation and the same run, without
-    model wake.
+    socket that carried nothing, the engine's own ``DAEMON_BUSY_CODES`` answer to that GET)
+    retains unknown observation and the same run, without model wake.
     Legacy caller-sized waits preserve their last-poll expiry contract.
     """
     from ouroboros.config import get_delegate_wait_max_sec, get_delegate_wait_sec
@@ -1235,7 +1236,7 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             return json.dumps({
                 "status": "observation_pending", "run_id": rid,
                 "reason": exc.observation_reason or exc.code, "detail": str(exc),
-                "waited_sec": time.monotonic() - started,
+                "waited_sec": time.monotonic() - started, "answered": exc.observation_answered,
             })
         return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
     finally:

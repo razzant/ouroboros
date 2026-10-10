@@ -39,7 +39,7 @@ from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.usage_accounting import (
     PhysicalAttemptPreparationFailed, current_physical_attempt_context, current_usage_scope,
     execute_physical_attempt, execute_physical_attempt_async, last_physical_attempt_capture)
-from ouroboros.utils import append_jsonl, sanitize_tool_result_for_log, utc_now_iso
+from ouroboros.utils import append_jsonl, read_json_dict, sanitize_tool_result_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -865,10 +865,10 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
 
 
 def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
-    """Read retained receipts offline; without dispatch facts, read their exact operation.
-    Missing/live/unknown custody defers, unknown price stays unknown; never create or cancel."""
+    """Read retained receipts offline; without terminal facts (custody's ``TERMINAL_STATES``, ``interrupted`` too), read the
+    exact operation. Missing/live/unknown custody defers, unknown dispatch abandons at unknown price; never create or cancel."""
+    from ouroboros.delegate_custody import TERMINAL_STATES
     from ouroboros.observability import call_manifest_path, read_call_payload
-    from ouroboros.utils import read_json_dict
     task_id, attempt_id = str(row.get("task_id") or ""), str(row.get("attempt_id") or "")
     call_id = f"{attempt_id}_model_response"
     manifest, payload = {}, {}
@@ -888,12 +888,12 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
     raw = payload.get("result_json_utf8") if isinstance(payload, dict) else None
     gateway = None
     try:
-        if operation_state not in {"succeeded", "failed", "cancelled"} or not dispatch_state:
+        if operation_state not in TERMINAL_STATES or not dispatch_state:
             gateway = (gateway_factory or read_owned_gateway)()
             detail = gateway.get_model_operation(operation_id, timeout_sec=_READ_TIMEOUT_SEC)
             operation_state = detail.get("state")
             dispatch_state = (detail.get("dispatch") or {}).get("state")
-            if operation_state not in {"succeeded", "failed", "cancelled"}:
+            if operation_state not in TERMINAL_STATES:
                 return None
             response = detail.get("response") or {}
             response_ref = response.get("ref") or manifest.get("response_ref") or {}

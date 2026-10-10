@@ -193,7 +193,7 @@ Desktop onboarding and the blocking web overlay are the same served `/onboarding
 
 #### Agent accounts
 
-Accounts projects the owned daemon without exposing tokens/credentials. Vendor-live and local verification differ; missing quota is not logout. Percentages/exhaustion need fresh windows and future resets. Independent catalog/accounts/quota `reads` preserve successful siblings (§1); saved stop cause and heap use/limit/headroom cause no automatic action.
+Accounts projects the owned daemon without exposing tokens/credentials. Vendor-live and local verification differ; missing quota is not logout. Percentages/exhaustion need fresh windows and future resets. Independent catalog/accounts/quota `reads` preserve successful siblings (§1); concurrent requests share one read; an unanswered facet serves its last read as stale, with its own `facets` time and error; saved stop cause and heap use/limit/headroom cause no automatic action.
 
 Family cards show routable accounts, `accountPools` “Next up” and Add. `get:account-pools` enables named rows, including `<harness>-default`, with Enabled/Remove; legacy or unreadable catalogs retain pseudo-rows. `not_run` is unknown; unknown availability offers Refresh. Removal preserves refusal and vendor-retained/unchanged credential warnings, never false logout.
 

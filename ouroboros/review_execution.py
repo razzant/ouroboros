@@ -686,6 +686,24 @@ _SESSION_POLL_SEC = 3.0
 _CLAUDEXOR_MAX_SECONDS = 604_800
 
 
+def _minted_review_root(root: str, drive: Any) -> bool:
+    """A tree minted for one review: an isolated review checkout (``<data>/state/review_checkouts``),
+    a retained review-input snapshot (``source_handles/review_inputs`` of a task under the data
+    root) or a checkout the subagent worktree registry holds (a child's copy, a body candidate).
+    Any other root, an owner's project or the system repository, keeps its registration
+    wherever it lives, even under the data root."""
+    import pathlib
+
+    from ouroboros.subagent_worktrees import registered_checkout
+    from ouroboros.tools.review_subject import CHECKOUT_SUBDIR
+
+    path, data = pathlib.Path(root).resolve(), pathlib.Path(drive).resolve()
+    parts = path.relative_to(data).parts if path.is_relative_to(data) else ()
+    return (parts[:2] == ("state", CHECKOUT_SUBDIR)
+            or any(parts[i:i + 2] == ("source_handles", "review_inputs") for i in range(len(parts) - 1))
+            or registered_checkout(root))
+
+
 def _retire_orphaned_review_registration(
     custody: Any, gateway: Any, custody_drive: Any, project_id: str, *,
     definite_refusal: bool, reason: str, invocation_id: str = "",
@@ -839,8 +857,10 @@ def run_delegated_review_session(
         if not recovering:
             from ouroboros.acceptance_retrieving import prepare_session_source
             prepare_session_source(invocation.source_delivery, task_id=task_id)
-            existing_project = gateway.find_project_id(root)
-            project_id = existing_project or gateway.register_project(root)
+            from ouroboros.delegate_registration_policy import resolve_registration
+            project_id, owned_project_id, _persistent, ephemeral = resolve_registration(  # a sticky thread keeps it
+                gateway, root, "", shape.access, minted=not use_thread and _minted_review_root(root, custody_drive))
+            existing_project = "" if owned_project_id else project_id
             schema_asked = bool(output_schema) and _effective_route_carries_schema(
                 gateway, route.route_id)
             key = custody.idempotency_key(
@@ -856,7 +876,7 @@ def run_delegated_review_session(
             invocation_id = custody.new_invocation_id()
             seconds = bounded_seconds(timeout_sec, default=300, maximum=_CLAUDEXOR_MAX_SECONDS)
             run_request = prepare_review_session_request(
-                invocation, route, prompt=prompt, root=root,
+                invocation, route, prompt=prompt, root=root, ephemeral=ephemeral,
                 thread_id=thread_id, schema_asked=schema_asked)
         if not run_id:
             from ouroboros.budget_pause import dispatch_fenced
@@ -880,7 +900,7 @@ def run_delegated_review_session(
                 idempotency_key=key, invocation_id=invocation_id,
                 operation_id=str(invocation.operation_id or ""),
                 max_seconds=seconds, request=run_request, project_id=project_id,
-                project_owned=not existing_project, route=route.route_id,
+                project_owned=bool(project_id) and not existing_project, route=route.route_id,
                 surface=surface, slot_id=slot_id,
                 # #112: pending recovery replays the request row's lineage.
                 root_task_id=root_task_id, parent_task_id=parent_task_id,
@@ -945,7 +965,7 @@ def run_delegated_review_session(
             entry = custody.RunCustody(
                 run_id=run_id, task_id=task_id, route_id=route.route_id, model=str(route.model or ""),
                 profile_id=str(getattr(route, "profile_id", "") or ""),
-                project_id=project_id, project_owned=not existing_project,
+                project_id=project_id, project_owned=bool(project_id) and not existing_project,
                 root_task_id=root_task_id, parent_task_id=parent_task_id, **usage_custody,
                 ledger_root=str(custody_drive), idempotency_key=key, invocation_id=invocation_id or retry_token)
             # A missing started row leaves the run process-local and unresumable.

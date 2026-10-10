@@ -162,11 +162,19 @@ class FakeClaudexorDaemon:
                  ghost_profile: str = "ghost-profile",
                  workspace_edits: Optional[Dict[str, str]] = None,
                  runs_dir: Optional[pathlib.Path] = None,
-                 live_input: str = "mid_turn") -> None:
+                 live_input: str = "mid_turn",
+                 reports_created: bool = False,
+                 require_registration: bool = False) -> None:
         self.harness_id = str(harness_id)
         # The harness row's declared live-input capability (``liveInput``); a
         # scenario passes "none" to script a route with no mid-run channel.
         self.live_input = str(live_input)
+        # Opt-in engine facts of the project registry: ``reports_created`` answers
+        # ``POST /v2/projects`` with the engine's ``created`` field, and
+        # ``require_registration`` refuses a run on an unregistered, non-ephemeral
+        # project root with the real 404 ``project_not_registered``.
+        self.reports_created = bool(reports_created)
+        self.require_registration = bool(require_registration)
         pin_version, pin_sha = _tree_engine_identity()
         self.engine_version = str(engine_version or pin_version)
         self.engine_build_sha = str(engine_build_sha or pin_sha)
@@ -330,9 +338,10 @@ class FakeClaudexorDaemon:
                 root = str(body.get("root") or "")
                 if not root:
                     return 400, {"code": "invalid_request", "message": "root is required"}
+                fresh = root not in self._projects
                 pid = self._projects.get(root) or ("proj" + uuid.uuid4().hex[:12])
                 self._projects[root] = pid
-                return 200, {"id": pid}
+                return 200, {"id": pid, **({"created": fresh} if self.reports_created else {})}
         if method == "DELETE" and len(parts) == 3 and parts[:2] == ["v2", "projects"]:
             for root, pid in list(self._projects.items()):
                 if pid == parts[2]:
@@ -449,6 +458,11 @@ class FakeClaudexorDaemon:
             self._replay[key] = {"digest": digest, "status": status, "payload": payload}
             return status, payload
 
+        scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
+        if (self.require_registration and scope.get("kind") == "project"
+                and scope.get("ephemeral") is not True and str(scope.get("root") or "") not in self._projects):
+            return _remember(404, {"code": "project_not_registered", "retryable": False,
+                                   "message": "register the root first, or declare scope.ephemeral"})
         harnesses = body.get("harnesses")
         if harnesses != [self.harness_id] or body.get("primaryHarness") != self.harness_id:
             return _remember(404, {"code": "route_not_found",

@@ -251,7 +251,9 @@ def test_widgets_frame_geometry_and_teardown_contract():
     assert "--widget-frame-height" in source
     assert "height: var(--widget-frame-height, 320px);" in style
     assert "type: 'ouro-widget-resize'" in source
-    assert "new ResizeObserver(report)" in source
+    assert "new ResizeObserver(scheduleReport)" in source
+    assert "window.requestAnimationFrame" in source
+    assert "window.cancelAnimationFrame(resizeFrame)" in source
     assert "box.bottom - bodyTop + bodyBottomSpacing" in source
     assert "fixedViewportBody" in source
     assert 'scrolling="no"' not in source

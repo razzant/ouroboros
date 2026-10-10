@@ -3223,10 +3223,10 @@ def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_p
     assert payload["quota"] and payload["profiles"] == {"profiles": [], "harnessAccounts": []}
 
 
-def test_status_payload_keeps_typed_unreachable_when_a_fanned_out_read_refuses(monkeypatch, tmp_path):
+def test_status_payload_keeps_a_typed_facet_failure_when_a_fanned_out_read_refuses(monkeypatch, tmp_path):
     """Concurrency must not change WHAT a refusal means: a catalog read that
-    raises still lands as the typed unreachable daemon state, not a half-filled
-    panel that looks healthy."""
+    raises lands as that facet's typed failure, not a half-filled panel that
+    looks healthy; the daemon that answered the handshake stays running."""
     from ouroboros.gateway.claudexor_accounts import _status_payload
     from ouroboros.gateways import claudexor as gw
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -3268,8 +3268,8 @@ def test_status_payload_keeps_typed_unreachable_when_a_fanned_out_read_refuses(m
     monkeypatch.setattr(gw, "ClaudexorGateway", FakeGateway)
 
     payload = _status_payload(include_models=False)
-    assert payload["daemon"]["state"] == "unreachable"
-    assert "daemon_unreachable" in payload["daemon"]["last_error"]
+    assert (payload["daemon"]["state"], payload["reads"]["catalog"]) == ("running", "failed")
+    assert payload["facets"]["catalog"] == {"observed_at": None, "stale": False, "error": "daemon_unreachable"}
     assert payload["harnesses"] == []
 
 
@@ -3482,10 +3482,10 @@ def test_status_payload_classifies_each_fanned_out_facet_independently(
     expected = {"catalog": "ok", "accounts": "ok", "quota": "ok"}
     expected[failing] = "failed"
     assert payload["reads"] == expected
-    # The refusal is still disclosed on the daemon, and the surviving facets keep
-    # their payload instead of blanking the whole panel.
-    assert payload["daemon"]["state"] == "unreachable"
-    assert "daemon_unreachable" in payload["daemon"]["last_error"]
+    # The refusal is disclosed on its own facet; the daemon that answered stays
+    # running, and the surviving facets keep their payload instead of blanking.
+    assert payload["daemon"]["state"] == "running" and payload["facets"][failing]["error"] == "daemon_unreachable"
+    assert all(payload["facets"][facet]["error"] is None for facet in expected if facet != failing)
     if failing != "catalog":
         assert [h["id"] for h in payload["harnesses"]] == ["codex"]
 
@@ -3533,7 +3533,7 @@ def test_wake_endpoint_starts_the_daemon_and_returns_the_fresh_reading(monkeypat
         order.append("ensure")
         return fake_ensure()
 
-    def fake_status(include_models):
+    def fake_status(include_models, **_kwargs):
         order.append("read")
         return {"daemon": {"state": "running"},
                 "reads": {"catalog": "ok", "accounts": "ok", "quota": "ok"}}

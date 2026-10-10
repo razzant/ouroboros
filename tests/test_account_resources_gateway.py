@@ -128,6 +128,21 @@ def test_status_negotiates_rich_quota_once_and_preserves_legacy_accounts(engine,
     assert "private-fixture-token" not in json.dumps(payload)
 
 
+def test_status_and_passive_quota_each_send_only_their_own_selector(engine):
+    """One resource-capable engine: full status negotiates resources, the passive view freshness."""
+    client, _, calls = engine
+    status = client.get("/api/claudexor/status").json()
+    passive_start = len(calls)
+    passive = client.get("/api/claudexor/status?view=quota").json()
+    assert [params for _, path, params, *_ in calls if path == "/v2/quota"] == [
+        {"view": "resources"}, {"view": "constraint_freshness"}]
+    assert status["resources"] == WIRE["quota"]["resources"]
+    assert passive["reads"] == {"catalog": "not_read", "accounts": "ok", "quota": "ok"}
+    assert passive["quota"] == WIRE["quota"]["snapshots"]
+    assert not {"resources", "resource_capabilities", "resource_capabilities_read"} & set(passive)
+    assert sorted(path for _, path, *_ in calls[passive_start:]) == ["/v2/credential-profiles", "/v2/quota"]
+
+
 def test_missing_rich_facet_is_failed_quota_not_fresh_empty(engine):
     client, state, _ = engine
     state["malformed_resources"] = True

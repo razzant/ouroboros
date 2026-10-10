@@ -69,6 +69,7 @@ from ouroboros.gateway.contracts import (
     UploadResponse,
     VideoOutbound,
 )
+from ouroboros.gateway.contracts import ClaudexorPassiveReadError, ClaudexorQuotaResponse
 from ouroboros.gateway.router import collect_routes
 from ouroboros.gateway.widgets import WidgetTab, WidgetsResponse
 
@@ -147,6 +148,39 @@ def test_provider_test_gateway_contract_shape_is_exact():
     assert _js_typedef_properties(text, "ProviderTestResponse") == {
         ("boolean", "ok"),
         ("string=", "error"),
+    }
+
+
+def test_claudexor_quota_view_has_separate_required_contract():
+    hints = get_type_hints(ClaudexorQuotaResponse, include_extras=True)
+    assert set(hints) == {
+        "view", "profiles", "quota", "quota_absences", "unified_accounts",
+        "reads", "read_errors", "timings_ms",
+    }
+    assert ClaudexorQuotaResponse.__total__ and not _notrequired_fields(ClaudexorQuotaResponse)
+    assert get_args(hints["view"]) == ("quota",)
+    assert hints["reads"] is ClaudexorStatusReads
+    assert hints["unified_accounts"] is bool
+    phases, error_type = get_args(hints["read_errors"])
+    assert set(get_args(phases)) == {"discovery", "accounts", "quota"}
+    assert error_type is ClaudexorPassiveReadError
+    assert get_args(hints["timings_ms"]) == (str, int)
+    errors = get_type_hints(ClaudexorPassiveReadError, include_extras=True)
+    assert errors["code"] is str
+    assert get_args(errors["status_code"]) == (int,)
+    assert _notrequired_fields(ClaudexorPassiveReadError) == {"status_code"}
+    assert not {"view", "read_errors", "timings_ms"} & set(ClaudexorStatusResponse.__annotations__)
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
+    assert _js_typedef_properties(text, "ClaudexorQuotaResponse") == {
+        ("'quota'", "view"), ("Object", "profiles"),
+        ("Array<Object>", "quota"), ("Array<Object>", "quota_absences"),
+        ("boolean", "unified_accounts"), ("ClaudexorStatusReads", "reads"),
+        ("Object<'discovery'|'accounts'|'quota', ClaudexorPassiveReadError>", "read_errors"),
+        ("Object<string, number>", "timings_ms"),
+    }
+    assert _js_typedef_properties(text, "ClaudexorPassiveReadError") == {
+        ("string", "code"), ("number=", "status_code"),
     }
 
 
@@ -238,6 +272,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "SettingsPostCommitFailureResponse",
         "ClaudexorLoginJobResponse",
         "ClaudexorLoginJobProblem",
+        "ClaudexorPassiveReadError",
+        "ClaudexorQuotaResponse",
         "ClaudexorCredentialProfileDeleteResponse",
         "ClaudexorVendorCredentialDisposition",
         "WidgetTab",
@@ -280,6 +316,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
                 ClaudexorCredentialProfileDeleteResponse,
                 ClaudexorVendorCredentialDisposition,
                 ClaudexorStatusReads, ClaudexorStatusResponse,
+                ClaudexorPassiveReadError, ClaudexorQuotaResponse,
                 WidgetTab, WidgetsResponse):
         expected = set(get_type_hints(cls, include_extras=True))
         actual = _js_typedef_fields(text, cls.__name__)

@@ -356,3 +356,112 @@ def test_outer_controls_still_cut_a_long_unobserved_stretch(tmp_path, monkeypatc
     result = json.loads(delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=wait_once).text)
     assert result["wake_events"] == [{"type": control}]
     assert len(ticks) == 3, "the stretch ended on the control, not on a daemon answer"
+
+
+_REAL_GATEWAY = gateway_module.ClaudexorGateway  # tests below replace the module's constructor
+
+
+def _scripted_gateway(handler):
+    gateway = _REAL_GATEWAY(gateway_module.DaemonEndpoint("127.0.0.1", 1, "fixture"))
+    gateway._client.close()
+    gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler))
+    return gateway
+
+
+def _busy(code="daemon_busy"):
+    return httpx.Response(503, json={"code": code, "message": "daemon RPC timeout (claudexor.list)",
+                                     "retryable": True})
+
+
+@pytest.mark.parametrize("code", sorted(gateway_module.DAEMON_BUSY_CODES))
+def test_a_busy_answer_to_a_read_is_an_observation_hole_and_a_post_keeps_its_refusal(code):
+    """The engine's typed 503 that it cannot serve now is, for a GET, the same retryable
+    hole as no answer (under the engine's own code, so no outage line); a POST keeps the
+    refusal because a lost answer never proves a mutation was not accepted."""
+    with _scripted_gateway(lambda _request: _busy(code)) as gateway:
+        with pytest.raises(gateway_module.ClaudexorUnavailable) as read:
+            gateway.get_run("run-existing")
+        with pytest.raises(gateway_module.ClaudexorUnavailable) as write:
+            gateway.handshake()
+    assert (read.value.code, read.value.status_code) == (code, 503)
+    assert read.value.observation_timeout is True and read.value.observation_reason == code
+    assert read.value.observation_answered is True, "the engine itself answered: the transport is intact"
+    assert (write.value.code, write.value.status_code) == (code, 503)
+    assert write.value.observation_timeout is False and write.value.observation_reason == ""
+    assert write.value.observation_answered is False
+
+
+@pytest.mark.parametrize("status,code", [(503, "idempotency_status_unavailable"), (500, "daemon_busy")])
+def test_other_received_answers_to_a_read_stay_refusals(status, code):
+    with _scripted_gateway(lambda _request: httpx.Response(status, json={"code": code, "message": "m"})) as gateway:
+        with pytest.raises(gateway_module.ClaudexorUnavailable) as caught:
+            gateway.get_run("run-existing")
+    assert caught.value.observation_timeout is False and caught.value.observation_reason == ""
+
+
+def _supervised_busy(tmp_path, monkeypatch, *, busy_reads, busy_handshake=False, code="daemon_busy",
+                     later_handshakes_busy=False, handshakes=None):
+    """The real supervision loop over the real observing wait and gateway. ``later_handshakes_busy``:
+    the engine was healthy when the wait began and then answers every route, the handshake
+    included, with ``code`` (a recovery-only window)."""
+    ctx = _delegating_ctx(tmp_path, acting=False)
+    notes, sleeps, reads = [], [], []
+    ctx.emit_progress_fn = lambda text, *, incident=None: notes.append((text, incident))
+    monkeypatch.setattr(delegate_supervision.time, "sleep", sleeps.append)
+    entry = delegate._RunCustody(task_id=ctx.task_id, route_id="fixture", model="fixture",
+                                project_id="fixture", project_owned=False, access="readonly")
+    monkeypatch.setitem(delegate_custody._CUSTODY, "run-busy", entry)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    handshakes = [] if handshakes is None else handshakes
+
+    def handler(request):
+        if request.url.path == "/v2/handshake":
+            handshakes.append(request.method)
+            if busy_handshake or (later_handshakes_busy and len(handshakes) > 1):
+                return _busy(code)
+            return httpx.Response(
+                200, json={"compatible": True, "protocolMajor": 3, "engine": {"version": "3.25.1", "sha": "f"}})
+        if request.url.path == "/v2/agent-capabilities":
+            return httpx.Response(200, json={"harnesses": [{"id": "fixture", "liveInput": "mid_turn"}]})
+        if request.url.path == "/v2/operations":
+            return httpx.Response(200, json={"operations": []})
+        assert request.url.path == "/v2/runs/run-busy", request.url.path
+        reads.append(request.method)
+        if len(reads) <= busy_reads:
+            return _busy(code)
+        return httpx.Response(200, json={"lastSeq": 1, "summary": {
+            "state": "succeeded", "effectiveAccess": "readonly", "runDir": str(run_dir),
+        }, "primaryOutput": {"kind": "answer", "text": "complete result", "truncated": False}})
+
+    monkeypatch.setattr(gateway_module, "ClaudexorGateway", lambda *a, **k: _scripted_gateway(handler))
+    result = json.loads(delegate_supervision.supervised_wait(ctx, "run-busy").text)
+    return result, sleeps, notes, reads
+
+
+@pytest.mark.parametrize("code", sorted(gateway_module.DAEMON_BUSY_CODES))
+def test_busy_reads_are_skipped_quietly_on_the_same_beat(tmp_path, monkeypatch, code):
+    result, sleeps, notes, reads = _supervised_busy(tmp_path, monkeypatch, busy_reads=2, code=code)
+    assert result["status"] == "terminal" and result["state"] == "succeeded", result
+    assert reads == ["GET"] * 3, "two busy beats, then the answered read"
+    assert sleeps == [delegate_supervision._TICK_SEC] * 2, "the cadence stays the three-second beat"
+    assert notes == [], "the daemon itself answered: no outage line, even for its daemon_unreachable"
+
+
+def test_a_recovery_only_window_keeps_the_transport_instead_of_rehandshaking_into_a_refusal(tmp_path, monkeypatch):
+    """While the engine serves recovery only it refuses every route, the handshake included.
+    The loop keeps the transport the engine answered on, so no rebuilt handshake turns the
+    window into a refusal that wakes the model (reviewer repro, 10.10)."""
+    handshakes = []
+    result, sleeps, notes, reads = _supervised_busy(tmp_path, monkeypatch, busy_reads=2, code="daemon_recovery_only",
+                                                    later_handshakes_busy=True, handshakes=handshakes)
+    assert result["status"] == "terminal" and result["state"] == "succeeded", result
+    assert handshakes == ["POST"], "one handshake: the answered transport was kept"
+    assert reads == ["GET"] * 3 and sleeps == [delegate_supervision._TICK_SEC] * 2 and notes == []
+
+
+def test_a_busy_answer_to_a_post_still_wakes_the_model(tmp_path, monkeypatch):
+    result, sleeps, notes, reads = _supervised_busy(tmp_path, monkeypatch, busy_reads=0, busy_handshake=True)
+    assert result["status"] == "refused" and result["reason"] == "daemon_busy", result
+    assert reads == [] and sleeps == [] and notes == []
