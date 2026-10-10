@@ -14,7 +14,6 @@ def _projection(mode: str):
         estimated_tokens=10,
         calibrated_tokens=10,
         calibration_ratio=1.0,
-        fits_known_window=None,
     )
 
 
@@ -89,7 +88,7 @@ def test_owner_low_deficit_reclaim_remeasures_on_one_basis(monkeypatch, tmp_path
 
     monkeypatch.setattr(cc, "_call_summarizer", summarize)
     plan = _plan()
-    messages = [*plan.messages_for("low"), *_tool_unit(350_000)]
+    messages = [*plan.messages_for("low"), *_tool_unit(450_000)]
     first = measure_main_fit(
         plan, messages, [], drive_root=tmp_path, profile="owner_low",
         rendered_mode="low", round_id="exec:round:1",
@@ -265,7 +264,7 @@ def test_target_miss_is_non_terminal_fit_evidence(monkeypatch, tmp_path):
         lambda *_a, **_kw: (1.0, "fresh_route_usage"),
     )
     plan = _plan()
-    messages = [*plan.messages_for("low"), {"role": "user", "content": "x" * 600_000}]
+    messages = [*plan.messages_for("low"), {"role": "user", "content": "x" * 900_000}]
     disposition = measure_main_fit(
         plan, messages, [], drive_root=tmp_path, profile="owner_low",
         rendered_mode="low", round_id="exec:round:1", automatic_pass_used=True,
@@ -314,7 +313,7 @@ def test_bare_env_low_keeps_p3_owner_max_but_gets_main_target(monkeypatch, tmp_p
         rendered_mode="low",
         round_id="exec:round:1",
     )
-    assert fit.measurement.target_total_tokens == 200_000
+    assert fit.measurement.target_total_tokens == 250_000
 
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE_AUTO_LOW", "false")
     assert config.get_owner_context_mode() == "low"
@@ -334,6 +333,7 @@ def test_round_fit_reads_density_from_canonical_store_not_child_drive(tmp_path, 
 
     from ouroboros import loop
     from ouroboros.capability_evidence import (
+        MAIN_DENSITY_BASIS,
         canonical_evidence_root,
         record_token_density,
     )
@@ -348,7 +348,7 @@ def test_round_fit_reads_density_from_canonical_store_not_child_drive(tmp_path, 
         prompt_tokens=180_000,  # density 1.8
         source="dispatch_usage",
         route_fp=plan.route_fp,
-        basis="bounded_proxy",
+        basis=MAIN_DENSITY_BASIS,
     )
 
     ctx = loop._RoundModelCallContext(

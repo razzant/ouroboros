@@ -253,18 +253,23 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
     import pathlib
 
     fields = ActiveChatActivity.__annotations__
-    managed_keys = {"required_question", "required_question_unavailable", "project_admission_hold"}
-    assert {key: value for key, value in fields.items() if key not in managed_keys} == ActiveDirectTurn.__annotations__
-    assert set(fields) - set(ActiveDirectTurn.__annotations__) == managed_keys
+    additional_keys = {
+        "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
+        "status", "outcome_axes", "reason_code", "root_phase_checkpoint", "timeout_retry_from", "original_task_id",
+        "finishing_reviews",
+    }
+    assert {key: value for key, value in fields.items() if key not in additional_keys} == ActiveDirectTurn.__annotations__
+    assert set(fields) - set(ActiveDirectTurn.__annotations__) == additional_keys
     from typing import get_type_hints
     hints = get_type_hints(ActiveChatActivity, include_extras=True)
-    for key in managed_keys:
+    for key in additional_keys:
         assert "NotRequired" in str(hints[key])
     assert "active_chat_activities" in StateResponse.__annotations__
     api_types = (
         pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
     ).read_text(encoding="utf-8")
-    for needle in ("ActiveChatActivity", "active_chat_activities", "task_phase", "project_admission_hold"):
+    api_types += (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "task_activity_types.js").read_text(encoding="utf-8")
+    for needle in ("ActiveChatActivity", "active_chat_activities", "task_phase", *additional_keys):
         assert needle in api_types, f"api_types.js mirror is missing {needle!r}"
 
 

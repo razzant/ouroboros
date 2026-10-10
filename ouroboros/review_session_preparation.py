@@ -58,7 +58,7 @@ def prepare_review_session_request(invocation: Any, route: Any, *,
     if schema_asked:
         run_request["outputSchema"] = output_schema
     if invocation.source_delivery:
-        from ouroboros.tools.scope_review_session import SESSION_INLINE_DIFF_CEILING_CHARS
+        from ouroboros.tools.review_brief_coupling import SESSION_INLINE_DIFF_CEILING_CHARS
         serialized = json.dumps(run_request, ensure_ascii=False)
         invocation.source_delivery.update(first_send_chars=len(serialized),
                                           first_send_bytes=len(serialized.encode("utf-8")),

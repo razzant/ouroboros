@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import task_pacing as pacing, usage_accounting as accounting
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
@@ -30,7 +31,15 @@ def request(root, **kwargs):
 
 
 def rows(root):
-    return [json.loads(line) for line in (root / accounting.LEDGER_REL).read_text().splitlines()]
+    return ledger_rows(root)
+
+
+def spend(root, amount, **kwargs):
+    """KNOWN spend: what every money limit decides on (#1487)."""
+    held = accounting.reserve_attempt(request(root, reservation_usd=amount, **kwargs))
+    accounting.mark_dispatched(held)
+    accounting.settle_attempt(held, {}, cost_usd=amount, cost_final=True)
+    return held
 
 
 def test_fallback_limit_is_the_value_applied_and_survives_settlement(root, monkeypatch):
@@ -38,7 +47,7 @@ def test_fallback_limit_is_the_value_applied_and_survives_settlement(root, monke
     monkeypatch.setenv("TOTAL_BUDGET", "500")
     accounting.mark_dispatched(reservation)
     accounting.settle_attempt(reservation, {}, cost_usd=0.2, cost_final=True)
-    assert len(rows(root)) == 3
+    assert [(row["state"], row["revision"]) for row in rows(root)] == [("settled", 3)]
     for row in rows(root):
         assert row["global_limit_usd"] == 100
         assert row["global_limit_source"] == "settings_budget_resolver"
@@ -89,7 +98,7 @@ def test_a_running_task_follows_the_budget_the_owner_saves_mid_run(root, monkeyp
     monkeypatch.setenv("TOTAL_BUDGET", "1.5")
 
     def scoped(_task):
-        accounting.reserve_attempt(request(root))
+        spend(root, 1.5)  # known spend reaches the $1.50 the task started under
         with pytest.raises(accounting.BudgetExceeded):
             accounting.reserve_attempt(request(root))
         settings.write_text(json.dumps({"TOTAL_BUDGET": 10}))   # the owner tops the budget up; this process's env is untouched
@@ -115,7 +124,7 @@ def test_the_wrapup_wallet_observation_follows_the_saved_budget_too(root, monkey
     settings.write_text(json.dumps({"TOTAL_BUDGET": 100}))
 
     def scoped(_task):
-        accounting.reserve_attempt(request(root, reservation_usd=90))
+        spend(root, 90)
         before = _wrapup_global_remaining()
         settings.write_text(json.dumps({"TOTAL_BUDGET": 500}))
         return before, _wrapup_global_remaining()
@@ -200,9 +209,10 @@ def test_unbounded_fallback_is_explicit_without_nonfinite_json(root, monkeypatch
 
 def test_soft_ceilings_reserve_nothing_and_concurrent_sends_still_share_one_pool(root, monkeypatch):
     monkeypatch.setenv("TOTAL_BUDGET", "10")
-    ceilings = [pacing.resolve_cost_ceiling(10, {}) for _ in range(2)]
+    assert pacing.resolve_cost_ceiling(10, {}).state == pacing.COST_CEILING_DISABLED  # ordinary: no early stop
+    ceilings = [pacing.resolve_cost_ceiling(10, {"cost_hard_stop_pct": 50}) for _ in range(2)]
     assert [ceiling.ceiling_usd for ceiling in ceilings] == [5, 5]
-    assert not (root / accounting.LEDGER_REL).exists()
+    assert not ledger_rows(root)
     assert all(pacing.cost_ceiling_disclosure(c)["allocation"] == "unreserved_shared_pool" for c in ceilings)
     barrier = threading.Barrier(2)
 
@@ -217,9 +227,18 @@ def test_soft_ceilings_reserve_nothing_and_concurrent_sends_still_share_one_pool
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(send, ("a", "b")))
-    assert sum(isinstance(result, accounting.AttemptReservation) for result in results) == 1
-    assert sum(isinstance(result, accounting.BudgetExceeded) for result in results) == 1
-    assert accounting.usage_projection(root)["accounted_usd"] == 6
+    # Owner Q4-A: both concurrent sends are admitted on $0 known spend — the pool's
+    # overshoot is accepted and disclosed as exposure, never prevented by holds.
+    assert all(isinstance(result, accounting.AttemptReservation) for result in results)
+    assert accounting.usage_projection(root)["accounted_usd"] == 12
+    for result in results:
+        accounting.mark_dispatched(result)
+        accounting.settle_attempt(result, {}, cost_usd=6, cost_final=True)
+    assert accounting.usage_projection(root)["settled_usd"] == 12  # a recorded overrun of $2
+    with pytest.raises(accounting.BudgetExceeded):
+        accounting.reserve_attempt(accounting.AttemptRequest(
+            model="fixture", provider="openai", drive_root=root, reservation_usd=0.01,
+            task_id="c", root_task_id="c"))
 
 
 def delivered_tool(name, ident, *, duration=None, error=False):
@@ -283,9 +302,12 @@ def test_real_note_transport_keeps_counts_measured_time_and_open_spend(root, mon
         assert spend["delegated_tree"]["subscription_sessions"] == 2
         assert spend["delegated_tree"]["unknown_unmetered"] == 1
         assert spend["delegated_tree"]["cost_final"] is False
-        assert spend["global"]["remaining_known_usd"] == 96.75
+        # Room above KNOWN spend ($1.25); the $2 unresolved bound rides as exposure (#1487).
+        assert spend["global"]["remaining_known_usd"] == 98.75
+        assert spend["global"]["settled_usd"] == 1.25 and spend["global"]["accounted_usd"] == 3.25
         assert spend["global"]["allocation"] == "unreserved_shared_pool"
-        rendered = messages[-1]["content"].split("Observed resource facts (accounted money includes open holds):\n")[1]
+        rendered = messages[-1]["content"].split(
+            "Observed resource facts (known spend is settled_usd; accounted money adds open holds):\n")[1]
         assert json.loads(rendered) == facts
         monkeypatch.setattr(accounting, "usage_breakdown", lambda *_a, **_kw: pytest.fail("read before next milestone"))
         assert not inject()
@@ -332,7 +354,7 @@ def test_review_scope_preserves_limit_provenance(tmp_path, monkeypatch):
         scoped = kwargs['review_usage_scope']
         with ua.usage_scope(scoped):
             reservation = ua.reserve_attempt(ua.AttemptRequest(model='fixture', provider='openai', reservation_usd=1))
-        row = json.loads((tmp_path / ua.LEDGER_REL).read_text().splitlines()[-1])
+        row = ledger_rows(tmp_path)[-1]
         observed.update(row)
         ua.release_attempt(reservation)
         raise Captured

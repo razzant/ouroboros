@@ -5,9 +5,11 @@ triad, scope, advisory, deep self-review — asks this module which rules it mus
 carry inline and which it reaches through a navigation map. Three tiers:
 
 1. **Rules, always inline.** The surface's applicable ``docs/CHECKLISTS.md``
-   section (supplied by the caller, which owns its own section name),
-   ``BIBLE.md`` whole and ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is
-   byte-stable across commits, so the caller puts it in its cache-marked prefix.
+   section (supplied by the caller, which owns its own section name), the
+   shared section every reviewer of this repository's code applies
+   (:data:`SHARED_CHECKLIST_SECTION`, loaded here), ``BIBLE.md`` whole and
+   ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is byte-stable across
+   commits, so the caller puts it in its cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
    change touches ``web/``; the review-and-commit protocol chapter always; and
    every DEVELOPMENT chapter whose text mentions a touched file NAME. Bounded by
@@ -22,6 +24,16 @@ carry inline and which it reaches through a navigation map. Three tiers:
 Every document that is not inlined is NAMED in the returned manifest and in the
 navigation text, never silently dropped (BIBLE P1), and the manifest is the
 disclosure record the durable review evidence carries.
+
+The tiers above are the **body layer**: they govern a change to Ouroboros's own
+body. A change review of another repository runs the **core layer**
+(``layer="core"``; `review_body_fact.layer_for` decides): tier 1 is the
+supplied universal checklist alone, the body's constitution, handbook, design
+system, architecture map and standing disclosures are recorded
+``not_applicable`` (named, never silently dropped), and the navigation indexes
+the SUBJECT's own documents (``subject_root``) plus its required-source
+manifest. The shared-contract section is a rule of this repository's CODE and
+travels with the body layer only.
 
 Choosing which reference chapter to inline from an exact file-name mention is
 context ASSEMBLY, not behaviour selection: no verdict, routing decision or
@@ -42,6 +54,9 @@ from ouroboros.utils import estimate_tokens
 
 BIBLE_PATH = "BIBLE.md"
 CHECKLISTS_PATH = "docs/CHECKLISTS.md"
+# One home in CHECKLISTS for a rule the triad, scope, advisory and deep review
+# all apply whatever their own section; plan and skill review never receive it.
+SHARED_CHECKLIST_SECTION = "Shared Contract Ownership"
 CHECKLISTS_ARCHIVE_PATH = "docs/CHECKLISTS_ARCHIVE.md"
 DESIGN_PATH = "docs/DESIGN.md"
 DEVELOPMENT_BOOK_ID = "development"
@@ -54,6 +69,18 @@ DESIGN_CHANGE_CLASS_PREFIX = "web/"
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
 _CARRIED_REASON = "carried by this surface's own delivery"
+
+CORE_LAYER = "core"
+BODY_LAYER = "body"
+GOVERNANCE_LAYERS = (CORE_LAYER, BODY_LAYER)
+# A body document in a core-layer manifest: named, not delivered, by rule.
+NOT_APPLICABLE_DISPOSITION = "not_applicable"
+_CORE_NOT_APPLICABLE = "core layer: governs Ouroboros's own body, not this subject"
+# Bounds of the core layer's index of the subject's own documents (root
+# Markdown files and docs/**): listed by name and size, the first few mapped.
+SUBJECT_DOCS_MAX_LISTED = 24
+SUBJECT_DOCS_MAX_MAPPED = 6
+SUBJECT_DOC_MAP_MAX_BYTES = 120_000
 
 
 @dataclass(frozen=True)
@@ -73,6 +100,7 @@ class GovernanceContext:
     stable_inline: str = ""
     selected_inline: str = ""
     inline_whole_documents: dict = field(default_factory=dict)
+    layer: str = BODY_LAYER
 
 
 def _normalize(path: Any) -> str:
@@ -184,6 +212,115 @@ def _book_navigation(repo_dir: Path, book_id: str, book, load_doc, *, instructio
         text, title=entrypoint.rsplit("/", 1)[-1], rel_path=entrypoint, instructions=instructions)
 
 
+def _subject_documents(subject_root: Path) -> list:
+    """The subject's own Markdown documents: root files (README, CONTRIBUTING
+    first), then ``docs/**``. Two bounded roots, never the whole tree."""
+    def _rank(path: Path):
+        name = path.name.lower()
+        return (0 if name.startswith("readme") else 1 if name.startswith("contributing") else 2, name)
+
+    try:
+        root_docs = sorted((p for p in subject_root.glob("*.md") if p.is_file()), key=_rank)
+        docs_dir = subject_root / "docs"
+        nested = sorted(p for p in docs_dir.rglob("*.md") if p.is_file()) if docs_dir.is_dir() else []
+    except OSError:
+        return []
+    return root_docs + nested
+
+
+def _subject_navigation(subject_root: Any, *, packet: bool) -> tuple[str, list]:
+    """The core layer's index of the SUBJECT's documents, with its manifest rows."""
+    from ouroboros.context_layout import generate_doc_nav_map
+
+    rows: list[dict] = []
+    if subject_root is None:
+        return ("### Subject documents\n\nNo subject root was supplied: the subject's own documents "
+                "were not indexed for this review" + (
+                    " and were not delivered to this packet." if packet
+                    else "; read them with your own tools."), rows)
+    root = Path(subject_root)
+    docs = _subject_documents(root)
+    if not docs:
+        return (f"### Subject documents\n\nThe subject keeps no Markdown document at its root or "
+                f"under `docs/` (root: `{root}`).", rows)
+    lines = [f"### Subject documents (root: `{root}`)", ""]
+    for index, path in enumerate(docs[:SUBJECT_DOCS_MAX_LISTED]):
+        rel = path.relative_to(root).as_posix()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        rows.append(_row(f"subject:{rel}", 3, "navigation", size,
+                         "the subject's own document: evidence of what it promises, not a rule"))
+        if index < SUBJECT_DOCS_MAX_MAPPED and 0 < size <= SUBJECT_DOC_MAP_MAX_BYTES:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            if text.strip():
+                lines.append(generate_doc_nav_map(text, title=rel, rel_path=rel, instructions=False))
+                lines.append("")
+                continue
+        lines.append(f"- `{rel}` ({size:,} bytes)")
+    if len(docs) > SUBJECT_DOCS_MAX_LISTED:
+        lines.append(f"- … {len(docs) - SUBJECT_DOCS_MAX_LISTED} more Markdown document(s) under "
+                     "the same roots, not listed")
+    return "\n".join(lines).rstrip(), rows
+
+
+def _core_layer_context(*, surface: str, touched_paths: Optional[Iterable[Any]], delivery: str,
+                        checklist_section_text: str, subject_root: Any) -> GovernanceContext:
+    """The core layer: the subject is not the Ouroboros body.
+
+    Tier 1 is the supplied universal checklist alone; the body's constitution,
+    handbook, design system, architecture map and standing disclosures are
+    recorded ``not_applicable`` — named, never silently dropped (P1). The
+    navigation indexes the SUBJECT's own documents and its required-source
+    manifest (empty by rule: no body inventory applies to another repository)."""
+    from ouroboros.tools.scope_required_sources import render_required_sources, scope_required_sources
+
+    packet = str(delivery or PACKET_DELIVERY) == PACKET_DELIVERY
+    checklist_text = str(checklist_section_text or "")
+    rows: list[dict] = []
+    if checklist_text.strip():
+        rows.append(_row(CHECKLISTS_PATH, 1, "inline", len(checklist_text),
+                         f"applicable {surface} checklist section (core layer), supplied by the surface"))
+    else:
+        rows.append(_row(CHECKLISTS_PATH, 1, "navigation", 0,
+                         "this surface supplies no checklist section"))
+    for path, tier in ((f"{CHECKLISTS_PATH}#{SHARED_CHECKLIST_SECTION}", 1), (BIBLE_PATH, 1),
+                       (CHECKLISTS_ARCHIVE_PATH, 1), ("docs/DEVELOPMENT.md", 2), (DESIGN_PATH, 2),
+                       ("docs/ARCHITECTURE.md", 3)):
+        rows.append(_row(path, tier, NOT_APPLICABLE_DISPOSITION, 0, _CORE_NOT_APPLICABLE))
+    subject_nav, subject_rows = _subject_navigation(subject_root, packet=packet)
+    rows.extend(subject_rows)
+    pairs = [("M", _normalize(path)) for path in (touched_paths or ()) if _normalize(path)]
+    # The scope brief states its own required-source manifest (with its identity)
+    # in its tail; every other surface receives the layer's statement here.
+    required = (scope_required_sources(subject_root, pairs, layer=CORE_LAYER)
+                if subject_root is not None and surface != "scope" else [])
+    rule_set = ("The checklist section inlined above is the whole rule set for this review"
+                if checklist_text.strip() else
+                f"NO section of `{CHECKLISTS_PATH}` is inlined for this review (this surface "
+                "supplies none); the universal change-review rules are the whole rule set")
+    navigation = _join([
+        "## Governance navigation (core layer)",
+        f"{rule_set}: the subject "
+        "is not the Ouroboros body, so Ouroboros's constitution, engineering handbook, design "
+        "system, architecture map and standing disclosures do not govern it and are not "
+        "delivered. The subject's own documents are evidence of what it promises, not law: use "
+        "them to judge behavioural documentation, public contracts and release metadata." + (
+            " This row has no repository tools: the documents named below were NOT delivered; "
+            "state any resulting uncertainty rather than claim to have read them." if packet else
+            " Everything named below is complete on disk in the subject repository; read any "
+            "range you need with your own tools."),
+        subject_nav,
+        render_required_sources(required, layer=CORE_LAYER) if surface != "scope" else "",
+    ])
+    return GovernanceContext(navigation=navigation, manifest=rows,
+                             tokens_estimate=estimate_tokens(navigation), layer=CORE_LAYER)
+
+
 def governance_context(
     repo_dir: Any,
     *,
@@ -193,16 +330,29 @@ def governance_context(
     delivery: str = PACKET_DELIVERY,
     checklist_section_text: str = "",
     already_inline: Any = (),
+    layer: str = BODY_LAYER,
+    subject_root: Any = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
-    ``surface`` labels the review surface in the disclosure record.
-    ``checklist_section_text`` is the tier-1 section that surface already
-    loaded; a surface supplying none has ``docs/CHECKLISTS.md`` recorded as read
-    on demand, never as an inlined section of zero characters.
-    ``already_inline`` names what the caller's OWN delivery carries in full
-    (:func:`_carried_reasons` states the mechanism)."""
-    from ouroboros.tools.review_helpers import load_governance_doc
+    ``repo_dir`` is the governance root — always the installed system
+    repository, whose rules execute. ``surface`` labels the review surface in
+    the disclosure record. ``checklist_section_text`` is the tier-1 section
+    that surface already loaded; a surface supplying none has
+    ``docs/CHECKLISTS.md`` recorded as read on demand, never as an inlined
+    section of zero characters. ``already_inline`` names what the caller's OWN
+    delivery carries in full (:func:`_carried_reasons` states the mechanism).
+    ``layer`` is the ONE external switch: ``body`` (the subject is Ouroboros's
+    body) runs the three tiers; ``core`` (any other subject) runs
+    :func:`_core_layer_context` over ``subject_root``."""
+    from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
+
+    if layer not in GOVERNANCE_LAYERS:
+        raise ValueError(f"unknown governance layer {layer!r}; expected one of {GOVERNANCE_LAYERS}")
+    if layer == CORE_LAYER:
+        return _core_layer_context(surface=surface, touched_paths=touched_paths, delivery=delivery,
+                                   checklist_section_text=checklist_section_text,
+                                   subject_root=subject_root)
 
     root = Path(repo_dir)
     names = _touched_names(touched_paths)
@@ -221,6 +371,19 @@ def governance_context(
     else:
         rows.append(_row(CHECKLISTS_PATH, 1, "navigation", 0,
                          "this surface supplies no checklist section"))
+    shared_path = f"{CHECKLISTS_PATH}#{SHARED_CHECKLIST_SECTION}"
+    shared_inline = False
+    try:
+        # Read where every surface reads its own section: the executing
+        # review code's checklist, never the reviewed tree's copy, so a
+        # contributor proposal cannot rewrite the rule it is judged by.
+        shared = load_checklist_section(SHARED_CHECKLIST_SECTION)
+        shared_inline = True
+    except (OSError, ValueError) as exc:
+        shared = f"[⚠️ OMISSION: {shared_path} could not be loaded: {exc}]"
+    tier1.append((shared_path, shared))
+    rows.append(_row(shared_path, 1, "inline", len(shared),
+                     "tier 1: every reviewer of this repository's code carries it"))
     for path in (BIBLE_PATH, CHECKLISTS_ARCHIVE_PATH):
         if path in carried:
             already = load_governance_doc(root, path, on_missing="silent")
@@ -314,9 +477,11 @@ def governance_context(
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
 
     # --- navigation -------------------------------------------------------
-    checklist_pointer = ("the section that applies to this review is inlined above."
-                         if checklist_text.strip() else
-                         "NO section of it is inlined for this review.")
+    inlined = [label for label, present in (
+        ("the section that applies to this review", bool(checklist_text.strip())),
+        (f"its `{SHARED_CHECKLIST_SECTION}` section", shared_inline)) if present]
+    checklist_pointer = (f"{' and '.join(inlined)} {'are' if len(inlined) > 1 else 'is'} inlined above."
+                         if inlined else "NO section of it is inlined for this review.")
     pointers = [f"- `{CHECKLISTS_PATH}` — the complete checklist book; {checklist_pointer}"]
     if not design_touched:
         pointers.append(f"- `{DESIGN_PATH}` — the design system; not inlined because no "

@@ -14,10 +14,10 @@ running ToolContext has: ``task_contract["predecessor_authority"]["source"]
 (the agent never copies the envelope into metadata). One hop only: the
 envelope's ``previous_task_id`` is never read. READ only: a write into the
 predecessor's drive stays refused while the task's own drive stays writable.
-The read follows the envelope the actor carries: a delegated child inherits its
-parent's envelope through the contract spread (``subagent_work_order`` copies the
-parent contract whole) and reads that predecessor's files too, read-only, exactly
-as it reads its parent's and root's; a child without the envelope keeps parent/root.
+The read follows the source the actor carries: a delegated child's predecessor
+brief retains its parent's source and reads that predecessor's files too,
+read-only, exactly as it reads its parent's and root's; a child without the
+brief keeps parent/root.
 """
 from __future__ import annotations
 
@@ -121,7 +121,9 @@ def continuation_registry(geo, *, predecessor=PRED):
 
 def child_registry(geo):
     """A delegated read-only child of PARENT under ROOT whose contract carries the
-    parent's predecessor envelope, exactly as the parent contract spread delivers it."""
+    predecessor source through the real child-contract builder."""
+    from ouroboros.tools.control_scheduling import _build_child_subagent_contract
+
     ctx = ToolContext(repo_dir=geo.repo, drive_root=geo.headless, task_id=CHILD)
     ctx.budget_drive_root = str(geo.canonical)
     ctx.task_metadata = {
@@ -130,7 +132,10 @@ def child_registry(geo):
         "root_task_id": ROOT,
         "budget_drive_root": str(geo.canonical),
     }
-    ctx.task_contract = {"predecessor_authority": predecessor_envelope(PRED)}
+    ctx.task_contract = _build_child_subagent_contract({
+        "tid": CHILD, "parent_task_id": PARENT, "root_task_id": ROOT,
+        "parent_contract": {"predecessor_authority": predecessor_envelope(PRED)},
+    })
     ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent", allow_enable=False)
     registry = ToolRegistry(repo_dir=geo.repo, drive_root=ctx.drive_root)
     registry.set_context(ctx)
@@ -265,11 +270,7 @@ def test_metadata_carries_the_envelope_only_when_no_contract_rides(geometry):
 # --- (e) a delegated child keeps parent/root even with an inherited envelope ------
 
 def test_a_delegated_child_inherits_the_continuations_predecessor_read(geometry):
-    """A child CAN carry ``predecessor_authority``: ``subagent_work_order`` copies the
-    parent's contract whole into the child task and ``build_task_contract`` preserves
-    the envelope. The read follows the envelope the actor carries - the child's lineage
-    grows by the predecessor and its files are readable, read-only, exactly as the
-    parent's and root's are; a child without the envelope keeps parent/root only."""
+    """The brief's source preserves the existing one-hop read grant."""
     registry, ctx = child_registry(geometry)
 
     assert lineage_task_ids(ctx) == (CHILD, PARENT, ROOT, PRED)

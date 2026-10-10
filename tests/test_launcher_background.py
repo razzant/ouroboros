@@ -43,7 +43,7 @@ class Hook:
 
 class Window:
     def __init__(self, answer=None):
-        self.events = SimpleNamespace(closing=Hook(), before_show=Hook(), shown=Hook())
+        self.events = SimpleNamespace(closing=Hook(), before_show=Hook(), shown=Hook(), closed=Hook())
         self.localization = {"global.ok": "OK", "global.cancel": "Cancel"}
         self.visible, self.calls, self.answer = True, [], answer
 
@@ -75,8 +75,9 @@ class FakeIndicator(lb.Indicator):
         self.background.events.append(("dispose", wait))
         self._stopped()
 
-    def notify(self, title, body):
+    def notify(self, title, body, sound=True):
         self.background.events.append(("banner", title, body))
+        self.background.banner_sounds = [*getattr(self.background, "banner_sounds", []), sound]
         return True
 
 
@@ -371,6 +372,9 @@ def test_quiet_start_needs_an_automatic_launch_background_on_and_a_live_indicato
             threading.Timer(0.02, self.ready.set).start()
             return True
 
+    # The short wait above belongs to the no-icon case only: here the icon comes up a moment
+    # after start(), and a loaded CI runner must not turn that moment into the no-icon path.
+    monkeypatch.setattr(lb, "INDICATOR_WAIT_SEC", 5.0)
     background, window = make(indicator=SlowIcon)
     assert background.start_hidden("automatic")
     background.run()
@@ -475,6 +479,8 @@ def test_attention_never_raises_a_window_hidden_on_purpose(settings, monkeypatch
     assert ("banner", "Task finished", "Report ready") in background.events
     assert cues == [(None, False)], "the banner owns its sound; no second one"
     assert result["status"] == "background" and result["ok"] and result["banner"]
+    background.attention(False, "Task finished", "")
+    assert background.banner_sounds[-2:] == [True, False], "Sound off reaches the banner itself"
     cues.clear()
     assert background.attention(True, "Task finished", "", False)["status"] == "background", \
         "a page with its own browser banner asks first: hidden, the native signal is placed all the same"
@@ -493,16 +499,24 @@ def test_panic_removes_the_indicator_without_waiting_and_before_the_lock(monkeyp
     calls = []
 
     class Started:
-        def stop(self, *, wait):
-            calls.append(("stop", wait))
+        def __init__(self, name):
+            self.name = name
 
-    monkeypatch.setattr(lb, "_active", Started())
+        def stop(self, *, wait):
+            calls.append((self.name, wait))
+
+    monkeypatch.setattr(lb, "_active", Started("indicator"))
+    monkeypatch.setattr(lb, "_notifier", Started("notifications"))  # Windows' notification icons
     lb.request_tray_cleanup()
     lb.stop_tray_before_exit(lambda: calls.append("release"), wait=0)
-    assert calls == [("stop", 0), ("stop", 0), "release"]
+    assert calls == [("indicator", 0), ("notifications", 0), ("indicator", 0), ("notifications", 0), "release"]
     calls.clear()
     lb.stop_tray_before_exit(lambda: calls.append("release"))
-    assert calls == [("stop", 0.5), "release"]
+    assert calls == [("indicator", 0.5), ("notifications", 0.5), "release"]
+    monkeypatch.setattr(lb, "_active", None)
+    calls.clear()
+    lb.stop_tray_before_exit(lambda: calls.append("release"))
+    assert calls == [("notifications", 0.5), "release"], "no background icon: the notification icons still go"
 
 
 def test_turning_background_off_removes_the_icon_only_while_the_window_is_visible(settings, monkeypatch, make):

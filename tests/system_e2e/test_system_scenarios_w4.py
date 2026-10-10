@@ -26,7 +26,8 @@ artifact / a recorded WIRE fact / the byte truth of the worktree:
   write → boot looks the stash up by attempt id, restores the owner's work
   uncommitted and clears the marker (nothing was applied); (b) a half-written
   ``pending_boot_smoke`` tx whose merge commit never reached HEAD → boot rolls
-  back typed (no junk ``failed-update-*`` ref is minted for a non-attempt);
+  back typed (no junk ``failed-update-*`` ref is minted for a non-attempt) and
+  keeps a clear-only handoff that the next boot, in a fresh process, clears;
   (c) merge applied + crash before the restart smoke → boot runs the smoke,
   finalizes, restores the stashed dirty work and clears the tx.
 * S21 — CANCELLATION WITH CHAT LINEAGE (the wave-2 W2-F1 counterpart of S7): the
@@ -464,7 +465,9 @@ data = pathlib.Path(sys.argv[2])
 from supervisor import git_ops
 git_ops.init(clone, data, "")
 from supervisor.update_merge import (
+    MARKER_CLEANUP_RETRY_PHASE,
     finalize_managed_update_on_boot,
+    read_update_tx_strict,
     stash_local_changes_for_update,
     write_update_tx,
 )
@@ -535,8 +538,27 @@ write_update_tx({"phase": "pending_boot_smoke", "pre_update_sha": head0,
                  "stash_sha": "", "local_work_carrier": "none",
                  "rollback_attempted": False})
 boot_b = finalize_managed_update_on_boot(True)
+# The rollback keeps a clear-only handoff until the restored process starts.
+status_b, handoff_b = read_update_tx_strict()
+assert status_b == "valid", (status_b, handoff_b)
+assert handoff_b.get("phase") == MARKER_CLEANUP_RETRY_PHASE, handoff_b
+assert handoff_b.get("gate_blocked_reason") == "rollback_restart_pending", handoff_b
+resumed_b = subprocess.run(
+    [sys.executable, "-c",
+     "import json,pathlib,sys; from supervisor import git_ops; "
+     "git_ops.init(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), ''); "
+     "from supervisor.update_merge import finalize_managed_update_on_boot; "
+     "print(json.dumps(finalize_managed_update_on_boot(True)))",
+     str(clone), str(data)],
+    cwd=str(clone), capture_output=True, text=True,
+)
+assert resumed_b.returncode == 0, (resumed_b.stdout, resumed_b.stderr)
+boot_b_resumed = json.loads(resumed_b.stdout.strip().splitlines()[-1])
+assert boot_b_resumed.get("finalized") is True, boot_b_resumed
+assert not boot_b_resumed.get("rolled_back"), boot_b_resumed
 report["half_written"] = {
     "boot": boot_b,
+    "resumed_boot": boot_b_resumed,
     "head": _git("rev-parse", "HEAD"), "head0": head0,
     "branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
     "porcelain": _git("status", "--porcelain"),
@@ -882,7 +904,7 @@ def test_s22_absorb_kill_recovery_absorbs_once_and_never_twice(
                 "commit_sha": commit_sha,
             }, marker
             assert server.proc.poll() is None, "auto-restart off must not restart the tree"
-            assert "triad_review" in stub.kinds() and "scope_review" in stub.kinds(), (
+            assert "triad_review" in stub.kinds() and "two_part_review" in stub.kinds(), (
                 stub.kinds())
 
             # HARD CRASH in the window.

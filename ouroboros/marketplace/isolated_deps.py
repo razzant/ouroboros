@@ -16,7 +16,7 @@ import uuid
 from typing import Any, Dict, List
 
 from ouroboros.marketplace.install_specs import install_specs_hash, relative_install_path
-from ouroboros.skill_loader import skill_state_dir
+from ouroboros.skill_loader import skill_state_dir, skill_state_dir_path
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso, replace_atomic
 from ouroboros.verified_download import fetch_exact_file, verify_exact_file
 
@@ -473,10 +473,11 @@ def read_deps_state(
     skill_name: str,
     skill_dir: pathlib.Path | None = None,
 ) -> Dict[str, Any]:
-    """Return persisted deps.json, optionally verified against the live env."""
+    """Return persisted deps.json, optionally verified against the live env.
+
+    Non-creating: a missing state dir reads like a missing file ({})."""
     try:
-        state_dir = skill_state_dir(drive_root, skill_name)
-        path = state_dir / DEPS_STATE_FILENAME
+        path = skill_state_dir_path(drive_root, skill_name) / DEPS_STATE_FILENAME
         state = read_json_dict(path) or {}
     except Exception:
         return {}

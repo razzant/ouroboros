@@ -638,10 +638,6 @@ def test_selected_manifestless_preflight_to_manifest_and_fresh_review(
     )
 
     monkeypatch.setattr(
-        "ouroboros.skill_review._run_skill_advisory_pre_review",
-        lambda *_a, **_kw: {"status": "empty"},
-    )
-    monkeypatch.setattr(
         "ouroboros.tools.review._handle_multi_model_review",
         lambda *_a, **_kw: json.dumps({"results": [_pass_actor("fake/a"), _pass_actor("fake/b")]}),
     )

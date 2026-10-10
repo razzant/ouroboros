@@ -201,14 +201,15 @@ def _enforce_task_timeouts_locked(
     # intent stays the one owner will and cancellation custody stays the killer;
     # a later graceful request can never extend either hard axis.
     from supervisor.owner_stop import running_owner_stop_tasks
+    from supervisor.restart_retention import RETAINED_FOR_BOOT
     from supervisor.worker_owner_wait import has_owner_wait_checkpoint
 
     owner_stop_held = running_owner_stop_tasks(
         _queue().DRIVE_ROOT, grace_sec=_queue().FINALIZATION_GRACE_SEC,
     )
     for task_id, meta in list(_queue().RUNNING.items()):
-        if not isinstance(meta, dict):
-            continue
+        if not isinstance(meta, dict) or meta.get(RETAINED_FOR_BOOT):
+            continue  # a stop already ended this attempt; its saved work belongs to the next boot
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
         started_at = float(meta.get("started_at") or 0.0)
         if started_at <= 0:

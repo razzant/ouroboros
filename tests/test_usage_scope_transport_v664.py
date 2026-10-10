@@ -10,6 +10,7 @@ import subprocess
 import sys
 import types
 from pathlib import Path
+from tests._usage_store_testing import ledger_rows
 
 
 def _scope(root: Path):
@@ -81,28 +82,12 @@ def test_generic_llm_attempt_keeps_semantic_scope_source(tmp_path, monkeypatch):
         reservation = reserve_attempt(request)
         release_attempt(reservation)
 
-    rows = [json.loads(line) for line in (tmp_path / "state" / "usage_attempts.jsonl").read_text().splitlines()]
-    reserved = next(row for row in rows if row.get("state") == "reserved")
+    rows = ledger_rows(tmp_path)
+    reserved = rows[0]  # the attempt's current row keeps the reservation's attribution
     assert reserved["source"] == "task_acceptance"
     assert reserved["task_id"] == "review-task"
     assert reserved["root_task_id"] == "root-task"
     assert llm._attempt_request({}, {}).source == "llm.chat"
-
-
-def test_native_review_episode_scopes_every_send(tmp_path):
-    """Successor pin for the retired Claude-SDK readonly child's usage-scope
-    transport: the advisory/actor native inspection episode runs IN-PROCESS,
-    so scope attribution needs no serialization — _run_advisory_native wraps
-    its substrate call in usage_scope(category="advisory_review",
-    source="advisory_native") and the episode's LLM sends inherit it."""
-    import importlib
-    import inspect
-
-    adv = importlib.import_module("ouroboros.tools.claude_advisory_review")
-    source = inspect.getsource(adv._run_advisory_native)
-    assert "usage_scope" in source
-    assert 'category="advisory_review"' in source
-    assert 'source="advisory_native"' in source
 
 
 def test_vlm_child_payload_carries_usage_scope(tmp_path, monkeypatch):

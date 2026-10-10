@@ -1,28 +1,24 @@
-"""Battle test: display projections never stall behind a real 64-way ledger convoy.
+"""Battle test: display projections never stall behind a real 64-way money convoy.
 
 CyberGym remaining1150 postmortem class: 64 lanes of monetary writes held the
-usage ledger lock almost continuously, and every display/compatibility read on
-a concurrency-critical thread waited out the 45s monetary timeout. py-spy
-caught the supervisor loop parked in ``_handle_task_heartbeat`` →
-``live_root_cost_projection`` → ``_memoized_final_rows`` → ``_locked`` (three
-dumps, stalls of 90-105s past the liveness deadline); the llm_usage refresh
-(``update_budget_from_usage``) and the ``assign_tasks`` budget pre-check share
-the shape, and on the gateway side the cost views ran the same locked read.
+money lock almost continuously, and every display/compatibility read on a
+concurrency-critical thread waited out the 45s monetary timeout (the supervisor
+loop parked in ``_handle_task_heartbeat`` -> ``live_root_cost_projection``).
 
-The first test runs the REAL monetary write path
-(``reserve_attempt``/``mark_dispatched``/``settle_attempt``) from 64 writer
-threads — the production lane count — against a real on-disk ledger, proves
-the convoy is real (a short-timeout lock attempt really fails), then drives
-the REAL loop and gateway display readers with their production arguments and
-proves none of them ever waits out the monetary timeout.
-
-The rest pin the money contract of that stale-while-revalidate path from both
-sides: a display reader is served the last validated snapshot quickly while
-``reserve_attempt`` keeps waiting for the lock and refuses an exhausted
-budget exactly; a snapshot may say "there is money" but never refuses by
-itself; the owner's live limit is applied to the snapshot, never remembered
-with it; a lagging snapshot cannot regress ``state.json``; a cold memo fails
-closed and the loop handlers survive that without publishing a zero.
+With the usage store a writer holds SQLite's write lock (RESERVED) for its
+short transaction and a reader takes only the read lock, so display AND strict
+readers answer exactly while a writer holds the money lock; a reader waits only
+while a commit holds the database EXCLUSIVE (milliseconds), and a display gives
+up after the short display wait and reports the fact unavailable (never a
+zero). The first test runs the REAL monetary write path from 64 writer threads
+(the production lane count), proves the convoy is real (a short-timeout write
+hold really fails), then drives the REAL loop and gateway display readers and
+proves none of them ever waits out the monetary timeout. The rest pin both
+sides: ``reserve_attempt`` waits for the write lock and refuses an exhausted
+budget exactly; readers under a held writer are exact; a reader under a held
+EXCLUSIVE lock is unavailable (display) or waits (strict); the loop handlers
+survive an unavailable read without publishing a zero; a lower marker cannot
+regress ``state.json``.
 """
 from __future__ import annotations
 
@@ -34,8 +30,8 @@ import time
 
 import pytest
 
-from ouroboros import _usage_rows_memo as rows_memo
 from ouroboros import usage_accounting as ua
+from ouroboros import usage_store
 from ouroboros.runtime_limits import USAGE_DISPLAY_LOCK_TIMEOUT_SEC
 from ouroboros.usage_ledger import UsageLockUnavailable
 
@@ -97,13 +93,11 @@ def _spend(data_root, cost, *, task_id="task", limit=1_000_000.0):
 
 @contextlib.contextmanager
 def _held_ledger_lock(data_root):
-    """One writer sitting on the monetary lock: the convoy, made deterministic."""
-    from ouroboros.usage_ledger import _locked
-
+    """One writer sitting on the money write lock: the convoy, made deterministic."""
     held, release = threading.Event(), threading.Event()
 
     def gatekeeper():
-        with _locked(data_root):
+        with ua._locked(data_root):
             held.set()
             release.wait(timeout=60)
 
@@ -116,6 +110,33 @@ def _held_ledger_lock(data_root):
         release.set()
         thread.join(timeout=30)
         assert not thread.is_alive(), "gatekeeper never released the lock"
+
+
+@contextlib.contextmanager
+def _held_exclusive(data_root):
+    """A commit in progress, held: SQLite's EXCLUSIVE lock, which readers wait on."""
+    usage_store.store_tier(data_root, wait_sec=5.0)
+    held, release = threading.Event(), threading.Event()
+
+    def committer():
+        conn = usage_store._connect(data_root / usage_store.STORE_REL, usage_store.TIER_ENFORCED)
+        try:
+            conn.execute("BEGIN EXCLUSIVE")
+            held.set()
+            release.wait(timeout=60)
+            conn.execute("ROLLBACK")
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=committer, daemon=True)
+    thread.start()
+    assert held.wait(timeout=10), "committer never took the exclusive lock"
+    try:
+        yield release
+    finally:
+        release.set()
+        thread.join(timeout=30)
+        assert not thread.is_alive()
 
 
 def _llm_usage_rows(data_root):
@@ -138,14 +159,12 @@ def _writer(data_root, worker_index, stop, errors):
 
 
 def _prove_convoy(data_root, stop):
-    """A short-timeout attempt on the monetary lock must really lose the race —
-    otherwise the convoy is vacuous and the battery below proves nothing."""
-    from ouroboros.usage_ledger import _locked
-
+    """A short-timeout write hold must really lose the race — otherwise the
+    convoy is vacuous and the battery below proves nothing."""
     deadline = time.monotonic() + _CONVOY_SEC
     while time.monotonic() < deadline and not stop.is_set():
         try:
-            with _locked(data_root, timeout_sec=USAGE_DISPLAY_LOCK_TIMEOUT_SEC):
+            with ua._locked(data_root, timeout_sec=0.01):
                 pass
         except UsageLockUnavailable:
             return True
@@ -156,7 +175,6 @@ def test_display_reads_never_stall_under_64way_write_convoy(data_root, superviso
     from ouroboros.cost_projection import live_root_cost_projection
     from ouroboros.gateway.cost_breakdown import _task_cost_breakdown_view
 
-    # Seed + warm the memo exactly as the first loop tick would.
     _spend(data_root, 0.0001, task_id="task-0")
     warm = ua.usage_projection(data_root, root_task_id="root")
     assert warm["attempt_counts"]
@@ -198,7 +216,7 @@ def test_display_reads_never_stall_under_64way_write_convoy(data_root, superviso
         for name, worst in durations.items():
             assert worst < _MAX_READ_SEC, f"{name} stalled {worst:.2f}s behind the convoy"
 
-        # The readers kept serving real data from the last validated snapshot.
+        # The readers kept serving real data from the store.
         projection = live_root_cost_projection("root", task, {}, data_root)
         assert projection.get("cost_accounting_status") == "available"
         assert projection.get("accounted_upper_bound_usd_with_children") is not None
@@ -210,16 +228,16 @@ def test_display_reads_never_stall_under_64way_write_convoy(data_root, superviso
 
     assert not errors, errors[:5]
 
-    # Convergence: stale serving is a convoy-only posture, not a wedge. Once the
-    # convoy eases, display reads alone catch up with the ledger.
+    # A display read and a strict read agree once the convoy stops.
     final_calls = int(ua.usage_breakdown(data_root).get("physical_calls") or 0)
     assert final_calls >= _WORKERS
     converged = ua.usage_breakdown(data_root, allow_stale=True)
     assert int(converged.get("physical_calls") or 0) == final_calls
 
 
-def test_display_reader_serves_the_snapshot_while_the_monetary_gate_stays_exact(data_root):
-    """Rule of the port: money stays exact, only display readers go stale."""
+def test_display_reads_are_exact_while_the_monetary_gate_waits(data_root):
+    """Money stays exact and so does every reader: a held write lock does not
+    stop a read, and ``reserve_attempt`` still waits for the write lock."""
     _spend(data_root, 0.40, limit=1.0)
     assert ua.usage_projection(data_root, global_limit_usd=1.0)["remaining_known_usd"] == pytest.approx(0.60)
     _spend(data_root, 0.60, task_id="second", limit=1.0)  # the budget is now genuinely exhausted
@@ -236,8 +254,9 @@ def test_display_reader_serves_the_snapshot_while_the_monetary_gate_stays_exact(
         shown, elapsed = _timed(
             lambda: ua.usage_projection(data_root, global_limit_usd=1.0, allow_stale=True))
         assert elapsed < _MAX_READ_SEC
-        assert shown["accounted_usd"] == pytest.approx(0.40)  # the snapshot lags, by design
-        # Without the display contract the very same read fails closed instead.
+        assert shown["accounted_usd"] == pytest.approx(1.0)  # exact, never a lagging snapshot
+        assert ua.usage_projection(data_root, global_limit_usd=1.0)["accounted_usd"] == pytest.approx(1.0)
+        # A second WRITE hold is what fails while the writer sits on the lock.
         with pytest.raises(UsageLockUnavailable):
             with ua._locked(data_root, timeout_sec=USAGE_DISPLAY_LOCK_TIMEOUT_SEC):
                 pass
@@ -245,7 +264,7 @@ def test_display_reader_serves_the_snapshot_while_the_monetary_gate_stays_exact(
         gate = threading.Thread(target=next_paid_attempt, daemon=True)
         gate.start()
         gate.join(timeout=1.5)
-        assert gate.is_alive() and not verdict, "reserve_attempt must wait for the lock, never a snapshot"
+        assert gate.is_alive() and not verdict, "reserve_attempt must wait for the write lock"
 
     gate.join(timeout=60)
     assert not gate.is_alive()
@@ -253,51 +272,28 @@ def test_display_reader_serves_the_snapshot_while_the_monetary_gate_stays_exact(
     assert ua.usage_projection(data_root, global_limit_usd=1.0)["accounted_usd"] == pytest.approx(1.0)
 
 
-def test_a_snapshot_may_admit_but_never_refuses(data_root, supervisor_state, monkeypatch):
-    """A lagging snapshot that still shows an open reservation must not pause or
-    fail queued work: the pre-check decides a refusal on the exact read only."""
+def test_a_pre_check_under_a_held_writer_is_exact_both_ways(data_root, supervisor_state, monkeypatch):
+    """The loop's pre-check reads exactly under a held write lock: it never admits on
+    stale money. An open hold is exposure, not spending (#1487), so the warmed snapshot
+    reads the whole $1; the exact read after settlement reads the known $0.90."""
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 1.0)
     reservation = ua.reserve_attempt(_request(data_root, reservation_usd=1.0, limit=1.0))
     ua.mark_dispatched(reservation)
-    assert supervisor_state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(0.0)
+    assert supervisor_state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(1.0)
     ua.settle_attempt(reservation, {"prompt_tokens": 5, "completion_tokens": 2}, cost_usd=0.10, cost_final=True)
-
-    answer: list = []
-    with _held_ledger_lock(data_root):
-        shown = ua.usage_projection(data_root, global_limit_usd=1.0, allow_stale=True)
-        assert shown["remaining_known_usd"] == pytest.approx(0.0)  # what the snapshot alone would say
-        pre_check = threading.Thread(
-            target=lambda: answer.append(supervisor_state.budget_remaining({}, strict=True, allow_stale=True)),
-            daemon=True,
-        )
-        pre_check.start()
-        pre_check.join(timeout=1.5)
-        assert pre_check.is_alive() and not answer, "a refusal was decided on a snapshot"
-    pre_check.join(timeout=60)
-    assert answer == [pytest.approx(0.90)]
-
-    # The quiet side: a snapshot that shows money answers at once, lock held or not.
     with _held_ledger_lock(data_root):
         remaining, elapsed = _timed(
             lambda: supervisor_state.budget_remaining({}, strict=True, allow_stale=True))
-    assert remaining == pytest.approx(0.90) and elapsed < _MAX_READ_SEC
-    # A caller that refuses below its own reserve names it, and gets the exact read there too.
-    with _held_ledger_lock(data_root):
-        waiting = threading.Thread(
-            target=lambda: answer.append(
-                supervisor_state.budget_remaining({}, strict=True, allow_stale=True, refuse_below=5.0)),
-            daemon=True,
-        )
-        waiting.start()
-        waiting.join(timeout=1.5)
-        assert waiting.is_alive(), "a reserve-floor refusal was decided on a snapshot"
-    waiting.join(timeout=60)
-    assert not waiting.is_alive()
+        assert remaining == pytest.approx(0.90) and elapsed < _MAX_READ_SEC
+        floor, elapsed = _timed(lambda: supervisor_state.budget_remaining(
+            {}, strict=True, allow_stale=True, refuse_below=5.0))
+        assert floor == pytest.approx(0.90) and elapsed < _MAX_READ_SEC
 
 
 def _assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):
-    """The real ``assign_tasks`` over a real ledger: a $5 limit, one lane that reserved $4
-    (the snapshot says $1 left, under the $2 evolution reserve) and then settled."""
+    """The real ``assign_tasks`` over a real ledger: a $5 limit, one lane whose $4 hold is
+    in flight (the warmed snapshot still says $5: a hold is not spending, #1487) and then
+    settles at ``settle_at`` — the exact read must see that known charge."""
     from types import SimpleNamespace
 
     from supervisor import queue, state, workers
@@ -316,7 +312,7 @@ def _assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):
     queue.init_queue_refs(pending, running, workers.QUEUE_SEQ_COUNTER_REF)
     reservation = ua.reserve_attempt(_request(data_root, reservation_usd=4.0, limit=5.0))
     ua.mark_dispatched(reservation)
-    assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(1.0)  # warms the memo
+    assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(5.0)  # warms the memo
     ua.settle_attempt(reservation, {"prompt_tokens": 5, "completion_tokens": 2}, cost_usd=settle_at, cost_final=True)
     sent: list = []
     pool[0] = SimpleNamespace(wid=0, busy_task_id=None, reaping=False,
@@ -329,18 +325,14 @@ def _assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):
     return workers, pending, reasons
 
 
-def test_an_evolution_row_is_never_dropped_on_a_snapshot(data_root, monkeypatch):
-    """``assign_tasks`` refuses at TWO floors: zero, and the evolution reserve. A lagging
-    snapshot inside the reserve must not drop an evolution row the exact budget affords."""
+def test_an_evolution_row_the_exact_budget_affords_is_assigned_under_a_held_writer(data_root, monkeypatch):
+    """``assign_tasks`` refuses at TWO floors: zero, and the evolution reserve. Under
+    a held write lock its read is exact, so an affordable evolution row is assigned."""
     workers, pending, reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
     with _held_ledger_lock(data_root):
-        tick = threading.Thread(target=workers.assign_tasks, daemon=True)
-        tick.start()
-        tick.join(timeout=1.5)
-        assert tick.is_alive(), "the evolution reserve refusal was decided on a snapshot"
-        assert [row["id"] for row in pending] == ["evo-1"] and not reasons
-    tick.join(timeout=60)
-    assert not tick.is_alive() and "evolution_dropped_budget" not in reasons  # exact budget: $4.90
+        _, elapsed = _timed(workers.assign_tasks)
+    assert elapsed < _MAX_READ_SEC
+    assert pending == [] and "evolution_dropped_budget" not in reasons  # exact budget: $4.90
 
 
 def test_an_evolution_row_the_exact_budget_cannot_afford_is_still_dropped(data_root, monkeypatch):
@@ -350,41 +342,38 @@ def test_an_evolution_row_the_exact_budget_cannot_afford_is_still_dropped(data_r
     assert pending == [] and "evolution_dropped_budget" in reasons  # exact budget: $1.50
 
 
-def test_a_cold_memo_reads_exactly_instead_of_refusing(data_root, supervisor_state, monkeypatch):
-    """"May admit, never refuses" includes the refusal by absence: with no validated
-    snapshot a pre-check waits for the exact read, as it did before, instead of telling
-    the owner that cost accounting is unavailable after a quarter of a second."""
+def test_a_pre_check_waits_through_a_commit_instead_of_refusing(data_root, supervisor_state, monkeypatch):
+    """A strict pre-check whose read lock is held off by a commit waits for the
+    exact read; it never tells the owner accounting is unavailable after a
+    quarter of a second (that is a display's answer)."""
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 5.0)
     _spend(data_root, 0.40, limit=5.0)
-    rows_memo._ROWS_MEMO.clear()  # a fresh supervisor generation: nothing validated yet
     answer: list = []
-    with _held_ledger_lock(data_root):
+    with _held_exclusive(data_root):
         pre_check = threading.Thread(
             target=lambda: answer.append(supervisor_state.budget_remaining({}, strict=True, allow_stale=True)),
             daemon=True,
         )
         pre_check.start()
         pre_check.join(timeout=1.5)
-        assert pre_check.is_alive() and not answer, "a cold memo refused instead of reading exactly"
+        assert pre_check.is_alive() and not answer, "a held-off read refused instead of waiting"
     pre_check.join(timeout=60)
     assert answer == [pytest.approx(4.60)]
-    # A DISPLAY reader keeps failing closed on a cold memo (the test below): it has no refusal to decide.
 
 
-def test_assignment_rides_the_snapshot_when_it_shows_money(data_root, monkeypatch):
-    """The other direction of the two tests above: with money plainly there the tick
-    never touches the lock, which is why this package exists."""
+def test_assignment_answers_under_a_held_writer_when_money_is_there(data_root, monkeypatch):
+    """With money plainly there the tick answers at once under a held write lock."""
     from supervisor import state
 
     workers, pending, reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
-    assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(4.90)  # revalidates
+    assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(4.90)
     with _held_ledger_lock(data_root):
         _, elapsed = _timed(workers.assign_tasks)
     assert elapsed < _MAX_READ_SEC and pending == [] and "evolution_dropped_budget" not in reasons
 
 
 def _display_readers(data_root, state):
-    """Every DISPLAY reader this package moved onto the snapshot, as the real callable."""
+    """Every DISPLAY reader, as the real callable."""
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.gateway.cost_breakdown import _task_cost_breakdown_view
     from supervisor import message_bus, queue
@@ -414,31 +403,35 @@ def test_every_display_reader_answers_under_a_held_monetary_lock(data_root, supe
     monkeypatch.setattr(message_bus, "TOTAL_BUDGET_LIMIT", 1_000_000.0, raising=False)
     _spend(data_root, 0.40)
     read = _display_readers(data_root, supervisor_state)[reader]
-    read()  # warm: the first read validates a snapshot
+    read()
     with _held_ledger_lock(data_root):
         _, elapsed = _timed(read)
     assert elapsed < _MAX_READ_SEC, f"{reader} waited {elapsed:.1f}s on the monetary lock"
 
 
 def test_a_wake_admission_reads_the_allowance_exactly(data_root):
-    """The dangerous direction of the status view's snapshot read: the SAME reader
-    admits a consciousness wake, and an admission waits for the exact read however
-    warm the memo is (``allow_stale`` is opt-in; the status view alone opts in)."""
+    """The SAME reader admits a consciousness wake: under a held write lock it
+    answers exactly; held off by a commit it waits for the exact read
+    (``allow_stale`` is opt-in; the status view alone opts in)."""
     from ouroboros.consciousness_allowance import allowance_window
 
     _spend(data_root, 0.40)
-    assert allowance_window(data_root)["status"]  # warms the memo
-    verdict: list = []
+    assert allowance_window(data_root)["status"]
     with _held_ledger_lock(data_root):
+        assert allowance_window(data_root)["status"] != "allowance_unknown"
+    verdict: list = []
+    with _held_exclusive(data_root):
         admission = threading.Thread(target=lambda: verdict.append(allowance_window(data_root)), daemon=True)
         admission.start()
         admission.join(timeout=1.5)
-        assert admission.is_alive() and not verdict, "a wake admission was decided on a snapshot"
+        assert admission.is_alive() and not verdict, "a wake admission was decided without the exact read"
+        status_view = allowance_window(data_root, allow_stale=True)
+        assert status_view["status"] == "allowance_unknown" and status_view["accounted_usd"] is None
     admission.join(timeout=60)
     assert verdict and verdict[0]["status"] != "allowance_unknown"
 
 
-def test_the_live_limit_is_applied_to_the_snapshot_never_remembered_with_it(
+def test_the_live_limit_is_applied_to_every_read_never_remembered(
     data_root, supervisor_state, monkeypatch,
 ):
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 1.0)
@@ -454,28 +447,7 @@ def test_the_live_limit_is_applied_to_the_snapshot_never_remembered_with_it(
     assert shown["limit_usd"] == pytest.approx(5.0)
 
 
-def test_contended_display_reads_back_off_instead_of_paying_the_timeout_each(data_root, monkeypatch):
-    monkeypatch.setattr(rows_memo, "USAGE_DISPLAY_REVALIDATE_AFTER_SEC", 600.0)
-    _spend(data_root, 0.25)
-    assert ua.usage_breakdown(data_root)["physical_calls"] == 1
-    attempts: list[dict] = []
-    real_locked = ua._locked
-
-    def counting_locked(root, **kwargs):
-        attempts.append(kwargs)
-        return real_locked(root, **kwargs)
-
-    monkeypatch.setattr(ua, "_locked", counting_locked)
-    with _held_ledger_lock(data_root):
-        for _ in range(25):
-            assert ua.usage_breakdown(data_root, allow_stale=True)["physical_calls"] == 1
-        assert attempts == [{"timeout_sec": USAGE_DISPLAY_LOCK_TIMEOUT_SEC}]
-    # The exact path is untouched by the backoff: it takes the lock every time.
-    ua.usage_breakdown(data_root)
-    assert attempts[-1] == {} and len(attempts) == 2
-
-
-def test_a_lagging_snapshot_cannot_regress_state_json(data_root, supervisor_state):
+def test_a_lower_marker_cannot_regress_state_json(data_root, supervisor_state):
     _spend(data_root, 0.40)
     assert supervisor_state.update_budget_from_usage({}) is True
     saved = supervisor_state.load_state()
@@ -492,24 +464,25 @@ def test_a_lagging_snapshot_cannot_regress_state_json(data_root, supervisor_stat
     assert after["usage_ledger_high_water_seq"] == [0, 10_000]
 
 
-def test_cold_memo_fails_closed_once_under_contention(data_root):
-    """No validated snapshot yet + a contended lock → the caller's unavailable
-    branch, exactly as before — display reads never invent a $0 authority."""
-    with _held_ledger_lock(data_root):
+def test_display_read_held_off_by_a_commit_is_unavailable_never_zero(data_root):
+    """A display read that cannot take its read lock within the display wait
+    is the caller's unavailable branch — display reads never invent a $0."""
+    _spend(data_root, 0.40)
+    with _held_exclusive(data_root):
+        started = time.monotonic()
         with pytest.raises(UsageLockUnavailable):
             ua.usage_projection(data_root, allow_stale=True)
-    # After the writer releases, the same read succeeds and seeds the memo.
-    assert ua.usage_projection(data_root, allow_stale=True)["accounted_usd"] == 0.0
+        assert time.monotonic() - started < _MAX_READ_SEC
+    assert ua.usage_projection(data_root, allow_stale=True)["accounted_usd"] == pytest.approx(0.40)
 
 
-def test_loop_handlers_survive_a_cold_memo_without_publishing_a_zero(data_root, supervisor_state, monkeypatch):
+def test_loop_handlers_survive_an_unavailable_read_without_publishing_a_zero(data_root, supervisor_state, monkeypatch):
     from ouroboros import server_liveness
     from ouroboros.cost_projection import live_root_cost_projection
     from supervisor import events_budget
 
     monkeypatch.setattr(server_liveness, "BUDGET_PROJECTION_RETRY_SEC", 0.0)  # retry on the very next turn
     _spend(data_root, 0.40)
-    rows_memo._ROWS_MEMO.clear()  # a fresh supervisor generation: nothing validated yet
     supervisor_state.save_state(dict(supervisor_state.load_state(), spent_usd=7.5))
 
     class Ctx:
@@ -519,7 +492,7 @@ def test_loop_handlers_survive_a_cold_memo_without_publishing_a_zero(data_root, 
     ctx = Ctx()
     task = {"id": "root", "root_task_id": "root", "budget_drive_root": str(data_root)}
     event = {"type": "llm_usage", "task_id": "task", "usage": {"prompt_tokens": 5, "cost": 0.4}}
-    with _held_ledger_lock(data_root):
+    with _held_exclusive(data_root):
         heartbeat, heartbeat_sec = _timed(lambda: live_root_cost_projection("root", task, {}, data_root))
         events_budget._handle_llm_usage(dict(event), ctx)
         _, usage_sec = _timed(lambda: server_liveness.flush_budget_projection(ctx))  # the turn's one write

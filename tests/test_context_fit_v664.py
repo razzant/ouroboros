@@ -21,7 +21,6 @@ def _projection(mode: str):
         estimated_tokens=10,
         calibrated_tokens=10,
         calibration_ratio=1.0,
-        fits_known_window=None,
     )
 
 
@@ -101,7 +100,7 @@ def test_known_owner_max_miss_reclaims_without_predicted_low(monkeypatch, tmp_pa
 
 def test_owner_low_uses_elastic_target_then_target_miss(monkeypatch, tmp_path):
     plan = _plan(preferred="low", window=500_000, known=True)
-    messages = plan.messages_for("low") + [{"role": "user", "content": "x" * 600_000}]
+    messages = plan.messages_for("low") + [{"role": "user", "content": "x" * 900_000}]
     first = _measure(
         monkeypatch, tmp_path, plan=plan, profile="owner_low", mode="low", messages=messages,
     )
@@ -130,7 +129,7 @@ def test_confirmed_window_below_target_wins_even_when_target_fits(monkeypatch, t
     assert measurement.target_deficit_tokens == 0
     assert measurement.capacity_deficit_tokens > 0
     # Deficit-triggered, low-water-sized: the goal carries an eighth of the BINDING
-    # boundary (the 65,550 window, not the 200K target) above the deficit.
+    # boundary (the 65,550 window, not the 250K target) above the deficit.
     assert measurement.low_water_margin_tokens == math.ceil(65_550 / RECLAIM_LOW_WATER_DIVISOR)
     assert measurement.reclaim_goal_tokens == (
         measurement.capacity_deficit_tokens + measurement.low_water_margin_tokens
@@ -140,14 +139,14 @@ def test_confirmed_window_below_target_wins_even_when_target_fits(monkeypatch, t
 
 @pytest.mark.parametrize("profile,preferred,window,known,boundary", [
     ("owner_max", "max", 70_000, True, 70_000),  # capacity binds a Max route
-    ("owner_low", "low", 500_000, True, 200_000),  # the economy target binds Low
-    ("owner_low", "low", 0, False, 200_000),  # unknown capacity: the target alone binds
+    ("owner_low", "low", 500_000, True, 250_000),  # the economy target binds Low
+    ("owner_low", "low", 0, False, 250_000),  # unknown capacity: the target alone binds
 ])
 def test_low_water_margin_follows_the_binding_boundary(
     monkeypatch, tmp_path, profile, preferred, window, known, boundary,
 ):
     plan = _plan(preferred=preferred, window=window, known=known)
-    messages = plan.messages_for(preferred) + [{"role": "user", "content": "x" * 600_000}]
+    messages = plan.messages_for(preferred) + [{"role": "user", "content": "x" * 900_000}]
     disposition = _measure(
         monkeypatch, tmp_path, plan=plan, profile=profile, mode=preferred, messages=messages,
     )
@@ -226,6 +225,34 @@ def test_task_local_low_does_not_inherit_owner_economy_target(monkeypatch, tmp_p
     assert disposition.measurement.target_deficit_tokens is None
     assert disposition.measurement.capacity_deficit_tokens == 0
     assert disposition.action == "send"
+
+
+def test_main_fit_plans_the_reply_allowance_and_keeps_the_capacity_trigger(monkeypatch, tmp_path):
+    """Nano's fit reserves the reply floor (8,192) and plans the window's reply; the capacity
+    trigger stays input + floor - window in every mode (Low/Max keep today's trigger point)."""
+    from dataclasses import replace
+
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS, RECLAIM_LOW_WATER_DIVISOR
+
+    plan = _plan(preferred="nano", window=128_000, known=True)
+    messages = plan.messages_for("max") + [{"role": "user", "content": "x" * 300_000}]  # ~75K raw tokens
+    nano = _measure(monkeypatch, tmp_path, plan=plan, profile="owner_nano", mode="nano", messages=messages,
+                    density=0.9).measurement
+    assert nano.response_reserve_tokens == NANO_MIN_HEADROOM_TOKENS
+    assert nano.raw_input_tokens > 75_000 and nano.estimated_input_tokens == math.ceil(nano.raw_input_tokens * 0.9)
+    assert nano.reply_allowance_tokens == 128_000 - nano.raw_input_tokens - math.ceil(128_000 / RECLAIM_LOW_WATER_DIVISOR)
+    assert nano.capacity_deficit_tokens == max(0, nano.estimated_input_tokens + NANO_MIN_HEADROOM_TOKENS - 128_000)
+    assert nano.target_deficit_tokens == max(0, nano.estimated_input_tokens + NANO_MIN_HEADROOM_TOKENS - 85_000)
+
+    small = replace(plan, output_reserve_tokens=4_096)  # a local lane's quarter window is its own ceiling
+    local = _measure(monkeypatch, tmp_path, plan=small, profile="owner_nano", mode="nano", messages=messages).measurement
+    assert local.response_reserve_tokens == local.reply_allowance_tokens == 4_096
+
+    for profile, mode in (("owner_max", "max"), ("task_local_low", "low")):
+        wide = _measure(monkeypatch, tmp_path, plan=replace(plan, preferred_mode=mode), profile=profile, mode=mode,
+                        messages=messages, density=0.9).measurement
+        assert wide.response_reserve_tokens == wide.reply_allowance_tokens == 65_536
+        assert wide.capacity_deficit_tokens == max(0, wide.estimated_input_tokens + 65_536 - 128_000) > 0
 
 
 def test_density_is_applied_once_on_the_declared_basis(monkeypatch, tmp_path):
@@ -322,13 +349,8 @@ def test_route_rebind_keeps_owner_projection_on_small_confirmed_route(monkeypatc
     assert rebound.route_fp == "small-route"
 
 
-@pytest.mark.parametrize("window,estimated,expected_fit", [
-    (80_000, 35_000, True),
-    (500_000, 40_000, False),
-])
-def test_route_rebind_preserves_nano_on_model_account_fallback(
-    monkeypatch, tmp_path, window, estimated, expected_fit,
-):
+@pytest.mark.parametrize("window,estimated", [(80_000, 35_000), (500_000, 40_000)])
+def test_route_rebind_preserves_nano_on_model_account_fallback(monkeypatch, tmp_path, window, estimated):
     from dataclasses import replace
 
     from ouroboros import context, context_fit, loop
@@ -372,7 +394,7 @@ def test_route_rebind_preserves_nano_on_model_account_fallback(
     assert rebound.preferred_mode == rebound.initial_mode == "nano"
     assert rebound.nano_projection is not None
     assert rebound.nano_projection.calibrated_tokens == estimated * 2
-    assert rebound.nano_projection.fits_known_window is expected_fit
+    assert rebound.window_tokens == window
     assert messages[0] == rebound.nano_projection.system_message()
     assert rebound.model == "claudexor::codex=fallback-model"
     assert rebound.model_route["credentialProfileId"] == "account-b"
@@ -442,14 +464,14 @@ def test_route_switch_without_immutable_core_fails_loudly(tmp_path):
         )
 
 
-def test_p3_commit_and_scope_review_do_not_use_task_context_fit():
+def test_p3_commit_review_seats_do_not_use_task_context_fit():
     from ouroboros import review_substrate
-    from ouroboros.tools import review, scope_review
+    from ouroboros.tools import review, review_multi_model
 
     source = (
         inspect.getsource(review_substrate.ReviewCoordinator._run_slot)
         + inspect.getsource(review._run_unified_review)
-        + inspect.getsource(scope_review._call_scope_llm)
+        + inspect.getsource(review_multi_model._query_model)
     )
     assert "run_llm_loop" not in source
     assert "ContextFitPlan" not in source

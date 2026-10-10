@@ -360,6 +360,7 @@ def evolution_block_reason() -> str:
     Evolution campaigns are self-modification work, so they require runtime
     mode ``advanced`` or ``pro``. In ``light`` (conversation-only) mode they are
     hard-blocked before any campaign state, queue entry, or expensive round.
+    Consulted at the owner and post-task entry points and idle enqueue; ``worker_assignment`` repeats it.
     Returns ``""`` when evolution is allowed.
     """
     from ouroboros.config import get_runtime_mode
@@ -537,7 +538,10 @@ def begin_evolution_transaction(task_id: str, *, cycle: int, campaign: Dict[str,
                                 transaction: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Attach a cycle, or refresh its base under Q immediately before its receipt.
 
-    Clear positive-refusal proof BEFORE admission; interruptions keep orphan custody.
+    A commit-less transaction with positive never-admitted proof from the same campaign source
+    and objective is returned as is: one transaction/task is retained, with no Git probe, history or write.
+    The refresh (the Q-held preparation call) renews base_head/base_branch/objective_fp/cycle and clears that
+    proof BEFORE admission; interruptions keep orphan custody.
     """
     previous = campaign.get("active_transaction")
     previous = previous if isinstance(previous, dict) else {}
@@ -759,18 +763,18 @@ def adopt_evolution_commit_intent(
         return ""
     head = str(head_sha or "").strip() or "HEAD"
     try:
+        from ouroboros.body_candidate import intent_capture  # boot verifies its serving SHA; else the candidate
         from supervisor import git_ops
 
-        rc_tree, actual_tree, _ = git_ops.git_capture(["git", "rev-parse", f"{head}^{{tree}}"])
-        rc_parents, parent_line, _ = git_ops.git_capture(
-            ["git", "rev-list", "--parents", "-n", "1", head]
-        )
+        capture, recover = intent_capture("" if head_sha else str(tx.get("task_id") or ""), git_ops.git_capture)
+        rc_tree, actual_tree, _ = capture(["git", "rev-parse", f"{head}^{{tree}}"])
+        rc_parents, parent_line, _ = capture(["git", "rev-list", "--parents", "-n", "1", head])
     except Exception:
         return ""
     fields = parent_line.strip().split() if rc_parents == 0 else []
     if rc_tree != 0 or not fields or actual_tree.strip() != tree_sha or fields[1:] != parents:
         return ""
-    commit_sha, now = fields[0], utc_now_iso()
+    commit_sha, now = recover(fields[0]), utc_now_iso()
     tx.update({
         "commit_sha": commit_sha,
         "commit_receipt": _build_commit_receipt(
@@ -829,8 +833,8 @@ def record_evolution_commit(
             ))
             tx.update({
                 "preflight_status": "passed",
-                "advisory_status": "fresh_or_bypassed",
-                "triad_scope_status": str(triad_scope_status or "unknown"),
+                "advisory_status": "fresh_or_bypassed",  # the retired advisory gate's schema-2 aggregate, kept for receipt readers
+                "triad_scope_status": str(triad_scope_status or "unknown"),  # the wave's aggregate, never inferred from the commit
                 **({"author_disposition": dict(author_disposition)} if author_disposition else {}),
                 "commit_sha": commit_sha,
                 "commit_receipt": dict(receipt),
@@ -907,21 +911,17 @@ def link_evolution_rescue(drive_root: pathlib.Path, rescue_info: Dict[str, Any])
 def _bump_objective_repeat_count(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
     """BUG3: count one non-absorbing cycle against its objective fingerprint.
 
-    Cumulative PER-FINGERPRINT (not a consecutive streak), so a blocked objective that is
-    re-proposed NON-consecutively (interleaved with other no_op work) still accumulates toward
-    the pause gate. ``setdefault`` tolerates campaigns persisted before this field existed; a
-    transaction without an ``objective_fp`` (e.g. a tx-less idle cycle) is skipped, never
-    bucketed under the empty key.
+    Cumulative PER-FINGERPRINT (not a consecutive streak), so a re-proposed blocked objective
+    still accumulates toward the pause gate. A transaction without an ``objective_fp`` is
+    skipped, never bucketed under the empty key.
     """
     fp = str((tx or {}).get("objective_fp") or "")
     if not fp:
         return
     counts = campaign.setdefault("objective_repeat_counts", {})
     counts[fp] = int(counts.get(fp, 0) or 0) + 1
-    # Layer B: also mark this objective attempted-and-dropped so the chooser (Layer A) can be
-    # told not to re-propose it. This is a campaign-local signal, NOT a backlog status flip:
-    # the backlog item stays "open" (the work is genuinely unsolved), we only stop FEEDING it
-    # back to the evolution objective chooser.
+    # Layer B: mark the objective attempted-and-dropped so the chooser stops re-proposing it;
+    # a campaign-local signal, the backlog item stays "open".
     dropped = campaign.setdefault("dropped_objective_fps", [])
     if fp not in dropped:
         dropped.append(fp)
@@ -971,11 +971,9 @@ def update_evolution_transaction(task_id: str, **updates: Any) -> bool:
 
 
 def _cleanup_worktree_after_cycle(tx: Dict[str, Any], task_id: str) -> None:
-    """Restore a no-op/abandoned admitted cycle's base, preserving dirty/ahead work
-    in recorded stash/local refs. Never reset a positively unadmitted cycle or
-    another live writer; unknown base, live tests and the cleanup kill-switch skip
-    cleanup with a reason. Never raises (OUROBOROS_EVOLUTION_CYCLE_CLEANUP=false).
-    """
+    """Restore an ended cycle's base, preserving dirty/ahead work in stash/local refs.
+    Unadmitted cycles, other writers, unknown base, live tests or disabled cleanup
+    retain their reason. Never raises (OUROBOROS_EVOLUTION_CYCLE_CLEANUP=false)."""
     if str(os.environ.get("OUROBOROS_EVOLUTION_CYCLE_CLEANUP", "true") or "true").lower() in {"0", "false", "no", "off"}:
         tx["cleanup_status"] = "disabled"
         return
@@ -986,6 +984,12 @@ def _cleanup_worktree_after_cycle(tx: Dict[str, Any], task_id: str) -> None:
     if not base_head:
         tx["cleanup_status"] = "skipped_no_base"
         return
+    from ouroboros import body_adoption, body_candidate
+    candidate = body_candidate.find(str(task_id))
+    if candidate is not None:                         # its work is in the retained candidate;
+        tx["cleanup_status"] = "candidate_retained"    # serving dirt belongs to someone else
+        return body_adoption.abandon(_evolution_campaign_path().parents[1], "evolution_cycle_ended",
+                                     task_id=str(task_id), candidate_id=str(candidate["candidate_id"]))
     update_lock_fh = None
     release_update_lock = None
     try:
@@ -1010,9 +1014,7 @@ def _cleanup_worktree_after_cycle(tx: Dict[str, Any], task_id: str) -> None:
         if os.environ.get("OUROBOROS_ALLOW_LIVE_REPO_TESTS") != "1":
             import sys as _sys
             try:
-                live_repo = git_ops.REPO_DIR.resolve(strict=False) == (
-                    pathlib.Path.home() / "Ouroboros" / "repo"
-                ).resolve(strict=False)
+                live_repo = git_ops.REPO_DIR.resolve(strict=False) == (pathlib.Path.home() / "Ouroboros" / "repo").resolve(strict=False)
             except OSError:
                 live_repo = False
             if live_repo and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in _sys.modules):
@@ -1172,7 +1174,10 @@ def update_evolution_campaign_after_task(
     rounds: int,
     transaction: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Record an evolution cycle outcome in the active campaign file."""
+    """Record an evolution cycle outcome in the active campaign file.
+
+    A terminal whose task and transaction are already in history is a replay: nothing is recounted,
+    and only missing cleanup, restart and owner-report effects are completed."""
     from supervisor import state
 
     state.assert_test_data_path(state.STATE_PATH)
@@ -1267,10 +1272,7 @@ def update_evolution_campaign_after_task(
             row = {
                 "task_id": str(task_id or ""),
                 "ts": utc_now_iso(),
-                # ABI-3 (fix-round-3): the honest cost name — this row reaches
-                # /api/state through the evolution snapshot. Stored legacy rows
-                # (cost_usd) keep resolving deprecated-wins at the readers and
-                # at the /api/state projection boundary.
+                # Honest cost name: this row reaches /api/state through the evolution snapshot.
                 "accounted_upper_bound_usd": float(cost_usd) if cost_available else None,
                 "cost_accounting_status": "available" if cost_available else "unavailable",
                 "outcome_axes": axes,
@@ -1417,10 +1419,8 @@ def build_evolution_task_text(cycle: int) -> str:
                 f"- {row.get('task_id')}: execution={execution_status}, objective={objective_status}; "
                 f"rounds={row.get('rounds', 0)}; cost={row_cost}"
             )
-    # Fix B (C10.2): surface the durable improvement backlog and recent solve-capability
-    # as optional CONTEXT, never a directive. Ouroboros decides what (if anything) to act
-    # on — an evolution cycle is NOT obligated to draw from the backlog or repeat past
-    # patterns. Injecting them is LLM-first steering, not a hardcoded work order.
+    # The durable backlog and recent solve-capability are optional CONTEXT, never a directive:
+    # a cycle is not obligated to draw from the backlog or repeat past patterns.
     try:
         from ouroboros.evolution_checkpoints import build_solve_capability_digest
         from ouroboros.improvement_backlog import format_backlog_digest
@@ -1452,7 +1452,7 @@ def build_evolution_task_text(cycle: int) -> str:
         "",
         "## Execution Contract",
         "- Work as a normal Ouroboros self-improvement task.",
-        "- Use standard tests and the normal advisory + triad + scope review flow before committing code.",
+        "- Use standard tests and the normal commit review by the review panel (`commit_reviewed`) before committing code.",
         "- Land at most ONE reviewed self-modification commit in this cycle. Fold reviewer fixes into that commit before committing; do not churn follow-up commits.",
         "- After a reviewed commit lands, call request_restart once and stop. Restart verification is the absorption boundary for the cycle.",
         "- An honest no-op is a legitimate outcome when the objective is unsafe, already solved, too broad, or needs owner input; do not commit just to make a cycle non-empty.",
@@ -1579,8 +1579,10 @@ def request_evolution_restart(drive_root: pathlib.Path, tx: Dict[str, Any], log:
             drive_root, expected_sha=commit_sha, expected_branch=str(tx.get("base_branch") or ""),
             reason=restart_reason, evolution_claim=claim,
         )
-        auto_restart = str(os.environ.get("OUROBOROS_EVOLUTION_AUTO_RESTART", "true") or "true").lower()
-        if auto_restart in {"0", "false", "no", "off"}:
+        from ouroboros import body_adoption
+        if not body_adoption.authorize_for_task(drive_root, claim["task_id"], commit_sha, restart_reason):
+            return  # a candidate commit with no authorized adoption cannot be restarted into
+        if str(os.environ.get("OUROBOROS_EVOLUTION_AUTO_RESTART", "true") or "true").lower() in {"0", "false", "no", "off"}:
             if log is not None:
                 log.info("Automatic evolution restart is off; the restart-verify marker for %s awaits "
                          "a manual restart", commit_sha[:12])

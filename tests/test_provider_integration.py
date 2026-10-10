@@ -3,7 +3,8 @@
 The integration marker is excluded from ordinary pull-request pytest.  These
 tests run only in the trusted target-push/manual/tag lane, where core provider
 credentials are mandatory and optional direct-provider credentials remain loud
-skips.  Every first turn sends the same complete shipped built-in catalog and
+skips.  Every first turn sends the same complete shipped built-in catalog, fitted
+to the route's tool-schema ceiling as Main does (direct OpenAI: 128), and
 validates a normalized ``delegate_start`` call without executing it.
 """
 

@@ -79,6 +79,40 @@ const anatomy = (card) => ({
     activity: card.querySelector('[data-live-activity]').textContent,
 });
 
+const findDescendant = (node, selector) => node.querySelector(selector)
+    || node.children.map(child => findDescendant(child, selector)).find(Boolean) || null;
+
+for (const kind of ['direct_chat', 'managed_task']) {
+    for (const censusFirst of [false, true]) {
+        test(`${kind} paused review work reaches the real card from census hydration (census first=${censusFirst})`, async () => {
+            const fx = fixture();
+            try {
+                const activity = fx.snapshot.active_chat_activities[0];
+                Object.assign(activity, { kind, phase: 'budget_paused', pause_cause: 'owner', finishing_reviews: true });
+                if (censusFirst) fx.hydrate();
+                await fx.replay();
+                if (!censusFirst) fx.hydrate();
+                const phase = () => fx.card().querySelector('[data-live-phase]').textContent;
+                assert.equal(phase(), 'Paused · owner pause · review work finishing');
+                assert.ok(findDescendant(fx.card(), '[data-resume-run]'), 'Resume is available while reviews finish');
+                assert.equal(fx.card().querySelector('[data-live-typing]').style.display, 'none');
+                for (const finishing of [true, false, true, undefined]) {
+                    if (finishing === undefined) delete activity.finishing_reviews;
+                    else activity.finishing_reviews = finishing;
+                    fx.hydrate();
+                    assert.equal(phase(), finishing ? 'Paused · owner pause · review work finishing'
+                        : 'Paused · owner pause', 'each census replaces the fact, including false or absence');
+                    assert.ok(findDescendant(fx.card(), '[data-resume-run]'));
+                }
+                Object.assign(activity, { phase: 'working', finishing_reviews: true });
+                fx.hydrate();
+                assert.equal(phase(), 'Working', 'a stale fact cannot keep the resumed task paused');
+                assert.equal(findDescendant(fx.card(), '[data-resume-run]'), null);
+            } finally { fx.destroy(); }
+        });
+    }
+}
+
 test('a bound direct activity restores its Project card and survives progress/history replay', async () => {
     const fx = fixture();
     try {

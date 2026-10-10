@@ -434,8 +434,7 @@ def _integrate_delegated_patch(
     status, entry, _ = orphan_disposition_status(ctx, drive, rid)
     if status != custody.OWNED or entry is None:
         return _delegated_disposition_refusal(status, entry, rid, acknowledge_ambiguous)
-    lock_path = custody.delegated_capture_dir(
-        drive, entry.task_id, entry.snapshot_id or rid) / "disposition.lock"
+    lock_path = custody.disposition_lock_path(drive, entry)  # one per snapshot, shared by a continuation chain
     try:
         lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=20.0, owner_aware_stale=True)
     except Exception as exc:
@@ -443,6 +442,10 @@ def _integrate_delegated_patch(
     if lock_fd is None:
         return "⚠️ INTEGRATE_LOCK_TIMEOUT: another disposition holds this captured result; retry after it completes."
     try:
+        from ouroboros.delegate_continuation import disposition_refusal
+
+        if handover := disposition_refusal(drive, custody.replay(drive).get(rid)):
+            return handover
         result = _integrate_delegated_patch_locked(ctx, rid, decision, reason, acknowledge_ambiguous, paths)
         from ouroboros.delegate_terminal import refresh_disposed_reconciliation
 
@@ -521,8 +524,7 @@ def _integrate_delegated_patch_locked(
     selection_note = "\npaths=[] selects the complete captured result, as when paths is omitted." if empty_paths else ""
     if entry.patch_apply_pending and acknowledge_ambiguous:
         _resolve_acknowledged_intent(drive, entry)
-    snapshot_key = entry.snapshot_id or entry.run_id
-    cap_dir = custody.delegated_capture_dir(drive, entry.task_id, snapshot_key)
+    cap_dir = custody.delegated_capture_dir(drive, entry.task_id, custody.capture_key(entry))
     manifest_path = cap_dir / "workspace_patch.json"
     patch_path = cap_dir / "workspace.patch"
     capture_refusal = _si()._capture_at_disposition(drive, entry, rid, manifest_path, decision)

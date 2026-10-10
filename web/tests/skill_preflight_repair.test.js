@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { renderInstalledSkillCard } from '../modules/skill_card_renderer.js';
+import { renderInstalledSkillCard, renderReviewFindingsList } from '../modules/skill_card_renderer.js';
 import { preflightFailed, preflightFindingText, topReviewFinding } from '../modules/utils.js';
 
 // #335: a deterministic preflight FAIL persists as review_status=pending.
@@ -86,9 +86,12 @@ test('Skip review is hidden when the preflight failed (it would 409)', () => {
 });
 
 test('the preflight finding renders a human-readable diagnosis, not raw JSON', () => {
+    // The card carries the collapsed findings block; its list is built when opened.
     const html = renderInstalledSkillCard(preflightSkill());
-    assert.match(html, /missing or escaping entry: plugin\.py/);
-    assert.doesNotMatch(html, /manifest_present/); // passing rows are not noise
+    assert.match(html, /data-skill-findings="[^"]+"><summary[^>]*>1 review finding<\/summary><\/details>/);
+    const opened = renderReviewFindingsList(preflightSkill());
+    assert.match(opened, /missing or escaping entry: plugin\.py/);
+    assert.doesNotMatch(opened, /manifest_present/); // passing rows are not noise
 
     const text = preflightFindingText({
         item: 'skill_preflight', verdict: 'FAIL', reason: PREFLIGHT_REASON,
@@ -102,10 +105,11 @@ test('the preflight finding renders a human-readable diagnosis, not raw JSON', (
 test('an unparseable preflight reason falls back to the raw rendering', () => {
     assert.equal(preflightFindingText({ item: 'skill_preflight', reason: 'not json' }), '');
     assert.equal(preflightFindingText({ item: 'other', reason: PREFLIGHT_REASON }), '');
-    const html = renderInstalledSkillCard(preflightSkill({
+    const skill = preflightSkill({
         review_findings: [{ item: 'skill_preflight', verdict: 'FAIL', reason: 'exploded' }],
-    }));
-    assert.match(html, /exploded/);
+    });
+    assert.doesNotMatch(renderInstalledSkillCard(skill), /exploded/); // built on open, not per render
+    assert.match(renderReviewFindingsList(skill), /exploded/);
 });
 
 test('non-repairable native source keeps the Review CTA on a preflight failure', () => {

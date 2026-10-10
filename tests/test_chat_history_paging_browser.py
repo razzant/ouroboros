@@ -143,7 +143,13 @@ def _step(page, feed, direction="older", *, automatic=False):
 def _to_beginning(page, feed):
     for _ in range(80):
         _idle(page, feed)
-        latest = page.evaluate("() => window.__historyReads.filter(read => read.done && read.body).at(-1)?.body")
+        # The walk's own reads carry a cursor. A refresh's recent read (a card finished,
+        # the room's revision moved) can land after the last of them and says nothing
+        # about the walk, so the beginning is the last cursor read that has no more.
+        latest = page.evaluate("""() => {
+            const reads = window.__historyReads.filter(read => read.done && read.body);
+            return (reads.filter(read => read.cursor).at(-1) || reads.at(-1))?.body;
+        }""")
         if latest and latest.get("has_more") is False:
             note = page.locator(feed).locator('..').locator('.chat-load-older-note').inner_text()
             assert note in {"Beginning of saved history", "Some saved history is not loaded. Shown messages may have gaps."}
@@ -172,6 +178,29 @@ def _screenshot(page, tmp_path, name):
     root = Path(os.environ.get("HISTORY_UI_EVIDENCE_DIR") or tmp_path / "history-ui-evidence")
     root.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(root / f"{name}.png"), full_page=False, animations="disabled")
+
+
+# A room shows its newest message (DESIGN "History edges"): the feed rests at its
+# end and its last row is on screen, clear of the composer drawn over the feed.
+_AT_NEWEST = """feed => {
+    const root = document.querySelector(feed), box = root.getBoundingClientRect();
+    const node = [...root.querySelectorAll('[data-history-id]')].at(-1);
+    const composer = root.parentElement.querySelector('.chat-input-area, #chat-input-area');
+    const floor = Math.min(box.bottom, composer?.getBoundingClientRect().top ?? box.bottom);
+    const rect = node?.getBoundingClientRect();
+    return {gap: root.scrollHeight - root.scrollTop - root.clientHeight, text: node?.textContent || '',
+        top: rect ? rect.top - box.top : null, clearance: rect ? floor - rect.bottom : null};
+}"""
+_ROW_OFFSET = "n => n.getBoundingClientRect().top - n.closest('.chat-messages').getBoundingClientRect().top"
+
+
+def _assert_at_newest(page, feed, newest):
+    """The room is at its newest message: no distance left to its end, that row on screen."""
+    page.evaluate(_FRAMES)
+    at = page.evaluate(_AT_NEWEST, feed)
+    assert at["gap"] <= 8 and newest in at["text"], at
+    assert at["top"] is not None and at["top"] >= 0 and at["clearance"] >= -1, at
+    return at
 
 
 def _capture_selection_failure(page, title, output, engine, before_box, line_height):
@@ -296,14 +325,15 @@ def test_history_archive_navigation_rotation_retry_and_sparse_project(
                     _screenshot(page, tmp_path, f"archive-beginning-{browser_engine}-{width}")
                     assert len(mounted) == len(set(mounted)), "physical source rows must not duplicate"
                     assert len(mounted) < 1200, "distant page bodies must leave the rendered window"
-                    handles = {read["body"]["page_cursor"] for read in _reads(page)
-                               if read.get("body", {}).get("page_cursor")}
+                    # At the beginning the control has left; the present is the floating
+                    # control's: one read of the newest page, which lands at its end.
+                    assert page.locator(f"{MAIN} .chat-load-older button").evaluate("node => node.hidden")
                     seen = len(_reads(page))
-                    # The live edge only refills the gap toward mounted rows; every
-                    # read it makes replays an exact page handle, never a rebuild.
-                    _step(page, MAIN, "newer", automatic=True)
-                    returning = _reads(page)[seen:]
-                    assert all(read.get("cursor") in handles for read in returning), returning
+                    page.locator("#chat-scroll-bottom").click()
+                    page.wait_for_function("n => window.__historyReads.length > n", arg=seen)
+                    _idle(page, MAIN)
+                    assert [read["cursor"] for read in _reads(page)[seen:]] == [None]
+                    _assert_at_newest(page, MAIN, live_text)
                     assert page.locator(f"{MAIN} .chat-load-newer").count() == 0
                     assert page.locator(f"{MAIN} .message").filter(has_text=live_text).count() == 1
                     page.reload(wait_until="domcontentloaded")
@@ -319,6 +349,7 @@ def test_history_archive_navigation_rotation_retry_and_sparse_project(
                 try:
                     _open(page, url)
                     feed = _open_project(page, project)
+                    _assert_at_newest(page, feed, "SPARSE_LATEST_MESSAGE")
                     _to_beginning(page, feed)
                     # Every row of this room is mounted, so no edge control may claim
                     # that something newer waits beyond the rendered transcript, and
@@ -331,8 +362,9 @@ def test_history_archive_navigation_rotation_retry_and_sparse_project(
                     assert len(_reads(page, project["chat_id"])) == settled, "a settled sparse room must not refetch"
                     assert page.locator(f"{feed} .message").filter(has_text="SPARSE_FIRST_SAVED_MESSAGE").count() == 1
                     assert "OTHER_ROOM_ONLY" not in page.locator(feed).locator('..').inner_text()
-                    assert any(read.get("body", {}).get("messages") == [] and read["body"]["has_more"]
-                               for read in _reads(page, project["chat_id"]) if read.get("cursor"))
+                    # A page is counted in the room's own rows: the first read holds both of
+                    # them, behind five archives of another room, and no page is read empty.
+                    assert not any(read.get("cursor") for read in _reads(page, project["chat_id"]))
                     _screenshot(page, tmp_path, f"sparse-beginning-{browser_engine}-{width}")
                 finally:
                     context.close()
@@ -368,7 +400,8 @@ def _feature_history(root):
         _human(4, cid, text="Routed archive message", client_message_id="routed-archive"),
     ]
     _write(root / "archive" / "chat_20260901T000000.jsonl", old)
-    # Both source budgets reach these oldest companions in the same final page.
+    # Only the conversation keeps Load more history: the narration's oldest rows
+    # arrive with an older page of the conversation, before its first message.
     _write(root / "logs" / "chat.jsonl", [
         _human(5, cid, text="Routed to another project", client_message_id="routed-other"),
         *[_human(index, cid) for index in range(6, 1655)],
@@ -557,20 +590,7 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                         assert other.locator('.msg-routing-annotation').text_content() == f"Routed to project · {routed_project['name']}"
                         assert other.locator('.msg-routing-actions').count() == int(routed_project is destination)
                     anchor.scroll_into_view_if_needed()
-                    identity = anchor.get_attribute("data-history-id")
-                    before_top = anchor.evaluate("node => node.getBoundingClientRect().top - node.closest('.chat-messages').getBoundingClientRect().top")
                     _screenshot(page, tmp_path, f"archive-features-{browser_engine}-{width}")
-                    page.locator('#project-panel-close').click()
-                    reopened = _open_project(page, project)
-                    restored = page.locator(f'{reopened} [data-history-id="{identity}"]')
-                    restored.wait_for(state="attached", timeout=30_000)
-                    page.evaluate(_FRAMES)
-                    after_top = restored.evaluate("node => node.getBoundingClientRect().top - node.closest('.chat-messages').getBoundingClientRect().top")
-                    assert abs(after_top - before_top) <= 8, (before_top, after_top)
-                    assert page.locator(f'{reopened} [data-quiz-id="saved-choice"] .chat-quiz-answer').text_content() == f"Owner's answer: {comment}"
-                    assert restored.locator('.msg-routing-annotation').text_content() == "Routed to project · History detail room"
-                    assert restored.locator('.msg-routing-actions').count() == 0
-                    other = page.locator(f'{reopened} [data-client-message-id="routed-other"]')
                     other.scroll_into_view_if_needed()
                     _screenshot(page, tmp_path, f"routing-other-project-{browser_engine}-{width}")
                     other.locator('.msg-routing-actions [data-intent="open-project"]').click()
@@ -578,6 +598,154 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                     page.locator(destination_feed).wait_for(state="visible", timeout=30_000)
                     _idle(page, destination_feed)
                     _screenshot(page, tmp_path, f"routing-destination-opened-{browser_engine}-{width}")
+                    # Opened again after reading back to its first message, the room is at its
+                    # newest message and reads its newest page only (owner decision 2026-10-05).
+                    page.locator('#project-panel-close').click()
+                    seen = len(page.evaluate("() => window.__historyReads"))
+                    reopened = _open_project(page, project)
+                    assert not [read["cursor"] for read in page.evaluate("n => window.__historyReads.slice(n)", seen)
+                                if read["cursor"]], "no older page is read again"
+                    _assert_at_newest(page, reopened, "Following dialogue 19")
+                    _screenshot(page, tmp_path, f"reopened-at-newest-{browser_engine}-{width}")
+                finally:
+                    context.close()
+        finally:
+            browser.close()
+
+
+QUIET_ASK = "QUIET_ORIGIN_REQUEST: plan the archive migration"
+
+
+def _rooms_behind_other_traffic(root):
+    """Two Projects whose rows lie only in OLD archives, behind other rooms' traffic.
+
+    ``history-quiet`` holds the owner's request that started it (a retained origin)
+    and 12 messages in the oldest archive, behind eleven archives of other rooms;
+    ``history-deep`` holds 400 messages (more than two pages) in two archives of its
+    own, five archives of another room between and after them.
+    """
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    quiet = create_project(root, "history-quiet", name="Quiet archived room")
+    deep = create_project(root, "history-deep", name="Deep archived room")
+    busy = create_project(root, "history-busy", name="Busy other room")
+    asked = "2026-08-01T09:00:00Z"
+    bind_task_to_project(root, "quiet-root", quiet["id"], quiet["chat_id"], origin={
+        "ref": build_owner_message_ref(chat_id=1, client_message_id="quiet-ask", ts=asked, text=QUIET_ASK),
+        "text": QUIET_ASK})
+    at = lambda day, index: f"2026-08-{day:02d}T{10 + index // 60:02d}:{index % 60:02d}:00Z"  # noqa: E731
+
+    def busy_archives(stamp):
+        for segment in range(5):
+            _write(root / "archive" / f"chat_{stamp}{segment}.jsonl", [
+                _human(index, busy["chat_id"], text="OTHER_ROOM_ONLY " + "x" * 2000) for index in range(350)])
+
+    _write(root / "archive" / "chat_20260801T000000.jsonl", [
+        _human(0, ts=asked, client_message_id="quiet-ask", text=QUIET_ASK),
+        *[_human(index, quiet["chat_id"], ts=at(1, index), direction="out" if index % 2 else "in",
+                 text=f"QUIET_ROW_{index:02d}") for index in range(12)],
+        *[_human(index, deep["chat_id"], ts=at(2, index), text=f"DEEP_ROW_{index:04d}") for index in range(200)],
+    ])
+    busy_archives("20260803T00000")
+    _write(root / "archive" / "chat_20260804T000000.jsonl", [
+        _human(index, deep["chat_id"], ts=at(4, index - 200), text=f"DEEP_ROW_{index:04d}")
+        for index in range(200, 400)])
+    busy_archives("20260805T00000")
+    _write(root / "logs" / "chat.jsonl", [
+        _human(index, busy["chat_id"], text=f"OTHER_ROOM_LIVE {index}") for index in range(20)])
+    return quiet, deep
+
+
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_a_room_behind_other_rooms_archives_opens_at_its_newest_message_and_pages_only_older(
+    direct_server_with_data, browser_engine, tmp_path,
+):
+    """The owner's complaint (2026-10-04): a Project quiet for a while opened with nothing but
+    its retained origin, its own messages cut off by other rooms' newer archives. A room's
+    pages are its own rows (owner decisions 2026-10-05): it opens at its newest message
+    without a press, complete when its whole history fits, and `Load more history` only
+    ever lands the next OLDER rows above, by the previous page's cursor, until it leaves."""
+    import re
+
+    from playwright.sync_api import sync_playwright
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    quiet, deep = _rooms_behind_other_traffic(root)
+    texts = "nodes => nodes.map(node => node.textContent)"
+
+    def deep_rows(feed):
+        found = (re.search(r"DEEP_ROW_(\d{4})", text) for text in
+                 page.locator(f"{feed} [data-history-id]").evaluate_all(texts))
+        return [int(match.group(1)) for match in found if match]
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        try:
+            for width, height, mobile in [(1280, 850, False), (390, 844, True)]:
+                context = browser.new_context(viewport={"width": width, "height": height},
+                                              is_mobile=mobile, has_touch=mobile)
+                page = context.new_page()
+                try:
+                    _open(page, url)
+                    feed = _open_project(page, quiet)
+                    _assert_at_newest(page, feed, "QUIET_ROW_11")
+                    reads = _reads(page, quiet["chat_id"])
+                    assert reads and not any(read["cursor"] for read in reads), "opened without a press"
+                    body = reads[-1]["body"]
+                    assert body["window"]["complete"] is True and body["has_more"] is False, body["window"]
+                    assert not any(row.get("origin_projected") for row in body["messages"]), \
+                        "the request's own saved row adopts the retained origin"
+                    shown = [text for text in page.locator(f"{feed} [data-history-id]").evaluate_all(texts)
+                             if "QUIET_" in text]
+                    assert len(shown) == 13 and QUIET_ASK in shown[0] and "QUIET_ROW_11" in shown[-1], shown
+                    assert page.locator(f"{feed} .saved-project-context").count() == 0
+                    panel = page.locator(feed).locator("..").inner_text()
+                    assert "Some saved history is not loaded" not in panel and "OTHER_ROOM_ONLY" not in panel
+                    assert page.locator(f"{feed} .chat-load-older-note").inner_text() == "Beginning of saved history"
+                    assert page.locator(f"{feed} .chat-load-older button").evaluate("node => node.hidden")
+                    _screenshot(page, tmp_path, f"quiet-room-newest-{browser_engine}-{width}")
+
+                    page.locator("#project-panel-close").click()
+                    feed = _open_project(page, deep)
+                    _assert_at_newest(page, feed, "DEEP_ROW_0399")
+                    reads = _reads(page, deep["chat_id"])
+                    assert reads and not any(read["cursor"] for read in reads), "opened without a press"
+                    newest = reads[0]["body"]  # the first recent read owns the paging chain
+                    shown = deep_rows(feed)
+                    assert newest["has_more"] is True and shown == list(range(250, 400)), shown[:3]
+                    button = page.locator(f"{feed} .chat-load-older button")
+                    cursor, presses = newest["next_cursor"], 0
+                    while not button.evaluate("node => node.hidden"):
+                        assert presses < 4, "the room's 400 messages are three pages"
+                        # The reader scrolls up to the control and presses it.
+                        page.locator(feed).evaluate(
+                            "n => { n.dispatchEvent(new WheelEvent('wheel', {deltaY: -1})); n.scrollTop = 160; }")
+                        page.evaluate(_FRAMES)
+                        button.scroll_into_view_if_needed()
+                        page.evaluate(_FRAMES)
+                        first = page.locator(f"{feed} [data-history-id]").filter(has_text=f"DEEP_ROW_{shown[0]:04d}")
+                        place, seen = first.evaluate(_ROW_OFFSET), len(_reads(page, deep["chat_id"]))
+                        button.click()
+                        page.wait_for_function("([id, n]) => window.__historyReads.filter(r => r.chatId === id).length > n",
+                                               arg=[deep["chat_id"], seen])
+                        _idle(page, feed)
+                        presses += 1
+                        pressed = _reads(page, deep["chat_id"])[seen:]
+                        assert [read["cursor"] for read in pressed] == [cursor], \
+                            "one press reads the next older page, by the cursor the previous page gave"
+                        assert pressed[0]["body"]["messages"], "no press lands nothing"
+                        now = deep_rows(feed)
+                        added = now[:len(now) - len(shown)]
+                        assert added and now[len(added):] == shown and added == sorted(added) and added[-1] < shown[0], \
+                            ("older rows land above the rows already shown", added[:3], shown[:3])
+                        assert abs(first.evaluate(_ROW_OFFSET) - place) <= 8, "the reader keeps their place"
+                        shown, cursor = now, pressed[0]["body"].get("next_cursor")
+                    assert presses == 2 and shown == list(range(400)), (presses, shown[:3])
+                    assert all(read["cursor"] != newest["page_cursor"] for read in _reads(page, deep["chat_id"])), \
+                        "the newest page is never read again"
+                    assert page.locator(f"{feed} .chat-load-older-note").inner_text() == "Beginning of saved history"
+                    _screenshot(page, tmp_path, f"deep-room-beginning-{browser_engine}-{width}")
                 finally:
                     context.close()
         finally:

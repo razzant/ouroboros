@@ -17,6 +17,11 @@ from tests.test_acceptance_delivery import _CLEAN_VERDICT, _EpisodeLLM, _tool_ca
 from tests.test_acceptance_source_first import _SOURCE_PATH, _prepared_request
 
 
+@pytest.fixture(autouse=True)
+def _provider_catalog_stays_off_the_wire(provider_catalog_offline):
+    """Every work order here measures the native row's window; see `provider_catalog_offline`."""
+
+
 @pytest.mark.parametrize("paged", [False, True])
 def test_native_episode_reads_retained_external_sources_after_original_cleanup(tmp_path, paged):
     request, slot, author, canonical, workspace = _prepared_request(tmp_path, session=False)

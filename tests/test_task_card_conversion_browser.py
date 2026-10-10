@@ -226,8 +226,14 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
                     page.wait_for_selector("#page-chat")
                     page.get_by_text(marker, exact=False).first.wait_for(timeout=30000)
+                    # Zero convert buttons is also the state of a card whose
+                    # binding has not landed yet. Wait for the fact the
+                    # assertion below requires: no card, or a card that names
+                    # its project.
                     reloaded = wait_until(
-                        lambda: (lambda facts: facts if facts["convert_buttons"] == 0 else None)(
+                        lambda: (lambda facts: facts if (
+                            not facts["card"] or facts["converted"] == "1" or facts["bound"] == "1"
+                        ) else None)(
                             page.evaluate(_MAIN_CARD_FACTS, task_id)),
                         30) or page.evaluate(_MAIN_CARD_FACTS, task_id)
                     assert reloaded["convert_buttons"] == 0, \

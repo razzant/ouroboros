@@ -17,8 +17,9 @@ existing immutable artifact store plus one pointer in the task result
 refuses those sends at $0. Owner decisions reach the operation as the canonical
 wait row's ``pending_action`` (the author's mailbox is the author's), and only a
 controller proven live — this process's registration, or another process of
-this server generation with the exact pid birth and a pointer still open — may
-be told to act. A panel whose controller died is discovered by the existing
+this server generation with the exact pid birth and custody session and a
+pointer still open that matches panel, slot and attempt, with no Stop/Panic or
+unreadable stop state (``review_operation_controller``) — may be told to act. A panel whose controller died is discovered by the existing
 maintenance pass.
 
 Collection here is PURE: it restores an exact completed producer outcome, reads
@@ -76,6 +77,9 @@ _LIVE: Dict[str, "ReviewOperation"] = {}
 _BOUND: contextvars.ContextVar[Optional["ReviewOperation"]] = contextvars.ContextVar(
     "ouroboros_review_operation", default=None)
 _SELF: Dict[int, Dict[str, Any]] = {}
+# Operations a paused author detached from that have since closed in THIS process
+# (owner id -> closed at): what the resumed author's notice may state as known.
+_CLOSED_DETACHED: Dict[str, str] = {}
 
 
 def controller_identity() -> Dict[str, Any]:
@@ -97,6 +101,8 @@ def controller_state(identity: Any) -> str:
     controller gone. A live pid is the recorded controller only with the same
     birth token (a reused pid proves the original gone); a live pid with no
     recorded or readable birth is ``unknown``.
+    For our own pid/birth, distinct nonempty custody sessions prove the old
+    controller gone after exec. Another process's session cannot prove that.
     """
     try:
         pid = int(identity.get("pid") or 0) if isinstance(identity, dict) else 0
@@ -111,7 +117,10 @@ def controller_state(identity: Any) -> str:
             return "unknown"
         if birth != own["birth"]:
             return "dead"
-        return "local" if str(identity.get("session") or "") == own["session"] else "unknown"
+        session = str(identity.get("session") or "")
+        if not session or not own["session"]:
+            return "unknown"
+        return "local" if session == own["session"] else "dead"
     from ouroboros.platform_layer import pid_is_alive, process_start_time
     from ouroboros.process_containment import pid_is_zombie
 
@@ -208,6 +217,9 @@ class ReviewOperation:
         self.control_state = ""
         self._drains = 0
         self._dispatched = False
+        # The owner paused the author while this operation's launched reviewers
+        # ran: the author took pending rows and parked (``review_custody``).
+        self.author_detached = False
         self._control, self._checked_at = "", float("-inf")
         parent_task = parent.task if isinstance(parent.task, dict) else {}
         metadata = getattr(parent.tool_context, "task_metadata", None)
@@ -291,6 +303,8 @@ class ReviewOperation:
                 return
             self.closed = True
             _LIVE.pop(self.owner_id, None)
+            if self.author_detached:
+                _CLOSED_DETACHED[self.owner_id] = utc_now_iso()
         self.wait.close()
         if not self.checkpointed:
             return
@@ -494,8 +508,17 @@ def review_operation_scope(*, request: Any, slots: List[Any], usage_ctx: Any,
         with _LOCK:
             _LIVE[binding.operation.owner_id] = binding.operation
         if sends:
-            binding.refused, restore = _retain_before_dispatch(
-                binding.operation, request, slots, sends, usage_ctx, root)
+            from ouroboros.review_pause import author_fence_closed
+
+            if author_fence_closed(parent):
+                # A NEW panel under the owner's accepted Pause never starts: every
+                # send slot is refused at $0, exactly as a fenced tool handoff is.
+                from ouroboros.owner_pause import NOT_STARTED_TEXT
+
+                binding.refused = {slot_id: NOT_STARTED_TEXT for slot_id in sends}
+            else:
+                binding.refused, restore = _retain_before_dispatch(
+                    binding.operation, request, slots, sends, usage_ctx, root)
     operation = binding.operation
     operation.enter()
     try:
@@ -610,15 +633,16 @@ def _link_historical_controls(operation: ReviewOperation, entry: dict) -> None:
             raise ValueError("the operation control address did not land")
 
 
-def _task_operation_entries(root: Any, task_id: str) -> Iterator[tuple]:
+def _task_operation_entries(root: Any, task_id: str, *, result_loader=None) -> Iterator[tuple]:
     """Resolve the task's existing primary/control addresses without inventing liveness."""
     from ouroboros.task_results import load_task_result
-    row = load_task_result(root, task_id, strict=True) or {}
+    read = result_loader or (lambda tid: load_task_result(root, tid, strict=True) or {})
+    row = read(task_id)
     for owner, entry in (row.get(OPERATIONS_FIELD) or {}).items():
         subject = task_id
         if entry.get("control_only"):
             subject = entry.get("subject_task_id")
-            target = load_task_result(root, subject, strict=True) or {}
+            target = read(subject)
             primary = (target.get(OPERATIONS_FIELD) or {}).get(owner) or {}
             # The immutable intent survives the upgrade; Stop must remain
             # addressable between primary-pointer and control-link writes.
@@ -630,9 +654,9 @@ def _task_operation_entries(root: Any, task_id: str) -> Iterator[tuple]:
 
 
 def task_has_live_review_operation(root: Any, task_id: str, *, exclude_owner_id: str = '',
-                                   sent_only: bool = False) -> bool:
+                                   sent_only: bool = False, result_loader=None) -> bool:
     """Physical review ownership; unsent preparation is excluded by ``sent_only``."""
-    for owner, _subject, entry in _task_operation_entries(root, task_id):
+    for owner, _subject, entry in _task_operation_entries(root, task_id, result_loader=result_loader):
         if owner == exclude_owner_id:
             continue
         if entry.get("state") not in _OPEN_STATES or sent_only and entry.get("state") == OPERATION_PREPARING:
@@ -663,9 +687,9 @@ def retain_preparing_owner_pause(root: Any, task_id: str, fence: dict) -> None:
         _update_operations(root, subject, retain)
 
 
-def paused_acceptance_preparations(root: Any, task_id: str, fence_id: str) -> list:
+def paused_acceptance_preparations(root: Any, task_id: str, fence_id: str, *, result_loader=None) -> list:
     """Durable owed work, separate from whether its controller is physically alive."""
-    return [(owner, subject, entry) for owner, subject, entry in _task_operation_entries(root, task_id)
+    return [(owner, subject, entry) for owner, subject, entry in _task_operation_entries(root, task_id, result_loader=result_loader)
             if (entry.get('preparation_pause') or {}).get('root_task_id') == task_id
             and (entry.get('preparation_pause') or {}).get('fence_id') == fence_id
             and entry.get('state') != 'preparation_refused']

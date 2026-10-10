@@ -139,6 +139,49 @@ def _destination(node: Any) -> str:
     return _markdown_value(value)
 
 
+def _heading_title(node: Any) -> str:
+    content = node.child_by_field_name("heading_content")
+    if content is None:
+        content = next((c for c in node.named_children if c.type in ("inline", "paragraph")), None)
+    return content.text.decode("utf-8").strip() if content else ""
+
+
+def parse_markdown_navigation(raw: bytes, source_path: str) -> tuple[Mapping[str, Any], str | None]:
+    """Read frontmatter and title without building links or physical ranges.
+
+    The same YAML reader and block grammar own syntax. An authored title needs
+    no body parse; otherwise visit only as far as the first real heading. This
+    projection is not a complete MarkdownSource or evidence of its links.
+    """
+    try:
+        raw.decode("utf-8")
+        metadata, body_start = _frontmatter(raw)
+        metadata = metadata or {}
+        # Missing native grammars must keep the same visible source gap as a
+        # complete read, including for a titled archived note.
+        block_parser = _markdown_parser("markdown", source_path)
+        _markdown_parser("markdown_inline", source_path)
+        title = metadata.get("title")
+        if isinstance(title, str) and title.strip():
+            return metadata, title
+        root = block_parser.parse(raw[body_start:]).root_node
+
+        def first_heading(node: Any) -> str | None:
+            if node.type in ("atx_heading", "setext_heading"):
+                return _heading_title(node)
+            for child in node.named_children:
+                title = first_heading(child)
+                if title is not None:
+                    return title
+            return None
+
+        return metadata, first_heading(root)
+    except MarkdownSourceError:
+        raise
+    except (UnicodeError, ValueError, yaml.YAMLError) as exc:
+        raise MarkdownSourceError(f"{source_path}: {type(exc).__name__}: {exc}") from exc
+
+
 def parse_markdown_source(raw: bytes, source_path: str) -> MarkdownSource:
     """Parse supplied bytes, including exact Git/index bytes, without any I/O."""
     try:
@@ -183,13 +226,10 @@ def _parse_markdown_source(raw: bytes, source_path: str) -> MarkdownSource:
     links: list[MarkdownLink] = []
     for node in nodes:
         if node.type in ("atx_heading", "setext_heading"):
-            content = node.child_by_field_name("heading_content")
-            if content is None:
-                content = next((c for c in node.named_children if c.type in ("inline", "paragraph")), None)
             marker = next((c.type for c in node.named_children if "marker" in c.type or "underline" in c.type), "")
             level = int(marker[5]) if marker.startswith("atx_h") else (1 if "h1" in marker else 2)
             headings.append(MarkdownHeading(
-                content.text.decode("utf-8").strip() if content else "", level,
+                _heading_title(node), level,
                 span(node), span(node.parent) if node.parent.type == "section" else span(node),
             ))
         if node.type != "inline":

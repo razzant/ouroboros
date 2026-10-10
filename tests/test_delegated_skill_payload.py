@@ -690,9 +690,6 @@ def test_registry_golden_e2e_start_wait_apply_review_stale(tmp_path, monkeypatch
     from tests.test_skill_review_persist_guard import _pass_actor
 
     monkeypatch.setattr(
-        "ouroboros.skill_review._run_skill_advisory_pre_review",
-        lambda *_a, **_kw: {"status": "empty"})
-    monkeypatch.setattr(
         "ouroboros.tools.review._handle_multi_model_review",
         lambda *_a, **_kw: json.dumps(
             {"results": [_pass_actor("fake/a"), _pass_actor("fake/b")]}))
@@ -1177,9 +1174,9 @@ def test_schema_and_docs_split_git_staging_from_payload_live_apply():
     assert "STAGED into your active root" in decision
     assert "applied LIVE into the non-Git payload" in decision
     arch = architecture_text()
-    assert "staging substrate differs" in arch
-    assert "A SKILL-PAYLOAD target captures through the payload adapter" in arch
-    assert "QUEUES the extension reconcile request" in arch
+    for identifier in ("integrate_delegated_patch", "integrate_payload_patch",
+                       "provision_payload_snapshot", "request_extension_reconcile"):
+        assert identifier in arch, identifier
 
 
 def test_registry_and_custody_baseline_disagreement_fails_capture_typed(

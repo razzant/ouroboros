@@ -17,6 +17,7 @@ import queue
 
 from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.llm import LLMClient
+from ouroboros.observability import timed_phase
 from ouroboros.loop_llm_call import _emit_live_log
 from ouroboros.utils import sanitize_tool_result_for_log
 
@@ -451,6 +452,7 @@ def _record_acceptance_source_ack(ctx: Any, ack: AcceptanceAck, *, observed: Any
     return ack
 
 
+@timed_phase("source_ack")
 def acknowledge_acceptance_observation(ctx: Any, source_sha256: str) -> AcceptanceAck:
     """Advance only consumed ingress, never criteria or the review verdict.
 

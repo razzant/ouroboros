@@ -371,22 +371,12 @@ def get_delegate_wait_sec() -> int:
 # for the alarm; ``consciousness.py`` adopts these readers in P2.
 WAKE_DEFAULT_SEC = 3300
 CONSCIOUSNESS_AUTONOMY_LEVELS = ("observe", "act", "full")
-# The usage ledger keeps every attempt younger than this UNFOLDED (``usage_compaction``
-# ``_foldable_attempt_ids``): a folded group row is stamped with the compaction instant,
-# so only unfolded rows keep the true spend time the rolling consciousness allowance
-# (``consciousness_allowance``, a 24 h window) reads. Twice the window, so a root that
-# spent inside the window is still attributable when the window closes.
-USAGE_LEDGER_FOLD_MIN_AGE_SEC = 48 * 3600
-# A DISPLAY reader of the usage ledger (heartbeat cost fields, the ``llm_usage`` budget
+# A DISPLAY reader of the usage store (heartbeat cost fields, the ``llm_usage`` budget
 # refresh, loop-thread budget pre-checks, ``/api/state``, the cost views) waits at most
-# this long for the monetary lock, then serves the last validated snapshot: a 45 s wait on
-# the supervisor loop or a gateway thread starves every worker behind it. Money never
+# this long for the store, then reports the fact unavailable: a 45 s wait on the
+# supervisor loop or a gateway thread starves every worker behind it. Money never
 # reads through this bound — ``reserve_attempt`` keeps the full monetary timeout.
 USAGE_DISPLAY_LOCK_TIMEOUT_SEC = 0.25
-# After one contended display read, further display reads of that ledger serve the
-# snapshot without touching the lock for this long, so a sustained write convoy costs a
-# display thread about one bounded attempt per second instead of one per read.
-USAGE_DISPLAY_REVALIDATE_AFTER_SEC = 1.0
 
 
 def get_consciousness_autonomy() -> str:

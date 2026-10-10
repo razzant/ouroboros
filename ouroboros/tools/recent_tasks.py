@@ -164,7 +164,7 @@ def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List
         return []
     facts: Dict[str, Dict[str, Any]] = {}
     if binding is not None:
-        from ouroboros.gateway.task_list_scan import raw_result_facts
+        from ouroboros.task_result_facts import raw_result_facts
 
         try:
             facts, _malformed = raw_result_facts(drive_root / "task_results")
@@ -201,7 +201,7 @@ def _presence_scope_inventory(
     queued work listed, and unreadable rows nothing attributes are counted, never dropped.
     An unreadable queue snapshot is a gap too: its queued work cannot be listed, not absent.
     """
-    from ouroboros.gateway.task_list_scan import raw_result_facts
+    from ouroboros.task_result_facts import raw_result_facts
 
     gap: Dict[str, Any] = {}
     try:

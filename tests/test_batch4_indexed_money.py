@@ -4,22 +4,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import json
 import os
 import threading
 import time
 
 import pytest
 
-from ouroboros import _usage_rows_memo as memo
 from ouroboros import usage_accounting as ua
 from ouroboros import usage_ledger as ledger
+from ouroboros import usage_store
 from tests.test_billing_group import _scope, _spend
 from tests.test_physical_candidate_capture import data_root as data_root
 from tests.test_usage_lock_continuity import held_lock, owner
 from tests.test_usage_lock_continuity import short_acquisitions as short_acquisitions
-from tests.test_usage_writer_view import request
-from tests.test_usage_writer_view import root as root
+from tests._usage_store_testing import request, write_journal
+from tests._usage_store_testing import root as root
 
 pytestmark = pytest.mark.serial
 
@@ -32,35 +31,35 @@ def group_scope(root, task="child", root_id="successor", *, cap=10, root_cap=Non
 
 @pytest.mark.parametrize("prefix", [1, 2500])
 def test_group_hot_writers_and_off_context_binding_never_scan_history(root, monkeypatch, prefix):
+    from ouroboros import _usage_rows
     from ouroboros import usage_admission as admission
-    from ouroboros.usage_compaction import _fold_clock
 
-    # Pre-group original rows join by root identity, while each successor keeps its own identity.
+    # Pre-group original rows (journaled, imported once) join by root identity,
+    # while each successor keeps its own identity.
     records = []
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     for index in range(prefix):
         row = dict(attempt_id=f"original-{index}", kind="attempt", task_id="original", root_task_id="original",
-                   provider="local", model="stub", root_limit_usd=10, reservation_upper_bound_usd=.001,
-                   ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_fold_clock())))
+                   provider="local", model="stub", root_limit_usd=10, reservation_upper_bound_usd=.001, ts=stamp)
         for state in ("reserved", "dispatched", "settled"):
-            records.append({**row, "seq": len(records)+1, "state": state,
+            records.append({**row, "state": state,
                             **({"cost_usd": .001, "cost_final": True} if state == "settled" else {})})
-    (root / ua.LEDGER_REL).write_text("".join(json.dumps(row)+"\n" for row in records))
+    write_journal(root, records)
     scope = group_scope(root)
     with ua.usage_scope(scope):
         late = ua.reserve_attempt(request(root, root_task_id="successor"))
         ua.mark_dispatched(late)
         ua.mark_unresolved(late, "receipt delayed")
-    validation = []
-    original_validate = ledger._validate_records
-    def sparse(rows, **kw):
-        validation.append((len(rows), len(kw.get("states", {})), len(kw.get("late_receipt_ids", set()))))
-        return original_validate(rows, **kw)
+
     def forbidden(*a, **kw):
         pytest.fail("group monetary call walked historical rows")
-    monkeypatch.setattr(ledger, "_validate_records", sparse)
-    for name in ("_summary", "_final_rows", "_read_records_locked"):
-        monkeypatch.setattr(ua, name, forbidden)
-    monkeypatch.setattr(admission, "group_rows", forbidden)
+
+    # The hot paths read summary rows and the addressed attempt only.
+    monkeypatch.setattr(usage_store, "read_usage_records", forbidden)
+    monkeypatch.setattr(usage_store, "migrate_from_journal", forbidden)
+    for name in ("_summary", "_breakdown_bucket"):
+        monkeypatch.setattr(_usage_rows, name, forbidden)
+        monkeypatch.setattr(ua, name, forbidden, raising=False)
     for index in range(8):
         with ua.usage_scope(group_scope(root, task=f"sibling-{index}", root_id=f"sibling-{index}")):
             assert ua.execute_physical_attempt(request(root, task_id=f"sibling-{index}", root_task_id=f"sibling-{index}",
@@ -71,11 +70,10 @@ def test_group_hot_writers_and_off_context_binding_never_scan_history(root, monk
     ua.settle_attempt(late, cost_usd=.3, cost_final=True)
     assert admission.ledger_billing_binding(root, "successor")["billing_group_limit_revision"] == "original-rev"
     assert admission.original_group_limit(root, "original") == {"limit_usd": 10.0, "source": "ledger_first_row"}
-    with memo._writer_locked(root) as view:
-        assert view.summary(billing_group_id="original")["accounted_usd"] == pytest.approx(prefix*.001+1.3)
-        assert view.summary("successor")["accounted_usd"] == .5
-        assert view.summary()["accounted_usd"] == view.summary(billing_group_id="original")["accounted_usd"]
-    assert max(max(row) for row in validation) <= 1
+    with usage_store.read(root) as txn:
+        assert txn.summary(billing_group_id="original")["accounted_usd"] == pytest.approx(prefix*.001+1.3)
+        assert txn.summary("successor")["accounted_usd"] == .5
+        assert txn.summary()["accounted_usd"] == txn.summary(billing_group_id="original")["accounted_usd"]
 
 
 @pytest.mark.parametrize("axis", ["root", "group", "global"])
@@ -114,7 +112,8 @@ def test_pre_send_wait_revalidates_late_charge_on_each_axis(root, monkeypatch, a
             prepared.append(reservation)
             # The same writer receives the original/sibling's delayed receipt after reservation.
             with ua.usage_scope(None):
-                ua.settle_attempt(late, cost_usd=1.5, cost_final=True)
+                # Its known price reaches the $2 cap exactly (#1487: equality refuses).
+                ua.settle_attempt(late, cost_usd=2.0, cost_final=True)
             lock_owner.enter_context(held_lock(root))
         req = request(root, root_task_id="successor", global_limit_usd=2 if axis == "global" else 100)
         async def send():
@@ -222,9 +221,9 @@ def test_group_real_async_response_cancellation_preserves_binding_and_capture(da
 
 
 @pytest.mark.parametrize("unlimited", [False, True])
-def test_compaction_rebuild_group_cash_cache_provenance_and_unpriced_liability(root, monkeypatch, unlimited):
-    from ouroboros import usage_compaction as compact
+def test_imported_aggregates_keep_group_cash_provenance_and_unpriced_liability(root, unlimited):
     from ouroboros.usage_admission import ledger_billing_binding, original_group_limit
+    from tests.fixtures_usage_store import foldable_attempt_ids, fold_into_archive
 
     cap = None if unlimited else 10
     for task, rid in (("original", "original"), ("successor", "successor"), ("helper", "successor")):
@@ -238,13 +237,10 @@ def test_compaction_rebuild_group_cash_cache_provenance_and_unpriced_liability(r
     before = ua.usage_projection(root, billing_group_id="original")
     assert before.get("limit_usd") == cap and before["unknown_unmetered"] == 1
     assert before["cost_final"] is False
-    monkeypatch.setattr(compact, "_fold_clock", lambda: time.time()+1_000_000)
-    with ua._locked(root) as lock:
-        assert compact.compact_usage_ledger_locked(root, heartbeat=lock)
-    # Existing warm writer/memo must reject the replaced generation, then cold replay must agree.
+    # The same money as an install upgraded from a compacted journal carries it.
+    fold_into_archive(root, foldable_attempt_ids(root))
     assert ua.usage_projection(root, billing_group_id="original") == before
-    with memo._LEDGER_READ_CACHE_LOCK:
-        memo._LEDGER_READ_CACHE.pop(str(root.resolve()), None)
+    usage_store.forget(root)  # a fresh process answers the same
     assert ua.usage_projection(root, billing_group_id="original") == before
     binding = ledger_billing_binding(root, "successor")
     assert binding["billing_group_limit_usd"] is cap or binding["billing_group_limit_usd"] == cap
@@ -259,20 +255,20 @@ def test_compaction_rebuild_group_cash_cache_provenance_and_unpriced_liability(r
 
 
 def test_group_six_place_policy_and_nonfinite_cap_remain_honest(root):
-    with ua._writer_locked(root) as view:
-        view.append(root, [{"kind": "external_unmetered", "attempt_id": "exact", "state": "settled",
-                           "root_task_id": "original", "cost_usd": "2.4675885", "cost_final": True}])
+    with usage_store.hold(root) as txn:
+        txn.write({"kind": "external_unmetered", "attempt_id": "exact", "state": "settled",
+                   "root_task_id": "original", "cost_usd": "2.4675885", "cost_final": True})
     with ua.usage_scope(group_scope(root, cap=2.467588002)):
         held = ua.reserve_attempt(request(root, root_task_id="successor", reservation_usd=0))
         ua.mark_dispatched(held)
         ua.release_attempt(held, "before_dispatch_failed:test", proven_unsent=True)
     with ua.usage_scope(group_scope(root, cap=2.467588001)), pytest.raises(ua.BudgetExceeded):
         ua.reserve_attempt(request(root, root_task_id="successor", reservation_usd=0))
-    with ua._locked(root):
-        records = ua._read_records_locked(root)
-        with pytest.raises(ledger.UsageNonFiniteMoney):
-            ua._append_rows_locked(root, records, [{"kind": "external_unmetered", "attempt_id": "invalid",
-                "state": "settled", "cost_usd": None, "billing_group_limit_usd": "NaN"}])
+    with pytest.raises(ledger.UsageNonFiniteMoney), usage_store.hold(root) as txn:
+        txn.write({"kind": "external_unmetered", "attempt_id": "invalid",
+                   "state": "settled", "cost_usd": None, "billing_group_limit_usd": "NaN"})
+    with usage_store.read(root) as txn:
+        assert txn.attempt("invalid") is None
 
 
 @pytest.mark.parametrize("source", ["owner", "panic"])

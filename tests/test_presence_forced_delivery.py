@@ -309,9 +309,11 @@ def test_a_budget_repricing_arms_presence_only_for_the_forced_call_it_commits(
     from ouroboros import task_pacing
     from ouroboros.contracts.task_contract import normalize_budget_profile
 
-    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile(None), root_cap_usd=50.0)
+    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=50.0)
     monkeypatch.setattr(loop, "_resolve_task_cost_ceiling", lambda *_a: ceiling)
-    monkeypatch.setattr(loop, "_loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0})
+    # The last-fit rail is an explicit profile's authored rail (#1128): that task's authority.
+    monkeypatch.setattr(task_pacing, "cost_stop_authority", lambda _ctx: task_pacing.COST_STOP_EXPLICIT)
+    monkeypatch.setattr(loop, "_loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0})
     # proxy last-fit -> exact probe last-fit -> the prepared candidate decides
     answers = iter((True, False, True, False, *prepared_fits))
     monkeypatch.setattr(task_pacing, "wrapup_reservation_fits", lambda **_k: next(answers, True))

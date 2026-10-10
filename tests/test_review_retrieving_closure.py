@@ -20,6 +20,10 @@ from tests.test_native_tool_round_executor import _tool_call
 
 pytestmark = pytest.mark.serial
 
+@pytest.fixture(autouse=True)
+def _provider_catalog_stays_off_the_wire(provider_catalog_offline):
+    """Every work order here measures the native row's window; see `provider_catalog_offline`."""
+
 
 def _source(root, task, name, payload):
     return artifacts.store_actor_source_bytes(root, task, category='context_checkpoints', source_id=name,
@@ -44,11 +48,26 @@ def _retrieving(tmp_path):
     request = ReviewRequest(surface='task_acceptance', task_id=task, goal='review the exact record', subject='answer A',
         evidence={'artifacts': [{'name': 'proof.txt', 'size': artifact.stat().st_size}],
                   'source_refs': [previous], 'tool_trajectory_source_ref': trajectory}, retry_key='retrieving')
-    native = ReviewSlot(slot_id='native', model='openai/fake', subagent_id='api-critic', timeout_sec=30)
+    # The pool row's delivery is its own explicit fact (F8): a catalog id alone says nothing.
+    native = ReviewSlot(slot_id='native', model='openai/fake', subagent_id='api-critic', timeout_sec=30,
+                        native_retrieval_override=True)
     session = ReviewSlot(slot_id='session', model='codex', route=ReviewRouteKind.AGENT_SESSION, session_target='codex')
     acceptance_retrieving_work_order(request, [native, session], session_root=str(repo), data_root=author)
     ctx = SimpleNamespace(task_id=task, task_attempt=1, drive_root=author, budget_drive_root=canonical, task_metadata={})
     return canonical, author, repo, request, native, session, ctx
+
+
+def test_the_work_order_measurement_leaves_the_process_capability_caches_as_found(tmp_path, monkeypatch, provider_catalog_offline):
+    import requests
+    from ouroboros.llm import LLMClient
+
+    def no_live_catalog(*_args, **_kwargs):
+        raise AssertionError('the work order reached a live provider catalog from a test')
+
+    monkeypatch.setattr(requests, 'get', no_live_catalog)
+    before = {name: copy.copy(getattr(LLMClient, name)) for name in provider_catalog_offline}
+    _retrieving(tmp_path)
+    assert {name: getattr(LLMClient, name) for name in provider_catalog_offline} == before
 
 
 def test_actual_native_and_session_work_orders_survive_author_cleanup(tmp_path):

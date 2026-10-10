@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
@@ -208,8 +209,7 @@ def test_physical_retry_seals_each_actual_selected_send(declared_plan, monkeypat
         _assert_declared(sent["messages"])
         assert "TOOL_RETURNED_EVIDENCE" in json.dumps(sent)
     finals = {}
-    for line in (env.drive_root / ua.LEDGER_REL).read_text().splitlines():
-        row = json.loads(line)
+    for row in ledger_rows(env.drive_root):
         finals[row["attempt_id"]] = row
     assert len(finals) == 2
     for row in finals.values():

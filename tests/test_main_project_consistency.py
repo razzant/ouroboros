@@ -11,7 +11,7 @@ import pytest
 from ouroboros import projects_registry as registry
 from ouroboros.task_results import load_task_result, write_task_result
 from supervisor import queue, workers
-from tests.test_project_hold_recovery import worker
+from tests.test_project_hold_recovery import resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 
 pytestmark = pytest.mark.serial
@@ -55,6 +55,7 @@ def test_known_none_recovers_same_id_after_bindings_outage(host, monkeypatch, pr
     queue.restore_pending_from_snapshot()
     path.write_text('{"bindings": {}}', encoding="utf-8")
     registry._registry_path(host.root).write_text("{still torn", encoding="utf-8")
+    resume_after_app_stop(host, original["id"])
     workers.assign_tasks()
     workers.assign_tasks()
     assert [row["id"] for row in sent] == [original["id"]]
@@ -75,7 +76,12 @@ def test_unscoped_producers_preserve_absence_and_stale_restore_policy(host, prod
     queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap), encoding="utf-8")
     host.pending.clear()
     queue.restore_pending_from_snapshot()
-    assert not host.pending
+    # Owner 2026-10-08 (#1563): accepted work never expires with snapshot age; the
+    # stale row waits for an explicit Resume and keeps its unscoped absence.
+    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+
+    [held] = host.pending
+    assert budget_hold_fact(held)["reason"] == HOLD_SAVED_WORK and "_project_admission" not in held
 
 
 @pytest.mark.parametrize("veto", ["legacy", "null", "malformed", "dispatch", "stopped", "binding", "origin", "folder"])
@@ -302,6 +308,8 @@ def test_never_dispatched_main_restores_once_and_live_retry_still_assigns(host, 
     queue.restore_pending_from_snapshot()
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
+    assert not sent, "fresh accepted work after an application stop requires Resume"
+    resume_after_app_stop(host, "main")
     workers.assign_tasks()
     assert [row["id"] for row in sent] == ["main"]
     queue.RUNNING.clear()
@@ -356,6 +364,8 @@ def test_host_producer_row_recovers_once_after_bindings_fault(host, monkeypatch,
         for key in ("_project_scope_none", "admitted_dispatch"):
             host.pending[0].pop(key)
     path.write_text('{"bindings": {}}', encoding="utf-8")
+    if not veto:
+        resume_after_app_stop(host, tid)
     workers.assign_tasks()
     workers.assign_tasks()
     assert [task["id"] for task in sent] == ([] if veto else [tid]) and not host.attempts

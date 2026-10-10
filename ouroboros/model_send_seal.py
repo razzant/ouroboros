@@ -6,11 +6,10 @@ last host-controlled pre-transport seam (``llm_attempt._candidate_before_dispatc
 
 - **Forward** (``sent ⟹ logged``): every physical attempt persists a sealed
   durable record of its exact send copy before dispatch (the ``model_send_seal``
-  block of the existing physical-candidate manifest), and the seam then
-  RECONSTRUCTS that record from disk and byte-compares it against the wire-bound
-  serialization (:func:`verify_sealed_candidate`). A mismatch is a typed durable
-  fact — an observability invariant, never a second dispatch gate: the existing
-  in-memory identity re-check keeps its refusal semantics unchanged.
+  block of the existing physical-candidate manifest). Explicit audit compares
+  its digest to the attempt and reads back CAS bytes. A supplied original
+  candidate also permits the exclusion-aware byte comparison
+  (:func:`verify_sealed_candidate`); dispatch does no disk read-back.
 - **Reverse** (``logged ⟹ sent``, ``model_send`` records ONLY): a bounded
   fail-soft reconciliation sweep (:func:`reconcile_model_send_seals`) joins every
   seal to exactly one accounting attempt and every seam-dispatched attempt back
@@ -309,14 +308,15 @@ def verify_sealed_candidate(
     *,
     task_id: str,
     attempt_id: str,
-    candidate: Dict[str, Any],
+    candidate: Optional[Dict[str, Any]],
     manifest_ref: Any,
     raw_sha256: str,
     raw_size_bytes: int,
+    record: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """Forward verification at the seam (design note §3.2, ratified narrowing).
+    """Explicit forward audit; never called from the send path.
 
-    Reads the sealed record just written back FROM DISK, applies the same
+    Reads the durable sealed record FROM DISK; with an original candidate applies the same
     exclusion map to the wire-bound candidate, and compares byte-for-byte —
     so a bug between "what we persisted" and "what we believe we persisted" is
     caught, not assumed away. ``raw_sha256``/``raw_size_bytes`` are the fresh
@@ -325,7 +325,8 @@ def verify_sealed_candidate(
     projection+serialization is the note's budgeted cost.
 
     Returns the typed violation fact (already durably recorded) on mismatch,
-    else ``None``. Never raises and never blocks dispatch: this invariant is
+    else ``None``. Without an original candidate, compare attempt digest and CAS
+    integrity only: excluded secret/native bytes cannot be reconstructed. Never raises: this invariant is
     observability — the in-memory identity refusal above the call keeps being
     the only blocking authority.
     """
@@ -376,8 +377,8 @@ def verify_sealed_candidate(
                 if blob_bytes is None:
                     kind, divergence_class = "reconstruction_divergence", "record_unreadable"
                 else:
-                    reconstructed = _reconstruct_blob_bytes(candidate)
-                    if reconstructed != blob_bytes:
+                    reconstructed = _reconstruct_blob_bytes(candidate) if candidate is not None else blob_bytes
+                    if reconstructed != blob_bytes or not cas_intact:
                         first_offset = _first_divergent_offset(reconstructed, blob_bytes)
                         # CAS-intact blob differing from a fresh projection of a
                         # digest-matching candidate means the exclusion map
@@ -399,7 +400,7 @@ def verify_sealed_candidate(
         }
         if first_offset is not None:
             fact["first_divergent_offset"] = int(first_offset)
-        record_model_send_violation(drive_root, fact)
+        (record(fact) if record is not None else record_model_send_violation(drive_root, fact))
         return fact
     except Exception:
         # Fail-soft by contract: the observability invariant must never take
@@ -435,17 +436,19 @@ def reconcile_model_send_seals(
 ) -> Dict[str, Any]:
     """Reverse direction of the invariant (design note §3.3, ``model_send`` only).
 
-    Bounded reconciliation riding the existing startup-sweep family: every
+    Bounded reconciliation in the explicit lifecycle audit: every
     ``model_send`` seal must join exactly one accounting attempt (any terminal
     state, including refused-before-dispatch), and every attempt DISPATCHED
-    THROUGH THE SEALING SEAM (its ledger ``candidate_manifest_ref`` carries
+    THROUGH THE SEALING SEAM (its ``candidate_manifest_ref`` carries
     ``model_send_seal_version``) must still resolve to its durable seal. An
     orphan on either side is a typed durable fact — the sweep deletes no seals
-    and fabricates no attempts. "No attempt row" is asked of the live replay
-    UNION the compaction archive, never of the live file alone, because a
-    folded attempt is absent from it by design. Fail-soft: an unreadable
-    ledger is UNKNOWN accounting state and skips every conclusion, and so is
-    an archive that cannot be read. Manifests promoted from a
+    and fabricates no attempts. "No attempt row" is asked of the usage store
+    UNION the retained journal evidence (the imported journal and the old
+    compaction archive: an attempt folded before the store existed is absent
+    from the store by design). Fail-soft: an unreadable store is UNKNOWN
+    accounting state and skips every conclusion, and so is retained evidence
+    that cannot be read. This is the explicit audit's history read (the whole
+    store via ``read_usage_records``), never an ordinary path. Manifests promoted from a
     child drive (``promoted_call_manifest``) are excluded — their attempt rows
     legitimately live in the child's ledger, not this one.
     """
@@ -463,7 +466,7 @@ def reconcile_model_send_seals(
         # before its live snapshot so a newly created seal cannot be mistaken
         # for an orphan merely because its reservation arrived after the read.
         manifest_paths = _seal_manifest_paths(root, max_manifests)
-        finals = {str(row["attempt_id"]): row for row in read_usage_records(root, final_only=True)}
+        finals = {str(row["attempt_id"]): row for row in read_usage_records(root)}
     except Exception:
         log.debug("model_send reconciliation skipped: ledger state unknown", exc_info=True)
         report["status"] = "unknown"
@@ -496,30 +499,7 @@ def _reconcile_seal_directions(
     manifest_paths: List[pathlib.Path],
 ) -> None:
     live_ids = set(finals)
-    archive_loaded = False
-    archived_ids: Optional[frozenset] = None
-
-    def _attempt_row_exists(attempt_id: str) -> bool:
-        nonlocal archive_loaded, archived_ids
-        if attempt_id in live_ids:
-            return True
-        if not archive_loaded:
-            archive_loaded = True
-            try:
-                from ouroboros.usage_compaction import archived_attempt_ids
-
-                # One validated history snapshot per pass, not one full chain
-                # walk per seal. Its lifetime is this batch, independent of the
-                # reader's cross-call cache TTL. The next pass reads anew.
-                archived_ids = archived_attempt_ids(root)
-            except Exception:
-                log.debug("model_send reconciliation: archived history unknown", exc_info=True)
-        # UNKNOWN skips reverse accusations for this pass; forward checks below
-        # still use the known live rows. Never turn a failed read into absence.
-        if archived_ids is None:
-            report["status"] = "unknown"
-        return archived_ids is None or attempt_id in archived_ids
-
+    seals: List[Tuple[Dict[str, Any], Dict[str, Any], str]] = []
     for manifest_path in manifest_paths:
         report["manifests_checked"] = report.get("manifests_checked", 0) + 1
         try:
@@ -533,8 +513,23 @@ def _reconcile_seal_directions(
         if not isinstance(seal, dict):
             continue
         report["seals"] += 1
-        attempt_id = str(seal.get("attempt_id") or manifest.get("call_id") or "")
-        if attempt_id and not _attempt_row_exists(attempt_id):
+        aid = str(seal.get("attempt_id") or manifest.get("call_id") or "")
+        attempt = finals.get(aid, {})
+        if attempt.get("candidate_raw_sha256"):
+            fact = verify_sealed_candidate(root, task_id=str(manifest.get("task_id") or ""),
+                attempt_id=aid, candidate=None, manifest_ref={"path": str(manifest_path)},
+                raw_sha256=attempt["candidate_raw_sha256"],
+                raw_size_bytes=int(attempt.get("candidate_raw_size_bytes") or 0), record=_write)
+            if fact:
+                report["forward_divergences"] = report.get("forward_divergences", 0) + 1
+        seals.append((manifest, seal, str(seal.get("attempt_id") or manifest.get("call_id") or "")))
+    # One retained-evidence scan per pass, for the ids the store does not hold.
+    retained = _retained_attempt_ids(root, {attempt_id for _m, _s, attempt_id in seals
+                                            if attempt_id and attempt_id not in live_ids})
+    if retained is None:  # UNKNOWN skips reverse accusations; never a failed read as absence
+        report["status"] = "unknown"
+    for manifest, seal, attempt_id in seals:
+        if attempt_id and retained is not None and attempt_id not in live_ids and attempt_id not in retained:
             report["orphan_seals"] += 1
             _write({
                 "type": VIOLATION_EVENT_TYPE,
@@ -580,3 +575,48 @@ def _reconcile_seal_directions(
                 "observed": {"basis": "", "sha256": "", "size": 0},
                 "divergence_class": "missing_seal_record",
             })
+
+
+def _retained_attempt_ids(root: pathlib.Path, wanted: set) -> Optional[set]:
+    """The ids of ``wanted`` that retained money evidence holds: the retired
+    journal files (``state/usage_attempts.jsonl*``: the imported journal) and
+    the old compaction archive segments (``archive/usage_ledger/``), newest
+    first, stopping once every id is found. A plain id scan for the explicit
+    audit: no chain verification, no hashes. ``None`` when a retained file
+    cannot be read (unknown, never absence)."""
+    if not wanted:
+        return set()
+
+    def newest_first(paths):
+        def mtime(path):
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+        return sorted((path for path in paths if path.is_file()), key=mtime, reverse=True)
+
+    files = newest_first((root / "state").glob("usage_attempts.jsonl*"))
+    archive = root / "archive" / "usage_ledger"
+    if archive.is_dir():
+        files += newest_first(archive.iterdir())
+    needles = {attempt_id.encode("utf-8"): attempt_id for attempt_id in wanted}
+    found: set = set()
+    try:
+        for path in files:
+            with open(path, "rb") as handle:
+                for line in handle:
+                    if not any(needle in line for needle in needles):
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    attempt_id = str(row.get("attempt_id") or "") if isinstance(row, dict) else ""
+                    if attempt_id in wanted:
+                        found.add(attempt_id)
+                        if len(found) == len(wanted):
+                            return found
+    except OSError:
+        log.debug("model_send reconciliation: retained evidence unreadable", exc_info=True)
+        return None
+    return found

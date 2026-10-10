@@ -30,6 +30,14 @@ from ouroboros.config import runtime_setting
 
 log = logging.getLogger(__name__)
 
+
+def _candidate_restart_guidance(tx, commit_sha, *, held=True):
+    prefix = "Reviewed candidate awaits deliberate adoption." if held else "Candidate availability is unconfirmed; inspect the retained transaction."
+    return (f"{prefix} Nothing was adopted automatically. When adoption is authorized, "
+            f"select the ended owner's candidate with prepare_self_change(resume={str(tx.get('task_id') or '')!r}), "
+            f"then request_restart(adopt_commit={commit_sha!r}); an active owner resumes its own task.")
+
+
 _TASK_RESULT_PROCESS_EVIDENCE_FIELDS = frozenset({
     # These are raw reasoning/transport records, not terminal task authority.
     # Exact immutable refs and compact terminal facts remain top-level and are
@@ -456,7 +464,16 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
 
 
 def check_budget(env: Any) -> Tuple[dict, int]:
-    """Check budget remaining with warning thresholds."""
+    """Check budget remaining with warning thresholds.
+
+    Server-side only: a worker verifying itself at construction need not read
+    the money store once per worker; the server's own check already covers the
+    install, and every reservation re-checks the limits anyway.
+    """
+    from ouroboros.utils import in_worker_process
+
+    if in_worker_process():
+        return {"status": "skipped", "reason": "worker_process"}, 0
     try:
         accounting_root = pathlib.Path(
             getattr(env, "budget_drive_root", None) or env.drive_path("state").parent
@@ -475,11 +492,10 @@ def check_budget(env: Any) -> Tuple[dict, int]:
         if total_budget is None:
             return {"status": "unconfigured"}, 0
         else:
-            from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
+            from ouroboros.usage_accounting import usage_projection
 
-            ensure_legacy_imported(accounting_root)
             accounting = usage_projection(accounting_root, global_limit_usd=total_budget)
-            spent = float(accounting.get("accounted_usd") or 0.0)
+            spent = float(accounting.get("settled_usd") or 0.0)
             remaining = float(accounting.get("remaining_known_usd") or 0.0)
             integrity_degraded = bool(accounting.get("integrity_degraded"))
 
@@ -707,6 +723,7 @@ def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
 # threshold in bytes, remediation pointer appended to the WARNING.
 def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
     from ouroboros.context_budget import (
+        CHRONICLE_JOURNAL_WARN_BYTES,
         EVENTS_LOG_WARN_BYTES,
         PROGRESS_LOG_WARN_BYTES,
         SCHEDULED_TASKS_WARN_BYTES,
@@ -714,7 +731,6 @@ def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
         SUPERVISOR_LOG_WARN_BYTES,
         TASK_REFLECTIONS_LOG_WARN_BYTES,
         TOOLS_LOG_WARN_BYTES,
-        USAGE_LEDGER_WARN_BYTES,
     )
 
     rotation_expected = (
@@ -723,20 +739,6 @@ def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
         "supervisor rotation tick (rotate_chat_log_if_needed pattern)."
     )
     return (
-        (
-            "state/usage_attempts.jsonl",
-            USAGE_LEDGER_WARN_BYTES,
-            "Warm reservations validate only appended rows under the monetary lock; "
-            "cold/replaced views prepare history outside it (_usage_rows_memo.py). "
-            "Size-triggered compaction (usage_compaction.py, CPL4-C6) should hold the file "
-            "far below this — growth can mean broken compaction, a large "
-            "unfoldable residue, a policy abort, refusal on the name tier "
-            "(no kernel locks), or a file that has not yet outgrown the floor "
-            "its last committed pass stamped into the ledger header (declined "
-            "before the pass, so no event). Check usage_ledger_compaction_refused or "
-            "usage_ledger_compaction_skipped in events.jsonl; the two snapshot-race "
-            "exits before archive/swap only log warnings, without a typed event.",
-        ),
         ("logs/events.jsonl", EVENTS_LOG_WARN_BYTES, rotation_expected),
         ("logs/tools.jsonl", TOOLS_LOG_WARN_BYTES, rotation_expected),
         ("logs/supervisor.jsonl", SUPERVISOR_LOG_WARN_BYTES, rotation_expected),
@@ -762,6 +764,13 @@ def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
             "Acceptance packet assembly reads this compact skill-review index; "
             "archive old root-task rows with their review histories.",
         ),
+        (
+            "memory/chronicle/records.jsonl",
+            CHRONICLE_JOURNAL_WARN_BYTES,
+            "Every task context decodes each acting page and part of this journal; it is "
+            "never rotated or cut. Select acting records through the index before loading "
+            "bodies (or fold more of the story) — never delete records.",
+        ),
     )
 
 
@@ -770,7 +779,7 @@ def hot_store_growth_notes(env: Any) -> list:
 
     Reused live by context.py::build_health_invariants (the
     check_stray_server_processes pattern). Deliberately NOT TTL-cached
-    (contrast context._STRAY_PROBE_CACHE): eight os.stat calls plus two shallow
+    (contrast context._STRAY_PROBE_CACHE): nine os.stat calls plus two shallow
     iterdir passes per task turn are orders of magnitude cheaper than the pgrep
     probe that cache exists for, and a stale reading would delay the signal."""
     from supervisor.state import ISOLATED_BENCHMARK_SENTINEL
@@ -794,22 +803,23 @@ def hot_store_growth_notes(env: Any) -> list:
                 f"WARNING: HOT STORE GROWTH — {rel} is {size / 1_000_000:.1f} MB "
                 f"(threshold {threshold // 1_000_000} MB). {remediation}"
             )
-    try:
-        archive_size = sum(
-            path.stat().st_size for path in (drive_root / "archive").glob("chat_*.jsonl")
-            if path.is_file()
-        )
-    except OSError:
-        archive_size = 0
-    from ouroboros.context_budget import CHAT_ARCHIVE_SCAN_WARN_BYTES
-    if archive_size > CHAT_ARCHIVE_SCAN_WARN_BYTES:
-        notes.append(
-            "WARNING: HOT STORE GROWTH — archive/chat_*.jsonl totals "
-            f"{archive_size / 1_000_000:.1f} MB (threshold "
-            f"{CHAT_ARCHIVE_SCAN_WARN_BYTES // 1_000_000} MB). Ordinary context reads "
-            "the consolidation-owned suffix; explicit chat_history replay scans this chain. "
-            "Investigate archive indexing/compaction without shortening the memory horizon."
-        )
+    # Append-only chains whose total size reaches a replaying reader: one row per chain.
+    from ouroboros.context_budget import CHAT_ARCHIVE_SCAN_WARN_BYTES, REVIEW_LEDGER_INDEX_WARN_BYTES
+    for folder, pattern, threshold, remediation in (
+        ("archive", "chat_*.jsonl", CHAT_ARCHIVE_SCAN_WARN_BYTES,
+         "Ordinary context reads only rows after the legacy frontier; explicit chat_history, memory_read(rows=true) "
+         "and page covers replay this chain. Investigate archive indexing/compaction without shortening the memory horizon."),
+        ("state/review_ledger", "index*.jsonl", REVIEW_LEDGER_INDEX_WARN_BYTES,
+         "Task context reads only the rotating hot index; readers that walk the rotated segments replay this chain — "
+         "move old segments and the records they name to cold storage, never delete the newest."),
+    ):
+        try:
+            total = sum(path.stat().st_size for path in (drive_root / folder).glob(pattern) if path.is_file())
+        except OSError:
+            total = 0
+        if total > threshold:
+            notes.append(f"WARNING: HOT STORE GROWTH — {folder}/{pattern} totals {total / 1_000_000:.1f} MB "
+                         f"(threshold {threshold // 1_000_000} MB). {remediation}")
     # Custody replay walks the whole events chain (live + rotated segments), so
     # the pre-rotation 100MB replay-degradation signal now watches the chain.
     try:
@@ -1138,6 +1148,13 @@ def verify_restart(env: Any, git_sha: str) -> None:
             snapshot_reachable = bool(
                 snapshot_sha and _commit_reachable(snapshot_sha, observed_sha)
             )
+            # #1539: a commit its task's body candidate still holds awaits adoption; read like
+            # reachability, outside the lock (None: unreadable, which never proves it lost).
+            snapshot_task, snapshot_held = str(snapshot_tx.get("task_id") or ""), None
+            if snapshot_sha and not snapshot_reachable:
+                from ouroboros.body_candidate import holds_commit
+
+                snapshot_held = holds_commit(snapshot_task, snapshot_sha, drive_root)
             # Reconcile AT MOST ONCE per server generation. A genuine restart
             # begins a new custody generation (NW-10 session id, which workers
             # inherit from the server); a routine worker RESPAWN keeps the same
@@ -1191,6 +1208,15 @@ def verify_restart(env: Any, git_sha: str) -> None:
                     commit_sha = adopt_evolution_commit_intent(campaign, tx, observed_sha)
                     if commit_sha:
                         expected_sha, reachable = commit_sha, True
+                    elif (recovered := adopt_evolution_commit_intent(campaign, tx)):
+                        # ...or the task's body candidate holds it (#1539): its receipt and
+                        # reviewed provenance are restored, but only the serving SHA proves a
+                        # restart, so the unadopted commit stays open until adoption lands it.
+                        tx["restart_guidance"] = _candidate_restart_guidance(tx, recovered)
+                        if gen:
+                            campaign["last_boot_reconcile_gen"] = gen
+                        campaign["updated_at"] = utc_now_iso()
+                        return campaign
                 # Capture before the absorbed branch pops it via _close_post_task_backlog.
                 outcome_snapshot["backlog_id"] = str(campaign.get("post_task_backlog_id") or "")
                 if not commit_sha or bool(tx.get("restart_verified")):
@@ -1234,6 +1260,22 @@ def verify_restart(env: Any, git_sha: str) -> None:
                         "commit_sha": commit_sha,
                         "observed_sha": observed_sha,
                     })
+                    return campaign
+                held = snapshot_held if str(tx.get("task_id") or "") == snapshot_task else None
+                if not reachable and held is not False:
+                    # Before its restart-bound adoption the serving HEAD lacks the candidate's
+                    # commit: keep the exact transaction, receipt and backlog link; adopt nothing.
+                    tx.update({"restart_required": True, "restart_verified": False,
+                               "restart_observed_sha": observed_sha, "updated_at": now,
+                               "restart_guidance": _candidate_restart_guidance(tx, commit_sha, held=held)})
+                    campaign.update({"last_boot_reconcile_gen": gen, "active_transaction": tx, "updated_at": now})
+                    reason = "candidate_holds_commit" if held else "candidate_unreadable"
+                    campaign["progress_notes"] = (
+                        f"Restart reconciliation kept the evolution transaction open ({reason}): "
+                        f"reviewed commit {commit_sha[:12]} awaits its restart-bound adoption.")
+                    event.update({"ts": now, "type": "evolution_tx_awaiting_adoption", "ok": False,
+                                  "reason": reason, "task_id": str(tx.get("task_id") or ""),
+                                  "commit_sha": commit_sha, "observed_sha": observed_sha})
                     return campaign
                 campaign["last_boot_reconcile_gen"] = gen
                 tx["restart_verified_at"] = now

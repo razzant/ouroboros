@@ -71,7 +71,8 @@ def test_stop_arriving_in_real_backoff_keeps_only_actual_physical_attempts(
     assert llm.calls == after_attempt
     rows = _ledger(canonical)
     assert len({row["attempt_id"] for row in rows}) == after_attempt
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "unresolved"] * after_attempt
+    assert [(row["state"], row["revision"]) for row in rows] == [("unresolved", 4)] * after_attempt
+    assert all(row["physical_failure"] for row in rows)
     assert accounting.usage_projection(canonical)["unresolved_upper_bound_usd"] == float(after_attempt)
     assert usage.get(loop_llm_call.TRANSPORT_DEATHS_KEY, {}).get("count", 0) == after_attempt - 1
     assert usage["_last_llm_retry_same_request"] is False

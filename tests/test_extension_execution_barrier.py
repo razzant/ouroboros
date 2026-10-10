@@ -593,6 +593,150 @@ def test_two_no_deps_extension_loads_overlap_with_real_imports(tmp_path):
         del builtins._ouro_1195_meeting
 
 
+class _SweepGate:
+    """A path-entry finder whose ``invalidate_caches`` runs INSIDE CPython's
+    ``PathFinder.invalidate_caches`` sweep, after its snapshot of
+    ``sys.path_importer_cache``.  It never claims a module."""
+
+    def __init__(self, on_sweep):
+        self._on_sweep = on_sweep
+
+    def find_spec(self, fullname, target=None):
+        return None
+
+    def invalidate_caches(self):
+        self._on_sweep()
+
+
+def test_overlapping_loads_never_overlap_their_importer_cache_sweeps(tmp_path, monkeypatch):
+    """The macOS CI failure of the overlap case above, made deterministic.
+
+    ``PathFinder.invalidate_caches`` snapshots ``sys.path_importer_cache`` and
+    then deletes each ``None`` entry by key; a second sweep that deletes the
+    key first makes the earlier one raise ``KeyError`` (CI: ``python310.zip``)
+    and the other plugin's rendezvous then breaks.  A gate parked in the cache
+    pauses the first load INSIDE its sweep, before a ``None`` entry it still
+    has to delete, until the second load has either swept past that entry (the
+    race) or waits on the importer-cache lock (the repair).  Event-gated both
+    ways; the plugin bodies still meet, so the sweep lock did not serialize
+    the imports.
+    """
+    first_paused, second_moved = threading.Event(), threading.Event()
+    waited: list = []
+
+    def before_entry():
+        if threading.current_thread().name == "sweep-first" and not first_paused.is_set():
+            first_paused.set()
+            waited.append(second_moved.wait(GATE))
+
+    def after_entry():
+        if threading.current_thread().name == "sweep-second":
+            second_moved.set()
+
+    class _SignallingLock:
+        """``deps._lock`` that reports the second load waiting behind the first."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            if not self._inner.acquire(blocking=False):
+                if threading.current_thread().name == "sweep-second":
+                    second_moved.set()
+                self._inner.acquire()
+            return self
+
+        def __exit__(self, *exc_info):
+            self._inner.release()
+
+    monkeypatch.setattr(deps, "_lock", _SignallingLock(threading.RLock()))
+    keys = [str(tmp_path / name) for name in ("gate-before", "absent.zip", "gate-after")]
+    import builtins
+
+    builtins._ouro_sweep_meeting = threading.Barrier(2)
+    threads = []
+    try:
+        prepared = {}
+        for label in ("sweep_one", "sweep_two"):
+            (tmp_path / label).mkdir()
+            prepared[label] = _prepare_extension(
+                tmp_path / label,
+                label,
+                (
+                    "import builtins\n"
+                    "builtins._ouro_sweep_meeting.wait(timeout=5)\n"
+                    "def register(api):\n"
+                    f"    api.register_tool('ping', lambda ctx: '{label}', description='p', schema={{}})\n"
+                ),
+                permissions=["tool"],
+            )
+        # Appended last, in this order: the paused sweep has already snapshotted
+        # the None entry it deletes once the gate returns.
+        sys.path_importer_cache[keys[0]] = _SweepGate(before_entry)
+        sys.path_importer_cache[keys[1]] = None
+        sys.path_importer_cache[keys[2]] = _SweepGate(after_entry)
+        results: dict = {}
+
+        def load(label):
+            loaded, _repo, drive_root = prepared[label]
+            try:
+                results[label] = extension_loader.load_extension(
+                    loaded, lambda: {}, drive_root=drive_root, _force_in_process=True)
+            except BaseException as exc:
+                results[label] = exc
+
+        first = threading.Thread(target=load, args=("sweep_one",), name="sweep-first")
+        second = threading.Thread(target=load, args=("sweep_two",), name="sweep-second")
+        first.start()
+        threads.append(first)
+        assert first_paused.wait(GATE), "the first load never entered its importer-cache sweep"
+        second.start()
+        threads.append(second)
+        for thread in (first, second):
+            thread.join(timeout=GATE * 2)
+        assert not first.is_alive() and not second.is_alive(), "extension loads did not settle"
+        assert waited == [True], "the second load neither swept nor waited on the importer-cache lock"
+        assert results == {"sweep_one": None, "sweep_two": None}, results
+        for label in prepared:
+            extension_loader.unload_extension(label)
+    finally:
+        # A failed assertion can leave a load parked on a gate: open both and join
+        # every started load before its hooks, and then the patched lock, go away.
+        second_moved.set()
+        builtins._ouro_sweep_meeting.abort()
+        for thread in threads:
+            thread.join(timeout=GATE)
+        for key in keys:
+            sys.path_importer_cache.pop(key, None)
+        del builtins._ouro_sweep_meeting
+
+
+def test_every_runtime_importer_cache_sweep_takes_the_shared_lock():
+    """The race is a class: a direct sweep beside the helper would reopen it."""
+    import ast
+    import inspect
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sweeps: dict = {}
+    for path in [*root.glob("ouroboros/**/*.py"), *root.glob("supervisor/**/*.py"),
+                 root / "server.py", root / "launcher.py"]:
+        text = path.read_text(encoding="utf-8")
+        if "invalidate_caches" not in text:
+            continue
+        lines = [
+            node.lineno for node in ast.walk(ast.parse(text))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "invalidate_caches"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "importlib"
+        ]
+        if lines:
+            sweeps[path.relative_to(root).as_posix()] = lines
+    body, start = inspect.getsourcelines(deps.invalidate_import_caches)
+    assert list(sweeps) == ["ouroboros/extension_isolated_deps.py"], sweeps
+    assert all(start <= line < start + len(body) for line in sweeps[list(sweeps)[0]]), sweeps
+
+
 def test_a_deps_bearing_load_excludes_a_concurrent_no_deps_load(tmp_path):
     """Real isolated-deps injection is a writer: no no-deps import may overlap it."""
     inside = threading.Event()

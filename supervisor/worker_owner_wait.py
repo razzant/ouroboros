@@ -81,6 +81,7 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
             _command(worker, task_id, current, "parked")
             return
         wait = {**wait, "started_at": meta["started_at"], "state": "waiting"}
+        park_interval_added = False
         try:
             # A warm wait may arrive before the cold consumption notification
             # (or its repair tick). Fold that exact interval before installing
@@ -92,13 +93,22 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
                 _handle_budget_pause({"phase": "consumed", "task_id": task_id,
                     "task_attempt": attempt, "pause_id": resume.get("pause_id"),
                     "grant_id": resume.get("grant_id")}, ctx)
-                if meta["task"].get("_budget_pause_resume"):
+                if (meta["task"].get("_budget_pause_resume") or {}).get("sleep_exclusion_since"):
                     raise RuntimeError("cold sleep consumption is not yet confirmed")
             wait = set_owner_wait(ctx.DRIVE_ROOT, task_id, wait)
             meta["owner_wait"] = wait
+            park_interval_added = ("sleep_parked_at" not in meta
+                                   and (isinstance(wait.get("sleep"), dict) or wait.get("reason") == "owner_pause"))
             if isinstance(wait.get("sleep"), dict):
                 # A model sleep is not execution: excluded live until the task runs again.
                 meta.setdefault("sleep_parked_at", _pool().time.time())
+            elif wait.get("reason") == "owner_pause":
+                from ouroboros.deadline_utils import parse_deadline_ts
+
+                # Include time spent awaiting this acknowledgement, without restarting
+                # the interval if the same park event is delivered again.
+                parked = parse_deadline_ts((wait.get("owner_pause") or {}).get("parked_at"))
+                meta.setdefault("sleep_parked_at", parked.timestamp() if parked else _pool().time.time())
             # A spent exact-budget carrier still on this row is retired by the
             # revocation seam's ``_owner_wait_resume`` branch when the restart
             # reads the durable grant as consumed (#1196, F3); it decides nothing
@@ -109,6 +119,8 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
         except Exception as exc:
             worker.active_capacity = True
             meta.pop("owner_wait", None)
+            if park_interval_added:
+                meta.pop("sleep_parked_at", None)
             _command(worker, task_id, wait, "refused", reason=str(exc))
             return
         _command(worker, task_id, wait, "parked")
@@ -138,7 +150,30 @@ def _resume_allowed(task_id: str, meta: dict, worker: Any) -> bool:
     except Exception:
         log.warning("Owner wait cannot read cancellation authority for %s", task_id, exc_info=True)
         return False
-    return (not intent or intent.get("stop_policy") == "finalize_then_cancel") and _pool().repo_writer_task_allowed(meta["task"])
+    if not ((not intent or intent.get("stop_policy") == "finalize_then_cancel")
+            and _pool().repo_writer_task_allowed(meta["task"])):
+        return False
+    return _owner_pause_wake_still_authorized(task_id, meta)
+
+
+def _owner_pause_wake_still_authorized(task_id: str, meta: dict) -> bool:
+    """A warm owner-Pause park woken by the Resume needs that Resume still standing
+    at the grant: a newer Pause of the root keeps the stack parked. A control
+    wake (Stop, Panic, a deadline) ends the park whatever the fence says."""
+    wait = meta.get("owner_wait") or {}
+    if wait.get("reason") != "owner_pause" or wait.get("resume_reason") != "control:owner_resume":
+        return True
+    from types import SimpleNamespace
+    from ouroboros.owner_pause import member_fence
+
+    task = meta.get("task") or {}
+    try:
+        return not member_fence(SimpleNamespace(
+            task_id=task_id, root_task_id=str(task.get("root_task_id") or task_id),
+            budget_drive_root=task.get("budget_drive_root") or _pool().DRIVE_ROOT))
+    except Exception:
+        log.warning("Owner pause authority unreadable for %s; its warm park stays parked", task_id, exc_info=True)
+        return False
 
 
 def _grant_resume(
@@ -159,14 +194,21 @@ def _grant_resume(
             return False
         wait = meta["owner_wait"]
         cold_handoff = meta["task"].get("_owner_wait_resume")
+        parked_at = meta.get("sleep_parked_at")
+        prior_paused = float(meta.get("budget_paused_sec") or 0.0)
+        paused = prior_paused + (max(0.0, _pool().time.time() - float(parked_at))
+                                 if isinstance(parked_at, (int, float)) else 0.0)
         try:
-            resumed = set_owner_wait(_pool().DRIVE_ROOT, task_id, {**wait, "state": "resumed"},
+            resumed = set_owner_wait(_pool().DRIVE_ROOT, task_id,
+                                     {**wait, "state": "resumed", "budget_paused_sec": paused},
                                      expected_wait_id=wait["wait_id"])
             if replacement is not None:
                 replacement.active_capacity = False
             worker.active_capacity = True
             meta["owner_wait"] = resumed
             meta["task"].pop("_owner_wait_resume", None)
+            meta["budget_paused_sec"] = paused
+            meta.pop("sleep_parked_at", None)
             if not queue.persist_queue_snapshot(reason="owner_wait_resumed"):
                 raise RuntimeError("owner wait resume snapshot was not persisted")
             _command(worker, task_id, resumed, "resume_granted")
@@ -177,6 +219,9 @@ def _grant_resume(
             if cold_handoff is not None:
                 meta["task"]["_owner_wait_resume"] = cold_handoff
             meta["owner_wait"] = wait
+            meta["budget_paused_sec"] = prior_paused
+            if parked_at is not None:
+                meta["sleep_parked_at"] = parked_at
             try:
                 set_owner_wait(_pool().DRIVE_ROOT, task_id, wait,
                                expected_wait_id=wait["wait_id"])
@@ -185,10 +230,6 @@ def _grant_resume(
                 log.warning("Owner-wait rollback remains unpersisted for %s", task_id, exc_info=True)
             raise
         meta.pop("owner_wait_resume_requested", None)
-        parked_at = meta.pop("sleep_parked_at", None)
-        if isinstance(parked_at, (int, float)):  # the ONE paused carrier every lifetime reader subtracts
-            meta["budget_paused_sec"] = float(meta.get("budget_paused_sec") or 0.0) + max(
-                0.0, _pool().time.time() - float(parked_at))
         if (str(resumed.get("quiz_id") or "")
                 and not str(resumed.get("resume_reason") or "").startswith("control:")):
             # The bound closed and the pooled task resumed: one seam with the direct lane.

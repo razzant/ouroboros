@@ -30,8 +30,10 @@ def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
             "this child's own retained progress, tool and event history",
         ],
         "omitted_automatic": [
-            "shared autobiography: identity, WORLD, dialogue and scratchpad",
-            "global/project knowledge, indexes, patterns, journal and workpad",
+            "shared autobiography: identity, WORLD, the top level of the life account, the parent's room page "
+            "(with the words that started its project) and the memory marks of that room and the global ones",
+            "the owner's words that caused this work (shared children receive them verbatim; include them in "
+            "context if this case needs them)",
             "shared review history, health narratives, update letters, registry and installed-skill summaries",
             "parent context, notes, review_notes, predecessor narrative and inherited attachments",
             "task-tree blackboard, routing manifests and other-task summaries",
@@ -63,7 +65,13 @@ def _text(value: Any) -> str:
 
 
 def assignment_instructions(ctx: Any) -> str:
-    """Host-authored complete normalized contract for every direct delegate start."""
+    """Host-authored assignment with a predecessor brief for each direct start.
+
+    The owner's words that caused the work follow the contract: a root's own
+    corpus, a child's inherited words, or the host's absence marker; a declared
+    contract keeps its parent's selection and carries none. Full predecessor
+    reports are read through the launching task, never claimed to be inline.
+    """
 
     contract = getattr(ctx, "task_contract", None)
     if not isinstance(contract, dict) or not contract:
@@ -76,10 +84,43 @@ def assignment_instructions(ctx: Any) -> str:
         contract = build_task_contract({"task_contract": contract})
     if not contract:
         return ""
+    from ouroboros.contracts.task_contract import task_input_sources
+    from ouroboros.main_context_authority import project_helper_predecessor_authority
+    from ouroboros.owner_words import owner_words_text
+
+    # A declared run's receipt names the words among omitted inputs, for the sessions it starts too.
+    declared = task_input_sources({"task_contract": contract}) == "declared"
+    if contract.get("predecessor_authority"):
+        contract["predecessor_authority"] = project_helper_predecessor_authority(
+            contract["predecessor_authority"], declared=declared)
+    words = "" if declared else owner_words_text(ctx, audience="session")
     return (
-        "HOST TASK CONTRACT AUTHORITY (complete normalized JSON; exact strings are authority):\n"
+        "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
         + json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + ("\n\nThe predecessor brief omits evidence; its source names get_task_result. "
+           "Ask the launching task (nanny or root) for the full report; it can reply through delegate_answer. "
+           "Without a question channel, return input_required for a new run with the answers."
+           if contract.get("predecessor_authority") else "")
+        + (f"\n\n{words}" if words else "")
     )
+
+
+def _owner_words_section(task: Mapping[str, Any]) -> str:
+    """The owner's words carried into this task by value; "" for a task scheduled without them.
+
+    Both the payload (nested ``metadata``) and the flat task-metadata/record shapes
+    give the same bytes, so a source-range check never sees a digest mismatch. A
+    declared task carries the field too, but its receipt names the words among the
+    omitted inputs, so its work order holds none: it keeps its parent's selection and the
+    words ride its task unread.
+    """
+    from ouroboros.contracts.task_contract import task_input_sources
+    from ouroboros.owner_words import render_owner_words, task_governing_words
+
+    if task_input_sources(task) == "declared":
+        return ""
+    return render_owner_words(*task_governing_words(task), audience="session",
+                              root_task_id=str(task.get("root_task_id") or ""))
 
 
 def _render_external_work_order(task: Mapping[str, Any]) -> str:
@@ -119,6 +160,7 @@ def _render_external_work_order(task: Mapping[str, Any]) -> str:
         "deadline_at": str(contract.get("deadline_at") or ""),
         "origin_message_ref": task.get("origin_message_ref") if isinstance(task.get("origin_message_ref"), dict) else {},
     }
+    owner_words = _owner_words_section(task)
     rendered = []
     for title, value in sections:
         body = (
@@ -127,6 +169,8 @@ def _render_external_work_order(task: Mapping[str, Any]) -> str:
         )
         if body:
             rendered.append(f"{title}\n{body}")
+        if title == "PARENT CONTEXT / REFERENCES" and owner_words:
+            rendered.append(owner_words)  # verbatim, its own heading; absent for a task scheduled before it
     rendered.append(
         "HOST AUTHORITY BINDING (facts, not instructions to widen)\n"
         + _text(json.dumps(authority, ensure_ascii=False, sort_keys=True))

@@ -1,4 +1,10 @@
-"""Typed active-operation facts shared by supervisor idle enforcement."""
+"""Typed active-operation facts shared by supervisor idle enforcement.
+
+In-flight LLM, review, VLM and tool work is leased as typed ``cognitive_operation``
+facts for the idle rail: a typed in-flight call is not idleness, while silent
+reasoning alone is not host progress. A lease is bounded by the task deadline and
+absolute ceiling; deadlines, budget, cancellation and ceilings never read it.
+"""
 
 from __future__ import annotations
 

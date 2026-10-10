@@ -12,7 +12,8 @@ from tests import test_subscription_role_routes_browser as roles
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 subscription_ui = roles.subscription_ui
 role_ui = roles.role_ui
-CONSUMERS = ("Models", "API actor", "Native actor", "Inline reviewer")
+# The API actor row is marked Reviewer: a reviewer is edited where its catalog row is.
+CONSUMERS = ("Models", "API actor", "Native actor")
 SAVED_MODEL = "catalog-owner-saved"
 DRAFT_MODEL = "catalog-owner-unsaved"
 SOURCE = "opaque-source"
@@ -66,9 +67,6 @@ def account_catalog_ui(role_ui):
     actors = ui["settings"]["OUROBOROS_SUBAGENTS"]["items"]
     actors[0]["route"]["target_id"] = target
     actors[2]["route"]["target_id"] = f"codex={SAVED_MODEL}"
-    slots = ui["fixture"]["preview"]["reviewer_slots"]
-    slots["triad"][0]["route"]["target_id"] = target
-    ui["settings"]["OUROBOROS_REVIEWER_SLOTS"] = json.dumps(slots)
 
     def catalog_response(route):
         ui["reads"].append(route.request.url)
@@ -92,9 +90,6 @@ def editor(ui, consumer):
         page.locator('[data-settings-tab="models"]').click()
         row = page.locator('[data-model-role="main"]')
         selectors = ('[data-model-role-source]', '[data-model-role-model]', '[data-model-role-account]')
-    elif consumer == "Inline reviewer":
-        row = page.locator('[data-slot-id="triad_1"]')
-        selectors = ('[data-slot-route]', '[data-slot-custom-api]', '[data-slot-profile]')
     else:
         row = page.locator('[data-subagent-row]').nth(0 if consumer == "API actor" else 2)
         selectors = tuple(f'[data-subagent-field="{field}"]' for field in ("route", "model", "account"))
@@ -140,9 +135,6 @@ def assert_saved(ui, consumer, model, pin):
     if consumer == "Models":
         assert saved["OUROBOROS_MODEL"] == target
         assert saved["OUROBOROS_MODEL_ACCOUNTS"]["main"] == pin
-    elif consumer == "Inline reviewer":
-        route = json.loads(saved["OUROBOROS_REVIEWER_SLOTS"])["triad"][0]["route"]
-        assert route == {"kind": "api_chat", "target_id": target, **({"profile_id": pin} if pin else {})}
     else:
         route = saved["OUROBOROS_SUBAGENTS"]["items"][0 if consumer == "API actor" else 2]["route"]
         assert route == {"kind": "api_model" if consumer == "API actor" else "agent_session",
@@ -216,7 +208,7 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
         account.select_option("work")
         assert "not checked" in suggestions(page, field)[DRAFT_MODEL]
         status = row.locator("[data-subagent-status]")
-        assert status.inner_text() == "Draft · Not checked"
+        assert status.inner_text() == "Not checked"
         # The unread account catalog is disclosed on the row's own status sentence.
         assert "model list could not be read" in status.get_attribute("title")
         account.select_option("")

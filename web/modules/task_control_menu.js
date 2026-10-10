@@ -1,19 +1,18 @@
-// S3 (Q2/HQ1): the shared three-action task stop/hurry control.
+// The shared task control menu used by Chat live cards and the Activity tab:
+// "Wrap up" (soft finalize-then-stop), "Hurry up" (typed task-local hurry
+// control, never a chat message), "Pause"/"Resume" (root-only, whole tree; the
+// request_id survives uncertain or latch_pending replies until a confirmed
+// Pause or Resume retires it) and "Stop now" (hard stop). Dismissing the menu
+// continues the run. While a cancel intent is pending, the only offered action
+// is "Stop now", the monotonic escalation of the same durable stop intent;
+// "Hurry up" is refused then and never offered.
 //
-// One dropdown of exactly three owner-decided actions — "Wrap up"
-// (soft finalize-then-stop), "Hurry up" (typed task-local hurry control,
-// NO chat message ever), "Stop now" (hard stop). Dismissing the
-// menu continues the run (the dismiss affordance replaced the old separate
-// "keep running" confirm). While a cancel intent is already pending, the only
-// offered action is "Stop now" — the monotonic escalation of the
-// SAME durable stop intent; "Hurry up" is refused then and never offered.
-//
-// Chat live cards and the Activity tab consume the SAME module (owner
-// product-wide parity), so eligibility gates differ per surface but the
-// actions, endpoint bindings, request-id retry, and refusals do not.
+// Eligibility gates differ per surface; endpoints, stop policy, request-id
+// retry and verbatim refusals are shared.
 
 import { cancelTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
 import { showToast } from './toast.js';
+import { tr } from './i18n.js';
 
 export const ACTION_FINALIZE = 'finalize';
 export const ACTION_HURRY = 'hurry';
@@ -31,7 +30,7 @@ export const REUSABLE_TASK_IDS = new Set(['active']);
  * v6.82 (P5): may this live card offer the stop/hurry control?
  * Card shape alone cannot answer it — a subagent narration replayed without
  * its lineage would mint a root-shaped card with a live Cancel. So eligibility
- * requires the supervisor's host-attested `cancelable` progress-meta marker on
+ * requires the supervisor's host-attested `cancelable` marker or current census on
  * top of the structural gates: a ROOT (non-subagent) card, not a reusable
  * slot, not finished, not converted into a project chip. The marker is stamped
  * from the ONE ownership seam the cancel endpoint itself consults — a pooled
@@ -48,6 +47,30 @@ export function cancelRunEligibility({
         && !converted
         && Boolean(String(groupId || '').trim())
         && !REUSABLE_TASK_IDS.has(String(groupId || ''));
+}
+
+export function resumeRunEligibility(record, activity) {
+    return !record?.cancelPendingPolicy && activity?.phase === 'budget_paused'
+        && cancelRunEligibility({ ...record, cancelable: true,
+            converted: record?.root?.dataset?.projectCreated === '1' });
+}
+
+// The direct button and the menu use the same request owner. A historical
+// pause never enables this door; the caller checks its current census on click.
+export function createTaskResumeButton(taskId, { canResume, onSettled = () => {} } = {}) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-xs btn-default';
+    button.dataset.resumeRun = '1';
+    button.textContent = tr('task.control.resume', 'Resume');
+    button.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        if (!canResume?.() || taskControlBusy(taskId)) return;
+        button.disabled = true;
+        try { await resumeTaskAction(taskId); await onSettled(); }
+        finally { button.disabled = false; }
+    });
+    return button;
 }
 
 // Frozen owner wording (Q2/HQ1) — exact strings, never localized/reworded here.
@@ -83,16 +106,16 @@ export function isRootTaskRow(task = {}, id = '') {
  * @param {{cancelPending?: boolean, budgetPaused?: boolean, wholeTree?: boolean}} [state]
  * @returns {string[]} ordered action ids
  */
-export function taskControlActions({ cancelPending = false, budgetPaused = false, wholeTree = true } = {}) {
+export function taskControlActions({ cancelPending = false, budgetPaused = false, wholeTree = true, resumeVisible = false } = {}) {
     // A pending cancel refuses hurry (HQ1) and a second soft stop is a no-op:
     // the single offered action is the hard escalation of the same intent.
     if (cancelPending) return [ACTION_STOP_NOW];
     // A budget-paused member is not running: nothing to wrap up or hurry.
     // The host-attested pause fact gates the offer; the server re-validates
     // (replay_unsafe and sibling checks answer 409 with the reason).
-    if (budgetPaused) return [ACTION_RESUME, ACTION_STOP_NOW];
-    // Owner Batch4: Pause saves the WHOLE tree exactly (sent work finishes,
-    // new work is fenced) until an explicit Resume; Stop still ends it.
+    if (budgetPaused) return resumeVisible ? [ACTION_STOP_NOW] : [ACTION_RESUME, ACTION_STOP_NOW];
+    // Pause saves the WHOLE tree until an explicit Resume: new work is fenced,
+    // members' own runs get a stop, launched reviewers finish; Stop still ends it.
     return wholeTree ? [ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_STOP_NOW]
         : [ACTION_FINALIZE, ACTION_HURRY, ACTION_STOP_NOW];
 }
@@ -432,7 +455,7 @@ function onMenuKeydown(event) {
  *     onAction: (action: string) => void}} opts
  */
 export function openTaskControlMenu(anchor, {
-    cancelPending = false, budgetPaused = false, wholeTree = true, busy = false, onAction,
+    cancelPending = false, budgetPaused = false, wholeTree = true, resumeVisible = false, busy = false, onAction,
 } = {}) {
     closeTaskControlMenu();
     if (!anchor?.isConnected || !document.body) return null;
@@ -442,7 +465,7 @@ export function openTaskControlMenu(anchor, {
     const menu = document.createElement('div');
     menu.className = 'task-control-menu';
     menu.setAttribute('role', 'menu');
-    for (const action of taskControlActions({ cancelPending, budgetPaused, wholeTree })) {
+    for (const action of taskControlActions({ cancelPending, budgetPaused, wholeTree, resumeVisible })) {
         const item = document.createElement('button');
         item.type = 'button';
         item.className = `task-control-item${action === ACTION_STOP_NOW ? ' danger' : ''}`;

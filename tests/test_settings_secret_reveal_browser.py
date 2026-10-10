@@ -198,3 +198,87 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             expect(github.locator(".settings-secret-value")).to_be_hidden()
         finally:
             browser.close()
+
+
+@pytest.mark.serial
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_settings_paints_and_saves_while_the_installed_skill_list_is_held(direct_server_with_data, engine):
+    """The settings document, Save and an owner edit never wait for the installed-skill
+    list; a hidden page does not read it; the skill-requested rows are enrichment that
+    lands after that read and never replaces a draft the owner changed meanwhile."""
+    from playwright.sync_api import expect, sync_playwright
+
+    server = direct_server_with_data
+    evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(server["data_dir"].parent)))
+    evidence.mkdir(parents=True, exist_ok=True)
+    listing = {"skills": [{"name": "reveal-fixture", "grants": {"requested_keys": ["TEST_REVEAL_KEY"]}}],
+               "live": {"settings_sections": []}}
+    held, saves = [], []
+    behavior = {"hold": True}
+
+    def listing_route(route):
+        if behavior["hold"]:
+            held.append(route)
+        else:
+            route.fulfill(json=listing)
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.on("request", lambda request: saves.append(request.post_data_json)
+                    if request.method == "POST" and request.url.endswith("/api/settings") else None)
+            page.route("**/api/extensions", listing_route)
+            page.goto(server["url"], wait_until="domcontentloaded")
+            page.wait_for_selector("#page-chat", timeout=30_000)
+            page.wait_for_function("document.querySelector('#s-gh-repo') !== null", timeout=30_000)
+            assert held == [], "the boot-time Settings load reads no installed-skill list while the page is hidden"
+
+            page.click('[data-nav-page="settings"]')
+            expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
+            assert len(held) == 1, "the visible page reads the list once, beside the document"
+            rows = page.locator("#skill-requested-secrets [data-secret-setting]")
+            expect(rows).to_have_count(0)
+            page.screenshot(path=str(evidence / f"settings-list-held-{engine}.png"))
+            held.pop().fulfill(json=listing)
+            expect(rows).to_have_count(1, timeout=20_000)
+            expect(page.locator("#settings-status")).to_have_text("Settings refreshed", timeout=20_000)
+
+            # An edit made while the list is held survives its arrival: the draft stays
+            # the owner's, dirty, and Save sends it.
+            page.click("#btn-reload-settings")
+            for _ in range(200):  # the route interception lands asynchronously
+                if held:
+                    break
+                page.wait_for_timeout(50)
+            assert len(held) == 1, "Reload reads the list once more, beside the document"
+            expect(page.locator("#btn-save-settings")).to_be_enabled()
+            page.click('[data-settings-tab="advanced"]')  # the repo field lives on Advanced
+            page.locator("#s-gh-repo").fill("owner/held-proof")
+            expect(page.locator("#settings-unsaved-indicator")).to_have_class(re.compile(r"\bis-visible\b"))
+            held.pop().fulfill(json=listing)
+            expect(page.locator("#s-gh-repo")).to_have_value("owner/held-proof")
+            expect(page.locator("#settings-unsaved-indicator")).to_have_class(re.compile(r"\bis-visible\b"))
+            # A confirmed Save waits for the settings document only: its reload's list read stays
+            # held, yet the save completes, Save is usable again and the owner can leave the page.
+            page.click("#btn-save-settings")
+            expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=20_000)
+            assert saves[-1]["GITHUB_REPO"] == "owner/held-proof"
+            for _ in range(200):
+                if held:
+                    break
+                page.wait_for_timeout(50)
+            assert len(held) == 1, "the post-save reload reads the list once more, still held"
+            expect(page.locator("#btn-save-settings")).to_be_enabled()
+            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            page.click('[data-nav-page="chat"]')
+            expect(page.locator("#page-chat")).to_be_visible(timeout=10_000)
+            behavior["hold"] = False
+            held.pop().fulfill(json=listing)
+            page.click('[data-nav-page="settings"]')
+            expect(rows).to_have_count(1, timeout=20_000)
+        finally:
+            for route in held:
+                route.abort()
+            browser.close()

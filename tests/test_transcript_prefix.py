@@ -264,7 +264,7 @@ def _fake_compaction(messages, *_args, **_kwargs):
         if message.get("role") == "tool":
             rebuilt[index] = {**message, "content": "[compacted tool result]"}
             break
-    receipt = SimpleNamespace(status="applied", checkpoint_ref="ckpt-1", reclaimed_tokens=10, goal_reached=True)
+    receipt = SimpleNamespace(status="applied", checkpoint_ref="ckpt-1", reclaimed_tokens=10, goal_reached=True, fit=None)
     return rebuilt, receipt, {"prompt_tokens": 1, "completion_tokens": 1}
 
 

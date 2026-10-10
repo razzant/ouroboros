@@ -631,7 +631,7 @@ def test_commit_pending_retry_reconciles_same_paid_attempt(tmp_path, monkeypatch
         task_metadata={}, event_queue=None, current_task_type="", parent_task_id="",
         emit_progress_fn=lambda *_args: None, drive_logs=lambda: drive / "logs",
     )
-    monkeypatch.setattr(git_tools, "_advisory_and_tests_gate", lambda *_a, **_k: None)
+    monkeypatch.setattr(git_tools, "_preflight_and_tests_gate", lambda *_a, **_k: None)
     monkeypatch.setattr(git_tools, "_review_binding_precondition_error", lambda *_a, **_k: "")
     monkeypatch.setattr(git_tools, "commit_review_contract_fingerprint", lambda: "contract")
     monkeypatch.setattr(
@@ -663,7 +663,6 @@ def test_commit_pending_retry_reconciles_same_paid_attempt(tmp_path, monkeypatch
                     "efforts": ["high"],
                     "slot_ids": ["slot_1"],
                 }},
-                [],
             )
             operation_id = run_ctx._review_reserved_operations[
                 "multi_model_review"

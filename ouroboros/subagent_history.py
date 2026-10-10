@@ -88,7 +88,9 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
     """Keep the latest fact per actor plus the old top-level receipt interface.
 
     Occurrence and observation differ when recovery collects an old run. Replays
-    neither refresh its date nor displace a newer fact. The existing actor-count
+    neither refresh its date nor displace a newer fact. Task, invocation and
+    attempt ids are kept as trace references when present, and ``identity``
+    carries the originally requested effort. The existing actor-count
     bound keeps this a compact projection; the event log retains full history.
     """
     from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS
@@ -145,7 +147,11 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
 
 
 def record_task_execution(task: Mapping[str, Any], usage: Mapping[str, Any], *, drive_root) -> None:
-    """Project configured attempt/start facts, never task correctness."""
+    """Project configured attempt/start facts, never task correctness.
+
+    A failed API call leaves ``applied_model`` empty; the model that served
+    instead is recorded under ``fallback`` and never certifies the failed route.
+    """
     snapshot = task.get("configured_subagent") or {}
     identity = execution_identity(snapshot)
     availability = task.get("subagent_availability") or {}

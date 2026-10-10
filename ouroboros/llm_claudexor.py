@@ -1,6 +1,6 @@
 """Caller-owned physical accounting; one engine operation rejoins lost control, private CAS precedes ACK.
 Only durable dispatched results update the caller's live turn slot; unknown/no-start/legacy outcomes preserve it.
-Pre-dispatch pricing reads that slot; route changes clear it. Deadlines/Stop stay unchanged (ARCHITECTURE §6).
+Pre-dispatch pricing reads that slot; route changes clear it. The engine version gate reads the last successful handshake; a failed probe never un-proves an engine already observed at the minimum. Deadlines/Stop stay unchanged (ARCHITECTURE §6).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import threading
 import time
 from typing import Any
 
-from ouroboros import config, context_fit
+from ouroboros import _usage_wait, config, context_fit
 from ouroboros._usage_response import provider_cost_value
 from ouroboros.anthropic_native_custody import scrub_native_custody
 from ouroboros.claudexor_daemon import ensure_owned_gateway, owned_engine_version, read_owned_gateway
@@ -25,6 +25,8 @@ from ouroboros.effort_evidence import model_effort_usage
 from ouroboros.gateways.claudexor import (ClaudexorUnavailable, engine_at_least, model_failure_evidence_supported,
                                           operation_query_supported, _READ_TIMEOUT_SEC)
 from ouroboros.llm_attempt import _attempt_request, _candidate_before_dispatch, effort_request_facts
+from ouroboros.llm_capability_policy import (
+    model_catalog as model_catalog, catalog_admits_model as catalog_admits_model)
 from ouroboros.send_clock import stamp_clock_note
 from ouroboros.llm_substitution import (
     AccountRotation, SubstitutionBudget, substitution_fact, failed_account_preference,
@@ -40,16 +42,6 @@ from ouroboros.usage_accounting import (
 from ouroboros.utils import append_jsonl, sanitize_tool_result_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
-def model_catalog(source: str, credential_profile_id: str | None = None, *,
-                  requested_model: str | None = None, timeout_sec: float | None = None) -> dict:
-    """Metadata-only transport; the capability evidence owner interprets the envelope."""
-    gateway = read_owned_gateway()
-    try:
-        hint = {"requested_model": requested_model} if requested_model is not None else {}
-        return gateway.list_source_models(source, credential_profile_id, **hint,
-                                          **({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
-    finally:
-        gateway.close()
 
 
 def model_sources(*, processing_view: bool = False) -> dict:
@@ -159,14 +151,14 @@ def propagate_model_error(error: Exception) -> None:
     retry or disclosed-unavailable path, just as it does for direct API calls.
     """
     from ouroboros.model_wait import ModelWaitInterrupted, model_wait_reason
+    from ouroboros.transport_custody import outcome_unknown_on_chain
 
     if isinstance(error, ModelWaitInterrupted):
         raise error
     if isinstance(error, ClaudexorModelError):
-        capture = getattr(error, "physical_attempt_capture", None)
         if (error.code in {"model_outcome_unknown", "model_operation_interrupted"}
                 or model_wait_reason(error)
-                or getattr(capture, "state", None) in {"dispatched", "unresolved"}):
+                or outcome_unknown_on_chain(error)):
             raise error
 
 
@@ -312,7 +304,7 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
         content = message.get("content")
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict):
-                for name in ("_caption", "_source_path", "_context_capsule", "cache_control"):
+                for name in ("_caption", "_source_path", "_original_image_url", "_context_capsule", "cache_control"):
                     block.pop(name, None)
         if message.get("role") == "tool" and isinstance(content, list) and content and all(
             isinstance(block, dict) and block.get("type") == "text" for block in content
@@ -817,7 +809,8 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
                 if prepared:
                     invocation.payload = payload = _request(target, prepared["messages"], prepared.get("tools"), prepared)
                 request, before = _accounted_request(invocation)
-                result = execute_physical_attempt(request, invocation.receive, extractor=invocation.extract_usage, before_dispatch=before)
+                result = execute_physical_attempt(request, invocation.receive, extractor=invocation.extract_usage, before_dispatch=before,
+                                                  late_owner=_usage_wait.late_transport_custody(invocation))
                 all_operations_not_started = False  # even a discarded substituted response ran
                 invocation.capture = last_physical_attempt_capture()
                 if substitution.admit(invocation, result):
@@ -825,8 +818,7 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
                     retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
                     payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
                     continue
-                adopt_turn_state((prepared or parameters).get("model_turn_state"),
-                                 invocation.payload, result)
+                adopt_turn_state((prepared or parameters).get("model_turn_state"), invocation.payload, result)
                 return rotation.disclose(substitution.disclose(invocation.finish(result)))
         except ClaudexorModelNotDispatched as error:
             all_operations_not_started &= getattr(getattr(error, "physical_attempt_capture", None), "state", None) == "released"
@@ -861,7 +853,7 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
                 raise cause from None
             raise
         finally:
-            invocation.close()
+            _usage_wait.close_unless_abandoned(invocation)  # an owner Pause's abandoned wait: the sender closes it
     raise AssertionError("Unreachable model preparation loop")
 
 
@@ -927,7 +919,7 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
 
 
 async def chat_claudexor_async(target: dict, messages: list, tools: list | None, **parameters: Any) -> tuple[dict, dict]:
-    """Offload synchronous I/O and joined accounting; adopt its capture in this caller."""
+    """Offload I/O; accounting follows sender custody through cancellation or Pause."""
     target = (await asyncio.to_thread(prepare_processing_target, target)
               if target.get("processing_preference") and "processing_preferences" not in target else target)
     payload = _request(target, messages, tools, parameters)
@@ -950,7 +942,8 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
                     return await invocation.offload(invocation.receive)
 
                 result = await execute_physical_attempt_async(
-                    request, receive, extractor=invocation.extract_usage, before_dispatch=prepare)
+                    request, receive, extractor=invocation.extract_usage, before_dispatch=prepare,
+                    late_owner=_usage_wait.late_transport_custody(invocation))
                 all_operations_not_started = False
                 invocation.capture = last_physical_attempt_capture()
                 if await invocation.offload(substitution.admit, invocation, result):
@@ -958,8 +951,7 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
                     retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
                     payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
                     continue
-                adopt_turn_state((prepared or parameters).get("model_turn_state"),
-                                 invocation.payload, result)
+                adopt_turn_state((prepared or parameters).get("model_turn_state"), invocation.payload, result)
                 return rotation.disclose(substitution.disclose(await invocation.offload(invocation.finish, result)))
         except ClaudexorModelNotDispatched as error:
             all_operations_not_started &= getattr(getattr(error, "physical_attempt_capture", None), "state", None) == "released"
@@ -996,5 +988,5 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
             raise
         finally:
             if not invocation.defer_close:
-                invocation.close()
+                _usage_wait.close_unless_abandoned(invocation)
     raise AssertionError("Unreachable model preparation loop")

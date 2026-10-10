@@ -4,6 +4,11 @@ VERSION remains canonical for author-facing carriers; pyproject receives PEP
 440 spelling, uv.lock mirrors the editable root package, web/package.json keeps
 VERSION spelling, README badge and direct-download URLs stay current, and
 changelog prose stays manual.
+
+Shared over ``VERSION_CARRIER_SPANS``: ``release_metadata_findings`` (the
+release-findings evaluator for commit admission), ``substitute_carrier_spans``
+(span substitution for update conflicts) and ``carrier_only_change`` (review
+pack cut).
 """
 
 from __future__ import annotations

@@ -1,11 +1,13 @@
 """Owner D10: Pause of an answered root's late phase and its soft same-task Resume.
 
 Real consumers end to end: the owner's Pause ingress, the post-task stage
-coordinator, dialogue consolidation (draft then correction), the usage ledger's
-physical-send gate, the saved actor-source pause, startup recovery, the Resume
-grant/executor, the activity census, Stop custody and held Continues. Only the
-model transport is a deterministic fake, and it still goes through
-``execute_physical_attempt`` — the real reservation and owner-fence gate.
+coordinator, scratchpad consolidation (a knowledge read, then its answer — one
+Light operation of two physical sends), the usage ledger's physical-send gate, the
+saved actor-source pause, startup recovery, the Resume grant/executor, the activity
+census, Stop custody and held Continues. Only the model transport is a
+deterministic fake, and it still goes through ``execute_physical_attempt`` — the
+real reservation and owner-fence gate. (The retired dialogue writer was the first
+paid stage these tests paused; the scratchpad stage now is.)
 """
 
 from __future__ import annotations
@@ -17,20 +19,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.consolidator import BLOCK_SIZE
 from tests.test_consolidator_context_fit import fit  # noqa: F401 — offline Light route/window facts
 
 ROOT = "late-root"
 ANSWER = "Already delivered answer"
 
 
-def _chat(root: pathlib.Path, start: int, count: int) -> None:
-    path = root / "logs" / "chat.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        for index in range(start, start + count):
-            handle.write(json.dumps({"ts": f"2026-01-0{1 + index // 1000}T{(index // 60) % 24:02d}:{index % 60:02d}:00Z",
-                                     "direction": "in", "text": f"owner line {index}", "chat_id": 1}) + "\n")
+def _scratchpad(root: pathlib.Path, count: int = 4, tag: str = "block") -> None:
+    """Enough scratchpad working memory that the post-task scratchpad stage runs."""
+    from ouroboros.memory import Memory
+
+    memory = Memory(root)
+    for index in range(count):
+        memory.append_scratchpad_block(f"{tag}-{index}-" + (chr(97 + index) * 8_000), source=f"source-{index}")
 
 
 class Light:
@@ -49,17 +50,24 @@ class Light:
             from ouroboros.usage_accounting import AttemptRequest, current_usage_scope, execute_physical_attempt
 
             prompt = str(messages[0]["content"])
-            kind = ("correction" if prompt.startswith("Compare this draft memory")
-                    else "draft" if "## Messages to summarize" in prompt else "other")
+            kind = "scratchpad" if "scratchpad working memory" in prompt else "other"
+            answered = messages[-1].get("role") == "tool"  # the read came back: this send answers
             scope = current_usage_scope()
 
             def send():
-                light.sends.append({"kind": kind, "prompt": prompt, "scope": scope})
+                light.sends.append({"kind": kind, "prompt": prompt, "scope": scope, "answer": answered})
                 pending = light.hooks.get(kind) or []
                 hook = pending.pop(0) if pending else None  # one per send of this kind, in order
                 if hook is not None:
                     hook()
-                return {"content": f"{kind}-{len(light.sends)}"}, {"prompt_tokens": 1, "completion_tokens": 1}
+                usage = {"prompt_tokens": 1, "completion_tokens": 1}
+                if kind == "scratchpad" and not answered:
+                    return {"content": "", "tool_calls": [{"id": "list", "type": "function", "function": {
+                        "name": "knowledge_list", "arguments": "{}"}}]}, usage
+                if kind == "scratchpad":
+                    return {"content": json.dumps({"knowledge_entries": [],
+                                                   "compressed_block": f"compressed-{len(light.sends)}"})}, usage
+                return {"content": f"{kind}-{len(light.sends)}"}, usage
 
             return execute_physical_attempt(
                 AttemptRequest(model=model or "openai/gpt-4.1-nano", provider="openai", reservation_usd=0.01),
@@ -82,7 +90,7 @@ def late(tmp_path, monkeypatch, fit):  # noqa: F811
     monkeypatch.setattr(workers, "REPO_DIR", tmp_path, raising=False)
     (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
     (tmp_path / "memory" / "identity.md").write_text("IDENTITY-BEFORE-PAUSE\n", encoding="utf-8")
-    _chat(tmp_path, 0, BLOCK_SIZE)
+    _scratchpad(tmp_path)
     task = {"id": ROOT, "root_task_id": ROOT, "type": "task", "chat_id": 1, "text": "Original requested work",
             "budget_drive_root": str(tmp_path)}
     write_task_result(tmp_path, ROOT, "completed", result=ANSWER, chat_id=1, text=task["text"],
@@ -136,6 +144,12 @@ def _phase(f) -> str:
     return str((_row(f).get("root_phase_checkpoint") or {}).get("post_task_synthesis") or "")
 
 
+def _scratch(f) -> list:
+    from ouroboros.memory import Memory
+
+    return Memory(f.root).load_scratchpad_blocks()
+
+
 def _facts_rows(f) -> list:
     rows = [json.loads(line) for line in (f.root / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     return [row for row in rows if row.get("summary_kind") == "host_task_facts"]
@@ -148,8 +162,8 @@ def _census(f) -> dict:
     return {row["activity_id"]: row["phase"] for row in rows}
 
 
-def _pause_during_draft(f, request_id="late-pause", cap=3.0, draft=1):
-    """The owner's Pause lands while the ``draft``-th Light draft is already on the wire."""
+def _pause_during_read(f, request_id="late-pause", cap=3.0):
+    """The owner's Pause lands while the scratchpad operation's first send (its read) is on the wire."""
     from supervisor.owner_pause_control import request_owner_pause
 
     entered, release, answer = threading.Event(), threading.Event(), {}
@@ -158,7 +172,7 @@ def _pause_during_draft(f, request_id="late-pause", cap=3.0, draft=1):
         entered.set()
         assert release.wait(10)
 
-    f.light.hooks["draft"] = [None] * (draft - 1) + [hook]
+    f.light.hooks["scratchpad"] = [hook]
     threads = _start(f, cap=cap)
     assert entered.wait(10)
     answer.update(request_owner_pause(ROOT, request_id=request_id))
@@ -169,42 +183,44 @@ def _pause_during_draft(f, request_id="late-pause", cap=3.0, draft=1):
 
 
 def test_pause_after_delivery_saves_the_remainder_and_soft_resume_reassesses_current_inputs(late):
-    """D10 core: Pause after the answer, without a RUNNING row; the confirmed draft is kept,
-    inputs change while paused, Restart keeps the pause, and one Resume finishes the SAME task
-    under its original money scope with only the unfinished correction re-thought."""
+    """D10 core: Pause after the answer, without a RUNNING row; the send on the wire
+    finishes and the next is refused, inputs change while paused, Restart keeps the pause,
+    and one Resume re-thinks the stopped stage on the SAME task under its original money
+    scope against the CURRENT inputs."""
     f = late
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.owner_pause import read_fence
     from ouroboros.post_task_checkpoint import late_phase_pause_record
     from ouroboros.task_results import list_task_results
 
-    pause = _pause_during_draft(f)
+    before_blocks = _scratch(f)
+    pause = _pause_during_read(f)
     assert pause["ok"] and pause["root_task_id"] == ROOT, pause
-    # The draft on the wire finished; the correction never got a physical send.
-    assert f.light.kinds() == ["draft"]
+    # The read on the wire finished; the answering send never got a physical send.
+    assert f.light.kinds() == ["scratchpad"]
     row = _row(f)
     assert row["status"] == "completed" and row["result"] == ANSWER
     assert _phase(f) == "paused"
     record = late_phase_pause_record(row)
-    assert record["stage"] == "chat_consolidation"
-    assert record["remaining_stages"][0] == "chat_consolidation" and "promotion" in record["remaining_stages"]
+    assert record["stage"] == "scratchpad_consolidation"
+    assert record["remaining_stages"][0] == "scratchpad_consolidation" and "promotion" in record["remaining_stages"]
+    assert "chat_consolidation" not in record["remaining_stages"]
     payload = json.loads(read_actor_source_bytes(f.root, ROOT, record["payload_ref"]))
-    assert list(payload["drafts"].values()) == ["draft-1"]
+    assert payload["drafts"] == {}  # no stage keeps a draft any more
     assert payload["money_scope"]["root_limit_usd"] == 3.0
     assert "calls" not in payload  # no request replay cache
     assert read_fence(f.root, ROOT)["state"] == "paused"
     assert _census(f)[ROOT] == "budget_paused"
-    assert len(_facts_rows(f)) == 1 and f.stages == []
+    assert len(_facts_rows(f)) == 1 and f.stages == [] and _scratch(f) == before_blocks
 
-    # Inputs change while paused: a new identity and another full chunk of dialogue.
+    # Inputs change while paused: a new identity.
     (f.root / "memory" / "identity.md").write_text("IDENTITY-AFTER-PAUSE\n", encoding="utf-8")
-    _chat(f.root, BLOCK_SIZE, BLOCK_SIZE)
 
     # Restart: startup recovery keeps the pause, starts nothing, and re-arms the latch a
     # stale snapshot would have dropped.
     f.q.BUDGET_ROOT_FENCES.clear()
     assert f.pipeline.recover_pending_root_post_task_synthesis(f.root, f.root) == 0
-    assert _phase(f) == "paused" and f.light.kinds() == ["draft"]
+    assert _phase(f) == "paused" and f.light.kinds() == ["scratchpad"]
     assert f.q.BUDGET_ROOT_FENCES[ROOT]["cause"] == "owner_pause"
     assert _census(f)[ROOT] == "budget_paused"
 
@@ -213,12 +229,11 @@ def test_pause_after_delivery_saves_the_remainder_and_soft_resume_reassesses_cur
     assert resumed["ok"] and resumed["late_phase"] == "resumed", resumed
     assert _phase(f) == "completed"
     kinds = f.light.kinds()
-    # Chunk 1: only its correction, of the saved draft against the CURRENT source and
-    # identity; chunk 2 (new dialogue) gets an ordinary draft and correction.
-    assert kinds == ["draft", "correction", "draft", "correction"], kinds
-    correction = f.light.sends[1]["prompt"]
-    assert "draft-1" in correction and "IDENTITY-AFTER-PAUSE" in correction and "owner line 0" in correction
-    assert "owner line 150" in f.light.sends[2]["prompt"]
+    # The stopped operation is re-thought whole (read, then answer) against the CURRENT identity.
+    assert kinds == ["scratchpad"] * 3, kinds
+    assert [send["answer"] for send in f.light.sends] == [False, False, True]
+    assert "IDENTITY-BEFORE-PAUSE" in f.light.sends[0]["prompt"]
+    assert "IDENTITY-AFTER-PAUSE" in f.light.sends[1]["prompt"] and "block-0-" in f.light.sends[1]["prompt"]
     # The same task, attempt identity and original money scope; no new task, no second answer.
     for send in f.light.sends:
         assert send["scope"].task_id == ROOT and send["scope"].root_task_id == ROOT
@@ -226,39 +241,13 @@ def test_pause_after_delivery_saves_the_remainder_and_soft_resume_reassesses_cur
     assert len(list_task_results(f.root)) == tasks_before
     assert _row(f)["result"] == ANSWER
     assert len(_facts_rows(f)) == 1 and f.stages == ["reflection"]
-    blocks = json.loads((f.root / "memory" / "dialogue_blocks.json").read_text(encoding="utf-8"))
-    assert len(blocks) == 2
-    assert json.loads((f.root / "memory" / "dialogue_meta.json").read_text(encoding="utf-8"))["last_consolidated_offset"] == 2 * BLOCK_SIZE
+    assert _scratch(f)[0]["content"] == "compressed-3" and len(_scratch(f)) == 3
     assert read_fence(f.root, ROOT)["state"] == "released" and ROOT not in f.q.BUDGET_ROOT_FENCES
     assert ROOT not in _census(f)
 
     # A duplicate Resume cannot spend again.
     again = _resume(f)
     assert not again.get("ok") and f.light.kinds() == kinds
-
-
-def test_pause_inside_a_later_chunk_keeps_finished_chunks_published_and_buys_only_the_rest(late):
-    """Within one paid stage: a chunk already drafted AND corrected is published before the
-    Pause propagates (its cursor advances), so Resume never re-buys it — only the stopped
-    correction of the next chunk, from its saved draft."""
-    f = late
-    from ouroboros.post_task_checkpoint import late_phase_pause_record
-
-    _chat(f.root, BLOCK_SIZE, BLOCK_SIZE)  # two full chunks owed
-    assert _pause_during_draft(f, draft=2)["ok"]
-    assert f.light.kinds() == ["draft", "correction", "draft"]
-    meta = json.loads((f.root / "memory" / "dialogue_meta.json").read_text(encoding="utf-8"))
-    assert meta["last_consolidated_offset"] == BLOCK_SIZE
-    assert len(json.loads((f.root / "memory" / "dialogue_blocks.json").read_text(encoding="utf-8"))) == 1
-    assert late_phase_pause_record(_row(f))["stage"] == "chat_consolidation"
-    resumed = _resume(f)
-    assert resumed["ok"], resumed
-    assert _phase(f) == "completed"
-    assert f.light.kinds() == ["draft", "correction", "draft", "correction"]
-    assert "draft-3" in f.light.sends[3]["prompt"] and "owner line 150" in f.light.sends[3]["prompt"]
-    meta = json.loads((f.root / "memory" / "dialogue_meta.json").read_text(encoding="utf-8"))
-    assert meta["last_consolidated_offset"] == 2 * BLOCK_SIZE
-    assert len(json.loads((f.root / "memory" / "dialogue_blocks.json").read_text(encoding="utf-8"))) == 2
 
 
 def test_fully_finished_root_reports_pause_inapplicable_and_buys_nothing(late):
@@ -294,11 +283,11 @@ def test_pause_with_running_row_parks_late_phase_and_task_done_settles_it(late, 
         answers.update(request_owner_pause(ROOT, request_id="pooled-late-pause"))
         assert _census(f)[ROOT] == "budget_pausing"
 
-    f.light.hooks["draft"] = [hook]
+    f.light.hooks["scratchpad"] = [hook]
     with task_model_wait_scope(task=f.task, drive_root=f.root, event_queue=None, worker_slot_held=True):
         _start(f, blocking=True)
     assert answers["ok"], answers
-    assert f.light.kinds() == ["draft"] and _phase(f) == "paused"
+    assert f.light.kinds() == ["scratchpad"] and _phase(f) == "paused"
     # Saved, but the worker still holds its slot until task_done: the tree is still pausing.
     assert _census(f)[ROOT] == "budget_pausing" and read_fence(f.root, ROOT)["state"] == "requested"
     # The task_done handler's order: release the slot, keep the owner latch, settle the tree.
@@ -316,7 +305,7 @@ def test_stop_cancels_the_saved_remainder_keeps_the_answer_and_releases_the_paus
     from supervisor.queue_transitions import task_has_live_ownership
     from supervisor.task_lifecycle import cancel_task_custody
 
-    assert _pause_during_draft(f)["ok"]
+    assert _pause_during_read(f)["ok"]
     assert task_has_live_ownership(ROOT)  # the saved remainder is addressable custody
     request_cancel(f.root, ROOT, reason="owner stop", source="http", requested_by="owner",
                    requested_stop_policy="immediate", allow_settled_target=True)
@@ -325,11 +314,11 @@ def test_stop_cancels_the_saved_remainder_keeps_the_answer_and_releases_the_paus
     checkpoint = row["root_phase_checkpoint"]
     assert row["status"] == "completed" and row["result"] == ANSWER
     assert checkpoint["post_task_synthesis"] == "degraded"
-    assert checkpoint["post_task_stop_reason"].startswith("owner_stopped:skipped=chat_consolidation")
+    assert checkpoint["post_task_stop_reason"].startswith("owner_stopped:skipped=scratchpad_consolidation")
     assert read_fence(f.root, ROOT)["state"] == "released" and ROOT not in f.q.BUDGET_ROOT_FENCES
     assert not task_has_live_ownership(ROOT)
     resumed = _resume(f)
-    assert not resumed.get("ok") and f.light.kinds() == ["draft"]
+    assert not resumed.get("ok") and f.light.kinds() == ["scratchpad"]
 
 
 @pytest.mark.parametrize("bound", ["deadline", "global_budget", "root_cap", "panic"])
@@ -342,8 +331,8 @@ def test_hard_bound_resume_refuses_without_grant_or_send_and_keeps_the_remainder
     from supervisor import state
 
     if bound == "root_cap":
-        f.light.cost = 0.05  # the paid draft overruns this root's own cap
-    assert _pause_during_draft(f, cap=0.015 if bound == "root_cap" else 3.0)["ok"]
+        f.light.cost = 0.05  # the paid read overruns this root's own cap
+    assert _pause_during_read(f, cap=0.015 if bound == "root_cap" else 3.0)["ok"]
     before = late_phase_pause_record(_row(f))
     expected = {"deadline": "deadline_passed", "global_budget": "budget_still_exhausted",
                 "root_cap": "root_hard_cap_exhausted", "panic": "restart_no_resume"}[bound]
@@ -357,7 +346,7 @@ def test_hard_bound_resume_refuses_without_grant_or_send_and_keeps_the_remainder
     refused = _resume(f)
     assert not refused["ok"] and refused["error"] == expected, refused
     assert _phase(f) == "paused" and late_phase_pause_record(_row(f)) == before  # no grant, nothing consumed
-    assert f.light.kinds() == ["draft"] and f.q.BUDGET_ROOT_FENCES[ROOT]["cause"] == "owner_pause"
+    assert f.light.kinds() == ["scratchpad"] and f.q.BUDGET_ROOT_FENCES[ROOT]["cause"] == "owner_pause"
     if bound == "root_cap":
         return  # raising an original root cap is the existing owner amendment, not a Resume form
     if bound == "deadline":
@@ -369,7 +358,7 @@ def test_hard_bound_resume_refuses_without_grant_or_send_and_keeps_the_remainder
     resumed = _resume(f)
     assert resumed["ok"], resumed
     assert _phase(f) == "completed"
-    assert f.light.kinds() == ["draft", "correction"] and _row(f)["result"] == ANSWER
+    assert f.light.kinds() == ["scratchpad"] * 3 and _row(f)["result"] == ANSWER
 
 
 def _continue_eligible(f):
@@ -392,7 +381,7 @@ def test_continue_stays_held_behind_a_paused_or_running_late_phase_and_never_ove
     from supervisor.events_budget import HOLD_CONTINUATION_WRITER, budget_hold_fact
 
     _continue_eligible(f)
-    assert _pause_during_draft(f)["ok"]
+    assert _pause_during_read(f)["ok"]
     ack = admit_continuation(ROOT, action_nonce="late-continue-0001")
     assert ack["ok"] and ack["held"], ack
     assert {"kind": "late_phase_paused", "task_id": ROOT} in ack["blockers"]
@@ -400,7 +389,7 @@ def test_continue_stays_held_behind_a_paused_or_running_late_phase_and_never_ove
     assert budget_hold_fact(held)["reason"] == HOLD_CONTINUATION_WRITER
     observed = {}
     # While the resumed remainder runs, the held successor stays held: no second writer.
-    f.light.hooks["correction"] = [lambda: observed.update(released=release_settled_continuations(ROOT))]
+    f.light.hooks["scratchpad"] = [lambda: observed.update(released=release_settled_continuations(ROOT))]
     resumed = _resume(f)
     assert resumed["ok"], resumed
     assert observed == {"released": []} and _phase(f) == "completed"
@@ -415,7 +404,7 @@ def test_a_live_continue_successor_refuses_late_resume_until_it_ended(late):
     f = late
     from ouroboros.post_task_checkpoint import late_phase_pause_record
 
-    assert _pause_during_draft(f)["ok"]
+    assert _pause_during_read(f)["ok"]
     before = late_phase_pause_record(_row(f))
     successor = {"id": "successor-1", "root_task_id": "successor-1",
                  "metadata": {"continuation": {"predecessor_task_id": ROOT}}}
@@ -423,11 +412,11 @@ def test_a_live_continue_successor_refuses_late_resume_until_it_ended(late):
     refused = _resume(f)
     assert not refused["ok"] and refused["error"] == "owner_pause_effects_unsettled", refused
     assert {"kind": "continuation_successor", "task_id": "successor-1"} in refused["blockers"]
-    assert late_phase_pause_record(_row(f)) == before and f.light.kinds() == ["draft"]
+    assert late_phase_pause_record(_row(f)) == before and f.light.kinds() == ["scratchpad"]
     f.workers.RUNNING.clear()
     resumed = _resume(f)
     assert resumed["ok"], resumed
-    assert _phase(f) == "completed" and f.light.kinds() == ["draft", "correction"]
+    assert _phase(f) == "completed" and f.light.kinds() == ["scratchpad"] * 3
 
 
 def test_completed_effects_inside_a_paused_stage_do_not_repeat_and_the_rest_is_rethought(late, monkeypatch):
@@ -437,7 +426,9 @@ def test_completed_effects_inside_a_paused_stage_do_not_repeat_and_the_rest_is_r
     from ouroboros import post_task_evolution
     from ouroboros.improvement_backlog import _count_of, load_backlog_items
 
-    (f.root / "logs" / "chat.jsonl").write_text("", encoding="utf-8")  # nothing to consolidate: promotion is the stage
+    from ouroboros.memory import Memory
+
+    Memory(f.root).mutate_scratchpad_blocks(lambda _blocks: [])  # nothing to consolidate: promotion is the stage
     entry = {"reflection": "lesson", "memory_actions": [],
              "backlog_candidates": [{"summary": "Make late work resumable", "category": "process"}]}
     monkeypatch.setattr(f.pipeline, "_run_reflection", lambda *a, **k: (f.stages.append("reflection"), entry)[1])
@@ -470,7 +461,7 @@ def test_restart_between_grant_and_start_revokes_the_unused_grant_and_resume_spe
     from ouroboros import agent_task_pipeline
     from ouroboros.post_task_checkpoint import late_phase_pause_record
 
-    assert _pause_during_draft(f)["ok"]
+    assert _pause_during_read(f)["ok"]
     real = agent_task_pipeline.recover_pending_root_post_task_synthesis
 
     def dies(*args, resume_task_id="", **kwargs):
@@ -487,6 +478,6 @@ def test_restart_between_grant_and_start_revokes_the_unused_grant_and_resume_spe
     assert real(f.root, f.root) == 0  # Restart: no automatic work
     revoked = late_phase_pause_record(_row(f))["grant"]
     assert revoked["grant_id"] == grant["grant_id"] and revoked["revoke_reason"] == "restart_no_resume"
-    assert _phase(f) == "paused" and f.light.kinds() == ["draft"]
+    assert _phase(f) == "paused" and f.light.kinds() == ["scratchpad"]
     assert _resume(f)["ok"] and _phase(f) == "completed"
-    assert f.light.kinds() == ["draft", "correction"]
+    assert f.light.kinds() == ["scratchpad"] * 3

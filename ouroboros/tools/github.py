@@ -1,4 +1,11 @@
-"""GitHub tools: issues, pull requests, comments, checks."""
+"""GitHub tools: issues, pull requests, comments, checks.
+
+``_gh_run`` is the structured transport read; ``_gh_cmd`` projects it onto the string ABI.
+``GH_TARGET_INVALID`` / ``GH_TARGET_REQUIRED`` refusals enter the tool-result sidecar. A target
+or missing-CLI refusal raised before the invocation's first ``gh`` launch is published
+``completed_no_effect``. The checks reader's literal ``gh api`` annotation path is the one
+subcall that does not take the explicit repo.
+"""
 
 from __future__ import annotations
 
@@ -43,6 +50,22 @@ _GH_STATUS_RE = re.compile(
     r"|^(?:[a-z][a-z ]*: )*HTTP (\d{3})(?::| \(|[ \t\r]*$)",
     re.MULTILINE,
 )
+# gh v2.86.0 ``canMerge`` (pkg/cmd/pr/merge) prints exactly these non-TTY refusals
+# and exits 1 BEFORE ``merge()``: BLOCKED/BEHIND advise --auto then --admin; DIRTY
+# advises --auto, then only without --repo a local conflict hint for the method.
+_PR_MERGE_REFUSAL_RE = re.compile(
+    r"X Pull request [\w.-]+/[\w.-]+#(?P<number>\d+) is not mergeable: (?:"
+    r"(?:the base branch policy prohibits the merge|the head branch is not up to date with the base branch)\.\n"
+    r"To have the pull request merged after all the requirements have been met, add the `--auto` flag\.\n"
+    r"To use administrator privileges to immediately merge the pull request, add the `--admin` flag\."
+    r"|the merge commit cannot be cleanly created\.\n"
+    r"To have the pull request merged after all the requirements have been met, add the `--auto` flag\."
+    r"(?:\nRun the following to resolve the merge conflicts locally:\n"
+    r"  gh pr checkout (?P<checkout>\d+) && git fetch (?P<remote>\S+) (?P<base>\S+)"
+    r" && git (?P<action>merge|rebase) (?P=remote)/(?P=base))?)"
+)
+# Commit counts for listed PRs, by GitHub node id: one fixed read, no commit objects.
+_PR_COMMIT_COUNTS_QUERY = "query($ids:[ID!]!){nodes(ids:$ids){...on PullRequest{id commits{totalCount}}}}"
 
 
 @dataclass(frozen=True)
@@ -54,6 +77,23 @@ class GhResult:
     # "target" is a local refusal and "deadline" a request the checks reader never sent;
     # neither is a subprocess exit or exception.
     failure: str
+
+
+def _merge_refused_before_effect(cmd: List[str], res: subprocess.CompletedProcess, stderr: str) -> bool:
+    """Whether the complete stderr of the merge ``merge_receipts`` sends is gh's own pre-merge refusal.
+
+    Only ``pr merge N --METHOD --match-head-commit SHA [--repo R]``, exit 1 with empty
+    stdout, the whole refusal for N and nothing else; a status, prefix or suffix proves nothing."""
+    args = cmd[1:]
+    if (res.returncode != 1 or res.stdout.strip() or args[:2] != ["pr", "merge"] or len(args) not in (6, 8)
+            or args[3] not in ("--merge", "--squash", "--rebase") or args[4] != "--match-head-commit"
+            or args[6:7] not in ([], ["--repo"])):
+        return False
+    match = _PR_MERGE_REFUSAL_RE.fullmatch(stderr.strip())
+    if match is None or match["number"] != args[2]:
+        return False
+    return match["checkout"] is None or (len(args) == 6 and match["checkout"] == args[2]
+                                         and match["action"] == ("rebase" if args[3] == "--rebase" else "merge"))
 
 
 def _refuse(ctx: ToolContext, text: str, code: str = "TOOL_ARG_ERROR", *, no_effect: bool = False) -> str:
@@ -190,17 +230,11 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
             status = _GH_STATUS_RE.search(err)
             head = " | ".join([line.strip() for line in err.splitlines() if line.strip()][:3])
             head = truncate_within_limit(head, 600)
-            # gh's canMerge refusal precedes its mutation (pkg/cmd/pr/merge).
+            # Classified from the whole stderr, before the bounded head the receipt keeps.
             # HTTP status alone proves nothing about which CLI step failed.
-            pre_effect = (args[:2] == ["pr", "merge"] and not res.stdout.strip() and re.fullmatch(
-                r"X Pull request [\w.-]+/[\w.-]+#\d+ is not mergeable: "
-                r"(?:the base branch policy prohibits the merge|the head branch is not up to date with the base branch)\.\n"
-                r"To have the pull request merged after all the requirements have been met, add the `--auto` flag\.\n"
-                r"To use administrator privileges to immediately merge the pull request, add the `--admin` flag\.",
-                err.strip()) is not None)
             return GhResult(False, "⚠️ GH_ERROR: " + head, res.returncode,
                             int(status.group(1) or status.group(2)) if status else None,
-                            "pre_effect" if pre_effect else "exit")
+                            "pre_effect" if _merge_refused_before_effect(cmd, res, err) else "exit")
         return GhResult(True, res.stdout.strip(), res.returncode, None, "")
     except FileNotFoundError as e:
         missing = str(getattr(e, "filename", "") or "")
@@ -333,12 +367,46 @@ def _close_issue(ctx: ToolContext, number: int, comment: str = "", repo: str = "
         return raw
     return f"✅ Issue #{number} closed."
 
+
+def _pr_commit_counts(ctx: ToolContext, prs: list) -> dict | str:
+    """Exact commit counts of the listed PRs by node id, or the error that withholds the list.
+
+    The list keeps its CLI target; the PR URLs GitHub returned name the one host and
+    repository the single fixed GraphQL read then asks. A count is never guessed."""
+    from ouroboros.merge_receipts import _PR_URL_RE
+
+    def unavailable(reason: str) -> str:
+        return _refuse(ctx, f"⚠️ TOOL_ERROR: commit counts of the listed PRs are unavailable ({reason}); "
+                            "no list is shown without them.", "TOOL_ERROR")
+
+    rows = [(pr, _PR_URL_RE.fullmatch(str(pr.get("url") or "")) if isinstance(pr, dict) else None) for pr in prs]
+    if any(where is None or where[4] != str(pr.get("number")) or not isinstance(pr.get("id"), str)
+           for pr, where in rows) or len({where.groups()[:3] for _pr, where in rows}) != 1:
+        return unavailable("GitHub returned rows without one consistent repository URL and id")
+    ids, host = [pr["id"] for pr, _where in rows], rows[0][1].group(1)
+    if len(set(ids)) != len(ids):
+        return unavailable("GitHub returned a repeated PR id")
+    res = _gh_run(["api", "graphql", "--hostname", host, "--input", "-"], ctx,
+                  input_data=json.dumps({"query": _PR_COMMIT_COUNTS_QUERY, "variables": {"ids": ids}}))
+    if not res.ok:
+        return res.text
+    try:
+        nodes = json.loads(res.text)["data"]["nodes"]
+        counts = {node["id"]: node["commits"]["totalCount"] for node in nodes}
+    except (ValueError, TypeError, KeyError):
+        return unavailable("the count response is malformed")
+    if len(counts) != len(nodes) or set(counts) != set(ids) or any(
+            type(count) is not int or count < 0 for count in counts.values()):
+        return unavailable("the count response does not hold one count for every listed PR")
+    return counts
+
+
 def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20, repo: str = "") -> str:
     args = [
         "pr", "list",
         "--state", state,
         "--limit", str(min(limit, 50)),
-        "--json", "number,title,author,headRefName,baseRefName,createdAt,isDraft,reviewDecision,commits",
+        "--json", "number,title,author,headRefName,baseRefName,createdAt,isDraft,reviewDecision,id,url",
     ]
     raw = _gh_cmd(args, ctx, repo=repo)
     if raw.startswith("⚠️"):
@@ -351,6 +419,9 @@ def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20, repo: str 
 
     if not prs:
         return f"No {state} pull requests found."
+    counts = _pr_commit_counts(ctx, prs)
+    if isinstance(counts, str):
+        return counts
 
     lines = [f"**{len(prs)} {state} PR(s):**\n"]
     for pr in prs:
@@ -360,7 +431,7 @@ def _list_prs(ctx: ToolContext, state: str = "open", limit: int = 20, repo: str 
         draft = " [DRAFT]" if pr.get("isDraft") else ""
         review = pr.get("reviewDecision") or ""
         review_str = f" [{review}]" if review else ""
-        n_commits = len(pr.get("commits", []))
+        n_commits = counts[pr["id"]]
         lines.append(
             f"- **PR #{pr['number']}**{draft}{review_str} {pr['title']}"
             f" (by @{author}, {head}→{base}, {n_commits} commits, created {pr['createdAt'][:10]})"
@@ -467,7 +538,7 @@ def _get_pr(ctx: ToolContext, number: int, repo: str = "") -> str:
             f"  2. create_integration_branch(pr_number={number})\n"
             f"  3. cherry_pick_pr_commits(shas=[...])  # SHAs above; use override_author only for placeholder identities\n"
             f"  4. stage_adaptations()                 # optional; do NOT commit_reviewed on the integration branch\n"
-            f"  5. stage_pr_merge(branch='integrate/pr-{number}') → preflight_review → commit_reviewed\n"
+            f"  5. stage_pr_merge(branch='integrate/pr-{number}') → commit_reviewed\n"
             f"  6. comment_on_pr(number={number}, body='Integrated as ...')"
         )
 
@@ -490,21 +561,22 @@ def _comment_on_pr(ctx: ToolContext, number: int, body: str, repo: str = "") -> 
 def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str,
               review_task_ids: Optional[List[str]] = None, reviewed_head_sha: str = "",
               reviewed_base_sha: str = "", review_scope: str = "full", review_verdict: str = "",
-              repo: str = "") -> str:
+              review_record_id: str = "", repo: str = "") -> str:
     """Thin transport binding; the receipt contract lives in ``merge_receipts``."""
     from ouroboros.merge_receipts import REVIEW_SCOPES, _VERDICT_RE, _sha, run_pr_merge
     from ouroboros.tool_access import canonical_data_root
 
     if review_scope not in REVIEW_SCOPES or (review_verdict and not _VERDICT_RE.fullmatch(review_verdict)):
         return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: review_scope is full|delta; review_verdict is a short word such as PASS.", no_effect=True)
+    record_id = str(review_record_id or "").strip()
     declared = ({"reviewed_head_sha": _sha(reviewed_head_sha), "reviewed_base_sha": _sha(reviewed_base_sha),
                  "scope": review_scope, "verdict": review_verdict}
-                if (reviewed_head_sha or review_verdict or review_task_ids) else None)
+                if (reviewed_head_sha or review_verdict or (review_task_ids and not record_id)) else None)
     receipt = run_pr_merge(
         ctx, lambda args, **kw: _gh_run(args, ctx, repo=repo, **kw), lambda args, **kw: _gh_run(args, ctx, **kw),
         drive_root=canonical_data_root(ctx), task_id=str(ctx.task_id or ""), number=int(number or 0),
         expected_head_sha=expected_head_sha, method=method,
-        review={"declared": declared, "task_ids": list(review_task_ids or [])})
+        review={"declared": declared, "task_ids": list(review_task_ids or []), "record_id": record_id})
     if receipt.get("refused"):
         code = "TOOL_ARG_ERROR" if receipt["refused"] == "arguments" else "TOOL_ERROR"
         return _refuse(ctx, f"⚠️ PR_MERGE_REFUSED: {receipt['refused']} — {receipt.get('detail', '')}", code, no_effect=True)
@@ -639,9 +711,9 @@ def get_tools() -> List[ToolEntry]:
             "name": "pr_merge",
             "description": (
                 "Merge a GitHub pull request so a receipt exists: states the exact head you expect "
-                "and the method (never auto-merge or admin), records what review you declare beside "
-                "what the host observes, reads GitHub back, and writes the receipt to this task's "
-                "record, its card and the PR body. A missing review is recorded loudly, never a lock. "
+                "and the method (never auto-merge or admin), records the host review record you name or "
+                "the review you declare beside what the host observes, reads GitHub back, and writes the "
+                "receipt to this task's record, its card and the PR body. A missing review is recorded loudly, never a lock. "
                 "An unknown or queued merge stays observation/publication-only on repeat calls; no resend. "
                 "Distinct from stage_pr_merge, which stages a local merge for a reviewed commit."
             ),
@@ -656,6 +728,10 @@ def get_tools() -> List[ToolEntry]:
                 "review_scope": {"type": "string", "enum": ["full", "delta"], "default": "full",
                                  "description": "delta = only the change since an earlier review; never counted as whole-PR coverage"},
                 "review_verdict": {"type": "string", "default": "", "description": "The declared verdict word, e.g. PASS"},
+                "review_record_id": {"type": "string", "default": "",
+                                     "description": "Id of the host review record to bind (e.g. the review_record_id commit_reviewed "
+                                                    "returns); the host then reads the reviewed subject and verdict from it instead "
+                                                    "of your declaration. An id with no record is refused before any merge"},
             }, "required": ["number", "expected_head_sha", "method"]},
         }, _pr_merge),
 

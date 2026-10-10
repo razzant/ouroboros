@@ -78,6 +78,9 @@ class SettingsDocumentBusy(TimeoutError):
     A writer wedged inside its hot-reload side effects would otherwise hold
     every later writer forever — the onboarding save among them ("Saving..."
     with nothing ever written). Typed so the endpoints answer it honestly.
+
+    The bound refuses the waiting writer; it never interrupts the holder, which
+    keeps the lock until its body ends.
     """
 
 

@@ -193,7 +193,10 @@ def test_quota_wait_rejoins_call_without_replaying_tools_and_keeps_ledger(elapse
     answer, usage = client.chat(messages, MODEL, model_role="main")
     assert answer == result()["message"]
     assert transport.uploads[0][0]["messages"] == transport.uploads[1][0]["messages"]
-    assert [row["state"] for row in ledger(root)] == ["reserved", "dispatched", "released", "reserved", "dispatched", "settled"]
+    # The never-started release retains its failure evidence before the answered repeat.
+    attempts = ledger(root)
+    assert [(row["state"], row["revision"]) for row in attempts] == [("released", 4), ("settled", 3)]
+    assert attempts[0]["physical_failure"]["stage"] == "raised_exception"
     assert len(usage["ledger_attempt_ids"]) == 2
     rows = list(events.queue)
     assert rows[0]["state"] == "waiting" and rows[-1]["state"] == "resolved"
@@ -204,7 +207,8 @@ def test_quota_wait_rejoins_call_without_replaying_tools_and_keeps_ledger(elapse
     assert controller.paused_seconds() == pytest.approx(2.5)
 
 
-def test_auto_wait_requests_its_model_and_resumes_when_compatible_second_account_recovers(live_wait, monkeypatch):
+@pytest.mark.parametrize("advisory", [False, True])
+def test_auto_wait_requests_its_model_and_resumes_when_compatible_second_account_recovers(live_wait, monkeypatch, advisory):
     _root, transport, client, _controller, events, _decide = live_wait
     recovered = result()
     recovered["route"].update(credentialProfileId="account-b", accountFingerprint="identity-b")
@@ -216,7 +220,8 @@ def test_auto_wait_requests_its_model_and_resumes_when_compatible_second_account
         calls.append((source, profile, requested_model))
         assert requested_model == "exact-model"
         return {"source": source, "credentialProfileId": "account-b",
-                "accountFingerprint": "identity-b", "models": [{"id": "exact-model"}]}
+                "accountFingerprint": "identity-b", "models": [] if advisory else [{"id": "exact-model"}],
+                "admission": {"requestedModel": requested_model, "inventoryAbsence": "advisory" if advisory else "authoritative"}}
 
     monkeypatch.setattr(client, "claudexor_model_catalog", catalog)
     _, usage = client.chat([{"role": "user", "content": "continue exact model"}], MODEL, model_role="main")
@@ -700,7 +705,9 @@ def test_call_can_decline_resource_wait_without_losing_task_binding(live_wait, c
     assert transport.uploads[0][0]["account"] == {"mode": "auto"}
     assert "wait_for_resources" not in json.dumps(transport.uploads[0][0])
     assert model_wait.current_model_wait() is controller and not controller.closed
-    assert [row["state"] for row in ledger(root)] == ["reserved", "dispatched", "released"]
+    attempts = ledger(root)
+    assert [(row["state"], row["revision"]) for row in attempts] == [("released", 4)]
+    assert attempts[0]["physical_failure"]["stage"] == "raised_exception"
 
     answer, usage = call()
     assert answer == result()["message"] and len(transport.accepted_operations) == 3

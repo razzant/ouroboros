@@ -46,7 +46,7 @@ def _protected_paths_block_message(paths, *, runtime_mode: str, action: str) -> 
     return (
         f"⚠️ CORE_PROTECTION_BLOCKED: runtime_mode={runtime_mode!r} refuses "
         f"to {action} protected Ouroboros core/contract/release path(s): {rendered}. "
-        "Use runtime_mode='pro' or 'cyber_pro' and pass the normal triad + scope review before "
+        "Use runtime_mode='pro' or 'cyber_pro' and pass the normal panel review before "
         "committing protected surfaces."
     )
 

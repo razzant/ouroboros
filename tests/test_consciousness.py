@@ -28,8 +28,8 @@ T0 = 1_800_000_000.0
 def _iso(ts):
     return clock_module._iso(ts)
 FLOOR, CEILING, DEFAULT = 900, 14400, 3300
-AVAILABLE = {"status": "available", "limit_usd": 20.0, "accounted_usd": 2.5, "remaining_usd": 17.5,
-             "resets_at": "", "unknown_unmetered": 0}
+AVAILABLE = {"status": "available", "limit_usd": 20.0, "settled_usd": 2.5, "accounted_usd": 2.5,
+             "remaining_usd": 17.5, "resets_at": "", "unknown_unmetered": 0}
 
 
 @pytest.fixture
@@ -204,7 +204,7 @@ def test_a_refused_wake_consumes_no_transition_and_the_admitted_one_persists_obs
 
 @pytest.mark.parametrize('failure', ['write', 'readback', 'corrupt_previous', 'missing_previous'])
 def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkeypatch, failure):
-    from ouroboros import artifacts, consolidator
+    from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
 
     _chat_row(root=clock.root, ts=_iso(T0 + 1), direction='in', chat_id=1, source='web', text='first')
@@ -221,7 +221,7 @@ def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkey
         elif failure == 'missing_previous':
             path.unlink()
         elif failure == 'write':
-            fault.setattr(consolidator, 'retain_memory_source', lambda *a, **kw: (_ for _ in ()).throw(OSError('write failed')))
+            fault.setattr(chat_chain, 'retain_memory_source', lambda *a, **kw: (_ for _ in ()).throw(OSError('write failed')))
         else:
             read = artifacts.read_actor_source_bytes
             fault.setattr(artifacts, 'read_actor_source_bytes', lambda root, task, ref: read(root, task, ref)
@@ -266,14 +266,14 @@ def test_inline_inventory_migrates_and_retains_closed_task_late_review(clock, ve
 @pytest.mark.parametrize('failure', ['write', 'readback', 'bootstrap_write'])
 @pytest.mark.parametrize('restart', [False, True])
 def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, failure, restart):
-    from ouroboros import artifacts, consolidator
+    from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import OBSERVATION_STATE_KEY
     from tests.test_consciousness_wake import _write
 
     _chat_row(root=clock.root, ts=_iso(T0 - 1), direction='in', chat_id=1, source='web', text='before bootstrap')
     with monkeypatch.context() as fault:
         if failure in {'write', 'bootstrap_write'}:
-            fault.setattr(consolidator, 'retain_memory_source', lambda *a, **kw: (_ for _ in ()).throw(OSError('write failed')))
+            fault.setattr(chat_chain, 'retain_memory_source', lambda *a, **kw: (_ for _ in ()).throw(OSError('write failed')))
         else:
             fault.setattr(artifacts, 'read_actor_source_bytes', lambda *a, **kw: b'bad readback')
         if failure == 'bootstrap_write':
@@ -494,13 +494,18 @@ def test_launch_cap_is_the_remaining_allowance_when_no_per_task_cap(clock, monke
     assert clock.launches[0]["metadata"]["root_cost_ceiling_usd"] == 17.5
 
 
-def test_less_than_one_planned_turn_left_is_exhausted(clock, monkeypatch):
-    """A remainder at or below the graceful stop's planning margin would only wake the
-    mind to be told to land at once: the tick skips it as exhausted instead."""
-    from ouroboros.task_pacing import COST_PLANNING_MARGIN_USD
-
-    thin = dict(AVAILABLE, remaining_usd=COST_PLANNING_MARGIN_USD, accounted_usd=20.0 - COST_PLANNING_MARGIN_USD)
+def test_a_thin_allowance_still_wakes_and_only_known_exhaustion_skips(clock, monkeypatch):
+    """Owner 2026-10-07: no extra $3 margin skip. $0.50 of known allowance left is a
+    wake under a $0.50 producer ceiling; only known spend at the limit skips."""
+    thin = dict(AVAILABLE, remaining_usd=0.5, settled_usd=19.5, accounted_usd=60.0)
     monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: dict(thin))
+    assert clock.clock.tick(T0 + FLOOR + 1) == "launched"
+    assert clock.launches[-1]["metadata"]["root_cost_ceiling_usd"] == 0.5
+    clock.launches.clear()
+    clock.clock._last_wake_task_id, clock.clock._next_wake_at = "", 0.0
+    clock.live = None
+    spent = dict(AVAILABLE, status="exhausted", remaining_usd=0.0, settled_usd=20.0, accounted_usd=20.0)
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: dict(spent))
     assert clock.clock.tick(T0 + FLOOR + 1) == "skipped:allowance_exhausted"
     assert clock.launches == []
     # On an exhausted day every root completion would otherwise pull the clock to "now" and cost a
@@ -592,6 +597,8 @@ def _launched(clock, now=T0 + FLOOR + 1):
 
 
 def test_finish_schedules_the_chosen_interval_clamped(clock, monkeypatch):
+    from ouroboros.task_results import write_task_result
+    write_task_result(clock.root, "wake0001", "completed", result="Finished")
     finished = _launched(clock)
     monkeypatch.setattr(clock_module.time, "time", lambda: T0 + 5000)
     clock.store[INTERVAL_STATE_KEY] = 100  # below the floor
@@ -762,3 +769,33 @@ def test_start_after_a_long_off_period_never_announces_a_past_wake(clock, monkey
     message = clock.clock.start()
     assert clock.clock.enabled and clock.clock.next_wake_at == T0 + 5000
     assert "next wake-up at" in message
+
+
+@pytest.mark.parametrize("pause_state", ["paused", "pausing"])
+def test_finish_parked_wake_keeps_slot_and_runner_backoff(clock, monkeypatch, pause_state):
+    from ouroboros.task_results import write_task_result
+    write_task_result(clock.root, "wake0001", "scheduled",
+                      budget_pause={"state": pause_state, "reason": "budget"})
+    clock.clock._backoff = 8
+    clock.clock._wake_finished("wake0001", True)
+    snapshot = clock.clock.status_snapshot()
+    assert snapshot["last_wake_outcome"] == pause_state
+    assert snapshot["tasks_running"] == 1
+    assert clock.clock._backoff == 1
+
+
+def test_finish_unreadable_wake_never_reports_done(clock, monkeypatch):
+    import ouroboros.task_results as results
+    monkeypatch.setattr(results, "load_task_result", lambda *a, **k: (_ for _ in ()).throw(OSError("read failed")))
+    clock.clock._wake_finished("wake0001", True)
+    assert clock.clock.status_snapshot()["last_wake_outcome"] == "unknown"
+    assert clock.clock._backoff == 1
+
+
+def test_finish_before_dispatch_budget_pause_is_not_done(clock):
+    from ouroboros.task_results import write_task_result
+    write_task_result(clock.root, "wake0001", "scheduled", reason_code="budget_exhausted",
+                      resource_limit={"replay_safe": True, "physical_calls": 0})
+    clock.clock._wake_finished("wake0001", True)
+    assert clock.clock.status_snapshot()["last_wake_outcome"] == "paused"
+    assert clock.clock._backoff == 1

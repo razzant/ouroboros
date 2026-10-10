@@ -247,6 +247,11 @@ def _terminal_payload(run_id: str, detail: Dict[str, Any],
     }
     if isinstance(detail.get("attemptExecution"), list):
         payload["attempt_execution"] = detail["attemptExecution"]
+    from ouroboros.delegate_continuation import terminal_continuity
+
+    # The engine's own continuation facts: `resumable` (why the work stopped, its
+    # limit window, which carriers can continue it) and one line per continued try.
+    payload.update(terminal_continuity(run_id, summary))
     if authority.delegated:
         payload["containment"] = _containment_evidence(detail)
     # A retry may read already-completed work even when its recorded profile
@@ -261,19 +266,19 @@ def _terminal_payload(run_id: str, detail: Dict[str, Any],
         # The codex-shaped question (B4): that lane has no mid-run channel, so a
         # question arrives as this TERMINAL. There is deliberately NO rerun verb
         # here — the engine's rerun_with_feedback would start a run outside this
-        # task's custody trail — so the honest answer path is a plain new start.
+        # task's custody trail — so the answer is a continuation start this task holds.
         payload["input_required_note"] = (
             "This run ended NEEDING INPUT (outcome_facts.reason=input_required — "
             "see outcome_facts.work_state.required_inputs). Its harness has no "
-            "mid-run question channel, so the question arrives as this terminal. Answer it by "
-            "starting a plain NEW delegate_start(subagent_id=..., prompt=...) whose "
-            "prompt carries the original "
-            "assignment plus the answers; custody of the new run stays with you. "
+            "mid-run question channel, so the question arrives as this terminal. Answer it with "
+            f"delegate_start(subagent_id=..., continue_from='{run_id}', prompt=<your answers>) (a configured "
+            "session omits subagent_id): the NEW run continues "
+            "this work where the engine can, and its custody stays with you. "
             "Do not look for a rerun/decision verb — none exists on this surface."
         )
         # The typed twin of the note (serial addressed turns): this lane's next
-        # turn is a NEW physical run, never a resumed session — the honest
-        # opposite of the waiting_on_user payload's ``same_session``.
+        # turn is a NEW physical run (a continuation of this one), never this
+        # live session — the honest opposite of waiting_on_user's ``same_session``.
         payload["continuation"] = "new_physical_run"
     return payload
 
@@ -406,6 +411,8 @@ def _delivered_terminal_payload(ctx: ToolContext, run_id: str, detail: Dict[str,
     full = _terminal_payload(run_id, detail, authority)
     if entry is not None:
         _delegate().add_terminal_source_verification(full, entry)
+        if entry.superseded_by:  # its snapshot and work belong to that continuation's one capture now
+            full["superseded_by"] = entry.superseded_by
     # Requested-vs-applied model, the review lane's own lexicon and rule
     # (AgentSessionReviewExecutor): compared only when BOTH are non-empty —
     # the engine writes aliases ('sonnet' beside 'claude-opus-5'), so a

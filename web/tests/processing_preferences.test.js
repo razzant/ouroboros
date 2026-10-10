@@ -3,8 +3,8 @@ import test from 'node:test';
 import { createModelRolesEditor } from '../modules/model_roles.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingSelectHtml,
     processingIntentLabel, processingExecutionText, processingCapabilityNote, processingDetailsHtml } from '../modules/route_editor_primitives.js';
-import { buildAvailableSubagentsSetting, parseAvailableSubagentsSetting, availableSubagentRowMarkup } from '../modules/subagents_settings.js';
-import { buildReviewerSlotsSetting, describeSubagentReference, describeLastExecution, reviewerProcessingInheritance } from '../modules/reviewer_slots.js';
+import { buildAvailableSubagentsSetting, parseAvailableSubagentsSetting, availableSubagentRowMarkup,
+    lastReviewRunText } from '../modules/subagents_settings.js';
 import { onboardingSettingsDraft } from '../modules/onboarding_agents_step.js';
 
 const contract = { modelSlots: [
@@ -12,16 +12,6 @@ const contract = { modelSlots: [
     { slot: 'light', label: 'Light', settingKey: 'OUROBOROS_MODEL_LIGHT', inputId: 'light' },
     { slot: 'fallback', label: 'Fallback', settingKey: 'OUROBOROS_MODEL_FALLBACKS', inputId: 'fallback' },
 ] };
-
-test('legacy deep-review inherits its role while resolved display facts never become authored settings', () => {
-    const row = { synthesizedFrom: 'OUROBOROS_MODEL_DEEP_SELF_REVIEW', materialized: false };
-    assert.equal(reviewerProcessingInheritance(row, 'fast', null, { deep_review_slot_1: 'economy' }), 'economy');
-    assert.equal(reviewerProcessingInheritance(row, 'fast', { deep_review: 'standard' }), 'standard');
-    assert.equal(reviewerProcessingInheritance(row, 'economy', {}), 'economy');
-    assert.equal(reviewerProcessingInheritance({ ...row, materialized: true }, 'fast', { deep_review: 'economy' }), 'fast');
-    assert.equal(reviewerProcessingInheritance({}, 'fast', { deep_review: 'economy' }), 'fast');
-    assert.deepEqual(row, { synthesizedFrom: 'OUROBOROS_MODEL_DEEP_SELF_REVIEW', materialized: false });
-});
 
 test('role processing survives save/reopen independently of identical model names and native slugs', () => {
     const settings = {
@@ -87,19 +77,17 @@ test('actor overrides are optional, canonical and preserved on the existing rout
     assert.match(invalid.error, /processing/);
 });
 
-test('inline reviewers persist overrides while actor references never persist copied or resolved modes', () => {
-    const inline = { slot_id: 't1', route: { kind: 'api_chat', target_id: 'openai::same' }, processing_preference: 'standard' };
-    const reference = { slot_id: 's1', subagent_id: 'worker', processing_preference: 'economy', resolved_processing_preference: 'fast' };
-    const saved = JSON.parse(buildReviewerSlotsSetting({ triad: [inline], scope: [reference],
-        advisory: { ...inline, enabled: true }, deepReview: { ...reference, materialized: true } }));
-    assert.equal(saved.triad[0].processing_preference, 'standard');
-    assert.equal(saved.advisory.processing_preference, 'standard');
-    assert.deepEqual(saved.scope[0], { slot_id: 's1', subagent_id: 'worker' });
-    assert.deepEqual(saved.deep_review, { subagent_id: 'worker' });
-    const roster = [{ subagent_id: 'worker', route: { kind: 'api_model', target_id: 'openai::same' } }];
-    assert.match(describeSubagentReference('worker', roster, { processingPreference: 'fast' }), /processing Fast.*from Models/);
-    roster[0].processing_preference = 'standard';
-    assert.match(describeSubagentReference('worker', roster, { processingPreference: 'fast' }), /processing Standard.*override/);
+test('a reviewer is a catalog row: its processing override and its mark persist together', () => {
+    const row = { subagent_id: 'worker', name: 'Worker', recommended_use: '',
+        route: { kind: 'api_model', target_id: 'openai::same' }, processing_preference: 'standard', review_eligible: true };
+    const saved = buildAvailableSubagentsSetting({ enabled: true, items: [row] });
+    assert.equal(saved.items[0].processing_preference, 'standard');
+    assert.equal(saved.items[0].review_eligible, true);
+    const reopened = parseAvailableSubagentsSetting(saved);
+    assert.equal(reopened.error, '');
+    assert.deepEqual(buildAvailableSubagentsSetting(reopened.setting), saved);
+    const { processing_preference: _dropped, ...inherited } = row;
+    assert.ok(!('processing_preference' in buildAvailableSubagentsSetting({ enabled: true, items: [inherited] }).items[0]));
 });
 
 test('only existing execution receipts disclose applied modes; unsupported speed stays editable', () => {
@@ -109,7 +97,7 @@ test('only existing execution receipts disclose applied modes; unsupported speed
         observedNative: [], reason: 'Processing preference unsupported', source: 'native' };
     assert.match(processingExecutionText(receipt), /Applied processing not reported.*requested Fast.*submitted service auto/);
     assert.doesNotMatch(processingExecutionText(receipt), /Applied processing: Fast/);
-    assert.match(describeLastExecution({ effective: { model: 'x', processing: { ...receipt, observed: 'mixed' } } }), /Applied processing: Mixed/);
+    assert.match(lastReviewRunText({ effective: { model: 'x', processing: { ...receipt, observed: 'mixed' } } }), /Applied processing: Mixed/);
     assert.equal(processingCapabilityNote('fast', undefined), '');
     assert.match(processingCapabilityNote('fast', { modes: ['standard'] }), /not advertised.*Ordinary service may be used/);
     assert.doesNotMatch(processingSelectHtml('', 'fast'), /disabled/);

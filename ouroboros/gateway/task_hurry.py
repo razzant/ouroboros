@@ -4,8 +4,8 @@ Split out of ``gateway/tasks.py`` by the module-size boundary (the same shape as
 ``gateway/task_events.py``); ``gateway.tasks`` re-exports ``api_task_hurry`` so
 route wiring and tests keep one namespace.
 
-The request body carries ONLY a client-generated stable ``request_id`` — there
-is no text field and no chat side effect anywhere on this path (§19.7.2 items
+The request body carries ONLY a client-generated stable ``request_id`` (a body
+with any extra field is refused, never ignored) — there is no text field and no chat side effect anywhere on this path (§19.7.2 items
 1-4): no ``steer_task``, no ``owner_text``, no ``send_message``, no outbox row,
 no routing receipt, no WS chat frame. The acknowledgement is the HTTP response;
 durable facts are the mailbox control, the ``owner_hurry`` task-result
@@ -36,7 +36,10 @@ def _admit_hurry_locked(task_id: str) -> Tuple[Optional[Dict[str, Any]], str, in
     live membership (RUNNING or PENDING), root-only eligibility (managed
     children refused), sealed-acceptance-fence refusal, and the cancel-pending
     re-check all happen inside one transaction so a racing cancel ingress and
-    this admission cannot both win.
+    this admission cannot both win. For a queue task (RUNNING or PENDING) it also
+    seeds an absent task-result lifecycle via ``ensure_control_task_result``
+    (create-only; an existing record is never rewritten); a direct-chat turn
+    never gets one.
     """
     from supervisor import queue as q
 

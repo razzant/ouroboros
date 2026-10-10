@@ -29,7 +29,7 @@ function errorText(data) {
 }
 
 export async function fetchJson(url, init = {}, options = {}) {
-    const response = await apiFetch(url, init);
+    const response = await (options.fetchImpl || apiFetch)(url, init);
     let data = null;
     try {
         data = await response.json();
@@ -58,6 +58,51 @@ export function jsonPost(url, payload = {}, options = {}) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
     }, options);
+}
+
+/** Exact-profile refresh; omitted target keeps the existing full refresh. */
+export function refreshAccountResources(target, options = {}) {
+    return jsonPost('/api/claudexor/quota/refresh', target ? { target } : {}, options);
+}
+
+/** The caller retains BOTH request and key until this logical operation settles. */
+export function createAccountReset(request, key, options = {}) {
+    return fetchJson('/api/claudexor/account-resets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+        body: JSON.stringify(request),
+    }, options);
+}
+
+export function getAccountReset(operationId, options = {}) {
+    return fetchJson(`/api/claudexor/account-resets/${encodeURIComponent(operationId)}`,
+        { cache: 'no-store' }, options);
+}
+
+/** Passive inspection; the host never starts an engine for this read. */
+export function harnessMaintenanceInventory({ harness = '', fresh = false, checkLatest = false } = {}) {
+    const params = new URLSearchParams();
+    if (harness) params.set('harness', harness);
+    if (fresh) params.set('fresh', 'true');
+    if (checkLatest) params.set('checkLatest', 'true');
+    return fetchJson(`/api/claudexor/maintenance/harnesses${params.size ? `?${params}` : ''}`, { cache: 'no-store' });
+}
+
+/** Reuse both key and body when the reply to an accepted request was lost. */
+export function startHarnessMaintenance(payload, idempotencyKey) {
+    return fetchJson('/api/claudexor/maintenance/operations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify(payload),
+    });
+}
+
+export function harnessMaintenanceOperation(operationId) {
+    return fetchJson(`/api/claudexor/maintenance/operations/${encodeURIComponent(operationId)}`, { cache: 'no-store' });
+}
+
+export function cancelHarnessMaintenance(operationId) {
+    return fetchJson(`/api/claudexor/maintenance/operations/${encodeURIComponent(operationId)}/cancel`, { method: 'POST' });
 }
 
 /**
@@ -260,6 +305,10 @@ export function updateStrategyForPlan(plan = {}) {
 }
 
 export const apiClient = {
+    harnessMaintenanceInventory,
+    startHarnessMaintenance,
+    harnessMaintenanceOperation,
+    cancelHarnessMaintenance,
     /** Read a recent window or replay one opaque, room-bound history page. */
     chatHistory: ({ chatId = 1, cursor = null, signal } = {}) => {
         const params = new URLSearchParams();
@@ -272,7 +321,20 @@ export const apiClient = {
     health: () => fetchJson('/api/health', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').StateResponse>} */
     state: () => fetchJson('/api/state', { cache: 'no-store' }),
+    /** One composer file into the upload store. @returns {Promise<import('./api_types.js').UploadResponse>} */
+    uploadChatAttachment: (file) => {
+        const body = new FormData();
+        body.append('file', file);
+        return fetchJson('/api/chat/upload', { method: 'POST', body }, { rejectOkFalse: true });
+    },
     settings: () => fetchJson('/api/settings', { cache: 'no-store' }),
+    /** @returns {Promise<import('./model_route_types.js').WebSearchRoute>} */
+    webSearchPreview: (selection = {}) => fetchJson(
+        `/api/settings?${new URLSearchParams({ websearch_preview: '1', ...selection })}`, { cache: 'no-store' }),
+    /** @returns {Promise<import('./model_route_types.js').ResponseLimitPreview>} */
+    responseLimitPreview: ({ model, local = false, account = '' }) => fetchJson(
+        `/api/settings?${new URLSearchParams({ response_limit_preview: '1', model, local: String(Boolean(local)), account })}`,
+        { cache: 'no-store' }),
     /** @param {{key: string}|{mcp_server_id: string}} selector @returns {Promise<{value: string}>} */
     revealSettingsSecret: (selector) => jsonPost('/api/settings/secret', selector),
     /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
@@ -322,6 +384,7 @@ export const apiClient = {
     /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
     logsTail: (name, limit = 2000) => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
+    /** @returns {Promise<import('./model_route_types.js').ResponseLimitAckResponse|Object>} */
     ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
     /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
     openAICompatibleModels: (payload) => jsonPost('/api/openai-compatible/models', payload),

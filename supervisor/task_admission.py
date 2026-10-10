@@ -1,4 +1,10 @@
-"""Atomic admission transitions for the managed task queue."""
+"""Atomic admission transitions for the managed task queue.
+
+Ingress ids are guarded by token-owned reservations: ``reserve_task_admission``
+runs before the caller creates drives, attachments or workspace artifacts, a
+different token on a live id is refused as ``duplicate_task_id``, and only the
+owning token can release it. A retry cannot therefore create a second task.
+"""
 
 from __future__ import annotations
 
@@ -334,6 +340,10 @@ def restored_handoff_unproven(task: dict, existing: Optional[dict], *, ancestor_
     An unreadable ancestor is neither interruption nor permission: both wait.
     """
     existing = existing or {}
+    if "_working_recovery" in task:
+        from supervisor import queue
+
+        return ancestor_unknown or not _working_resume_granted(task, queue.DRIVE_ROOT, existing=existing)
     possible = (bool(existing.get("started_at")) or existing.get("admitted_dispatch", "none") != "none"
                 or ancestor_unknown)
     if task.get("project_id"):
@@ -363,7 +373,7 @@ def enqueue_with_admission_receipt(task: Dict[str, Any], *, receipt_required: bo
         window = queue.consciousness_admission_window(task)
         if window is not None:
             enqueue_kwargs["consciousness_window"] = window
-    with queue._queue_lock:
+    with queue.prepared_root_billing(task), queue._queue_lock:  # the ledger read happens before the lock
         admitted = queue.enqueue_task(task, **enqueue_kwargs)
         if not isinstance(admitted, dict) or admitted.get("_admission_blocked"):
             return admitted
@@ -400,17 +410,23 @@ def enqueue_with_admission_receipt(task: Dict[str, Any], *, receipt_required: bo
 
 
 def record_project_dispatch_possible(task: dict) -> bool:
-    """Persist possible handoff for scope-verifiable work beside admitted_dispatch.
+    """Persist possible handoff for scoped work and every saved-work successor.
 
     Assignment reads back 'possible' before handoff, so even an older PENDING
-    snapshot cannot overrule it if the best-effort RUNNING mirror fails. This
-    result fact never becomes 'none'; fresh admission's positive 'none' lives
+    snapshot cannot overrule it if the best-effort RUNNING mirror fails. Its
+    attempt mark never decreases; fresh admission's positive 'none' lives
     on the queue row. No early result may preempt the admission receipt owner.
     """
-    if not task.get("project_id") and task.get("_project_scope_none") is not True:
+    if not task.get("project_id") and task.get("_project_scope_none") is not True and "_working_recovery" not in task:
         return True
     from supervisor import queue
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
+
+    attempt = task.get("_attempt") or 1
+    if type(attempt) is not int or attempt < 1:
+        return False
+    source = _working_source(task, queue.DRIVE_ROOT) if "_working_recovery" in task else None
+    accepted = [False]
 
     def project(current, _incoming):
         if (current.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED}
@@ -418,20 +434,74 @@ def record_project_dispatch_possible(task: dict) -> bool:
             if current.get("_owner_hold"):
                 task["_owner_hold"] = current["_owner_hold"]
             return None
-        return {"admitted_dispatch": "possible", "status": current.get("status") or STATUS_REQUESTED}
+        marked = current.get("admitted_dispatch_attempt")
+        if (marked is not None and (type(marked) is not int or marked < 1 or marked > attempt)
+                or "admitted_dispatch_attempt" in current and marked is None
+                or source is not None and not _working_attempt_unstarted(task, current, source)):
+            return None
+        accepted[0] = True
+        return {"admitted_dispatch": "possible", "admitted_dispatch_attempt": attempt,
+                "status": current.get("status") or STATUS_REQUESTED}
 
     try:
         written = write_task_result(queue.DRIVE_ROOT, task["id"], STATUS_REQUESTED,
                                     _field_projector=project, strict_existing_dict=True)
-        if written is False:
+        if written is False or not accepted[0]:
             return False
         stored = load_task_result(queue.DRIVE_ROOT, task["id"], strict=True) or {}
         return (stored.get("admitted_dispatch") == "possible"
+                and type(stored.get("admitted_dispatch_attempt")) is int
+                and stored["admitted_dispatch_attempt"] == attempt
                 and stored.get("status") not in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED}
                 and not stored.get("_owner_hold"))
     except Exception:
         log.warning("Project dispatch evidence unavailable for %s", task.get("id"), exc_info=True)
         return False
+
+
+def _working_source(task: dict, drive_root: Any) -> dict:
+    from ouroboros.working_checkpoint import recovery_source_for_task
+
+    try:
+        return recovery_source_for_task(pathlib.Path(task.get("budget_drive_root") or drive_root), task)
+    except (OSError, ValueError, TypeError, KeyError):
+        log.warning("Saved work source could not authorize dispatch for %s", task.get("id"), exc_info=True)
+        return {}
+
+
+def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
+    """An exact source permits its next attempt only before that attempt's handoff.
+
+    New launchers stamp the attempt BEFORE put, including when the RUNNING
+    mirror later fails. An old source with no addressed mark proves no such
+    protocol; retain it rather than guess. Earlier attempt marks never reset.
+    """
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
+
+    if (not source or stored.get("task_id") != task.get("id")
+            or not stored.get("status") or stored.get("admission_outcome") == "never_admitted"
+            or stored.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED}):
+        return False
+    target = task["_attempt"]  # the exact-source reader validated this integer
+    marked = stored.get("admitted_dispatch_attempt")
+    if "admitted_dispatch_attempt" in stored:
+        if type(marked) is not int or not 0 < marked < target:
+            return False
+    elif (type(source.get("retained_work_dispatch_protocol")) is not int
+          or source["retained_work_dispatch_protocol"] != 1):
+        return False
+    observed = stored.get("task_attempt")
+    return ("task_attempt" not in stored
+            or type(observed) is int and 0 < observed < target)
+
+
+def _working_resume_granted(task: dict, drive_root: Any, *, existing: Optional[dict] = None) -> bool:
+    source = _working_source(task, drive_root)
+    if not source:
+        return False
+    stored = existing if existing is not None else load_task_result(
+        pathlib.Path(task.get("budget_drive_root") or drive_root), str(task.get("id") or ""), strict=True) or {}
+    return _working_attempt_unstarted(task, stored, source)
 
 
 def _exact_resume_granted(task: dict, drive_root: Any) -> bool:
@@ -534,7 +604,9 @@ def revalidate_project_holds() -> None:
             # old RUNNING mirror was best-effort. Fresh queue admission supplies
             # positive 'none'; canonical possible handoff always vetoes that row.
             stored = load_task_result(queue.DRIVE_ROOT, tid, strict=True) or {}
-            granted = owner_resume or _exact_resume_granted(task, queue.DRIVE_ROOT) or assisted_resume_authorizes(task, stored)
+            granted = (owner_resume or _exact_resume_granted(task, queue.DRIVE_ROOT)
+                       or _working_resume_granted(task, queue.DRIVE_ROOT, existing=stored)
+                       or assisted_resume_authorizes(task, stored))
             if (stored.get("admission_outcome") == "never_admitted"
                     or not granted and (
                         stored.get("status") != STATUS_SCHEDULED or stored.get("started_at")
@@ -790,7 +862,7 @@ def subagent_schedule_preflight(
             ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
             parent_id=evt.get("parent_task_id"),
             root_task_id=str(evt.get("root_task_id") or evt.get("parent_task_id") or tid),
-            role=str(evt.get("role") or "researcher"), result_fields={},
+            role=str(evt.get("role") or "").strip(), result_fields={},
             detail=(
                 f"{label} not scheduled: the existing durable result for this task id "
                 "is unreadable, so its identity authority was preserved."

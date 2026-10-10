@@ -37,6 +37,9 @@ DEFAULT_POLICY = POLICY_CHECK
 
 # Must cover every built-in exported from ouroboros/tools; invariant-tested.
 TOOL_POLICY: Dict[str, str] = {
+    # Typed host maintenance enforces existing actor/resource/Pause authority.
+    "inspect_harness": POLICY_SKIP,
+    "maintain_harness": POLICY_SKIP,
     # Read-only / trivially safe.
     "read_file": POLICY_SKIP,
     "list_files": POLICY_SKIP,
@@ -46,6 +49,7 @@ TOOL_POLICY: Dict[str, str] = {
     "recent_tasks": POLICY_SKIP,
     "live_roots": POLICY_SKIP,
     "knowledge_read": POLICY_SKIP,
+    "memory_read": POLICY_SKIP,
     "knowledge_list": POLICY_SKIP,
     "journal_read": POLICY_SKIP,
     "workpad_read": POLICY_SKIP,
@@ -90,6 +94,8 @@ TOOL_POLICY: Dict[str, str] = {
     "commit_reviewed": POLICY_SKIP,
     "vcs_commit_reviewed": POLICY_SKIP,
     "knowledge_write": POLICY_SKIP,
+    "chronicle_write": POLICY_SKIP,
+    "memory_mark": POLICY_SKIP,
     "journal_write": POLICY_SKIP,
     "workpad_write": POLICY_SKIP,
     "update_focus": POLICY_SKIP,
@@ -140,6 +146,9 @@ TOOL_POLICY: Dict[str, str] = {
     "discard_child_result": POLICY_SKIP,
     "override_delegation_constraint": POLICY_SKIP,
     "request_restart": POLICY_SKIP,
+    # Provisions (or rebinds) this task's own body candidate under the isolated worktree
+    # root: no serving-tree write, no external effect; the mode gates live in the handler.
+    "prepare_self_change": POLICY_SKIP,
     "request_deep_self_review": POLICY_SKIP,
     "set_tool_timeout": POLICY_SKIP,
     "toggle_evolution": POLICY_SKIP,
@@ -161,6 +170,7 @@ TOOL_POLICY: Dict[str, str] = {
     "enable_tools": POLICY_SKIP,
     "preflight_review": POLICY_SKIP,
     "advisory_review": POLICY_SKIP,  # compat alias of preflight_review
+    "review_change": POLICY_SKIP,
     "start_service": POLICY_CHECK_CONDITIONAL,
     "stop_service": POLICY_SKIP,
 

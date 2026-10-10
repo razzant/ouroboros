@@ -2,13 +2,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import threading
-import time
 
 import pytest
 
 from ouroboros import usage_accounting as ua
-from ouroboros import usage_compaction as compaction
+from ouroboros import usage_store
 from ouroboros.transport_custody import ProviderNotDispatched, release_pre_dispatch_attempt
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def reserve(root):
 
 def rows(root):
     with ua._locked(root):
-        return ua._read_records_locked_cached(root)
+        return ledger_rows(root)
 
 
 def test_late_receipt_replaces_the_bound_once(root):
@@ -55,29 +55,29 @@ def test_late_receipt_replaces_the_bound_once(root):
 
 def test_carried_bound_and_observed_revision_are_authoritative(root):
     attempt = reserve(root)
-    observed = rows(root)[-1]["seq"]
+    observed = rows(root)[-1]["revision"]
     ua.mark_unresolved(attempt, "newer evidence")
-    assert ua.terminalize_abandoned_attempt(attempt, reason="dead", expected_seq=observed) == "unresolved"
-    assert len(rows(root)) == 3
+    assert ua.terminalize_abandoned_attempt(attempt, reason="dead", expected_revision=observed) == "unresolved"
+    assert [(row["state"], row["revision"]) for row in rows(root)] == [("unresolved", 3)]
     forged_bound = replace(attempt, reservation_upper_bound_usd=99)
     assert ua.terminalize_abandoned_attempt(forged_bound, reason="dead") == "settled"
     assert ua.usage_projection(root)["accounted_usd"] == 1.25
     assert ua.terminalize_abandoned_attempt(forged_bound, reason="again") == "settled"
-    assert len(rows(root)) == 4
+    assert [(row["state"], row["revision"]) for row in rows(root)] == [("settled", 4)]
 
 
 def test_real_settlement_wins_race_with_administrative_close(root, monkeypatch):
     attempt = reserve(root)
     entered, release = threading.Event(), threading.Event()
-    append = ua._append_rows_locked
+    write = usage_store.Txn.write
 
-    def held_append(root, records, additions, **kwargs):
-        if additions[0].get("cost_usd") == .2:
+    def held_write(txn, row, previous=None):
+        if row.get("cost_usd") == .2:
             entered.set()
             assert release.wait(5)
-        return append(root, records, additions, **kwargs)
+        return write(txn, row, previous)
 
-    monkeypatch.setattr(ua, "_append_rows_locked", held_append)
+    monkeypatch.setattr(usage_store.Txn, "write", held_write)
     with ThreadPoolExecutor(2) as pool:
         actual = pool.submit(ua.settle_attempt, attempt, cost_usd=.2, cost_final=True)
         try:
@@ -87,7 +87,8 @@ def test_real_settlement_wins_race_with_administrative_close(root, monkeypatch):
             release.set()
         actual.result(5)
         assert abandoned.result(5) == "settled"
-    assert len(rows(root)) == 3
+    [row] = rows(root)
+    assert (row["state"], row.get("settle_reason"), row["revision"]) == ("settled", None, 3)
     assert ua.usage_projection(root)["confirmed_usd"] == .2
 
 
@@ -100,16 +101,18 @@ def test_late_never_started_proof_releases_without_a_physical_call(root):
     assert projection["cost_final"] is True
 
 
-def test_late_receipt_remains_writable_after_real_compaction(root, monkeypatch):
+def test_late_receipt_remains_writable_after_export_and_reimport(root):
     for _ in range(20):
         ua.settle_attempt(reserve(root), cost_usd=.01, cost_final=True)
     attempt = reserve(root)
     ua.terminalize_abandoned_attempt(attempt, reason="owner ended")
-    monkeypatch.setattr(compaction, "_fold_clock", lambda: time.time() + 1_000_000)
-    with ua._locked(root) as heartbeat:
-        assert compaction.compact_usage_ledger_locked(root, heartbeat=heartbeat)
-    assert any(row["kind"] == "usage_baseline" for row in rows(root))
+    # Downgrade export, then the next upgrade's import: the abandoned
+    # settlement keeps its one late-receipt right across both.
+    assert usage_store.export_journal(root)["attempts"] == 21
+    assert rows(root)[-1]["settle_reason"] == "abandoned"
     ua.settle_attempt(attempt, {"prompt_tokens": 4}, cost_usd=.1, cost_final=True)
     final = ua.usage_breakdown(root)
     assert final["confirmed_usd"] == .3 and final["physical_calls"] == 21
     assert final["cost_final"] is True
+    with pytest.raises(ua.UsageAccountingError):
+        ua.settle_attempt(attempt, {"prompt_tokens": 4}, cost_usd=.2, cost_final=True)

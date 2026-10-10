@@ -239,7 +239,8 @@ def project_origin_rows(drive_root: Any, project_chat_id: int) -> List[Dict[str,
     """Origin rows a Project lens can SYNTHESIZE when the canonical row is gone.
 
     Only bindings that carry ``source_text`` qualify (cross-thread origins — the
-    binding is the retention-proof copy of the message that started the project).
+    binding is the retention-proof copy of the message that started the project),
+    with the attachment refs, ``source`` and placeholder mark recorded from its row.
     Deduplicated by complete origin identity so several bindings created from one
     owner message yield one row."""
     from ouroboros.projects_registry import project_task_bindings
@@ -264,7 +265,11 @@ def project_origin_rows(drive_root: Any, project_chat_id: int) -> List[Dict[str,
         if identity in seen:
             continue
         seen.add(identity)
-        rows.append({"ref": dict(ref), "text": text, "origin_id": project_origin_identity(ref)})
+        media = row.get("source_attachments")
+        rows.append({"ref": dict(ref), "text": text, "origin_id": project_origin_identity(ref), **({
+            "attachments": media, "channel": str(row.get("source_channel") or ""),
+            "text_placeholder": row.get("source_text_placeholder") is True,
+        } if isinstance(media, list) and media else {})})
     return rows
 
 
@@ -280,6 +285,9 @@ def bound_room_chat(bindings: Dict[str, int], row: Dict[str, Any]) -> int:
 def room_membership(chat_id: int, project_chat_ids: set, source_refs: list,
                     bindings: Dict[str, int]):
     """Canonical room membership shared by history and evidence readers.
+
+    ``gateway.history_segments.room_segment_lens`` mirrors the Project admissions
+    below to skip archives; change both together.
 
     Presentation-only hiding and cross-room question pointers belong to the UI
     caller. A room source retains the actual cognitive result as well.
@@ -306,38 +314,6 @@ def room_membership(chat_id: int, project_chat_ids: set, source_refs: list,
         return entry_chat not in project_chat_ids and not bound
 
     return matches
-
-
-def project_recent_dialogue(
-    memory: Any, project_chat_id: int, max_entries: int,
-) -> tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
-    """Focused recent rows plus retention-proof cross-thread owner origins."""
-    from ouroboros.projects_registry import all_task_bindings
-
-    try:
-        bound = all_task_bindings(memory.drive_root)
-    except Exception:
-        bound = {}
-    refs = source_refs_for_project(memory.drive_root, project_chat_id)
-    matches = room_membership(project_chat_id, {project_chat_id}, refs, bound)
-    entries, coverage = memory.read_unconsolidated_chat(
-        memory.load_dialogue_meta(), max_entries,
-        predicate=lambda row: matches(_row_chat_id(row), row),
-    )
-    present_ref_keys = set()
-    for entry in entries:
-        present_ref_keys.update(_entry_source_identities(entry))
-    retained: List[Dict[str, Any]] = []
-    for origin in project_origin_rows(memory.drive_root, project_chat_id):
-        ref = origin.get("ref") if isinstance(origin.get("ref"), dict) else {}
-        if _source_ref_identity(ref) in present_ref_keys:
-            continue
-        retained.append({
-            "chat_id": ref.get("chat_id"), "client_message_id": ref.get("client_message_id"),
-            "ts": ref.get("ts"), "direction": "in", "text": origin.get("text"),
-            "project_origin_projection": True,
-        })
-    return entries, coverage, retained
 
 
 def _source_ref_identity(ref: Dict[str, Any]) -> Optional[tuple]:
@@ -388,7 +364,7 @@ def matching_project_origin(entry: dict, refs: list) -> str:
 
 def resolve_owner_message_source(drive_root: Any, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Stream the exact named owner source across the durable generation chain."""
-    from ouroboros.consolidator import _ordered_chat_generation_paths
+    from ouroboros.chat_chain import _ordered_chat_generation_paths
 
     live = pathlib.Path(drive_root) / "logs" / "chat.jsonl"
     ref_key = _source_ref_identity(ref)
@@ -499,6 +475,7 @@ def append_chat_annotation(
     attachment_manifest: Any = None,
     require_latest_status: Any = None,
     require_latest_token: Any = None,
+    reasoning_effort: str = "",
 ) -> bool:
     """Append one compact UI annotation.
 
@@ -513,6 +490,10 @@ def append_chat_annotation(
     a compare-and-append under the annotations lock: the row is written only
     while the message's CURRENT latest status is in the set — the first-wins
     claim seam of the routing picker (#198). Absent/None keeps plain append.
+
+    ``reasoning_effort`` rides a picker row whose producer chose the explicit
+    start of a New task picked from it (#1539), and a closing row naming the
+    start that root was admitted with; a steered task never wears one.
     """
     message_id = str(client_message_id or "").strip()
     if not message_id:
@@ -545,6 +526,8 @@ def append_chat_annotation(
         row["attachment_manifest"] = [
             dict(item) for item in attachment_manifest if isinstance(item, dict)
         ]
+    if str(reasoning_effort or ""):
+        row["reasoning_effort"] = str(reasoning_effort)[:16]
     path = pathlib.Path(drive_root) / "logs" / _ANNOTATIONS_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = jsonl_append_lock_path(path)
@@ -606,7 +589,8 @@ def routing_target_label(
 # "Not started: …" on a promote and "Not moved: …" on a scope bind. The receipt
 # under the owner's message, the host-initiated System row and the picker's
 # 409 toast all read this table; the browser renders the sentence verbatim (no
-# client table). A reason without a row stays raw ("Not started (<reason>)")
+# client table). Tool results to the agent read the same table: they keep the
+# machine prefix and code, then append these words. A reason without a row stays raw ("Not started (<reason>)")
 # so a new refusal is visible before it has words.
 ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "workspace_unusable": "the working folder can't be used",
@@ -922,24 +906,6 @@ def canonical_task_summary_reached_chat(result: Dict[str, Any], chat_id: Any) ->
     return str(row_chat) == str(chat_id)
 
 
-def append_authored_task_summary(
-    canonical_root: Any, result_root: Any, row: Dict[str, Any], *, status: str = "",
-) -> bool:
-    """Append the authored row and persist its identical continuation narrative."""
-    appended = append_canonical_task_summary(canonical_root, row)
-    persist_continuation_narrative(
-        result_root,
-        str(row.get("task_id") or ""),
-        str(row.get("text") or ""),
-        summary_id=str(row.get("summary_id") or ""),
-        summary_kind=str(row.get("summary_kind") or ""),
-        result_ref=row.get("result_ref") if isinstance(row.get("result_ref"), dict) else {},
-        source_coverage=row.get("source_coverage") if isinstance(row.get("source_coverage"), dict) else {},
-        status=status,
-    )
-    return appended
-
-
 def _narrative_result_ref_is_valid(value: Any, task_id: str) -> bool:
     if not isinstance(value, dict):
         return False
@@ -969,61 +935,6 @@ def continuation_narrative_is_valid(value: Any, task_id: str) -> bool:
         and _narrative_result_ref_is_valid(coverage.get("task_result"), tid)
         and coverage.get("task_result") == result_ref
     )
-
-
-def persist_continuation_narrative(
-    drive_root: Any,
-    task_id: str,
-    text: str,
-    *,
-    summary_id: str,
-    summary_kind: str,
-    result_ref: Dict[str, Any],
-    source_coverage: Dict[str, Any],
-    status: str = "",
-) -> bool:
-    """Persist the exact authored summary through the task-result lock."""
-    tid = str(task_id or "").strip()
-    narrative = {
-        "text": str(text or ""),
-        "task_id": tid,
-        "summary_id": str(summary_id or ""),
-        "summary_kind": str(summary_kind or ""),
-        "result_ref": dict(result_ref) if isinstance(result_ref, dict) else {},
-        "source_coverage": dict(source_coverage) if isinstance(source_coverage, dict) else {},
-        "written_at": utc_now_iso(),
-    }
-    if not tid or not continuation_narrative_is_valid(narrative, tid):
-        return False
-    try:
-        from ouroboros.task_results import load_task_result, write_task_result
-
-        existing = load_task_result(drive_root, tid) or {}
-        if not existing and not str(status or "").strip():
-            return False
-        requested_status = str(status or existing.get("status") or "running")
-
-        def _project(current: Dict[str, Any], _patch: Dict[str, Any]) -> Dict[str, Any]:
-            current_narrative = current.get("continuation_narrative")
-            if continuation_narrative_is_valid(current_narrative, tid):
-                # The summary id is task-unique.  A second post-task worker must
-                # not race a complete narrative with a partial/empty rewrite.
-                return {
-                    "status": str(current.get("status") or requested_status),
-                    "continuation_narrative": dict(current_narrative),
-                }
-            return {
-                "status": str(current.get("status") or requested_status),
-                "continuation_narrative": dict(narrative),
-            }
-
-        write_task_result(
-            drive_root, tid, requested_status, _field_projector=_project,
-        )
-        return True
-    except Exception:
-        log.warning("Failed to persist continuation narrative for %s", tid, exc_info=True)
-        return False
 
 
 def _bounded_chat_tail_rows(
@@ -1567,6 +1478,7 @@ def announce_project_started(
                 "project_id": pid,
                 "project_name": snapshot["project_name"],
                 "target_label": snapshot["target_label"],
+                "task_name": snapshot["task_name"],
             },
         }
         return bool(enqueue_terminal_delivery(drive_root, event))
@@ -1576,12 +1488,12 @@ def announce_project_started(
 
 
 __all__ = ["AGENT_RECEIPT_ID_PREFIX", "announce_project_started",
-    "append_authored_task_summary", "append_chat_annotation", "append_canonical_task_summary",
+    "append_chat_annotation", "append_canonical_task_summary",
     "append_terminal_task_projection", "build_owner_message_ref", "chat_annotation_receipt",
     "entry_matches_source_ref", "latest_chat_annotations",
     "enqueue_project_completion_summary", "project_completion_delivery_outcome",
     "completion_status_label", "outcome_phase", "owner_message_ref_is_valid",
-    "project_origin_rows", "project_question_pointer", "project_recent_dialogue",
+    "project_origin_rows", "project_question_pointer",
     "routing_options_with_labels", "routing_target_label", "resolve_owner_message_source",
     "source_refs_for_project",
 ]

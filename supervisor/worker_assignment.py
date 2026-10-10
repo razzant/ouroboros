@@ -62,7 +62,8 @@ def _tick_parked_work(queue: Any) -> None:
     with queue._queue_lock:
         consuming = [(task_id, meta.get("attempt"), dict(meta["task"]["_budget_pause_resume"]))
                      for task_id, meta in queue.RUNNING.items()
-                     if meta.get("sleep_parked_at") and (meta.get("task") or {}).get("_budget_pause_resume")]
+                     if meta.get("sleep_parked_at")
+                     and ((meta.get("task") or {}).get("_budget_pause_resume") or {}).get("sleep_exclusion_since")]
     for task_id, attempt, resume in consuming:
         _handle_budget_pause({"phase": "consumed", "task_id": task_id,
             "task_attempt": attempt, "pause_id": resume.get("pause_id"),
@@ -243,8 +244,10 @@ def _claim_worker_launch(queue, candidate, worker):
             root_id = str(candidate.get("root_task_id") or candidate.get("id"))
             latch = queue.BUDGET_ROOT_FENCES.get(root_id) or {}
             resume = candidate.get("_budget_pause_resume")
+            # A monetary latch hands over only an explicit selection against it (an
+            # owner-resumed cold sleeper must start), never sleep readiness.
             selected_child = bool(candidate.get("id") != root_id and isinstance(resume, dict)
-                                  and latch.get("cause") == "owner_pause"
+                                  and (latch.get("cause") == "owner_pause" or budget_fence_selected(candidate, latch))
                                   and resume.get("root_fence_id") == latch.get("fence_id"))
             with launch_admission(SimpleNamespace(
                     task_id=candidate.get("id"), root_task_id=candidate.get("root_task_id"),
@@ -259,6 +262,8 @@ def _claim_worker_launch(queue, candidate, worker):
                 # (#1315): no physical handoff before both are verified.
                 if not record_project_dispatch_possible(candidate) or not record_dispatch_possible(candidate):
                     return False
+                from ouroboros.obligations import drive_started
+                drive_started(_pool().DRIVE_ROOT, candidate)
                 _mirror_assigned_running_status(candidate)
                 worker.in_q.put(candidate)
                 return True
@@ -543,7 +548,7 @@ def assign_tasks() -> None:
                 _pool().PENDING.pop(chosen_idx)
                 w.busy_task_id = task["id"]
                 now_ts = time.time()
-                resume = task.get("_owner_wait_resume") or task.get("_budget_pause_resume") or {}
+                resume = task.get("_owner_wait_resume") or task.get("_budget_pause_resume") or task.get("_working_recovery") or {}
                 _pool().RUNNING[task["id"]] = {
                     "task": dict(task), "worker_id": w.wid,
                     "started_at": float(resume.get("started_at") or now_ts), "last_heartbeat_at": now_ts,

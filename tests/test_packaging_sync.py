@@ -68,7 +68,9 @@ def test_push_to_remote_push_tags_compatibility(monkeypatch):
     assert ok is True
     assert commands == [
         ["push", "-u", "origin", "feature"],
-        ["push", "origin", "--tags"],
+        # Only annotated tags reachable from the pushed branch: a release tag on an
+        # unadopted body candidate (shared tag namespace) must not leak (#1539).
+        ["push", "--follow-tags", "origin", "feature"],
     ]
 
 
@@ -216,15 +218,6 @@ def test_install_page_matches_macos_quick_start_and_model_prerequisite():
         assert release_asset_download_url(proof_id, version) in install_page
 
 
-def test_architecture_doc_describes_build_script_release_tag_check():
-    architecture = architecture_text(REPO)
-
-    assert "Release tag prerequisite" in architecture
-    assert "scripts/build_repo_bundle.py" in architecture
-    assert "release-tag SSOT" in architecture
-    assert "annotated `v$(cat VERSION)` tag points at `HEAD`" in architecture
-
-
 def test_system_prompt_lists_bible_in_safety_critical_set():
     """prompts/SYSTEM.md ``Safety-critical files`` section must name EXACTLY
     ``ouroboros.runtime_mode_policy.SAFETY_CRITICAL_PATHS`` — including
@@ -308,21 +301,16 @@ def test_server_workers_init_reads_manifest_branches_not_hardcoded_strings():
 
 
 def test_architecture_module_tree_lists_all_live_extension_http_endpoints():
-    """The high-level module map entry for ``ouroboros/gateway/extensions.py``
-    must list every HTTP path the module actually registers, so the
-    architecture map does not contradict the endpoint table later in the
-    same document. Specifically the Phase 5 review surface
-    ``POST /api/skills/<skill>/review`` is exported via
-    ``server.py`` and must appear in both places."""
+    """The module map keeps an entry for ``ouroboros/gateway/extensions.py``,
+    and the §4 endpoint registry (the map entry points there) lists the
+    skill routes the module registers, including the Phase 5 review surface
+    ``POST /api/skills/{skill}/review``."""
     architecture = architecture_text(REPO)
 
-    # Module map entry lives on the ``gateway/extensions.py`` tree line.
-    tree_idx = architecture.find("├── extensions.py")
-    assert tree_idx != -1
-    tree_line = architecture[tree_idx : architecture.find("\n", tree_idx)]
-    assert "POST /api/skills/<skill>/toggle" in tree_line
-    assert "POST /api/skills/<skill>/delete" in tree_line
-    assert "POST /api/skills/<skill>/review" in tree_line
+    # Module map entry for ``gateway/extensions.py``.
+    assert re.search(r"^\s*extensions\.py — ", architecture, re.MULTILINE)
+    for route in ("toggle", "delete", "review"):
+        assert f"| POST | `/api/skills/{{skill}}/{route}` |" in architecture
 
 
 def test_architecture_doc_lists_valid_extension_route_methods_in_frozen_contracts():

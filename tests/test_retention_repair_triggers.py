@@ -321,3 +321,101 @@ def test_corrupt_canonical_deflate_recovers_from_healthy_retained_child(tmp_path
     assert gzip.decompress(target.read_bytes()) == gzip.decompress(exact)
     assert task_custody.settle_child_drive(parent, task, child, live=lambda _: False)["status"] == "removed"
     assert gzip.decompress(target.read_bytes()) == gzip.decompress(exact)
+
+
+def _immutable_artifact(tmp_path):
+    parent, task = tmp_path / "canonical", "artifact-repair"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    source = artifacts.task_artifact_dir_path(child, task, create=True) / "captured.txt"
+    exact = b"the immutable captured bytes"
+    source.write_bytes(exact)
+    artifact = {**artifacts.artifact_record(source), "immutable": True}
+    source.write_bytes(b"x" * len(exact))
+    write_task_result(child, task, "completed", result="answer", artifact_status="ready", artifacts=[artifact])
+    headless.copy_child_task_result(parent, {"id": task, "drive_root": str(child)})
+    return parent, child, task, source, exact
+
+
+@pytest.mark.parametrize("repair_at", ["source", "canonical"])
+def test_immutable_artifact_failure_reuses_observation_and_reopens_on_exact_repair(tmp_path, monkeypatch, repair_at):
+    parent, child, task, source, exact = _immutable_artifact(tmp_path)
+    generation, copies, original = object(), [], artifacts.copy_artifact_file
+    monkeypatch.setattr(artifacts, "copy_artifact_file", lambda *a, **kw: (copies.append(a), original(*a, **kw))[1])
+    assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["pending"] == [task]
+    row_path = parent / "task_results" / f"{task}.json"
+    before, first = row_path.read_bytes(), len(copies)
+    failure = load_task_result(parent, task)["child_ref_promotion"]["pending_refs"][0]
+    assert failure["failure_kind"] == "immutable_identity_mismatch"
+    assert task_custody.settle_child_drive(parent, task, child, live=lambda _: False)["status"] == "retained"
+    assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["unchanged"] == [task]
+    assert len(copies) == first and row_path.read_bytes() == before and child.exists()
+    target = source if repair_at == "source" else Path(failure["canonical_path"])
+    target.write_bytes(exact)
+    assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["completed"] == [task]
+    assert len(copies) > first
+    row = load_task_result(parent, task)
+    assert Path(row["artifacts"][0]["path"]).read_bytes() == exact
+    assert not row["child_ref_promotion"]["pending_refs"]
+    if repair_at == "source":
+        assert task_custody.settle_child_drive(parent, task, child, live=lambda _: False)["status"] == "removed"
+
+
+def test_immutable_artifact_retry_keeps_generation_and_reference_repair_inputs(tmp_path, monkeypatch):
+    parent, child, task, _source, _exact = _immutable_artifact(tmp_path)
+    generation = object()
+    observability.retry_pending_child_ref_promotions(parent, generation=generation)
+    for change in ("ref", "inventory", "generation"):
+        if change == "ref":
+            row = load_task_result(parent, task)
+            row["artifacts"][0]["sha256"] = "f" * 64
+            write_task_result(parent, task, "completed", artifacts=row["artifacts"])
+        elif change == "inventory":
+            observability.persist_call(child, task_id=task, call_id="repair-note", call_type="tool_call", payload={"result": "known"})
+        else:
+            generation = object()
+        assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["retried"] == [task]
+        assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["unchanged"] == [task]
+    assert child.exists() and load_task_result(parent, task)["child_ref_promotion"]["pending_refs"]
+
+
+def test_transient_artifact_copy_error_is_never_a_stable_failure(tmp_path, monkeypatch):
+    parent, _child, task, source, exact = _immutable_artifact(tmp_path)
+    source.write_bytes(exact)
+    generation, attempts = object(), []
+    def unavailable(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("temporary destination write failure")
+    with monkeypatch.context() as failure:
+        failure.setattr(artifacts, "copy_artifact_file", unavailable)
+        observability.retry_pending_child_ref_promotions(parent, generation=generation)
+        first = len(attempts)
+        assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["retried"] == [task]
+        assert len(attempts) > first
+    assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["completed"] == [task]
+
+
+def test_repair_between_failed_artifact_read_and_memo_cannot_be_cached(tmp_path, monkeypatch):
+    parent, _child, task, source, exact = _immutable_artifact(tmp_path)
+    generation, remember = object(), source_retention.remember_unavailable_retry
+    def repair_then_remember(*args, **kwargs):
+        source.write_bytes(exact)
+        return remember(*args, **kwargs)
+    with monkeypatch.context() as repairing:
+        repairing.setattr(source_retention, "remember_unavailable_retry", repair_then_remember)
+        assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["pending"] == [task]
+    assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["completed"] == [task]
+
+
+def test_in_place_call_inventory_repair_reopens_unavailable_observation(tmp_path):
+    parent, child, task, _blob, _exact = _inventory(tmp_path)
+    generation = object()
+    observability.retry_pending_child_ref_promotions(parent, generation=generation)
+    assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["unchanged"] == [task]
+    call = child / "observability/calls" / task / "broken.json"
+    before = call.parent.stat().st_mtime_ns
+    manifest = json.loads(call.read_text(encoding="utf-8"))
+    repaired = observability.write_blob(child, {"result": "repaired call source"})
+    manifest.update(full_payload_ref=repaired, redacted_projection_ref=repaired)
+    call.write_text(json.dumps(manifest), encoding="utf-8")
+    assert call.parent.stat().st_mtime_ns == before
+    assert observability.retry_pending_child_ref_promotions(parent, generation=generation)["completed"] == [task]

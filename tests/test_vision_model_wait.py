@@ -13,6 +13,7 @@ pytestmark = pytest.mark.serial
 from ouroboros import usage_accounting as ua
 from ouroboros.llm_claudexor import ClaudexorModelError, ClaudexorModelNotDispatched
 from ouroboros.tools import vision, vision_process
+from tests._usage_store_testing import ledger_rows
 
 MODEL = "claudexor::fixture=image-model"
 ROUTE = {"source": "fixture", "model": "image-model", "credentialProfileId": "account-exact",
@@ -230,8 +231,8 @@ def test_real_child_reconstructs_provider_field_display_after_settlement(child_f
     assert error.ledger_attempt_ids == [error.physical_attempt_capture.attempt_id]
     rows = _events(events)
     assert sum(row["kind"] == "generation" for row in rows) == sum(row["kind"] == "ack" for row in rows) == 1
-    attempts = [json.loads(line) for line in (root / ua.LEDGER_REL).read_text().splitlines()]
-    assert [row["state"] for row in attempts] == ["reserved", "dispatched", "settled"]
+    attempts = ledger_rows(root)
+    assert [row["state"] for row in attempts] == ["settled"]
 
 
 def test_parent_cancel_reaches_same_live_operation(child_fixture):
@@ -278,7 +279,7 @@ def test_killed_child_retains_exact_operation_checkpoint(child_fixture):
     manifest = json.loads(Path(custody["request_manifest_ref"]["path"]).read_text())
     assert manifest["operation_id"] == error.operation_id
     assert len([row for row in _events(events) if row["kind"] == "generation"]) == 1
-    rows = [json.loads(line) for line in (root / ua.LEDGER_REL).read_text().splitlines()]
+    rows = ledger_rows(root)
     assert rows[-1]["state"] == "dispatched" and not any(row["state"] == "released" for row in rows)
 
 

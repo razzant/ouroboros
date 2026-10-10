@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests import test_merge_receipt_qualification as qualification
 from tests import test_pr_merge_receipts as merge_fixture
 from tests import test_subscription_setup_browser as ui_fixture
 from tests.test_merge_receipt_qualification import (
@@ -19,7 +20,13 @@ subscription_ui = ui_fixture.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 
-def test_merge_card_stays_current_after_outbox_delivery_and_reload(request, world, monkeypatch, tmp_path):
+def assert_review_source(text, source):
+    other = "record" if source == "declaration" else "declaration"
+    assert f"review source: {source}" in text and f"review source: {other}" not in text
+
+
+@pytest.mark.parametrize("source", ["declaration", "record"])
+def test_merge_card_stays_current_after_outbox_delivery_and_reload(request, world, monkeypatch, tmp_path, source):
     from ouroboros.gateway.history import make_chat_history_endpoint
     from ouroboros.utils import append_jsonl
 
@@ -27,6 +34,11 @@ def test_merge_card_stays_current_after_outbox_delivery_and_reload(request, worl
         "type": "task_progress", "chat_id": 7, "task_id": "merge-task",
         "text": "Reading the PR.", "ts": "2026-09-16T00:00:00Z",
     })
+    suffix = "" if source == "declaration" else "-record"
+    if source == "record":
+        qualification.install_ledger(monkeypatch, {qualification.RECORD_ID: qualification.ledger_record()})
+        monkeypatch.setattr(qualification, "registered_merge", lambda world: qualification.record_merge(
+            world, review_record_id=qualification.RECORD_ID))
     exercise_publication(world, monkeypatch, "buffered")
     history = json.loads(asyncio.run(make_chat_history_endpoint(world.root)(
         SimpleNamespace(query_params={"chat_id": "7"}))).body)
@@ -62,18 +74,20 @@ def test_merge_card_stays_current_after_outbox_delivery_and_reload(request, worl
         card = page.locator('.chat-live-card[data-task-id="merge-task"]')
         if card.get_attribute("data-expanded") != "1":
             card.locator('[data-live-summary-button]').click()
-        page.screenshot(path=str(output / "merge-receipt-live.png"), full_page=True)
+        page.screenshot(path=str(output / f"merge-receipt-live{suffix}.png"), full_page=True)
         line = card.locator('.chat-live-line.result')
         assert line.count() == 1 and "merge: merged" in line.inner_text()
+        assert_review_source(line.inner_text(), source)
         replay = page.evaluate("() => receiptChat.refreshHistory({revision: 1})")
         assert replay["painted"], "receipt history must paint successfully"
         card = page.locator('.chat-live-card[data-task-id="merge-task"]')
         if card.get_attribute("data-expanded") != "1":
             card.locator('[data-live-summary-button]').click()
-        page.screenshot(path=str(output / "merge-receipt-replay.png"), full_page=True)
+        page.screenshot(path=str(output / f"merge-receipt-replay{suffix}.png"), full_page=True)
         assert not page.get_by_role("button", name="Retry loading messages").is_visible()
         line = card.locator('.chat-live-line.result')
         assert line.count() == 1 and "merge: merged" in line.inner_text()
+        assert_review_source(line.inner_text(), source)
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     finally:
         page.evaluate("() => receiptChat.destroy()")

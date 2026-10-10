@@ -124,42 +124,40 @@ def _image_history():
     ]
 
 
-def test_blind_model_placeholder_on_direct_provider_lane(monkeypatch):
-    """C2.3 (triad+scope round-2): a BLIND model on the DIRECT (non-OpenRouter)
-    OpenAI/Cloud.ru lane must get image placeholders too — the replacement used to
-    run only after the direct branch had already returned with raw image blocks."""
+def _direct_lane_payload(monkeypatch, verdict):
+    """A direct (non-OpenRouter) OpenAI-lane send: the one send policy, then the builder."""
     import json as _json
+    from ouroboros import vision_routing
     from ouroboros.llm import LLMClient
-    import ouroboros.provider_models as pm
 
-    monkeypatch.setattr(pm, "supports_vision", lambda m: False)
-    client = LLMClient()
-    target = {"resolved_model": "some/blind-direct-model", "provider": "openai",
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
+    monkeypatch.setattr(vision_routing, "supports_vision", lambda *_a, **_k: verdict)
+    monkeypatch.setattr(vision_routing, "resolve_vision_caption_model", lambda *_a, **_k: "")
+    sent = vision_routing.prepare_messages_for_send(_image_history(), routing=vision_routing.VisionRoutingContext(
+        "openai::some-direct-model", object(), {}))
+    target = {"resolved_model": "some-direct-model", "provider": "openai",
               "supports_openrouter_extensions": False}
-    kwargs = client._build_remote_kwargs(
-        target, _image_history(), reasoning_effort="low", max_tokens=64,
+    kwargs = LLMClient()._build_remote_kwargs(
+        target, sent, reasoning_effort="low", max_tokens=64,
         tool_choice="auto", temperature=None, tools=None,
     )
-    blob = _json.dumps(kwargs["messages"])
+    return _json.dumps(kwargs["messages"])
+
+
+def test_confirmed_text_only_route_gets_no_pixels_on_the_direct_lane(monkeypatch):
+    """C2.3, moved to the policy: a route whose own metadata says it cannot see gets
+    an honest marker on the DIRECT lane too (Auto, no caption route); the builder
+    itself only encodes what the policy gave it."""
+    blob = _direct_lane_payload(monkeypatch, False)
     assert "image_url" not in blob  # raw image block was replaced
     assert "base64,AAAA" not in blob  # the image payload is gone
+    assert "image omitted" in blob
 
 
-def test_vision_model_keeps_image_on_direct_lane(monkeypatch):
-    """A vision-capable model on the same direct lane keeps its image block."""
-    import json as _json
-    from ouroboros.llm import LLMClient
-    import ouroboros.provider_models as pm
-
-    monkeypatch.setattr(pm, "supports_vision", lambda m: True)
-    client = LLMClient()
-    target = {"resolved_model": "some/vision-direct-model", "provider": "openai",
-              "supports_openrouter_extensions": False}
-    kwargs = client._build_remote_kwargs(
-        target, _image_history(), reasoning_effort="low", max_tokens=64,
-        tool_choice="auto", temperature=None, tools=None,
-    )
-    assert "image_url" in _json.dumps(kwargs["messages"])
+def test_unknown_or_seeing_route_keeps_image_on_direct_lane(monkeypatch):
+    """Unknown is not no: an unknown route and a confirmed one both keep the image."""
+    for verdict in (True, None):
+        assert "image_url" in _direct_lane_payload(monkeypatch, verdict)
 
 # --- B1 (v6.39): GLM/cloud.ru OpenAI-compatible top-level reasoning_content ---
 

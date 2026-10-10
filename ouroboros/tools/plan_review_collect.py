@@ -8,7 +8,9 @@ happens next: the per-slot progress line and the ONE system frame the last
 settlement writes into the task's mailbox (the mind wakes exactly as it does
 for a child result — ``wait_task``/``wait_tasks`` return on
 ``owner_mailbox_pending``), and the $0 collection that closes or advances the
-recorded wave through the existing ``review_disposition`` mode. Closing and
+recorded wave through the existing ``review_disposition`` mode. A collection uses drain window 0 (settled slots
+are reconciled, nothing is re-sent or awaited), and a new envelope collects
+every other custody-pending wave before it supersedes anything. Closing and
 aggregating a wave stays with the collecting call (the sole wave writer);
 Historical settlement attaches exact source references through the same wave
 owner; it never reaggregates or changes the current plan.

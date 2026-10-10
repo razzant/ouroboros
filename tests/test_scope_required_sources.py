@@ -1,8 +1,8 @@
-"""The change-relative required-source manifest of the scope reviewer.
+"""The change-relative required-source manifest of the two-part brief.
 
 What the producer owes, what identity each row carries (the same one a
-``read_file`` receipt stamps), and how the chain reaches the episode's coverage
-fold, the scope result and the panel reducer.
+``read_file`` receipt stamps), and how the chain reaches the retrieving seat's
+request policy, its answer record and the wave reducer.
 """
 
 from __future__ import annotations
@@ -57,14 +57,14 @@ def test_only_protected_contract_and_prompt_paths_are_owed_in_full(tmp_path):
     _write(repo, "ouroboros/safety.py", "SAFETY = 1\n")
     _write(repo, "prompts/SYSTEM.md", "system prompt\n")
     _write(repo, "ouroboros/contracts/tool_abi.py", "ABI = 1\n")
-    _write(repo, "ouroboros/tools/scope_review.py", "ordinary = 1\n")
+    _write(repo, "ouroboros/tools/review_brief_coupling.py", "ordinary = 1\n")
     _write(repo, "web/modules/chat.js", "export const a = 1;\n")
     _commit(repo)
 
     rows = scope_required_sources(repo, [
         ("M", "ouroboros/safety.py"), ("M", "prompts/SYSTEM.md"),
         ("A", "ouroboros/contracts/tool_abi.py"),
-        ("M", "ouroboros/tools/scope_review.py"), ("M", "web/modules/chat.js"),
+        ("M", "ouroboros/tools/review_brief_coupling.py"), ("M", "web/modules/chat.js"),
     ])
     owed = {row["path"]: row["disposition"] for row in rows}
     assert owed == {
@@ -76,7 +76,7 @@ def test_only_protected_contract_and_prompt_paths_are_owed_in_full(tmp_path):
     }
     # A merely-touched ordinary file is a POINTER, never a required source: its
     # complete change evidence is the inlined diff.
-    assert "ouroboros/tools/scope_review.py" not in owed
+    assert "ouroboros/tools/review_brief_coupling.py" not in owed
     assert "web/modules/chat.js" not in owed
 
 
@@ -274,10 +274,10 @@ def test_uncovered_sources_names_only_the_rows_that_fell_short():
 
 
 # ---------------------------------------------------------------------------
-# The chain: producer -> request policy -> coverage -> result -> reducer
+# The chain: producer -> request policy -> coverage -> record -> reducer
 # ---------------------------------------------------------------------------
 
-from tests.test_review_session_scope_wiring import _scope_ctx, _scope_matrix_rows  # noqa: E402
+from tests.test_review_session_scope_wiring import _coupling_matrix_rows  # noqa: E402
 
 def _staged_protected_repo(tmp_path):
     import subprocess
@@ -296,17 +296,28 @@ def _staged_protected_repo(tmp_path):
     return repo
 
 
+def _one_retrieving_seat(delivery):
+    from ouroboros.review_execution import ReviewRouteKind
+
+    route = ReviewRouteKind.AGENT_SESSION if delivery == "session" else ReviewRouteKind.API_CHAT
+    return {"models": ["fixture/model"], "routes": [route], "efforts": [""], "session_targets": ["fixture/model"],
+            "session_profiles": [""], "subagent_ids": [""], "use_local": [None], "slot_ids": ["slot_1"],
+            "retrieves": [True], "parts": [("change", "coupling")]}
+
+
 @pytest.mark.parametrize("delivery", ["native", "session"])
 def test_the_required_source_manifest_reaches_both_retrieving_deliveries(
     tmp_path, monkeypatch, delivery
 ):
     """The producer's rows travel to the reviewer three ways: the exact
     identities in the request policy (folded by whoever observes the reads),
-    the manifest identity, and the human list in the brief itself."""
-    import ouroboros.tools.scope_review as scope_mod
-    from ouroboros.review_execution import ReviewRouteKind
+    the manifest identity, and the human list in the brief itself. The wave's
+    assembly (``_prepare_unified_review``) builds them per seat; its dispatch
+    hands them to the substrate as the seat's policy."""
+    from ouroboros.tools import review as review_mod
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.scope_required_sources import SCOPE_REQUIRED_SOURCES_POLICY
+    import ouroboros.reviewer_slot_config as slot_cfg
 
     repo = _staged_protected_repo(tmp_path)
     captured = {}
@@ -317,33 +328,42 @@ def test_the_required_source_manifest_reaches_both_retrieving_deliveries(
         captured["messages"] = list(request.messages)
         return SimpleNamespace(actors=[{
             "slot_id": slots[0].slot_id, "model": slots[0].model, "status": "ok",
-            "raw_text": json.dumps(_scope_matrix_rows()),
+            "raw_text": json.dumps({"change": [], "change_clean": True, "coupling": _coupling_matrix_rows()}),
             "usage": {"native_read_coverage": {"status": "complete", "sources": []}},
             "prompt_ref": {}, "response_ref": {},
         }])
 
     monkeypatch.setattr("ouroboros.review_substrate.run_review_request", _capture)
-    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data")
+    monkeypatch.setattr(slot_cfg, "commit_triad_delivery", lambda: _one_retrieving_seat(delivery))
     (tmp_path / "data").mkdir(exist_ok=True)
-    result = scope_mod.run_scope_review(
-        ctx, "amend the system prompt", slot_id="scope_slot_1",
-        scope_model="fixture/model",
-        route=ReviewRouteKind.AGENT_SESSION if delivery == "session" else ReviewRouteKind.API_CHAT,
-    )
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data")
+    ctx.task_id = "required-sources"
+    ctx._review_history, ctx._review_advisory, ctx._coupling_review_history = [], [], {}
 
-    rows = captured["policy"]["native_required_sources"]
+    prepared, _early, exited = review_mod._prepare_unified_review(ctx, "amend the system prompt")
+    assert not exited
+    policy = prepared["row_plan"]["session_policies"][0]
+    rows = policy["native_required_sources"]
     assert [row["path"] for row in rows] == ["prompts/SYSTEM.md"]
     assert rows[0]["complete_chars"] == len("runtime system prompt, amended\n")
     assert rows[0]["range_basis"] == "unicode_text_universal_newlines"
-    ref = captured["policy"]["native_required_sources_ref"]
+    ref = policy["native_required_sources_ref"]
     assert ref["policy"] == SCOPE_REQUIRED_SOURCES_POLICY and ref["required_source_count"] == 1
-    # No packet is ever rendered for a scope row, and the brief names the source.
+    brief = prepared["row_plan"]["session_tasks"][0]
+    assert "prompts/SYSTEM.md (modified" in brief
+    assert "MINIMUM, not a sufficiency claim" in brief
+
+    if delivery == "session":
+        return  # the session transport is pinned in tests/test_review_session_scope_wiring.py
+    review_mod._dispatch_unified_review(ctx, "amend the system prompt", prepared)
+    assert captured["policy"]["native_required_sources"] == rows
+    assert captured["policy"]["native_required_sources_ref"] == ref
+    # No packet is ever rendered for a retrieving seat; the brief names the source.
     assert captured["messages"] == []
-    assert "prompts/SYSTEM.md (modified" in captured["task"]
-    assert "MINIMUM, not a sufficiency claim" in captured["task"]
-    assert result.status == "responded"
-    assert result.coverage == "complete"
-    assert result.coverage_manifest_ref == ref
+    assert captured["task"] == brief
+    outcome = ctx._last_coupling_result
+    assert outcome.status == "responded" and outcome.verdict == "PASS"
+    assert outcome.seats[0]["coverage"] == "complete"
 
 
 @pytest.mark.parametrize("fact,expected", [
@@ -353,119 +373,101 @@ def test_the_required_source_manifest_reaches_both_retrieving_deliveries(
      "incomplete"),
     (None, "unobserved"),
 ])
-def test_the_scope_result_carries_the_observed_coverage_state(tmp_path, monkeypatch, fact, expected):
+def test_the_seat_record_carries_the_observed_coverage_state(fact, expected):
     """One reader for every delivery: whoever observed the reads reports the
     fact, and an absent fact is `unobserved` rather than a guess."""
-    import ouroboros.tools.scope_review as scope_mod
+    from ouroboros.triad_review import parse_seat_answers
 
-    usage = {"native_read_coverage": fact} if fact is not None else {}
-    monkeypatch.setattr(scope_mod, "_call_scope_llm",
-                        lambda *_a, **_k: (json.dumps(_scope_matrix_rows()), usage, ""))
-    result = scope_mod.run_scope_review(
-        _scope_ctx(tmp_path), "coverage state", scope_model="fixture", slot_id="scope_slot_1")
-    assert result.coverage == expected
+    actor = {"model": "fixture", "slot_id": "scope_slot_1", "verdict": "OK",
+             "text": json.dumps({"coupling": _coupling_matrix_rows()})}
     if fact is not None:
-        assert result.context_manifest["native_read_coverage"] == fact
+        actor["native_read_coverage"] = fact
+    parsed = parse_seat_answers({"results": [actor]}, {"scope_slot_1": ("coupling",)})
+    record = parsed.actor_records[0]
+    assert record.status == "responded" and record.coverage == expected
+    if fact is not None:
+        assert record.context_manifest["native_read_coverage"] == fact
 
 
-def _reduce(tmp_path, monkeypatch, rows, *, enforcement="blocking"):
-    """Run the panel reducer over prepared per-row results."""
-    from ouroboros import config as cfg
-    from ouroboros.tools import parallel_review
+def _seat(slot_id, *, status="responded", coverage="complete", uncovered=(), critical=()):
+    """One wave seat's raw record, as the wave's parser would have left it."""
+    from ouroboros.triad_review import parse_seat_answers
 
-    monkeypatch.setattr(cfg, "get_review_enforcement", lambda: enforcement)
-    monkeypatch.setattr(parallel_review, "_scope_enforcement", lambda: enforcement)
-    slots = [SimpleNamespace(model=f"m{i}", slot_id=f"scope_slot_{i + 1}", route=None,
-                             effort="", session_target="", session_profile="", retrieves=True)
-             for i in range(len(rows))]
-    scope_rows = [{"slot": slot, "prepared": {"brief": 1}, "final": None}
-                  for slot in slots]
-    monkeypatch.setattr(parallel_review, "run_scope_review",
-                        lambda _ctx, _msg, **kwargs: rows[kwargs["slot_id"]])
-    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="reduce",
-                          pending_events=[])
-    return parallel_review._run_scope(
-        ctx, "reduce", scope_rows, True, goal="", scope="", review_rebuttal="",
-        history_snapshot=[], scope_history={}), ctx
+    rows = _coupling_matrix_rows()
+    for finding in critical:
+        rows = [finding if row["item"] == finding["item"] else row for row in rows]
+    actor = {"model": f"m/{slot_id}", "slot_id": slot_id, "verdict": "OK" if status == "responded" else "ERROR",
+             "text": json.dumps({"change": [], "change_clean": True, "coupling": rows}) if status == "responded" else "",
+             **({"error": "Error: transport failed"} if status != "responded" else {})}
+    if coverage != "unobserved":
+        actor["native_read_coverage"] = {
+            "status": "incomplete" if coverage == "incomplete" else "complete",
+            **({"reason": "declared_empty"} if coverage == "declared_empty" else {}),
+            "sources": [{"path": path, "status": "incomplete"} for path in uncovered]}
+    return parse_seat_answers({"results": [actor]}, {slot_id: ("change", "coupling")}).actor_records[0].to_dict()
 
 
-def _row(status="responded", coverage="complete", uncovered=()):
-    from ouroboros.tools.scope_review import ScopeReviewResult
+def _reduce(records):
+    """The wave reducer over prepared seat records: the verdict, its coupling
+    outcome and the history line the subject keeps."""
+    from ouroboros.review_ledger import build_rows, coupling_outcome, reduce_verdict
+    from ouroboros.tools.parallel_review import _coupling_history_entry
 
-    manifest = {"native_read_coverage": {
-        "status": "incomplete" if coverage == "incomplete" else "complete",
-        "sources": [{"path": path, "status": "incomplete" if coverage == "incomplete" else "complete"}
-                    for path in uncovered],
-    }} if coverage != "unobserved" else {}
-    return ScopeReviewResult(blocked=False, status=status, coverage=coverage,
-                             model_id="m", context_manifest=manifest)
+    rows = build_rows({"triad_raw": records})
+    verdict = reduce_verdict(rows)
+    outcome = coupling_outcome(verdict, rows)
+    return verdict, outcome, _coupling_history_entry(outcome)
 
 
-def test_unobserved_coverage_counts_toward_the_quorum(tmp_path, monkeypatch):
+def test_unobserved_coverage_counts_toward_the_quorum():
     """A delivery whose reads the host cannot see keeps the P3 exception: its
     verdict counts, and the provenance limit is disclosure, not a shortfall."""
-    rows = {"scope_slot_1": _row(coverage="unobserved"),
-            "scope_slot_2": _row(coverage="declared_empty")}
-    result, _ctx = _reduce(tmp_path, monkeypatch, rows)
-    assert result.blocked is False and result.status == "responded"
-    assert result.context_manifest["scope_responded_count"] == 2
-    assert result.context_manifest["scope_coverage_incomplete_count"] == 0
+    verdict, outcome, _entry = _reduce([_seat("scope_slot_1", coverage="unobserved"),
+                                        _seat("scope_slot_2", coverage="declared_empty")])
+    assert verdict["aggregate"] == "PASS" and verdict["quorum"]["responded"] == 2
+    assert outcome.blocked is False and outcome.status == "responded"
+    assert [s["coverage"] for s in outcome.seats] == ["unobserved", "declared_empty"]
 
 
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
 @pytest.mark.parametrize("second_coverage", ["complete", "incomplete"])
-def test_read_coverage_is_diagnostic_under_every_enforcement(
-    tmp_path, monkeypatch, enforcement, second_coverage
-):
-    rows = {"scope_slot_1": _row(coverage="complete"),
-            "scope_slot_2": _row(coverage=second_coverage, uncovered=("prompts/SYSTEM.md",))}
-    result, ctx = _reduce(tmp_path, monkeypatch, rows, enforcement=enforcement)
-    assert result.blocked is False and result.status == "responded"
-    assert not result.block_message and not result.advisory_findings and not result.critical_findings
-    assert result.context_manifest["scope_responded_count"] == 2
-    assert result.context_manifest["scope_coverage_incomplete_count"] == (second_coverage == "incomplete")
-    assert result.context_manifest["scope_degraded_reasons"] == []
-    assert all(row["status"] == "responded" for row in ctx._last_scope_raw_results)
-    diagnostic = result.context_manifest["scope_coverage_diagnostics"][1]
-    assert diagnostic == {"slot_id": "scope_slot_2", "coverage": second_coverage,
-                          "uncovered_sources": ["prompts/SYSTEM.md"] if second_coverage == "incomplete" else []}
-    from ouroboros.tools.parallel_review import _scope_history_entry
-    assert "Read coverage (diagnostic):" in _scope_history_entry(result)["summary"]
+def test_read_coverage_is_diagnostic_on_the_record(second_coverage):
+    """Read coverage never changes the verdict: it rides the seat record and the
+    history line as a diagnostic, under every enforcement (the ledger knows no
+    enforcement at all; the gate applies it after the verdict)."""
+    verdict, outcome, entry = _reduce([
+        _seat("scope_slot_1", coverage="complete"),
+        _seat("scope_slot_2", coverage=second_coverage, uncovered=("prompts/SYSTEM.md",))])
+    assert verdict["aggregate"] == "PASS" and verdict["quorum"]["responded"] == 2
+    assert outcome.blocked is False and not outcome.advisory_findings and not outcome.critical_findings
+    assert outcome.seats[1] == {**outcome.seats[1], "slot_id": "scope_slot_2", "status": "responded",
+                                "coverage": second_coverage, "matrix": "full"}
+    assert f"scope_slot_2: {second_coverage}" in entry["summary"]
+    assert "Read coverage (diagnostic):" in entry["summary"]
 
 
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
 @pytest.mark.parametrize("count", [1, 3])
-def test_every_answer_counts_even_when_all_rows_have_incomplete_coverage(tmp_path, monkeypatch, enforcement, count):
-    rows = {f"scope_slot_{i + 1}": _row(coverage="incomplete", uncovered=("ouroboros/safety.py",))
-            for i in range(count)}
-    result, ctx = _reduce(tmp_path, monkeypatch, rows, enforcement=enforcement)
-    assert result.blocked is False and result.status == "responded"
-    assert not result.block_message and not result.advisory_findings
-    assert result.context_manifest["scope_responded_count"] == count
-    assert result.context_manifest["scope_coverage_incomplete_count"] == count
-    assert all(row["status"] == "responded" and row["failure_phase"] == ""
-               for row in ctx._last_scope_raw_results)
+def test_every_answer_counts_even_when_all_seats_have_incomplete_coverage(count):
+    verdict, outcome, _entry = _reduce([
+        _seat(f"scope_slot_{i + 1}", coverage="incomplete", uncovered=("ouroboros/safety.py",)) for i in range(count)])
+    assert verdict["aggregate"] == "PASS" and verdict["quorum"]["responded"] == count
+    assert outcome.blocked is False and not outcome.advisory_findings
+    assert all(s["status"] == "responded" and s["coverage"] == "incomplete" for s in outcome.seats)
 
 
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
-def test_incomplete_coverage_never_hides_substantive_critical_findings(tmp_path, monkeypatch, enforcement):
-    rows = {"scope_slot_1": _row(coverage="complete"),
-            "scope_slot_2": _row(coverage="complete"),
-            "scope_slot_3": _row(coverage="incomplete", uncovered=("prompts/SYSTEM.md",))}
+def test_incomplete_coverage_never_hides_substantive_critical_findings():
     finding = {"item": "cross_module_bugs", "severity": "critical", "verdict": "FAIL",
                "reason": "The producer and consumer use different units."}
-    rows["scope_slot_3"].critical_findings = [finding]
-    rows["scope_slot_3"].blocked = enforcement == "blocking"
-    rows["scope_slot_3"].block_message = "Unit mismatch" if enforcement == "blocking" else ""
-    result, _ctx = _reduce(tmp_path, monkeypatch, rows, enforcement=enforcement)
-    assert result.blocked is (enforcement == "blocking")
-    assert result.critical_findings == [finding]
-    assert result.context_manifest["scope_responded_count"] == 3
-    assert result.context_manifest["scope_coverage_incomplete_count"] == 1
-    assert result.block_message == ("Unit mismatch" if enforcement == "blocking" else "")
+    verdict, outcome, entry = _reduce([
+        _seat("scope_slot_1"), _seat("scope_slot_2"),
+        _seat("scope_slot_3", coverage="incomplete", uncovered=("prompts/SYSTEM.md",), critical=(finding,))])
+    assert verdict["aggregate"] == "FAIL" and verdict["per_question"]["coupling"] == "FAIL"
+    assert outcome.blocked is True
+    assert [{k: f[k] for k in finding} for f in outcome.critical_findings] == [finding]
+    assert outcome.seats[2]["coverage"] == "incomplete"
+    assert entry["summary"].startswith("Critical: cross_module_bugs")
 
 
-def test_coverage_diagnostics_do_not_become_technical_failures(tmp_path):
+def test_coverage_diagnostics_do_not_become_technical_failures():
     from ouroboros.tools.commit_gate import review_failure_is_technical
 
     assert not review_failure_is_technical({"failure_phase": "coverage_authority"})
@@ -475,94 +477,71 @@ def test_coverage_diagnostics_do_not_become_technical_failures(tmp_path):
 
 
 @pytest.mark.parametrize("coverage", ["complete", "incomplete"])
-def test_read_diagnostics_do_not_hide_a_missing_reviewer_answer(tmp_path, monkeypatch, coverage):
-    rows = {"scope_slot_1": _row(coverage=coverage),
-            "scope_slot_2": _row(status="error", coverage="unobserved")}
-    result, ctx = _reduce(tmp_path, monkeypatch, rows)
-    assert result.blocked is True
-    assert "SCOPE_QUORUM_NOT_MET" in result.block_message
-    assert result.context_manifest["scope_responded_count"] == 1
-    assert ctx._last_scope_raw_results[1]["status"] == "error"
+def test_read_diagnostics_do_not_hide_a_missing_reviewer_answer(coverage):
+    verdict, outcome, _entry = _reduce([_seat("scope_slot_1", coverage=coverage),
+                                        _seat("scope_slot_2", status="error", coverage="unobserved")])
+    # Two assigned seats need both; one answer is a quorum failure, never a PASS.
+    assert verdict["aggregate"] == "QUORUM_FAILED"
+    assert verdict["quorum"] == {**verdict["quorum"], "responded": 1, "assigned": 2, "required": 2}
+    # The coupling QUESTION keeps the one answer it got (its own quorum is one
+    # seat); the WAVE is what failed, and the gate decides by the aggregate.
+    assert outcome.status == "responded" and outcome.verdict == "PASS" and outcome.blocked is False
+    assert [s["status"] for s in outcome.seats] == ["responded", "error"]
 
 
-def test_the_review_contract_fingerprint_binds_the_scope_delivery_class(monkeypatch):
-    """Recorded free-replay authority must not survive this contract change: the
-    delivery class, the retrieving output contract and the manifest policy are
-    all hashed into the commit gate's contract identity."""
-    import ouroboros.review_substrate as substrate
-    from ouroboros.review_records import ReviewRouteKind, ReviewSlot
+def test_the_review_contract_fingerprint_binds_the_parts_and_the_contracts(monkeypatch):
+    """Recorded free-replay authority must not survive a contract change: the
+    parts each seat is asked, the two answer contracts and the manifest policy
+    are all hashed into the commit gate's contract identity."""
+    import ouroboros.reviewer_slot_config as slot_cfg
+    from ouroboros.review_records import ReviewRouteKind
     from ouroboros.tools.commit_gate import commit_review_contract_fingerprint
 
-    retrieving = ReviewSlot(slot_id="scope_slot_1", model="m",
-                            route=ReviewRouteKind.API_CHAT, native_retrieval_override=True)
-    packet = ReviewSlot(slot_id="scope_slot_1", model="m", route=ReviewRouteKind.API_CHAT)
-    monkeypatch.setattr(substrate, "scope_reviewer_slots", lambda *_a, **_k: [retrieving])
+    def _plan(parts):
+        return {"models": ["m"], "routes": [ReviewRouteKind.API_CHAT], "efforts": [""], "session_targets": [""],
+                "session_profiles": [""], "subagent_ids": [""], "use_local": [None], "slot_ids": ["slot_1"],
+                "retrieves": [True], "parts": [parts]}
+
+    monkeypatch.setattr(slot_cfg, "commit_triad_delivery", lambda: _plan(("change", "coupling")))
     baseline = commit_review_contract_fingerprint()
     assert baseline
 
-    # The SAME row identity with a different delivery class is a different contract.
-    monkeypatch.setattr(substrate, "scope_reviewer_slots", lambda *_a, **_k: [packet])
+    # The SAME seat asked a different question is a different contract.
+    monkeypatch.setattr(slot_cfg, "commit_triad_delivery", lambda: _plan(("change",)))
     assert commit_review_contract_fingerprint() != baseline
 
-    monkeypatch.setattr(substrate, "scope_reviewer_slots", lambda *_a, **_k: [retrieving])
+    monkeypatch.setattr(slot_cfg, "commit_triad_delivery", lambda: _plan(("change", "coupling")))
     assert commit_review_contract_fingerprint() == baseline
     with monkeypatch.context() as patched:
-        patched.setattr("ouroboros.tools.scope_required_sources.SCOPE_REQUIRED_SOURCES_POLICY",
-                        "v-next")
+        patched.setattr("ouroboros.tools.scope_required_sources.SCOPE_REQUIRED_SOURCES_POLICY", "v-next")
         assert commit_review_contract_fingerprint() != baseline
     with monkeypatch.context() as patched:
-        patched.setattr("ouroboros.tools.scope_review.SCOPE_RETRIEVING_OUTPUT_CONTRACT",
-                        "a different retrieving contract")
+        patched.setattr("ouroboros.triad_review.REVIEW_TWO_PART_OBJECT_CONTRACT", "a different contract B")
+        assert commit_review_contract_fingerprint() != baseline
+    with monkeypatch.context() as patched:
+        patched.setattr("ouroboros.triad_review.REVIEW_JSON_ARRAY_CONTRACT", "a different contract A")
         assert commit_review_contract_fingerprint() != baseline
 
 
-def test_a_stored_bare_scope_row_discloses_its_migration_once_per_install(tmp_path, monkeypatch):
-    """A row saved before the retrieving delivery changes what it spends and how
-    long it takes, so the change is announced in the durable event stream — once."""
-    import ouroboros.tools.scope_review as scope_mod
-    from ouroboros import config as cfg
-    from ouroboros.tools import review_admission
-    from ouroboros.tools.registry import ToolContext
-
-    data = tmp_path / "data"
-    data.mkdir()
-    monkeypatch.setattr(cfg, "DATA_DIR", str(data))
-    repo = _staged_protected_repo(tmp_path)
-    monkeypatch.setattr(scope_mod, "_call_scope_llm", lambda *_a, **_k: ("", None, ""))
-    ctx = ToolContext(repo_dir=repo, drive_root=data)
-    ctx.pending_events = []
-
-    for _ in range(2):
-        scope_mod.run_scope_review(ctx, "amend the prompt", slot_id="scope_slot_1",
-                                   scope_model="fixture/model")
-    events = [e for e in ctx.pending_events
-              if e.get("type") == review_admission.SCOPE_DELIVERY_MIGRATION_EVENT]
-    assert len(events) == 1, ctx.pending_events
-    assert events[0]["slot_id"] == "scope_slot_1"
-    assert events[0]["model"] == "fixture/model"
-    assert events[0]["delivery"] == "native_retrieval"
-    marker = data / "state" / review_admission.SCOPE_DELIVERY_MIGRATION_FILENAME
-    assert json.loads(marker.read_text(encoding="utf-8"))["slot_id"] == "scope_slot_1"
-
-
-def test_a_bare_api_scope_seat_is_priced_as_its_native_first_send(tmp_path):
-    """Wave admission must price what the row SENDS: a bare api scope row opens a
-    native inspection episode, so its seat is the episode's first send (work
-    order plus tool schemas), never a packet message pair it never assembles."""
+def test_a_native_retrieving_seat_is_priced_as_its_first_send(tmp_path):
+    """Wave admission must price what the seat SENDS: a native retrieving seat
+    opens an inspection episode, so its price is the episode's first send (work
+    order, its own two-part brief and tool schemas), never a packet message pair
+    it never assembles."""
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_native_episode import native_first_send_chars
-    from ouroboros.review_records import ReviewSlot
-    from ouroboros.reviewer_slot_config import SCOPE_ROLE_HINT
     from ouroboros.tools.review_admission import commit_gate_paid_seats
-    from ouroboros.tools.scope_review import SCOPE_RETRIEVING_OUTPUT_CONTRACT
+    from ouroboros.tools.review_multi_model import TRIAD_ROLE_HINT
+    from ouroboros.triad_review import REVIEW_TWO_PART_OBJECT_CONTRACT
 
     repo = _repo(tmp_path)
-    slot = ReviewSlot(slot_id="scope_slot_1", model="api/model",
-                      route=ReviewRouteKind.API_CHAT, native_retrieval_override=True)
-    prepared = {"scope_model_id": "api/model", "prompt": "", "stable_prefix_len": 0,
-                "session_task": "BRIEF", "repo_dir": str(repo), "retrieves": True}
-    seats = commit_gate_paid_seats(None, True, [{"slot": slot, "prepared": prepared, "final": None}])
+    prepared = {"prompt": "", "stable_prefix_len": 0, "target_repo": str(repo), "models": ["api/model"],
+                "routes": [ReviewRouteKind.API_CHAT],
+                "row_plan": {"models": ["api/model"], "routes": [ReviewRouteKind.API_CHAT], "slot_ids": ["scope_slot_1"],
+                             "retrieves": [True], "parts": [("coupling",)], "session_tasks": ["BRIEF"]}}
+    seats = commit_gate_paid_seats(prepared, False)
+    assert [s["slot_id"] for s in seats] == ["scope_slot_1"]
     assert seats[0]["prompt_chars"] == native_first_send_chars(
-        str(repo), surface="scope_review", role_hint=SCOPE_ROLE_HINT,
-        slot_id="scope_slot_1", session_task="BRIEF",
-        output_contract=SCOPE_RETRIEVING_OUTPUT_CONTRACT)
+        str(repo), surface="multi_model_review", role_hint=TRIAD_ROLE_HINT,
+        slot_id="scope_slot_1", session_task="BRIEF", output_contract=REVIEW_TWO_PART_OBJECT_CONTRACT)
+    assert commit_gate_paid_seats(prepared, True) == []

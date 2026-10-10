@@ -863,6 +863,19 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     """Search repo text with optional regex, path, glob, and result cap."""
     if not query:
         return "⚠️ SEARCH_ERROR: query is required."
+    if not isinstance(query, str):
+        return "⚠️ SEARCH_ERROR: query must be a string."
+    # Validate a regex query UP FRONT, before any path fact: an invalid pattern is an
+    # error whatever the path, and the contract holds for BOTH the ripgrep path and the
+    # Python fallback. ripgrep accepts some malformed patterns permissively (e.g. an
+    # unterminated '[' yields "no matches" instead of erroring), so without this the rg
+    # path would silently swallow an invalid regex while only the fallback rejected it.
+    # Non-regex queries are matched literally and need no check.
+    if regex:
+        try:
+            re.compile(query)
+        except re.error as e:
+            return f"⚠️ SEARCH_ERROR: invalid regex: {e}"
     normalized, block = _access_or_block(ctx, root, "search")
     if block:
         return block
@@ -883,8 +896,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     display_path = binding.target_path.relative_to(root_path).as_posix() if normalized in {"active_workspace", "system_repo"} else path
     display_search_path = _root_display_path(normalized, display_path)
     search_root = binding.target_path
-    if not search_root.exists():
-        return f"⚠️ SEARCH_ERROR: path not found: {display_search_path}"
     if normalized != "user_files":
         # Reject a search ROOT that escapes its resource root (e.g. the requested path is an
         # in-tree symlink pointing outside — untrusted child project/deliverable trees) BEFORE
@@ -901,6 +912,10 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     )
     if protected_root_block:
         return protected_root_block
+    # An admitted, absent path is an ordinary discovery miss: a typed warning
+    # (parity with list_files/read_file), never a denial or an invalid query.
+    if not search_root.exists():
+        return f"⚠️ SEARCH_NOT_FOUND: path not found: {display_search_path}"
     protected_root_read_block = block_reason_for_path(
         ctx, search_root, "read_bytes", binding
     )
@@ -938,19 +953,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         if skip:
             return _drop(skip)
         return True
-
-    # Validate a regex query UP FRONT so the invalid-regex contract holds for BOTH the
-    # ripgrep path and the Python fallback. ripgrep accepts some malformed patterns
-    # permissively (e.g. an unterminated '[' yields "no matches" instead of erroring),
-    # so without this the rg path would silently swallow an invalid regex while only the
-    # fallback rejected it. Non-regex queries are matched literally and need no check.
-    # (Checked before the wall-clock budget below: an invalid regex returns immediately,
-    # so there is no point starting the timer for it.)
-    if regex:
-        try:
-            re.compile(query)
-        except re.error as e:
-            return f"⚠️ SEARCH_ERROR: invalid regex: {e}"
 
     import time as _time
     _search_t0 = _time.monotonic()  # start the wall-clock budget BEFORE rg, so a

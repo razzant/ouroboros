@@ -577,6 +577,9 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path, *, crea
     from ouroboros.test_environment import isolated_environment
 
     temp_root = pathlib.Path(temp_root).resolve(strict=False)
+    # The scrub drops settings keys (`test_environment.settings_keys`), secret
+    # suffixes, `NODE_OPTIONS`, `VIRTUAL_ENV` and the OUROBOROS_/GH_/GIT_/PYTEST_/
+    # PYTHON/UV_/PIP_ prefixes; writable paths are re-rooted under `temp_root`.
     env = isolated_environment(temp_root, repo_worktree, create=create)
     # PREPENDED, so `-p ouroboros_preflight_probe` resolves to the gate's own
     # worker-count plugin and not to anything the candidate tree or the

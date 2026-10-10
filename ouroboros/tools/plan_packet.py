@@ -2,11 +2,12 @@
 
 Companion of ``ouroboros.tools.plan_spec`` (schema / findings / aggregate /
 evidence): the system prompt carries the findings-only stance, the domain-free
-rubric, the blocking rule, the convergence rule (cycle ≥2), the checklist
-section verbatim, and the governance pack (W3: BIBLE.md + ARCHITECTURE.md in full for a
+rubric, the convergence rule (cycle ≥2), the checklist section verbatim — whose
+height rule is what may block; a fallback blocking rule stands in only when the
+section is missing — and the governance pack (W3: BIBLE.md + ARCHITECTURE.md in full for a
 self-modification plan, their navigation maps otherwise); the user content carries
-TASK OBJECTIVE · SPEC · PLAN PROSE · EVIDENCE · OWN ROOM DIALOGUE · RELATED
-ROOM POINTERS · ROOT EXPLORATION LOG · PRIOR CYCLES in that order. The full
+TASK OBJECTIVE · OWNER WORDS · SPEC · PLAN PROSE · EVIDENCE · OWN ROOM DIALOGUE ·
+RELATED ROOM POINTERS · ROOT EXPLORATION LOG · PRIOR CYCLES in that order. The full
 redacted dialogue uses task source custody and route-sized projections; only
 exploration and prior-cycle summaries retain independent display bounds. The
 ``PLAN_REVIEW_CONTROL_JSON`` control line is NOT emitted here (Phase C owns it).
@@ -120,7 +121,7 @@ def build_plan_review_system_prompt(
         "and suggest a simpler or more general alternative when useful. Express this advice as "
         "optional `note` findings; Ouroboros decides whether to adopt it, without a required "
         "disposition. A preference, premise challenge, or repeated suggestion alone is never "
-        "a blocker. Independently demonstrated failures still follow the blocking rule below. "
+        "a blocker. Independently demonstrated failures still follow the rule below on what may block. "
         "A question the plan leaves open is returned to its author, not filed as advice: "
         "`need_evidence` with the spec id in `breaks` asks Ouroboros, who authors the plan and is "
         "the addressee of everything this review produces, to answer, escalate, or defer it openly "
@@ -132,7 +133,10 @@ def build_plan_review_system_prompt(
             "7. Governance (this plan touches Ouroboros's own body): does the spec contradict "
             "BIBLE.md or a frozen contract? Cite the principle.\n"
         )
-    parts.append(f"\n## Blocking rule\n\n{_BLOCKING_RULE}\n")
+    if not checklist_section:
+        # The checklist's "Height rule" is the one home of what may block; this
+        # copy stands in only when the host could not supply it (named below).
+        parts.append(f"\n## Blocking rule\n\n{_BLOCKING_RULE}\n")
     # The convergence rule is cycle-dependent, so it lives in the USER content's prior-cycles
     # section — the system prompt stays byte-stable across cycles and its cache block hits
     # (production-gate advisory, 39c3a195).
@@ -315,14 +319,18 @@ def build_plan_review_user_content(
     The delivery layer selects a newest source range only when the actual route
     cannot fit the complete dialogue beside governance and the operative plan.
     Exploration and prior cycles retain their existing disclosed display bounds.
+    The owner's words that caused the work (``manifest["owner_words"]``) follow
+    the objective whole, in the cache-stable prefix; no key, no section.
     """
     from ouroboros.tools.plan_dialogue import render_dialogue
 
     view = spec_with_ids(spec)
     if goal and not view.get("goal"):
         view["goal"] = goal
+    owner_words = str(manifest.get("owner_words") or "")
     sections = [
         "## TASK OBJECTIVE\n\n" + (objective or "(none declared)") + "\n",
+        *([owner_words + "\n"] if owner_words.strip() else []),
         "## SPEC (ids are the only valid `breaks` targets)\n\n" + _json_block(view) + "\n",
         "## PLAN PROSE\n\n" + (plan_prose or "(none)") + "\n",
         "## EVIDENCE\n\n" + _render_evidence(manifest),

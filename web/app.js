@@ -114,6 +114,7 @@ async function showPage(name, options = {}) {
             const canLeave = await handler({ from: state.activePage, to: pageName });
             if (canLeave === false) return false;
         }
+        if (state.activePage === 'chat') mainChat?.closeTransient?.();
         document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
         document.getElementById(`page-${pageName}`)?.classList.add('active');
         state.activePage = pageName;
@@ -271,6 +272,10 @@ getNotifier().attach({
 getNotifier().configure({
     showToast,
     onActivate: (target) => {
+        // A notification leads to its message: no document stays open over it,
+        // in Main or in any room, whichever chat it names.
+        mainChat?.closeTransient?.();
+        for (const inst of projectInstances.values()) inst.closeTransient?.();
         const chatId = Number(target?.chatId);
         const project = Array.isArray(lastProjectRows)
             ? lastProjectRows.find((row) => Number(row?.chat_id) === chatId)
@@ -307,10 +312,8 @@ function hydrateOpenChatsFromState(data, snapshotRequestedAt) {
 // alive; closing or switching destroys the previous one. The exception is an
 // instance holding unsendable client state (staged File attachments / an
 // in-flight upload): it is hidden and marked instead, so switching to Settings
-// mid-upload never drops attachments. Scroll intent survives destruction in a
-// small stash keyed by project id and is re-applied after the recreated
-// instance's first paint.
-const projectScrollStash = new Map();
+// mid-upload never drops attachments. Every reopen lands at the newest message
+// (owner decision 2026-10-05): a recreated instance opens there, a kept one moves there.
 
 // A cancelled paint can no longer read, so its request is retired with it: a
 // reopened pending-work survivor must start its own read, never join that one.
@@ -323,13 +326,13 @@ function destroyProjectInstance(pid) {
     const inst = projectInstances.get(pid);
     if (!inst) return;
     if (inst.hasPendingWork?.()) {
+        // Kept for its staged files; a reader it opened does not stay over the next view.
+        inst.closeTransient?.();
         inst.page.hidden = true;
         inst.page.dataset.pendingWork = '1';
         cancelProjectPaint(pid, inst);
         return;
     }
-    const scroll = inst.getScrollState?.();
-    if (scroll) projectScrollStash.set(pid, scroll);
     inst.destroy?.();
     projectInstances.delete(pid);
     projectPaintRequests.delete(pid);
@@ -344,10 +347,14 @@ function closeProjectPanel({ sync = true } = {}) {
     if (activeId) destroyProjectInstance(activeId);
     // Anything left is a hidden pending-work survivor; keep it hidden.
     for (const [pid, inst] of projectInstances) {
+        inst.closeTransient?.();
         inst.page.hidden = true;
         cancelProjectPaint(pid, inst);
     }
     if (sync) syncNavigationState();
+    // Leaving a Project for Main is a return to Main: its newest message (owner
+    // decision 2026-10-05). Another page shows Main later through `ouro:page-shown`.
+    if (activeId && state.activePage === 'chat') void mainChat?.showLatest?.();
 }
 
 async function openProjectPanel(project, { closeDrawer = true, openOnly = false, taskId = '', quizId = '' } = {}) {
@@ -365,6 +372,8 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     try {
         const movedToChat = await showPage('chat', { closeProject: false, closeDrawer: false });
         if (movedToChat === false || navigation !== projectNavigationGeneration) return;
+        // The room covers Main: a document Main had open closes rather than sit over it.
+        mainChat?.closeTransient?.();
         navState.activeProjectId = project.id;
         projectPanelTitle.textContent = project.name || project.id;
         // One live panel: every OTHER project instance is destroyed (or hidden and
@@ -382,27 +391,28 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
                 mountEl: projectPanelBody,
                 asPanel: true,
                 title: project.name || project.id,
-                initialScrollState: projectScrollStash.get(project.id) || null,
                 // The panel's Retry reruns the open transaction (fetch, paint, ACK)
                 // against the newest known revision, so a recovered read is also seen.
                 onHistoryRetry: () => acknowledgeProjectAfterPaint(freshProjectRow(project), null, { forcePaint: true }),
                 // Arriving at the newest messages retries a withheld acknowledgement.
                 onReadingLatest: () => acknowledgeProjectAfterPaint(freshProjectRow(project)),
             });
-            projectScrollStash.delete(project.id);
             projectInstances.set(project.id, inst);
         }
         // A reopened pending-work survivor is live again.
         delete inst.page.dataset.pendingWork;
         for (const [pid, other] of projectInstances) {
             other.page.hidden = pid !== project.id;
-            if (pid !== project.id) cancelProjectPaint(pid, other);
+            if (pid !== project.id) {
+                other.closeTransient?.();
+                cancelProjectPaint(pid, other);
+            }
         }
         if (closeDrawer) navState.mobileDrawerOpen = false;
         syncNavigationState();
-        // Restore this thread's scroll instead of leaving it at the top (P7). Runs
-        // after the panel is shown so the column has real geometry to scroll.
-        inst.restoreScrollPosition?.();
+        // Reopened at the newest message; after the panel is shown, so the column
+        // has real geometry. A question opened from Main is revealed below instead.
+        if (!(taskId && quizId)) void inst.showLatest?.();
         // ACK only the exact revision whose history was fetched and painted. chat.js
         // owns the paint receipt; an already-painted instance skips the forced
         // refetch — the server clamps the ACK, so no repaint is needed.

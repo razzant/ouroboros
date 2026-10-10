@@ -14,6 +14,7 @@ decision 3=A).
 import base64
 
 import ouroboros.usage_accounting as usage_accounting
+from ouroboros.capability_evidence import MAIN_DENSITY_BASIS
 from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT
 from ouroboros.llm import _attempt_request
 from ouroboros.usage_accounting import AttemptRequest
@@ -78,7 +79,7 @@ def test_density_observer_uses_the_bounded_basis(monkeypatch):
     )
     usage_accounting._observe_token_density(request, {"prompt_tokens": 1_450})
     assert captured["prompt_chars"] == 1_500 * 4
-    assert captured["basis"] == "bounded_proxy"
+    assert captured["basis"] == MAIN_DENSITY_BASIS
     # The witness now calibrates ~1.0 on the estimator's own basis instead of
     # the poisoned 0.05-0.65 range the raw basis produced with live images.
     assert 0.9 <= captured["prompt_tokens"] / (captured["prompt_chars"] / 4) <= 1.1
@@ -141,8 +142,9 @@ def test_bounded_estimate_matches_the_fit_estimator_on_tool_heavy_payloads():
 def test_legacy_and_raw_rows_never_calibrate_the_fit(tmp_path):
     """sol M6: an upgraded install's pre-basis witness (e.g. 0.55 from raw
     base64 on an image route) must not stay authoritative for its 14-day TTL —
-    only bounded_proxy rows calibrate; anything else falls back to the neutral
-    cold estimate until the new witness accumulates."""
+    only MAIN_DENSITY_BASIS rows calibrate; anything else (raw, the retired
+    "bounded_proxy", no stamp) falls back to the neutral cold estimate until the
+    new witness accumulates."""
     import json as _json
 
     from ouroboros.capability_evidence import (
@@ -169,10 +171,18 @@ def test_legacy_and_raw_rows_never_calibrate_the_fit(tmp_path):
     density, source = resolve_main_token_density(tmp_path, "route-1", "openai/gpt-test")
     assert (density, source) == (1.0, "cold_estimate")
 
-    # A bounded_proxy row calibrates as before (above the 20K-char noise floor).
+    # The retired basis (measured without the Messages ``system`` field) is ignored too.
+    record_token_density(
+        tmp_path, "openai/gpt-test", prompt_chars=60_000, prompt_tokens=90_000,
+        route_fp="route-1", basis="bounded_proxy",
+    )
+    density, source = resolve_main_token_density(tmp_path, "route-1", "openai/gpt-test")
+    assert (density, source) == (1.0, "cold_estimate")
+
+    # A row on the current basis calibrates as before (above the 20K-char noise floor).
     record_token_density(
         tmp_path, "openai/gpt-test", prompt_chars=60_000, prompt_tokens=14_500,
-        route_fp="route-1", basis="bounded_proxy",
+        route_fp="route-1", basis=MAIN_DENSITY_BASIS,
     )
     density, source = resolve_main_token_density(tmp_path, "route-1", "openai/gpt-test")
     assert source == "fresh_route_usage"
@@ -181,9 +191,10 @@ def test_legacy_and_raw_rows_never_calibrate_the_fit(tmp_path):
 
 def test_raw_witness_never_throttles_the_first_bounded_witness(tmp_path):
     """final-lane sol MAJOR: on an upgraded store a fresh RAW row at the same
-    numeric density must not suppress the FIRST bounded_proxy write as
+    numeric density must not suppress the FIRST current-basis write as
     'no drift' — that left the main resolver cold for the whole freshness
-    window. Throttle identity and newest-row comparison are basis-scoped."""
+    window. Throttle identity and newest-row comparison are basis-scoped, so
+    the retired "bounded_proxy" basis cannot suppress it either."""
     from ouroboros.capability_evidence import (
         _DENSITY_MEMO,
         record_token_density,
@@ -195,11 +206,31 @@ def test_raw_witness_never_throttles_the_first_bounded_witness(tmp_path):
         tmp_path, "openai/gpt-test", prompt_chars=400_000, prompt_tokens=150_000,
         route_fp="route-t", basis="raw",
     )
-    # Same numeric density, DIFFERENT basis: must persist, not throttle away.
     record_token_density(
         tmp_path, "openai/gpt-test", prompt_chars=400_000, prompt_tokens=150_000,
         route_fp="route-t", basis="bounded_proxy",
     )
+    assert resolve_main_token_density(tmp_path, "route-t", "openai/gpt-test") == (1.0, "cold_estimate")
+    # Same numeric density, DIFFERENT basis: must persist, not throttle away.
+    record_token_density(
+        tmp_path, "openai/gpt-test", prompt_chars=400_000, prompt_tokens=150_000,
+        route_fp="route-t", basis=MAIN_DENSITY_BASIS,
+    )
     density, source = resolve_main_token_density(tmp_path, "route-t", "openai/gpt-test")
     assert source == "fresh_route_usage"
     assert abs(density - 1.5) < 0.01
+
+
+def test_a_top_level_system_field_counts_in_the_bounded_basis():
+    """The Messages API carries the system prompt in its own field; the witness
+    denominator and the send finalizer measure it as a leading system message,
+    so a direct-Anthropic reply is not over-sized by the whole prompt."""
+    from ouroboros.context_fit import bounded_prompt_tokens_for_payload, estimate_context_prompt_tokens
+
+    messages = [{"role": "user", "content": "describe " * 500}]
+    system = [{"type": "text", "text": "governance " * 5_000, "cache_control": {"type": "ephemeral"}}]
+    bare = bounded_prompt_tokens_for_payload({"messages": messages}, 0)
+    with_system = bounded_prompt_tokens_for_payload({"system": system, "messages": messages}, 0)
+    assert with_system == estimate_context_prompt_tokens([{"role": "system", "content": system}, *messages], None)
+    assert with_system - bare > 10_000
+    assert bounded_prompt_tokens_for_payload({"system": "", "messages": messages}, 0) == bare

@@ -41,7 +41,6 @@ def subscription_ui():
     settings = {
         **fixture["preview"]["model_settings"],
         "OUROBOROS_SUBAGENTS": fixture["preview"]["available_subagents"],
-        "OUROBOROS_REVIEWER_SLOTS": json.dumps(fixture["preview"]["reviewer_slots"]),
         "OUROBOROS_RUNTIME_MODE": "advanced",
         "OUROBOROS_CONTEXT_MODE": "max",
         "_meta": {"setup_contract": bootstrap["contract"]},
@@ -99,30 +98,27 @@ def subscription_ui():
                 body = copy.deepcopy(fixture["preview"])
                 if not payload.get('subscriptionsConnected'):
                     body['model_settings'] = {key: payload.get(key, '') for key in body['model_settings']}
-                    body['available_subagents'] = {'enabled': True, 'items': []}
-                    body['reviewer_slots'] = {
-                        'triad': [{'slot_id': 'triad_1', 'route': {'kind': 'api_chat', 'target_id': payload.get('OUROBOROS_MODEL')}}],
-                        'scope': [{'slot_id': 'scope_1', 'route': {'kind': 'api_chat', 'target_id': payload.get('OUROBOROS_MODEL')}}],
-                        'advisory': {'enabled': True, 'route': {'kind': 'api_chat', 'target_id': payload.get('OUROBOROS_MODEL')}},
-                    }
+                    main = payload.get('OUROBOROS_MODEL')
+                    # The endpoint mints the factory reviewer row of an API-only draft.
+                    body['available_subagents'] = {'enabled': True, 'items': [{
+                        'subagent_id': 'review-1', 'recommended_use': 'Independent review.', 'effort': 'high',
+                        'route': {'kind': 'api_model', 'target_id': main},
+                        'review_eligible': True, 'minted_from': 'factory_default'}] if main else []}
                 if payload.get("skipSubscriptionPresets"):
                     body["model_settings"] = {key: payload.get(key, '') for key in body["model_settings"]}
-                    body["available_subagents"] = payload.get("OUROBOROS_SUBAGENTS") or {"enabled": True, "items": []}
-                    slots = json.loads(payload["OUROBOROS_REVIEWER_SLOTS"]) if payload.get("OUROBOROS_REVIEWER_SLOTS") else body["reviewer_slots"]
-                    for value in slots.values():
-                        for row in value if isinstance(value, list) else [value]:
-                            if not isinstance(row, dict):
-                                continue
-                            row.pop("subagent_id", None)
-                            row["route"] = {"kind": "api_chat", "target_id": payload["OUROBOROS_MODEL"]}
-                            pin = payload.get("OUROBOROS_MODEL_ACCOUNTS", {}).get("main")
-                            if pin:
-                                row["route"]["profile_id"] = pin
-                    body["reviewer_slots"] = slots
-                body["reviewer_slots"] = json.dumps(body["reviewer_slots"])
+                    catalog = payload.get("OUROBOROS_SUBAGENTS") or body["available_subagents"]
+                    pin = payload.get("OUROBOROS_MODEL_ACCOUNTS", {}).get("main")
+                    # Like ``review_rows_on_main``: every marked row moves onto Main; the rest stay.
+                    catalog["items"] = [{
+                        **{key: row[key] for key in ("subagent_id", "recommended_use", "effort", "review_eligible",
+                                                     "minted_from", "enabled") if key in row},
+                        "route": {"kind": "api_model", "target_id": payload["OUROBOROS_MODEL"],
+                                  **({"credential_profile_id": pin} if pin else {})},
+                    } if row.get("review_eligible") is True else row for row in catalog["items"]]
+                    body["available_subagents"] = catalog
             elif path == "/api/onboarding/complete":
-                assert isinstance(payload["OUROBOROS_REVIEWER_SLOTS"], str)
-                assert isinstance(json.loads(payload["OUROBOROS_REVIEWER_SLOTS"]), dict)
+                assert "OUROBOROS_REVIEWER_SLOTS" not in payload, "the wizard never authors review lanes"
+                assert isinstance(payload["OUROBOROS_SUBAGENTS"], dict)
                 if backend.get("client"):
                     result = backend["client"].post(path, json=payload)
                     route.fulfill(status=result.status_code, content_type="application/json", body=result.text)
@@ -134,8 +130,9 @@ def subscription_ui():
             body = fixture["status"]
         elif path == "/api/settings":
             body = settings
-        elif path == "/api/reviewer-slots":
-            body = fixture["preview"]["reviewer_slots"]
+        elif path == "/api/review-pool":
+            body = backend.get("review_pool", {"pool": [], "excluded": [], "last_executions": {},
+                                               "row_costs": {}, "config_error": "", "migration": None})
         elif path == "/api/model-catalog":
             body = copy.deepcopy(backend.get("catalog_response", fixture["catalog"]))
             if backend.get("catalog_status"):
@@ -165,14 +162,18 @@ def subscription_ui():
             engine = os.environ.get("OUROBOROS_UI_BROWSER_ENGINE", "chromium")
             if engine not in {"chromium", "webkit", "firefox"}:
                 raise ValueError(f"Unsupported browser engine: {engine}")
-            browser = getattr(pw, engine).launch(headless=True)
+            browser = getattr(pw, engine).launch(
+                headless=True, executable_path=os.environ.get("OUROBOROS_UI_BROWSER_EXECUTABLE") or None)
             try:
-                page = browser.new_page(viewport={"width": 1360, "height": 900},
-                                        has_touch=os.environ.get("OUROBOROS_UI_HAS_TOUCH") == "1")
-                page.route_web_socket('**/ws', lambda ws: ws.send(json.dumps({"type": "heartbeat"})))
-                page.route("**/api/**", respond)
-                page.on("pageerror", lambda error: page_errors.append(str(error)))
-                yield {"page": page, "url": f"http://127.0.0.1:{server.server_port}",
+                def new_page(**options):
+                    page = browser.new_page(viewport={"width": 1360, "height": 900},
+                                            has_touch=os.environ.get("OUROBOROS_UI_HAS_TOUCH") == "1", **options)
+                    page.route_web_socket('**/ws', lambda ws: ws.send(json.dumps({"type": "heartbeat"})))
+                    page.route("**/api/**", respond)
+                    page.on("pageerror", lambda error: page_errors.append(str(error)))
+                    return page
+
+                yield {"page": new_page(), "new_page": new_page, "url": f"http://127.0.0.1:{server.server_port}",
                        "posts": posts, "reads": reads, "fixture": fixture,
                        "settings": settings, "errors": page_errors, "backend": backend, "bootstrap": bootstrap}
                 assert not page_errors
@@ -210,7 +211,8 @@ def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription
     page.click('#quick-start-btn')
     page.wait_for_selector('.summary-card')
     assert "gpt-test" in page.locator('.summary-card').inner_text()
-    assert "Deep self-review" in page.locator('.summary-card').inner_text()
+    reviewers = page.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
+    assert "codex=gpt-test" in reviewers.inner_text()
     capture(page, "summary-quick")
     page.click('#next-btn')
     page.wait_for_url(ui["url"] + "/")
@@ -218,11 +220,17 @@ def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription
     assert len(writes) == 1
     assert writes[0]["OPENROUTER_API_KEY"] == ""
     assert writes[0]["OUROBOROS_MODEL"] == 'claudexor::codex=gpt-test'
-    assert json.loads(writes[0]["OUROBOROS_REVIEWER_SLOTS"])["deep_review"]["subagent_id"] == "codex"
+    # The reviewers are the catalog rows marked Reviewer; no lane is sent or kept.
+    assert [row.get("review_eligible") for row in writes[0]["OUROBOROS_SUBAGENTS"]["items"]] == [True]
     assert not any(path == '/api/settings' for path, _ in ui["posts"])
     saved = onboarding.saved()
     assert saved['OUROBOROS_MODEL'] == writes[0]['OUROBOROS_MODEL']
-    assert saved['OUROBOROS_REVIEWER_SLOTS'] == writes[0]['OUROBOROS_REVIEWER_SLOTS']
+    catalog = saved['OUROBOROS_SUBAGENTS']
+    catalog = json.loads(catalog) if isinstance(catalog, str) else catalog
+    posted = writes[0]["OUROBOROS_SUBAGENTS"]["items"]
+    # The visible rows are saved as shown (the subscription preset may only append its own).
+    assert [(row['subagent_id'], row.get('review_eligible')) for row in catalog['items'][:len(posted)]] == [('codex', True)]
+    assert 'OUROBOROS_REVIEWER_SLOTS' not in saved
     assert not saved['OPENAI_API_KEY'] and not saved['OPENROUTER_API_KEY']
     assert onboarding.calls['supervisor'] == 1
 
@@ -279,15 +287,20 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     main.locator('[data-model-role-model]').fill('owner-model')
     page.evaluate('window.scrollTo(0, 0)')
     capture(page, "models-desktop")
+    # A reviewer is a catalog row marked Reviewer, edited where the row is.
+    page.locator('[data-collapse="subagents"] > summary').click()
+    reviewer = page.locator('[data-subagent-row]').first
+    assert reviewer.locator('[data-subagent-field="review_eligible"]').is_checked()
+    assert page.locator('[data-review-pool-count]').inner_text() == 'Reviewers: 1'
+    default_effort = reviewer.locator('[data-subagent-field="effort"] option[value=""]')
+    assert default_effort.inner_text() == 'Default (reviews at high)'
+    reviewer.locator('[data-subagent-field="effort"]').select_option('high')
+    assert reviewer.locator('[data-subagent-field="effort"]').input_value() == 'high'
+    reviewer.scroll_into_view_if_needed()
+    capture(page, "reviewer-row-editable")
     page.click('#next-btn')
-    page.wait_for_selector('#reviewer-slots-section', state='attached')
-    page.locator('details').filter(has=page.locator('#reviewer-slots-section')).locator(':scope > summary').click()
-    assert page.locator('#reviewer-deep-review-row select').count() > 0
+    assert page.locator('[data-reviewers-note]').inner_text().startswith('Reviewers: 1 — the rows marked Reviewer')
     capture(page, "review-editable")
-    deep_review = page.locator('#reviewer-deep-review-row')
-    deep_review.locator('[data-deep-review-effort]').select_option('high')
-    deep_review.scroll_into_view_if_needed()
-    capture(page, "deep-review-editable")
     page.click('#next-btn')
     page.wait_for_selector('[data-collapse="api-budget"]')
     assert not page.locator('[data-collapse="api-budget"]').evaluate('(el) => el.open')
@@ -300,8 +313,8 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     vision = summary.locator('.summary-kv').filter(has=page.get_by_text('Vision', exact=True))
     assert 'Uses Main' in vision.inner_text()
     assert 'Account: work' in vision.inner_text()
-    deep_summary = summary.locator('.summary-kv').filter(has=page.get_by_text('Deep self-review', exact=True))
-    assert 'Effort: high' in deep_summary.inner_text()
+    reviewers = summary.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
+    assert 'codex=gpt-test · Effort: high' in reviewers.inner_text()
     capture(page, "summary-manual")
     page.click('#next-btn')
     page.wait_for_url(ui["url"] + "/")
@@ -314,7 +327,8 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     assert body['OUROBOROS_MODEL_ACCOUNTS']['fallback'] == ['', 'work']
     assert body['OUROBOROS_MODEL_CONTEXT_WINDOWS']['main'] == 1000000
     assert body['OUROBOROS_MODEL_FALLBACKS'] == 'openai::second, claudexor::codex=first'
-    assert json.loads(body['OUROBOROS_REVIEWER_SLOTS'])['deep_review']['effort'] == 'high'
+    (row,) = body['OUROBOROS_SUBAGENTS']['items']
+    assert (row['subagent_id'], row['review_eligible'], row['effort']) == ('codex', True, 'high')
 
 
 def test_settings_accounts_and_model_roles_use_the_same_compact_components(subscription_ui):
@@ -406,9 +420,8 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
     page.wait_for_function("() => document.querySelector('.wizard-inline-note')?.textContent.includes('Reviewers were assigned to Main')")
     assert not any(path == '/api/onboarding/complete' for path, _ in ui['posts']), 'Recovery is a preview, not a write'
     assert not onboarding.settings_path.exists()
-    for label in ['Triad review', 'Scope review', 'Advisory review', 'Deep self-review']:
-        row = page.locator('.summary-kv').filter(has=page.get_by_text(label, exact=True))
-        assert 'claudexor::codex=owner-main' in row.inner_text()
+    reviewers = page.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
+    assert 'claudexor::codex=owner-main · Account: personal' in reviewers.inner_text()
     capture(page, 'manual-main-reviewer-recovery')
     if edit_after_recovery == 'main':
         for _ in range(3):
@@ -419,30 +432,36 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
         page.wait_for_selector('#skip-presets-btn:not([hidden])')
         assert page.locator('#next-btn').is_enabled()
         assert 'Main changed; reviewers keep the assignments shown above' in page.locator('.wizard-inline-note').inner_text()
-        assert 'owner-main' in page.locator('.summary-kv').filter(has=page.get_by_text('Triad review', exact=True)).inner_text()
+        assert 'owner-main' in reviewers.inner_text() and 'new-main' not in reviewers.inner_text()
     elif edit_after_recovery:
-        page.click('#back-btn')
-        page.click('#back-btn')
-        page.locator('[data-collapse="reviewers"] > summary').click()
-        page.locator('[data-deep-review-api-model]').fill('owner-deep')
-        page.click('#next-btn')
-        page.click('#next-btn')
+        # The reviewers are rows of the Models step's catalog: edit one there.
+        for _ in range(3):
+            page.click('#back-btn')
+        page.locator('[data-collapse="subagents"] > summary').click()
+        first = page.locator('[data-subagent-row]').filter(has=page.locator('[data-subagent-field="review_eligible"]:checked')).first
+        assert first.count() == 1
+        first.locator('[data-subagent-field="model"]').fill('owner-deep')
+        for _ in range(3):
+            page.click('#next-btn')
         page.wait_for_function("() => !document.querySelector('.wizard-error').textContent")
-        deep = page.locator('.summary-kv').filter(has=page.get_by_text('Deep self-review', exact=True))
-        assert 'owner-deep' in deep.inner_text()
+        assert 'claudexor::codex=owner-deep' in reviewers.inner_text()
     page.click('#next-btn')
     page.wait_for_url(ui['url'] + '/')
     bodies = [body for path, body in ui['posts'] if path == '/api/onboarding/complete']
     assert len(bodies) == 1 and bodies[0]['skipSubscriptionPresets'] is True
     assert bodies[0]['OUROBOROS_MODEL'] == ('claudexor::codex=new-main' if edit_after_recovery == 'main' else 'claudexor::codex=owner-main')
-    assert json.loads(onboarding.saved()['OUROBOROS_REVIEWER_SLOTS']) == json.loads(bodies[0]['OUROBOROS_REVIEWER_SLOTS'])
+    saved = onboarding.saved()
+    catalog = saved['OUROBOROS_SUBAGENTS']
+    catalog = json.loads(catalog) if isinstance(catalog, str) else catalog
+    marked = [row for row in catalog['items'] if row.get('review_eligible') is True]
+    assert marked == [row for row in bodies[0]['OUROBOROS_SUBAGENTS']['items'] if row.get('review_eligible') is True]
+    assert 'OUROBOROS_REVIEWER_SLOTS' not in saved
     assert onboarding.calls['supervisor'] == 1
-    for kind, value in json.loads(bodies[0]['OUROBOROS_REVIEWER_SLOTS']).items():
-        for row in value if isinstance(value, list) else [value]:
-            if isinstance(row, dict):
-                expected = 'owner-deep' if edit_after_recovery is True and kind == 'deep_review' else 'owner-main'
-                assert row['route']['target_id'] == f'claudexor::codex={expected}'
-                assert row['route']['profile_id'] == 'personal'
+    assert marked, 'Use Main kept the reviewers: none were dropped'
+    for index, row in enumerate(marked):
+        expected = 'owner-deep' if edit_after_recovery is True and index == 0 else 'owner-main'
+        assert row['route'] == {'kind': 'api_model', 'target_id': f'claudexor::codex={expected}',
+                                'credential_profile_id': 'personal'}
 
 
 def test_failed_main_reviewer_recovery_does_not_latch_finish(subscription_ui):
@@ -541,3 +560,226 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     page.unroute('**/api/model-catalog')
     assert page.locator('#next-btn').is_disabled()
     assert page.locator('#quick-start-btn').is_hidden()
+
+
+def _zai_key(page, plan):
+    page.locator('[data-collapse="api-access"] > summary').click()
+    page.locator('[data-collapse="more-providers"] > summary').click()
+    page.locator('#zai-key').fill('zai-fixture-credential')
+    page.locator('#zai-plan').fill(plan)
+
+
+@pytest.mark.parametrize('plan, owner_vision', [('', None), ('coding', None), ('payg', ''), ('payg', 'zai::glm-ocr')])
+def test_fresh_zai_setup_proposes_the_image_capable_vision_the_owner_may_change(subscription_ui, plan, owner_vision):
+    """PR #1560: a fresh Z.ai-only setup shows and saves Flash in Vision; an owner's
+    clear or replacement survives Back/Next and is what gets saved."""
+    ui, page = subscription_ui, subscription_ui['page']
+    ui['fixture']['status']['profiles']['profiles'] = []
+    page.goto(ui['url'] + '/onboarding')
+    _zai_key(page, plan)
+    page.click('#next-btn')
+    vision = page.locator('[data-model-role="vision"] [data-model-role-model]')
+    vision.wait_for()
+    assert vision.input_value().endswith('glm-5.3-flash')
+    capture(page, f'zai-models-{plan or "default"}')
+    if owner_vision is not None:
+        vision.fill(owner_vision)
+        page.click('#back-btn')
+        page.click('#next-btn')
+        assert vision.input_value() == owner_vision.rpartition('::')[2]   # the source picker holds "zai"
+    for _ in range(3):
+        page.click('#next-btn')
+    page.wait_for_selector('.summary-card')
+    capture(page, f'zai-summary-{plan or "default"}-{"owner" if owner_vision is not None else "default"}')
+    page.click('#next-btn')
+    page.wait_for_url(ui['url'] + '/')
+    body = [body for path, body in ui['posts'] if path == '/api/onboarding/complete'][0]
+    assert (body['ZAI_API_KEY'], body['ZAI_PLAN'], body['OUROBOROS_MODEL']) == ('zai-fixture-credential', plan, 'zai::glm-5.3')
+    assert body['OUROBOROS_MODEL_VISION'] == ('zai::glm-5.3-flash' if owner_vision is None else owner_vision)
+
+
+def test_a_connected_subscription_keeps_the_zai_vision_default_out(subscription_ui):
+    """The subscription path owns model selection: a Z.ai key beside it adds no Vision default."""
+    ui, page = subscription_ui, subscription_ui['page']
+    page.goto(ui['url'] + '/onboarding')
+    page.wait_for_selector('#next-btn:not([disabled])')
+    _zai_key(page, '')
+    page.click('#next-btn')
+    page.wait_for_function("() => document.querySelector('[data-model-role=\"main\"] [data-model-role-model]')?.value === 'gpt-test'")
+    assert page.locator('[data-model-role="vision"] [data-model-role-model]').input_value() == ''
+    capture(page, 'zai-with-subscription-models')
+
+
+@pytest.mark.parametrize('scenario, expected_vision', [
+    ('key-first', ''), ('local-first', ''), ('remote-default', ''),
+    ('remote-main-edit', ''), ('remote-clear', ''),
+    ('remote-custom', 'zai::glm-ocr'), ('remote-explicit-default', 'zai::glm-5.3-flash'),
+    ('local-fallback', 'zai::glm-5.3-flash'),
+])
+def test_local_main_with_zai_defaults_only_untouched_vision(subscription_ui, monkeypatch, scenario, expected_vision):
+    ui, page = subscription_ui, subscription_ui['page']
+    ui['fixture']['status']['profiles']['profiles'] = []
+    page.goto(ui['url'] + '/onboarding')
+
+    def disclosure(name):
+        details = page.locator(f'[data-collapse="{name}"]')
+        if not details.evaluate('el => el.open'):
+            details.locator(':scope > summary').click()
+
+    def key():
+        disclosure('api-access')
+        disclosure('more-providers')
+        page.locator('#zai-key').fill('zai-fixture-credential')
+
+    def local():
+        disclosure('api-access')
+        disclosure('local-model')
+        page.locator('#local-source').fill('/models/local-test.gguf')
+        mode = 'fallback' if scenario == 'local-fallback' else 'all'
+        page.locator(f'[data-local-mode="{mode}"]').click()
+
+    vision = page.locator('[data-model-role="vision"] [data-model-role-model]')
+    if scenario == 'local-first':
+        local()
+        key()
+    else:
+        key()
+        if scenario.startswith('remote-'):
+            page.click('#next-btn')
+            assert vision.input_value() == 'glm-5.3-flash'
+            if scenario == 'remote-main-edit':
+                page.locator('[data-model-role="main"] [data-model-role-model]').fill('owner-main')
+            elif scenario in {'remote-clear', 'remote-custom', 'remote-explicit-default'}:
+                # Even an explicit choice equal to the suggestion belongs to the owner.
+                vision.fill(expected_vision.rpartition('::')[2])
+            page.click('#back-btn')
+        local()
+    page.click('#next-btn')
+    capture(page, f'local-zai-models-{scenario}')
+    assert vision.input_value() == expected_vision.rpartition('::')[2]
+    for _ in range(3):
+        page.click('#next-btn')
+    page.wait_for_selector('.summary-card')
+    capture(page, f'local-zai-summary-{scenario}')
+    page.click('#next-btn')
+    page.wait_for_url(ui['url'] + '/')
+    writes = [body for path, body in ui['posts'] if path == '/api/onboarding/complete']
+    assert len(writes) == 1
+    body = writes[0]
+    assert body['OUROBOROS_MODEL_VISION'] == expected_vision
+    assert body['LOCAL_ROUTING_MODE'] == ('fallback' if scenario == 'local-fallback' else 'all')
+    if scenario == 'remote-main-edit':
+        assert body['OUROBOROS_MODEL'] == 'zai::owner-main'
+    if not expected_vision:
+        # Continue the actual browser draft through the validator and caption
+        # consumer: a present Z.ai key must not turn local Main into a paid call.
+        from ouroboros.llm import LLMClient
+        from ouroboros.settings_setup_contract import validate_setup_payload
+        from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+        settings, error = validate_setup_payload(body, {})
+        assert not error
+        assert settings['USE_LOCAL_MAIN'] is True
+        for key, value in settings.items():
+            if isinstance(value, (str, bool, int, float)):
+                monkeypatch.setenv(key, str(value))
+        monkeypatch.setenv('OUROBOROS_IMAGE_INPUT_MODE', 'caption')
+        calls = []
+        monkeypatch.setattr(LLMClient, 'vision_query', lambda *_a, **_k: calls.append(_k))
+        message = [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {
+            'url': 'data:image/png;base64,aW1hZ2U='}}]}]
+        result = prepare_messages_for_send(message, routing=VisionRoutingContext(
+            settings['OUROBOROS_MODEL'], LLMClient(), {}, use_local=settings['USE_LOCAL_MAIN']))
+        assert calls == []
+        assert result[0]['content'][0]['text'] == (
+            '[image omitted: our local llama.cpp transport lane cannot carry images; no caption route is available]')
+
+
+@pytest.mark.parametrize('choice', ['generated', 'main-edited', 'deliberate-Flash'])
+def test_review_shortcut_reconciles_local_vision_before_preview(
+        subscription_ui, onboarding, monkeypatch, record_property, choice):
+    """The shortcut must reconcile the same draft as Next, before preview or save."""
+    import httpx
+    from ouroboros import net_transport
+    from ouroboros.llm import LLMClient
+    from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+    ui, page = subscription_ui, subscription_ui['page']
+    profiles = ui['fixture']['status']['profiles']['profiles']
+    ui['fixture']['status']['profiles']['profiles'] = []
+    ui['backend'].update(preview_client=onboarding.client, client=onboarding.client)
+    page.goto(ui['url'] + '/onboarding')
+    _zai_key(page, 'coding')
+    page.click('#next-btn')
+    vision = page.locator('[data-model-role="vision"] [data-model-role-model]')
+    assert vision.input_value() == 'glm-5.3-flash'
+    if choice == 'deliberate-Flash':
+        vision.fill('glm-5.3-flash')
+    elif choice == 'main-edited':
+        page.locator('[data-model-role="main"] [data-model-role-model]').fill('owner-main')
+    capture(page, f'shortcut-initial-vision-{choice}')
+    page.click('#back-btn')
+    # Observe a newly connected Codex account without a live login or daemon.
+    ui['fixture']['status']['profiles']['profiles'] = profiles
+    onboarding.calls['snapshot_payload'] = {
+        **LIVE_SNAPSHOT, 'harnesses': [LIVE_SNAPSHOT['harnesses'][1]],
+        'profiles': {'harnessAccounts': [_profile_account('codex', 'personal')],
+                     'profiles': [_profile('codex', 'personal')]},
+        'model_catalog': ui['fixture']['catalog']['items'],
+    }
+    page.evaluate("async () => (await import('/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+    page.wait_for_selector('#quick-start-btn:not([hidden])')
+    page.wait_for_selector('#onboarding-access-retry:not([disabled])')
+    page.locator('[data-collapse="local-model"] > summary').click()
+    page.locator('#local-source').fill('/models/local-test.gguf')
+    page.locator('[data-local-mode="all"]').click()
+    capture(page, f'shortcut-local-accounts-{choice}')
+    page.click('#quick-start-btn')
+    page.wait_for_selector('.summary-card')
+    summary = page.locator('.summary-kv').filter(has=page.get_by_text('Vision', exact=True)).inner_text()
+    capture(page, f'shortcut-summary-{choice}')
+    page.click('#next-btn')
+    page.wait_for_url(ui['url'] + '/')
+    writes = [body for path, body in ui['posts'] if path == '/api/onboarding/complete']
+    assert len(writes) == 1
+    saved = onboarding.saved()
+    assert saved['USE_LOCAL_MAIN'] is True
+    for key, value in saved.items():
+        if isinstance(value, (str, bool, int, float)):
+            monkeypatch.setenv(key, str(value))
+    monkeypatch.setenv('OUROBOROS_IMAGE_INPUT_MODE', 'caption')
+    wire = []
+
+    def answer(request):
+        wire.append({'url': str(request.url), 'body': json.loads(request.content)})
+        return httpx.Response(200, json={
+            'id': 'shortcut-test', 'object': 'chat.completion', 'created': 0, 'model': 'glm-5.3-flash',
+            'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'Dark red'}}],
+            'usage': {'prompt_tokens': 9, 'completion_tokens': 2, 'total_tokens': 11},
+        })
+
+    monkeypatch.setattr(net_transport, 'remote_httpx_transport', lambda *_a, **_k: httpx.MockTransport(answer))
+    image = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,aW1hZ2U='}}
+    result = prepare_messages_for_send([{'role': 'user', 'content': [image]}], routing=VisionRoutingContext(
+        saved['OUROBOROS_MODEL'], LLMClient(), {}, use_local=saved['USE_LOCAL_MAIN']))
+    record_property('caption_consumer', json.dumps({'vision': saved['OUROBOROS_MODEL_VISION'], 'wire': wire, 'result': result}))
+    expected = 'zai::glm-5.3-flash' if choice == 'deliberate-Flash' else ''
+    local_previews = [body for path, body in ui['posts']
+                      if path == '/api/onboarding/subagents/preview' and body.get('LOCAL_ROUTING_MODE') == 'all']
+    assert local_previews and all(body['OUROBOROS_MODEL_VISION'] == expected for body in local_previews)
+    assert writes[0]['subscriptionsConnected'] is True
+    assert writes[0]['OUROBOROS_MODEL_VISION'] == saved['OUROBOROS_MODEL_VISION'] == expected
+    if choice == 'main-edited':
+        assert saved['OUROBOROS_MODEL'] == 'zai::owner-main'
+    if expected:
+        assert 'glm-5.3-flash' in summary and 'Uses Main' not in summary
+        assert len(wire) == 1
+        assert wire[0]['url'] == 'https://api.z.ai/api/coding/paas/v4/chat/completions'
+        assert wire[0]['body']['model'] == 'glm-5.3-flash'
+        assert image in wire[0]['body']['messages'][0]['content']
+        assert result[0]['content'][0]['text'] == '[image caption: Dark red]'
+    else:
+        assert 'Uses Main' in summary
+        assert wire == []
+        assert result[0]['content'][0]['text'] == (
+            '[image omitted: our local llama.cpp transport lane cannot carry images; no caption route is available]')

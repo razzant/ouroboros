@@ -71,7 +71,7 @@ def test_versioned_spellings_engage_the_inline_write_fence_like_unversioned(tmp_
     for unversioned, versioned, flag, code in FENCE_CASES:
         # The payload NAMES the repo, which is the owner-approved trigger for the
         # non-python families (a bare relative filename is not a repo-path spelling
-        # and no longer blocks — see the disclosure in CHECKLISTS item 21).
+        # and no longer blocks — see the disclosure in CHECKLISTS item 7).
         named = code.replace("probe.txt", f"{repo}/probe.txt")
         results = {
             spelling: light_shell_repo_mutation(
@@ -453,7 +453,7 @@ def test_legitimate_deliverable_writes_stay_allowed(tmp_path):
     # Dynamic target with the cwd INSIDE the repo: for a NON-python family this now
     # RUNS. The resolved-cwd test is python-only, because the default shell cwd IS
     # the repository and applying it to every family refused ordinary node/ruby work
-    # outright — more than the owner approved. Disclosed in CHECKLISTS item 21.
+    # outright — more than the owner approved. Disclosed in CHECKLISTS item 7.
     assert light_shell_repo_mutation(
         ["node", "-e", "require('fs').writeFileSync(process.env.N,'y')"],
         repo_dir=repo, cwd=str(repo), work_dir=repo,

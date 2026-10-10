@@ -1810,7 +1810,7 @@ def test_find_child_tasks_does_not_regress_terminal_or_running_from_stale_queue_
         ],
         "running": [],
     }
-    (tmp_path / "state").mkdir()
+    (tmp_path / "state").mkdir(exist_ok=True)
     (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
 
     effective_done = load_effective_task_result(tmp_path, "childdone")

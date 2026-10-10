@@ -56,11 +56,17 @@ def test_terminal_evidence_survives_when_its_narration_is_on_an_older_page(tmp_p
             "content": "First saved narration" if index == 0 else f"Later work {index}",
             "ts": f"2026-09-0{index + 1}T00:00:00Z",
         }) + "\n")
+        # Older pages follow the conversation, so the room has older dialogue to page
+        # through while its narration pages alongside (owner decision 2026-10-05).
+        (archive / f"chat_2026090{index + 1}T000000.jsonl").write_text(json.dumps({
+            "direction": "in", "chat_id": 1, "text": f"Older dialogue {index}",
+            "ts": f"2026-09-0{index + 1}T00:00:00Z",
+        }) + "\n")
     endpoint = make_chat_history_endpoint(tmp_path)
 
     def read(cursor=None):
         response = asyncio.run(endpoint(SimpleNamespace(query_params={
-            "chat_id": "1", "n_progress": "1", **({"cursor": cursor} if cursor else {}),
+            "chat_id": "1", "n_human": "1", "n_progress": "1", **({"cursor": cursor} if cursor else {}),
         })))
         assert response.status_code == 200
         return json.loads(response.body)

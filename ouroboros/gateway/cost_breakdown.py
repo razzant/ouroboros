@@ -94,10 +94,10 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
     def _cost_breakdown_response() -> JSONResponse:
         try:
             from ouroboros.pricing import infer_model_category
-            from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+            from ouroboros.usage_accounting import usage_breakdown
 
-            ensure_legacy_imported(data_dir)
-            # Display read: a contended ledger lock serves the last validated snapshot.
+            # Display read: the store's summary rows; contention past the short display
+            # wait reports accounting unavailable (503), never a zero.
             breakdown = usage_breakdown(data_dir, allow_stale=True)
             unattributed = dict(breakdown.get("unattributed") or {})
             by_model_raw = dict(breakdown.get("by_model") or {})
@@ -115,8 +115,9 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                 "available": True,
                 "authority": "physical_attempt_ledger",
                 "limit_usd": round(limit, 6),
+                # Room above KNOWN (settled) spend, the admission rule's own number.
                 "remaining_known_usd": (
-                    round(max(0.0, limit - float(breakdown.get("accounted_usd") or 0.0)), 6)
+                    round(max(0.0, limit - float(breakdown.get("settled_usd") or 0.0)), 6)
                     if limit > 0
                     else None
                 ),
@@ -193,7 +194,7 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
         from ouroboros.cost_projection import honest_accounted_amount
         from ouroboros.usage_accounting import usage_breakdown
 
-        # Read at display time only: contention serves the last validated snapshot.
+        # Read at display time only: the root's summary rows (unavailable under contention).
         breakdown = usage_breakdown(drive_root, root_task_id=root_id, allow_stale=True)
     except Exception:
         log.debug("cost breakdown view unavailable for %s", task_id, exc_info=True)

@@ -301,7 +301,8 @@ def test_owner_http_save_projects_full_choice_into_task_start_snapshot(monkeypat
         'recommended_use': 'Implementation on this installation.', 'access': 'full',
     }]}
     with TestClient(app) as client:
-        response = client.post('/api/settings', json={SUBAGENTS_SETTING: config})
+        # A worker row, not a reviewer: the owner confirms the empty review pool.
+        response = client.post('/api/settings', json={SUBAGENTS_SETTING: config, 'allow_empty_review_pool': True})
         assert response.status_code == 200, response.text
         assert json.loads(json.loads(isolated_settings.read_text(encoding='utf-8'))[SUBAGENTS_SETTING])['items'][0]['access'] == 'full'
         start = apply_task_start_settings()
@@ -309,7 +310,7 @@ def test_owner_http_save_projects_full_choice_into_task_start_snapshot(monkeypat
         assert selected['access'] == 'full'
         assert json.loads(start.environ[SUBAGENTS_SETTING])['items'][0]['access'] == 'full'
         config['items'][0]['access'] = 'workspace_write'
-        response = client.post('/api/settings', json={SUBAGENTS_SETTING: config})
+        response = client.post('/api/settings', json={SUBAGENTS_SETTING: config, 'allow_empty_review_pool': True})
         assert response.status_code == 200
         assert selected['access'] == 'full'
         assert json.loads(start.environ[SUBAGENTS_SETTING])['items'][0]['access'] == 'full'

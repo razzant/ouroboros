@@ -13,11 +13,6 @@ def test_presence_keeps_own_memory_but_skips_evolution_effects(tmp_path, monkeyp
     monkeypatch.setattr(memory_module, "Memory", lambda **kwargs: object())
     monkeypatch.setattr(
         pipeline,
-        "_run_chat_consolidation",
-        lambda *args, **kwargs: calls.append("chat_consolidation"),
-    )
-    monkeypatch.setattr(
-        pipeline,
         "_run_scratchpad_consolidation",
         lambda *args, **kwargs: calls.append("scratchpad_consolidation"),
     )
@@ -72,7 +67,6 @@ def test_presence_keeps_own_memory_but_skips_evolution_effects(tmp_path, monkeyp
     assert result == {"reflection": "ok"}
     assert calls == [
         "facts",  # free, before every paid stage
-        "chat_consolidation",
         "scratchpad_consolidation",
         "reflection",
         "memory_actions",
@@ -89,7 +83,6 @@ def test_ordinary_task_retains_global_post_task_effects(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_is_root_post_task", lambda task: False)
     monkeypatch.setattr(llm_module, "LLMClient", lambda: object())
     monkeypatch.setattr(memory_module, "Memory", lambda **kwargs: object())
-    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_record_task_facts", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -138,7 +131,7 @@ def test_presence_post_task_applies_own_experience_with_background_off(tmp_path,
     from ouroboros.knowledge import read_knowledge_note, resolve_knowledge_address
 
     monkeypatch.setattr(llm_module, "LLMClient", lambda: object())
-    for name in ("_run_chat_consolidation", "_run_scratchpad_consolidation", "_record_task_facts"):
+    for name in ("_run_scratchpad_consolidation", "_record_task_facts"):
         monkeypatch.setattr(pipeline, name, lambda *a, **k: None)
     entry = {"reflection": "A useful shared moment.", "memory_actions": [{
         "type": "knowledge_write", "topic": "shared experience", "scope": "global",

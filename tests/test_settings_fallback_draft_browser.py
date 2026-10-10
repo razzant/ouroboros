@@ -69,11 +69,14 @@ def test_all_settings_number_fields_are_in_complete_raw_draft_selector(role_ui):
         roles.open_agents(ui)
     page.wait_for_function("() => !document.querySelector('#btn-refresh-model-catalog').disabled")
     selector = (Path(__file__).resolve().parents[1] / 'web/modules/settings.js').read_text().split('function snapshotSettingsDraft()', 1)[1].split("page.querySelectorAll('", 1)[1].split("')", 1)[0]
+    # A maximum response is an exact-route acknowledgement its own Apply writes
+    # (`POST /api/owner/capability-ack`), never a Settings draft field.
     facts = page.evaluate('''selector => [...document.querySelectorAll('#page-settings input[type="number"]')]
         .filter(input => !input.closest('[data-extension-settings-form]'))
         .map(input => ({id:input.id, model_context:input.hasAttribute('data-model-role-context'),
-            selected:input.matches(selector)}))''', selector)
-    assert all(row['selected'] for row in facts), facts
+            acknowledgement:input.hasAttribute('data-response-limit'), selected:input.matches(selector)}))''', selector)
+    assert all(row['selected'] is not row['acknowledgement'] for row in facts), facts
+    assert any(row['acknowledgement'] for row in facts)
     assert sum(row['model_context'] for row in facts) >= 7
     output = os.environ.get('OUROBOROS_UI_EVIDENCE_DIR')
     if output:

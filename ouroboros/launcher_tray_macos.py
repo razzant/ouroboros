@@ -75,7 +75,7 @@ class MacStatusItem(Indicator):
         self._keep.append(delegate)
         app.setDelegate_(delegate)
 
-    def notify(self, title, body):
+    def notify(self, title, body, sound=True):
         def cue():
             import AppKit
 

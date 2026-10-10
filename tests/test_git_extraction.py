@@ -15,6 +15,7 @@ import pathlib
 from ouroboros.tools import (
     git,
     git_evolution,
+    git_managed_postcommit,
     git_plumbing,
     git_repo_edit,
     git_review_cycle,
@@ -25,7 +26,7 @@ from ouroboros.tools import (
 REPO = pathlib.Path(__file__).parents[1]
 TOOLS = REPO / "ouroboros" / "tools"
 
-_LEAVES = (git_plumbing, git_review_cycle, git_evolution, git_repo_edit, git_vcs_ops)
+_LEAVES = (git_plumbing, git_review_cycle, git_managed_postcommit, git_evolution, git_repo_edit, git_vcs_ops)
 
 _MOVED_OWNERS = {
     "_BINARY_EXTENSIONS": git_plumbing,
@@ -43,13 +44,16 @@ _MOVED_OWNERS = {
     "_finalize_blocked_review": git_review_cycle,
     "_fingerprint_staged_diff": git_review_cycle,
     "_handle_revalidation_failure": git_review_cycle,
-    "_mark_failed_bypass_advisory_stale": git_review_cycle,
     "_review_binding_precondition_error": git_review_cycle,
     "_review_cycle_infra_failure": git_review_cycle,
     "_run_non_committing_review_cycle": git_review_cycle,
     "_run_reviewed_stage_cycle": git_review_cycle,
     "_stage_candidate_for_review": git_review_cycle,
     "_verify_reviewed_commit_binding": git_review_cycle,
+    "_finish_managed_commit": git_managed_postcommit,
+    "_managed_commit_paused": git_managed_postcommit,
+    "_managed_post_commit_tests_gate": git_managed_postcommit,
+    "_resume_managed_commit": git_managed_postcommit,
     "_check_evolution_commit_stage": git_evolution,
     "_evolution_commit_authority": git_evolution,
     "_evolution_publication_stopped_result": git_evolution,
@@ -109,14 +113,15 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     ).encode()
     # Informed Advisory commit aliases plus explicit local vcs_diff base/head.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "93c0f6fced87cf33dc7a46395367f8315cb1ba7760d738489960dffd0084949a"
+        "e20b653778ee12e2e41d0f6baee598e28165260483038540a4143686abdfe7dd"  # FIX6a 1: `reviewers`/`reason` compose the commit panel by review_change's rule (decision 1A); FIX3 T1 before it: `scope` described by the panel's coupling questions
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
         for entry in entries
     } == {
-        "commit_reviewed": ("ouroboros.tools.git", "_repo_commit_push"),
-        "vcs_commit_reviewed": ("ouroboros.tools.git", "_repo_commit_push"),
+        # The public handler names the call's review record in every outcome (DEVELOPMENT 05).
+        "commit_reviewed": ("ouroboros.tools.git", "_commit_reviewed"),
+        "vcs_commit_reviewed": ("ouroboros.tools.git", "_commit_reviewed"),
         "vcs_status": ("ouroboros.tools.git_vcs_ops", "_git_status"),
         "vcs_diff": ("ouroboros.tools.git_vcs_ops", "_git_diff"),
         "vcs_pull_ff": ("ouroboros.tools.git_vcs_ops", "_pull_from_remote"),

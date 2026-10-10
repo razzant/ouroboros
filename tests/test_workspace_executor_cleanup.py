@@ -43,6 +43,16 @@ def _write_docker_records(state_dir, *, foreground_pidfile="/tmp/ouroboros-exec-
         ),
         encoding="utf-8",
     )
+    from ouroboros.owned_shutdown import import_inherited_records
+
+    import_inherited_records(state_dir.parents[1])
+
+
+def _index_raw(path):
+    """Name a hand-written record in the ownership set, bypassing the import's validation."""
+    from ouroboros.owned_shutdown import record_executor_process
+
+    assert record_executor_process(path, json.loads(path.read_text(encoding="utf-8")))
 
 
 def _install_live_docker_service(workspace_executor, tmp_path):
@@ -166,6 +176,7 @@ def test_executor_cleanup_ignores_unowned_forged_process_records(tmp_path, monke
         ),
         encoding="utf-8",
     )
+    _index_raw(state_dir / "foreground-forged.json")
 
     monkeypatch.setattr(
         workspace_executor,
@@ -196,6 +207,7 @@ def test_executor_cleanup_ignores_owner_shaped_forged_host_pid_records(tmp_path,
         ),
         encoding="utf-8",
     )
+    _index_raw(state_dir / "foreground-forged.json")
 
     monkeypatch.setattr(
         workspace_executor,
@@ -260,6 +272,7 @@ def test_executor_cleanup_ignores_pidless_docker_service_records(tmp_path, monke
         ),
         encoding="utf-8",
     )
+    _index_raw(state_dir / "service-docker.json")
 
     monkeypatch.setattr(
         workspace_executor.subprocess,

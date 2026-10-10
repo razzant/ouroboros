@@ -3,7 +3,7 @@
   "OPENAI_API_KEY": "",
   "ANTHROPIC_API_KEY": "",
   "OUROBOROS_MODEL": "anthropic/claude-sonnet-4.6",
-  "OUROBOROS_SUBAGENTS": "{\"enabled\":true,\"items\":[{\"subagent_id\":\"benchmark-model\",\"recommended_use\":\"Use for substantial implementation, difficult debugging, research synthesis, and end-to-end ownership. Prefer when overall quality and continuity matter more than speed.\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}}]}",
+  "OUROBOROS_SUBAGENTS": "{\"enabled\":true,\"items\":[{\"subagent_id\":\"benchmark-model\",\"recommended_use\":\"Use for substantial implementation, difficult debugging, research synthesis, and end-to-end ownership. Prefer when overall quality and continuity matter more than speed.\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}},{\"subagent_id\":\"benchmark-review-1\",\"recommended_use\":\"Fixed-model benchmark reviewer: packet delivery on the measured model\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.6\"},\"review_eligible\":true,\"delivery\":\"packet\",\"minted_from\":\"factory_default\"},{\"subagent_id\":\"benchmark-review-2\",\"recommended_use\":\"Fixed-model benchmark reviewer: packet delivery on the measured model\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.6\"},\"review_eligible\":true,\"delivery\":\"packet\",\"minted_from\":\"factory_default\"},{\"subagent_id\":\"benchmark-review-3\",\"recommended_use\":\"Fixed-model benchmark reviewer: packet delivery on the measured model\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.6\"},\"review_eligible\":true,\"delivery\":\"packet\",\"minted_from\":\"factory_default\"}]}",
   "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
   "OUROBOROS_MODEL_FALLBACKS": "anthropic/claude-sonnet-4.6",
   "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
@@ -25,6 +25,5 @@
     "youtube_transcript",
     "send_photo",
     "claude_code_edit"
-  ],
-  "OUROBOROS_REVIEWER_SLOTS": "{\"triad\":[{\"slot_id\":\"benchmark-triad-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}},{\"slot_id\":\"benchmark-triad-2\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}},{\"slot_id\":\"benchmark-triad-3\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}}],\"scope\":[{\"slot_id\":\"benchmark-scope-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}}]}"
+  ]
 }

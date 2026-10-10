@@ -40,7 +40,7 @@ def test_runtime_child_environment_drops_launcher_authority(monkeypatch):
 
 def test_execution_binding_appends_without_rewriting_canonical_work_order():
     instructions = (
-        "HOST TASK CONTRACT AUTHORITY (complete normalized JSON; exact strings are authority):\n"
+        "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
         '{"workspace_root":"/authority","task_constraint":{"write_root":"/authority"}}'
     )
     bound = apply_execution_binding(instructions, "/private/snapshot", "/authority")

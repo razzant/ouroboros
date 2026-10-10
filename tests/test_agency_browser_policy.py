@@ -90,6 +90,15 @@ def test_local_file_reads_follow_parent_reach_without_a_workspace_fence(mode):
             "file:///outside/workspace/report.html", restricted=restricted, runtime_mode=mode) == ""
 
 
+def _evaluated(ctx, value):
+    """The evaluated value. A successful evaluate carries its generation's browser
+    conditions as a host note AFTER the clean data (#1606), never instead of it."""
+    text = browser._browser_action(ctx, "evaluate", value=value)
+    data, note, conditions = text.rpartition("\n\nBrowser conditions: ")
+    assert note and "Browser conditions: " + conditions == ctx.browser_state.browser_conditions, text
+    return data
+
+
 @pytest.mark.browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_live_evaluate_reads_policy_words_and_cyber_posts_once(control_page, tmp_path, monkeypatch, engine):
@@ -103,7 +112,7 @@ def test_live_evaluate_reads_policy_words_and_cyber_posts_once(control_page, tmp
         literal = "/api/owner/context-mode low /api/owner/safety-mode /api/owner/skills/x/attest-review "
         literal += "settings.json OUROBOROS_REVIEW_ENFORCEMENT OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS "
         literal += "OUROBOROS_POST_TASK_EVOLUTION OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE"
-        assert browser._browser_action(ctx, "evaluate", value=json.dumps(literal)) == literal
+        assert _evaluated(ctx, json.dumps(literal)) == literal
         expression = "() => fetch('/api/settings', {method:'POST', body:JSON.stringify({"
         expression += "OUROBOROS_REVIEW_ENFORCEMENT:'advisory'})}).then(r => r.json()).then(r => {"
         expression += "document.querySelector('#result').textContent='Completed '+r.received; return r.received;})"
@@ -111,9 +120,9 @@ def test_live_evaluate_reads_policy_words_and_cyber_posts_once(control_page, tmp
         assert hits == []
         # The next operation reuses the browser and reads the effective mode.
         monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "cyber_pro")
-        assert browser._browser_action(ctx, "evaluate", value=expression) == "1"
+        assert _evaluated(ctx, expression) == "1"
         assert hits == [("/api/settings", {"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"})]
-        assert browser._browser_action(ctx, "evaluate", value="document.querySelector('#result').textContent") == "Completed 1"
+        assert _evaluated(ctx, "document.querySelector('#result').textContent") == "Completed 1"
         assert "Screenshot captured" in browser._browser_action(ctx, "screenshot")
         screenshot = base64.b64decode(ctx.browser_state.last_screenshot_b64)
         assert screenshot.startswith(b"\x89PNG")
@@ -123,10 +132,10 @@ def test_live_evaluate_reads_policy_words_and_cyber_posts_once(control_page, tmp
         with pytest.raises(Exception, match="SyntaxError"):
             browser._browser_action(ctx, "evaluate", value="const = ;")
         assert len(hits) == 1
-        assert browser._browser_action(ctx, "evaluate", value="return 2 + 3;") == "5"
+        assert _evaluated(ctx, "return 2 + 3;") == "5"
         with pytest.raises(Exception, match="SyntaxError"):
             browser._browser_action(ctx, "evaluate", value="window.effectCount = (window.effectCount || 0) + 1; JSON.parse('invalid')")
-        assert browser._browser_action(ctx, "evaluate", value="window.effectCount") == "1"
+        assert _evaluated(ctx, "window.effectCount") == "1"
     finally:
         browser.cleanup_browser(ctx)
 
@@ -146,7 +155,7 @@ def test_live_cyber_acting_access_preserves_explicit_readonly(control_page, tmp_
         assert "Agency browser ready" in browser._browse_page(acting, url, engine=engine)
         code = "() => fetch('/api/owner/context-mode', {method:'POST', body:'{\"mode\":\"low\"}'})"
         code += ".then(r => r.json()).then(r => r.received)"
-        assert browser._browser_action(acting, "evaluate", value=code) == "1"
+        assert _evaluated(acting, code) == "1"
         assert hits == [("/api/owner/context-mode", {"mode": "low"})]
     finally:
         browser.cleanup_browser(acting)

@@ -383,6 +383,10 @@ def acquire_exclusive_file_lock(
             except Exception as exc:
                 if probe is None and isinstance(creation_error, FileExistsError) and isinstance(exc, FileNotFoundError):
                     report("contention", exc)  # Observed holder released its name before our probe.
+                elif probe is None and IS_WINDOWS and isinstance(exc, PermissionError):
+                    # Windows refuses to open a name its holder is deleting (delete pending, or the
+                    # deleter's DELETE handle, which CPython's open does not share): that release is contention.
+                    report("contention", exc)
                 else:
                     report("permission" if isinstance(exc, PermissionError) else "unknown", exc)
                     log.debug("Failed to inspect/remove stale lock %s", lock_path, exc_info=True)
@@ -606,31 +610,13 @@ def pid_is_alive(pid: int) -> bool:
     """Observe process presence; access denial remains alive, not signal authority.
 
     Windows probes OpenProcess/GetExitCodeProcess, never os.kill(pid, 0): there
-    signal 0 is CTRL_C_EVENT, delivered to the pid's whole console group."""
+    signal 0 is CTRL_C_EVENT, delivered to the pid's whole console group. An
+    unexplained Windows open failure reads as dead here, never as provably gone."""
     if pid <= 0:
         return False
     if IS_WINDOWS:
-        _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        _STILL_ACTIVE = 259
-        _ERROR_ACCESS_DENIED = 5
-        handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-        if not handle:
-            # A live but access-protected process reads as alive; anything else (invalid parameter -> no such pid) reads as dead.
-            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
-        try:
-            code = ctypes.wintypes.DWORD()
-            if not _kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return True  # opened but unreadable -> fail SAFE toward alive
-            return int(code.value) == _STILL_ACTIVE
-        finally:
-            _kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:  # EPERM: it exists and refuses us; anything else undeterminable reads as present
-        pass
-    return True
+        return _windows_process_state(pid) in {"running", "denied", "unreadable"}
+    return not pid_provably_gone(pid)  # EPERM: it exists and refuses us
 
 
 def signal_pid(pid: int, signum: int = 0) -> bool:
@@ -643,17 +629,23 @@ def signal_pid(pid: int, signum: int = 0) -> bool:
 
 
 def pid_is_signalable(pid: int) -> bool:
-    """Whether this caller can signal a PID: POSIX signal-zero, Windows presence.
-
-    This is distinct from identity/ownership and from an access-denied live PID."""
-    if pid <= 0:
-        return False
-    return pid_is_alive(pid) if IS_WINDOWS else signal_pid(pid)
+    """Whether this caller can signal a PID (POSIX signal-zero, Windows presence); not identity/ownership."""
+    return pid > 0 and (pid_is_alive(pid) if IS_WINDOWS else signal_pid(pid))
 
 
 def pid_provably_gone(pid: int) -> bool:
-    """Positive absence from the platform presence reader; denial is not death."""
-    return not pid_is_alive(pid)
+    """Positive absence only (#1554): POSIX ESRCH; Windows no such pid
+    (ERROR_INVALID_PARAMETER) or a readable exit code. Access denial, EPERM and
+    every unexplained error are not death; a zombie is the caller's question."""
+    if pid <= 0:
+        return True
+    if IS_WINDOWS:
+        return _windows_process_state(pid) in {"no_such_pid", "exited"}
+    try:
+        os.kill(pid, 0)
+        return False
+    except OSError as exc:
+        return isinstance(exc, ProcessLookupError)
 
 
 # Windows locking via LockFileEx: unlike msvcrt.locking(), works on empty files.
@@ -777,10 +769,7 @@ def request_process_tree_kill(proc, *, job_handle=None) -> dict:
 
 
 def kill_process_tree(proc: subprocess.Popen, *, exclude_pids: "set[int] | None" = None) -> None:
-    """Capture descendants before termination and spare retained branches.
-
-    POSIX kills the group only when it contains no spared PID, then escaped
-    descendants. Windows uses selective PID termination when exclusions exist."""
+    """Capture then kill; retain caller-selected branches (selective PIDs on Windows)."""
     kill_pid_tree(proc.pid, exclude_pids=exclude_pids, include_process_group=True)
 
 
@@ -848,10 +837,8 @@ def current_process_group_id() -> int:
 
 
 def _group_has_spared_process(pgid: int, roots: "set[int] | None") -> bool:
-    for pid in roots or ():
-        if any(process_group_id(p) == pgid for p in [pid, *collect_descendant_pids(pid)]):
-            return True
-    return False
+    return any(process_group_id(p) == pgid for root in roots or ()
+               for p in [root, *collect_descendant_pids(root)])
 
 
 _BOOT_ID = ""  # full hex of the /proc boot id; empty until a successful read, then latched
@@ -920,10 +907,7 @@ def process_command(pid: int) -> str:
         except Exception:
             return ""
     try:
-        # -ww: unlimited width. BSD ps truncates to the terminal/128 cols
-        # otherwise, and consumers match exact argv tokens — a packaged
-        # interpreter path is long enough to push the script argument off the
-        # end of a truncated line.
+        # BSD ps needs -ww to retain long packaged interpreter/script argv.
         result = subprocess.run(["ps", "-ww", "-p", str(int(pid)), "-o", "command="],
                                 capture_output=True, text=True, timeout=3)
         return result.stdout.strip()
@@ -947,10 +931,7 @@ def force_kill_pid(pid: int) -> None:
 
 def kill_pid_tree(pid: int, exclude_pids: "set[int] | None" = None, *,
                   include_process_group: bool = False) -> None:
-    """Kill a captured PID tree, sparing excluded roots and their descendants.
-
-    The caller owns retention policy. Popen cleanup also selects its unspared group;
-    PID-only callers keep their existing selective-tree semantics."""
+    """Caller selects retained subtrees; PID callers kill selectively, Popen also uses unspared groups."""
     if IS_WINDOWS and not exclude_pids:
         try:
             _hidden_run(["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -971,31 +952,42 @@ def kill_pid_tree(pid: int, exclude_pids: "set[int] | None" = None, *,
 def _tree_kill_targets(pid: int, exclude_pids: "set[int] | None") -> tuple[list[int], set[int]]:
     """Capture before signalling; a spared root keeps its entire branch alive."""
     exclude = {int(p) for p in (exclude_pids or ())}
-    if IS_WINDOWS:
-        children = _windows_process_children()
-        descendants = _snapshot_descendants(pid, children)
-        spared = exclude | {p for root in exclude for p in _snapshot_descendants(root, children)}
-        return [p for p in [*descendants, pid] if p not in spared], spared
-    descendants = collect_descendant_pids(pid)
-    spared = exclude | {p for root in exclude for p in collect_descendant_pids(root)}
+    children = _process_children()
+    descendants = _snapshot_descendants(pid, children)
+    spared = exclude | {p for root in exclude for p in _snapshot_descendants(root, children)}
     return [p for p in [*descendants, pid] if p not in spared], spared
 
 
-def _windows_process_children() -> dict[int, list[int]]:
-    """One PID/PPID observation for both the target and retained subtrees."""
-    import psutil
-
+def _process_children() -> dict[int, list[int]] | None:
+    """One PID/PPID snapshot per walk; unavailable POSIX snapshots retain pgrep."""
     children: dict[int, list[int]] = {}
-    for process in psutil.process_iter(["pid", "ppid"]):
-        parent = process.info.get("ppid")
-        if parent is not None:
-            children.setdefault(int(parent), []).append(process.pid)
+    if IS_WINDOWS:
+        import psutil
+        for process in psutil.process_iter(["pid", "ppid"]):
+            parent = process.info.get("ppid")
+            if parent is not None:
+                children.setdefault(int(parent), []).append(process.pid)
+    else:
+        try:
+            out = subprocess.run(["ps", "-axo", "pid=,ppid="],
+                                 capture_output=True, text=True, timeout=3, check=True)
+            for line in out.stdout.splitlines():
+                pid, parent = map(int, line.split())
+                if pid <= 0 or parent < 0:
+                    return None
+                children.setdefault(parent, []).append(pid)
+            return children or None
+        except Exception:
+            return None
     return children
 
 
-def _snapshot_descendants(pid: int, children: dict[int, list[int]]) -> list[int]:
+def _snapshot_descendants(pid: int, children: dict[int, list[int]] | None) -> list[int]:
     """Children before parents, excluding the root itself."""
     result: list[int] = []
+    if children is None:
+        _collect_descendants(pid, result)
+        return result
     seen = {pid}
 
     def visit(parent: int) -> None:
@@ -1027,10 +1019,10 @@ def collect_descendant_pids(pid: int, *, exclude_pids: "set[int] | None" = None)
         targets, _ = _tree_kill_targets(int(pid), exclude_pids)
         return [target for target in targets if target != int(pid)]
     if IS_WINDOWS:
-        return _snapshot_descendants(int(pid), _windows_process_children())
+        return _snapshot_descendants(int(pid), _process_children())
     result: List[int] = []
     try:
-        _collect_descendants(int(pid), result)
+        result = _snapshot_descendants(int(pid), _process_children())
     except (TypeError, ValueError):
         pass
     return result
@@ -1042,11 +1034,7 @@ def tcp_keepalive_socket_options() -> List[tuple]:
     Dead-socket rationale and per-platform fallback: ARCHITECTURE §6 transport."""
     import socket
 
-    from ouroboros.config import (
-        TCP_KEEPALIVE_IDLE_SEC,
-        TCP_KEEPALIVE_INTERVAL_SEC,
-        TCP_KEEPALIVE_PROBE_COUNT,
-    )
+    from ouroboros.config import TCP_KEEPALIVE_IDLE_SEC, TCP_KEEPALIVE_INTERVAL_SEC, TCP_KEEPALIVE_PROBE_COUNT
 
     options: List[tuple] = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
     idle_name = "TCP_KEEPIDLE" if IS_LINUX else ("TCP_KEEPALIVE" if IS_MACOS else "")
@@ -1258,10 +1246,8 @@ def get_system_memory() -> str:
             mem_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip())
             return f"{mem_bytes / (1024**3):.1f} GB"
         elif os_name == "Linux":
-            out = subprocess.check_output(
-                ["awk", '/MemTotal/ {print $2/1024/1024 " GB"}', "/proc/meminfo"],
-            ).strip().decode()
-            return out
+            return subprocess.check_output(
+                ["awk", '/MemTotal/ {print $2/1024/1024 " GB"}', "/proc/meminfo"]).strip().decode()
         elif os_name == "Windows":
             out = _hidden_run(
                 ["wmic", "ComputerSystem", "get", "TotalPhysicalMemory", "/value"],
@@ -1443,19 +1429,32 @@ if IS_WINDOWS:
         ]
 
 
-def _windows_process_start_time(pid: int) -> str:
-    handle = _kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return ""
+def _windows_query(pid: int, read: Callable[[Any], Any]) -> tuple:
+    """``(open_error, read(handle))`` under one limited-query handle; error 0 when opened."""
+    if not (handle := _kernel32.OpenProcess(0x1000, False, int(pid))):  # PROCESS_QUERY_LIMITED_INFORMATION
+        return ctypes.get_last_error() or -1, None
     try:
-        created, exited, kernel, user = (ctypes.wintypes.FILETIME() for _ in range(4))
-        if not _kernel32.GetProcessTimes(
-            handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user),
-        ):
-            return ""
-        return f"win-filetime:{(created.dwHighDateTime << 32) | created.dwLowDateTime}"
+        return 0, read(handle)
     finally:
         _kernel32.CloseHandle(handle)
+
+
+def _windows_process_start_time(pid: int) -> str:
+    def created(handle: Any) -> str:
+        times = [ctypes.wintypes.FILETIME() for _ in range(4)]
+        return (f"win-filetime:{(times[0].dwHighDateTime << 32) | times[0].dwLowDateTime}"
+                if _kernel32.GetProcessTimes(handle, *(ctypes.byref(item) for item in times)) else "")
+    return _windows_query(pid, created)[1] or ""
+
+
+def _windows_process_state(pid: int) -> str:
+    """``running``/``exited``/``unreadable`` once opened; else ``denied``, ``no_such_pid`` or ``error``."""
+    def exit_code(handle: Any) -> Optional[int]:
+        code = ctypes.wintypes.DWORD()
+        return int(code.value) if _kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) else None
+    error, code = _windows_query(pid, exit_code)
+    return (("denied" if error == 5 else "no_such_pid" if error == 87 else "error") if error
+            else "unreadable" if code is None else "running" if code == 259 else "exited")
 
 
 def _windows_breakaway_flags() -> int:

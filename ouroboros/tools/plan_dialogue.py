@@ -6,6 +6,7 @@ import pathlib
 from typing import Any
 
 from ouroboros.dialogue_evidence import own_room_chat, read_room_source, task_room_record
+from ouroboros.owner_words import owner_words_text
 from ouroboros.projects_registry import all_task_bindings, list_reserved_projects
 from ouroboros.task_results import load_plan_review_state
 
@@ -60,6 +61,9 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
     Room growth is evidence for the next changed author request. It cannot
     itself mint another paid plan envelope. Health/roster/cycle rails stay with
     the existing engine, which still decides whether any dispatch is earned.
+    The owner's words that caused the work follow the same rule: a replay takes
+    the recorded section (a wave recorded without one stays without), a fresh
+    request takes the run's words now (``owner_words_text``).
     """
     from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
 
@@ -80,6 +84,7 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
         else:
             own = dict(previous)  # An explicit missing-room fact also replays exactly.
         pointers = (exact.get("evidence_manifest_full") or {}).get("related_rooms") or []
+        words = (exact.get("evidence_manifest_full") or {}).get("owner_words") or ""
     else:
         chat = own_room_chat(ctx, root)
         source = read_room_source(root, chat, task_id=task_id, mailbox_root=ctx.drive_root) if chat is not None else None
@@ -92,8 +97,9 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
             ) if persist else None
             own = _source_view(root, task_id, source, ref)
         pointers = related_rooms(ctx, root, chat)
+        words = owner_words_text(ctx, audience="plan")
     return {**manifest, "author_request_fingerprint": author_fingerprint,
-            "own_dialogue": own, "related_rooms": pointers}
+            "own_dialogue": own, "related_rooms": pointers, **({"owner_words": words} if words else {})}
 
 
 def plan_chat_reader(root: pathlib.Path, task_id: str):
@@ -239,7 +245,8 @@ def fit_dialogue_view(packet: str, own: dict, capacity_chars: int, *, measure=le
     """Keep the whole conversation when it fits this delivery's actual measure, else the
     largest NEWEST run of conversation rows, the cut named in the footer with its exact
     line range. Only the inline conversation yields room; governance, the operative inputs
-    and the pointer stay intact. Progress and host rows are never inline."""
+    and the pointer stay intact. Progress and host rows are never inline. When even zero rows
+    do not fit, the zero-row view is returned and the over-capacity core is left untrimmed."""
     full, facts = dialogue_view(own)
     if measure(packet) <= capacity_chars or full not in packet:
         return packet, facts
@@ -291,7 +298,12 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
                          native_mandatory_chars: int, data_root: Any = "",
                          frozen: dict | None = None, session_root: str = "", task_id: str = "",
                          session_limits: dict | None = None) -> dict:
-    """Project a fresh request, or reuse the recorded delivery at collection."""
+    """Project a fresh request, or reuse the recorded delivery at collection.
+
+    Each slot's fit lands in ``dialogue_delivery``; a session slot with an engine bound also
+    records ``input_limit`` (the bound, the measured ``prompt_chars``, ``fits``). A frozen
+    delivery replays the recorded inputs and never re-fits against live context.
+    """
     if frozen is not None:
         from ouroboros.tools.plan_review_artifacts import frozen_delivery_inputs
         return frozen_delivery_inputs(frozen, slots)

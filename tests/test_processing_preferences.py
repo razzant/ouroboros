@@ -14,22 +14,16 @@ from ouroboros.model_slots import (
     resolve_processing_preference,
     task_processing_preference,
 )
-from ouroboros.reviewer_slot_config import parse_reviewer_slots, roster_env_override
+from ouroboros.reviewer_slot_config import review_pool_rows
 from ouroboros.subagent_runtime import select_subagent_snapshot, validate_subagent_snapshot
 
 
-def actor_settings(preference=None):
-    row = {"subagent_id": "critic", "recommended_use": "Review the assigned work",
-           "route": {"kind": "api_model", "target_id": "openai::same-model"}, "effort": "high"}
+def actor_settings(preference=None, **row_fields):
+    row = {"subagent_id": "critic", "recommended_use": "Review the assigned work", "review_eligible": True,
+           "route": {"kind": "api_model", "target_id": "openai::same-model"}, "effort": "high", **row_fields}
     if preference is not None:
         row["processing_preference"] = preference
     return {GLOBAL: "fast", "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [row]})}
-
-
-def panel(row):
-    return json.dumps({"triad": [dict(row, slot_id="critic-1")],
-                       "scope": [dict(row, slot_id="scope-1")],
-                       "advisory": {"enabled": False}})
 
 
 def test_equal_model_roles_and_ordered_fallback_keep_independent_preferences():
@@ -70,8 +64,8 @@ def test_actor_snapshot_and_reviewer_capture_the_same_preference(authored, effec
     settings = actor_settings(authored)
     before = copy.deepcopy(settings)
     snapshot, _ = select_subagent_snapshot(settings, subagent_id="critic")
-    with roster_env_override(settings["OUROBOROS_SUBAGENTS"], environ=settings):
-        row = parse_reviewer_slots(panel({"subagent_id": "critic"})).triad[0]
+    # The catalog row IS the reviewer row: the pool reads the one authored choice.
+    (row,) = review_pool_rows(settings)
     assert snapshot["processing_preference"] == row.processing_preference == effective
     monkeypatch.setenv(GLOBAL, "economy")
     assert validate_subagent_snapshot(snapshot)["processing_preference"] == effective
@@ -84,25 +78,14 @@ def test_actor_snapshot_and_reviewer_capture_the_same_preference(authored, effec
     assert encoded["items"][0].get("processing_preference", "") == (authored or "")
 
 
-def test_inline_standard_overrides_global_fast_without_changing_model_or_effort(monkeypatch):
-    monkeypatch.setenv(GLOBAL, "fast")
-    route = {"kind": "api_chat", "target_id": "openai::same-model"}
-    row = parse_reviewer_slots(panel({"route": route, "effort": "high",
-                                      "processing_preference": "standard"})).triad[0]
+def test_inline_standard_overrides_global_fast_without_changing_model_or_effort():
+    (row,) = review_pool_rows(actor_settings("standard"))
     assert (row.target_id, row.effort, row.processing_preference) == (
         "openai::same-model", "high", "standard")
-    inherited = parse_reviewer_slots(panel({"route": route})).triad[0]
-    monkeypatch.setenv(GLOBAL, "economy")
+    (inherited,) = review_pool_rows(actor_settings())
     assert inherited.processing_preference == "fast"
-    assert parse_reviewer_slots(panel({"route": route})).triad[0].processing_preference == "economy"
-
-
-@pytest.mark.parametrize("preference", ["", "standard", "fast"])
-def test_reviewer_reference_cannot_save_a_second_processing_choice(preference):
-    settings = actor_settings("economy")
-    with roster_env_override(settings["OUROBOROS_SUBAGENTS"], environ=settings):
-        with pytest.raises(ValueError, match="inherits Processing"):
-            parse_reviewer_slots(panel({"subagent_id": "critic", "processing_preference": preference}))
+    (under_economy,) = review_pool_rows({**actor_settings(), GLOBAL: "economy"})
+    assert under_economy.processing_preference == "economy"
 
 def test_reviewer_last_execution_preserves_mixed_observation_and_never_echoes_request(tmp_path, monkeypatch):
     from types import SimpleNamespace

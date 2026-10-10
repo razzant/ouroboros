@@ -128,7 +128,6 @@ def test_browser_disconnect_after_click_never_replays_action(monkeypatch):
     monkeypatch.setattr(browser, "_ensure_browser", lambda ctx, *a, **k: (page, ctx.browser_state))
     monkeypatch.setattr(browser, "_readonly_subagent", lambda ctx: False)
     monkeypatch.setattr(browser, "_is_infrastructure_error", lambda ctx: True)
-    monkeypatch.setattr(browser, "cleanup_browser", lambda ctx: None)
     result = browser._browser_action(_action_ctx(), "click", selector="#submit")
     assert seen == ["click"]
     assert "BROWSER_ACTION_OUTCOME_UNKNOWN" in result

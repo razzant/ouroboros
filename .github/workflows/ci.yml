@@ -5,7 +5,7 @@
 # Tier 2.5 (Integration): Manual / tag (branch pushes: provider-canary-push.yml)       → Real-provider tests, reusable provider-canary.yml (~2 min)
 # Tier 2.6 (Skill smoke): Push to ouroboros-stable / manual / tag                     → LIVE OuroborosHub official-skill install smoke (3-OS, ~5 min) + review→grant→enable-persistence flow on one cheap reviewer slot (ubuntu-only step, OPENROUTER_API_KEY, ~$1.2/run)
 # Tier 3 (Build+Release): Tag v*                                                       → PyInstaller + GitHub Release (~15 min)
-# Scheduled (System E2E): Daily cron / manual                                          → KEYLESS tests/system_e2e/ scenario lane (Ubuntu, ≤40 min)
+# Opt-in (System E2E):    Manual / tag (no schedule)                                     → KEYLESS tests/system_e2e/ scenario lane (Ubuntu, ≤40 min)
 # Manual (Live E2E):      Dispatch input e2e_live=true only (no schedule)                → PAID devtools/e2e_live stand, $30 cap, OUROBOROS_E2E_LIVE_OPENROUTER_KEY (skipped honestly without it)
 #
 # Tier 2.5 requires OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY.
@@ -41,16 +41,10 @@ on:
         description: 'Run the paid live E2E stand ($30 cap; needs the OUROBOROS_E2E_LIVE_OPENROUTER_KEY secret)'
         type: boolean
         default: false
-  # One cron, owned by exactly ONE job through `github.event.schedule`: 04:37
-  # is the keyless system-e2e-mock lane (the paid e2e-live stand runs only on
-  # its opt-in dispatch input). Off the hour deliberately: GitHub's cron queue
-  # is deepest at :00. NOTE for any job added later — a scheduled run reports
-  # the DEFAULT BRANCH in github.ref, so a job gated on a branch ref alone fires
-  # on the schedule (integration-test carries the explicit event guard), and a
-  # job gated on the bare event name fires on every cron this block carries —
-  # bind a scheduled job to its own cron string.
-  schedule:
-    - cron: '37 4 * * *'
+  # No schedule (owner, 2026-10-05): nobody read the nightly results. The
+  # keyless system-e2e-mock lane runs on manual dispatch and release tags. A
+  # scheduled run would report the DEFAULT BRANCH in github.ref, which is why
+  # the paid lanes below keep their `!= 'schedule'` guards.
 
 # Read-only is sufficient for tests and fork PRs. The release job overrides
 # this narrowly with contents: write when publishing a tag.
@@ -74,6 +68,10 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
       || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
       || github.event_name == 'workflow_dispatch'
+    # The growth-mode step reads the pull request's label events.
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     env:
       # This job installs pytest-xdist/pytest-timeout below, so the preflight
@@ -147,6 +145,21 @@ jobs:
         timeout-minutes: 60
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial"
+      # Whom the reference-book rule binds (scripts/book_growth_mode.py): the size
+      # lane below blocks, warns or passes a grown book by this mode.
+      - name: Decide the reference-book growth mode
+        id: book_mode
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT: ${{ github.event_name }}
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+        run: python scripts/book_growth_mode.py
       # OFFICIAL-CI-ONLY enforcement of the repository size gates: manifest
       # exactness against this tree plus the pairwise base-vs-tip shrink-only
       # transition. Local runs exclude the `size_ratchet` marker and surface
@@ -163,6 +176,7 @@ jobs:
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         env:
           OURO_SIZE_RATCHET_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          OURO_BOOK_GROWTH_MODE: ${{ steps.book_mode.outputs.mode }}
         run: python -m pytest tests/ -m size_ratchet -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/size"
       - name: Guard extracted transport imports stay out of core
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
@@ -226,6 +240,10 @@ jobs:
       || startsWith(github.ref, 'refs/tags/v')
       || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
       || (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros' && github.repository == 'razzant/ouroboros')
+    # The growth-mode step reads the pull request's label events.
+    permissions:
+      contents: read
+      pull-requests: read
     strategy:
       fail-fast: false
       matrix:
@@ -290,6 +308,21 @@ jobs:
         timeout-minutes: 60
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial"
+      # Whom the reference-book rule binds (scripts/book_growth_mode.py): the size
+      # lane below blocks, warns or passes a grown book by this mode.
+      - name: Decide the reference-book growth mode
+        id: book_mode
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT: ${{ github.event_name }}
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+        run: python scripts/book_growth_mode.py
       # Same size-ratchet enforcement contract as quick-test (see its comment).
       # PRs carry their base SHA; branch pushes carry event.before; dispatch runs leave
       # the env empty and tag pushes carry an all-zeros before — both degrade to
@@ -301,10 +334,46 @@ jobs:
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         env:
           OURO_SIZE_RATCHET_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          OURO_BOOK_GROWTH_MODE: ${{ steps.book_mode.outputs.mode }}
         run: python -m pytest tests/ -m size_ratchet -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/size"
       - name: Guard extracted transport imports stay out of core
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
+      # The owner-attachment path on real Windows (confined handle reads behind
+      # `/api/files/download?upload=`): this one module's Chromium cases on the Windows
+      # leg of THIS matrix — no second matrix, and the complete UI lane stays in
+      # ui-browser.yml. Nothing skips: the smoke switch is set, an engine that cannot
+      # launch fails, and a run in which no case ran or any case skipped is refused.
+      # The browser fixture runs its candidate only from an interpreter that cannot import
+      # an INSTALLED ouroboros (tests/candidate_checkout.py), and this job's shared env has
+      # the checkout installed. So these two steps own a dependency-only env from the same
+      # reviewed lock and the shared env's own base interpreter (the setup action's test
+      # profile with --no-install-project, as the UI lane's); the shared env and every
+      # other step of this job stay as they are.
+      - name: Install the dependency-only env and Chromium for the Windows owner-attachment browser test
+        id: attachment_browser_install
+        timeout-minutes: 20
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.setup_python.outcome == 'success' && steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success' }}
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/attachment-browsers
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/attachment-env
+        run: |
+          base="$(python -c 'import sys; print(sys._base_executable, end="")')"
+          uv sync --locked --extra browser --group dev --no-install-project --python "$base"
+          "$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m playwright install chromium
+      - name: Run the owner-attachment browser test on Windows (Chromium)
+        id: attachment_browser
+        timeout-minutes: 30
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' }}
+        shell: bash
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/attachment-browsers
+          ATTACHMENT_PYTHON: ${{ runner.temp }}/attachment-env/Scripts/python.exe
+        run: |
+          "$ATTACHMENT_PYTHON" -I -S scripts/safe_test.py -- "$ATTACHMENT_PYTHON" -m pytest tests/test_chat_attachments_browser.py -m ui_browser -k chromium -q --tb=short -rs --junitxml="$RUNNER_TEMP/ci-private/attachment-browser.xml"
+          python -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k = int(s.get('tests')), int(s.get('skipped')); print(f'{n} ran, {k} skipped'); sys.exit(n == 0 or k > 0)" "$RUNNER_TEMP/ci-private/attachment-browser.xml"
       # Names the failed, crashed and in-flight tests in the job summary and as
       # annotations; a killed step still reports through its incremental journal.
       - name: Publish test evidence
@@ -367,9 +436,8 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   integration-test:
     # A scheduled run is neither a manual run nor a tag. The leading guard keeps
-    # the nightly cron above OFF this paid lane even if a branch-ref condition
-    # joins the group below: a scheduled run carries the default branch in
-    # github.ref.
+    # any schedule OFF this paid lane even if a branch-ref condition joins the
+    # group below: a scheduled run carries the default branch in github.ref.
     if: |
       github.event_name != 'schedule'
       && (github.event_name == 'workflow_dispatch'
@@ -586,12 +654,12 @@ jobs:
             "python -m pytest tests/ -m portable_detail -q --tb=short"
 
   # ──────────────────────────────────────────────────────────────────
-  # Scheduled: the KEYLESS system_e2e scenario lane (tests/system_e2e/).
+  # The KEYLESS system_e2e scenario lane (tests/system_e2e/).
   # Those tests carry `integration` + `serial` AND the OUROBOROS_E2E_DEEP env
   # gate, so no other job in this file can reach them — without this one the
   # suite would be proof nobody executes. Deliberately NOT a push/PR lane
   # (owner 9A, replacing the plan §8 PR lane): each scenario spawns a real
-  # isolated server, so the cost belongs on a nightly, not on every review.
+  # isolated server, so it runs on manual dispatch and release tags only.
   # No provider secrets: the lane is keyless by construction and this job
   # names none, which is the only way a job gets one. The four OUROBOROS_*
   # roots point into runner.temp so no scenario can reach a real install.
@@ -599,13 +667,8 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   system-e2e-mock:
     # Also on a release tag: the release bar must not skip the 57-scenario lane
-    # (owner decision, batch №13 item 4, 2026-09-02). Bound to ITS cron string,
-    # so a cron another job adds to the schedule block never runs this lane a
-    # second time each night.
-    if: |
-      (github.event_name == 'schedule' && github.event.schedule == '37 4 * * *')
-      || github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
+    # (owner decision, batch №13 item 4, 2026-09-02).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -637,6 +700,31 @@ jobs:
           OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-e2e-cancel/data
           OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/ouroboros-e2e-cancel/data/settings.json
         run: python -m pytest tests/test_e2e_cancellation_scenarios.py -o addopts="" -o faulthandler_timeout=540 -q
+      # The scenario servers' journals are this lane's traces: without them a red
+      # scenario names an assertion and nothing of what its server did (owner,
+      # 2026-10-04). The servers' data roots are pytest tmp_path trees, not the
+      # OUROBOROS_* roots above (tests/conftest.py isolates every test FROM
+      # those): bare pytest makes its session root `ouroboros-pytest-*` in the
+      # runner's default temp directory, /tmp. Journals and task results only,
+      # with the segments a server rotated past 800 KB into data/archive/ (no
+      # benchmark sentinel here, supervisor/state.py rotate_jsonl_log_if_needed);
+      # a settings file is never uploaded (the lane is keyless; the rule holds).
+      # Diagnostics only, like test-evidence: a failed upload never reddens the
+      # job, so the two scenario passes alone decide it and the release bar.
+      - name: Upload the scenario servers' traces (journals, task results)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: system-e2e-traces
+          overwrite: true
+          path: |
+            /tmp/ouroboros-pytest-*/**/data/logs/**
+            /tmp/ouroboros-pytest-*/**/data/task_results/**
+            /tmp/ouroboros-pytest-*/**/data/archive/*.jsonl
+            !/tmp/ouroboros-pytest-*/**/settings.json
+          if-no-files-found: warn
+          retention-days: 30
 
   # ──────────────────────────────────────────────────────────────────
   # Manual (paid): the LIVE E2E stand (devtools/e2e_live/run_live_lanes.py)
@@ -691,16 +779,24 @@ jobs:
   # webkit. The run root is under runner.temp (the stand refuses a root inside
   # the repo), the lane settings file (0600, carries the key) is NEVER
   # uploaded: the artifact globs name the manifest, the result index, each
-  # lane's result.json and its screenshots only — no `lanes/**`.
+  # lane's result.json, its screenshots and its traces/ bundle (the lane
+  # server's journals, written key-redacted by the stand and withheld when the
+  # key survives redaction: devtools/e2e_live/traces.py) — no `lanes/**`,
+  # never a lane's data/ directory.
   # ──────────────────────────────────────────────────────────────────
   e2e-live:
     name: e2e-live (SM1 x1 — largest subset feasible under the $30 cap)
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_live == 'true'
     runs-on: ubuntu-latest
-    # One SM1 lane: the task (--task-timeout 2400), the self-mod evolution cycle
-    # as a second root task, the absorb wait with the re-exec restart, and two
-    # hermetic preflight suites on a 4-vCPU runner — well inside this bound.
-    timeout-minutes: 150
+    # One SM1 lane: the task (--task-timeout 4500 = 75 min; at 2400 all four runs
+    # hit the deadline, and the traced one spent ~21 min on edits and ~17 min on
+    # the review path before a review wave was cut off, #1501), the self-mod
+    # evolution cycle as a second root task, the absorb wait with the re-exec
+    # restart, and two hermetic preflight suites on a 4-vCPU runner. The
+    # stand's own worst case is 2 x (task + ready) + 30 min of bounded waits
+    # ~= 190 min; this bound adds provisioning, so the stand ends the run with
+    # its own verdict and traces, never a job kill.
+    timeout-minutes: 210
     env:
       HAS_E2E_LIVE_KEY: ${{ secrets.OUROBOROS_E2E_LIVE_OPENROUTER_KEY != '' && 'true' || 'false' }}
     steps:
@@ -741,7 +837,7 @@ jobs:
           python -m devtools.e2e_live.run_live_lanes \
             --source-repo "$GITHUB_WORKSPACE" --seed HEAD --out "$RUNNER_TEMP/e2e_live" \
             --scenarios SM1 --attempts 1 --pass-of 1 --lanes 1 \
-            --total-budget 30 --per-task-usd 15 --task-timeout 2400 --self-mod \
+            --total-budget 30 --per-task-usd 15 --task-timeout 4500 --self-mod \
             --key-env OUROBOROS_E2E_LIVE_OPENROUTER_KEY --watch-interval 60
       # The manifest is written at admission and finalized on EVERY exit path,
       # so the summary reads the run's own record — and must render EVERY shape
@@ -803,8 +899,11 @@ jobs:
               with open(path, "a", encoding="utf-8") as fh:
                   fh.write(text)
           PY
-      - name: Upload run artifacts (manifest, lane results, screenshots)
+      # Diagnostics only: a failed upload never reddens the job; the stand's exit
+      # is the verdict.
+      - name: Upload run artifacts (manifest, lane results, screenshots, traces)
         if: always() && env.HAS_E2E_LIVE_KEY == 'true'
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: e2e-live-run
@@ -814,6 +913,7 @@ jobs:
             ${{ runner.temp }}/e2e_live/result_index.jsonl
             ${{ runner.temp }}/e2e_live/lanes/*/result.json
             ${{ runner.temp }}/e2e_live/lanes/*/shots/*.png
+            ${{ runner.temp }}/e2e_live/lanes/*/traces/**
           if-no-files-found: warn
           retention-days: 30
 
@@ -1281,6 +1381,11 @@ jobs:
             syft_sha256: 815ee6973ec5dff6a671d7f41b0e78835a8c45b91d5a39f4743ea1cee833d3be
             syft_binary: syft.exe
     runs-on: ${{ matrix.os }}
+    # Build workers have no signing Environment. Signing uses a separate
+    # fresh Windows runner after this worker has exited. The runner drops
+    # empty outputs, so only the Windows leg sets this one.
+    outputs:
+      windows_archive_sha256: ${{ matrix.os == 'windows-latest' && steps.release_asset.outputs.sha256 || '' }}
     env:
       OUROBOROS_RELEASE_TAG: ${{ github.ref_name }}
       # Only non-secret booleans are job-wide. Credential values are exposed
@@ -1466,12 +1571,24 @@ jobs:
         shell: pwsh
         run: .\build_windows.ps1
 
-      # The proof chain begins at the final archive, after the build scripts
-      # have finished signing, notarizing, and packaging it.
       - name: Locate final release archive
         id: release_asset
         shell: bash
         run: python scripts/release_proof.py locate --directory dist --github-output "$GITHUB_OUTPUT"
+
+      # Unprivileged handoff, never a release asset: windows-sign signs and
+      # repacks it when ESIGNER_CERT_SHA1 is set, otherwise windows-proof
+      # proves it as the explicitly unsigned release ZIP. Both check the
+      # job-output digest before extracting.
+      - name: Transfer unsigned Windows archive
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-unsigned-archive
+          path: ${{ steps.release_asset.outputs.path }}
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Smoke final macOS DMG
         id: smoke_macos
@@ -1700,40 +1817,8 @@ jobs:
           echo "artifact_path=$APPIMAGE" >> "$GITHUB_OUTPUT"
           echo "sbom_path=$APPDIR" >> "$GITHUB_OUTPUT"
 
-      - name: Smoke final Windows archive
-        id: smoke_windows
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $SmokeRoot = Join-Path $env:RUNNER_TEMP "ouroboros-windows-$env:GITHUB_RUN_ATTEMPT"
-          $HomeDir = Join-Path $env:RUNNER_TEMP "ouroboros-smoke-home"
-          New-Item -ItemType Directory -Force -Path $SmokeRoot, $HomeDir | Out-Null
-          Expand-Archive -Path "${{ steps.release_asset.outputs.path }}" -DestinationPath $SmokeRoot
-          # PyInstaller 6 onedir puts datas under _internal\ (the runtime resolves
-          # the bundle root itself — packaged_cli walks Resources/Frameworks/_internal).
-          if (-not (Test-Path "$SmokeRoot\Ouroboros\_internal\repo.bundle")) { throw "repo.bundle missing" }
-          if (-not (Test-Path "$SmokeRoot\Ouroboros\_internal\repo_bundle_manifest.json")) { throw "repo bundle manifest missing" }
-          python scripts/fetch_claudexor_runtime.py --verify-only --output-dir "$SmokeRoot\Ouroboros\_internal\claudexor-runtime"
-          if ($LASTEXITCODE -ne 0) { throw "embedded Claudexor runtime verification failed: $LASTEXITCODE" }
-          $env:HOME = $HomeDir
-          $env:USERPROFILE = $HomeDir
-          $env:LOCALAPPDATA = Join-Path $HomeDir "AppData\Local"
-          $env:APPDATA = Join-Path $HomeDir "AppData\Roaming"
-          $env:HOMEDRIVE = Split-Path -Qualifier $HomeDir
-          $env:HOMEPATH = $HomeDir.Substring($env:HOMEDRIVE.Length)
-          New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA, $env:APPDATA | Out-Null
-          & "$SmokeRoot\Ouroboros\bin\ouroboros.cmd" --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "packaged CLI smoke failed: $LASTEXITCODE" }
-          $env:OUROBOROS_DATA_DIR = Join-Path $env:RUNNER_TEMP "ouroboros-claudexor-smoke"
-          $env:OUROBOROS_BUNDLE_DIR = "$SmokeRoot\Ouroboros\_internal"
-          python scripts/claudexor_platform_smoke.py --managed-runtime --lane fixture --max-seconds 300
-          if ($LASTEXITCODE -ne 0) { throw "packaged Claudexor runtime smoke failed: $LASTEXITCODE" }
-          python scripts/betterleaks_platform_smoke.py --bundle-root "$SmokeRoot\Ouroboros\_internal"
-          if ($LASTEXITCODE -ne 0) { throw "packaged Betterleaks runtime smoke failed: $LASTEXITCODE" }
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "sbom_path=$SmokeRoot"
-
       - name: Record packaged artifact smoke
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           EXTRA_CHECKS=()
@@ -1769,6 +1854,7 @@ jobs:
             --check clean_shutdown --check shared_libraries
 
       - name: Install digest-pinned Syft
+        if: matrix.os != 'windows-latest'
         id: syft
         shell: bash
         env:
@@ -1792,9 +1878,10 @@ jobs:
           echo "path=$TOOL_DIR/$SYFT_BINARY" >> "$GITHUB_OUTPUT"
 
       - name: Generate CycloneDX SBOM from packaged payload
+        if: matrix.os != 'windows-latest'
         shell: bash
         env:
-          SBOM_PATH: ${{ steps.smoke_macos.outputs.sbom_path || steps.smoke_linux.outputs.sbom_path || steps.smoke_windows.outputs.sbom_path }}
+          SBOM_PATH: ${{ steps.smoke_macos.outputs.sbom_path || steps.smoke_linux.outputs.sbom_path }}
         run: |
           set -euo pipefail
           "${{ steps.syft.outputs.path }}" "dir:$SBOM_PATH" \
@@ -1809,11 +1896,13 @@ jobs:
             --output cyclonedx-json=dist/sbom-linux-appimage-x86_64.cdx.json
 
       - name: Attest build provenance
+        if: matrix.os != 'windows-latest'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ steps.release_asset.outputs.path }}
 
       - name: Attest SBOM
+        if: matrix.os != 'windows-latest'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ steps.release_asset.outputs.path }}
@@ -1926,6 +2015,7 @@ jobs:
       # match nothing on macOS and Windows, which is fine — `error` fires only
       # when the whole path set is empty.
       - name: Upload build artifact
+        if: matrix.os != 'windows-latest'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ouroboros-${{ matrix.os }}
@@ -1946,6 +2036,199 @@ jobs:
             dist/sbom-linux-deb-amd64.cdx.json
             dist/sbom-linux-rpm-x86_64.cdx.json
             dist/sbom-linux-rpm-red80-x86_64.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # Windows signing is selected by configuration. With ESIGNER_CERT_SHA1 unset
+  # (forks, repositories without a certificate) no job binds the signing
+  # Environment and windows-proof proves the build's ZIP as explicitly
+  # unsigned. Once it is set, signing is required: any failure here, a
+  # malformed thumbprint or a missing secret included, blocks the whole
+  # release. Build and sign never share a runner.
+  windows-sign:
+    if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && vars.ESIGNER_CERT_SHA1 != '' && needs.build.result == 'success' && needs.release-preflight.result == 'success' && needs.release-preflight.outputs.tag_valid == 'true' }}
+    needs: [build, release-preflight]
+    runs-on: windows-latest
+    environment: windows-release-signing
+    # Only this job holds the eSigner secrets: no OIDC token and no attestation
+    # right here; the secret-free windows-proof job attests the signed ZIP.
+    permissions:
+      contents: read
+      artifact-metadata: write
+    outputs:
+      archive_sha256: ${{ steps.release_asset.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.10'
+      - name: Download unsigned Windows archive (never a release asset)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-unsigned-archive
+          path: unsigned
+      - name: Check unsigned archive digest before extraction
+        id: unsigned_asset
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ needs.build.outputs.windows_archive_sha256 }}
+        run: python scripts/release_proof.py locate --directory unsigned --expect-sha256 "$EXPECTED_SHA256" --github-output "$GITHUB_OUTPUT"
+      - name: Sign, verify and package Windows executable
+        shell: pwsh
+        env:
+          ESIGNER_USERNAME: ${{ secrets.ESIGNER_USERNAME }}
+          ESIGNER_PASSWORD: ${{ secrets.ESIGNER_PASSWORD }}
+          ESIGNER_CREDENTIAL_ID: ${{ secrets.ESIGNER_CREDENTIAL_ID }}
+          ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_TOTP_SECRET }}
+          ESIGNER_CERT_SHA1: ${{ vars.ESIGNER_CERT_SHA1 }}
+          UNSIGNED_ARCHIVE: ${{ steps.unsigned_asset.outputs.path }}
+        run: .\scripts\sign_windows_release.ps1 -UnsignedArchive $env:UNSIGNED_ARCHIVE
+      - name: Locate final release archive
+        id: release_asset
+        shell: bash
+        run: python scripts/release_proof.py locate --directory dist --github-output "$GITHUB_OUTPUT"
+      - name: Transfer signed Windows archive (not yet release proof)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-signed-archive
+          path: ${{ steps.release_asset.outputs.path }}
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 1
+
+  # No eSigner secrets on this fresh runner, in either mode: it checks the
+  # final ZIP against its producer's job-output digest before extracting,
+  # verifies the signature when signing is configured, smokes the packaged
+  # app, then records the proof, SBOM and attestations for the release asset.
+  windows-proof:
+    if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && (vars.ESIGNER_CERT_SHA1 == '' || needs.windows-sign.result == 'success') }}
+    needs: [build, windows-sign]
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      WINDOWS_SIGNER_THUMBPRINT: ${{ vars.ESIGNER_CERT_SHA1 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-python-env
+      - name: Download final Windows archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ vars.ESIGNER_CERT_SHA1 != '' && 'windows-signed-archive' || 'windows-unsigned-archive' }}
+          path: dist
+      - name: Check final archive digest before extraction
+        id: release_asset
+        shell: bash
+        env:
+          SIGNED_SHA256: ${{ needs.windows-sign.outputs.archive_sha256 }}
+          UNSIGNED_SHA256: ${{ needs.build.outputs.windows_archive_sha256 }}
+        run: |
+          EXPECTED_SHA256="$UNSIGNED_SHA256"
+          if [ -n "$WINDOWS_SIGNER_THUMBPRINT" ]; then EXPECTED_SHA256="$SIGNED_SHA256"; fi
+          python scripts/release_proof.py locate --directory dist --expect-sha256 "$EXPECTED_SHA256" --github-output "$GITHUB_OUTPUT"
+      - name: Smoke final Windows archive
+        id: smoke_windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $SmokeRoot = Join-Path $env:RUNNER_TEMP "ouroboros-windows-$env:GITHUB_RUN_ATTEMPT"
+          $HomeDir = Join-Path $env:RUNNER_TEMP "ouroboros-smoke-home"
+          New-Item -ItemType Directory -Force -Path $SmokeRoot, $HomeDir | Out-Null
+          Expand-Archive -Path "${{ steps.release_asset.outputs.path }}" -DestinationPath $SmokeRoot
+          if ($env:WINDOWS_SIGNER_THUMBPRINT) {
+              $Signer = & .\scripts\verify_windows_signature.ps1 -Executable "$SmokeRoot\Ouroboros\Ouroboros.exe" -ExpectedThumbprint $env:WINDOWS_SIGNER_THUMBPRINT
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "signer_thumbprint=$($Signer.Thumbprint)", "signer_publisher=$($Signer.Publisher)"
+          }
+          # PyInstaller 6 onedir puts datas under _internal\ (the runtime resolves
+          # the bundle root itself — packaged_cli walks Resources/Frameworks/_internal).
+          if (-not (Test-Path "$SmokeRoot\Ouroboros\_internal\repo.bundle")) { throw "repo.bundle missing" }
+          if (-not (Test-Path "$SmokeRoot\Ouroboros\_internal\repo_bundle_manifest.json")) { throw "repo bundle manifest missing" }
+          python scripts/fetch_claudexor_runtime.py --verify-only --output-dir "$SmokeRoot\Ouroboros\_internal\claudexor-runtime"
+          if ($LASTEXITCODE -ne 0) { throw "embedded Claudexor runtime verification failed: $LASTEXITCODE" }
+          $env:HOME = $HomeDir
+          $env:USERPROFILE = $HomeDir
+          $env:LOCALAPPDATA = Join-Path $HomeDir "AppData\Local"
+          $env:APPDATA = Join-Path $HomeDir "AppData\Roaming"
+          $env:HOMEDRIVE = Split-Path -Qualifier $HomeDir
+          $env:HOMEPATH = $HomeDir.Substring($env:HOMEDRIVE.Length)
+          New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA, $env:APPDATA | Out-Null
+          & "$SmokeRoot\Ouroboros\bin\ouroboros.cmd" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "packaged CLI smoke failed: $LASTEXITCODE" }
+          $env:OUROBOROS_DATA_DIR = Join-Path $env:RUNNER_TEMP "ouroboros-claudexor-smoke"
+          $env:OUROBOROS_BUNDLE_DIR = "$SmokeRoot\Ouroboros\_internal"
+          python scripts/claudexor_platform_smoke.py --managed-runtime --lane fixture --max-seconds 300
+          if ($LASTEXITCODE -ne 0) { throw "packaged Claudexor runtime smoke failed: $LASTEXITCODE" }
+          python scripts/betterleaks_platform_smoke.py --bundle-root "$SmokeRoot\Ouroboros\_internal"
+          if ($LASTEXITCODE -ne 0) { throw "packaged Betterleaks runtime smoke failed: $LASTEXITCODE" }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "sbom_path=$SmokeRoot"
+
+      - name: Record packaged artifact smoke
+        shell: bash
+        env:
+          SIGNER_THUMBPRINT: ${{ steps.smoke_windows.outputs.signer_thumbprint }}
+          SIGNER_PUBLISHER: ${{ steps.smoke_windows.outputs.signer_publisher }}
+        run: |
+          SIGNED=()
+          if [ -n "$WINDOWS_SIGNER_THUMBPRINT" ]; then
+            SIGNED=(--authenticode-thumbprint "$SIGNER_THUMBPRINT" --authenticode-publisher "$SIGNER_PUBLISHER"
+                    --check authenticode_signer --check timestamp --check signed_payload_archive_match)
+          fi
+          python scripts/release_proof.py record-smoke \
+            --proof-id windows-x64 --artifact "${{ steps.release_asset.outputs.path }}" \
+            --output dist/release-smoke-windows-x64.json \
+            --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME" \
+            --check embedded_repo_bundle --check embedded_claudexor_runtime \
+            --check embedded_betterleaks_runtime --check packaged_cli_help "${SIGNED[@]}"
+      - name: Install digest-pinned Syft
+        id: syft
+        shell: bash
+        env:
+          SYFT_VERSION: 1.50.0
+          SYFT_ARCHIVE: syft_1.50.0_windows_amd64.zip
+          SYFT_SHA256: 815ee6973ec5dff6a671d7f41b0e78835a8c45b91d5a39f4743ea1cee833d3be
+        run: |
+          set -euo pipefail
+          ARCHIVE="$RUNNER_TEMP/$SYFT_ARCHIVE"
+          TOOL_DIR="$RUNNER_TEMP/syft-$SYFT_VERSION"
+          curl --fail --location --silent --show-error \
+            "https://github.com/anchore/syft/releases/download/v$SYFT_VERSION/$SYFT_ARCHIVE" \
+            --output "$ARCHIVE"
+          python -c 'import hashlib,sys; p,e=sys.argv[1:]; a=hashlib.sha256(open(p,"rb").read()).hexdigest(); raise SystemExit(0 if a == e else f"Syft digest mismatch: {a} != {e}")' \
+            "$ARCHIVE" "$SYFT_SHA256"
+          mkdir -p "$TOOL_DIR"
+          python -c 'import shutil,sys; shutil.unpack_archive(sys.argv[1], sys.argv[2])' \
+            "$ARCHIVE" "$TOOL_DIR"
+          test -f "$TOOL_DIR/syft.exe"
+          echo "path=$TOOL_DIR/syft.exe" >> "$GITHUB_OUTPUT"
+      - name: Generate CycloneDX SBOM from final Windows payload
+        shell: bash
+        run: |
+          "${{ steps.syft.outputs.path }}" "dir:${{ steps.smoke_windows.outputs.sbom_path }}" \
+            --output cyclonedx-json=dist/sbom-windows-x64.cdx.json
+      - name: Attest Windows build provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ steps.release_asset.outputs.path }}
+      - name: Attest Windows SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ steps.release_asset.outputs.path }}
+          sbom-path: dist/sbom-windows-x64.cdx.json
+      - name: Upload Windows release asset and proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ouroboros-windows-latest
+          overwrite: true
+          path: |
+            ${{ steps.release_asset.outputs.path }}
+            dist/release-smoke-windows-x64.json
+            dist/sbom-windows-x64.cdx.json
           if-no-files-found: error
           retention-days: 30
 
@@ -2010,11 +2293,11 @@ jobs:
   release:
     if: >-
       ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') &&
-          needs.build.result == 'success' && needs.release-preflight.result == 'success' &&
+          needs.build.result == 'success' && needs.windows-proof.result == 'success' && needs.release-preflight.result == 'success' &&
           needs.marker-guards.result == 'success' && needs.ui-smoke.result == 'success' &&
           needs.docker-ui-smoke.result == 'success' && needs.docker-portable-test.result == 'success' &&
           needs.skill-smoke.result == 'success' }}
-    needs: [build, android-build, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke]
+    needs: [build, windows-proof, android-build, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke]
     runs-on: ubuntu-latest
     concurrency:
       group: release-${{ github.ref }}
@@ -2033,9 +2316,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Download all artifacts
+      - name: Download release artifacts (exclude unsigned build handoff)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          pattern: ouroboros-*
           path: release-artifacts/
           merge-multiple: true
 
@@ -2085,6 +2369,9 @@ jobs:
         env:
           ANDROID_BUILD_RESULT: ${{ needs.android-build.result }}
           ANDROID_ATTESTATION_RESULT: ${{ steps.verify_artifacts.outputs.android_result }}
+          # Empty selects the explicitly unsigned Windows ZIP; set, the proof
+          # receipt must name exactly this verified signer.
+          WINDOWS_SIGNER_THUMBPRINT: ${{ vars.ESIGNER_CERT_SHA1 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2099,6 +2386,7 @@ jobs:
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --android-build-result "$ANDROID_BUILD_RESULT" \
             --android-attestation-result "$ANDROID_ATTESTATION_RESULT" \
+            --windows-signer-thumbprint "$WINDOWS_SIGNER_THUMBPRINT" \
             --github-output "$GITHUB_OUTPUT" \
             --notes-output release-notes.md \
             "${ARGS[@]}"

@@ -145,8 +145,9 @@ def test_environment_template_roundtrips_import_list_review_and_publish(tmp_path
     template.write_bytes(content)
     loaded = _reviewed_skill(payload, drive)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", "")
-    summary = json.loads(_handle_list_skills(ToolContext(repo_dir=tmp_path, drive_root=drive)))
-    row = next(item for item in summary["skills"] if item["name"] == "demo")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=drive)
+    assert [row["name"] for row in json.loads(_handle_list_skills(ctx))["skills"]] == ["demo"]
+    row = json.loads(_handle_list_skills(ctx, name="demo"))["skills"][0]
     assert not row["load_error"] and row["content_hash"] == loaded.content_hash
     packs = _build_skill_file_packs(payload, expected_content_hash=loaded.content_hash)
     assert "### .env.example" in "\n".join(packs)

@@ -45,6 +45,22 @@ def _predecessor_selector_error(value: Any, tool_name: str) -> str:
     return ""
 
 
+def _root_effort_arg(value: Any, tool_name: str) -> tuple[Dict[str, str], str]:
+    """The new root's explicit starting effort as event fields, or the refusal.
+
+    Omitted (``None``) leaves the field absent, so the task type's configured
+    effort applies; a supplied value must name a tier, before any effect.
+    """
+    if value is None:
+        return {}, ""
+    from ouroboros.settings_scales import requested_effort
+
+    try:
+        return {"reasoning_effort": requested_effort(value)}, ""
+    except ValueError as exc:
+        return {}, f"⚠️ TOOL_ARG_ERROR ({tool_name}): {exc}"
+
+
 def _attach_origin_from_metadata(ctx: ToolContext, evt: Dict[str, Any]) -> None:
     """Copy the ingress-captured owner-message origin (ref + full text) onto a
     promote-shaped event BY VALUE. The host built the ref at chat admission;
@@ -330,6 +346,8 @@ def _promote_chat_to_task(
     workspace: str = "",
     source: str = "",
     predecessor_task_id: Any = _MISSING_PREDECESSOR_SELECTOR,
+    context_requires_self_body_docs: bool = False,
+    reasoning_effort: Any = None,
 ) -> str:
     """Route real work out of the conversation lane into a supervised pooled task.
 
@@ -349,6 +367,9 @@ def _promote_chat_to_task(
     selector_error = _predecessor_selector_error(predecessor_task_id, "promote_chat_to_task")
     if selector_error:
         return selector_error
+    effort_fields, effort_error = _root_effort_arg(reasoning_effort, "promote_chat_to_task")
+    if effort_error:
+        return effort_error
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (promote_chat_to_task): objective is required"
@@ -448,6 +469,8 @@ def _promote_chat_to_task(
         # v6.58.0: "none" opts a project-room task OUT of the room's working_dir
         # default (a folder-less task in a folder-ful project stays possible).
         "workspace": workspace_sentinel,
+        "context_requires_self_body_docs": context_requires_self_body_docs,
+        **effort_fields,
         "chat_id": current_chat_id,
         **({"resource_intent": {"kind": "system_repo"}} if intent_system_repo else {}),
         "client_message_id": str(
@@ -632,6 +655,7 @@ def _route_to_project(
     ctx: ToolContext, project_id: str = "", message: str = "", reason: str = "",
     predecessor_task_id: Any = _MISSING_PREDECESSOR_SELECTOR,
     candidates: Any = None,
+    reasoning_effort: Any = None,
 ) -> str:
     """Route a main-chat message to an EXISTING project so the work continues in
     that project's context (its memory/journal/thread), keeping the main chat free.
@@ -644,6 +668,9 @@ def _route_to_project(
     selector_error = _predecessor_selector_error(predecessor_task_id, "route_to_project")
     if selector_error:
         return selector_error
+    effort_fields, effort_error = _root_effort_arg(reasoning_effort, "route_to_project")
+    if effort_error:
+        return effort_error
     from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
     from ouroboros.projects_registry import get_project
 
@@ -733,6 +760,9 @@ def _route_to_project(
             "attachment_uploads": list(
                 ((getattr(ctx, "task_metadata", {}) or {}).get("chat_attachment_uploads") or [])
             ),
+            # The explicit start rides the card the same way: a New task picked
+            # from it is a root this turn chose the effort for.
+            **effort_fields,
             "ts": utc_now_iso(),
         }
         manual_event.update(predecessor_event)
@@ -745,6 +775,9 @@ def _route_to_project(
             return (
                 f"⚠️ NEEDS_MANUAL_TARGET ({failure}, {mode}): no route was dispatched{_cause_words(failure)}. "
                 f"Host-validated options: {options_text}"
+                + (f" A New task picked from it starts on reasoning_effort={effort_fields['reasoning_effort']}; "
+                   "picking an existing task delivers the message there and leaves that task's effort "
+                   "unchanged." if effort_fields else "")
             )
         return (
             f"⚠️ ROUTING_UNCONFIRMED ({failure}, {mode}): no route was dispatched{_cause_words(failure)}, and "
@@ -759,6 +792,7 @@ def _route_to_project(
         "routing_token": routing_token,
         "objective": objective,
         "project_id": pid,
+        **effort_fields,
         "chat_id": current_chat_id,
         "routed_from_main": True,
         "client_message_id": client_message_id,

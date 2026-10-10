@@ -3,17 +3,16 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 from decimal import Decimal
 
 import pytest
 
-from ouroboros import _usage_rows_memo as memo
 from ouroboros import usage_accounting as ua
-from ouroboros import usage_compaction as compact
+from ouroboros import usage_journal as journal
 from ouroboros import usage_ledger as ledger
-from ouroboros.usage_legacy_import import IMPORT_REL
-from tests.test_usage_writer_view import request, root as root, seed
+from ouroboros import usage_store
+from ouroboros.usage_journal import IMPORT_REL
+from tests._usage_store_testing import request, root as root, seed, write_journal
 
 
 @contextlib.contextmanager
@@ -29,14 +28,40 @@ def archive_bytes(root):
             for path in (root / "archive").rglob("*") if path.is_file()}
 
 
+_HELD = {"attempt_id": "held", "kind": "attempt", "state": "reserved", "task_id": "child",
+         "root_task_id": "dominant", "provider": "local", "model": "stub",
+         "reservation_upper_bound_usd": "0.1", "pricing_known": True}
+
+
+def _held(root):
+    return ua.AttemptReservation("held", root, "stub", "local", 0.1, "", "", None)
+
+
+def _refuses_everywhere(root, held):
+    """Every non-display money access re-runs the refused import and fails closed; a display
+    reports the store unavailable (never zero) without running the import."""
+    sends = []
+    with nonfinite_failure():
+        ua.usage_projection(root)
+    with pytest.raises(ledger.UsageLockUnavailable):
+        ua.usage_projection(root, allow_stale=True)
+    with nonfinite_failure():
+        ua.mark_dispatched(held)
+    with nonfinite_failure():
+        ua.execute_physical_attempt(
+            request(root, reservation_usd=.1, global_limit_usd=.5), lambda: sends.append(1))
+    assert sends == []
+    assert not (root / usage_store.STORE_REL).exists()
+    assert not (root / ledger.QUARANTINE_REL).exists()
+
+
 @pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN", float("inf"), float("nan")])
 @pytest.mark.parametrize("source", ["cost", "usage.cost", "usage.total_cost", "state"])
 def test_real_legacy_import_refuses_nonfinite_before_projection_or_send(root, value, source):
-    held = ua.reserve_attempt(request(root, reservation_usd=.1))
-    path = root / ua.LEDGER_REL
+    path = write_journal(root, [_HELD])
     original = path.read_bytes()
-    (root / IMPORT_REL).unlink()  # exercise resumable import with an existing hold
     events_path, state_path = root / "logs/events.jsonl", root / "state/state.json"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
     event = {"type": "llm_usage", "task_id": "legacy", "root_task_id": "legacy", "provider": "openai"}
     if source == "state":
         state_path.write_text(json.dumps({"spent_usd": value}))
@@ -47,95 +72,67 @@ def test_real_legacy_import_refuses_nonfinite_before_projection_or_send(root, va
     events_path.write_text(json.dumps(event) + "\n")
     sources = {file: file.read_bytes() for file in (events_path, state_path) if file.exists()}
     with nonfinite_failure():
-        ua.ensure_legacy_imported(root)
-        ua.usage_projection(root, root_task_id="legacy")
+        usage_store.migrate_from_journal(root)
     archived = archive_bytes(root)
     assert sources[events_path] in archived.values()
     if state_path in sources:
         assert sources[state_path] in archived.values()
-    sends = []
-    with nonfinite_failure():
-        ua.execute_physical_attempt(
-            request(root, reservation_usd=.1, global_limit_usd=.5), lambda: sends.append(1))
-    assert sends == []
+    _refuses_everywhere(root, _held(root))
     assert path.read_bytes() == original
-    assert json.loads(original.splitlines()[-1])["attempt_id"] == held.attempt_id
-    assert json.loads(original.splitlines()[-1])["state"] == "reserved"
     assert not (root / IMPORT_REL).exists()
-    assert not (root / ledger.QUARANTINE_REL).exists()
     assert archive_bytes(root) == archived
     assert all(file.read_bytes() == data for file, data in sources.items())
 
 
 @pytest.mark.parametrize("field", ["cost_usd", "reservation_upper_bound_usd"])
 @pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN", float("inf"), float("nan")])
-@pytest.mark.parametrize("cache_state", ["cold", "warm", "replacement"])
-def test_persisted_nonfinite_never_quarantines_or_admits(root, field, value, cache_state):
-    # A real compacted archive and a live reservation must both survive failure.
+def test_a_persisted_nonfinite_journal_row_is_never_quarantined_or_imported(root, field, value):
     seed(root, 12, cost=".01")
-    with ledger._locked(root) as beat:
-        assert compact.compact_usage_ledger_locked(root, heartbeat=beat)
-    held = ua.reserve_attempt(request(root, reservation_usd=.1))
-    path = root / ua.LEDGER_REL
+    path = root / ledger.LEDGER_REL
     prefix = path.read_bytes()
     count = len(prefix.splitlines())
-    ua.usage_projection(root)  # seed both writer and display snapshots
-    if cache_state == "cold":
-        with memo._LEDGER_READ_CACHE_LOCK:
-            memo._LEDGER_READ_CACHE.pop(str(root.resolve()), None)
-    bad = {"seq": count + 1, "attempt_id": "legacy-nonfinite", "kind": "legacy_usage",
+    held = {**_HELD, "seq": count + 1, "ts": "2020-01-01T00:00:00Z"}
+    bad = {"seq": count + 2, "attempt_id": "legacy-nonfinite", "kind": "legacy_usage",
            "root_task_id": "legacy", "state": "settled", "cost_usd": .01,
            "cost_final": True, "reservation_upper_bound_usd": .2, field: value}
-    body = prefix + (json.dumps(bad) + "\n").encode()
-    if cache_state == "replacement":
-        replacement = root / "replacement.jsonl"
-        replacement.write_bytes(body)
-        os.replace(replacement, path)
-    else:
-        with path.open("ab") as output:
-            output.write(body[len(prefix):])
-    archived = archive_bytes(root)
-    # Test the selected cache state first; subsequent failures must remain loud.
+    body = prefix + (json.dumps(held) + "\n").encode() + (json.dumps(bad) + "\n").encode()
+    path.write_bytes(body)
     with nonfinite_failure():
-        ua.usage_projection(root)
-    with nonfinite_failure():
-        ua.usage_projection(root, allow_stale=True)
-    with ledger._locked(root), nonfinite_failure():
-        ledger._read_records_locked(root)
-    with nonfinite_failure():
-        ledger._validate_records([json.loads(line) for line in body.splitlines()])
+        journal._validate_records([json.loads(line) for line in body.splitlines()])
     with nonfinite_failure():
         ua._summary([bad])
-    with nonfinite_failure():
-        ua.mark_dispatched(held)
-    sends = []
-    with nonfinite_failure():
-        ua.execute_physical_attempt(
-            request(root, reservation_usd=.1, global_limit_usd=.5), lambda: sends.append(1))
-    with ledger._locked(root) as beat, nonfinite_failure():
-        compact.compact_usage_ledger_locked(root, heartbeat=beat)
-    assert sends == []
+    _refuses_everywhere(root, _held(root))
     assert path.read_bytes() == body
-    assert archive_bytes(root) == archived
+
+
+@pytest.mark.parametrize("field", ["cost_usd", "reservation_upper_bound_usd", "reservation_usd",
+                                   "max_budget_usd", "global_limit_usd", "root_limit_usd"])
+def test_the_store_never_persists_nonfinite_money(root, field):
+    held = ua.reserve_attempt(request(root, reservation_usd=.1))
+    with usage_store.read(root) as txn:
+        before = txn.attempts()
+    bad = {"attempt_id": "legacy-nonfinite", "kind": "legacy_usage", "root_task_id": "legacy",
+           "state": "settled", "cost_usd": .01, "cost_final": True, field: "Infinity"}
+    with nonfinite_failure():
+        with usage_store.hold(root) as txn:
+            txn.write(bad)
+    current = dict(before[-1])
+    with nonfinite_failure():
+        with usage_store.hold(root) as txn:
+            txn.write({**current, "state": "dispatched", field: float("inf")}, current)
+    with usage_store.read(root) as txn:
+        assert txn.attempts() == before
+    ua.mark_dispatched(held)  # the refused writes left the reservation intact
     assert not (root / ledger.QUARANTINE_REL).exists()
-    assert json.loads(prefix.splitlines()[-1])["attempt_id"] == held.attempt_id
-    assert json.loads(prefix.splitlines()[-1])["state"] == "reserved"
 
 
 @pytest.mark.parametrize("field", ["reservation_usd", "max_budget_usd", "global_limit_usd", "root_limit_usd"])
 def test_other_persisted_money_fields_refuse_without_tail_repair(root, field):
-    held = ua.reserve_attempt(request(root))
-    path = root / ua.LEDGER_REL
-    prefix = path.read_bytes()
-    row = {**json.loads(prefix.splitlines()[-1]), "seq": 2, "state": "dispatched", field: "Infinity"}
-    body = prefix + (json.dumps(row) + "\n").encode()
-    path.write_bytes(body)
-    with ledger._locked(root), nonfinite_failure():
-        ledger._read_records_locked(root)
-    with nonfinite_failure():
-        ua.mark_dispatched(held)
+    dispatched = {**_HELD, "state": "dispatched", field: "Infinity"}
+    path = write_journal(root, [_HELD, dispatched])
+    body = path.read_bytes()
+    _refuses_everywhere(root, _held(root))
     assert path.read_bytes() == body
-    assert not (root / ledger.QUARANTINE_REL).exists()
 
 
 @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"),
@@ -149,11 +146,12 @@ def test_exact_amount_never_turns_nonfinite_into_unknown(value):
 
 @pytest.mark.parametrize("value", [.125, "1.25e-1", " .125 "])
 def test_finite_legacy_import_projection_admission_and_send_survive(root, value):
-    (root / IMPORT_REL).unlink()
+    (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "logs/events.jsonl").write_text(json.dumps({
         "type": "llm_usage", "task_id": "legacy", "root_task_id": "legacy",
         "cost": value, "provider": "openai", "prompt_tokens": 7}) + "\n")
-    assert ua.ensure_legacy_imported(root)["completed"] is True
+    assert usage_store.migrate_from_journal(root)["status"] == "completed"
+    assert json.loads((root / IMPORT_REL).read_text(encoding="utf-8"))["completed"] is True
     projection = ua.usage_projection(root, root_task_id="legacy")
     assert projection["accounted_usd"] == .125
     assert projection["cost_final"] is True

@@ -296,30 +296,3 @@ class TestSharedGitReviewHelpers:
             "rename",
             paths=["old_name.txt", "new_name.txt"],
         )
-
-    def test_scope_actor_record_preserves_raw_status_and_findings(self):
-        from types import SimpleNamespace
-
-        from ouroboros.tools.review_helpers import build_scope_actor_record
-
-        result = SimpleNamespace(
-            model_id="",
-            status="parse_failure",
-            raw_text="not json",
-            prompt_chars=123,
-            tokens_in=10,
-            tokens_out=2,
-            cost_usd=0.01,
-            critical_findings=[{"item": "intent_alignment"}],
-            advisory_findings=[{"item": "scope_review_skipped"}],
-        )
-
-        record = build_scope_actor_record(result, fallback_model_id="scope-model")
-
-        assert record["model_id"] == "scope-model"
-        assert record["status"] == "parse_failure"
-        assert record["raw_text"] == "not json"
-        assert record["parsed_items"] == [
-            {"item": "intent_alignment"},
-            {"item": "scope_review_skipped"},
-        ]

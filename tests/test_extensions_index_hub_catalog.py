@@ -47,7 +47,6 @@ def _skill(drive_root: pathlib.Path, bucket: str, slug: str) -> tuple[LoadedSkil
 @pytest.fixture
 def index(monkeypatch, tmp_path):
     """Build the real index over ``count`` hub skills; any catalog download fails the test."""
-    import supervisor.queue as supervisor_queue
     from ouroboros.gateway import extensions as extensions_api
 
     drive_root = tmp_path / "data"
@@ -55,7 +54,6 @@ def index(monkeypatch, tmp_path):
         extensions_api, "snapshot",
         lambda: {"tools": [], "routes": [], "ws_handlers": [], "ui_tabs": []},
     )
-    monkeypatch.setattr(supervisor_queue, "sync_skill_schedules", lambda *_a, **_kw: None)
     monkeypatch.setattr("ouroboros.tools.github.github_token_from_env_or_settings", lambda: "")
     monkeypatch.setattr(
         ouroboroshub, "_fetch_bytes",

@@ -209,26 +209,19 @@ async def api_extensions_index(request: Request) -> JSONResponse:
     """Return discovered extensions plus live loader snapshot.
 
     The synchronous body runs in a worker thread and reuses discovered skills
-    to avoid repeated filesystem walks during Widgets/Skills refresh.
+    to avoid repeated filesystem walks during Widgets/Skills refresh. A passive
+    read (DEVELOPMENT "Passive GET"): a dead ``running`` review job is healed by
+    its owners (boot, the maintenance pass, the next review start), never here.
     """
     try:
-        import asyncio
-
         from ouroboros.config import get_skills_repo_path
-        from ouroboros.skill_review_runner import reconcile_stale_review_jobs
 
         drive_root = _request_drive_root(request)
         repo_path = get_skills_repo_path()
-        await asyncio.to_thread(
-            reconcile_stale_review_jobs,
-            drive_root,
-            repo_path=repo_path,
-        )
         payload = await asyncio.to_thread(_build_extensions_index, drive_root, repo_path)
         return JSONResponse(payload)
     except Exception as exc:
-        log.exception("api_extensions_index failure")
-        return json_exception(exc)
+        return json_exception(exc, context="api_extensions_index failure")
 
 
 async def api_skill_daemons(_request: Request) -> JSONResponse:
@@ -253,14 +246,9 @@ def _build_extensions_index(drive_root, repo_path):
         skill for skill in skills
         if not bool(getattr(skill, "identity_collision", False))
     ]
-    try:
-        from supervisor.queue import sync_skill_schedules
-
-        # Empty inventory retires vanished skills; collision placeholders keep
-        # prior rows for ambiguous identities while unique peers still sync.
-        sync_skill_schedules(skills, drive_root=drive_root)
-    except Exception:
-        log.debug("Failed to sync skill schedules", exc_info=True)
+    # No schedule sync here: it takes the supervisor queue lock and the schedule
+    # file lock, so a read would wait on every holder. The scheduler tick and
+    # the lifecycle actions mirror manifest schedules.
     runtime_states = {
         s.name: runtime_state_for_loaded_skill(s, drive_root, skills=skills)
         for s in unique_skills
@@ -394,7 +382,14 @@ def _build_extensions_index(drive_root, repo_path):
             ),
             "review_findings": list(s.review.findings or []),
             "skill_review": skill_review_ui_projection(drive_root, s.name),
-            "grants": grant_status_for_skill(drive_root, s),
+            # An extension row reuses the grant status its runtime state computed
+            # above (same function, same drive_root and skill): one settings
+            # read per skill, not two.
+            "grants": (
+                runtime_states[s.name]["grant_status"]
+                if s.name in runtime_states
+                else grant_status_for_skill(drive_root, s)
+            ),
         })
         presence_runtime = presence_runtime_card_projection(drive_root, s)
         if presence_runtime is not None:
@@ -644,7 +639,10 @@ async def api_extension_dispatch(request: Request) -> Response:
     try:
         from ouroboros.extension_process_runner import disclose_inprocess_extension_dispatch
 
-        disclose_inprocess_extension_dispatch(
+        # A ledger append under the money lock for an extension holding a funded
+        # provider key: a lock wait, so it runs off the event loop.
+        await asyncio.to_thread(
+            disclose_inprocess_extension_dispatch,
             spec,
             drive_root=drive_root,
             surface_kind="route",
@@ -759,15 +757,11 @@ async def api_owner_skill_attest_review(request: Request) -> JSONResponse:
     return JSONResponse(payload, status_code=200 if payload.get("ok") else int(payload.get("status_code") or 409))
 
 
-async def api_skill_lifecycle_queue(request: Request) -> JSONResponse:
-    """GET /api/skills/lifecycle-queue — recent mutating skill operations."""
+async def api_skill_lifecycle_queue(_request: Request) -> JSONResponse:
+    """GET /api/skills/lifecycle-queue — recent mutating skill operations.
 
-    try:
-        from ouroboros.skill_review_runner import reconcile_stale_review_jobs
-
-        await asyncio.to_thread(reconcile_stale_review_jobs, _request_drive_root(request))
-    except Exception:
-        log.debug("stale review job reconciliation failed", exc_info=True)
+    The queue snapshot only: polled every second while a lifecycle action is
+    pending, so it heals nothing (the review-job owners do)."""
     return JSONResponse(queue_snapshot())
 
 
@@ -1008,11 +1002,12 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
         state.get("action"),
         state.get("reason"),
     )
-    # Reconcile can flip grants/load state, so refresh schedule readiness now.
+    # Reconcile can flip grants/load state, so refresh schedule readiness now —
+    # off the event loop: the resync waits for the supervisor queue lock.
     try:
         from supervisor.queue import resync_skill_schedules
 
-        resync_skill_schedules(drive_root)
+        await asyncio.to_thread(resync_skill_schedules, drive_root)
     except Exception:
         log.debug("api_skill_reconcile schedule sync failed", exc_info=True)
     return JSONResponse(extension_reconcile_receipt(skill_name, state))

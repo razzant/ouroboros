@@ -488,7 +488,7 @@ def test_the_design_note_names_the_exact_kernel_refusal_sets():
     closed if the design note contradicted the implemented errno sets.
     So the note names both sets and this compares them, member for member, by
     the numbers (EWOULDBLOCK and ENOTSUP are aliases on Linux, not everywhere)."""
-    note = pathlib.Path(__file__).resolve().parents[1] / "docs" / "USAGE_COMPACTION.md"
+    note = pathlib.Path(__file__).resolve().parents[1] / "docs" / "USAGE_STORE.md"
     spelled = re.findall(r"are exactly ((?:`[A-Z]+`/)+`[A-Z]+`)", note.read_text(encoding="utf-8"))
     assert len(spelled) == 2, spelled
     unsupported, held = ({getattr(errno, name.strip("`")) for name in group.split("/")} for group in spelled)

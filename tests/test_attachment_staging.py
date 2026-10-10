@@ -163,6 +163,18 @@ class TestStageTaskAttachments:
         assert manifest[0]["is_image"] is True
         assert manifest[0]["mime"] == "image/png"
 
+    def test_the_bytes_not_the_extension_make_an_image(self, tmp_path):
+        from ouroboros.artifacts import stage_task_attachments
+
+        drive = _drive(tmp_path)
+        page, clip, vector = tmp_path / "page.png", tmp_path / "clip.mp4", tmp_path / "logo.svg"
+        page.write_bytes(b"<html><script>x</script></html>")
+        clip.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 28)
+        vector.write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+        manifest = stage_task_attachments(drive, "task05b", [{"path": str(path)} for path in (page, clip, vector)])
+        assert [(row["is_image"], row["mime"]) for row in manifest] == [
+            (False, "application/octet-stream"), (True, "image/jpeg"), (False, "image/svg+xml")]
+
     def test_missing_and_nonfile_skipped(self, tmp_path):
         from ouroboros.artifacts import stage_task_attachments
 

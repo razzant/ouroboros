@@ -75,53 +75,6 @@ function rendererFixture(options = {}) {
     return { doc, record, ...renderer };
 }
 
-test('saved expanded line restores the renderer disclosure and requests full output once', () => {
-    const hydrated = [];
-    const f = rendererFixture({ initialAnchor: { lineKey: 'saved', lineExpanded: true },
-        hydrate: (item, record) => hydrated.push([item, record]) });
-    const item = { lineKey: 'saved', truncated: true, fullRef: 'child' };
-    f.record.items = [item];
-    f.renderLiveCardTimeline(f.record);
-    assert.equal(f.record.expandedLineKeys.has('saved'), true);
-    assert.equal(f.record.timelineEl.firstElementChild.firstElementChild.getAttribute('aria-expanded'), 'true');
-    assert.deepEqual(hydrated, [[item, f.record]]);
-    f.renderLiveCardTimeline(f.record);
-    assert.equal(hydrated.length, 1);
-});
-
-test('an adopted live line reopens expanded by its physical row, keeping its new DOM key and full hydration', () => {
-    const hydrated = [];
-    const f = rendererFixture({ initialAnchor: {
-        lineKey: 'line-live-random', lineHistoryId: 'progress:41', lineExpanded: true,
-        cardChain: [{ taskId: 'owner' }],
-    }, hydrate: (item) => hydrated.push(item) });
-    f.record.groupId = 'owner';
-    const other = { lineKey: 'history-progress-40', historyId: 'progress:40',
-        headline: 'Same result', ts: '12:00', truncated: true, fullRef: 'other' };
-    const item = { lineKey: 'history-progress-41', historyId: 'progress:41',
-        headline: 'Same result', ts: '12:00', truncated: true, fullRef: 'child' };
-    f.record.items = [other, item];
-    f.renderLiveCardTimeline(f.record);
-    assert.equal(f.record.expandedLineKeys.has(item.lineKey), true);
-    assert.equal(f.record.expandedLineKeys.has(other.lineKey), false);
-    assert.equal(f.record.expandedLineKeys.has('line-live-random'), false);
-    assert.equal(f.record.timelineEl.lastElementChild.dataset.liveLineKey, item.lineKey);
-    assert.deepEqual(hydrated, [item]);
-});
-
-test('an evolving lifecycle reopens by lifecycle identity as its source row changes', () => {
-    const f = rendererFixture({ initialAnchor: {
-        lineKey: 'line-live-random', lineLifecycleKey: 'subagent-lifecycle:child',
-        lineExpanded: true, cardChain: [{ taskId: 'owner' }],
-    } });
-    f.record.groupId = 'owner';
-    const item = { lineKey: 'terminal-subagent-lifecycle-child',
-        dedupeKey: 'subagent-lifecycle:child', sourceHistoryId: 'progress:99' };
-    f.record.items = [item];
-    f.renderLiveCardTimeline(f.record);
-    assert.equal(f.record.expandedLineKeys.has(item.lineKey), true);
-});
-
 for (const kind of ['receipt', 'lifecycle', 'terminal', 'activity']) {
 test(`a live ${kind} retains its physical page and exact row through canonical adoption`, () => {
     const evolving = kind !== 'activity';
@@ -196,7 +149,8 @@ test(`a live ${kind} retains its physical page and exact row through canonical a
     assert.equal(saved.historyId, 'chat:41', 'the nested line must supply its own physical page, not a card-wide source');
     mounted.card.remove();
 
-    const cold = rendererFixture({ initialAnchor: saved });
+    // A rebuilt card (fresh DOM keys) finds the saved line by its row identity.
+    const cold = rendererFixture();
     cold.record.groupId = 'owner';
     for (const [id, offset] of [['other-receipt', 40], ['receipt', 41]]) {
         mergeHistoricalTimelineItem(cold.record, summary(id), row(offset), '12:00');
@@ -209,9 +163,6 @@ test(`a live ${kind} retains its physical page and exact row through canonical a
     assert.equal(reopened.anchors.restoreVisibleTimelineAnchor(saved, { exact: true }), true);
     assert.equal(reopened.messages.scrollTop, 300);
     assert.equal(cold.record.timelineEl.lastElementChild.getBoundingClientRect().top, saved.offset);
-    assert.equal(cold.record.expandedLineKeys.has(coldItem.lineKey), true);
-    assert.equal(cold.record.expandedLineKeys.has(cold.record.items[0].lineKey), false);
-    assert.equal(cold.record.timelineEl.lastElementChild.firstElementChild.getAttribute('aria-expanded'), 'true');
     assert.equal(reopened.anchors.serializeTimelineAnchor().historyId, 'chat:41');
     assert.equal(reopened.anchors.serializeTimelineAnchor().lineLifecycleKey, evolving ? `${prefix}receipt` : '');
     assert.equal(beforeReplay.lineLifecycleKey, evolving ? `${prefix}receipt` : '');

@@ -249,8 +249,10 @@ def test_the_restart_census_skips_saved_pauses_including_a_direct_actor(tmp_path
 
 
 def test_owner_restart_passes_the_hold_only_through_its_own_kill(tmp_path, monkeypatch):
-    """The never-started hold is the owner Restart's policy alone: its stop asks
-    ``kill_workers`` for it, and the transport notice names what was held."""
+    """Owner 2026-10-08 (quiz d2f7532b): the owner Restart's stop keeps saved work and
+    the queue for the next boot (its transaction names what returns) instead of
+    asking ``kill_workers`` to hold never-started rows; an existing hold stays and
+    the transport notice still names what was held."""
     from ouroboros import cancel_intents, server_restart
     from ouroboros import delegate_custody as custody
     from supervisor.events_budget import HOLD_OWNER_RESTART
@@ -266,7 +268,8 @@ def test_owner_restart_passes_the_hold_only_through_its_own_kill(tmp_path, monke
 
     server_restart._stop_owned_work(ctx)
 
-    assert kills and kills[0]["hold_never_started"] is True
+    assert kills and kills[0]["retain_saved_work"] is True and kills[0]["preserve_pending"] is True
+    assert "hold_never_started" not in kills[0]
     assert kills[0]["reconcile_delegate_custody"] is False
     assert server_restart._owner_restart_held_count(ctx) == 1
 

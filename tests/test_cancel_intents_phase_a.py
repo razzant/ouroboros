@@ -332,13 +332,13 @@ def test_boot_migrates_the_latch_before_any_quarantining_read():
     from ouroboros import server_maintenance
 
     recovery = inspect.getsource(server_maintenance._run_startup_task_recovery)
-    assert recovery.index("_migrate_startup_cancel_latches") < recovery.index(
-        "reconcile_orphaned_running_tasks"), recovery
-    assert "migrate_legacy_cancel_latches" not in inspect.getsource(
-        server_maintenance._startup_custody_sweep), (
-        "the migration must not ALSO run from the later custody sweep, whose "
-        "own reads would already have quarantined the latch"
-    )
+    assert "_migrate_startup_cancel_latches" not in recovery
+    import server
+    lifespan = inspect.getsource(server.lifespan)
+    assert lifespan.index("prepare_startup_state") < lifespan.index("_run_startup_task_recovery")
+    assert lifespan.index("prepare_startup_state") < lifespan.index("_start_supervisor_if_needed")
+    assert "migrate_legacy_cancel_latches" not in inspect.getsource(server_maintenance._startup_custody_sweep)
+
 
 def test_the_admitted_latch_reaches_the_cancelled_terminal(tmp_path, monkeypatch):
     """The carve-out's whole point. Once admitted, the latch is an ORDINARY

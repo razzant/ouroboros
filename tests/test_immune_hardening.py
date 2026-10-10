@@ -109,7 +109,6 @@ class TestAdvisoryOverrideVisibility:
             "selected_attempt": None,
             "open_obligations": [],
             "open_debts": [],
-            "repo_commit_ready": False,
             "retry_anchor": None,
             "advisory_overrides": {"count": 3, "recent": [{"ts": "t", "block_reason": "x"}]},
             "guidance_run": None,
@@ -304,16 +303,16 @@ class TestGitInfo:
         ]
 
 
-class TestScopeChecklistFailClosed:
+class TestCouplingChecklistFailClosed:
     def test_missing_checklist_raises(self, monkeypatch):
         import pytest
 
-        import ouroboros.tools.scope_review_session as scope_session
+        import ouroboros.tools.review_brief_coupling as brief_mod
 
-        monkeypatch.setattr(scope_session, "load_checklist_section", lambda *_a, **_k: "")
+        monkeypatch.setattr(brief_mod, "load_checklist_section", lambda *_a, **_k: "")
         with pytest.raises(RuntimeError, match="fail-closed"):
-            scope_session.build_scope_session_task(
-                pathlib.Path("."), scope_session.ScopeBriefInputs(commit_message="msg"),
+            brief_mod.build_retrieving_brief(
+                pathlib.Path("."), brief_mod.BriefInputs(commit_message="msg"),
             )
 
 

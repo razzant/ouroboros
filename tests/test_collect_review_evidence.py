@@ -8,8 +8,8 @@ Also covers advisory-run ATTRIBUTION. Repository readiness is repository-scoped
 by design, but the run lists are not: a root's reflection received another
 task's failed advisory rows with their identity stripped and narrated them as
 its own failures. The split is a projection over existing records, so it is the
-same under advisory and blocking review enforcement; only ``repo_commit_ready``
-reads enforcement at all.
+same under advisory and blocking review enforcement; since decision 3A retired
+the advisory gate, no ``repo_commit_ready`` verdict is projected from the rows.
 """
 
 
@@ -50,7 +50,7 @@ def test_another_tasks_advisory_failures_are_not_rendered_as_this_tasks_own(tmp_
     repo_dir = _repo_with_history(tmp_path)
     repo_key = make_repo_key(repo_dir)
     state = AdvisoryReviewState()
-    state.add_run(_advisory_run(snapshot_hash="b-snapshot", repo_key=repo_key,
+    state.advisory_runs.append(_advisory_run(snapshot_hash="b-snapshot", repo_key=repo_key,
                                 task_id="task-b", failing=_FOREIGN_FAILURE))
     save_state(tmp_path, state)
 
@@ -73,8 +73,8 @@ def test_another_tasks_advisory_failures_are_not_rendered_as_this_tasks_own(tmp_
     assert _FOREIGN_FAILURE not in rendered[:heading]
 
 
-def test_another_tasks_exact_snapshot_advisory_still_answers_repository_readiness(tmp_path):
-    """Attribution is not scoping: the checkout is still covered by B's review."""
+def test_another_tasks_exact_snapshot_advisory_still_describes_the_checkout(tmp_path):
+    """Attribution is not scoping: B's row still names the checkout's advisory status."""
     from ouroboros.review_evidence import collect_review_evidence
     from ouroboros.review_state import (
         AdvisoryReviewState, compute_snapshot_hash, make_repo_key, save_state,
@@ -83,14 +83,14 @@ def test_another_tasks_exact_snapshot_advisory_still_answers_repository_readines
     repo_dir = _repo_with_history(tmp_path)
     repo_key = make_repo_key(repo_dir)
     state = AdvisoryReviewState()
-    state.add_run(_advisory_run(snapshot_hash=compute_snapshot_hash(repo_dir),
+    state.advisory_runs.append(_advisory_run(snapshot_hash=compute_snapshot_hash(repo_dir),
                                 repo_key=repo_key, task_id="task-b"))
     save_state(tmp_path, state)
 
     evidence = collect_review_evidence(tmp_path, task_id="task-a", repo_dir=repo_dir)
 
     assert evidence["current_repo"]["advisory_status"] == "fresh"
-    assert evidence["current_repo"]["repo_commit_ready"] is True
+    assert "repo_commit_ready" not in evidence["current_repo"]
     assert evidence["recent_advisory_runs"] == []
     assert [row["task_id"] for row in evidence["foreign_advisory_runs"]] == ["task-b"]
 
@@ -102,7 +102,7 @@ def test_a_run_without_a_task_id_stays_unknown_and_is_never_re_attributed(tmp_pa
 
     repo_dir = _repo_with_history(tmp_path)
     state = AdvisoryReviewState()
-    state.add_run(_advisory_run(snapshot_hash="legacy-snapshot",
+    state.advisory_runs.append(_advisory_run(snapshot_hash="legacy-snapshot",
                                 repo_key=make_repo_key(repo_dir), task_id=""))
     save_state(tmp_path, state)
 
@@ -121,9 +121,9 @@ def test_an_empty_repo_key_does_not_pull_another_tasks_runs_into_this_task(tmp_p
     repo_a = _repo_with_history(tmp_path, "repo-a")
     repo_b = _repo_with_history(tmp_path, "repo-b")
     state = AdvisoryReviewState()
-    state.add_run(_advisory_run(snapshot_hash="a-snapshot", repo_key=make_repo_key(repo_a),
+    state.advisory_runs.append(_advisory_run(snapshot_hash="a-snapshot", repo_key=make_repo_key(repo_a),
                                 task_id="task-a"))
-    state.add_run(_advisory_run(snapshot_hash="b-snapshot", repo_key=make_repo_key(repo_b),
+    state.advisory_runs.append(_advisory_run(snapshot_hash="b-snapshot", repo_key=make_repo_key(repo_b),
                                 task_id="task-b", failing=_FOREIGN_FAILURE))
     save_state(tmp_path, state)
 
@@ -186,7 +186,7 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
     repo_a_key = make_repo_key(repo_a)
     repo_b_key = make_repo_key(repo_b)
     state = AdvisoryReviewState()
-    state.add_run(AdvisoryRunRecord(
+    state.advisory_runs.append(AdvisoryRunRecord(
         snapshot_hash=compute_snapshot_hash(repo_a),
         commit_message="repo a ready",
         status="fresh",
@@ -216,7 +216,6 @@ def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
 
     evidence = collect_review_evidence(tmp_path, repo_dir=repo_a)
 
-    assert evidence["current_repo"]["repo_commit_ready"] is True
     assert evidence["current_repo"]["stale_reason"] == ""
     assert evidence["current_repo"]["stale_ts"] == ""
     assert evidence["open_obligations"] == []
@@ -255,7 +254,9 @@ def test_collect_review_evidence_includes_commit_readiness_debt(tmp_path):
 
     evidence = collect_review_evidence(tmp_path, repo_dir=repo_dir)
 
-    assert evidence["current_repo"]["repo_commit_ready"] is False
+    # The debt stays a disclosed diagnostic; since decision 3A it no longer holds a
+    # commit, and no readiness verdict is projected next to it.
+    assert "repo_commit_ready" not in evidence["current_repo"]
     assert len(evidence["commit_readiness_debts"]) >= 1
     assert evidence["commit_readiness_debts"][0]["category"] in {"obligation_repeat", "readiness_warning"}
 

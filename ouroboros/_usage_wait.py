@@ -12,6 +12,7 @@ import contextlib
 import contextvars
 import logging
 import pathlib
+import sys
 import threading
 import time
 import uuid
@@ -214,18 +215,166 @@ async def postresponse_off_loop(function, *args, retain_on_cancel):
     raise cancelled
 
 
-def model_send(reservation, send):
-    """One physical sender owned until it returns; no wait under Pause's lock."""
-    from concurrent.futures import ThreadPoolExecutor
+# The main round's own answer wait (``receiver_abandonable``) re-reads its
+# owner Pause fence at this interval: responsiveness, not a lifetime or bound.
+ABANDON_POLL_SEC = 0.5
+_ABANDONABLE = contextvars.ContextVar("model_receiver_abandonable", default=False)
+_ABANDONED_SENDS: set[asyncio.Task] = set()
+
+
+@contextlib.contextmanager
+def receiver_abandonable():
+    """Mark an author model wait as one an owner Pause interrupts.
+
+    Owner 2026-10-08 (quiz 9312a119, option 1): Pause interrupts the LOCAL wait
+    for an already-sent answer and keeps the previous ready point. The loop's
+    round, fallback, forced-final and compaction calls opt in; an unmarked
+    tool or review-episode call keeps waiting as before.
+    """
+    token = _ABANDONABLE.set(True)
+    try:
+        yield
+    finally:
+        _ABANDONABLE.reset(token)
+
+
+def _receiver_paused(reservation) -> bool:
+    """The send's own task is under a closed owner fence it is not selected out of.
+
+    Unreadable authority keeps waiting (the pre-existing behaviour); it never
+    abandons a paid answer on a guess.
+    """
+    from ouroboros.owner_pause import _member_coordinates, fence_closed, read_fence
+
+    root_drive, root_task_id, task_id = _member_coordinates(reservation.scope)
+    if not root_drive or not root_task_id:
+        return False
+    try:
+        fence = read_fence(root_drive, root_task_id)
+    except Exception:
+        return False
+    return bool(fence_closed(fence) and task_id not in (fence.get("selected_members") or {}))
+
+
+def model_send(reservation, send, *, settle_late=None):
+    """One physical sender; its receiver may leave only through the handover below.
+
+    The sender and the receiver race on ONE handover: either the receiver takes
+    the answer (or error) and the caller settles it as before, or the receiver
+    abandons first (owner Pause) and the SENDER settles whatever later arrives
+    through ``settle_late`` — one accounting settlement and one retention
+    disposition either way. Abandonment never claims the request unsent or
+    cancelled remotely; the executor is not joined, so the caller unwinds at
+    once while the sender keeps its reservation.
+    """
+    from concurrent.futures import ThreadPoolExecutor, wait
     from ouroboros.owner_pause import submit_model
 
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-send") as executor:
-        future = submit_model(reservation, executor.submit, send)
-        return future.result()
+    abandonable = bool(_ABANDONABLE.get() and settle_late is not None)
+    lock, handover = threading.Lock(), {"state": "waiting"}
+
+    def sender_keeps() -> bool:
+        with lock:
+            if handover["state"] == "abandoned":
+                return True
+            handover["state"] = "taken"
+            return False
+
+    def owned():
+        try:
+            result = send()
+        except BaseException as exc:
+            if sender_keeps():
+                settle_late(error=exc)
+            raise
+        if sender_keeps():
+            settle_late(result=result)
+        return result
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-send")
+    abandoned = False
+    try:
+        future = submit_model(reservation, executor.submit, owned if abandonable else send)
+        if not abandonable:
+            return future.result()
+        while True:
+            # Readiness is separate from retrieving the outcome: a provider's
+            # own TimeoutError is an outcome, never another polling tick.
+            if future.done() or wait((future,), timeout=ABANDON_POLL_SEC).done:
+                return future.result()
+            if not _receiver_paused(reservation):
+                continue
+            with lock:
+                if handover["state"] != "waiting" or future.done():
+                    continue  # completion/cancellation won: retrieve its outcome
+                handover["state"] = "abandoned"
+            abandoned = True
+            raise _abandoned(reservation, future)
+    finally:
+        executor.shutdown(wait=not abandoned)
 
 
-async def model_send_async(reservation, complete, *, retain_on_cancel):
-    """Join cancellation/settlement before the exact consumer may retire."""
+def retain_unadopted(request, reservation, **facts):
+    """The retention callback for a paid answer its receiver will not adopt (cancelled or abandoned)."""
+    from dataclasses import replace
+    from ouroboros.llm_observability import retain_cancelled_response
+    from ouroboros.usage_accounting import UsageScope
+
+    target = replace(request, drive_root=reservation.drive_root,
+                     task_id=(reservation.scope or UsageScope()).task_id or request.task_id)
+    return lambda response, capture: retain_cancelled_response(target, response, capture, **facts)
+
+
+def late_settler(reservation, request, extractor, manifest_ref, capture, late_owner):
+    """``model_send``'s ``settle_late``: the SENDER's settlement of an answer its receiver abandoned.
+
+    The late answer or error goes through the SAME accounting as a taken one; a received
+    answer is retained as evidence (never adopted); the transport's ``late_owner`` then
+    acknowledges or closes it. The receiver recorded the attempt as still dispatched.
+    """
+    from ouroboros import usage_accounting as ua
+
+    retain = retain_unadopted(request, reservation, control_reason="owner_pause_abandoned")
+
+    def settle_late(*, result=None, error=None) -> None:
+        try:
+            if error is not None:
+                ua._terminalize_failed_attempt(reservation, error)
+            else:
+                ua._account_response(reservation, request, result, extractor, manifest_ref)
+                retain(result, ua.last_physical_attempt_capture() or capture)
+        except Exception:
+            log.exception("Late settlement or retention of abandoned attempt %s failed; inspect durable attempt state",
+                          reservation.attempt_id)
+        if late_owner is not None:
+            try:
+                late_owner(result, error)
+            except Exception:
+                log.exception("Late transport custody of abandoned attempt %s failed", reservation.attempt_id)
+    return settle_late
+
+
+def _abandoned(reservation, sender):
+    """Retire the exact receiver identity, then describe the interruption.
+
+    The retired consumer can never accept this answer (``conflicting_writers``
+    stops counting the in-flight attempt as a writer); the next send binds a
+    fresh one. A failed retirement write keeps its positive witness (#1554).
+    """
+    from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait
+
+    owner = current_model_wait()
+    if owner is not None:
+        owner.rotate_answer_consumer()
+    error = ModelWaitInterrupted("owner_pause")
+    error.receiver_abandoned = True
+    error.model_sender_future = sender
+    error.ledger_attempt_ids = [reservation.attempt_id]
+    return error
+
+
+async def model_send_async(reservation, complete, *, retain_on_cancel, retain_on_abandon=None, late_owner=None):
+    """Owner Pause hands settlement to the sender; caller cancellation joins it."""
     from ouroboros import usage_accounting as ua
     from ouroboros.owner_pause import submit_model
 
@@ -233,12 +382,28 @@ async def model_send_async(reservation, complete, *, retain_on_cancel):
     async def invoke():
         outcome["entered"] = True
         try:
-            return await complete()
+            outcome["response"] = await complete()
         except BaseException as exc:
             outcome["error"] = exc
-            return None  # Keep exception identity across an asyncio Task boundary.
         finally:
             outcome["capture"] = ua.last_physical_attempt_capture()
+        # No await separates completion from its handover. Only the event loop
+        # changes this state, so Pause cannot also take a completed outcome.
+        if outcome.get("abandoned"):
+            try:
+                if "error" not in outcome:
+                    await asyncio.to_thread(retain_on_abandon, outcome["response"], outcome["capture"])
+            except Exception:
+                log.exception("Failed to retain abandoned paid response")
+            finally:
+                if late_owner is not None:
+                    try:
+                        await asyncio.to_thread(late_owner, outcome.get("response"), outcome.get("error"))
+                    except Exception:
+                        log.exception("Failed to close abandoned model transport")
+        else:
+            outcome["taken"] = True
+        return outcome.get("response")  # Preserve exception identity in outcome.
 
     try:
         future = submit_model(reservation, lambda run, fn: run(asyncio.create_task, fn()), invoke)
@@ -246,6 +411,18 @@ async def model_send_async(reservation, complete, *, retain_on_cancel):
         exc.model_sender_not_started = True
         raise
     try:
+        if _ABANDONABLE.get() and retain_on_abandon is not None:
+            while not future.done():
+                done, _pending = await asyncio.wait((future,), timeout=ABANDON_POLL_SEC)
+                if done:
+                    break
+                if not outcome.get("taken") and _receiver_paused(reservation):
+                    outcome["abandoned"] = True
+                    # asyncio keeps weak references to tasks. The sender owns
+                    # its paid receipt even after this receiver has unwound.
+                    _ABANDONED_SENDS.add(future)
+                    future.add_done_callback(_ABANDONED_SENDS.discard)
+                    raise _abandoned(reservation, future)
         response = await asyncio.shield(future)
         if "error" in outcome:
             raise outcome["error"]
@@ -268,7 +445,7 @@ async def model_send_async(reservation, complete, *, retain_on_cancel):
         except BaseException:
             # Task boundaries may synthesize a fresh CancelledError. Keep the
             # caller's cancellation, carrying the exact joined paid outcome.
-            error = outcome["error"]
+            error = outcome.get("error", cancelled)
             for field in ("response", "response_manifest_ref", "response_retention_error", "physical_attempt_capture"):
                 if hasattr(error, field):
                     setattr(cancelled, field, getattr(error, field))
@@ -294,3 +471,50 @@ async def model_send_async(reservation, complete, *, retain_on_cancel):
         capture = outcome.get("capture")
         if capture is not None:
             ua.adopt_physical_attempt_capture(capture)
+
+
+def late_transport_custody(transport):
+    """``late_owner`` for a transport whose receiver may leave (owner Pause): its SENDER
+    acknowledges a retained answer exactly as an adopted one would be (the answer itself
+    is never adopted), then closes the transport."""
+    def settle(_result, error):
+        try:
+            if error is None and getattr(transport, "response_ref", None):
+                transport.acknowledge()
+        finally:
+            transport.close()
+    return settle
+
+
+def close_unless_abandoned(transport) -> None:
+    """The receiver's ``finally``: close its transport unless THIS exit is its own
+    abandonment, whose sender still polls the transport and closes it after settling."""
+    if not getattr(sys.exc_info()[1], "receiver_abandoned", False):
+        transport.close()
+
+
+def close_after_model_send(transport) -> None:
+    """A temporary HTTP client stays with its abandoned sender until settlement."""
+    sender = getattr(sys.exc_info()[1], "model_sender_future", None)
+    if sender is None:
+        transport.close()
+    else:
+        sender.add_done_callback(lambda _done: transport.close())
+
+
+async def aclose_after_model_send(transport) -> None:
+    """Async temporary-client custody follows the same exact sender future."""
+    sender = getattr(sys.exc_info()[1], "model_sender_future", None)
+    if sender is None:
+        await transport.aclose()
+        return
+
+    def close(_done):
+        task = asyncio.create_task(transport.aclose())
+        _ABANDONED_SENDS.add(task)
+        def finished(done):
+            _ABANDONED_SENDS.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                log.error("Failed to close abandoned HTTP client", exc_info=done.exception())
+        task.add_done_callback(finished)
+    sender.add_done_callback(close)

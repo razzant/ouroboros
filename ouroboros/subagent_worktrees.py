@@ -14,6 +14,10 @@ not ``.git`` scoped). Tree-proportional work never runs under it (#1241):
 listing, classifying, hashing, populating, copying (and re-recording the copied
 bytes' stat) and deleting a snapshot's files happen outside the lock, so one
 huge inventory delays only its own task.
+
+Registry updates are whole-file read-modify-write, O(rows). Eligible untracked
+text is hashed into the target's object database; once the pin or branch is
+deleted those blobs are unreachable loose objects until ``git gc``.
 """
 
 from __future__ import annotations
@@ -48,6 +52,9 @@ _BRANCH_PREFIX = "subagent/"
 # baseline ref namespace. The ref pins the baseline commit against GC for as
 # long as the snapshot lives; it is deleted with the snapshot.
 _KIND_DELEGATED_EXEC = "delegated_exec"
+# Own-body authoring candidates (``body_candidate.py``): retention is decided by
+# unique work and last use, never by age alone, and never by a child task's id.
+_KIND_BODY_CANDIDATE = "body_candidate"
 _BASELINE_REF_PREFIX = "refs/ouroboros/delegated/"
 
 # Serializes worktree mutations within this process; the on-disk lock serializes
@@ -1208,7 +1215,7 @@ def remove_worktree(
     entries = _load_registry(data_dir, strict=True, op="remove_worktree")
     match: Optional[Dict[str, Any]] = None
     for entry in entries:
-        if entry.get("kind") == _KIND_DELEGATED_EXEC:
+        if entry.get("kind") in (_KIND_DELEGATED_EXEC, _KIND_BODY_CANDIDATE):
             continue
         if task_id and entry.get("task_id") == str(task_id):
             match = entry
@@ -1228,6 +1235,8 @@ def remove_worktree(
     wt_path = Path(match.get("path") or "")
     if _deletable(wt_path, root) and wt_path.exists():
         _force_rmtree(wt_path)  # the checkout's files go first, OUTSIDE the lock (#1241)
+    from ouroboros import body_candidate
+    body_candidate.discard_scratch(match)  # an own-body copy's sibling process environment, unless retained
     with _ops_lock(root, op="remove_worktree", task_id=str(task_id or ""), timeout_sec=lock_wait_sec):
         _remove_paths(Path(match.get("git_dir") or match.get("repo_dir") or "."), wt_path, match.get("branch") or "", allowed_root=root)
         survivors = [
@@ -1254,8 +1263,31 @@ def prune_orphans(
     removed: List[Dict[str, Any]] = []
     kept: List[Dict[str, Any]] = []
     repos: set[str] = set()
+    # A candidate's verdict reads its whole tree (and may capture it), so it is
+    # computed before the lock; under the lock the row is read again and a removing
+    # verdict is applied only while it still describes that row and that checkout
+    # (`body_candidate.verdict_holds`). A row first seen under the lock is kept.
+    from ouroboros import body_candidate
+    verdicts = {
+        str(entry.get("path") or ""): body_candidate.retention_verdict(
+            entry, data_dir=data_dir,
+            expired=max(float(entry.get("created_at") or 0), float(entry.get("used_at") or 0)) < cutoff)
+        for entry in _load_registry(data_dir, strict=True, op="prune_orphans")
+        if entry.get("kind") == _KIND_BODY_CANDIDATE}
     with _ops_lock(root, op="prune"):
         for entry in _load_registry(data_dir, strict=True, op="prune_orphans"):
+            if entry.get("kind") == _KIND_BODY_CANDIDATE:
+                verdict = verdicts.get(str(entry.get("path") or "")) or {"remove": False}
+                if not verdict["remove"] or not body_candidate.verdict_holds(entry, verdict, data_dir=data_dir):
+                    kept.append(entry)
+                    continue
+                body_candidate.discard_scratch(entry)
+                _remove_paths(Path(str(entry.get("git_dir") or entry.get("repo_dir") or ".")),
+                              Path(str(entry.get("path") or "")),
+                              "" if verdict.get("keep_branch") else str(entry.get("branch") or ""),
+                              allowed_root=root)
+                removed.append(entry)
+                continue
             if entry.get("kind") == _KIND_DELEGATED_EXEC:
                 # Delegated execution snapshots have their OWN lifecycle: they persist
                 # until the run's explicit patch disposition, and the startup GC
@@ -1273,6 +1305,7 @@ def prune_orphans(
             if created < cutoff or not path_exists:
                 if repo_dir or wt_path:
                     _remove_paths(Path(repo_dir or "."), Path(wt_path), entry.get("branch") or "", allowed_root=root)
+                body_candidate.discard_scratch(entry)
                 removed.append(entry)
             else:
                 kept.append(entry)

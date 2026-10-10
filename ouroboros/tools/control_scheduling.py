@@ -30,6 +30,7 @@ from ouroboros.contracts.task_contract import (
     normalize_allowed_resources,
 )
 from ouroboros.headless import prepare_task_drive, task_state_dir
+from ouroboros.owner_words import governing_words_for_schedule
 from ouroboros.subagent_history import snapshot_handle
 from ouroboros.subagent_runtime import (
     SubagentSelectionError,
@@ -525,6 +526,8 @@ def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
     """Build a delegated child's task contract from a single spec mapping (extracted
     from _schedule_task to keep it under the method size gate; one dict param to stay
     within the parameter-count discipline; pure construction)."""
+    from ouroboros.main_context_authority import project_helper_predecessor_authority
+
     parent_contract = spec.get("parent_contract")
     input_source_fields = {}
     if isinstance(parent_contract, dict) and "input_sources" in parent_contract:
@@ -535,21 +538,12 @@ def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
             and input_source_fields.get("input_sources") != "declared"):
         raise ValueError("input_sources=shared cannot widen an inherited declared selection")
     if input_source_fields.get("input_sources") == "declared":
-        # Omit whole prior-case narrative carriers; keep the predecessor source
-        # that grants lineage reads. Input selection must not alter that access.
-        predecessor = (parent_contract or {}).get("predecessor_authority")
+        # Prior-case notes are not declared inputs; the predecessor is projected
+        # after the parent spread below, preserving its lineage read source.
         parent_contract = {
             key: value for key, value in (parent_contract or {}).items()
-            if key not in {"notes", "review_notes", "predecessor_authority"}
+            if key not in {"notes", "review_notes"}
         }
-        if isinstance(predecessor, dict) and predecessor:
-            reference_keys = {"source", "task_id", "authority_sha256", "authority_chars", "digest_semantics"}
-            reference = {key: value for key, value in predecessor.items() if key in reference_keys}
-            omitted = predecessor.get("omitted_fields")
-            reference["omitted_fields"] = sorted(set(
-                [str(key) for key in predecessor if key not in reference_keys | {"omitted_fields"}]
-                + (list(omitted) if isinstance(omitted, list) else [])))
-            parent_contract["predecessor_authority"] = reference
         input_source_fields["context"] = str(spec.get("context") or "")
     objective = spec.get("objective", "")
     expected_output = spec.get("expected_output", "")
@@ -602,6 +596,9 @@ def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
                 # value silently wins back — which is exactly what used to happen to a
                 # requested child deadline whenever the parent carried one of its own.
                 "deadline_at": narrowed_deadline_at,
+                "predecessor_authority": project_helper_predecessor_authority(
+                    parent_contract.get("predecessor_authority"),
+                    declared=input_source_fields.get("input_sources") == "declared"),
                 "delegation_budget": delegation_budget,
                 "resource_policy": spec.get("resource_policy", parent_contract.get("resource_policy", {})),
                 "attachment_manifest": spec.get("attachment_manifest") or [],
@@ -657,6 +654,15 @@ def _child_workspace(ctx, metadata, params):
     """Bind the parent's observed source before selecting the child's start."""
     workspace_root = str(getattr(ctx, "workspace_root", "") or metadata.get("workspace_root") or "").strip()
     workspace_mode = str(getattr(ctx, "workspace_mode", "") or metadata.get("workspace_mode") or "").strip()
+    from ouroboros import body_candidate
+    from ouroboros.workspace_copies import same_directory
+
+    own_body_copy = str(params.get("write_surface") or "").strip().lower() == "self_worktree"
+    if body_candidate.is_bound(ctx) and (not workspace_root or (own_body_copy and same_directory(
+            workspace_root, body_candidate.serving_repo_dir_for(ctx)))):
+        # The parent authors a body candidate: its child reads and copies THAT, and an
+        # acting child's patch therefore returns into it, never into the serving tree.
+        workspace_root, workspace_mode = str(body_candidate.descriptor(ctx)["path"]), "self_worktree"
     from ouroboros.tool_access_reads import admit_child_start_folder, capture_parent_workspace
     parent_workspace = capture_parent_workspace(ctx)
     workspace_root, workspace_mode = _inherited_workspace_from_active_repo(ctx, workspace_root, workspace_mode)
@@ -667,12 +673,32 @@ def _child_workspace(ctx, metadata, params):
             if not selected_path.is_absolute() and (not parent_workspace["root"]
                     or parent_workspace.get("availability") == "unavailable"):
                 raise ValueError("relative workspace_root needs an available parent folder; name an absolute readable folder")
-            workspace_root = admit_child_start_folder(ctx,
-                selected_path if selected_path.is_absolute() else Path(parent_workspace["root"]) / selected_path, params)
+            selected_path = selected_path if selected_path.is_absolute() else Path(parent_workspace["root"]) / selected_path
+            if (own_body_copy and body_candidate.is_bound(ctx)
+                    and same_directory(selected_path, body_candidate.serving_repo_dir_for(ctx))):
+                selected_path = Path(body_candidate.descriptor(ctx)["path"])
+            workspace_root = admit_child_start_folder(ctx, selected_path, params)
             workspace_mode = "read_only"
         except (OSError, ValueError, RuntimeError) as exc:
             return workspace_root, workspace_mode, parent_workspace, f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {exc}"
     return workspace_root, workspace_mode, parent_workspace, ""
+
+
+def child_copies_serving_body(ctx, params) -> bool:
+    """Whether a self_worktree child scheduled now copies the serving checkout: this
+    selection names it, or names nothing and the supervisor copies the system repository.
+    The body-candidate seam asks before scheduling, so such a child copies the candidate.
+    A named selection is pinned to the checkout it resolved to here: binding moves the
+    parent folder a relative spelling (``../repo``) is read from, not the selected source."""
+    from ouroboros.body_candidate import serving_repo_dir_for
+    from ouroboros.workspace_copies import same_directory
+
+    metadata = getattr(ctx, "task_metadata", None)
+    source, _mode, _parent, error = _child_workspace(ctx, metadata if isinstance(metadata, dict) else {}, params)
+    copies = not error and (not source or same_directory(source, serving_repo_dir_for(ctx)))
+    if copies and str(params.get("workspace_root") or "").strip():
+        params["workspace_root"] = source
+    return copies
 
 
 def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, **params: Any) -> str:
@@ -881,6 +907,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "parent_cognitive_route": parent_cognitive_route,
         **{key: fields[key] for key in ("directory_strategy", "scope_paths") if key in fields},
     }
+    owner_origin = governing_words_for_schedule(ctx)  # the owner's words that caused this tree, by value
     child_facts = {
         "objective": objective,
         "expected_output": expected_output,
@@ -900,6 +927,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "allowed_resources": allowed_resources,
         "required_capabilities": required_caps,
         **intent_fields,
+        **owner_origin,
         "subagent_envelope": envelope,
     }
     evt = {
@@ -912,7 +940,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "write_surface": requested_surface,
         "resource_intent": ({"kind": "explicit_none"} if folderless_scratch_dir(ctx) is not None
                             else dict(metadata.get("resource_intent") or {})),
-        "origin_metadata": consciousness_origin_metadata(metadata),  # a consciousness child: label, category, level
+        "origin_metadata": {**consciousness_origin_metadata(metadata), **owner_origin},  # tree origin: consciousness label/level + owner words
         **presence_binding_authority_metadata(metadata, task_contract=getattr(ctx, "task_contract", None)),  # never speaker
     }
     _populate_subagent_event_extras(

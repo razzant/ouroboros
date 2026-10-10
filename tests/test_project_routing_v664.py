@@ -749,6 +749,62 @@ def test_omissions_count_children_ordered_after_the_cap(tmp_path):
     assert manifest["omissions"]["final_results"] == 1  # exactly the root cut by the cap
 
 
+def _recent_dialogue(tmp_path):
+    import server
+
+    return server._main_routing_manifest(_ctx(tmp_path))["recent_canonical_dialogue"]
+
+
+def test_main_window_shows_the_owners_quiz_choice_past_a_long_question(tmp_path):
+    """The window clipped each row's raw text at 500 chars, and a quiz answer's text is
+    the host frame that puts the whole question before the choice: past a long question
+    the owner's choice was always cut. The window now renders a row as memory does."""
+    from ouroboros.owner_quiz import quiz_answer_frame
+    from supervisor.message_bus import log_chat
+
+    block = {
+        "quiz_id": "q-tower", "question": "Which way for the tower? " + "context " * 80,
+        "options": ["Keep the tower and repaint it", "Rebuild from scratch"],
+        "asked_at": "2026-10-05T10:00:00Z", "answered_at": "2026-10-05T10:05:00Z",
+        "answered_index": 0, "comment": "keep it, the base is solid; " * 24, "state": "answered",
+    }
+    frame = quiz_answer_frame(block, 0, block["comment"])
+    assert frame.index("The owner chose option 1") > 500  # past the old clip
+    # The row exactly as the answer door writes it (gateway.task_decision).
+    log_chat("system", 1, 0, frame, ts=block["answered_at"], source="owner_quiz_answer",
+             task_id="root-q", client_message_id="quiz_answer:root-q:q-tower",
+             record_type="quiz_answer", quiz=dict(block), drive_root=tmp_path)
+
+    [row] = _recent_dialogue(tmp_path)
+
+    assert len(block["comment"]) > 500
+    assert row["text"] == (
+        f'[answer q-tower] chose (1) Keep the tower and repaint it — "{block["comment"]}"')
+    assert (row["direction"], row["task_id"]) == ("system", "root-q")
+
+
+def test_main_window_keeps_people_whole_and_bounds_every_other_row(tmp_path):
+    """People's words ride whole, as memory keeps them; a child's long report keeps the
+    disclosed bound, its omission note inside the 500 chars; a row without text stays out."""
+    from supervisor.message_bus import log_chat
+
+    owner = "w" * 595 + " end."
+    lineage = {"subagent_task_id": "child-1", "delegation_role": "subagent",
+               "parent_task_id": "root-1", "root_task_id": "root-1"}
+    log_chat("in", 1, 1, owner, source="web", client_message_id="owner-600", drive_root=tmp_path)
+    log_chat("out", 1, 0, "R" * 2000, task_id="child-1", message_meta=lineage, drive_root=tmp_path)
+    log_chat("out", 1, 0, "", task_id="root-1", drive_root=tmp_path)
+    log_chat("system", 1, 0, "", task_id="root-1", record_type="task_summary", drive_root=tmp_path)
+
+    rows = _recent_dialogue(tmp_path)
+
+    assert [(row["direction"], row["task_id"]) for row in rows] == [("in", ""), ("out", "child-1")]
+    assert rows[0]["text"] == owner and len(owner) == 600
+    report = rows[1]["text"]
+    assert len(report) <= 500 and report.startswith("R" * 400)
+    assert report.endswith("OMISSION NOTE: truncated at 500 chars; original length 2000")
+
+
 def test_project_room_direct_chat_root_is_admitted_as_a_predecessor(tmp_path):
     """The second half of the traced refusal (I29): a project room's direct-chat
     root left the per-project pointer empty, so the room's own decision turn had no
@@ -780,7 +836,7 @@ def test_project_room_direct_chat_root_is_admitted_as_a_predecessor(tmp_path):
 
 
 def test_promoting_from_an_owner_root_still_succeeds_after_the_child_filter(tmp_path):
-    """CHECKLISTS item 21 positive path: the narrowing removes CHILDREN from the
+    """CHECKLISTS item 7 positive path: the narrowing removes CHILDREN from the
     predecessor window, and the owner's own root result stays fully promotable
     through the same manifest -> authority route."""
     import server

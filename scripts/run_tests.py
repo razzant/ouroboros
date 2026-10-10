@@ -8,8 +8,8 @@
 A bare call always means the FULL battery — it never skips a test on the
 strength of an earlier run. The default mode is one xdist run in which the
 `serial` tests are pinned to a few file-sharded groups (`--serial-shards`,
-tests/conftest.py) and therefore overlap the parallel tests instead of waiting
-for them; `--sequential` keeps the marker split and xdist flags of
+tests/conftest.py; a file's group is a stable hash of its path) and therefore
+overlap the parallel tests instead of waiting for them; `--sequential` keeps the marker split and xdist flags of
 `ouroboros.preflight_runner` and `.github/workflows/ci.yml` in two passes.
 The reviewed-commit gate and CI stay the authority: this script is feedback.
 

@@ -306,7 +306,13 @@ def carry_cost_meta(source: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
 def live_root_cost_projection(
     task_id: str, task: Mapping[str, Any], event: Mapping[str, Any], drive_root: pathlib.Path,
 ) -> Dict[str, Any]:
-    """Return a non-final root-subtree projection for the existing heartbeat."""
+    """Return a non-final root-subtree projection for the existing heartbeat.
+
+    ``{}`` means no figure: a non-root task, or a root with no attributable
+    subtree rows (absent, not zero). Consumers: the root heartbeat
+    (``supervisor.events_worker_reports``) and the live cost in
+    ``gateway.history``; ``supervisor.events`` re-exports it.
+    """
     from ouroboros.task_results import resolve_task_lineage
 
     lineage = resolve_task_lineage(

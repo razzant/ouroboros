@@ -202,7 +202,6 @@ def test_reviewer_convergence_rule_rides_the_series_round(tmp_path, monkeypatch)
     from ouroboros import skill_review_prompt as prompts
 
     captured = {}
-    monkeypatch.setattr(prompts, "_run_skill_advisory_pre_review", lambda *a, **k: {})
     monkeypatch.setattr(
         prompts, "_build_review_prompt",
         lambda **kwargs: (captured.update(kwargs) or "prompt", 0),
@@ -228,7 +227,6 @@ def test_series_round_falls_back_to_history_without_the_lifecycle_guard(tmp_path
     from ouroboros import skill_review_prompt as prompts
 
     captured = {}
-    monkeypatch.setattr(prompts, "_run_skill_advisory_pre_review", lambda *a, **k: {})
     monkeypatch.setattr(
         prompts, "_build_review_prompt",
         lambda **kwargs: (captured.update(kwargs) or "prompt", 0),

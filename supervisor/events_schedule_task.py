@@ -171,7 +171,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     desc = str(evt.get("objective") or evt.get("description") or "").strip()
     expected_output = str(evt.get("expected_output") or "").strip()
     constraints = str(evt.get("constraints") or "").strip()
-    role = str(evt.get("role") or "researcher").strip() or "researcher"
+    role = str(evt.get("role") or "").strip()
     task_context = str(evt.get("context") or "").strip()
     parent_id = evt.get("parent_task_id")
     root_task_id = str(evt.get("root_task_id") or parent_id or tid)
@@ -713,7 +713,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         if _notice_chat is not None and _notice_chat != HIDDEN_CHAT_ID:
             ctx.send_with_budget(
                 _notice_chat,
-                f"🗓️ Scheduled subagent {tid} ({role}): {desc}{suffix}" if delegation_role == "subagent" else f"🗓️ Scheduled task {tid}: {desc}",
+                f"🗓️ Scheduled subagent {tid}{' (' + role + ')' if role else ''}: {desc}{suffix}" if delegation_role == "subagent" else f"🗓️ Scheduled task {tid}: {desc}",
                 is_progress=True, task_id=tid, progress_meta=progress_meta,
                 role="system", system_type="task_scheduled")
         ctx.persist_queue_snapshot(reason="schedule_subagent_event")

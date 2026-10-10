@@ -4,6 +4,7 @@ import pytest
 import httpx
 
 from ouroboros import usage_accounting as ua
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
@@ -386,7 +387,6 @@ def test_requests_lane_event_fields_name_the_innermost_typed_cause(data_root):
     RemoteDisconnected over its ProtocolError wrapper; ProtocolError alone when
     urllib3 hands it over as MaxRetryError.reason; wrappers keep it."""
     import http.client
-    import json
 
     import requests
     import urllib3
@@ -412,7 +412,7 @@ def test_requests_lane_event_fields_name_the_innermost_typed_cause(data_root):
     reservation = ua.reserve_attempt(_request(data_root))
     ua.mark_dispatched(reservation)
     assert ua._terminalize_failed_attempt(reservation, bare) == "unresolved"
-    rows = [json.loads(line) for line in (data_root / ua.LEDGER_REL).read_text().splitlines() if line.strip()]
+    rows = ledger_rows(data_root)
     assert rows[-1]["state"] == "unresolved"
     assert rows[-1]["reason"].startswith("ConnectionError [cause: RemoteDisconnected]:")
 

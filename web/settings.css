@@ -487,7 +487,6 @@
 }
 
 .available-subagents-toolbar,
-.available-subagent-head,
 .available-subagent-actions {
     display: flex;
     flex-wrap: wrap;
@@ -499,6 +498,13 @@
 .available-subagents-toolbar .btn-default,
 .available-subagent-actions {
     margin-left: auto;
+}
+
+/* Reserve the intent slot even when Settings' Save bar owns the dirty word:
+   the first edit never re-wraps or collapses a toolbar line above the cards. */
+.available-subagents-intent {
+    min-width: 8rem;
+    min-height: calc(var(--type-meta) * var(--line-meta));
 }
 
 .available-subagents-count,
@@ -522,17 +528,23 @@
     gap: var(--space-2);
 }
 
-/* Compact card (docs/DESIGN.md §6 row anatomy): head → Description → route
-   controls → one meta line. Inner rhythm is one space token and the card
-   padding three, so three cards fit a laptop-height Settings body. */
+/* Open card (docs/DESIGN.md §6 row anatomy): head → current exceptions →
+   labelled Source and Model, then Account / Effort / Access → Description →
+   one meta line → Processing and Details & history. The card is a size
+   container, so its own width, not the viewport, picks the field columns. */
 .available-subagent-row {
     display: flex;
     flex-direction: column;
-    gap: var(--space-1);
+    gap: var(--space-2);
     padding: var(--space-3);
     border: 1px solid var(--surface-border);
     border-radius: var(--radius);
     background: var(--surface-card-soft);
+    container: subagentcard / inline-size;
+}
+
+.available-subagent-row [hidden] {
+    display: none;
 }
 
 /* An entry the owner tried to save with an error is emphasised, not dimmed. */
@@ -541,12 +553,52 @@
     background: var(--status-error-bg);
 }
 
+/* The title side wraps inside its own basis; the Reviewer mark and the actions
+   keep the end slot. Whether the head wraps depends on the card width only, so
+   no status word or caption moves the Reviewer box (docs/DESIGN.md §6). */
+.available-subagent-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-2);
+}
+
+.available-subagent-title {
+    display: flex;
+    flex: 1 1 16rem;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    min-width: 0;
+    min-height: 34px;
+}
+
+/* Source beside a wide Model, then Account / Effort / Access; fewer columns as
+   the card narrows. Tracks yield to the card (minmax(0, …)). */
 .available-subagent-route {
     display: grid;
-    /* A track minimum yields to the container: the viewport query does not know
-       the Settings column width, so the floor is capped at 100% of the row. */
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: var(--space-2);
+}
+
+.available-subagent-field-model {
+    grid-column: span 2;
+}
+
+@container subagentcard (max-width: 34rem) {
+    .available-subagent-route {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .available-subagent-field-model {
+        grid-column: 1 / -1;
+    }
+}
+
+@container subagentcard (max-width: 22rem) {
+    .available-subagent-route {
+        grid-template-columns: minmax(0, 1fr);
+    }
 }
 
 .available-subagent-heading {
@@ -567,7 +619,7 @@
     cursor: pointer;
 }
 
-/* Two short words on one line; the full sentence is the status's title. */
+/* One short availability word; the full sentence is the status's title. */
 .available-subagent-head .settings-inline-status {
     min-width: 0;
     white-space: nowrap;
@@ -597,19 +649,74 @@
 }
 
 .available-subagent-meta {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
 }
 
-.available-subagent-meta[data-run-history] {
-    white-space: normal;
+/* A current exception in words (a specific refusal, a marked row switched off):
+   the status title needs a hover a phone lacks. */
+.available-subagent-status-reason {
+    color: var(--status-warn-fg);
+    font-size: var(--type-meta);
+    line-height: var(--line-body);
     overflow-wrap: anywhere;
 }
 
 .available-subagent-actions .btn-default {
     min-height: 34px;
     padding: 0 11px;
+}
+
+.available-subagent-reviewer {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: 34px;
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    cursor: pointer;
+}
+
+/* Details & history: label beside value, stacked on a narrow card. */
+.available-subagent-facts {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin: var(--space-1) 0 0;
+}
+
+.available-subagent-facts > div {
+    display: grid;
+    grid-template-columns: minmax(0, 8rem) minmax(0, 1fr);
+    gap: var(--space-2);
+}
+
+.available-subagent-facts dt {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    font-weight: 600;
+}
+
+.available-subagent-facts dd {
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    overflow-wrap: anywhere;
+}
+
+@container subagentcard (max-width: 28rem) {
+    .available-subagent-facts > div {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0;
+    }
+}
+
+.available-subagents-review-empty {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--status-warn-fg);
+    font-size: var(--type-meta);
 }
 
 .settings-secret-list {
@@ -678,6 +785,8 @@
 
 .settings-effort-card {
     gap: 10px;
+    /* The card's own width, not the viewport, decides when a segmented group wraps. */
+    container: effortcard / inline-size;
 }
 
 .settings-effort-card label {
@@ -689,16 +798,41 @@
     letter-spacing: normal;
 }
 
+/* One equal-width grid for every segmented control. The renderer writes how many
+   choices it drew (`--segment-count`, page_header.js renderSegmentedField): up to
+   four share one row and fill it; a longer scale keeps four equal columns and
+   leaves its last row partly empty rather than stretching a lone choice. Each
+   track is that exact fraction of the row, so no math function sits in the
+   repeat count. */
 .settings-effort-group {
+    --segment-gap: 8px;
+    --segment-columns: min(var(--segment-count, 4), 4);
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(calc((100% - (var(--segment-columns) - 1) * var(--segment-gap)) / var(--segment-columns)), 1fr));
+    gap: var(--segment-gap);
+}
+
+/* A card of 20rem or less stacks two equal columns. Above it today's longest
+   labels ("Development" in three columns, "Advanced" in four) still sit inside
+   their buttons, and the default desktop window keeps its four-column effort
+   scales. */
+@container effortcard (max-width: 20rem) {
+    .settings-effort-group {
+        --segment-columns: min(var(--segment-count, 4), 2);
+    }
+}
+
+/* Max review cycles: five one-glyph values (1 / 2 / 3 / 5 / ∞) keep one compact
+   row at every width. */
+[data-review-cycles-group].settings-effort-group {
+    --segment-columns: var(--segment-count, 5);
 }
 
 /* .ui-segment — SSOT base look for a segmented single-select button (sibling of
-   .app-tab). Settings-specific overrides (column counts, accent colors) stay on
+   .app-tab). Settings-specific overrides (layout, accent colors) stay on
    .settings-effort-*; the resting look + centering live here. The flex centering
-   fixes labels that sat top-left in taller cells (the effort-button bug). */
+   fixes labels that sat top-left in taller cells (the effort-button bug); a word
+   longer than its column (a translated label) breaks rather than overflowing. */
 .ui-segment {
     display: inline-flex;
     align-items: center;
@@ -714,6 +848,13 @@
     cursor: pointer;
     font-size: var(--button-font-size);
     font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+/* Keyboard focus is the one DESIGN ring, apart from the hover and selected paint. */
+.ui-segment:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
 }
 
 .settings-effort-btn.active,
@@ -721,25 +862,6 @@
     color: var(--text-primary);
     border-color: rgba(232, 93, 111, 0.35);
     background: rgba(232, 93, 111, 0.12);
-}
-
-/* Review enforcement toggle: 2 columns. */
-[data-enforcement-group].settings-effort-group {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-[data-update-channel-group].settings-effort-group {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-/* Task-result review keeps its compact 3-column shape. */
-[data-task-review-group].settings-effort-group {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-/* Max review cycles: five short segments (1 / 2 / 3 / 5 / ∞) on one row. */
-[data-review-cycles-group].settings-effort-group {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 /* Shared disabled segmented-button style. */
@@ -852,10 +974,6 @@
         align-items: stretch;
     }
 
-    .available-subagent-route {
-        grid-template-columns: 1fr;
-    }
-
     .available-subagents-toolbar .btn-default {
         margin-left: 0;
     }
@@ -871,19 +989,6 @@
 
     .settings-action-row > .btn-default {
         justify-self: end;
-    }
-
-    .settings-effort-group {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    [data-update-channel-group].settings-effort-group,
-    [data-task-review-group].settings-effort-group {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    [data-review-cycles-group].settings-effort-group {
-        grid-template-columns: repeat(5, minmax(0, 1fr));
     }
 }
 
@@ -989,3 +1094,197 @@
 
 
 /* track-migration:end */
+
+/* Account resource disclosure (the Accounts store owns its data). */
+.account-resource-panel {
+    grid-column: 1 / -1;
+    margin-top: var(--space-3);
+    padding: var(--space-4);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.account-resource-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+}
+.account-resource-head h5 {
+    font-size: var(--type-body);
+    color: var(--text-primary);
+    font-weight: 600;
+    margin: 0;
+}
+.resource-age {
+    font-size: var(--type-meta);
+    color: var(--text-meta);
+}
+.resource-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--space-5);
+}
+.resource-section h6 {
+    font-size: var(--type-body);
+    color: var(--text-primary);
+    font-weight: 600;
+    margin: 0 0 var(--space-3);
+}
+.resource-fact {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-4);
+    margin-bottom: var(--space-2);
+}
+.resource-fact dt {
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--text-meta);
+    min-width: 0;
+}
+.resource-fact dd {
+    margin: 0;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    min-width: 0;
+}
+.resource-window {
+    margin: 0 0 var(--space-4);
+}
+.resource-window .resource-fact {
+    margin-bottom: var(--space-2);
+}
+.resource-track {
+    height: var(--space-1);
+    border-radius: var(--radius-xs);
+    background: var(--bg-hover);
+    overflow: hidden;
+    margin-bottom: var(--space-1);
+}
+.resource-fill {
+    width: var(--resource-used);
+    height: 100%;
+    background: var(--text-meta);
+    border-radius: var(--radius-xs);
+}
+.resource-window[data-spent="true"] .resource-fill {
+    background: var(--amber);
+}
+.resource-reset-section {
+    margin-top: var(--space-4);
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--surface-border);
+}
+.resource-reset-section > h6 {
+    font-size: var(--type-body);
+    color: var(--text-primary);
+    margin: 0 0 var(--space-2);
+    font-weight: 600;
+}
+.resource-offer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) 0;
+}
+.resource-offer + .resource-offer {
+    border-top: 1px solid var(--surface-border);
+}
+.resource-offer-title {
+    font-size: var(--type-body);
+    color: var(--text-primary);
+    font-weight: 600;
+    margin-bottom: var(--space-1);
+}
+.resource-offer-copy {
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--text-meta);
+}
+.resource-offer .btn {
+    flex-shrink: 0;
+}
+.resource-message {
+    padding: var(--space-3);
+    margin-bottom: var(--space-4);
+    border-radius: var(--radius-sm);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+}
+.resource-message[data-tone="warn"] {
+    color: var(--status-warn-fg);
+    background: var(--status-warn-bg);
+}
+.resource-message[data-tone="ok"] {
+    color: var(--status-ok-fg);
+    background: var(--status-ok-bg);
+}
+.resource-message strong {
+    font-size: var(--type-body);
+    color: var(--text-primary);
+    font-weight: 600;
+    display: block;
+}
+.resource-message small {
+    font-size: var(--type-meta);
+    color: var(--text-meta);
+    display: block;
+    line-height: var(--line-meta);
+    margin-top: var(--space-1);
+}
+
+.resource-reset-offer + .resource-reset-offer {
+    border-top: 1px solid var(--surface-border);
+    padding-top: var(--space-3);
+    margin-top: var(--space-3);
+}
+.harness-account-actions [data-resources][aria-expanded="true"] {
+    background: var(--bg-hover);
+}
+@media (max-width: 980px) {
+    .account-resource-panel {
+        padding: var(--space-3);
+    }
+    .resource-columns {
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--space-2);
+    }
+    .resource-section + .resource-section {
+        border-top: 1px solid var(--surface-border);
+        padding-top: var(--space-3);
+    }
+    .resource-offer {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: var(--space-3);
+    }
+    .account-resource-head {
+        align-items: flex-start;
+    }
+    .account-resource-panel .btn, .harness-account-actions .btn {
+        min-height: var(--touch-target-min);
+    }
+    .resource-offer .btn {
+        align-self: flex-start;
+    }
+}
+
+.resource-provenance {
+    margin-top: var(--space-4);
+    font-size: var(--type-meta);
+    color: var(--text-meta);
+}
+.resource-provenance summary {
+    cursor: pointer;
+    min-height: var(--touch-target-min);
+}
+.resource-provenance dl { margin-top: var(--space-2); }

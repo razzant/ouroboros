@@ -19,7 +19,7 @@ def _make_env_and_memory(tmpdir: pathlib.Path):
     (repo_dir / "docs" / "ARCHITECTURE.md").write_text("# Ouroboros v1.2.3 — Architecture", encoding="utf-8")
     (repo_dir / "docs" / "DEVELOPMENT.md").write_text("# DEVELOPMENT.md", encoding="utf-8")
     (repo_dir / "README.md").write_text("version-1.2.3", encoding="utf-8")
-    (repo_dir / "docs" / "CHECKLISTS.md").write_text("## Repo Commit Checklist", encoding="utf-8")
+    (repo_dir / "docs" / "CHECKLISTS.md").write_text("## Change Review Checklist", encoding="utf-8")
     (drive_root / "state" / "state.json").write_text('{"spent_usd": 0}', encoding="utf-8")
     (drive_root / "memory" / "scratchpad.md").write_text("scratch", encoding="utf-8")
     (drive_root / "memory" / "identity.md").write_text("identity", encoding="utf-8")
@@ -28,7 +28,7 @@ def _make_env_and_memory(tmpdir: pathlib.Path):
     return env, memory
 
 
-def test_build_llm_messages_returns_three_system_blocks():
+def test_build_llm_messages_marks_every_stable_block_before_the_changing_tail():
     from ouroboros.context import build_llm_messages
 
     tmpdir = pathlib.Path(tempfile.mkdtemp())
@@ -37,15 +37,15 @@ def test_build_llm_messages_returns_three_system_blocks():
     system_msg = messages[0]
     assert system_msg["role"] == "system"
     assert isinstance(system_msg["content"], list)
-    assert len(system_msg["content"]) == 3
-    assert system_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
-    assert system_msg["content"][1]["cache_control"] == {"type": "ephemeral"}
-    assert "cache_control" not in system_msg["content"][2]
-    # The real render declares block 0 as the cross-conversation stable prefix
-    # (llm_messages.split_leading_system_prefix reads it on the OpenAI-family/Codex wire).
+    stable, dynamic = system_msg["content"][:-1], system_msg["content"][-1]
+    assert all(block["cache_control"] == {"type": "ephemeral"} and block["text"].strip() for block in stable)
+    assert "cache_control" not in dynamic
+    assert stable[0]["text"].startswith("You are Ouroboros.")
+    assert stable[1]["text"].startswith("## DEVELOPMENT.md\n")
+    assert "## My story" in stable[-1]["text"]
     from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
 
-    assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == 1
+    assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == len(stable)
 
 
 def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
@@ -66,20 +66,23 @@ def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
     (tmpdir / "drive" / "memory" / "knowledge" / "patterns.md").write_text("patterns", encoding="utf-8")
 
     messages, _ = build_llm_messages(env=env, memory=memory, task={"id": "t2", "type": "task", "text": "hi"})
-    stable_text = messages[0]["content"][1]["text"]
-    dynamic_text = messages[0]["content"][2]["text"]
+    stable_text = messages[0]["content"][-2]["text"]
+    dynamic_text = messages[0]["content"][-1]["text"]
 
+    # Block B: identity, the deep review and my story; knowledge leads C, where its
+    # many daily edits never cost the cached story.
     assert "## Identity" in stable_text
-    assert "## Knowledge base" in stable_text
-    assert "## Known error patterns (Pattern Register)" in stable_text
+    assert "## My story" in stable_text
     assert "## Last Deep Self-Review" in stable_text
+    for knowledge in ("## Shared understanding", "## Knowledge base", "## Known error patterns (Pattern Register)"):
+        assert knowledge in dynamic_text and knowledge not in stable_text, knowledge
     assert "## Scratchpad" not in stable_text
-    assert "## Dialogue History" not in stable_text
-    assert "## Dialogue Summary" not in stable_text
     assert "## Memory Registry" not in stable_text
 
     assert "## Scratchpad" in dynamic_text
-    assert ("## Dialogue Summary" in dynamic_text) or ("## Dialogue History" in dynamic_text)
+    assert "## This room (Main)" in dynamic_text and "## My story" not in dynamic_text
+    for gone in ("## Dialogue History", "## Dialogue Summary", "## Recent chat"):
+        assert gone not in stable_text and gone not in dynamic_text, gone
     assert "## Memory Registry (what I know / don't know)" in dynamic_text
     assert "## Memory Registry\n\n" not in dynamic_text
     assert "## Memory Registry (what I know / don't know)" not in stable_text
@@ -220,10 +223,9 @@ def test_build_memory_sections_partition_modes():
     assert any(section.startswith("## Identity") for section in stable)
     assert not any(section.startswith("## Scratchpad") for section in stable)
     assert any(section.startswith("## Scratchpad") for section in volatile)
-    assert any(
-        section.startswith("## Dialogue Summary") or section.startswith("## Dialogue History")
-        for section in volatile
-    )
+    # The retold dialogue is the memory view's (``## My story``), never a memory section.
+    assert not any(section.startswith(("## Dialogue Summary", "## Dialogue History", "## Legacy Dialogue"))
+                   for section in [*stable, *volatile, *all_sections])
     assert not any(section.startswith("## Memory Registry") for section in volatile)
     assert registry_digest.startswith("## Memory Registry (what I know / don't know)")
     assert any(section.startswith("## Identity") for section in all_sections)

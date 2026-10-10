@@ -17,6 +17,8 @@ from typing import Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
 from ouroboros.markdown_source import MarkdownSource, SourceRange, parse_markdown_source
+from ouroboros.repo_remotes import OFFICIAL_REPO
+from ouroboros.update_channels import UPDATE_CHANNEL_BRANCHES
 
 
 BOOK_ENTRYPOINTS = {
@@ -289,3 +291,191 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
     span = heading.section
     return read_book_range(book, source.source_path, span.start_line,
                            span.end_line - span.start_line + 1)
+
+
+# --------------------------------------------------------------------------- book balance
+# A measurement, never a gate (BIBLE P3 c5): the official CI `size_ratchet` lane is the
+# only surface that refuses a grown book; every local surface states the same fact.
+
+BOOK_GROWTH_RULE = (
+    "Official CI requires each touched book to end no larger than at its base; text a change "
+    "adds is paid by shortening the same book. The repository owner's book-growth label can "
+    "approve an exception. Local commits are not blocked."
+)
+
+
+@dataclass(frozen=True)
+class BookBalance:
+    book_id: str
+    size: int                              # composed UTF-8 bytes in the working tree
+    vs_head: int | None                    # net change against HEAD; None when HEAD has no such book
+    vs_upstream: int | None                # contribution delta against the official target's merge-base
+    upstream: str                          # local official development ref, "" when unavailable
+    changed: tuple[tuple[str, int], ...]   # sources whose bytes differ from HEAD, with their delta
+    merge_base: str = ""                   # exact measured commit, never the feature's tracking tip
+
+    @property
+    def owed(self) -> int:
+        """Known growth for warning consumers: contribution when measured, else HEAD only."""
+        delta = self.vs_upstream if self.vs_upstream is not None else self.vs_head
+        return max(0, delta or 0)
+
+
+def _git_bytes(root: Path, *args: str) -> bytes | None:
+    import subprocess
+
+    try:
+        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def _official_fetch_url(url: str) -> bool:
+    """Recognize the official GitHub repository, not a remote's conventional name."""
+    if "://" not in url:  # Git's scp-like SSH spelling.
+        host, colon, path = url.partition(":")
+        url = f"ssh://{host}/{path}" if colon else ""
+    try:
+        parsed = urlsplit(url)
+        ports = {"https": 443, "http": 80, "ssh": 22, "git": 9418}
+        return (parsed.scheme in ports and parsed.hostname == "github.com"
+                and parsed.port in (None, ports[parsed.scheme]) and not parsed.query and not parsed.fragment
+                and parsed.path.lower().rstrip("/").removesuffix(".git") == f"/{OFFICIAL_REPO.lower()}")
+    except ValueError:
+        return False
+
+
+def _official_contribution_target(root: Path) -> str:
+    """Use a cached official development ref; no fetch, tracking-branch or settings fallback.
+
+    Git supplies shared remotes/refs for linked worktrees too. If multiple official
+    remotes have this ref, the first by name wins and is shown in every measurement.
+    """
+    remotes = (_git_bytes(root, "remote", "-v") or b"").decode("utf-8", errors="replace")
+    for row in sorted(remotes.splitlines()):
+        name, _, location = row.partition("\t")
+        if location.endswith(" (fetch)") and _official_fetch_url(location[:-8]):
+            ref = f"refs/remotes/{name}/{UPDATE_CHANNEL_BRANCHES['development']}"
+            if _git_bytes(root, "rev-parse", "--verify", f"{ref}^{{commit}}"):
+                return ref
+    return ""
+
+
+def book_source_sizes(root: Path, book_id: str, ref: str = "") -> dict[str, int] | None:
+    """UTF-8 bytes of each book source, entrypoint first, in the working tree or at ``ref``.
+
+    Only the entrypoint is parsed; chapter bytes are sizes, so a measurement costs one
+    `git show` plus one `git ls-tree` per ref. ``None`` when the book is unreadable there.
+    """
+    root, entry = Path(root), BOOK_ENTRYPOINTS[book_id]
+    try:
+        if ref:
+            raw = _git_bytes(root, "show", f"{ref}:{entry}")
+            listing = _git_bytes(root, "ls-tree", "-r", "-l", "-z", "--full-tree", ref, "--", f"docs/{book_id}")
+            if raw is None or listing is None:
+                return None
+            blobs = {}
+            for row in listing.decode("utf-8").split("\0"):
+                meta, _, path = row.partition("\t")
+                if path and meta.split()[1] == "blob":
+                    blobs[path] = int(meta.split()[3])
+            size_of = blobs.__getitem__
+        else:
+            raw = (root / entry).read_bytes()
+            size_of = lambda path: (root / path).stat().st_size  # noqa: E731
+        members = _member_paths(parse_markdown_source(raw, entry), book_id) or ()
+        return {entry: len(raw), **{path: size_of(path) for path in members}}
+    except (OSError, ValueError, KeyError, IndexError, UnicodeDecodeError):
+        return None
+
+
+def composed_size(sizes: dict[str, int]) -> int:
+    """``len(compose_book(book).encode())`` from source sizes: sources joined by one blank line."""
+    return sum(sizes.values()) + 2 * (len(sizes) - 1)
+
+
+def book_balances(root: Path, paths: Iterable[str] | None = None) -> list[BookBalance]:
+    """The balance of every book ``paths`` touch (every book when ``None``); never raises."""
+    wanted = list(BOOK_ENTRYPOINTS) if paths is None else sorted(
+        {book_id for book_id, entry in BOOK_ENTRYPOINTS.items()
+         for path in paths if book_entrypoint_for(path) == entry})
+    if not wanted:
+        return []
+    upstream = _official_contribution_target(root)
+    base = (_git_bytes(root, "merge-base", "HEAD", upstream) or b"").decode().strip() if upstream else ""
+    balances: list[BookBalance] = []
+    for book_id in wanted:
+        now = book_source_sizes(root, book_id)
+        if now is None:
+            continue
+        head = book_source_sizes(root, book_id, "HEAD")
+        at_base = book_source_sizes(root, book_id, base) if base else None
+        changed = tuple((path, now.get(path, 0) - (head or {}).get(path, 0))
+                        for path in dict.fromkeys([*now, *(head or {})])
+                        if now.get(path, 0) != (head or {}).get(path, 0))
+        balances.append(BookBalance(
+            book_id, composed_size(now),
+            composed_size(now) - composed_size(head) if head is not None else None,
+            composed_size(now) - composed_size(at_base) if at_base is not None else None,
+            upstream, changed, base))
+    return balances
+
+
+def _signed(value: int | None) -> str:
+    return "n/a" if value is None else f"{value:+,} B"
+
+
+def render_book_balance(balance: BookBalance) -> str:
+    """One line: worktree size, HEAD delta, contribution delta and its actual cached base."""
+    line = f"{balance.book_id.title()} book {balance.size:,} B: {_signed(balance.vs_head)} vs HEAD"
+    if balance.upstream:
+        line += f", {_signed(balance.vs_upstream)} vs {balance.upstream} (merge-base {balance.merge_base or 'unavailable'})"
+    if balance.vs_upstream is None:
+        line += "; contribution unknown"
+    if balance.changed:
+        line += " (" + ", ".join(f"{Path(path).stem} {delta:+,}" for path, delta in balance.changed) + ")"
+    return line
+
+
+def book_balance_note(root: Path, paths: Iterable[str]) -> str:
+    """The footer for a write to Ouroboros's own body; ``""`` when no book source was written.
+
+    Callers decide that ``root`` is the body (the system repository or its bound candidate):
+    a user's project with a ``docs/architecture`` folder never receives this note.
+    """
+    touched = [path for path in paths if book_path_role(path)]
+    if not touched:
+        return ""
+    balances = book_balances(root, touched)
+    wanted = {book_entrypoint_for(path) for path in touched}
+    available = {balance.book_id for balance in balances}
+    unavailable = [f"{book_id.title()} book balance unavailable"
+                   for book_id, entry in BOOK_ENTRYPOINTS.items()
+                   if entry in wanted and book_id not in available]
+    lines = [render_book_balance(balance) for balance in balances] + unavailable
+    if any(balance.owed for balance in balances):
+        return "ℹ️ Reference books:\n" + "\n".join(lines) + "\n" + BOOK_GROWTH_RULE
+    measured = not unavailable and all(balance.vs_upstream is not None for balance in balances)
+    return "ℹ️ Reference book: " + "; ".join(lines) + ("; nothing owed." if measured else ".")
+
+
+def book_plan_fact(root: Path, paths: Iterable[str]) -> str:
+    """The author-facing plan fact for repository paths a plan will change; ``""`` when none applies.
+
+    A named book source, or a new ``ouroboros/``/``supervisor/`` module (the commit gate then
+    requires a staged Architecture-book source), means the work adds book text.
+    """
+    paths = [str(path).replace("\\", "/").lstrip("./") for path in paths]
+    books = sorted({book_entrypoint_for(path) for path in paths if book_path_role(path)})
+    new_modules = [path for path in paths if path.startswith(("ouroboros/", "supervisor/"))
+                   and path.endswith(".py") and not (Path(root) / path).exists()]
+    if not books and not new_modules:
+        return ""
+    named = [f"book sources of {', '.join(books)}"] if books else []
+    if new_modules:
+        named.append(f"new module(s) {', '.join(new_modules[:5])}, and the commit gate requires a "
+                     "staged Architecture-book source with a new module")
+    balances = "; ".join(render_book_balance(balance) for balance in book_balances(root))
+    return (f"FACT: affected_paths name {' and '.join(named)}. {BOOK_GROWTH_RULE}"
+            + (f" Now: {balances}." if balances else ""))

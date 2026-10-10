@@ -163,9 +163,8 @@ def observe_review_usage(observer: Any, usage: Optional[Dict[str, Any]]) -> None
 
 def observe_failed_review_send(observer: Any, exc: BaseException) -> None:
     """Rows for every physically dispatched attempt behind a failed reviewer send."""
-    from ouroboros.usage_accounting import (
-        POSITIVE_PHYSICAL_ATTEMPT_STATES, _drive_root, read_usage_records, current_usage_scope,
-    )
+    from ouroboros import usage_store
+    from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, _drive_root, current_usage_scope
 
     capture = getattr(exc, "physical_attempt_capture", None)
     attempt_ids = [str(value) for value in (getattr(exc, "ledger_attempt_ids", None) or []) if value]
@@ -176,8 +175,9 @@ def observe_failed_review_send(observer: Any, exc: BaseException) -> None:
     try:
         scope = current_usage_scope()
         root = _drive_root(getattr(scope, "drive_root", None))
-        finals = {str(row["attempt_id"]): row for row in read_usage_records(root, final_only=True)}
-        rows = {attempt_id: finals[attempt_id] for attempt_id in attempt_ids if attempt_id in finals}
+        with usage_store.read(root) as txn:  # one PK lookup per attempt id
+            found = {attempt_id: txn.attempt(attempt_id) for attempt_id in attempt_ids}
+        rows = {attempt_id: row for attempt_id, row in found.items() if row is not None}
     except Exception:
         log.debug("failed to resolve review attempt states", exc_info=True)
     capture_state = str(getattr(capture, "state", "") or "")

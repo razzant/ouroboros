@@ -9,9 +9,6 @@ paths — is read from that one checkout):
 * the triad touched-file pack BEFORE and AFTER the disclosed pack exclusions
   (``review_file_pack.triad_pack_exclusions``: span-only release carriers on a
   VERSION-staged commit, governance docs byte-identical to the inlined prefix);
-* the advisory touched-path MANIFEST (``preflight_review_prompt``): the
-  retrieving advisory delivery names each path with its size and disposition
-  and inlines no bodies, so the number here is the manifest, not a pack;
 * the governance context the triad packet carries, tier by tier: the byte-stable
   prefix (checklist section + archive + tier-1 inline rules), the change-class
   selection and the navigation maps that open the dynamic tail, and the
@@ -34,11 +31,10 @@ limit/headroom figure is in it) and tiktoken ``o200k_base`` (not Anthropic's
 tokenizer) are printed side by side and never conflated.
 
 One change, checked: every arm reads the checkout's INDEX as the reviewed change
-while the packs read working-tree text and the advisory arm resolves its paths
-from ``git status --porcelain`` (HEAD→working tree, as the run does). Those
-coincide only when the index IS the working tree, so a checkout with an
-unstaged edit or an untracked file is refused with the typed
-:class:`MeasuredCheckoutDirty` (exit 2) instead of measured across two changes.
+while the packs read working-tree text. Those coincide only when the index IS
+the working tree, so a checkout with an unstaged edit or an untracked file is
+refused with the typed :class:`MeasuredCheckoutDirty` (exit 2) instead of
+measured across two changes.
 
 Offline by construction: reviewer windows are read from the Capability Evidence
 CACHE only (``capability_evidence.probe(allow_fetch=False)`` under
@@ -130,7 +126,7 @@ def _staged_entries(repo: pathlib.Path) -> list[tuple[str, str, str]]:
 
 
 def _porcelain(repo: pathlib.Path) -> str:
-    """``git status --porcelain`` — the text the advisory run resolves its paths from."""
+    """``git status --porcelain`` — the worktree state the one-change invariant reads."""
     return subprocess.run(
         ["git", "status", "--porcelain"], cwd=str(repo), check=True, capture_output=True, text=True).stdout
 
@@ -138,8 +134,8 @@ def _porcelain(repo: pathlib.Path) -> str:
 def _require_index_is_worktree(porcelain: str) -> None:
     """The one-change invariant every arm rests on (module docstring): an entry
     with a worktree-column status — an unstaged edit (``XM``), an untracked file
-    (``??``) — means the advisory arm would pack text or paths the index arms
-    never see. Typed refusal, never a silently cross-arm number."""
+    (``??``) — means the packs would read text the index never staged. Typed
+    refusal, never a silently cross-arm number."""
     dirty = [line for line in porcelain.splitlines() if len(line) > 1 and line[1] != " "]
     if dirty:
         raise MeasuredCheckoutDirty(
@@ -162,19 +158,14 @@ def _panel_rows(plan: dict) -> list[dict]:
 
 
 def _checklist_section(repo: pathlib.Path) -> str:
-    """``review._load_checklist_section()`` read from the TARGET checkout.
+    """``review._load_checklist_section()`` (body layer) read from the TARGET checkout.
 
     The runtime reads the checklist from its own REPO_ROOT (a frozen contract);
-    this measurer measures one checkout, so the same section + archive come from
-    ``repo``."""
-    path = repo / "docs" / "CHECKLISTS.md"
-    text = path.read_text(encoding="utf-8")
-    header = "## Repo Commit Checklist"
-    start = text.find(header)
-    if start == -1:
-        raise ValueError(f"Section {header!r} not found in {path}")
-    end = text.find("\n## ", start + len(header))
-    section = text[start:] if end == -1 else text[start:end]
+    this measurer measures one checkout, so the same layered sections + archive
+    come from ``repo`` (``review_helpers.load_checklist_layers`` pointed at it)."""
+    from ouroboros.tools.review_helpers import load_checklist_layers
+
+    section = load_checklist_layers("body", repo / "docs" / "CHECKLISTS.md")
     archive = (repo / "docs" / "CHECKLISTS_ARCHIVE.md").read_text(encoding="utf-8").strip()
     return f"{section}\n\n{archive}" if archive else section
 
@@ -203,7 +194,10 @@ def _governance_prefix(
     carries: tier 1 rides the cache-marked stable prefix, the change-class
     selection and the navigation maps open the dynamic tail. A panel with no api
     row assembles no packet, so it asks for no governance — the same branch the
-    runtime takes. Everything is read from ``repo``, never from this checkout."""
+    runtime takes. The principal checklist and repository documents are read
+    from ``repo``; the shared ownership section follows the runtime loader and
+    comes from the executing checkout. Cross-checkout measurements therefore
+    retain that disclosed mixed-source boundary."""
     from ouroboros.tools import review
     from ouroboros.tools.governance_context import GovernanceContext, governance_context
 
@@ -218,10 +212,10 @@ def _governance_prefix(
         already_inline=("BIBLE.md", "docs/CHECKLISTS_ARCHIVE.md"),
     ) if api_models else GovernanceContext()
     stable = review._REVIEW_PROMPT_TEMPLATE_STABLE.format(
-        preamble=review.REVIEW_PREAMBLE,
+        preamble=review.review_preamble("body"),
         critical_calibration=review.CRITICAL_FINDING_CALIBRATION,
         json_contract=review.REVIEW_JSON_ARRAY_CONTRACT,
-        anti_pattern_lock_guard=review.REPO_ANTI_PATTERN_LOCK_GUARD,
+        anti_pattern_lock_guard=review.anti_pattern_lock_guard("body"),
         checklist_section=checklist,
     ) + (f"\n{governance.stable_inline}\n" if governance.stable_inline.strip() else "")
     tail = "\n\n".join(
@@ -363,21 +357,6 @@ def measure(repo: pathlib.Path) -> dict:
     for rel in paths:
         one, _ = build_touched_file_pack(repo, [rel])
         per_file[rel] = {**_measure(one, enc), "excluded": rel in excluded}
-    # The advisory delivery retrieves, so what it sends about the touched files is
-    # the MANIFEST (path, size, disposition), not their bodies. Its paths come
-    # from `git status --porcelain` as the run resolves them (HEAD→working tree);
-    # the index IS the working tree — checked above, and re-checked on the
-    # resolved path set — so both sides name the one staged change.
-    from ouroboros.tools.preflight_review_prompt import _advisory_touched_manifest
-    from ouroboros.tools.review_file_pack import parse_changed_paths_from_porcelain
-
-    advisory_paths = list(paths)
-    resolved = parse_changed_paths_from_porcelain(porcelain)
-    if sorted(resolved) != sorted(advisory_paths):
-        raise MeasuredCheckoutDirty(
-            f"the advisory arm resolved {resolved} from the porcelain while the index names "
-            f"{advisory_paths}; the checkout is not one staged change")
-    advisory_manifest = _advisory_touched_manifest(repo, advisory_paths, porcelain)
     zero_parts = _zero_diff_message(repo, prefix, paths)
     zero_tokens = _measure("".join(zero_parts.values()), enc)["chars_div_4"]
     fit: dict = {
@@ -413,10 +392,6 @@ def measure(repo: pathlib.Path) -> dict:
             "excluded_paths": sorted(excluded),
             "exclusion_note": note,
             "per_file": per_file,
-        },
-        "advisory_touched_manifest": {
-            **_measure(advisory_manifest, enc),
-            "paths": advisory_paths,  # both arms: the index list == the porcelain-resolved list
         },
         "governance_context": {
             "stable_prefix_total": _measure(prefix["stable_prefix"], enc),
@@ -461,9 +436,6 @@ def main(argv: list[str] | None = None) -> int:
     for rel, m in sorted(pack["per_file"].items(), key=lambda kv: -(kv[1]["o200k"] or kv[1]["chars"])):
         flag = "CUT " if m["excluded"] else "keep"
         print(f"  {flag} {rel:40} {m['chars']:>10,} chars {m['o200k']!s:>9} o200k")
-    m = report["advisory_touched_manifest"]
-    print(f"advisory touched manifest (bodies not inlined): {m['chars']:>10,} chars  "
-          f"{m['chars_div_4']:>9,} chars/4  {m['o200k']!s:>9} o200k")
     print(f"governance context (one checkout: {report['repo']}), per api row, per round:")
     for name, m in report["governance_context"]["parts"].items():
         print(f"  {name:42} {m['chars']:>10,} chars {m['o200k']!s:>9} o200k")

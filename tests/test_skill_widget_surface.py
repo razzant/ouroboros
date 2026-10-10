@@ -440,7 +440,7 @@ def test_save_enabled_best_effort_disclosure_contract_is_documented():
 
     architecture = architecture_text()
     assert "best-effort" in str(save_enabled.__doc__)
-    assert "append failure is logged and never blocks the enablement change" in architecture
+    assert "skill_enabled_changed" in architecture
 
 
 def test_api_skill_toggle_records_the_owner_ui_actor(tmp_path, monkeypatch):

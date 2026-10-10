@@ -76,7 +76,8 @@ def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_
     """At 780x680 the Agents route grid and a custom secret row stay inside the
     Settings column: the scroll body does not scroll sideways and no control (a route
     select, the secret row's Remove) is pushed past its right edge. At 1280x800 the
-    five route controls still share one row. Every measurement is taken before the
+    five route controls use Source + Model above Account / Effort / Access.
+    Every measurement is taken before the
     first assertion, so one failing run reports both grids."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
@@ -158,7 +159,9 @@ def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_
     assert secrets["worst"]["over"] <= 1, (
         f"a custom secret field escapes the scroll body:\n{where}")
 
-    # The narrow fit is not bought with the wide layout: given the room, the five
-    # route controls (including Access) still share one line.
+    # The narrow fit is not bought with the wide layout: given the room, the open card
+    # keeps Source beside a wide Model, then Account / Effort / Access on one line
+    # (docs/DESIGN.md §6) — three tracks, two rows, never a one-column stack.
     assert shape["children"] == 5, f"unexpected route controls at 1280px:\n{where}"
-    assert shape["rows"] == 1, f"the route controls no longer share one row at 1280px:\n{where}"
+    assert len(shape["template"].split()) == 3, f"the route grid lost its three tracks at 1280px:\n{where}"
+    assert shape["rows"] == 2, f"the route controls no longer form Source+Model / Account+Effort+Access at 1280px:\n{where}"

@@ -22,7 +22,8 @@
  *
  * Excluded from the overlay by construction: every chat transcript (model prose and the
  * host rows, which translate through `tr` instead), logs, code, inputs, owner-supplied
- * names, and menus portaled to `document.body` from excluded roots.
+ * names, menus portaled to `document.body` from excluded roots, and authored content
+ * portaled there (`data-i18n-authored`).
  */
 import { apiClient } from './api_client.js';
 
@@ -54,11 +55,13 @@ export const EXCLUDE_SELECTOR = [
 
 /** Subtrees the overlay never enters: every chat transcript (Main's `#chat-messages` and
  *  the Project instances, whose ids are namespaced but carry the mirror class), live cards,
- *  logs, file views, the owner's empty-Main copy, and the menus chat portals to <body>. */
+ *  logs, file views, the owner's empty-Main copy, the menus chat portals to <body>, and
+ *  `[data-i18n-authored]`: authored content shown outside a transcript (a delivered
+ *  document's text, name and size line), whose text and attributes are never chrome. */
 export const SKIP_ROOTS = [
     '#chat-messages', '.chat-messages', '.chat-live-card', '#log-entries', '.log-entries',
     '.files-preview-content', '.files-editor', '.chat-empty-welcome', '.chat-photo-menu',
-    '.task-control-menu', '#reconnect-overlay',
+    '.task-control-menu', '#reconnect-overlay', '[data-i18n-authored]',
 ].join(',');
 
 /** Roots where a BARE owner-supplied name lands (a project title, a path segment). Gated

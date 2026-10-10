@@ -48,7 +48,7 @@ class TestAdvisoryReviewStatusInContext:
             AdvisoryReviewState, AdvisoryRunRecord, save_state, format_status_section
         )
         state = AdvisoryReviewState()
-        state.add_run(AdvisoryRunRecord(
+        state.advisory_runs.append(AdvisoryRunRecord(
             snapshot_hash="abc123",
             commit_message="test commit",
             status="fresh",
@@ -96,15 +96,14 @@ class TestAdvisoryReviewStatusInContext:
         repo_key = make_repo_key(tmp_path / "repo")
         snapshot_hash = compute_snapshot_hash(tmp_path / "repo")
         state = AdvisoryReviewState()
-        state.add_run(AdvisoryRunRecord(
+        state.advisory_runs.append(AdvisoryRunRecord(
             snapshot_hash=snapshot_hash,
             commit_message="test commit",
-            status="bypassed",
+            status="stale",
             ts="2026-04-07T09:59:00+00:00",
             repo_key=repo_key,
             bypass_reason="manual audit override",
         ))
-        state.advisory_runs[-1].status = "stale"
         state.last_stale_from_edit_ts = "2026-04-07T10:00:00+00:00"
         state.last_stale_reason = "edit_text mutated tracked.py"
         state.last_stale_repo_key = repo_key
@@ -159,14 +158,17 @@ class TestAdvisoryReviewStatusInContext:
             task={"id": "task-new", "type": "task", "text": "continue"},
             review_context_builder=lambda: build_review_context(env),
         )
-        dynamic_text = messages[0]["content"][2]["text"]
+        dynamic_text = messages[0]["content"][-1]["text"]
 
         assert "## Review Continuity" in dynamic_text
-        assert "repo_commit_ready=no" in dynamic_text
+        # The debt is still narrated as the retry anchor; since decision 3A it no
+        # longer holds a commit, and no readiness axis is projected next to it.
         assert "retry_anchor=commit_readiness_debt" in dynamic_text
         assert "Commit-readiness debt" in dynamic_text
-        assert "bypass_reason=manual audit override" in dynamic_text
         assert "stale_marker=2026-04-07T10:00:00" in dynamic_text
+        for retired in ("Advisory readiness", "repo_commit_ready", "advisory_status=", "snapshot_hash=",
+                        "bypass_reason=", "no advisory run matches"):
+            assert retired not in dynamic_text, retired
         assert "### Open review continuations" in dynamic_text
         assert "critical_finding=tests_affected: Fix the failing test before commit" in dynamic_text
         assert "### Historical review ledger" in dynamic_text
@@ -196,7 +198,7 @@ class TestAdvisoryReviewStatusInContext:
         repo_a_key = make_repo_key(repo_a)
         repo_b_key = make_repo_key(repo_b)
         state = AdvisoryReviewState()
-        state.add_run(AdvisoryRunRecord(
+        state.advisory_runs.append(AdvisoryRunRecord(
             snapshot_hash=compute_snapshot_hash(repo_a),
             commit_message="repo a ready",
             status="fresh",
@@ -222,7 +224,9 @@ class TestAdvisoryReviewStatusInContext:
         save_state(tmp_path, state)
 
         dynamic_text = build_review_context(env)
-        assert "repo_commit_ready=yes" in dynamic_text
+        assert "## Review Continuity" in dynamic_text
+        assert f"- repo_key={repo_a_key}" in dynamic_text
+        assert "open_obligations=0" in dynamic_text
         assert "foreign_issue" not in dynamic_text
         assert "repo b blocked" not in dynamic_text
 

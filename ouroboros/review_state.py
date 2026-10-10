@@ -1,17 +1,21 @@
-"""Durable advisory/review ledger persisted in state/advisory_review.json."""
+"""Durable advisory/review state with full compact atomic encoding.
+Shallow mappings retain raw evidence and normalization. Conditional saves strictly
+load and prepare under lock; only equal payloads skip replacement. Acquisition
+failures retain platform causes without changing timeout or stale-lock policy.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
 import logging
 import os
 import pathlib
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.utils import (
-    atomic_write_json,
+    write_text_atomic,
     truncate_review_artifact as _truncate_review_artifact,
     truncate_review_artifact as _truncate_review_reason,
 )
@@ -194,6 +198,7 @@ def _validate_attempt_authority_shape(data: Dict[str, Any]) -> List[Any]:
 
 def _load_state_unlocked(
     drive_root: pathlib.Path, *, strict_attempt_authority: bool = False,
+    source_snapshot: Optional[List[tuple[str, Any]]] = None,
 ) -> AdvisoryReviewState:
     path = drive_root / _STATE_RELPATH
     if not path.exists():
@@ -205,6 +210,8 @@ def _load_state_unlocked(
         if strict_attempt_authority:
             raise ValueError("advisory review state root must be an object")
         return AdvisoryReviewState()
+    if source_snapshot is not None:
+        source_snapshot.append((raw, data.get("saved_at")))
 
     raw_attempts = (
         _validate_attempt_authority_shape(data)
@@ -328,46 +335,55 @@ def compute_obligation_semantic_redirects(
         return {}
 
 
-def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -> None:
+def _save_state_unlocked(
+    drive_root: pathlib.Path, state: AdvisoryReviewState, *, unchanged_from: tuple[str, Any] | None = None,
+) -> None:
     path = drive_root / _STATE_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
     _prepare_state_for_persistence(state)
     # Legacy/in-memory callers may construct pre-author-disposition
     # CommitAttemptRecord objects directly.  Normalize the additive field before
-    # dataclasses.asdict so persistence remains backward compatible.
+    # dataclass encoding so persistence remains backward compatible.
     for attempt in state.attempts:
         if not hasattr(attempt, "author_disposition"):
             setattr(attempt, "author_disposition", {})
     data: Dict[str, Any] = {
         "state_version": _STATE_SCHEMA_VERSION,
         "schema_version": _STATE_SCHEMA_VERSION,
-        "advisory_runs": [asdict(r) for r in state.advisory_runs],
-        "attempts": [asdict(r) for r in state.attempts],
-        "open_obligations": [asdict(o) for o in state.open_obligations],
+        "advisory_runs": [_dataclass_mapping(r) for r in state.advisory_runs],
+        "attempts": [_dataclass_mapping(r) for r in state.attempts],
+        "open_obligations": [_dataclass_mapping(o) for o in state.open_obligations],
         "next_obligation_seq": int(state.next_obligation_seq or 1),
-        "commit_readiness_debts": [asdict(item) for item in state.commit_readiness_debts],
+        "commit_readiness_debts": [_dataclass_mapping(item) for item in state.commit_readiness_debts],
         "next_commit_readiness_debt_seq": int(state.next_commit_readiness_debt_seq or 1),
         "last_stale_from_edit_ts": state.last_stale_from_edit_ts,
         "last_stale_reason": state.last_stale_reason,
         "last_stale_repo_key": state.last_stale_repo_key,
         "last_stale_task_id": state.last_stale_task_id,
-        "saved_at": _utc_now(),
+        "saved_at": unchanged_from[1] if unchanged_from is not None else _utc_now(),
     }
-    atomic_write_json(path, data)
+    content = json.dumps(
+        data, ensure_ascii=False, separators=(",", ":"), default=_dataclass_mapping,
+    )
+    if unchanged_from is not None:
+        # Original text cannot alias normalized rows; JSON keeps True != 1.
+        # Legacy formatting/key order may save once; only saved_at is ignored.
+        if content == unchanged_from[0]:
+            return
+        data["saved_at"] = _utc_now()
+        content = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=_dataclass_mapping)
+    write_text_atomic(path, content)
 
 
 def save_state(drive_root: pathlib.Path, state: AdvisoryReviewState) -> None:
-    """Persist review state atomically under the review-state lock.
-
-    Raises ``TimeoutError`` on lock failure (matching ``update_state``): a
-    silently skipped save left the advisory ledger reporting a stale "fresh"
-    pre-review, which the commit gate then trusted — an immune-system hole,
-    not a tolerable degradation.
+    """Persist atomically under the review-state lock; never skip a failed save.
+    Acquisition failures raise ReviewStateLockError, a TimeoutError.
     """
     lock_path = drive_root / _LOCK_RELPATH
-    lock_fd = acquire_review_state_lock(drive_root)
+    outcome: Dict[str, Any] = {}
+    lock_fd = acquire_review_state_lock(drive_root, outcome=outcome)
     if lock_fd is None:
-        raise TimeoutError(f"Could not acquire review state lock for {lock_path}")
+        raise ReviewStateLockError(lock_path, outcome)
     try:
         _save_state_unlocked(drive_root, state)
     finally:
@@ -378,14 +394,25 @@ def update_state(
     drive_root: pathlib.Path,
     mutator: Callable[[AdvisoryReviewState], Any],
 ) -> Any:
-    """Run read-modify-write under an explicit lock."""
-    lock_fd = acquire_review_state_lock(drive_root)
+    """Locked RMW; only explicit ReviewStateMutation no-ops can skip a save.
+
+    The complete prepared payload must still equal the strict load. Ordinary
+    mutators always save; None still returns the prepared state.
+    """
+    outcome: Dict[str, Any] = {}
+    lock_fd = acquire_review_state_lock(drive_root, outcome=outcome)
     if lock_fd is None:
-        raise TimeoutError(f"Could not acquire review state lock for {drive_root / _LOCK_RELPATH}")
+        raise ReviewStateLockError(drive_root / _LOCK_RELPATH, outcome)
     try:
-        state = _load_state_unlocked(drive_root, strict_attempt_authority=True)
+        source_snapshot: List[tuple[str, Any]] = []
+        state = _load_state_unlocked(drive_root, strict_attempt_authority=True, source_snapshot=source_snapshot)
         result = mutator(state)
-        _save_state_unlocked(drive_root, state)
+        if isinstance(result, ReviewStateMutation):
+            previous = source_snapshot[0] if not result.changed and source_snapshot else None
+            _save_state_unlocked(drive_root, state, unchanged_from=previous)
+            result = result.value
+        else:
+            _save_state_unlocked(drive_root, state)
         return state if result is None else result
     finally:
         release_review_state_lock(drive_root, lock_fd)
@@ -395,14 +422,17 @@ def acquire_review_state_lock(
     drive_root: pathlib.Path,
     timeout_sec: float = 4.0,
     stale_sec: float = 90.0,
+    *, outcome: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     lock_path = drive_root / _LOCK_RELPATH
-    return acquire_exclusive_file_lock(
-        lock_path,
-        timeout_sec=timeout_sec,
-        stale_sec=stale_sec,
-        metadata=f"pid={os.getpid()} ts={_utc_now()}\n",
+    started = time.monotonic()
+    lock_fd = acquire_exclusive_file_lock(
+        lock_path, timeout_sec=timeout_sec, stale_sec=stale_sec,
+        metadata=f"pid={os.getpid()} ts={_utc_now()}\n", outcome=outcome,
     )
+    if outcome is not None:
+        outcome.update(elapsed_sec=time.monotonic() - started, timeout_sec=timeout_sec)
+    return lock_fd
 
 
 def release_review_state_lock(drive_root: pathlib.Path, lock_fd: Optional[int]) -> None:
@@ -430,46 +460,6 @@ def discover_repo_root(path: pathlib.Path) -> pathlib.Path:
 
 def make_repo_key(repo_dir: pathlib.Path) -> str:
     return str(discover_repo_root(repo_dir))
-
-
-def advisory_commit_ready(
-    effectively_fresh: bool,
-    open_obligations: Any,
-    open_debts: Any,
-    enforcement: str | None = None,
-    *, matching_run: AdvisoryRunRecord | None = None,
-) -> bool:
-    """SSOT for every ``repo_commit_ready`` projection (H5, capinv-447).
-
-    Mirrors the real advisory gate: Cyber retains action authority; otherwise
-    fresh/bypassed/skipped coverage, or a
-    typed technical failure permitted under owner-selected advisory enforcement.
-    ``matching_run`` is supplied only after the caller matches current repo/hash;
-    permission never changes its failure status or makes it fresh. Obligations
-    and debt block only under blocking enforcement. Triad, scope, custody and
-    every other commit requirement remain independent.
-    """
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-
-    if not review_enforcement_blocks("blocking"):
-        return True
-    if not effectively_fresh:
-        from ouroboros.config import get_review_enforcement
-        from ouroboros.tools.commit_gate import review_failure_is_technical
-
-        # The caller has already matched the record to the current repo/hash.
-        # This is permission under advisory enforcement, never freshness/PASS.
-        if ((enforcement or get_review_enforcement()) != "advisory"
-                or getattr(matching_run, "status", "") not in {"error", "parse_failure"}
-                or not review_failure_is_technical(getattr(matching_run, "execution", {}) or {})):
-            return False
-    if open_obligations or open_debts:
-        if enforcement is None:
-            from ouroboros.config import get_review_enforcement
-
-            enforcement = get_review_enforcement()
-        return str(enforcement or "").strip().lower() != "blocking"
-    return True
 
 
 def compute_snapshot_hash(
@@ -528,11 +518,9 @@ def mark_advisory_stale_after_edit(drive_root: pathlib.Path) -> None:
         log.debug("mark_advisory_stale_after_edit failed (non-fatal): %s", e)
 
 
-def _mark_advisory_stale_locked(state: AdvisoryReviewState) -> None:
-    has_invalidatable = any(r.status in ("fresh", "bypassed", "skipped") for r in state.advisory_runs)
-    if not has_invalidatable:
-        return
-    state.mark_repo_stale(repo_key="", reason_ts=_utc_now(), reason="Worktree edit invalidated advisory freshness.", stale_repo_key="")
+def _mark_advisory_stale_locked(state: AdvisoryReviewState) -> ReviewStateMutation:
+    changed = state.mark_repo_stale(repo_key="", reason_ts=_utc_now(), reason="Worktree edit invalidated advisory freshness.", stale_repo_key="")
+    return ReviewStateMutation(None, changed=bool(changed))
 
 
 def invalidate_advisory_after_mutation(
@@ -555,10 +543,31 @@ def invalidate_advisory_after_mutation(
         reason = _build_invalidation_reason(source_tool, mutation_root, changed_paths, resolved_repo_keys)
         # Exactly one resolved checkout scopes the invalidation; none or several stale all.
         repo_key = resolved_repo_keys[0] if len(resolved_repo_keys) == 1 else ""
-        update_state(drive_root, lambda state: state.mark_repo_stale(
-            repo_key=repo_key, reason_ts=reason_ts, reason=reason,
-            stale_repo_key=repo_key, stale_task_id=mutating_task_id,
-        ))
+        def _invalidate_runs(state: AdvisoryReviewState) -> ReviewStateMutation:
+            changed = state.mark_repo_stale(
+                repo_key=repo_key, reason_ts=reason_ts, reason=reason,
+                stale_repo_key=repo_key, stale_task_id=mutating_task_id,
+            )
+            return ReviewStateMutation(changed, changed=bool(changed))
+
+        invalidated = update_state(drive_root, _invalidate_runs)
+        if isinstance(invalidated, int) and invalidated > 0:
+            return
+        # The author's preflight is a review-ledger record, not a legacy run: with no
+        # run left to invalidate, the newest look on the checkout is what the mutation
+        # makes stale (CHECKLISTS "Finish all edits first", D5-002).
+        from ouroboros.review_ledger import latest_preflight_record
+
+        look_ts = str((latest_preflight_record(drive_root, repo_key=repo_key) or {}).get("ts") or "")
+        if look_ts:
+            def _invalidate_look(state: AdvisoryReviewState) -> ReviewStateMutation:
+                changed = state.mark_look_stale(
+                    look_ts, reason_ts=reason_ts, reason=reason,
+                    stale_repo_key=repo_key, stale_task_id=mutating_task_id,
+                )
+                return ReviewStateMutation(changed, changed=changed)
+
+            update_state(drive_root, _invalidate_look)
     except Exception as e:
         log.debug("invalidate_advisory_after_mutation failed (non-fatal): %s", e)
 
@@ -622,7 +631,6 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
         if state.last_stale_reason:
             lines.append(f"   Reason: {state.last_stale_reason}")
         lines.append(f"   Invalidated by: {state.stale_marker_attribution_note()}")
-        lines.append("   Run preflight_review again before commit_reviewed.")
 
     if open_debts:
         lines.append(f"\n### Commit-readiness debt ({len(open_debts)})")
@@ -709,11 +717,6 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
     return "\n".join(lines)
 
 
-# What the refusal quote renders at most from an over-window row's
-# block_details (mirrors _quote_verdict_attempt's own limit=600), and a small
-# bound for the free-text commit message on compacted rows.
-
-
 def _prepare_state_for_persistence(state: AdvisoryReviewState) -> None:
     """Normalize ledgers and counters before persistence."""
     state._coalesce_open_obligations()
@@ -785,6 +788,8 @@ from ouroboros.review_state_records import (  # noqa: E402, F401 -- intentional 
     CommitAttemptRecord,
     CommitReadinessDebtItem,
     ObligationItem,
+    ReviewStateLockError,
+    ReviewStateMutation,
     _ATTEMPT_MERGE_INCOMING_FIRST,
     _ATTEMPT_MERGE_INCOMING_LISTS,
     _ATTEMPT_STR_DEFAULTS,
@@ -809,6 +814,7 @@ from ouroboros.review_state_records import (  # noqa: E402, F401 -- intentional 
     _attempt_order_key,
     _coerce_int,
     _commit_readiness_debts_view,
+    _dataclass_mapping,
     _dedupe_strings,
     _filter_lifecycle_records,
     _filter_repo_scope,

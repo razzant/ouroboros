@@ -19,6 +19,7 @@ from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.tools.control_runtime import _switch_model
+from tests._usage_store_testing import attempt_rows_in_start_order
 from tests.test_llm_claudexor import MODEL, ROUTE, ledger, result
 from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
@@ -141,11 +142,11 @@ def test_native_loop_fallback_then_symbolic_return_uses_real_role_account_and_fi
                          f"{attempt}_model_request.json").read_text(encoding="utf-8"))
                          for attempt in gateway.creates]
     assert [manifest["model_role"] for manifest in request_manifests] == [role, "fallback:0", role]
-    rows = ledger(ctx.drive_root)
-    assert [row["state"] for row in rows] == [
-        "reserved", "dispatched", "unresolved", "reserved", "dispatched", "settled",
-        "reserved", "dispatched", "settled"]
-    dispatched = [row for row in rows if row["state"] == "dispatched"]
+    # One current row per attempt, in start order; each keeps its dispatch context.
+    rows = attempt_rows_in_start_order(ctx.drive_root)
+    assert [(row["state"], row["revision"]) for row in rows] == [("unresolved", 4), ("settled", 3), ("settled", 3)]
+    assert rows[0]["physical_failure"]["stage"] == "raised_exception"
+    dispatched = rows
     assert len({row["attempt_id"] for row in dispatched}) == 3
     assert [row["physical_context"]["capacity_total_tokens"] for row in dispatched] == [900_000, 240_000, 900_000]
     assert [row["physical_context"]["route_fp"] for row in dispatched] == [
@@ -191,7 +192,7 @@ def test_accepted_get_404_recovers_same_native_operation_for_both_turns(live_wai
     assert message == result()["message"]
     assert observed_reads == ["op-0"] * 3
     assert len(gateway.uploads) == len(gateway.creates) == len(gateway.accepted_operations) == 1
-    assert [row["state"] for row in ledger(root)] == ["reserved", "dispatched", "settled"]
+    assert [(row["state"], row["revision"]) for row in ledger(root)] == [("settled", 3)]
     assert len(usage["ledger_attempt_ids"]) == 1 and not gateway.cancels
     events = [json.loads(line) for line in (root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert any(event.get("detail") == "same_model_operation_rejoined" for event in events)
@@ -241,7 +242,8 @@ def test_lost_create_reply_without_operation_id_cannot_authorize_new_generation(
     assert set(gateway.creates) == {original_key[0]}
     assert gateway.uploads[0][0]["account"] == {"mode": "pin", "profileId": "account-a"}
     rows = ledger(ctx.drive_root)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "unresolved"]
+    assert [(row["state"], row["revision"]) for row in rows] == [("unresolved", 4)]
+    assert rows[0]["physical_failure"]["stage"] == "raised_exception"
     assert len({row["attempt_id"] for row in rows}) == 1
     assert not gateway.acks
 
@@ -490,8 +492,8 @@ def test_primary_refusal_wait_paces_real_requests_without_catalog_recovery(
     assert not owner.waits  # no immediate resource_available row/new paid call loop
     if wire == "managed":
         assert all(payload["account"] == {"mode": "pin", "profileId": "account-a"} for payload, _ in gateway.uploads)
-    rows = ledger(ctx.drive_root)
-    assert sum(row["state"] == "dispatched" for row in rows) == attempts
+    rows = ledger(ctx.drive_root)  # one current row per attempt: every sent attempt
+    assert sum(row["state"] in {"dispatched", "settled", "unresolved"} for row in rows) == attempts
     assert not any(row["state"] == "released" for row in rows)
     assert any("primary provider temporarily refused" in note for note in notes)
     assert not any("$0" in note or "connection restored" in note.lower() for note in notes)

@@ -18,7 +18,7 @@ answers (a plan re-ask addressed by ``review_disposition`` items is one paid cyc
 * task acceptance — paid panel runs per task. The last paid result still
   permits an author response; only an explicit task-local improvement-pass
   limit bounds author work, independently of this paid ceiling;
-* commit gate — paid triad+scope cycles per ROOT task (the whole task tree
+* commit gate — paid review-wave cycles per ROOT task (the whole task tree
   shares one ceiling; a manual session is its own task; a follow-up task is a
   fresh root). The paid fact is recorded on the attempt row AT DISPATCH and
   the count is derived from the attempt ledger; the ceiling counts MONEY —

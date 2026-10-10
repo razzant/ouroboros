@@ -69,7 +69,7 @@ def test_history_never_fabricates_a_terminal_status_for_legacy_bg_rows(tmp_path)
 
 def test_live_card_disclosure_is_explicit_user_owned_state():
     src = _read("web/modules/chat.js")
-    assert "const explicitCardExpansion = new Map(initialScrollState?.disclosures?.cards || []);" in src
+    assert "const explicitCardExpansion = new Map();" in src  # a room opens at its newest, with no carried disclosure
     assert "explicitCardExpansion.set(record.groupId, nowExpanded);" in src
     assert "explicitCardExpansion.has(normalizedGroupId)" in src
     assert "explicitCardExpansion.get(normalizedGroupId)" in src

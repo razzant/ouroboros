@@ -1,10 +1,14 @@
 """The owner's Pause of a whole task tree: its durable fence and launch gate.
 
-Owner Batch4 (5A/7A): Pause fences NEW effects of every member of one root's
-tree, lets operations already handed to an executor finish (no cancellation — unlike the budget
-pause, which requests stops of delegated runs), then saves each member as the
-exact same-ID pause the budget rail already writes (``budget_pause``, reason
-``owner``). Nothing here is a scheduler, a ledger or a second pause store:
+Owner Batch4 (5A/7A), amended 2026-10-08 (#1562, full variant): Pause fences
+NEW effects of every member of one root's tree; operations already handed to an
+executor finish; the member's OWN delegated runs get a concrete stop
+(``external_runs`` policy ``stop_task_owned``) while reviewers that already
+launched finish their same check (``review_episode``, armed only at the
+attempt's actual handoff under this module's launch lock); each member parks
+warm (owner wait) or as the exact same-ID pause the budget rail already writes
+(``budget_pause``, reason ``owner``). Nothing here is a scheduler, a ledger or
+a second pause store:
 
 - The FENCE is one projection on the ROOT's task result (``owner_pause``),
   written by the supervisor's accept step through the task result's own
@@ -24,8 +28,9 @@ exact same-ID pause the budget rail already writes (``budget_pause``, reason
 
 The fence being closed is NOT the tree being Paused: the root's ``state``
 turns ``paused`` only when no member of the tree still runs and every parked
-member's sent work (delegated runs included) has settled; until then the
-truthful state is ``requested`` (the tree is pausing).
+member's own sent work (delegated runs included) has settled; reviewers the
+Pause lets finish never keep it pausing (the fence lists them as
+``finishing_reviews``). Until then the truthful state is ``requested``.
 """
 
 from __future__ import annotations
@@ -45,6 +50,9 @@ log = logging.getLogger(__name__)
 _TOOL_OPERATION = ContextVar("owner_pause_tool_operation", default=None)
 _HANDED_TOOL = ContextVar("owner_pause_handed_tool", default=None)
 _HANDED_MODEL = ContextVar("owner_pause_handed_model", default="")
+# One PHYSICAL review attempt's completion allowance (``review_episode``):
+# armed only by that attempt's first launch the fence admitted.
+_REVIEW_EPISODE = ContextVar("owner_pause_review_episode", default=None)
 
 RAIL_OWNER_PAUSE = "owner_pause"
 REASON_OWNER = "owner"
@@ -142,7 +150,7 @@ def _resume_outstanding(current: Dict[str, Any], fence: Dict[str, Any]) -> bool:
 
 
 def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
-                  late_work: bool = False) -> Tuple[Dict[str, Any], bool]:
+                  late_work: bool = False, requested_by: str = "owner") -> Tuple[Dict[str, Any], bool]:
     """Close the root's fence durably; ``(fence, created)``.
 
     Idempotent by ``request_id`` across Resume and later Pause generations;
@@ -193,7 +201,9 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
             return stamp_task_result_schema({**current, "owner_pause": fence})
         fence = {
             "fence_id": uuid.uuid4().hex, "request_id": str(request_id or ""),
-            "state": FENCE_REQUESTED, "requested_by": "owner", "requested_at": utc_now_iso(),
+            # ``owner`` for the owner's own press; a stop door names itself
+            # (``server_shutdown``, ``owner_restart``): the next start reads it.
+            "state": FENCE_REQUESTED, "requested_by": str(requested_by or "owner"), "requested_at": utc_now_iso(),
             "requested_at_ts": time.time(), "root_task_id": str(root_task_id),
             "generation": int(old.get("generation") or 0) + 1,
             # Still closed here only under outstanding Resume authority: name it.
@@ -220,7 +230,7 @@ def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state:
     from ouroboros.task_results import (
         require_writable_task_result_schema, stamp_task_result_schema, task_result_path,
     )
-    from ouroboros.utils import update_json_locked, utc_now_iso
+    from ouroboros.utils import utc_now_iso
 
     written: Dict[str, Any] = {}
 
@@ -236,10 +246,14 @@ def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state:
             return None
         fence = {**old, **fields, "state": state, f"{state}_at": utc_now_iso()}
         written.update(fence)
-        return stamp_task_result_schema({**current, "owner_pause": fence})
+        from ouroboros.pause_notices import notice_fields
+        notice = (notice_fields(current, root_drive, root_task_id, fence_id, "owner")
+                  if state == FENCE_PAUSED and old.get("state") != FENCE_PAUSED else {})
+        return stamp_task_result_schema({**current, **notice, "owner_pause": fence})
 
-    update_json_locked(task_result_path(pathlib.Path(root_drive), str(root_task_id)), update,
-                       strict_existing_dict=True)
+    from ouroboros.obligations import update_result
+    update_result(task_result_path(pathlib.Path(root_drive), str(root_task_id)), update,
+                  strict_existing_dict=True)
     return dict(written)
 
 
@@ -354,6 +368,12 @@ def member_fence(source: Any) -> Dict[str, Any]:
     root_drive, root_task_id, _task_id = _member_coordinates(source)
     if not root_drive or not root_task_id:
         return {}
+    marker = _REVIEW_EPISODE.get()
+    if (isinstance(marker, dict) and marker.get("root_task_id") == root_task_id
+            and marker.get("pause_before_launch")):
+        # The author detached before this slot's first handoff. Its preparation
+        # may still unwind after Resume, but that does not authorize a late send.
+        return {"state": FENCE_REQUESTED, "reason": "owner_pause_before_review_launch"}
     try:
         from ouroboros.model_wait import current_model_wait
         owner = current_model_wait()
@@ -367,7 +387,68 @@ def member_fence(source: Any) -> Dict[str, Any]:
         return {"state": "unknown", "reason": "owner_pause_authority_unreadable"}
     if fence_closed(fence) and _task_id in (fence.get("selected_members") or {}):
         return {}  # One consumed owner Resume, bound to this fence generation.
+    if fence_closed(fence) and _episode_dispatched_before(fence, root_task_id):
+        return {}  # The already-started review episode finishes its own check.
     return fence if fence_closed(fence) else {}
+
+
+@contextmanager
+def review_episode(root_task_id: str, operation: Any = None):
+    """Bind ONE physical review attempt's Pause exception to this context (owner 2026-10-08).
+
+    The owner's full variant: a reviewer that already started finishes the
+    SAME check while its author is paused — its further model rounds,
+    inspections and run starts — but nothing new starts. The marker yielded
+    here is armed only by this attempt's first ACTUAL physical handoff: the
+    exact model sender handed to its executor (``submit_model``), or an
+    operation submitted at its final start point (``operation_start``: the
+    delegated run's POST, a process start, a tool executor) — each still under
+    the root's launch lock that admitted it with the fence OPEN. Registering
+    an operation, a ``START_REQUESTED`` row (the POST still meets the fence), a
+    noted dispatch, a preparation, a capacity probe or a ledger transition is
+    no authority. A Pause accepted later has
+    a newer generation, so the armed attempt alone passes it; an attempt that
+    had not launched when the Pause landed is refused at $0 like any other
+    launch. The author's own context never carries a marker: its tools, sends,
+    commit, apply and publication stay refused.
+    """
+    marker = {"root_task_id": str(root_task_id or ""), "operation": operation, "armed_generation": None}
+    token = _REVIEW_EPISODE.set(marker)
+    try:
+        yield marker
+    finally:
+        _REVIEW_EPISODE.reset(token)
+
+
+def episode_armed(marker: Any) -> bool:
+    """Whether this physical review attempt launched before any later Pause."""
+    return isinstance(marker, dict) and marker.get("armed_generation") is not None
+
+
+def _episode_dispatched_before(fence: Dict[str, Any], root_task_id: str) -> bool:
+    marker = _REVIEW_EPISODE.get()
+    if (not episode_armed(marker) or marker.get("root_task_id") != str(root_task_id or "")
+            or getattr(marker.get("operation"), "closed", False)):
+        return False
+    try:
+        return int(marker["armed_generation"]) < int(fence.get("generation") or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def arm_review_episode(source: Any) -> None:
+    """Call INSIDE ``launch_admission`` right after the actual handoff succeeded:
+    the fence admitted it under the same launch lock, so this attempt's episode
+    began before any Pause that lock has not yet let in. Arms once."""
+    root_drive, root_task_id, _task_id = _member_coordinates(source)
+    marker = _REVIEW_EPISODE.get()
+    if not isinstance(marker, dict) or episode_armed(marker) or marker.get("root_task_id") != str(root_task_id or ""):
+        return
+    try:
+        marker["armed_generation"] = int(read_fence(root_drive, root_task_id).get("generation") or 0)
+    except Exception:
+        # Unarmed is the conservative fact: a later Pause then refuses this attempt.
+        log.warning("Review episode of %s was not armed", root_task_id, exc_info=True)
 
 
 def scope_fence() -> Dict[str, Any]:
@@ -475,7 +556,7 @@ def tree_member_results(root_drive: Any, root_task_id: str) -> Dict[str, Dict[st
     census. Rows without a top-level root still need their legacy metadata read.
     The memo selects files only; it never supplies live status or custody.
     """
-    from ouroboros.gateway.task_list_scan import raw_result_facts
+    from ouroboros.task_result_facts import raw_result_facts
     from ouroboros.task_results import load_task_result, task_results_dir
 
     facts, malformed = raw_result_facts(task_results_dir(root_drive, create=False))
@@ -616,6 +697,7 @@ def operation_start(source: Any = None):
                 raise OwnerPauseRefused("operation_already_returned")
             active[2]["not_started"] = False
         yield
+        arm_review_episode(source)  # the submission inside succeeded under this same lock
 
 
 def submit_tool(source: Any, name: str, submit: Any, function: Any, *args: Any):
@@ -623,11 +705,16 @@ def submit_tool(source: Any, name: str, submit: Any, function: Any, *args: Any):
     with launch_admission(source):
         context = copy_context()
         context.run(_HANDED_TOOL.set, {"invocation": (id(source), name), "claimed": False})
-        return submit(context.run, function, *args)
+        handed = submit(context.run, function, *args)
+        arm_review_episode(source)
+        return handed
 
 
-def run_operation(source: Any, function: Any, *args: Any, **kwargs: Any):
+def run_operation(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     """Submit an opaque synchronous call; join outside the short launch lock.
+
+    The forwarders' own parameters are positional-only: every keyword, such as
+    a tool argument named ``source`` or ``function``, belongs to the callee.
 
     The worker owns only this call. Its copied context does not authorize any
     nested process, model or delegated submission after a subsequent Pause.
@@ -641,7 +728,7 @@ def run_operation(source: Any, function: Any, *args: Any, **kwargs: Any):
         return future.result()
 
 
-def run_tool_handler(source: Any, function: Any, *args: Any, **kwargs: Any):
+def run_tool_handler(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     """The host joins the actual body, including its exception unwind.
 
     A caller's outer timeout cannot reach this finally while the body still runs.
@@ -662,7 +749,7 @@ def run_tool_handler(source: Any, function: Any, *args: Any, **kwargs: Any):
             active[2]["settled"] = True
 
 
-def submit_async_operation(source: Any, function: Any, *args: Any, **kwargs: Any):
+def submit_async_operation(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     """Submit to the current event loop without executing the body under a lock."""
     import asyncio
 
@@ -711,6 +798,8 @@ def submit_model(reservation: Any, submit: Any, function: Any):
             require_physical_dispatch_window()
             context = copy_context()
             context.run(_HANDED_MODEL.set, reservation.attempt_id)
-            return submit(context.run, function)
+            handed = submit(context.run, function)
+            arm_review_episode(reservation.scope)  # the exact sender now owns these bytes
+            return handed
     except OwnerPauseRefused as exc:
         raise _PhysicalSendNotStarted(str(exc)) from exc

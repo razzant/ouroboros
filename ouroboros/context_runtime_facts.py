@@ -187,7 +187,7 @@ def _project_room_fact(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def _runtime_budget_info(env: Any, task: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     """Start-of-task budget block: global projection + the STATIC per-task tree cap,
     written once at task start so the cached prefix stays byte-stable (DEVELOPMENT
-    cache_friendliness item 22); live tree spend rides only the cache-breaking
+    cache_friendliness item 28); live tree spend rides only the cache-breaking
     surfaces (checkpoint/pacing/milestones)."""
     try:
         from ouroboros.usage_accounting import usage_projection
@@ -196,10 +196,13 @@ def _runtime_budget_info(env: Any, task: Dict[str, Any], ctx: Any = None) -> Dic
         total_usd = resolve_total_budget_usd()
         budget_root = pathlib.Path(task.get("budget_drive_root") or env.drive_root)
         projection = usage_projection(budget_root, global_limit_usd=total_usd)
-        spent_usd = float(projection.get("accounted_usd") or 0.0)
+        # Known spend (confirmed + estimated) is what the limit decides on; open
+        # holds ride beside it, never added in (#1487).
+        spent_usd = float(projection.get("settled_usd") or 0.0)
         budget_info = {
             "status": "available" if total_usd is not None else "no_global_limit", "total_usd": total_usd,
-            "spent_usd": spent_usd, "remaining_usd": None if total_usd is None else total_usd - spent_usd,
+            "spent_usd": spent_usd, "spent_basis": "known_settled_incl_estimates",
+            "remaining_usd": None if total_usd is None else max(0.0, total_usd - spent_usd),
             "reserved_usd": float(projection.get("reserved_usd") or 0.0),
             "unresolved_upper_bound_usd": float(projection.get("unresolved_upper_bound_usd") or 0.0),
             "unknown_unmetered": int(projection.get("unknown_unmetered") or 0),
@@ -215,8 +218,13 @@ def _runtime_budget_info(env: Any, task: Dict[str, Any], ctx: Any = None) -> Dic
         budget_info["per_task_tree_cap_usd"] = root_cap
         budget_info["per_task_tree_cap_rule"] = (
             "Hard cap for THIS task's WHOLE tree (own model calls + all subagents), enforced "
-            "by the physical-attempt ledger: dispatches are refused once the tree's accounted "
-            "spend reaches it and the task is force-stopped. Budget checkpoints during the task report the live tree number."
+            "by the physical-attempt ledger: new dispatches are refused once the tree's KNOWN "
+            "spend (confirmed and estimated) reaches it. A task with an exact continuation then "
+            "pauses with its work saved; an actor without one (no continuation owner, task id or "
+            "durable root) ends with a typed budget_exhausted result and no paid recap. "
+            "Open reservations and unresolved charges are not counted as spending, and calls "
+            "in flight or charged late can take the tree past the cap. Budget checkpoints "
+            "during the task report the live tree number."
         )
     if ctx is not None:
         budget_info["in_task_cost_ceiling"] = _in_task_cost_ceiling(ctx, budget_info.get("remaining_usd"))

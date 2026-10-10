@@ -1,4 +1,5 @@
 import {
+    boundedText,
     escapeHtmlAttr as escapeHtml,
     grantReady,
     isRateLimitError,
@@ -11,6 +12,7 @@ import {
 } from './utils.js';
 import { formatRelativeAge, installedTime, renderToneBadge } from './ui_helpers.js';
 import { hubListingRowFor, hubSubmissionFacts, hubSyncVerdict } from './hub_sync.js';
+import { hasSemanticVerdict, lifecycleMeta } from './review_presentation.js';
 
 function hasSkillUiTab(skill, live = {}) {
     return (live?.ui_tabs || []).some((tab) => (tab?.skill || tab?.skill_name || tab?.extension || '') === skill.name);
@@ -190,15 +192,24 @@ function sourceChip(skill) {
     return `<span class="skills-source-chip skills-source-${tone}">${escapeHtml(label)}</span>`;
 }
 
-function reviewFindings(skill) {
-    const findings = Array.isArray(skill.review_findings) ? skill.review_findings : [];
-    if (!findings.length) return '';
+/** The findings list a card builds when its block is opened (skills.js), from the row already in memory. */
+export function renderReviewFindingsList(skill) {
+    const findings = Array.isArray(skill?.review_findings) ? skill.review_findings : [];
+    if (!findings.length) return '<div class="muted">Findings are not in the current list; Refresh to reload them.</div>';
     const rows = findings.map((f) => {
         const preflight = preflightFindingText(f);
         const reason = preflight || f.reason || f.message || JSON.stringify(f);
         return `<li><strong>${escapeHtml(f.verdict || f.severity || '')}</strong> ${escapeHtml(f.item || f.check || f.title || 'finding')}: ${escapeHtml(reason)}</li>`;
     }).join('');
-    return `<details class="skills-review-findings ui-rich-content"><summary class="muted">${findings.length} review finding${findings.length === 1 ? '' : 's'}</summary><ul>${rows}</ul></details>`;
+    return `<ul>${rows}</ul>`;
+}
+
+function reviewFindings(skill) {
+    const findings = Array.isArray(skill.review_findings) ? skill.review_findings : [];
+    if (!findings.length) return '';
+    // Collapsed on every render with its summary only: findings are most of
+    // the list payload, and a hidden list costs nothing until it is opened.
+    return `<details class="skills-review-findings ui-rich-content" data-skill-findings="${escapeHtml(skill.name)}"><summary class="muted">${findings.length} review finding${findings.length === 1 ? '' : 's'}</summary></details>`;
 }
 
 function reviewRunTitle(run) {
@@ -207,6 +218,35 @@ function reviewRunTitle(run) {
     const snapshot = String(run?.content_hash || '').slice(0, 12) || 'unknown';
     const revised = run?.snapshot_revised ? ' — revised snapshot' : '';
     return `Skill review round ${round} — snapshot ${snapshot} (attempt ${attempt})${revised}`;
+}
+
+/**
+ * A run's job lifecycle and its review verdict are separate recorded facts:
+ * the current job file keeps the lifecycle in `status` and the verdict in
+ * `review_status`; a history row keeps the lifecycle in `job_status` and the
+ * verdict — or the lifecycle word when no verdict arrived — in `status`. A
+ * failed, timed-out, cancelled or interrupted job is named beside the verdict
+ * with its recorded `terminal_reason`, so it never reads as an open `pending`;
+ * a successful job shows its verdict alone, as do legacy verdict-only rows.
+ */
+function reviewRunOutcome(run) {
+    const lifecycle = String(run.lifecycle_status || run.job_status || run.status || '');
+    const verdict = String(run.review_status || run.status || '');
+    const failure = lifecycleMeta(lifecycle);
+    if (!failure) return { label: verdict || lifecycle || 'unknown', reason: '' };
+    const reason = String(run.terminal_reason || '').trim();
+    return {
+        label: `${hasSemanticVerdict(verdict) ? verdict : 'review verdict unavailable'} · ${failure}`,
+        reason: reason.toLowerCase() === lifecycle.toLowerCase() ? '' : reason,
+    };
+}
+
+// Keep a long recorded reason readable by keyboard and touch as well as hover.
+function reviewReasonRow(reason) {
+    if (!reason) return '';
+    const shown = boundedText(reason, 400);
+    const complete = shown === reason ? '' : `<details class="skills-review-reason"><summary>Full reason</summary><div>${escapeHtml(reason)}</div></details>`;
+    return `<div class="skills-review-reason"${shown === reason ? '' : ` title="${escapeHtml(reason)}"`}>Reason: ${escapeHtml(shown)}</div>${complete}`;
 }
 
 function reviewHistory(skill) {
@@ -220,16 +260,16 @@ function reviewHistory(skill) {
         ? review.current : history[history.length - 1];
     if (!current) return '';
     const rows = history.map((run) => {
-        const status = run.review_status || run.status || run.job_status || 'unknown';
+        const outcome = reviewRunOutcome(run);
         const source = run.source ? ` · ${run.source}` : '';
-        return `<li>${escapeHtml(reviewRunTitle(run))} · ${escapeHtml(status)}${escapeHtml(source)}</li>`;
+        return `<li>${escapeHtml(reviewRunTitle(run))} · ${escapeHtml(outcome.label)}${escapeHtml(source)}${reviewReasonRow(outcome.reason)}</li>`;
     }).join('');
     const omitted = Number(review.history_omitted);
     const historyLabel = Number.isFinite(omitted) && omitted > 0
         ? `${history.length} of ${history.length + omitted}`
         : `${history.length}`;
-    const currentStatus = current.review_status || current.status || current.job_status || 'unknown';
-    return `<div class="skills-review-current"><strong>${escapeHtml(reviewRunTitle(current))}</strong> · ${escapeHtml(currentStatus)}</div>
+    const currentOutcome = reviewRunOutcome(current);
+    return `<div class="skills-review-current"><strong>${escapeHtml(reviewRunTitle(current))}</strong> · ${escapeHtml(currentOutcome.label)}</div>${reviewReasonRow(currentOutcome.reason)}
         ${rows ? `<details class="skills-review-history ui-rich-content"><summary class="muted">Skill Review history (${historyLabel})</summary><ol>${rows}</ol></details>` : ''}`;
 }
 
@@ -392,7 +432,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     </article>`;
 }
 
-/** Patch only state/queue-derived facts; forms, disclosure and open menus keep identity. */
+/** Patch only state/queue/action-derived facts; forms, disclosure and open menus keep identity. */
 export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing, live, options, menu = card) {
     const template = card.ownerDocument.createElement('template');
     template.innerHTML = renderInstalledSkillCard(skill, reviewing, repairing, live, options);
@@ -407,12 +447,19 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
             if (target.getAttribute(attr.name) !== attr.value) target.setAttribute(attr.name, attr.value);
         }
     }
-    for (const selector of ['.skills-status-chip', '.skills-primary-action', '[data-skill-errors]', '.skills-card-desc']) {
+    // An action in flight marks the card and shows its progress row without a list read.
+    for (const name of ['data-reviewing', 'data-repairing']) {
+        if (next.hasAttribute(name)) card.setAttribute(name, next.getAttribute(name));
+        else card.removeAttribute(name);
+    }
+    for (const selector of ['.skills-status-chip', '.skills-primary-action', '[data-skill-errors]', '.skills-card-desc', '.skills-review-progress']) {
         const target = card.querySelector(selector), source = next.querySelector(selector);
         if (!target && source) {
-            // Only virtual queue rows gain a new action or description here.
-            (selector === '.skills-primary-action' ? card.querySelector('.skills-card-toggle')
-                : card.querySelector('.skills-card-title')).appendChild(source);
+            // Only virtual queue rows gain a new action or description here; a
+            // progress row goes under the header, where a fresh render puts it.
+            if (selector === '.skills-primary-action') card.querySelector('.skills-card-toggle').appendChild(source);
+            else if (selector === '.skills-review-progress') (card.querySelector('.skills-lock-hint') || card.querySelector('.skills-card-head')).after(source);
+            else card.querySelector('.skills-card-title').appendChild(source);
         } else if (target && !source) target.remove();
         else if (target && source) {
             attributes(target, source, target.tagName === 'BUTTON' && target.dataset.skillAction === source.dataset.skillAction);

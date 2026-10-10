@@ -843,10 +843,10 @@ class TestGenerationExpectation:
         from ouroboros.tools.registry import BrowserState
 
         pinned, replacement = BrowserState(), BrowserState()
-        ctx = types.SimpleNamespace(browser_state=replacement,
-                                    _active_browser_generation=pinned)
-        with pytest.raises(RuntimeError) as err:
-            browser_mod._ensure_browser(ctx)
+        ctx = types.SimpleNamespace(browser_state=replacement)
+        with browser_mod.browser_call_scope(ctx, pinned):
+            with pytest.raises(RuntimeError) as err:
+                browser_mod._ensure_browser(ctx)
         assert "BROWSER_SESSION_RETIRED" in str(err.value)
         assert replacement.pw_instance is None  # untouched
 
@@ -862,7 +862,7 @@ class TestGenerationExpectation:
 
         def _replace_legitimately_and_fail(c, engine="chromium", device=""):
             _retired, fresh = browser_mod._detach_browser(c)
-            setattr(c, "_active_browser_generation", fresh)
+            browser_mod._browser_call.get().generation = fresh
             raise RuntimeError("recreate failed")
 
         monkeypatch.setattr(browser_mod, "_ensure_browser", _replace_legitimately_and_fail)

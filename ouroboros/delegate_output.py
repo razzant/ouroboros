@@ -1,8 +1,11 @@
 """Staged output for delegated runs, and the durable receipt that it was READ.
 
 Terminal payloads too large for the tool budget are written whole to the task drive.
-D7's acknowledgement records which authorized reader received every character of
-which content. ``tools.delegate`` re-exports this delivery surface.
+The inline payload then carries bounded ``*_preview`` heads of the bulk fields while
+the file carries the full bytes. D7's acknowledgement records which authorized reader
+received every character of which content: it binds the reader, the content sha256 and
+delivered coverage of every character to EOF. ``tools.delegate`` re-exports this
+delivery surface.
 """
 
 from __future__ import annotations

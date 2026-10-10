@@ -1,11 +1,20 @@
-"""Cumulative note changes belong to the correction's own delivered sources."""
+"""A knowledge nomination binds only the revision its own operation completely read.
+
+Reflection and scratchpad consolidation send one Light operation (``_call_consolidation_llm``
+with a ``KnowledgeReadContext``); the retired dialogue writer's draft/correction pair and the
+retired pressure maintenance were more such operations. The host credits a read only for the
+characters actually delivered, binds that revision to the nomination, and the common
+writer then requires it for every existing note: no read, a partial read or a stale read
+never lands a change, an existing note changes only by anchored edits, and a newer
+concurrent change is preserved.
+"""
 
 from copy import deepcopy
 import json
 
 import pytest
 
-from ouroboros import consolidator as c, knowledge as k, room_consolidation as rc
+from ouroboros import consolidator as c, knowledge as k
 from ouroboros.tools.registry import ToolContext
 from tests import test_consolidator_context_fit as fit_helpers
 
@@ -13,62 +22,48 @@ fit = fit_helpers.fit
 TOPIC = "shared-understanding"
 
 
-def _answer(content, edits=None):
-    change = edits if isinstance(edits, dict) else {"edits": edits}  # a dict names every authored field
-    return "I recorded the episode.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
-        {"topic": TOPIC, "scope": "global", **(change if edits is not None else {"content": content})}])
+class ReadingLLM:
+    """One scripted operation: an optional knowledge_read, then its nomination. Reads,
+    delivery, binding and publication are real."""
 
-
-class CorrectionLLM:
-    """Scripted responses; all read, delivery, binding and publication are real."""
-
-    def __init__(self, draft, corrected, *, correction_read="complete", draft_read=True,
-                 before_correction=None, after_correction_read=None, expected_note=None,
-                 correction_edits=None):
-        self.draft, self.corrected, self.correction_edits = draft, corrected, correction_edits
-        self.correction_read, self.draft_read = correction_read, draft_read
-        self.before_correction = before_correction
-        self.after_correction_read = after_correction_read
+    def __init__(self, change, *, read="complete", after_read=None, before_read=None, expected_note=None):
+        self.change, self.read, self.after_read, self.before_read = change, read, after_read, before_read
         self.expected_note = expected_note
         self.calls = []
 
     def chat(self, **kwargs):
         self.calls.append(deepcopy(kwargs))
         messages = kwargs["messages"]
-        correction = messages[0]["content"].startswith("Compare this draft memory")
-        if messages[-1]["role"] != "tool":
-            if correction and self.before_correction:
-                self.before_correction()
-            mode = self.correction_read if correction else ("complete" if self.draft_read else "none")
-            if mode != "none":
-                args = {"topic": TOPIC, "scope": "global"}
-                if mode == "partial":
-                    args.update(start_char=0, end_char=12)
-                return {"tool_calls": [{"id": "read-note", "type": "function", "function": {
-                    "name": "knowledge_read", "arguments": json.dumps(args)}}]}, {"cost": 0.01}
-        if correction and self.correction_read == "complete":
+        if messages[-1]["role"] != "tool" and self.read != "none":
+            if self.before_read:
+                self.before_read()
+            args = {"topic": TOPIC, "scope": "global"}
+            if self.read == "partial":
+                args.update(start_char=0, end_char=12)
+            return {"tool_calls": [{"id": "read-note", "type": "function", "function": {
+                "name": "knowledge_read", "arguments": json.dumps(args)}}]}, {"cost": 0.01}
+        if self.read == "complete" and self.expected_note is not None:
             # The scripted answer is permitted only after actual source delivery.
             assert self.expected_note in messages[-1]["content"]
-            if self.after_correction_read:
-                self.after_correction_read()
-        return {"content": _answer(self.corrected if correction else self.draft,
-                                   self.correction_edits if correction else None)}, {"cost": 0.01}
+        if self.after_read:
+            self.after_read()
+        return {"content": json.dumps({"knowledge_entries": [{"topic": TOPIC, "scope": "global", **self.change}]})}, {
+            "cost": 0.01}
 
 
 def _setup(tmp_path, initial):
-    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="room-memory")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="memory-operation")
     address = k.resolve_knowledge_address(tmp_path, TOPIC, "global")
     original = k.write_knowledge_note(address, initial).current if initial else None
     return ctx, address, original
 
 
-def _consolidate(ctx, llm, episode):
-    room = rc.RoomSource("1", "Main", [{"text": episode}], episode)
-    block, usage = rc.summarize_block(
-        c._light_call(llm, ctx, {}), [room], first_ts="2026-09-01T10:00:00Z",
-        last_ts="2026-09-01T10:01:00Z", knowledge_instruction=c.KNOWLEDGE_MAINTENANCE_PROMPT)
-    assert block and block["rooms"][0]["content"] == "I recorded the episode."
-    return usage["_knowledge_entries"]
+def _operate(ctx, llm, episode="An episode."):
+    knowledge = c.KnowledgeReadContext(ctx, "knowledge_probe")
+    content, usage = c._call_consolidation_llm(
+        llm, c.KNOWLEDGE_MAINTENANCE_PROMPT + "\n## Episode\n" + episode, "Knowledge probe", knowledge=knowledge)
+    assert content, usage
+    return knowledge.bind_entries(json.loads(content)["knowledge_entries"])
 
 
 CASES = [
@@ -83,39 +78,30 @@ CASES = [
 
 
 @pytest.mark.parametrize("initial,episode,updated", CASES)
-@pytest.mark.parametrize("correction_read", ["none", "partial", "complete"])
-def test_correction_cannot_borrow_draft_read_and_can_preserve_cumulative_knowledge(
-        tmp_path, fit, initial, episode, updated, correction_read):
+@pytest.mark.parametrize("read", ["none", "partial", "complete"])
+def test_only_the_operations_own_complete_read_binds_a_revision(tmp_path, fit, initial, episode, updated, read):
     ctx, address, original = _setup(tmp_path, initial)
-    # Without the full note the failure-shaped response reduces it to the episode.
-    content = updated if correction_read == "complete" else episode
-    edits = [{"old_text": initial, "new_text": updated, "basis": episode}] if correction_read == "complete" else None
-    llm = CorrectionLLM(updated, content, correction_read=correction_read,
-                        expected_note=original.text, correction_edits=edits)
-    entries = _consolidate(ctx, llm, episode)
+    change = ({"edits": [{"old_text": initial, "new_text": updated, "basis": episode}]} if read == "complete"
+              else {"content": episode})  # without the full note the failure shape reduces it to the episode
+    entries = _operate(ctx, ReadingLLM(change, read=read, expected_note=original.text), episode)
     outcome = c._write_knowledge_entries(address.shelf, entries, context=ctx)[0]
     current = k.read_knowledge_note(address)
-    if correction_read == "complete":
+    if read == "complete":
         assert entries[0]["expected_revision"] == original.revision
         assert outcome["ok"] and current.text.endswith(updated)
     else:
         assert entries[0]["expected_revision"] is None
         assert outcome["reason"] == "revision_required" and not outcome["ok"]
         assert current.raw == original.raw
-    # Both authoring stages receive the cumulative scope and range-read support.
-    for call in (llm.calls[0], next(call for call in llm.calls
-                                  if call["messages"][0]["content"].startswith("Compare this draft memory"))):
-        assert c.KNOWLEDGE_MAINTENANCE_PROMPT in call["messages"][0]["content"]
 
 
-def test_own_complete_read_can_revise_and_remove_obsolete_facts_without_draft_read(tmp_path, fit):
+def test_own_complete_read_can_revise_and_remove_obsolete_facts(tmp_path, fit):
     ctx, address, original = _setup(tmp_path, "Alex owns Alpha. Old office: Building 7. Contact by email.")
     updated = "Alex now owns Beta. Contact by email."
     basis = "The new episode moves ownership and asks to remove the obsolete office."
-    llm = CorrectionLLM(original.text, updated, draft_read=False, expected_note=original.text, correction_edits=[
+    entries = _operate(ctx, ReadingLLM({"edits": [
         {"old_text": "Alex owns Alpha.", "new_text": "Alex now owns Beta.", "basis": basis},
-        {"old_text": "Old office: Building 7. ", "new_text": "", "basis": basis}])
-    entries = _consolidate(ctx, llm, "Alex moved from Alpha to Beta and asked to remove the obsolete office address.")
+        {"old_text": "Old office: Building 7. ", "new_text": "", "basis": basis}]}, expected_note=original.text))
     assert entries[0]["expected_revision"] == original.revision
     assert c._write_knowledge_entries(address.shelf, entries, context=ctx)[0]["ok"]
     current = k.read_knowledge_note(address)
@@ -126,21 +112,20 @@ def test_own_complete_read_can_revise_and_remove_obsolete_facts_without_draft_re
 
 
 @pytest.mark.parametrize("change_after_read", [False, True])
-def test_correction_binds_its_current_revision_and_preserves_later_concurrent_changes(tmp_path, fit, change_after_read):
+def test_binding_holds_the_read_revision_and_preserves_later_concurrent_changes(tmp_path, fit, change_after_read):
     ctx, address, original = _setup(tmp_path, "Draft-era understanding.")
     latest = "A newer established observation."
 
     def replace():
         assert k.write_knowledge_note(address, latest, expected_revision=original.revision).ok
 
-    llm = CorrectionLLM(original.text, "A newer established observation with the new episode.",
-                        before_correction=None if change_after_read else replace,
-                        after_correction_read=replace if change_after_read else None,
-                        expected_note=original.text if change_after_read else latest,
-                        correction_edits=[{"old_text": "Draft-era understanding." if change_after_read else latest,
-                                           "new_text": "A newer established observation with the new episode.",
-                                           "basis": "The new episode establishes this change."}])
-    entries = _consolidate(ctx, llm, "A new episode.")
+    llm = ReadingLLM({"edits": [{"old_text": "Draft-era understanding." if change_after_read else latest,
+                                 "new_text": "A newer established observation with the new episode.",
+                                 "basis": "The new episode establishes this change."}]},
+                     before_read=None if change_after_read else replace,
+                     after_read=replace if change_after_read else None,
+                     expected_note=original.text if change_after_read else latest)
+    entries = _operate(ctx, llm)
     current = k.read_knowledge_note(address)
     assert entries[0]["expected_revision"] == (original.revision if change_after_read else current.revision)
     result = c._write_knowledge_entries(address.shelf, entries, context=ctx)[0]
@@ -152,47 +137,24 @@ def test_correction_binds_its_current_revision_and_preserves_later_concurrent_ch
         assert k.read_knowledge_note(address).text.endswith("with the new episode.")
 
 
-def test_correction_can_create_a_new_nominated_note_without_reading(tmp_path, fit):
+def test_an_unread_operation_can_create_a_new_note(tmp_path, fit):
     ctx, address, _ = _setup(tmp_path, None)
-    llm = CorrectionLLM("New observation.", "Corrected new observation.",
-                        draft_read=False, correction_read="none")
-    entries = _consolidate(ctx, llm, "A new observation.")
+    entries = _operate(ctx, ReadingLLM({"content": "New observation."}, read="none"))
     assert entries[0]["expected_revision"] is None
     assert c._write_knowledge_entries(address.shelf, entries, context=ctx)[0]["ok"]
-    assert k.read_knowledge_note(address).text.endswith("Corrected new observation.")
+    assert k.read_knowledge_note(address).text.endswith("New observation.")
 
 
-def test_unread_correction_failure_remains_visible_after_dialogue_publication(tmp_path, fit):
-    ctx, address, original = _setup(tmp_path, "An established body of knowledge.")
-    chat, blocks, meta = fit_helpers._paths(tmp_path)
-    fit_helpers._write_chat(chat, text_size=0)
-    llm = CorrectionLLM(original.text, "Only this episode.", correction_read="none")
-    c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx)
-    stored = json.loads(blocks.read_text(encoding="utf-8"))[0]
-    assert stored["knowledge_writes"][0]["reason"] == "revision_required"
-    state = json.loads(meta.read_text(encoding="utf-8"))
-    assert state["last_consolidated_offset"] == 100
-    assert len(state["pending_knowledge_nominations"]) == 1
-    assert state["pending_knowledge_nominations"][0]["reason"] == "revision_required"
-    assert k.read_knowledge_note(address).raw == original.raw
-
-
-def test_legacy_full_replacement_after_complete_reads_stays_visible_debt(tmp_path, fit):
+def test_a_whole_replacement_after_a_complete_read_is_refused(tmp_path, fit):
     initial = ("---\ntype: person\nsummary: Established biography and delivery.\n---\n"
                "# Alex\n\nLong-standing role: maintains Alpha.\nReport R1 was delivered at 10:05.\n"
                "Private contact preference: email.\n")
     ctx, address, original = _setup(tmp_path, initial)
-    chat, blocks, meta = fit_helpers._paths(tmp_path)
-    fit_helpers._write_chat(chat, text_size=0)
-    # The historical failure shape: both actors read the whole note, then
-    # nominate a short replacement that omits its older facts.
-    llm = CorrectionLLM("Alex wants shorter updates.", "Alex wants shorter updates.", expected_note=original.text)
-    c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx)
-    stored = json.loads(blocks.read_text(encoding="utf-8"))[0]
-    assert stored["knowledge_writes"][0]["reason"] == "existing_note_requires_edits"
-    state = json.loads(meta.read_text(encoding="utf-8"))
-    assert state["last_consolidated_offset"] == 100
-    assert [row["reason"] for row in state["pending_knowledge_nominations"]] == ["existing_note_requires_edits"]
+    # The historical failure shape: read the whole note, then nominate a short replacement.
+    entries = _operate(ctx, ReadingLLM({"content": "Alex wants shorter updates."}, expected_note=original.text))
+    assert entries[0]["expected_revision"] == original.revision
+    outcome = c._write_knowledge_entries(address.shelf, entries, context=ctx)[0]
+    assert not outcome["ok"] and outcome["reason"] == "existing_note_requires_edits"
     assert k.read_knowledge_note(address).raw == original.raw
 
 
@@ -200,12 +162,10 @@ def test_narrow_source_grounded_edit_moves_only_its_span(tmp_path, fit):
     initial = ("---\ntype: person\nsummary: Established biography and delivery.\n---\n"
                "# Alex\n\nLong-standing role: maintains Alpha.\nPrivate contact preference: email.\n")
     ctx, address, original = _setup(tmp_path, initial)
-    llm = CorrectionLLM("Alex wants shorter updates.", "Alex wants shorter updates.",
-                        expected_note=original.text, correction_edits=[{
-                            "old_text": "Private contact preference: email.",
-                            "new_text": "Private contact preference: email. Today Alex asked for shorter updates.",
-                            "basis": "Alex's new request in this episode."}])
-    entries = _consolidate(ctx, llm, "Alex asked for a shorter update today.")
+    entries = _operate(ctx, ReadingLLM({"edits": [{
+        "old_text": "Private contact preference: email.",
+        "new_text": "Private contact preference: email. Today Alex asked for shorter updates.",
+        "basis": "Alex's new request in this episode."}]}, expected_note=original.text))
     assert entries[0]["expected_revision"] == original.revision
     assert c._write_knowledge_entries(address.shelf, entries, context=ctx)[0]["ok"]
     assert k.read_knowledge_note(address).raw == original.raw.replace(
@@ -220,9 +180,8 @@ def test_explicit_removal_and_summary_revision_keep_unrelated_content_while_bad_
     episode = "Alex asked to remove the old address and moved ownership to Beta."
     edits = [{"old_text": "Alpha owns ingestion.", "new_text": "Beta owns ingestion.", "basis": episode},
              {"old_text": "Old address: Building 7.\n", "new_text": "", "basis": episode}]
-    llm = CorrectionLLM(initial, "Updated note.", expected_note=original.text,
-                        correction_edits={"edits": edits, "summary": "Beta owns ingestion."})
-    entries = _consolidate(ctx, llm, episode)
+    entries = _operate(ctx, ReadingLLM({"edits": edits, "summary": "Beta owns ingestion."},
+                                       expected_note=original.text), episode)
     assert c._write_knowledge_entries(address.shelf, entries, context=ctx)[0]["ok"]
     assert k.read_knowledge_note(address).raw == original.raw.replace(
         b"Alpha owns ingestion.", b"Beta owns ingestion.").replace(b"Old address: Building 7.\n", b"").replace(
@@ -254,9 +213,8 @@ def test_summary_only_change_after_its_own_complete_read_merges_and_keeps_unknow
     unread = c.KnowledgeReadContext(ctx).bind_entries([{"topic": TOPIC, "scope": "global", "edits": [],
                                                         "summary": "Unread context."}])
     assert c._write_knowledge_entries(address.shelf, unread, context=ctx)[0]["reason"] == "revision_required"
-    llm = CorrectionLLM(initial, "unused", expected_note=original.text,
-                        correction_edits={"edits": [], "summary": "New context."})
-    entries = _consolidate(ctx, llm, "The context of this history changed.")
+    entries = _operate(ctx, ReadingLLM({"edits": [], "summary": "New context."}, expected_note=original.text),
+                       "The context of this history changed.")
     assert entries[0]["expected_revision"] == original.revision
     assert c._write_knowledge_entries(address.shelf, entries, context=ctx)[0]["ok"]
     current = k.read_knowledge_note(address)

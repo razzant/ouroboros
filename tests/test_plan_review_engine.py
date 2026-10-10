@@ -932,8 +932,10 @@ def test_packet_uses_the_REAL_checklist_section_and_its_findings_only_contract()
 
 
 def test_diff_size_cap_is_route_aware():
-    """Owner decision 2026-08-16: the advisory hard cap binds only a reviewer that receives the
-    diff as PROMPT TEXT; an all-agent_session panel retrieves the diff itself."""
+    """Owner decision 2026-08-16: the hard cap binds only a reviewer that receives the diff as
+    PROMPT TEXT; a panel of retrieving seats (sessions, native api rows) reads the diff itself.
+    The script refuses where the gate's admission refuses — a packet seat over the cap — and
+    never on its own for the operator lane (I3-D1)."""
     import importlib.util
     import pathlib as _pathlib
     import sys
@@ -946,20 +948,20 @@ def test_diff_size_cap_is_route_aware():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    session_panel = {
-        "triad_slots": [{"route": {"kind": "agent_session", "target_id": "cursor=sol"}}],
-        "scope_slots": [{"route": {"kind": "agent_session", "target_id": "codex=sol"}}],
-    }
-    api_panel = {
-        "triad_slots": [{"route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-sol"}}],
-        "scope_slots": [{"route": {"kind": "agent_session", "target_id": "codex=sol"}}],
-    }
+    retrieving_panel = {"pool_slots": [
+        {"route": {"kind": "agent_session", "target_id": "cursor=sol"}},
+        {"route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-sol"}, "delivery": "native"},
+    ]}
+    packet_panel = {"pool_slots": [
+        {"route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-sol"}, "delivery": "packet"},
+        {"route": {"kind": "agent_session", "target_id": "codex=sol"}},
+    ]}
     contributor = SimpleNamespace(contributor=True)
     operator = SimpleNamespace(contributor=False)
-    assert module._diff_size_refusal(contributor, session_panel, 900_000, 500_000) is False
-    assert module._diff_size_refusal(contributor, api_panel, 900_000, 500_000) is True
-    assert module._diff_size_refusal(operator, session_panel, 900_000, 500_000) is True
-    assert module._diff_size_refusal(contributor, api_panel, 400_000, 500_000) is False
+    for lane in (contributor, operator):
+        assert module._diff_size_refusal(lane, retrieving_panel, 900_000, 500_000) is False
+        assert module._diff_size_refusal(lane, packet_panel, 900_000, 500_000) is True
+        assert module._diff_size_refusal(lane, packet_panel, 400_000, 500_000) is False
 
 def test_disposition_cannot_close_a_superseded_wave(harness, monkeypatch):
     """I-01: a $0 disposition of an older wave must never release the current hold."""

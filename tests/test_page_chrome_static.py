@@ -30,7 +30,11 @@ def test_shared_page_header_helper_has_no_inline_styles():
 
     assert "export function renderPageHeader" in source
     assert "export function renderTabStrip" in source
-    assert "style=" not in source
+    # The one inline value is the segmented generator's own count of the choices it
+    # rendered, a narrowly named custom property the shared grid reads (DEVELOPMENT
+    # "Design System"); no visual property is ever written inline.
+    assert re.findall(r'style="([^"]*)"', source) == ["--segment-count: ${options.length}"]
+    assert ".style." not in source
     assert "app-page-header" in source
     assert "app-tab-strip" in source
 
@@ -65,18 +69,14 @@ def test_settings_secrets_are_generic_and_integrations_tab_removed():
     assert "Source Control" in ui
 
 
-def test_settings_scope_review_effort_round_trips():
-    """6.3 moved the Review/Scope efforts off the Behavior tab onto the Models
-    page as PER-SLOT dropdowns (red on cxi/p6-ui-v2's own head — the branch
-    moved the carrier and left this pin behind): the owner-facing carrier is now
-    reviewer_slots.js, where an EMPTY slot effort inherits the surface default
-    (OUROBOROS_EFFORT_SCOPE_REVIEW backend-side) and the advisory row defaults
-    low (D14). The mode-guard filter in settings.js is unchanged."""
-    slots_ui = _read("web/modules/reviewer_slots.js")
+def test_settings_review_effort_round_trips():
+    """A reviewer's effort is its catalog row's own effort, edited beside the
+    route: a row marked Reviewer with neither a row effort nor a compound session
+    effort says in its effort select's Default option that it reviews at the pool
+    default. The mode-guard filter in settings.js is unchanged."""
+    editor = _read("web/modules/subagents_settings.js")
     settings = _read("web/modules/settings.js")
-    assert "scope review effort" in slots_ui   # per-slot surface-default wording
-    assert "review effort" in slots_ui
-    assert "effort: 'low'" in slots_ui          # the advisory default (D14)
+    assert "`Default (reviews at ${REVIEW_POOL_DEFAULT_EFFORT})`" in editor
     assert "key !== 'OUROBOROS_RUNTIME_MODE' && key !== 'OUROBOROS_CONTEXT_MODE'" in settings
 
 
@@ -222,19 +222,22 @@ def test_server_navigation_and_chat_static_contracts():
     assert "data?.evolution_state?.detail" in chat_source
     assert "data?.bg_consciousness_state?.detail" in chat_source
     assert re.search(r'<input[^>]+id="chat-file-input"[^>]+multiple', chat_source)
-    assert "uploaded.slice(0, ATTACHMENT_PREVIEW_COUNT)" in chat_source
-    assert "for (const stagedItem of staged)" in chat_source
-    assert "pendingAttachments" in chat_source
-    assert "attachmentsUploading" in chat_source
-    assert "setAttachmentUploadState" in chat_source
-    assert "attachBtn.classList.toggle('uploading', uploading)" in chat_source
-    assert "input.disabled = uploading;" in chat_source
+    # The composer's staged files live in chat_attachments.js (DESIGN "Chat attachments");
+    # chat.js uploads through it on Send and names the uploads for the model.
+    attachments_source = _read("web/modules/chat_attachments.js")
+    assert "createComposerAttachments({" in chat_source
+    assert "composerText(text, uploadedAttachments.map(" in chat_source
+    assert "attachmentTail(names);" in attachments_source  # every message but the exact /restart command
+    assert "list.slice(0, ATTACHMENT_PREVIEW_COUNT)" in attachments_source
+    assert "for (const item of [...pending])" in attachments_source
+    assert "attachBtn.classList.toggle('uploading', flag)" in attachments_source
+    assert "input.readOnly = flag;" in attachments_source
     assert "cleanupUploadedAttachments" in chat_source
-    assert "await cleanupUploadedAttachments(uploaded);" in chat_source
+    assert "await cleanupUploadedAttachments(e.uploaded || []);" in chat_source
     assert "await cleanupUploadedAttachments(uploadedAttachments);" in chat_source
     assert "ws.send({" in chat_source and "{ queue: false }" in chat_source
     assert "result?.status !== 'sent'" in chat_source
-    assert "data-attachment-remove" in chat_source
+    assert "data-attachment-remove" in attachments_source
     media_source = _read("web/modules/chat_media.js")
     assert "export async function cleanupUploadedAttachments" in media_source
     assert "method: 'DELETE'" in media_source

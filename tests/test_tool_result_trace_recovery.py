@@ -140,7 +140,10 @@ def test_publication_failure_keeps_full_inline_but_refuses_after_recap(tmp_path,
     assert projected["result_source_ref"] == {}
     assert "__unresolved_partial_artifacts__" not in full_packet
     assert _dispatch(ctx, full_packet)[0] == 1
-    packet = _evidence(ctx, row, budget=4_000)
+    # Include the historical-input availability exhibit added to the packet's
+    # fixed core, while keeping this budget far below the 20 KB tool result.
+    # The assertions below still require a recap and a source-unavailable refusal.
+    packet = _evidence(ctx, row, budget=6_000)
     assert "__immutable_core_overflow__" not in packet
     assert packet["tool_trajectory_source_ref"]
     assert packet["tool_trajectory"][0]["result_source_ref"] == {}
@@ -324,7 +327,9 @@ def test_whole_row_shedding_retains_effective_source_or_unavailability(
     calls = [row] + [{"tool": "later_tool", "result": "later evidence"} for _ in range(20)]
     packet = build_task_acceptance_evidence(
         ctx, llm_trace={"tool_calls": calls}, drive_root=ctx.drive_root,
-        task_id=ctx.task_id, budget_chars=10_000,
+        # Leave room for the historical-input availability exhibit in the
+        # fixed core; the first 20 KB row must still be shed (asserted below).
+        task_id=ctx.task_id, budget_chars=12_000,
     )
     assert "__immutable_core_overflow__" not in packet
     assert len(packet["tool_trajectory"]) == 20

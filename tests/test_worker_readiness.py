@@ -4,8 +4,8 @@ What is pinned, on fake process objects (no child is ever forked here):
 
 * spawn installs every slot ``reaping`` and hands the whole set to the ONE readiness seam;
 * respawn installs its fresh slot the same way, through the same seam, carrying its attempt count;
-* the seam opens a slot only on the child's OWN ``worker_ready`` row (matched by pid), verifying the
-  booted SHA in the same step; a foreign pid's row does not open it;
+* the seam opens a slot only on the child's OWN ``worker_ready`` row (matched by pid); its checkout
+  SHA comparison is diagnostic and never changes admission; a foreign pid's row does not open it;
 * no ``worker_ready`` inside the window -> the child is torn down (process tree), the slot is
   replaced through ``respawn_worker`` and a typed ``worker_ready_timeout`` row names slot, pid,
   wait and reason; its own entry progress permits one extension to the birth-relative ceiling;
@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -211,6 +212,7 @@ def test_the_slot_opens_only_on_its_own_worker_ready_row_and_verifies_the_sha(po
     verify = _rows(seam.supervisor, "worker_sha_verify")
     assert len(verify) == 1
     assert verify[0]["ok"] is True and verify[0]["worker_id"] == 0 and verify[0]["worker_pid"] == 5001
+    assert verify[0]["relation"] == "equal"
     assert verify[0]["slot_opened"] is True and verify[0]["attempt"] == 1
     assert _rows(seam.supervisor, "worker_ready_timeout") == []
 
@@ -326,16 +328,126 @@ def test_a_late_watcher_cannot_grant_a_fresh_window_after_the_ceiling(pool, seam
     assert _rows(seam.supervisor, "worker_ready_timeout")[0]["waited_sec"] == 4.0
 
 
-def test_sha_mismatch_on_the_ready_row_opens_the_slot_and_tells_the_owner(pool, seam, monkeypatch):
-    monkeypatch.setattr(pool.workers, "load_state", lambda: {"current_sha": "abc123", "owner_chat_id": 7})
+@pytest.fixture
+def sha_history(pool):
+    """A real graph: root -> baseline -> descendant, plus root -> other branch."""
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=pool.root, check=True, capture_output=True, text=True,
+            timeout=10,
+        ).stdout.strip()
+
+    def commit(name):
+        git("-c", "user.name=Worker SHA Test", "-c", "user.email=worker@example.test",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", name)
+        return git("rev-parse", "HEAD")
+
+    git("init", "-b", "main")
+    root = commit("root")
+    baseline = commit("baseline")
+    descendant = commit("descendant")
+    git("checkout", "-b", "other", root)
+    other = commit("other")
+    return {"root": root, "baseline": baseline, "descendant": descendant, "other": other,
+            "missing": "f" * 40, "absent": ""}
+
+
+@pytest.mark.parametrize("expected,observed,relation,warn", [
+    ("baseline", "baseline", "equal", False),
+    ("baseline", "descendant", "descendant", False),
+    ("baseline", "root", "non_descendant", True),
+    ("baseline", "other", "non_descendant", True),
+    ("baseline", "missing", "unavailable", True),
+    ("missing", "descendant", "unavailable", True),
+    ("baseline", "absent", "unavailable", True),
+    ("absent", "descendant", "not_applicable", False),
+    ("absent", "absent", "not_applicable", False),
+])
+def test_checkout_relation_is_a_fact_not_a_worker_admission_gate(
+    pool, seam, monkeypatch, sha_history, expected, observed, relation, warn,
+):
+    expected_sha, observed_sha = sha_history[expected], sha_history[observed]
+    state = {"current_sha": expected_sha, "owner_chat_id": 7}
+    monkeypatch.setattr(pool.workers, "load_state", lambda: dict(state))
+    from supervisor import state as supervisor_state
+    update_state = MagicMock()
+    monkeypatch.setattr(supervisor_state, "update_state", update_state)
     slot = _booting_slot(pool, 0, 5001)
-    append_jsonl(seam.events, {"type": "worker_ready", "worker_id": 0, "pid": 5001, "git_sha": "other"})
+    append_jsonl(seam.events, {"type": "worker_ready", "worker_id": 0, "pid": 5001,
+                              "git_sha": observed_sha})
+    real_run, queries = subprocess.run, []
+
+    def observe_query(command, **kwargs):
+        assert slot.reaping is False, "ready capacity opens before diagnostic I/O"
+        assert command == (["git", "rev-parse", "--is-shallow-repository"] if queries else
+                           ["git", "merge-base", "--is-ancestor", expected_sha, observed_sha])
+        assert kwargs["cwd"] == pool.root
+        assert kwargs["timeout"] == pool.lifecycle._WORKER_SHA_LOOKUP_TIMEOUT_SEC
+        assert kwargs["env"]["GIT_NO_LAZY_FETCH"] == "1"
+        queries.append(command)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(pool.lifecycle.subprocess, "run", observe_query)
 
     seam.run({0: slot}, seam.cursor, 1)
 
     assert slot.reaping is False
-    assert _rows(seam.supervisor, "worker_sha_verify")[0]["ok"] is False
-    assert seam.sent and "SHA mismatch" in seam.sent[0][1]
+    assert seam.killed == [] and seam.respawned == []
+    row, = _rows(seam.supervisor, "worker_sha_verify")
+    assert row["relation"] == relation
+    assert row["expected_sha"] == expected_sha and row["observed_sha"] == observed_sha
+    assert row["ok"] is ((bool(observed_sha) and expected_sha == observed_sha) if expected_sha else None)
+    assert row["slot_opened"] is True
+    assert len(queries) == (2 if relation == "non_descendant" else
+                           int(bool(expected_sha and observed_sha and expected_sha != observed_sha)))
+    assert bool(seam.sent) is warn
+    if warn:
+        assert len(seam.sent) == 1 and seam.sent[0][0] == 7
+        assert expected_sha[:8] in seam.sent[0][1] and (observed_sha or "unknown")[:8] in seam.sent[0][1]
+        assert ("not a descendant" if relation == "non_descendant" else "could not be compared") in seam.sent[0][1]
+    assert bool(_rows(seam.supervisor, "worker_sha_verify_skipped")) is (not expected_sha)
+    update_state.assert_not_called()
+
+
+@pytest.mark.parametrize("boundary,relation", [("descendant", "unavailable"), ("root", "descendant")])
+def test_shallow_history_keeps_proven_ancestry_but_cannot_prove_non_ancestry(pool, seam, monkeypatch, sha_history, boundary, relation):
+    baseline, descendant = sha_history["baseline"], sha_history["descendant"]
+    # A real Git shallow boundary hides descendant's parent traversal without
+    # deleting baseline's object. The same graph above proves ancestry when full.
+    (pool.root / ".git" / "shallow").write_text(sha_history[boundary] + "\n", encoding="utf-8")
+    monkeypatch.setattr(pool.workers, "load_state", lambda: {"current_sha": baseline, "owner_chat_id": 7})
+    slot = _booting_slot(pool, 0, 5001)
+    append_jsonl(seam.events, {"type": "worker_ready", "pid": 5001, "git_sha": descendant})
+
+    seam.run({0: slot}, seam.cursor, 1)
+
+    assert slot.reaping is False and seam.killed == [] and seam.respawned == []
+    row, = _rows(seam.supervisor, "worker_sha_verify")
+    assert row["ok"] is False and row["relation"] == relation
+    if relation == "unavailable":
+        assert row["relation_error"] == "shallow_history"
+        assert len(seam.sent) == 1 and "could not be compared" in seam.sent[0][1]
+    else:
+        assert seam.sent == []
+
+
+@pytest.mark.parametrize("error", [OSError("git unavailable"), subprocess.TimeoutExpired("git", 2)])
+def test_checkout_lookup_failure_is_unavailable_without_holding_ready_capacity(pool, seam, monkeypatch, error):
+    monkeypatch.setattr(pool.workers, "load_state", lambda: {"current_sha": "a" * 40, "owner_chat_id": 7})
+    slot = _booting_slot(pool, 0, 5001)
+    append_jsonl(seam.events, {"type": "worker_ready", "pid": 5001, "git_sha": "b" * 40})
+    query = MagicMock(side_effect=error)
+    monkeypatch.setattr(pool.lifecycle.subprocess, "run", query)
+
+    seam.run({0: slot}, seam.cursor, 1)
+
+    assert slot.reaping is False and seam.killed == [] and seam.respawned == []
+    query.assert_called_once()
+    row, = _rows(seam.supervisor, "worker_sha_verify")
+    assert row["ok"] is False and row["relation"] == "unavailable"
+    assert row["relation_error_type"] == type(error).__name__
+    assert len(seam.sent) == 1 and "could not be compared" in seam.sent[0][1]
+    assert _rows(seam.supervisor, "worker_ready_released") == []
 
 
 def test_no_worker_ready_inside_the_window_tears_down_replaces_and_types_the_row(pool, seam):

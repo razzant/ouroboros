@@ -156,13 +156,13 @@ def test_initiate_presence_resolves_binding_and_reports_actual_delivery(monkeypa
 
     def admit(**kwargs):
         captured["admission_args"] = kwargs
-        return SimpleNamespace()
+        return SimpleNamespace(binding_id=created["binding_id"])
 
     def run(**kwargs):
+        from ouroboros.presence_runner import PresenceTurnResult
+
         captured["event"] = kwargs["event"]
-        return SimpleNamespace(
-            outcome="tool_delivered", text="", task_id="turn-1", work_ref="",
-        )
+        return PresenceTurnResult(outcome="tool_delivered", text="", task_id="turn-1", work_ref="")
 
     monkeypatch.setattr("ouroboros.presence_admission.admit_presence_turn", admit)
     monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn", run)

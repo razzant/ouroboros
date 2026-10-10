@@ -171,9 +171,9 @@ PROVIDER_CREDENTIAL_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 # Active settings keys that hold a ROUTED model identity (prefix -> provider via
-# provider_for_model). Heavy is a bounded migration/history input, not a live
-# route selector; keeping the split here prevents new consumers (including
-# Provider Test) from accidentally resurrecting it.
+# provider_for_model). Heavy and the retired review scalars are migration/history
+# inputs, not live route selectors; the active set keeps consumers (including
+# Provider Test) from accidentally resurrecting them.
 # Superset of the live slots; a key absent from settings still declares whatever
 # ``config.SETTINGS_DEFAULTS`` will hand the runtime, which is why declared_model_settings()
 # fills the defaults in rather than treating "unset" as "unused".
@@ -181,9 +181,7 @@ ACTIVE_MODEL_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT",
     "OUROBOROS_MODEL_VISION", "OUROBOROS_MODEL_CONSCIOUSNESS",
     "OUROBOROS_MODEL_FALLBACKS", "OUROBOROS_MODEL_FALLBACK",
-    "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "OUROBOROS_WEBSEARCH_MODEL",
-    "OUROBOROS_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODEL",
+    "OUROBOROS_WEBSEARCH_MODEL",
 )
 LEGACY_MODEL_SETTING_KEYS: tuple[str, ...] = ("OUROBOROS_MODEL_HEAVY",)
 # Compatibility import name. Its meaning is now explicitly the active set.
@@ -192,8 +190,7 @@ MODEL_SETTING_KEYS = ACTIVE_MODEL_SETTING_KEYS
 # Settings keys whose value is a Claude Agent SDK / Claude Code model NAME (``opus[1m]``),
 # NOT a routed model identity: they carry no provider prefix, so provider_for_model would
 # mis-route them to OpenRouter.  Their transport is the Anthropic SDK subprocess, which
-# authenticates with ANTHROPIC_API_KEY (the Claude runtime gateways:
-# tools/claude_advisory_review.py), so a non-empty value DECLARES the anthropic provider.
+# authenticates with ANTHROPIC_API_KEY, so a non-empty value DECLARES the anthropic provider.
 
 
 def provider_for_model(model: str) -> str:
@@ -205,6 +202,18 @@ def provider_for_model(model: str) -> str:
         if name.startswith(prefix):
             return provider
     return "openrouter"
+
+
+# Physical per-request ceilings on tool schemas, by execution provider; a provider
+# absent here has no known ceiling. OpenAI's own API refuses a longer `tools` array
+# (400 array_above_max_length); the same models through OpenRouter accepted 129
+# (provider canary, CI run 37204372307, 2026-10-04).
+PROVIDER_TOOL_SCHEMA_LIMITS: dict[str, int] = {"openai": 128}
+
+
+def tool_schema_limit(model: str, *, use_local: bool = False) -> int | None:
+    """The route's ceiling on tool schemas in one request, or None when none is known."""
+    return None if use_local else PROVIDER_TOOL_SCHEMA_LIMITS.get(provider_for_model(model))
 
 
 def parse_claudexor_model(model: str) -> tuple[str, str]:
@@ -502,7 +511,11 @@ ZAI_DIRECT_DEFAULTS = {
     "main": "zai::glm-5.3",
     "heavy": "",
     "light": "zai::glm-5.3-flash",
-    "vision": "",
+    # Image input per docs.z.ai/guides/vlm/glm-5.3-flash.md (read 2026-10-08; glm-5.3
+    # is text-only). A contributor probe (2026-10-06) covered the Coding Plan endpoint
+    # only; pay-as-you-go rests on the docs. A new install's wizard proposes it; a
+    # saved Vision choice, empty included, stays as saved.
+    "vision": "zai::glm-5.3-flash",
     "fallback": "zai::glm-5.3-flash",
     # No deep_review default: the route publishes no window metadata and no live
     # measurement exists, so the slot follows the MiniMax clear-instead-of-fill path.
@@ -521,8 +534,8 @@ DEEPSEEK_DIRECT_DEFAULTS = {
     # sizing remains evidence-driven; a missing window measurement does not
     # remove review authority (see ARCHITECTURE §7).
     "deep_self_review": "deepseek::deepseek-v4-pro",
-    # No vision default: deepseek-v4-flash-vision-exp is experimental; it is
-    # recognized by supports_vision() for explicit owner selection only.
+    # No vision default: deepseek-v4-flash-vision-exp is experimental and is
+    # for explicit owner selection only.
 }
 
 ANTHROPIC_DIRECT_DEFAULTS = {
@@ -562,11 +575,6 @@ DIRECT_PROVIDER_REVIEW_ROLES = {
     # DeepSeek install reviews with three independent thinking v4-pro calls.
     "deepseek": ("main", "main", "main"),
     "zai": ("main", "main", "main"),
-}
-
-DIRECT_PROVIDER_SCOPE_DEFAULTS = {
-    provider: defaults["main"]
-    for provider, defaults in DIRECT_PROVIDER_DEFAULTS.items()
 }
 
 _ANTHROPIC_MODEL_ALIASES = {
@@ -671,48 +679,19 @@ def compute_direct_review_models_fallback(
     return [compiled[index % len(compiled)] for index in range(count)]
 
 
-# Conservative static vision map by normalized id/prefix. The OpenRouter
-# /models overlay (llm.py) refines this at runtime; static knowledge only
-# covers families whose vision support is long-established.
-_VISION_MODEL_PREFIXES: tuple[str, ...] = (
-    "openai/gpt-5", "openai/gpt-4o", "openai/gpt-4.1", "openai/o3", "openai/o4",
-    "google/gemini-", "anthropic/claude-",
-    "x-ai/grok-4", "x-ai/grok-3",
-    "qwen/qwen-vl", "qwen/qwen2.5-vl", "qwen/qwen3-vl",
-    "mistralai/pixtral", "meta-llama/llama-4", "meta-llama/llama-3.2-90b-vision",
-    "openai/gpt-5.5",
-    # Narrow on purpose: only the dedicated vision variant. Plain deepseek
-    # chat/v4 ids stay non-vision (pinned by tests), and this slash-form
-    # normalized id also names a real OpenRouter vendor namespace — the
-    # OpenRouter /models overlay may refine exact ids either way.
-    "deepseek/deepseek-v4-flash-vision",
-)
-
-# Runtime overlay: model_id → bool, fed from OpenRouter /models
-# architecture.input_modalities by llm.py (same lifecycle as its
-# supported-parameters cache).
-_VISION_OVERLAY: dict = {}
-
-
-def update_vision_overlay(model_id: str, supports: bool) -> None:
-    normalized = normalize_model_identity(model_id)
-    if normalized:
-        _VISION_OVERLAY[normalized] = bool(supports)
-
-
 def supports_vision(model_id: str, *, model_role: str = "",
                     model_account_override: str | None = None) -> bool | None:
-    """Image capability; None means unavailable subscription metadata, not blindness.
+    """Image input of the exact route: True, False, or None when nothing sourced says.
 
-    Subscription metadata belongs to this call's role/account, never the global
-    model-id overlay. Image senders preserve input when that fact is unknown;
-    the actual call can start the engine and return its normal typed refusal.
-    Metadata discovery itself must not start it or buy a model generation.
+    A Claudexor route answers from the catalog of this call's role/account, never
+    a global overlay; an API route answers from the fresh route-scoped catalog
+    record (``vision_routing.route_image_input``). A model's name is not
+    evidence, so every other case is None: image senders preserve input when the
+    fact is unknown and the actual call returns the route's own answer. Our own
+    lanes that cannot carry bytes (local, GigaChat) are the send policy's
+    transport fact, decided by lane, not a model fact. Metadata discovery never
+    starts an engine or buys a model generation.
     """
-    # Local lanes have no vision regardless of family name; check the RAW id —
-    # normalize_model_identity strips the " (local)" suffix.
-    if str(model_id or "").strip().endswith(" (local)"):
-        return False
     if provider_for_model(model_id) == "claudexor":
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
         from ouroboros.llm import LLMClient
@@ -735,12 +714,9 @@ def supports_vision(model_id: str, *, model_role: str = "",
         item = next((row for row in catalog.get("models", []) if row.get("id") == native_model), {})
         modalities = item.get("inputModalities")
         return "image" in modalities if isinstance(modalities, list) and modalities else None
-    normalized = normalize_model_identity(model_id)
-    if not normalized:
-        return False
-    if normalized in _VISION_OVERLAY:
-        return _VISION_OVERLAY[normalized]
-    return normalized.startswith(_VISION_MODEL_PREFIXES)
+    from ouroboros.vision_routing import route_image_input
+
+    return route_image_input(model_id).verdict
 
 
 # NOTE (v6.33.0): the static per-model context-window table was REMOVED. It

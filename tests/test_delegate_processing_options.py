@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.tools.delegate import _processing_start_request
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.mark.parametrize("preference", ["standard", "fast", "economy"])
@@ -42,7 +43,6 @@ def test_no_preference_preserves_legacy_body_without_catalog_read():
     ([{"cashUsd": 1.25, "cashKnowledge": "exact"}, {"cashUsd": 0.5, "cashKnowledge": "exact"}], 1.75, True),
 ])
 def test_terminal_and_existing_ledger_use_attempt_cash_not_valuation(tmp_path, costs, expected, final):
-    import json
     from ouroboros import delegate_custody as custody
     from ouroboros.subagents import DelegatedRunShape
     from ouroboros.tools.delegate_terminal_evidence import _terminal_payload
@@ -53,7 +53,7 @@ def test_terminal_and_existing_ledger_use_attempt_cash_not_valuation(tmp_path, c
                               project_persistent=True, ledger_root=str(tmp_path))
     result = custody.settle_run(tmp_path, None, entry, detail)
     assert result["ledger_recorded"]
-    rows = [json.loads(line) for line in (tmp_path / "state" / "usage_attempts.jsonl").read_text().splitlines()]
+    rows = ledger_rows(tmp_path)
     row = next(row for row in rows if row.get("kind") == "subscription_session")
     payload = _terminal_payload("cash-test", detail, DelegatedRunShape("readonly", "ask", "live", False))
     assert payload["cost"]["cost_usd"] == row["cost_usd"] == expected

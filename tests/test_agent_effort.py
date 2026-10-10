@@ -54,22 +54,6 @@ def test_evolution_effort_configurable():
 
 
 # ---------------------------------------------------------------------------
-# Review
-# ---------------------------------------------------------------------------
-
-def test_review_effort_default_is_high():
-    """Default review effort is 'high'."""
-    with patch.dict(os.environ, {}, clear=True):
-        assert resolve_effort("review") == "high"
-
-
-def test_review_effort_configurable():
-    """Review effort can be overridden via OUROBOROS_EFFORT_REVIEW."""
-    with patch.dict(os.environ, {"OUROBOROS_EFFORT_REVIEW": "high"}, clear=True):
-        assert resolve_effort("review") == "high"
-
-
-# ---------------------------------------------------------------------------
 # Consciousness
 # ---------------------------------------------------------------------------
 
@@ -97,5 +81,4 @@ def test_task_type_is_case_insensitive():
     """Task type matching is case-insensitive."""
     with patch.dict(os.environ, {}, clear=True):
         assert resolve_effort("EVOLUTION") == "high"
-        assert resolve_effort("Review") == "high"
         assert resolve_effort("CONSCIOUSNESS") == resolve_effort("task")

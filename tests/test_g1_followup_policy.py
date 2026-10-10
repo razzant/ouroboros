@@ -249,7 +249,7 @@ def test_group_scope_includes_sibling_and_original_late_charge(world):
     queue.check_scheduled_tasks()
     [task] = pending
     fields = task_billing_fields(task, task['id'], 999.0, root)
-    for who, amount in ((ORIGIN, 4.0), ('sibling', 4.0)):
+    for who, amount in ((ORIGIN, 5.0), ('sibling', 5.0)):  # known spend reaches the group's $10
         with ua.usage_scope(ua.UsageScope(drive_root=root, task_id=who, root_task_id=who,
                                          source='test', root_limit_usd=10.0, **BINDING)):
             reservation = ua.reserve_attempt(ua.AttemptRequest(model='openai/gpt-5.2', provider='openai', reservation_usd=amount))

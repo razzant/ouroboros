@@ -1,7 +1,6 @@
 import { renderPageHeader, renderSegmentedField, renderTabStrip, bindTabStrip } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { renderAgentAccountsSection, renderAgentsServiceBanner } from './harness_accounts.js';
-import { renderReviewerSlotsSection } from './reviewer_slots.js';
 import { renderSubagentsSection } from './subagents_settings.js';
 import { languageBlockHtml } from './settings_language.js';
 import { modelRolesHost } from './model_roles.js';
@@ -23,12 +22,11 @@ const SETTINGS_TABS = [
 ];
 // Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
 
-// 6.3: Review and Scope Review efforts moved to per-slot dropdowns in
-// Agents → Review lanes. Behavior keeps the surface-level lanes.
+// Review effort, Deep Self-Review's included, is a property of the catalog row
+// that runs it (Agents → Available subagents). Behavior keeps the surface-level lanes.
 const EFFORT_FIELDS = [
     ['s-effort-task', 'Task / Chat', 'medium'],
     ['s-effort-evolution', 'Evolution', 'high'],
-    ['s-effort-deep-self-review', 'Deep Self-Review', 'high'],
     ['s-effort-consciousness', 'Consciousness', ''],  // '' = the Task / Chat effort (a wake-up is a Main turn)
 ];
 
@@ -377,23 +375,25 @@ export function renderSettingsPage() {
                         ${modelRolesHost('settings-model-roles')}
                     </div>
 
-                    <!-- Review lanes and Delegation moved to the Agents tab
-                         (D-10): they answer "who does the work", not "which API
-                         model id". One capability, one section — no control here
-                         duplicates one there. The deep self-review reviewer is a
-                         Review lanes row too (R7); its former model field's key,
-                         OUROBOROS_MODEL_DEEP_SELF_REVIEW, survives only as the
-                         backend's invisible migration source for that row. -->
+                    <!-- Reviewers and Delegation live in the Agents tab (D-10):
+                         they answer "who does the work", not "which API model
+                         id". One capability, one section — no control here
+                         duplicates one there. -->
 
                     <div class="form-section">
-                        <h3>Other Model Slots</h3>
+                        <h3>Web search</h3>
                         <div class="form-grid two">
                             <div class="form-field ui-field">
-                                <label for="s-websearch-model">Web Search Model</label>
-                                <input id="s-websearch-model" placeholder="gpt-5.2" class="ui-control" name="s-websearch-model" type="text" aria-describedby="s-websearch-model-help">
-                                <div class="settings-inline-note ui-field-help" id="s-websearch-model-help">OpenAI model for <code>web_search</code>. Requires <code>OPENAI_API_KEY</code> and an empty Legacy Base URL.</div>
+                                <label for="s-websearch-source">Source</label>
+                                <select id="s-websearch-source" class="ui-control"><option value="auto">Auto</option><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option><option value="anthropic">Anthropic</option><option value="ddgs">ddgs</option></select>
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-websearch-model">Model</label>
+                                <input id="s-websearch-model" placeholder="Auto: source defaults" class="ui-control" name="s-websearch-model" type="text" aria-describedby="s-websearch-model-help">
+                                <div class="settings-inline-note ui-field-help" id="s-websearch-model-help">Built-in <code>web_search</code> only. Skills, MCP and browser tools remain independent choices. Empty uses source defaults.</div>
                             </div>
                         </div>
+                        <div class="ui-field-help" id="s-websearch-preview" role="status"></div>
                     </div>
                 </section>
 
@@ -406,7 +406,6 @@ export function renderSettingsPage() {
                          daemon or runtime problem is explained, instead of the
                          scattering of "(not in discovery)" the owner reported. -->
                     ${renderSubagentsSection()}
-                    ${renderReviewerSlotsSection()}
                 </section>
 
                 <section class="settings-panel" data-settings-panel="behavior">
@@ -468,7 +467,6 @@ export function renderSettingsPage() {
                             <input id="s-task-review-mode" type="hidden" value="auto">
                             ${renderSegmentedField({
                                 target: 's-task-review-mode',
-                                modifier: 'data-task-review-group',
                                 options: [
                                     { value: 'off', label: 'Off' },
                                     { value: 'auto', label: 'Auto' },
@@ -480,7 +478,7 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Max Review Cycles</h3>
-                        <div class="settings-section-copy">Limits paid review waves, including dispatched technical failures: plan and task review per task, commit triad+scope per root task, and skill review per root task or manual snapshot. The last review still permits author corrections within ordinary task limits; explicit task-local author limits remain separate. Collection and exact replay are free. Advisory allows an explicit decision after receiving feedback or a disclosed unavailable result; Blocking still requires reviewer approval. <code>&infin;</code> removes the count cap, while deadlines, budgets and lifecycle limits still apply.</div>
+                        <div class="settings-section-copy">Limits paid review waves, including dispatched technical failures: plan and task review per task, commit review per root task, and skill review per root task or manual snapshot. The last review still permits author corrections within ordinary task limits; explicit task-local author limits remain separate. Collection and exact replay are free. Advisory allows an explicit decision after receiving feedback or a disclosed unavailable result; Blocking still requires reviewer approval. <code>&infin;</code> removes the count cap, while deadlines, budgets and lifecycle limits still apply.</div>
                         <div class="settings-effort-card">
                             <label>Max Review Cycles</label>
                             <input id="s-review-max-cycles" type="hidden" value="2">
@@ -500,7 +498,7 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Image Input</h3>
-                        <div class="settings-section-copy">Auto sends images inline to vision-capable models and captions them for blind models. Caption always uses text captions; Inline refuses caption fallback; Off emits placeholders.</div>
+                        <div class="settings-section-copy">Auto sends images unless the model's own metadata says it cannot see them; then a model that can see writes a caption, or a short note takes the image's place. Inline always sends images, even when metadata says no; if the provider refuses one, you see the refusal and that image becomes a note. Caption always replaces images with text captions. Off replaces images with a note and starts no caption work. The local model and GigaChat cannot carry images in any mode: they get a caption or a note that says so.</div>
                         <div class="settings-effort-card">
                             <label>Image Input Mode</label>
                             <input id="s-image-input-mode" type="hidden" value="auto">
@@ -534,7 +532,7 @@ export function renderSettingsPage() {
                         <div class="settings-section-copy">
                             Working-context size profile (separate axis from Runtime Mode and Review Enforcement).
                             <code>Max</code> inlines ARCHITECTURE and DEVELOPMENT in full &mdash; for ~1M-context models (today's behavior).
-                            <code>Nano</code> is the compact owner window. <code>Low</code> fits ~200K / local models: ARCHITECTURE becomes a navigation map (read full sections on demand), DEVELOPMENT stays full for normal runnable tasks unless a structured non-development caller opts out, and memory compacts sooner. It governs Ouroboros's own working window: it never changes the model or reasoning effort, and scope review runs in every mode.
+                            <code>Nano</code> is the compact owner window. <code>Low</code> fits ~250K / local models: ARCHITECTURE becomes a navigation map (read full sections on demand), DEVELOPMENT stays full for normal runnable tasks unless a structured non-development caller opts out, and memory compacts sooner. It governs Ouroboros's own working window: it never changes the model or reasoning effort, and the review panel runs in every mode.
                             <br><strong>Human controlled:</strong> saved via the owner endpoint; saves immediately (no restart), and lowering requires Ouroboros to be idle.
                         </div>
                         <div class="settings-effort-card">
@@ -613,7 +611,6 @@ export function renderSettingsPage() {
                             <input id="s-update-channel" type="hidden" value="stable">
                             ${renderSegmentedField({
                                 target: 's-update-channel',
-                                modifier: 'data-update-channel-group',
                                 title: 'Applies immediately; no restart required.',
                                 options: [
                                     { value: 'stable', label: 'Stable' },
@@ -630,7 +627,7 @@ export function renderSettingsPage() {
                             Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.
                             <code>Light</code> blocks repo self-modification but allows reviewed + enabled skills to run.
                             <code>Advanced</code> is the default &mdash; self-modify the evolutionary layer; protected core/contract/release files stay guarded by the shared runtime-mode policy.
-                            <code>Pro</code> can edit protected core/contract/release surfaces, but commits still go through the normal triad + scope review gate; Advanced remains limited to the evolutionary layer.
+                            <code>Pro</code> can edit protected core/contract/release surfaces, but commits still go through the normal review gate; Advanced remains limited to the evolutionary layer.
                             <code>Cyber Pro</code> grants the full host and configuration authority, including credentials, models, Supervisor configuration and protected rewrites. Review scope and enforcement stay owner-controlled. Review Enforcement remains independent, so <code>Blocking</code> stays available in Cyber Pro.
                             <br><strong>Human controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
                             Web/Docker sessions save mode changes through the owner endpoint; the new mode takes effect after restart.
@@ -778,6 +775,7 @@ export function renderSettingsPage() {
                             <label class="theme-choice-label" id="s-appearance-theme-label">Theme</label>
                             <div data-theme-control aria-labelledby="s-appearance-theme-label"></div>
                             <div class="settings-inline-note theme-status" data-theme-status role="status" aria-live="polite"></div>
+                            <div class="settings-inline-note" data-shell-storage-status role="status" aria-live="polite"></div>
                         </div>
                     </div>
 
@@ -786,13 +784,15 @@ export function renderSettingsPage() {
                         <div class="settings-section-copy">
                             While this client is running, Ouroboros can pull you back to a question or a
                             finished task. Notifications arrive whether or not this window has focus, and
-                            clicking one opens its source; a banner from the tray or menu-bar indicator
-                            opens the window as you left it. Sound silences this client's tone and the
-                            macOS sound; a Windows tray balloon follows Windows' own sound setting.
+                            clicking one opens its source where the system supports it. The desktop app hands
+                            them to the system's own notifications where the system allows it, and that system
+                            decides their sound; otherwise a browser banner or an alert inside the app. Sound off
+                            asks for them silently. Test asks the system for permission when it has not been asked yet.
                             <br><strong>Per device, not per account:</strong> like the theme above, these choices
                             are stored by this client alone and never sent to the server.
-                            Where this system exposes no notifications, or permission is denied, alerts appear
-                            inside the app instead. Do Not Disturb and OS permissions still decide what you see.
+                            Where this system exposes no notifications, or permission is denied, alerts fall back
+                            to a browser banner this client allows, or to the app. Do Not Disturb and OS
+                            permissions still decide what you see.
                         </div>
                         <div class="settings-effort-card">
                             <label class="local-toggle ui-field ui-field-inline">
@@ -1036,7 +1036,7 @@ export function renderSettingsPage() {
                         title="Restart the agent process">Restart now</button>
                 </div>
                 <div class="settings-footer-status">
-                    <span id="settings-unsaved-indicator" class="settings-inline-status settings-unsaved-indicator" aria-hidden="true">Unsaved changes</span>
+                    <span id="settings-unsaved-indicator" class="settings-inline-status settings-unsaved-indicator">Unsaved changes</span>
                     <div id="settings-restart-status" class="settings-inline-status" role="status" aria-live="polite" hidden></div>
                     <div id="settings-status" class="settings-inline-status" role="status" aria-live="polite" aria-atomic="true"></div>
                 </div>

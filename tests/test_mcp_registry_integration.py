@@ -128,6 +128,10 @@ def test_web_tool_restriction_preserves_mcp_discovery_and_dispatch(
     mcp_client.reconfigure_from_settings(_settings(server))
     assert mcp_client.get_manager().refresh_server("demo")["ok"]
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **kw: (True, ""))
+    # Web is explicitly disallowed below, so no search is dispatched. Declare
+    # synthetic backend availability to test that resource refusal, rather
+    # than depending on a developer/CI install having web credentials.
+    monkeypatch.setattr("ouroboros.tools.search._available_web_search_backends", lambda: ["fixture"])
     room = tmp_path / "room"
     room.mkdir()
     contract = build_task_contract({"allowed_resources": {web_key: False}})

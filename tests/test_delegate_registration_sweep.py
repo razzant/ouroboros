@@ -4,9 +4,17 @@ Split from test_delegated_run_isolation.py (module line cap)."""
 from __future__ import annotations
 
 import itertools
+import json
 
 from ouroboros import delegate_custody as custody
 
+
+
+def _finished_owner(root, task_id):
+    path = root / 'task_results' / f'{task_id}.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({'_schema_version': 1, 'task_id': task_id,
+                               'status': 'completed'}), encoding='utf-8')
 
 def test_last_shared_project_sibling_retires_once_in_every_settlement_order(tmp_path):
     class _Gateway:
@@ -30,11 +38,14 @@ def test_last_shared_project_sibling_retires_once_in_every_settlement_order(tmp_
                 ledger_root=str(root),
             ))
             custody.emit(root, custody.LEDGER_RECORDED, {"run_id": run_id})
+            _finished_owner(root, f"task-{run_id}")
 
         for run_id in order:
             row = custody.replay(root)[run_id]
             custody.settle_run(root, gateway, row, {"summary": {"state": "succeeded"}})
 
+        assert gateway.removals == [], order
+        custody.retire_settled_registrations(root, gateway, live_task_ids=set())
         assert gateway.removals == ["shared-project"], order
         replayed = custody.replay(root)
         assert all(not row.project_owned for row in replayed.values()), order
@@ -77,13 +88,15 @@ def test_registration_sweep_defers_behind_a_live_unowned_sharer(tmp_path):
 
     # Owner settled, unowned sibling still live: the sweep must not attempt.
     dc._CUSTODY.clear()
-    dc.retire_settled_registrations(tmp_path, gateway)
+    dc.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
     assert gateway.removals == [], "a live unowned sharer defers the attempt"
 
-    # Sibling settles: the very next sweep discharges the registration.
+    # Sibling and both owners settle: the next sweep discharges the registration.
+    _finished_owner(tmp_path, "t-a")
+    _finished_owner(tmp_path, "t-b")
     dc.emit(tmp_path, dc.SETTLED, {"run_id": "run-b", "task_id": "t-b", "route": "r"})
     dc._CUSTODY.clear()
-    dc.retire_settled_registrations(tmp_path, gateway)
+    dc.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
     assert gateway.removals == ["prj-shared"]
 
 
@@ -95,8 +108,6 @@ def test_registration_sweep_defers_behind_a_live_unowned_sharer(tmp_path):
 # once under the engine's own code, never recorded as a deletion, and only when
 # no unsettled run of the project exists (a replayed PROJECT_RETIRED clears
 # `project_owned` for EVERY sibling of the project).
-
-import json
 
 
 def _rows(root):
@@ -137,6 +148,7 @@ def _has_threads():
 
 
 def _start(root, run_id, *, owned, project_id="prj-kept", persistent=False):
+    _finished_owner(root, f"t-{run_id}")
     custody.record_started(root, custody.RunCustody(
         run_id=run_id, task_id=f"t-{run_id}", route_id="r", model="m",
         project_id=project_id, project_owned=owned, project_persistent=persistent,
@@ -153,7 +165,7 @@ def test_exact_project_has_threads_with_every_run_settled_discharges_exactly_onc
     _settle(tmp_path, "run-a")
     custody._CUSTODY.clear()
 
-    custody.retire_settled_registrations(tmp_path, gateway)
+    custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
 
     assert gateway.removals == ["prj-kept"]
     assert _of(tmp_path, custody.PROJECT_RETIRE_FAILED) == [], "a permanent refusal is not a failure"
@@ -175,7 +187,7 @@ def test_exact_project_has_threads_with_every_run_settled_discharges_exactly_onc
     # A second explicit sweep appends nothing and asks the daemon nothing.
     custody._CUSTODY.clear()
     before = len(_rows(tmp_path))
-    custody.retire_settled_registrations(tmp_path, gateway)
+    custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
     assert gateway.removals == ["prj-kept"] and len(_rows(tmp_path)) == before
 
 
@@ -190,7 +202,7 @@ def test_a_run_started_during_the_refused_delete_blocks_the_discharge(tmp_path):
     gateway = _RefusingGateway(
         _has_threads(), on_remove=lambda: _start(tmp_path, "run-b", owned=True))
 
-    custody.retire_project(tmp_path, gateway, custody.replay(tmp_path)["run-a"])
+    custody.retire_project(tmp_path, gateway, custody.replay(tmp_path)["run-a"], live_task_ids=set())
 
     assert gateway.removals == ["prj-kept"]
     assert _of(tmp_path, custody.PROJECT_RETIRED) == [], "an unsettled sibling forbids the discharge"
@@ -205,7 +217,7 @@ def test_a_run_started_during_the_refused_delete_blocks_the_discharge(tmp_path):
     _settle(tmp_path, "run-b")
     custody._CUSTODY.clear()
     gateway.on_remove = None
-    custody.retire_settled_registrations(tmp_path, gateway)
+    custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
     retired = _of(tmp_path, custody.PROJECT_RETIRED)
     assert len(retired) == 1 and retired[0]["project_kept"] is True
     custody._CUSTODY.clear()
@@ -228,7 +240,7 @@ def test_any_other_refusal_stays_a_retryable_typed_failure(tmp_path):
     for index, exc in enumerate(refusals, start=1):
         gateway.exc = exc
         custody._CUSTODY.clear()
-        custody.retire_settled_registrations(tmp_path, gateway)
+        custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
         assert len(gateway.removals) == index, "every failure is retried"
         assert _of(tmp_path, custody.PROJECT_RETIRED) == [], f"no discharge for {exc!r}"
         failed = _of(tmp_path, custody.PROJECT_RETIRE_FAILED)
@@ -242,7 +254,7 @@ def test_any_other_refusal_stays_a_retryable_typed_failure(tmp_path):
 
     # The daemon accepts at last: an ordinary retirement, not a kept project.
     gateway.exc = None
-    custody.retire_settled_registrations(tmp_path, gateway)
+    custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
     retired = _of(tmp_path, custody.PROJECT_RETIRED)
     assert len(retired) == 1 and "project_kept" not in retired[0]
     custody._CUSTODY.clear()
@@ -257,7 +269,7 @@ def test_persistent_sharer_branch_unchanged_and_a_new_registration_is_owned_agai
     _settle(tmp_path, "run-a")
     _settle(tmp_path, "run-p")
     custody._CUSTODY.clear()
-    custody.retire_settled_registrations(tmp_path, gateway)
+    custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
     assert gateway.removals == []
     retired = _of(tmp_path, custody.PROJECT_RETIRED)
     assert len(retired) == 1
@@ -270,7 +282,7 @@ def test_persistent_sharer_branch_unchanged_and_a_new_registration_is_owned_agai
     _start(root, "run-a", owned=True)
     _settle(root, "run-a")
     custody._CUSTODY.clear()
-    custody.retire_settled_registrations(root, gateway)
+    custody.retire_settled_registrations(root, gateway, live_task_ids=set())
     assert gateway.removals == ["prj-kept"]
     assert [row["run_id"] for row in _of(root, custody.PROJECT_RETIRED)] == ["run-a"]
     _start(root, "run-c", owned=True)
@@ -282,7 +294,7 @@ def test_persistent_sharer_branch_unchanged_and_a_new_registration_is_owned_agai
     # Its own duty is its own: discharged once more, under the engine's code.
     _settle(root, "run-c")
     custody._CUSTODY.clear()
-    custody.retire_settled_registrations(root, gateway)
+    custody.retire_settled_registrations(root, gateway, live_task_ids=set())
     assert gateway.removals == ["prj-kept", "prj-kept"]
     assert [row["run_id"] for row in _of(root, custody.PROJECT_RETIRED)] == ["run-a", "run-c"]
     custody._CUSTODY.clear()

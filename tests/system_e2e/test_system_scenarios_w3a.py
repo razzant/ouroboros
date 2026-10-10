@@ -30,19 +30,14 @@ harness exit code) and synchronizes by durable-event polling:
   blocks the commit (repo HEAD does not move), a byte-identical resubmission is
   refused FREE with the typed ``IDENTICAL_DIFF_REFUSED`` (no reviewer paid
   twice for the same bytes), and a fixed diff passes clean review and lands.
-  Plus the freshness refresh and revalidation contracts — the mechanics of this
-  tree, both pinned live:
-    (a) advisory freshness: a fresh ``preflight_review`` verdict is invalidated
-        by a later worktree edit (``invalidate_advisory_after_mutation``:
-        snapshot-hash + stale-from-edit mark), and ``commit_reviewed`` without
-        the audited skip automatically obtains a fresh verdict before triad;
-        the stale episode remains recorded and cannot authorize the new bytes;
-    (b) post-verdict revalidation: the staged material is mutated WHILE the
-        paid triad+scope wave is in flight (after the pre-dispatch fingerprint,
-        before settlement) — verdicts come back all-clean and the commit is
-        STILL refused (``REVIEW_REVALIDATION_FAILED``, block_reason
-        ``revalidation_failed``, fingerprint_status ``mismatch``): a verdict
-        for other bytes is never carried forward.
+  Plus the post-verdict revalidation contract, pinned live: the staged material
+  is mutated WHILE the paid triad+scope wave is in flight (after the
+  pre-dispatch fingerprint, before settlement) — verdicts come back all-clean
+  and the commit is STILL refused (``REVIEW_REVALIDATION_FAILED``, block_reason
+  ``revalidation_failed``, fingerprint_status ``mismatch``): a verdict for
+  other bytes is never carried forward. (The advisory-freshness contract
+  retired with the advisory pipeline, decision 3A: a preflight is one named
+  ``review_change(surface=preflight)`` look, never a commit precondition.)
 * S17 — ACCEPTANCE LOOP (required + blocking): the terminal runs the real
   acceptance dialogue — panel 1 rejects with an actionable capsule, the loop
   feeds the improvement note back, the agent reworks, panel 2 accepts clean
@@ -60,6 +55,7 @@ absorb and the update variations in wave 4. Still deferred: gateway/UI truth
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -67,6 +63,8 @@ import subprocess
 import pytest
 
 from tests.system_e2e.harness import (
+    KEYLESS_PACKET_ROWS,
+    KEYLESS_REVIEW_ROWS,
     LANE_MOCK,
     NATIVE_EPISODE_MARKER,
     PLAN_REVIEW_MARKER,
@@ -77,10 +75,9 @@ from tests.system_e2e.harness import (
     body_text,
     classify_call,
     clone_repo,
-    keyless_reviewer_slots,
     keyless_settings,
     require_lane,
-    scope_clean_text,
+    two_part_clean_text,
     scripted_completion,
     start_server,
     submit_running,
@@ -174,18 +171,6 @@ def test_w3a_review_script_never_touches_agent_script_steps():
     assert not script.consumed()
     with pytest.raises(ValueError, match="review-organ kinds"):
         ReviewScript({"agent": ["nope"]})
-
-
-def test_w3a_keyless_reviewer_slots_advisory_row_parses_under_the_trees_parser():
-    from ouroboros.reviewer_slot_config import parse_reviewer_slots
-
-    config = parse_reviewer_slots(keyless_reviewer_slots(advisory=True))
-    assert config.advisory.enabled is True
-    assert config.advisory.kind == "api_chat"
-    assert config.advisory.target_id == "openai-compatible::mock-model"
-    # The default form stays byte-compatible: no advisory key, shipped default row.
-    config_default = parse_reviewer_slots(keyless_reviewer_slots())
-    assert config_default.advisory.target_id == ""
 
 
 # ===========================================================================
@@ -541,7 +526,10 @@ S12_SCRIPT = [
 def test_s15_advisory_class_red_verdict_recorded_and_commit_lands(e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s12")
-    review_script = ReviewScript({"triad_review": [W3A_TRIAD_RED] * 3})
+    # One wave, one brief: the packet rows answer contract A (the scripted red
+    # verdicts), the native row answers contract B clean; one critical anywhere
+    # makes the wave red.
+    review_script = ReviewScript({"triad_review": [W3A_TRIAD_RED] * len(KEYLESS_PACKET_ROWS)})
     feedback = {}
     decision = {"disposition": "rejected", "rationale": "I inspected the missing-marker criticism; this doc-only enforcement fixture intentionally retains the note and records my decision."}
 
@@ -596,9 +584,11 @@ def test_s15_advisory_class_red_verdict_recorded_and_commit_lands(e2e_clone, tmp
             assert author["enforcement"] == "advisory" and author["source"] == "author"
             assert {key: author[key] for key in decision} == decision and author["recorded_at"]
             assert len(_tool_rows(task_drive, "commit_reviewed")) >= 2
+            # ONE paid wave over the whole pool: every packet row and the native row
+            # once; the author's commit paid no second panel.
             kinds = stub.kinds()
-            assert kinds.count("triad_review") == 3, kinds
-            assert kinds.count("scope_review") == 1, kinds
+            assert kinds.count("triad_review") == len(KEYLESS_PACKET_ROWS), kinds
+            assert kinds.count("two_part_review") == len(KEYLESS_REVIEW_ROWS) - len(KEYLESS_PACKET_ROWS), kinds
             review_script.assert_consumed()
         finally:
             server.stop()
@@ -645,7 +635,8 @@ def test_s16_blocking_class_red_blocks_identical_refused_free_then_green_lands(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s13")
-    review_script = ReviewScript({"triad_review": [W3A_TRIAD_RED] * 3})
+    # Wave 1: the packet rows answer red (contract A) beside a clean native seat.
+    review_script = ReviewScript({"triad_review": [W3A_TRIAD_RED] * len(KEYLESS_PACKET_ROWS)})
     stub = ScriptedStubModel(S13_SCRIPT, review_script=review_script)
     with stub:
         settings = keyless_settings(
@@ -690,21 +681,21 @@ def test_s16_blocking_class_red_blocks_identical_refused_free_then_green_lands(
                 head_before, head_after, parent)
 
             # Durable ledger: a VERDICT-blocked attempt (critical_findings) is
-            # recorded; the identical resubmit paid nothing (6 triad calls
-            # total: red wave + clean wave, none for the resubmit).
+            # recorded; the identical resubmit paid nothing (two paid waves over
+            # the whole pool: red wave + clean wave, none for the resubmit).
             attempts = task_drive.advisory_review().get("attempts") or []
             blocked = [a for a in attempts if isinstance(a, dict)
                        and a.get("block_reason") == "critical_findings"]
             assert blocked, attempts
             kinds = stub.kinds()
-            assert kinds.count("triad_review") == 6, kinds
-            assert kinds.count("scope_review") == 2, kinds
+            assert kinds.count("triad_review") == 2 * len(KEYLESS_PACKET_ROWS), kinds
+            assert kinds.count("two_part_review") == 2 * (len(KEYLESS_REVIEW_ROWS) - len(KEYLESS_PACKET_ROWS)), kinds
             review_script.assert_consumed()
         finally:
             server.stop()
 
 
-# --- S16 stale-advisory refresh (private clone: the scenario mutates the
+# --- S16 post-verdict revalidation (private clone: the scenario mutates the
 # staged index mid-review, which must never leak into the shared session clone).
 
 S13B_DOC = "docs/notes/system_e2e_w3a_freshness.md"
@@ -712,44 +703,26 @@ S13B_MSG = "docs: system_e2e w3a freshness smoke (doc-only)"
 S13B_JUNK = "w3a_freshness_junk.txt"
 
 
-def _s13b_commit_step(*, skip_advisory: bool) -> dict:
-    return {"tool": "commit_reviewed", "arguments": {
-        "commit_message": S13B_MSG,
-        "paths": [S13B_DOC],
-        "skip_advisory_review": skip_advisory,
-        "skip_tests": True,
-        "goal": "Land the freshness smoke note.",
-        "scope": f"{S13B_DOC} only.",
-    }}
-
-
 S13B_SCRIPT = [
     {"tool": "write_file", "arguments": {
         "root": "system_repo", "path": S13B_DOC,
-        "content": "# w3a freshness smoke\n\nCandidate reviewed by the advisory episode.\n",
+        "content": "# w3a freshness smoke\n\nCandidate for the post-verdict revalidation.\n",
     }},
-    # The doc-only scope is named ALONE, with no VERSION: this step is also the
-    # live proof of the doc-only carve in the advisory admission (owner 11A,
-    # finding W3A-F1). Before the carve, `release_metadata_preflight` blocked
-    # ANY changed set without VERSION in scope — including the doc-only diffs
-    # the commit gate exempts — so this scenario had to name the UNCHANGED
-    # VERSION to reach a real verdict at all, and every real install's doc-only
-    # work degraded to the audited bypass.
-    {"tool": "preflight_review", "arguments": {
-        "commit_message": S13B_MSG, "skip_tests": True, "paths": [S13B_DOC],
+    # No preflight_reviewer: the commit records `preflight: not_performed` and goes
+    # straight to the paid triad+scope wave the scope hook mutates under.
+    {"tool": "commit_reviewed", "arguments": {
+        "commit_message": S13B_MSG,
+        "paths": [S13B_DOC],
+        "skip_tests": True,
+        "goal": "Land the freshness smoke note.",
+        "scope": f"{S13B_DOC} only.",
     }},
-    {"tool": "write_file", "arguments": {
-        "root": "system_repo", "path": S13B_DOC,
-        "content": "# w3a freshness smoke\n\nEDITED AFTER the advisory verdict — advisory is stale.\n",
-    }},
-    _s13b_commit_step(skip_advisory=False),  # -> fresh advisory, then post-verdict revalidation_failed
 ]
 
 
 @pytest.mark.integration
 @pytest.mark.serial
-def test_s16_freshness_refreshes_advisory_then_rejects_post_verdict_mutation(
-        tmp_path_factory):
+def test_s16_rejects_post_verdict_mutation(tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s13b")
     clone = clone_repo(root)
@@ -757,65 +730,42 @@ def test_s16_freshness_refreshes_advisory_then_rejects_post_verdict_mutation(
     def _mutate_staged_tree_then_pass(_body):
         # The post-verdict freshness probe: stage NEW bytes while the paid
         # review wave is in flight (after the pre-dispatch fingerprint, before
-        # settlement). The scope verdict returned here is ALL-CLEAN — the
+        # settlement). The two-part verdict returned here is ALL-CLEAN — the
         # refusal below can only come from the freshness gate, never from the
         # verdicts.
         (clone / S13B_JUNK).write_text("staged mid-review to prove post-verdict freshness\n",
                                        encoding="utf-8")
         subprocess.run(["git", "add", S13B_JUNK], cwd=str(clone),
                        check=True, capture_output=True)
-        return scope_clean_text()
+        return two_part_clean_text()
 
-    review_script = ReviewScript({"scope_review": [_mutate_staged_tree_then_pass]})
+    review_script = ReviewScript({"two_part_review": [_mutate_staged_tree_then_pass]})
     stub = ScriptedStubModel(S13B_SCRIPT, review_script=review_script)
     with stub:
         settings = keyless_settings(
             stub,
             OUROBOROS_RUNTIME_MODE="advanced",
             OUROBOROS_REVIEW_ENFORCEMENT="blocking",
-            OUROBOROS_REVIEWER_SLOTS=keyless_reviewer_slots(advisory=True),
         )
         server = start_server(clone, root, settings)
         try:
             head_before = _head(clone)
             task_id = submit_running(
-                server, "Run the freshness smoke: preflight, edit, then try to commit; finish.")
+                server, "Run the freshness smoke: write the note, then try to commit; finish.")
             result = server.wait_task(task_id, timeout=600)
             assert result.get("status") == "completed", result
             oracle = ArtifactOracle(server.data_root)
             wait_durable_result(oracle, task_id)
             task_drive = oracle.task_drive(task_id)
 
-            # The advisory episode ran keyless on the stub and came back fresh.
-            preflight_rows = _tool_rows(task_drive, "preflight_review")
-            assert len(preflight_rows) == 1, preflight_rows
-            preflight_result = str(preflight_rows[0].get("result_preview") or "")
-            assert '"status": "fresh"' in preflight_result, preflight_result
-
-            # Contract (a): an edit invalidates the earlier advisory. The
-            # un-skipped commit now refreshes it automatically before triad;
-            # the original stale verdict cannot authorize the edited bytes.
             commit_rows = _tool_rows(task_drive, "commit_reviewed")
             assert len(commit_rows) == 1, commit_rows
 
-            # The durable advisory ledger shows the fresh run demoted to stale.
-            # The automatic refresh adds a fresh row without erasing the
-            # previous stale episode.
-            advisory_state = task_drive.advisory_review()
-            runs = advisory_state.get("advisory_runs") or []
-            assert len(runs) == 2, advisory_state
-            assert len({r.get("snapshot_hash") for r in runs}) == 2, runs
-            original_hash = json.loads(preflight_result)["snapshot_hash"]
-            assert any(r.get("snapshot_hash") == original_hash and r.get("status") == "stale"
-                       for r in runs), runs
-            statuses = {str(r.get("status") or "") for r in runs if isinstance(r, dict)}
-            assert "stale" in statuses, runs
-
-            # Contract (b): all-clean verdicts for OTHER bytes are rejected —
-            # the typed revalidation refusal, mismatch fingerprint status.
+            # All-clean verdicts for OTHER bytes are rejected — the typed
+            # revalidation refusal, mismatch fingerprint status.
             reval_refusal = json.dumps(commit_rows[0])
             assert "REVIEW_REVALIDATION_FAILED" in reval_refusal, commit_rows[0]
-            attempts = advisory_state.get("attempts") or []
+            attempts = task_drive.advisory_review().get("attempts") or []
             reval = [a for a in attempts if isinstance(a, dict)
                      and a.get("block_reason") == "revalidation_failed"]
             assert reval, attempts
@@ -827,13 +777,13 @@ def test_s16_freshness_refreshes_advisory_then_rejects_post_verdict_mutation(
             assert _head(clone) == head_before
             assert S13B_MSG not in _git_log_subjects(clone)
 
-            # Call accounting: explicit advisory plus its automatic refresh;
-            # exactly one triad wave and the hooked scope call.
+            # Call accounting: no preflight was named, so no preflight seat ran;
+            # exactly one wave over the whole pool — the packet rows and the
+            # hooked native seat.
             kinds = stub.kinds()
-            assert kinds.count("advisory_review") == 2, kinds
-            assert kinds.count("triad_review") == 3, kinds
-            assert kinds.count("scope_review") == 1, kinds
-            assert max(i for i, kind in enumerate(kinds) if kind == "advisory_review") < kinds.index("triad_review"), kinds
+            assert "advisory_review" not in kinds, kinds
+            assert kinds.count("triad_review") == len(KEYLESS_PACKET_ROWS), kinds
+            assert kinds.count("two_part_review") == len(KEYLESS_REVIEW_ROWS) - len(KEYLESS_PACKET_ROWS), kinds
             review_script.assert_consumed()
         finally:
             server.stop()
@@ -850,22 +800,24 @@ S14_ANSWER_V2 = "Final answer: the summary is complete. W3A_DONE"
 _OWNER_SOURCE_RE = re.compile(r'"owner_source_sha256": "([0-9a-f]{64})"')
 
 
-def _control_step(delivery_control: str, full_answer: str | None = None):
-    """A scripted answer to the host's delivery control.
-
-    Acceptance is asynchronous (owner D4=A): the panel settles in custody and its
-    verdicts wake Main with the keep/replace control re-offered, so the scripted
-    agent answers that control instead of a bare final. The exact owner source
-    selector is read from the transcript's last ``[ACCEPTANCE_SUBJECT_OBSERVATION]``
-    (the wave-2 dynamic-argument contract of ``scripted_completion``)."""
+def _completion_step(full_answer: str, *, answer_form: str):
+    """Select complete bytes or an offered answer hash after host feedback."""
     def step(body: dict) -> dict:
-        found = _OWNER_SOURCE_RE.findall(body_text(body))
-        control = {"delivery_control": delivery_control}
-        if full_answer is not None:
-            control["full_answer"] = full_answer
+        text = body_text(body)
+        assert any(row.get("function", {}).get("name") == "finish_task"
+                   for row in body.get("tools", [])), "finish_task was not offered"
+        arguments = {"action": "finish"}
+        if answer_form == "answer":
+            arguments["answer"] = full_answer
+        else:
+            selector = hashlib.sha256(full_answer.encode("utf-8")).hexdigest()
+            assert selector in re.findall(r"(?:retained as |answer_sha256=)([0-9a-f]{64})", text), (
+                "The complete answer must be offered before selecting its hash", selector)
+            arguments["answer_sha256"] = selector
+        found = _OWNER_SOURCE_RE.findall(text)
         if found:
-            control["acceptance_subject"] = {"owner_source_sha256": found[-1]}
-        return {"final": json.dumps(control)}
+            arguments["acceptance_subject"] = {"owner_source_sha256": found[-1]}
+        return {"tool": "finish_task", "arguments": arguments}
     return step
 
 
@@ -884,8 +836,7 @@ def _keep_until_acceptance_settled(full_answer: str, *, wave_ordinal: int, answe
     wake. The host then drains it in another round, reusing the paid verdict.
     That round still belongs to this phase, not the stub's exhausted fallback.
     """
-    keep = (_control_step("keep") if answer_form == "control"
-            else lambda _body: {"final": full_answer})
+    keep = _completion_step(full_answer, answer_form=answer_form)
     waits = {"rounds": 0}
 
     def step(body: dict):
@@ -908,21 +859,19 @@ def _keep_until_acceptance_settled(full_answer: str, *, wave_ordinal: int, answe
 
 @pytest.mark.integration
 @pytest.mark.serial
-@pytest.mark.parametrize("answer_form", ["prose", "control"])
+@pytest.mark.parametrize("answer_form", ["answer", "answer_sha256"])
 def test_s17_acceptance_reject_rework_accept(e2e_clone, tmp_path_factory, answer_form):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s14")
     review_script = ReviewScript({
         "acceptance": [W3A_ACCEPT_REJECT] * 3 + [W3A_ACCEPT_PASS] * 3,
     })
-    # Both answer forms retain V2 through separate quorum/final-slot wakes;
-    # repeated collection must not buy a third panel or exhaust the script.
-    rework = ({"final": S14_ANSWER_V2} if answer_form == "prose"
-              else _control_step("replace", S14_ANSWER_V2))
+    # Both answer forms retain V2 through separate quorum/final-slot wakes; repeated collection must
+    # not buy a third panel or exhaust the script. A new hash is selectable only once the whole response was held.
     stub = _HoldingStubModel(
-        [{"final": S14_ANSWER_V1}, rework,
-         _keep_until_acceptance_settled(S14_ANSWER_V2, wave_ordinal=2,
-                                       answer_form=answer_form)],
+        [{"final": S14_ANSWER_V1}, *([{"final": S14_ANSWER_V2}] if answer_form == "answer_sha256" else []),
+         _completion_step(S14_ANSWER_V2, answer_form=answer_form),
+         _keep_until_acceptance_settled(S14_ANSWER_V2, wave_ordinal=2, answer_form=answer_form)],
         review_script=review_script,
     )
     with stub:
@@ -959,17 +908,17 @@ def test_s17_acceptance_reject_rework_accept(e2e_clone, tmp_path_factory, answer
 
 @pytest.mark.integration
 @pytest.mark.serial
-@pytest.mark.parametrize("answer_form", ["prose", "control"])
+@pytest.mark.parametrize("answer_form", ["answer", "answer_sha256"])
 def test_s17_acceptance_identical_rework_is_free_replay_refusal(
         e2e_clone, tmp_path_factory, answer_form):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s14b")
     review_script = ReviewScript({"acceptance": [W3A_ACCEPT_REJECT] * 3})
-    # Both ordinary prose and explicit keep collect the rejected answer's
-    # verdict; unchanged material must replay at $0 without a new panel.
-    followup = ({"final": S14_ANSWER_V1} if answer_form == "prose" else _control_step("keep"))
-    stub = ScriptedStubModel(
-        [{"final": S14_ANSWER_V1}, followup, {"final": S14_ANSWER_V1}],
+    # Explicitly select the unchanged answer after rejection; both selection
+    # forms must replay its paid verdict at $0 without a new panel.
+    stub = _HoldingStubModel(
+        [{"final": S14_ANSWER_V1},
+         _keep_until_acceptance_settled(S14_ANSWER_V1, wave_ordinal=1, answer_form=answer_form)],
         review_script=review_script,
     )
     with stub:

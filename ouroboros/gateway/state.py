@@ -131,7 +131,7 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
     concurrent request.
     """
     from ouroboros.tools.github import github_token_from_env_or_settings
-    from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection, usage_writer_snapshot
+    from ouroboros.usage_accounting import usage_projection, usage_writer_snapshot
     from supervisor.queue import get_evolution_status_snapshot
     from supervisor.state import TOTAL_BUDGET_LIMIT, control_value, load_state
     from supervisor.workers import PENDING, RUNNING, WORKERS
@@ -153,14 +153,13 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
     drive_root = request_drive_root(request)
     accounting_available = True
     try:
-        ensure_legacy_imported(drive_root)
         # The writer's slim snapshot (totals, marker, OpenRouter bucket): this response
         # serializes ``physical_calls`` and scalar accounting fields only, so the five
         # grouped axes of ``usage_breakdown`` would be rendered per poll and thrown away.
         # Its private provenance keys stay off the wire even when the unbounded-budget
         # branch reuses the mapping directly as its accounting projection.
-        # /api/state is polled: both reads are display reads, so a contended ledger lock
-        # serves the last validated snapshot instead of parking this worker thread.
+        # /api/state is polled: both reads are display reads (a short wait, then the
+        # accounting is reported unavailable) instead of parking this worker thread.
         breakdown = {
             key: value
             for key, value in usage_writer_snapshot(drive_root, allow_stale=True).items()
@@ -179,10 +178,10 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
         log.exception("Physical-attempt accounting unavailable for /api/state")
         accounting_available = False
         breakdown, accounting = {}, {}
-    # Compatibility header/bar uses the conservative dispatch authority:
-    # settled + live reservations + unresolved upper bounds.  Actual paid
-    # cost remains separately visible as accounting.settled_usd/confirmed.
-    spent = float(accounting.get("accounted_usd") or 0.0) if accounting_available else None
+    # Compatibility header/bar shows the dispatch authority's own number: KNOWN
+    # spend (settled: confirmed + estimated, #1487). Reservations and unresolved
+    # upper bounds stay separately visible in the accounting block.
+    spent = float(accounting.get("settled_usd") or 0.0) if accounting_available else None
     # De-triplication: hand the evolution snapshot the projection this request
     # already computed, so budget_remaining does not replay the ledger again —
     # but ONLY when this request's drive root IS the supervisor's root and the
@@ -283,13 +282,13 @@ def _epoch_or_zero(value: Any) -> float:
         return 0.0
 
 
-# Exact root/task path -> stat-keyed finalizing and question display facts.
+# Exact root/task path -> stat-keyed outcome, finalizing and question display facts.
 _FINALIZING_MEMO: Dict[tuple, tuple] = {}
 _FINALIZING_MEMO_MAX = 64
 
 
 def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
-    """One stat-keyed read serves finalizing and the current required question."""
+    """One stat-keyed read serves outcome, finalizing, retry and question facts."""
     memo_id = (str(pathlib.Path(drive_root).resolve()), task_id)
     try:
         from ouroboros.task_results import task_results_dir
@@ -317,7 +316,18 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     wait = data.get("owner_wait") if isinstance(data.get("owner_wait"), dict) else {}
     quizzes = data.get("owner_quiz") if isinstance(data.get("owner_quiz"), dict) else {}
     quiz = quizzes.get(str(wait.get("quiz_id") or ""), {})
+    # Outcome knowledge does not end live activity: a failed answer can still
+    # have open post-task work. Carry the same canonical axes as history/detail.
+    from ouroboros.outcomes import normalize_outcome_axes
+
+    display = {key: data[key] for key in ("status", "reason_code", "timeout_retry_from", "original_task_id")
+               if key in data}
+    if data.get("status") or data.get("outcome_axes"):
+        display["outcome_axes"] = normalize_outcome_axes(data)
+    if synthesis:
+        display["root_phase_checkpoint"] = {"post_task_synthesis": synthesis}
     facts = {"finalizing": post_task_synthesis_is_open(synthesis), "late_phase": synthesis,
+             "display": display,
              # An answered root's census row (D10) carries only its own routing identity.
              "row": {key: data[key] for key in ("chat_id", "project_id", "_is_direct_chat", "queued_at")
                      if key in data},
@@ -351,17 +361,81 @@ def _managed_task_budget_pausing(drive_root: Any, row: Dict[str, Any], task_id: 
                 and int(pause.get("task_attempt") or 0) == int(row.get("_attempt") or 1)):
             return True
         # The owner paused this RUNNING root's tree: it is settling toward its
-        # boundary (sent work finishing), not working (ouroboros/owner_pause.py).
-        from types import SimpleNamespace
-
-        from ouroboros.owner_pause import member_fence
-
-        state = member_fence(SimpleNamespace(
-            task_id=task_id, root_task_id=str(row.get("root_task_id") or task_id),
-            budget_drive_root=str(row.get("budget_drive_root") or drive_root))).get("state")
+        # boundary (its own sent work stopping), not working (ouroboros/owner_pause.py).
+        state = _owner_fence_state(drive_root, row, task_id)
         return None if state == "unknown" else state == "requested"
     except Exception:
         return None
+
+
+def _owner_fence_state(drive_root: Any, row: Dict[str, Any], task_id: str) -> str:
+    """The member's owner-Pause fence state (``requested``/``paused``/``unknown``/``""``)."""
+    from types import SimpleNamespace
+
+    from ouroboros.owner_pause import member_fence
+
+    return str(member_fence(SimpleNamespace(
+        task_id=task_id, root_task_id=str(row.get("root_task_id") or task_id),
+        budget_drive_root=str(row.get("budget_drive_root") or drive_root))).get("state") or "")
+
+
+def _finishing_reviews(drive_root: Any, row: Dict[str, Any], task_id: str) -> bool:
+    """Whether review work the owner's Pause lets finish still runs, as its census recorded it.
+    The census names tasks and model sends alike, so it is never a reviewer count."""
+    try:
+        from ouroboros.owner_pause import read_fence
+
+        fence = read_fence(pathlib.Path(row.get("budget_drive_root") or drive_root),
+                           str(row.get("root_task_id") or task_id))
+        return fence.get("state") == "paused" and bool(fence.get("finishing_reviews"))
+    except Exception:
+        return False
+
+
+def _activity_pause_cause(row: dict, fence: dict) -> str:
+    """Explain a parked census row from its existing typed control, never its phase name."""
+    hold = row.get("_budget_pause_hold") or {}
+    if isinstance(hold, dict) and hold.get("reason") in {"owner_restart_hold", "saved_work_hold"}:
+        # saved_work_hold: work saved before the application stopped waits for Resume
+        # after it started again (#1563); the published cause vocabulary is unchanged.
+        return "restart"
+    if fence.get("cause") == "owner_pause":
+        return "owner"
+    pause = row.get("_budget_pause") or row.get("budget_pause") or {}
+    reason = pause.get("reason") if isinstance(pause, dict) else None
+    if reason in {"budget", "owner", "sleep"}:
+        return reason
+    if isinstance(pause, dict) and pause.get("status") == "paused_before_dispatch":
+        return "budget"
+    if row.get("reason_code") in {"budget_paused", "budget_exhausted"}:
+        return "budget"
+    if row.get("reason_code") == "owner_paused":
+        return "owner"
+    return "unknown"
+
+
+def _direct_activity_pause_projection(drive_root: Any, row: dict, availability: Any) -> dict:
+    """Project a direct actor's saved warm Pause without changing its registry.
+
+    A requested fence alone cannot say the author reached its boundary. The
+    existing owner-wait record supplies that fact; the settled root fence then
+    supplies Paused and the separate review count, just as for managed tasks.
+    """
+    activity = dict(row)
+    task_id = str(row.get("activity_id") or "")
+    state = _owner_fence_state(drive_root, row, task_id)
+    if state == "unknown":
+        activity["phase"] = "unknown"
+        if availability is not None:
+            availability["complete"] = False
+    elif state in {"requested", "paused"}:
+        from supervisor.owner_pause_control import _warm_paused_direct_turn
+
+        if _warm_paused_direct_turn(pathlib.Path(row.get("budget_drive_root") or drive_root), task_id):
+            activity.update(phase="budget_paused" if state == "paused" else "budget_pausing", pause_cause="owner")
+            if state == "paused" and (finishing := _finishing_reviews(drive_root, row, task_id)):
+                activity["finishing_reviews"] = finishing
+    return activity
 
 
 def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *, direct_turns=None, availability=None) -> list:
@@ -380,7 +454,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     relabelled a managed task. Never raises.
     """
     direct_rows = direct_turns if direct_turns is not None else _direct_turns_snapshot_safe()
-    activities = [dict(row) for row in direct_rows]
+    activities = [_direct_activity_pause_projection(drive_root, row, availability) for row in direct_rows]
     bindings = task_bindings if isinstance(task_bindings, dict) else {}
     try:
         from supervisor import queue as queue_mod
@@ -431,8 +505,14 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 "client_message_id": "",
                 "kind": "direct_chat" if row.get("_is_direct_chat") else "managed_task",
                 "phase": phase,
+                **({"pause_cause": _activity_pause_cause(
+                    row, fence_rows.get(str(row.get("root_task_id") or task_id), {}))}
+                   if phase in {"budget_paused", "budget_pausing"} else {}),
+                **({"finishing_reviews": finishing} if phase == "budget_paused" and (
+                    finishing := _finishing_reviews(drive_root, row, task_id)) else {}),
                 "started_at": started_at,
                 "task_attempt": int(row.get("_attempt") or 1),
+                **{key: row[key] for key in ("timeout_retry_from", "original_task_id") if row.get(key)},
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
@@ -456,6 +536,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 pausing = _managed_task_budget_pausing(drive_root, row, task_id)
                 if pausing is not False:
                     phase = "unknown" if pausing is None else "budget_pausing"
+                elif _owner_fence_state(drive_root, row, task_id) == "paused":
+                    phase = "budget_paused"  # its stack parked warm under a settled Pause
                 else:
                     phase = "finalizing" if _managed_task_finalizing(drive_root, task_id) else "working"
                 activities.append(_activity(task_id, row, phase, started_at))
@@ -468,7 +550,10 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
             if latch.get("cause") != "owner_pause" or root_id in visible:
                 continue
             facts = _task_activity_facts(drive_root, root_id)
-            if facts.get("late_phase") == "paused":
+            # The fence's own census is the truth of "Paused": reviewers already
+            # launched finish separately and never keep the tree Pausing.
+            if facts.get("late_phase") == "paused" or _owner_fence_state(
+                    drive_root, {"root_task_id": root_id}, root_id) == "paused":
                 phase = "budget_paused"
             elif (facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id)
                   or task_has_live_review_operation(drive_root, root_id, sent_only=True)):
@@ -508,7 +593,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 if binding.get(key):
                     activity[key] = binding[key]
     try:
-        from ouroboros.project_dialogue import project_question_pointer
+        from ouroboros.project_dialogue import owner_wait_projection, project_question_pointer
         from ouroboros.projects_registry import list_reserved_projects
 
         projects = {str(row["id"]): row for row in list_reserved_projects(drive_root)}
@@ -518,13 +603,16 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
         log.debug("Required-question activity detail unavailable", exc_info=True)
         for activity in activities:
             activity["required_question_unavailable"] = True
-        return activities
+        projects = {}  # Known wait state survives missing optional Project detail.
     for activity in activities:
         try:
             facts = _task_activity_facts(drive_root, str(activity.get("activity_id") or ""))
+            activity.update(facts.get("display") or {})
             wait = facts.get("owner_wait", {})
             if not wait.get("quiz_id"):
                 continue
+            activity["owner_wait"] = {**owner_wait_projection(wait["quiz_id"], wait, facts.get("quiz")),
+                                      "quiz_state": (facts.get("quiz") or {}).get("state", "unknown")}
             pointer = project_question_pointer(
                 {"task_id": activity["activity_id"], "quiz_id": wait["quiz_id"], "wait_for_answer": True},
                 facts.get("quiz"), projects.get(str(activity.get("project_id") or "")), wait,

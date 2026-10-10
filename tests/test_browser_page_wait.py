@@ -5,12 +5,15 @@ import base64
 import io
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+from ouroboros import owner_pause
 from ouroboros.contracts.task_constraint import TaskConstraint
+from ouroboros.task_results import write_task_result
 from ouroboros.tools import browser, vision
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
@@ -32,6 +35,10 @@ def test_real_current_page_waits_and_timeout_observations(tmp_path, engine):
     # Readonly startup must use an installed browser; this test never installs.
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "data", workspace_root=str(tmp_path),
                       task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False))
+    # A real member lets tool_handoff consume the sticky-executor ticket;
+    # an anonymous context runs each handler on a fresh operation thread.
+    ctx.task_id = ctx.root_task_id = "page-wait"
+    write_task_result(ctx.drive_root, ctx.task_id, "running", root_task_id=ctx.root_task_id)
     tools = ToolRegistry(tmp_path, ctx.drive_root)
     tools.set_context(ctx)
     page = tmp_path / "index.html"
@@ -42,27 +49,35 @@ def test_real_current_page_waits_and_timeout_observations(tmp_path, engine):
       <p id="ready" hidden>Rendered result is ready</p>
       <button id="remove" onclick="document.querySelector('#ready').remove()">Remove result</button>
       </body></html>''', encoding="utf-8")
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    def call(name, args):
+        # Preserve Playwright/greenlet affinity through the registry handoff.
+        return owner_pause.submit_tool(ctx, name, executor.submit, tools.execute_result,
+                                       name, args).result()
+
     try:
-        text = tools.execute("browse_page", {"url": page.as_uri(), "engine": engine,
-                                              "wait_for": "#ready", "state": "attached"})
+        text = call("browse_page", {"url": page.as_uri(), "engine": engine,
+                                    "wait_for": "#ready", "state": "attached"}).text
         if "not already installed" in text:
             if engine in os.environ.get("OUROBOROS_EXPECT_BROWSER_ENGINES", "").split(","):
                 pytest.fail(text)
             pytest.skip(text)
         assert "Browser wait proof" in text
         original = ctx.browser_state.page
-        timed = json.loads(tools.execute("browser_action", {
-            "action": "wait", "selector": "#ready", "state": "visible", "timeout": 50}))
+        timed = json.loads(call("browser_action", {
+            "action": "wait", "selector": "#ready", "state": "visible", "timeout": 50}).text)
         assert timed == {"status": "timeout", "selector": "#ready", "requested_state": "visible",
                          "url": page.as_uri(), "matched_elements": 1, "first_visible": False}
-        assert json.loads(tools.execute("browser_action", {
-            "action": "wait", "selector": "#ready", "state": "hidden"}))["status"] == "reached"
-        assert "Clicked" in tools.execute("browser_action", {"action": "click", "selector": "#show"})
-        reached = json.loads(tools.execute("browser_action", {
-            "action": "wait", "selector": "#ready", "state": "visible", "timeout": 3000}))
+        assert json.loads(call("browser_action", {
+            "action": "wait", "selector": "#ready", "state": "hidden"}).text)["status"] == "reached"
+        assert "Clicked" in call("browser_action", {"action": "click", "selector": "#show"}).text
+        reached = json.loads(call("browser_action", {
+            "action": "wait", "selector": "#ready", "state": "visible", "timeout": 3000}).text)
         assert reached["status"] == "reached" and reached["first_visible"] is True
-        assert ctx.browser_state.page is original and original.url == page.as_uri()
-        assert "Screenshot captured" in tools.execute("browser_action", {"action": "screenshot"})
+        assert ctx.browser_state.page is original
+        assert executor.submit(lambda: original.url).result() == page.as_uri()
+        assert "Screenshot captured" in call("browser_action", {"action": "screenshot"}).text
         png = base64.b64decode(ctx.browser_state.last_screenshot_b64)
         assert png.startswith(b"\x89PNG\r\n\x1a\n")
         shot = ctx.drive_root / "state/skills/browser-proof/jobs/wait/output/screen.png"
@@ -86,13 +101,21 @@ def test_real_current_page_waits_and_timeout_observations(tmp_path, engine):
             Path(out).mkdir(parents=True, exist_ok=True)
             (Path(out) / f"page-wait-{engine}.png").write_bytes(png)
             (Path(out) / f"page-wait-{engine}-vision.jpg").write_bytes(prepared)
-        assert "cannot run arbitrary" in tools.execute("browser_action", {"action": "evaluate", "value": "1+1"})
-        assert "Clicked" in tools.execute("browser_action", {"action": "click", "selector": "#remove"})
+        assert "cannot run arbitrary" in call("browser_action", {"action": "evaluate", "value": "1+1"}).text
+        assert "Clicked" in call("browser_action", {"action": "click", "selector": "#remove"}).text
         for state in ("hidden", "detached"):
-            absent = json.loads(tools.execute("browser_action", {"action": "wait", "selector": "#ready", "state": state}))
+            absent = json.loads(call("browser_action", {"action": "wait", "selector": "#ready", "state": state}).text)
             assert absent["status"] == "reached" and absent["matched_elements"] == 0
         # Acting evaluate remains a working operation; waits do not replace it.
         ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=str(tmp_path))
-        assert tools.execute("browser_action", {"action": "evaluate", "value": "() => Promise.resolve(7)"}) == "7"
+        evaluated = call("browser_action", {"action": "evaluate", "value": "() => Promise.resolve(7)"})
+        assert evaluated.status == "ok" and evaluated.producer_text == "7"
+        assert len(evaluated.host_annotations) == 1
+        conditions = evaluated.host_annotations[0]
+        assert conditions.startswith(f"Browser conditions: {engine} ") and "(Playwright); " in conditions
+        assert evaluated.text == f"7\n\n{conditions}"
     finally:
-        browser.cleanup_browser(ctx)
+        try:
+            executor.submit(browser.cleanup_browser, ctx).result()
+        finally:
+            executor.shutdown()

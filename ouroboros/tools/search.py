@@ -28,7 +28,9 @@ from ouroboros.config import runtime_setting
 
 log = logging.getLogger(__name__)
 
-DEFAULT_SEARCH_MODEL = "gpt-5.2"
+from ouroboros.search_routes import SEARCH_MODELS, resolve_web_search_route
+
+DEFAULT_SEARCH_MODEL = SEARCH_MODELS["openai"]
 DEFAULT_SEARCH_CONTEXT_SIZE = "medium"
 DEFAULT_REASONING_EFFORT = "high"
 
@@ -37,6 +39,7 @@ def _wrapped_provider_error(provider: str, exc: Exception) -> RuntimeError:
     """Sanitize a provider error without dropping its physical-attempt fact."""
     detail = sanitize_tool_result_for_log(str(exc))[:500]
     wrapped = RuntimeError(f"{provider} web search failed ({type(exc).__name__}): {detail}")
+    wrapped.ledger_attempt_ids = list(getattr(exc, "ledger_attempt_ids", []) or [])
     capture = getattr(exc, "physical_attempt_capture", None)
     if isinstance(capture, PhysicalAttemptCapture):
         setattr(wrapped, "physical_attempt_capture", capture)
@@ -45,10 +48,12 @@ def _wrapped_provider_error(provider: str, exc: Exception) -> RuntimeError:
 
 def _provider_outcome_is_unknown(exc: Exception) -> bool:
     """Whether paid work started without a typed terminal provider outcome."""
+    from ouroboros.transport_custody import outcome_unknown_on_chain
+
     capture = getattr(exc, "physical_attempt_capture", None)
     return bool(
         isinstance(capture, PhysicalAttemptCapture)
-        and capture.state in {"dispatched", "unresolved"}
+        and outcome_unknown_on_chain(exc)
         and capture.provider_status_code is None
     )
 
@@ -190,37 +195,23 @@ def _resolve_openai_client_settings() -> tuple[str, str | None, str, str]:
 
 
 def _openrouter_model(model: str) -> str:
-    active = str(model or runtime_setting("OUROBOROS_WEBSEARCH_MODEL") or DEFAULT_SEARCH_MODEL).strip()
-    if not active:
-        active = DEFAULT_SEARCH_MODEL
-    return active if "/" in active else f"openai/{active}"
+    route = resolve_web_search_route(backend="openrouter", model=model or None)
+    legs = route["legs"] + route["unavailable"]
+    if not legs:
+        raise ValueError(route.get("error", "Search model unavailable"))
+    return legs[0]["model"]
 
 
 def _anthropic_model(model: str) -> str:
-    active = str(model or runtime_setting("OUROBOROS_WEBSEARCH_MODEL") or "").strip()
-    if active.startswith("anthropic::"):
-        return active[len("anthropic::"):]
-    if active.startswith("anthropic/"):
-        return active[len("anthropic/"):]
-    return "claude-sonnet-4-6"
+    route = resolve_web_search_route(backend="anthropic", model=model or None)
+    legs = route["legs"] + route["unavailable"]
+    if not legs:
+        raise ValueError(route.get("error", "Search model unavailable"))
+    return legs[0]["model"]
 
 
 def _available_web_search_backends() -> list[str]:
-    backends: list[str] = []
-    openai_key, _base_url, _provider, _api_key_type = _resolve_openai_client_settings()
-    if openai_key:
-        backends.append("openai_responses")
-    if str(runtime_setting("OPENROUTER_API_KEY") or "").strip():
-        backends.append("openrouter_server_tool")
-    if str(runtime_setting("ANTHROPIC_API_KEY") or "").strip():
-        backends.append("anthropic_server_tool")
-    try:
-        import ddgs  # noqa: F401
-
-        backends.append("ddgs")
-    except Exception:
-        pass
-    return backends
+    return [leg["backend"] for leg in resolve_web_search_route()["legs"]]
 
 
 def _web_search_backend_pin() -> str:
@@ -349,6 +340,7 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
             "answer_type": "summary",
             "sources": _extract_sources_from_response(response),
             "backend": "openrouter_server_tool",
+            "model": active_model, "reported_model": getattr(response, "model", None), "ledger_attempt_ids": list(attempt_ids),
         }, ensure_ascii=False, indent=2)
     except UsageAccountingError:
         raise
@@ -404,6 +396,7 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
             "answer_type": "summary",
             "sources": _extract_sources_from_response(response),
             "backend": "anthropic_server_tool",
+            "model": active_model, "reported_model": getattr(response, "model", None), "ledger_attempt_ids": list(attempt_ids),
         }, ensure_ascii=False, indent=2)
     except UsageAccountingError:
         raise
@@ -532,7 +525,7 @@ def _responses_search_candidate(ctx, query: str, model: str, options: dict):
     return target, candidate, request, _candidate_before_dispatch(candidate, request)
 
 
-def _web_search(
+def _web_search_openai(
     ctx: ToolContext,
     query: str,
     model: str = "",
@@ -547,69 +540,10 @@ def _web_search(
     preference = resolve_processing_preference("websearch", override=_processing_preference)
     if _web_search_deadline_exhausted(ctx):
         return _web_search_deadline_result()
-    # Backend pin forces ONE backend. Fixed-model runs pin pure-retrieval 'ddgs',
-    # 'openai' pins its leg, and 'auto'/'' keep the cascade below. This is a
-    # transport config gate, not an agent-behaviour gate (P5-safe).
-    pinned = _web_search_backend_pin()
-    if pinned in ("ddgs", "openrouter", "anthropic"):
-        try:
-            if pinned == "ddgs":
-                return _web_search_ddgs(query)
-            if pinned == "openrouter":
-                return _web_search_openrouter(ctx, query, model=model, search_context_size=search_context_size, processing_preference=preference)
-            return _web_search_anthropic(ctx, query, model=model, processing_preference=preference)
-        except UsageAccountingError:
-            raise
-        except Exception as exc:
-            backend = {
-                "openrouter": "openrouter_server_tool",
-                "anthropic": "anthropic_server_tool",
-            }.get(pinned, pinned)
-            if _provider_outcome_is_unknown(exc):
-                return _unknown_provider_outcome(backend)
-            detail = sanitize_tool_result_for_log(str(exc))[:500]
-            return json.dumps(
-                {"error": f"pinned web_search backend '{pinned}' failed: {detail}", "backend": pinned},
-                ensure_ascii=False, indent=2,
-            )
-    def _fallbacks(previous_errors: list[str] | None = None) -> str:
-        errors = list(previous_errors or [])
-        if pinned == "openai":
-            # 'openai' is a TRUE pin: hard-fail rather than cascading to other backends,
-            # so a fixed/repro run cannot silently fall back to a different transport.
-            detail = "; ".join(errors) if errors else (
-                "no official OPENAI_API_KEY (without OPENAI_BASE_URL) configured"
-            )
-            return json.dumps(
-                {"error": f"pinned web_search backend 'openai' unavailable: {detail}", "backend": "openai"},
-                ensure_ascii=False, indent=2,
-            )
-        for backend_name, backend in (
-            ("openrouter_server_tool", lambda: _web_search_openrouter(
-                ctx, query, model=model, search_context_size=search_context_size,
-                processing_preference=preference)),
-            ("anthropic_server_tool", lambda: _web_search_anthropic(
-                ctx, query, model=model, processing_preference=preference)),
-            ("ddgs", lambda: _web_search_ddgs(query)),
-        ):
-            try:
-                if _web_search_deadline_exhausted(ctx):
-                    return _web_search_deadline_result()
-                return backend()
-            except UsageAccountingError:
-                raise
-            except Exception as exc:
-                errors.append(sanitize_tool_result_for_log(str(exc))[:500])
-                if _provider_outcome_is_unknown(exc):
-                    return _unknown_provider_outcome(backend_name)
-        return json.dumps({
-            "error": (
-                "web_search unavailable: no configured search backend succeeded. "
-                "Configure official OPENAI_API_KEY (without OPENAI_BASE_URL), OPENROUTER_API_KEY, "
-                "ANTHROPIC_API_KEY, or install optional ddgs."
-            ),
-            "backend_errors": errors,
-        }, ensure_ascii=False, indent=2)
+    def _fallbacks(previous_errors=None):
+        return json.dumps({"error": "; ".join(previous_errors or ["Official OpenAI search is unavailable"]),
+                           "backend": "openai_responses", "ledger_attempt_ids": attempt_ids})
+    attempt_ids = []
     api_key, base_url, provider, api_key_type = _resolve_openai_client_settings()
     if not api_key:
         return _fallbacks()
@@ -636,6 +570,7 @@ def _web_search(
             "base_url": base_url, "preference": preference, "submission": _processing_submission,
             "search_context_size": active_context, "effort": active_effort})
         reservation = reserve_attempt(request)
+        attempt_ids.append(reservation.attempt_id)
         if _web_search_deadline_exhausted(ctx):
             release_attempt(reservation, "deadline_exhausted_before_dispatch")
             reservation = None
@@ -734,6 +669,7 @@ def _web_search(
                 ),
                 "backend": "openai_responses",
                 "reason_code": "provider_outcome_unknown",
+                "ledger_attempt_ids": attempt_ids,
             }, ensure_ascii=False, indent=2)
 
         # Track web search cost (estimate from tokens — OpenAI usage has no total_cost)
@@ -767,7 +703,7 @@ def _web_search(
                 log.debug("Failed to emit web_search cost event", exc_info=True)
 
         if text.strip() or sources:
-            return json.dumps({"answer": text or "(no answer)", "answer_type": "summary", "sources": sources, "backend": "openai_responses"}, ensure_ascii=False, indent=2)
+            return json.dumps({"answer": text or "(no answer)", "answer_type": "summary", "sources": sources, "backend": "openai_responses", "model": active_model, "reported_model": getattr(resp_obj, "model", None), "ledger_attempt_ids": attempt_ids}, ensure_ascii=False, indent=2)
     except Exception as e:
         from ouroboros.llm_attempt import ProcessingNotStarted
 
@@ -803,6 +739,7 @@ def _web_search(
                 ),
                 "backend": "openai_responses",
                 "reason_code": "provider_outcome_unknown",
+                "ledger_attempt_ids": attempt_ids,
             }, ensure_ascii=False, indent=2)
         retryable_terminal = status == 408 or status == 429 or (
             status is not None and 500 <= status <= 599
@@ -819,7 +756,7 @@ def _web_search(
             ):
                 return _fallbacks([f"OpenAI web search timed out before a safe retry: {detail}"])
             log.debug("web_search OpenAI safe terminal/pre-dispatch retry")
-            return _web_search(
+            return _web_search_openai(
                 ctx, query, model=model, search_context_size=search_context_size,
                 reasoning_effort=reasoning_effort, _attempt=1,
                 _processing_preference=preference,
@@ -832,19 +769,64 @@ def _web_search(
     return _fallbacks(["OpenAI web search returned no answer and no sources"])
 
 
+def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_size: str = "",
+                reasoning_effort: str = "") -> str:
+    from ouroboros.model_slots import resolve_processing_preference
+
+    route = resolve_web_search_route(model=model or None)
+    tried = []
+    preference = resolve_processing_preference("websearch")
+    result = {"error": route.get("error") or f"web_search unavailable: source {route['source']} has no configured search backend that succeeded. Configure a search API key or install optional ddgs.",
+              "backend": route["source"]}
+    # Auto tries eligible routes; a pinned source always reaches its own backend,
+    # which reports its own missing credential or accounting refusal.
+    for leg in route["legs"] + ([] if route["source"] == "auto" else route["unavailable"]):
+        if _web_search_deadline_exhausted(ctx):
+            result = json.loads(_web_search_deadline_result())
+            break
+        try:
+            with capture_attempt_ids() as ids:
+                if leg["source"] == "openai":
+                    raw = _web_search_openai(ctx, query, model=leg["model"], search_context_size=search_context_size,
+                                             reasoning_effort=reasoning_effort, _processing_preference=preference)
+                elif leg["source"] == "openrouter":
+                    raw = _web_search_openrouter(ctx, query, model=leg["model"], search_context_size=search_context_size,
+                                                 processing_preference=preference)
+                elif leg["source"] == "anthropic":
+                    raw = _web_search_anthropic(ctx, query, model="anthropic::" + leg["model"], processing_preference=preference)
+                else:
+                    raw = _web_search_ddgs(query)
+            result = json.loads(raw)
+        except UsageAccountingError:
+            raise
+        except Exception as exc:
+            result = (json.loads(_unknown_provider_outcome(leg["backend"])) if _provider_outcome_is_unknown(exc)
+                      else {"error": sanitize_tool_result_for_log(str(exc))[:500]})
+            capture = getattr(exc, "physical_attempt_capture", None)
+            if capture and getattr(capture, "attempt_id", None):
+                ids.append(capture.attempt_id)
+            ids.extend(getattr(exc, "ledger_attempt_ids", []) or [])
+        # A pinned source's failure is reported as that source; legs_tried names the backend.
+        pinned_failure = route["source"] != "auto" and "error" in result and result.get("reason_code") is None
+        result.update(backend=route["source"] if pinned_failure else leg["backend"], model=leg["model"])
+        tried.append({**leg, "outcome": result.get("reason_code") or ("failed" if "error" in result else "succeeded"),
+                      "ledger_attempt_ids": list(dict.fromkeys([*ids, *result.get("ledger_attempt_ids", [])])),
+                      **({"error": result["error"]} if "error" in result else {})})
+        if "error" not in result or result.get("reason_code") in {"provider_outcome_unknown", "deadline_exhausted"}:
+            break
+    return json.dumps({**result, "route": route, "legs_tried": tried,
+                       "backend_errors": [leg["error"] for leg in tried if "error" in leg]}, ensure_ascii=False, indent=2)
+
+
 def get_tools() -> List[ToolEntry]:
-    backends = _available_web_search_backends()
-    backend_note = ", ".join(backends) if backends else "unavailable (no key/backend configured)"
     return [
         ToolEntry("web_search", {
             "name": "web_search",
             "description": (
-                "Search the web using the best available backend "
-                f"({backend_note}). Preferred order: OpenAI Responses, OpenRouter server tool, "
-                "Anthropic server tool, optional ddgs. "
-                f"Defaults: model={DEFAULT_SEARCH_MODEL}, search_context_size={DEFAULT_SEARCH_CONTEXT_SIZE}, "
-                f"reasoning_effort={DEFAULT_REASONING_EFFORT}. "
-                "Override any parameter per-call if needed (LLM-first: you decide). "
+                "Search the web with the configured Source and Model. Auto uses the eligible built-in "
+                "routes listed in this task's runtime facts; a specific source is strict. "
+                "Skills, MCP and browser tools are independent choices. A per-call model override "
+                "follows the same source selection. Empty model uses the saved choice or provider defaults. "
                 "For a COMPOUND question (several distinct facts/entities/time ranges in one ask), "
                 "issue one focused web_search per sub-question instead of one broad query — "
                 "narrow queries return sharper sources. These read-only searches run in parallel. "
@@ -854,7 +836,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "A single focused search query (split compound asks into separate calls)."},
-                "model": {"type": "string", "description": f"OpenAI model (default: {DEFAULT_SEARCH_MODEL})"},
+                "model": {"type": "string", "description": "Search model override; native id or routed source::model. Must agree with a pinned Source."},
                 "search_context_size": {"type": "string", "enum": ["low", "medium", "high"],
                                         "description": f"How much context to fetch (default: {DEFAULT_SEARCH_CONTEXT_SIZE})"},
                 "reasoning_effort": {"type": "string", "enum": ["low", "medium", "high"],

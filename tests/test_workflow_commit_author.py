@@ -7,8 +7,8 @@ from ouroboros.mutation_attribution import capture_mutation_baseline
 from ouroboros.review_state import load_state
 from ouroboros.task_results import write_task_result
 from ouroboros.tools import git
-from ouroboros.tools.scope_review import ScopeReviewResult
-from tests.test_advisory_inline_freshness import candidate  # noqa: F401
+from ouroboros.review_ledger import CouplingOutcome
+from tests.test_git_review_preflight_gate import candidate  # noqa: F401
 
 
 @pytest.mark.parametrize("failure", ["critical", "scope_critical", "infra", "pending"])
@@ -37,11 +37,17 @@ def test_explicit_continuation_commits_current_bytes_without_repaying(candidate,
         finding = {"item": "budget", "severity": "critical", "verdict": "FAIL", "reason": "wrong amount"}
         ctx._last_review_critical_findings = [finding] if failure == "critical" else []
         ctx._last_triad_raw_results = [{"slot_id": "critic", "status": "responded", "parsed": [finding], "raw_text": "wrong amount"}]
-        scope = ScopeReviewResult(blocked=failure == "scope_critical", status="responded", critical_findings=[finding] if failure == "scope_critical" else [], block_message="Scope found wrong amount" if failure == "scope_critical" else "")
-        ctx._last_scope_raw_result = {"status": "responded", "critical_findings": scope.critical_findings}
+        scope = CouplingOutcome(verdict="FAIL" if failure == "scope_critical" else "PASS", blocked=failure == "scope_critical", status="responded", critical_findings=[finding] if failure == "scope_critical" else [])
         if failure in {"infra", "pending"}:
             ctx._last_triad_raw_results = [{"slot_id": "critic", "status": "error", "error": "unavailable",
                 "operation_id": "paid-original", "operation_state": "in_flight" if failure == "pending" else "settled"}]
+        if failure == "pending":
+            # Received feedback beside the live seat: the seat asked the coupling
+            # question answered while the critic is still running.
+            ctx._last_triad_raw_results.append({
+                "slot_id": "coupling", "status": "responded", "parts": ["coupling"], "raw_text": "[]",
+                "answers": {"coupling": {"status": "responded", "verdict": "PASS", "findings": [],
+                                         "critical": 0, "coverage": "full"}}})
         return ("review unavailable" if failure in {"infra", "pending"} else None), scope, "infra_failure" if failure in {"infra", "pending"} else "", []
     monkeypatch.setattr(git, "_run_parallel_review", reviewer)
     before = git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)

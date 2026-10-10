@@ -26,6 +26,8 @@ def historical_source_location_owned(location: str) -> bool:
 
     if location == "observations.source_ref" or location in {"evidence." + key for key in _EVIDENCE_SOURCE_REF_FIELDS}:
         return True
+    if location in {f"historical_author_inputs.anchors[{index}].source_ref" for index in (0, 1)}:
+        return True
     index, separator, field = location.removeprefix("trace.tool_calls[").partition("].")
     return bool(location.startswith("trace.tool_calls[") and separator and index.isdecimal()
                 and field in (*TOOL_SOURCE_REF_FIELDS, *("trace_ref." + key for key in CALL_SOURCE_REF_FIELDS)))
@@ -148,6 +150,10 @@ def retain_acceptance_history(drive_root: Any, task: dict, text: str, trace: dic
         # references. A nested shape, digest or provenance label grants nothing.
         carriers = [("evidence." + key, evidence.get(key)) for key in _EVIDENCE_SOURCE_REF_FIELDS]
         carriers.append(("observations.source_ref", observations.get("source_ref")))
+        historical_inputs = evidence.get("historical_author_inputs") or {}
+        carriers.extend((f"historical_author_inputs.anchors[{index}].source_ref", anchor.get("source_ref"))
+                        for index, anchor in enumerate(historical_inputs.get("anchors", []))
+                        if index < 2 and isinstance(anchor, dict))
         for index, call in enumerate(trace.get("tool_calls") or []):
             if not isinstance(call, dict):
                 continue
@@ -174,6 +180,7 @@ def retain_acceptance_history(drive_root: Any, task: dict, text: str, trace: dic
             "effective_criteria": candidate.get("effective_criteria", seed["effective_criteria"]),
             "task_contract": task.get("task_contract"),
             "owner_corpus": evidence.get("task_inputs"),
+            "historical_author_inputs": historical_inputs,
             "sources": sources, "artifact_manifests": manifests,
             "trajectory_cutoff": {"tool_calls": len(trace.get("tool_calls") or []),
                                   "reasoning_notes": len(trace.get("reasoning_notes") or [])},

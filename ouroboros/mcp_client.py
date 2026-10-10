@@ -1108,7 +1108,8 @@ class MCPManager:
             err_text = f"{type(exc).__name__}: {_redact_error_text(exc, cfg)}"
             with self._lock:
                 target = self._servers.get(server_id)
-                if target is not None:
+                # A failure of a replaced entry says nothing about its replacement.
+                if target is not None and target.config == cfg:
                     target.last_error = err_text
                     target.last_attempted = attempted_at
                     target.tools = []
@@ -1174,12 +1175,8 @@ class MCPManager:
         finished_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             target = self._servers.get(server_id)
-            if target is not None and target.config != cfg:
-                return {
-                    "ok": False,
-                    "error": f"stale MCP refresh discarded for server {server_id!r}",
-                }
-            if target is not None:
+            stale = not self._enabled or target is None or target.config != cfg
+            if not stale:
                 target.tools = deduped
                 target.tool_name_collisions = collisions
                 # A successful refresh with omissions keeps the omission note
@@ -1188,6 +1185,19 @@ class MCPManager:
                 target.last_error = "; ".join(omission_notes)
                 target.last_attempted = attempted_at
                 target.last_refreshed = finished_at
+        if stale:
+            closed = None
+            if cfg.browser_bridge:
+                # Settings changed between this listing's configuration read and its
+                # open, before revocation could see the session: close exactly it.
+                from ouroboros.mcp_task_sessions import release_stale
+
+                closed = release_stale(cfg, authority)
+            return {
+                "ok": False,
+                "error": f"stale MCP refresh discarded for server {server_id!r}",
+                **({"bridge_closure": closed["closure"]} if closed else {}),
+            }
         return {
             "ok": True,
             "server_id": cfg.id,
@@ -1320,7 +1330,7 @@ class MCPManager:
             timeout = self._tool_timeout_sec
         if resolution.status != "callable":
             return resolution.refusal(prefixed_name)
-        from ouroboros.mcp_task_sessions import BrowserBridgeTimeout
+        from ouroboros.mcp_task_sessions import BrowserBridgeBroken, BrowserBridgeTimeout
 
         advice = note = ""
         try:
@@ -1338,6 +1348,16 @@ class MCPManager:
             return ToolResult(status="timeout", code="MCP_TIMEOUT",
                               text=f"⚠️ MCP_TOOL_TIMEOUT: {_redact_error_text(exc, cfg)}",
                               meta={"dynamic_provider": True})
+        except BrowserBridgeBroken as exc:
+            # The action's own connection closed before any answer (a broken observation
+            # refuses before dispatch instead): possibly submitted, never resent. No final
+            # response arrived, so the call is not recorded as returned.
+            broken = (f"⚠️ MCP_TOOL_ERROR: BROWSER_ACTION_OUTCOME_UNKNOWN — {_redact_error_text(exc, cfg)} "
+                      "Read the current page state before any retry.")
+            return ToolResult(status="error", code="MCP_ERROR", text=broken, meta={
+                "dynamic_provider": True, "host_verdict": True, "transport": "closed",
+                "dispatch": "possible" if exc.submitted else "none",
+                "effect": "unknown" if exc.submitted else "none", "bridge_closure": exc.closure})
         except asyncio.TimeoutError:
             text = (
                 f"⚠️ MCP_TOOL_TIMEOUT: server {cfg.id!r} did not respond in {timeout}s. "
@@ -1439,6 +1459,10 @@ def ensure_configured_from_settings(*, refresh: bool = False, authority: Any = N
     except OSError:
         mtime_ns = None
     if manager.is_configured() and manager.settings_mtime_ns() is None:
+        # The server process configures from saved Settings without an mtime; its
+        # direct turns still discover a task-owned bridge, which nothing else lists.
+        if refresh:
+            manager.refresh_all(authority=authority, unlisted_only=True)
         return
     changed = False
     if not (manager.is_configured() and manager.settings_mtime_ns() == mtime_ns):

@@ -95,3 +95,46 @@ provider calls: model requests, model catalogs, Provider Test, pricing and
 capability probes. Everything else keeps its own trust store: `git`, `uv`,
 `pip`, the Claudexor engine and its runtime downloads, the Telegram skill, MCP
 servers, the web-search scraper and the browsers.
+
+## Logs and External Monitoring
+
+Ouroboros sends no telemetry; nothing below leaves the machine until the
+deployment connects a destination of its own.
+
+- The server process writes `logs/server.log` (2 MB × 4) and its stderr. Each
+  pool worker logs to its stderr only: the desktop launcher copies it into
+  `logs/agent_stdout.log`, Docker keeps it as the container log.
+- The server and every pool worker configure this logging at their real
+  start (`ouroboros/process_logging.py`), whatever the entry point (`python
+  server.py`, `ouroboros server`, Colab); the desktop launcher keeps its own
+  `logs/launcher.log` and routes its uncaught exceptions there. Under
+  `OUROBOROS_WORKER_START_METHOD=fork` a worker inherits the server's handlers
+  instead (`docs/PERSISTENCE.md`). Not covered: whatever runs before that call
+  (the entry module's own imports), out-of-process extension children, the
+  startup historical-audit child, the local-model server and other helper
+  processes. An unexpected failure — a task
+  exception, a worker crash, an unhandled gateway request (HTTP 500), an
+  uncaught thread exception — is a stdlib `logging` record with its traceback,
+  so a handler attached in that process receives it. Message text passes the
+  secret-redacting filter; tracebacks and structured extras do not.
+- The durable records stay the JSONL ledgers under `logs/` and the task drives
+  (`docs/PERSISTENCE.md`); a file-tailing collector (OpenTelemetry Collector,
+  Vector, Fluent Bit) can ship them without any change to Ouroboros. The subset
+  an observer may rely on is the record passport,
+  `ouroboros/contracts/record_contract.py`: the anchor rows and their
+  guaranteed fields, correlation ids, which fields carry content, rotation, the
+  tools-row replica, the child task drives that are deleted after
+  `OUROBOROS_GC_RETENTION_DAYS`, and where money must be read (the accounting
+  views, never a sum of `llm_usage`). `docs/examples/log_collector/` is a
+  verified Vector setup that ships their metadata only.
+- An error tracker attaches from inside the process: an in-process extension
+  skill loads in the server and in every worker, and can initialise a
+  Sentry-compatible SDK (self-hosted Sentry, GlitchTip) installed into
+  Ouroboros's own environment (in Docker, a layer of the image; a skill-declared
+  dependency would move the extension out of process, where it cannot see these
+  records). Turn frame-local capture off and pass events through
+  `ouroboros.observability.redact_projection` before they leave;
+  `docs/examples/error_tracker/` is a verified extension that does this and
+  says what still leaves (messages and exception text can quote task text).
+  Failures that happen before the extension loads stay in the local logs only,
+  as do the launcher's and the Claudexor daemon's.

@@ -118,7 +118,7 @@ def postwork(f, monkeypatch):
     from ouroboros import agent_task_pipeline as pipeline
     from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
     observed = []
-    for name in ('_record_task_facts', '_run_chat_consolidation', '_run_scratchpad_consolidation',
+    for name in ('_record_task_facts', '_run_scratchpad_consolidation',
                  '_run_reflection', '_update_improvement_backlog'):
         monkeypatch.setattr(pipeline, name, lambda *_a, _name=name, **_k: observed.append(_name))
     monkeypatch.setattr('ouroboros.post_task_evolution.maybe_promote', lambda *_a, **_k: observed.append('promotion'))

@@ -136,13 +136,10 @@ def test_frozen_table_is_nonempty_and_covers_known_owners(frozen):
 
 
 def test_contracts_package_coverage_gap_is_pinned(frozen):
-    """The two known §11.1 gaps are pinned; a NEW contracts-package module
+    """§11.1 rows cover the whole contracts package; a NEW contracts-package module
     that never gets a §11.1 row must turn this red even after regeneration."""
     doc = frozen[0]
-    known_gaps = {
-        "ouroboros/contracts/skill_payload_policy.py",
-        "ouroboros/contracts/task_constraint.py",
-    }
+    known_gaps: set[str] = set()
     listed = {line[3:-1] for line in doc.splitlines()
               if line.startswith("- `ouroboros/contracts/")}
     assert listed == known_gaps, (
@@ -159,7 +156,7 @@ def test_every_data_layout_entry_resolves(layout):
 
 def test_data_layout_probes_key_durable_files(layout):
     doc = layout[0]
-    for token in ("settings.json", "queue_snapshot.json", "usage_attempts.jsonl",
+    for token in ("settings.json", "queue_snapshot.json", "usage.sqlite",
                   "terminal_deliveries.json", "chat.jsonl"):
         assert f"`{token}`" in doc, f"layout inventory lost the `{token}` entry"
 

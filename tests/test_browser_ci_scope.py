@@ -68,7 +68,7 @@ def test_one_browser_lane_serves_pull_requests_manual_tags_and_ouroboros_pushes(
     # A push reaches the lane through its own workflow, never through ci.yml's
     # push trigger.
     assert "push" not in caller["if"] and "schedule" not in caller["if"]
-    assert ci_triggers["schedule"] == [{"cron": "37 4 * * *"}]
+    assert "schedule" not in ci_triggers  # owner, 2026-10-05: no nightly run nobody reads
 
     assert list(push_triggers) == ["push", "workflow_dispatch"]
     assert push_triggers["workflow_dispatch"]["inputs"]["diagnostic"]["options"] == [

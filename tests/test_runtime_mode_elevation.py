@@ -902,8 +902,12 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
             "the raw document with only its context compatibility pair changed, in serializer "
             "bytes. Routing through the prologue would merge defaults and turn unrelated absence "
             "into authorship.",
-        ("ouroboros/usage_legacy_import.py", "_legacy_snapshot"):
+        ("ouroboros/usage_journal.py", "legacy_snapshot"):
             "reads/hashes the settings file for the usage archive; its writes target the archive.",
+        ("ouroboros/review_run_isolation.py", "isolate_review_data"):
+            "points the isolated review at the host settings (or the drive's unwritten default path) "
+            "and hashes them for the integrity pin; its one write is the drive's isolation record "
+            "(contributor-review-isolation.json), never a settings document.",
         ("ouroboros/tools/core.py", "_data_write"):
             "names SETTINGS_PATH only to REFUSE agent writes to it.",
         ("ouroboros/colab_bootstrap.py", "write_colab_settings"):

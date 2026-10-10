@@ -36,15 +36,14 @@ LC2_LEAF_OWNERS: dict[str, tuple[str, str]] = {
         "ouroboros.agent_task_pipeline",
         "build_trace_summary _update_improvement_backlog _apply_reflection_memory_actions "
         "_child_task_evidence _pre_synthesis_usage_snapshot _compact_review_projection "
-        "_record_task_facts _run_chat_consolidation "
+        "_record_task_facts _run_memory_fallback_draft "
         "_run_scratchpad_consolidation _run_reflection"
     ),
-    "ouroboros.usage_legacy_import": (
-        "ouroboros.usage_accounting",
-        "IMPORT_REL _legacy_snapshot ensure_legacy_imported _completed_import_watermark "
-        "_ensure_legacy_imported_locked"
-    ),
 }
+# The third L-C2 leaf (ouroboros/usage_legacy_import.py) was retired with the
+# usage store: its one-time import is the store's migration job
+# (usage_store.migrate_from_journal; the pre-ledger snapshot lives in
+# usage_journal), and usage_accounting re-exports none of it.
 
 
 def test_lc2_owner_facades_preserve_identity():

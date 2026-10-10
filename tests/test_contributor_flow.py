@@ -51,7 +51,13 @@ def test_public_contributor_flow_is_agent_first_and_route_neutral():
     assert "SHAPE, not truth" in guide
     assert "--contributor" in guide
     assert "--base-ref upstream/ouroboros" in guide
-    assert "--head-ref HEAD" in guide
+    # D31: the command runs from a clean checkout of the target base (the installed
+    # body) and names the proposal; the proposal is never that checkout's HEAD.
+    assert "git worktree add --detach ../ouroboros-review upstream/ouroboros" in guide
+    assert "--head-ref <your-branch>" in guide
+    assert "--head-ref HEAD" not in guide
+    assert "installed body's review flow and rules" in guide
+    assert "re-runs itself" not in guide
     assert "review-packet.zip" in guide
     assert "evidence, not a promise to merge" in guide
     assert "OpenRouter" not in guide

@@ -47,8 +47,12 @@ def _native_file_api(port, read_sizes):
         response.read = read
         return response
 
+    from ouroboros.launcher_background import DesktopApi
+
+    # MainApi's real base, and `background` as a headless launch leaves it (no window, no indicator).
     namespace = {"actual_port": port, "pathlib": pathlib, "shutil": shutil,
                  "tempfile": tempfile, "base64": base64, "log": logging.getLogger(__name__),
+                 "DesktopApi": DesktopApi, "background": None,
                  "urllib": SimpleNamespace(parse=urllib.parse, request=SimpleNamespace(urlopen=open_recorded))}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(source), "exec"), namespace)
     return namespace["MainApi"](), sha256(source.read_bytes()).hexdigest()
@@ -155,7 +159,8 @@ def test_large_attachment_returns_through_real_document_handler_and_download(
             assert page.locator(".attach-badge").count() == 28
             page.locator("#chat-input").fill("Return the large attached dataset as a downloadable document.")
             page.locator("#chat-send").click()
-            card = page.locator(".chat-file-card").filter(has_text="large-delivery.bin")
+            # The delivered document, not the owner's own attachment card of the same name.
+            card = page.locator(".chat-bubble.assistant .chat-file-card").filter(has_text="large-delivery.bin")
             card.wait_for(state="visible", timeout=60_000)
             assert calls and len(document_frames) == 1
             frame = document_frames[0]

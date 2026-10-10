@@ -142,14 +142,15 @@ def test_the_model_has_no_argument_that_could_widen_the_profile():
     entry = next(e for e in delegate.get_tools() if e.name == "delegate_start")
     properties = set(entry.schema["parameters"]["properties"])
     # `retry_of` names an INVOCATION, not authority (ownership-checked replay);
-    # `continue_from` names this task's OWN settled run (custody-checked, same
-    # executor and authority, #1196); root/bucket/skill_name are a SELECTOR
-    # resolved through the same ResolvedResourceBinding authorizer as ordinary
-    # writes (R1 item 9).
+    # `continue_from` names a settled run of this task's line (custody-checked; access
+    # never wider) and `continue_carrier` only how the engine re-briefs it;
+    # root/bucket/skill_name are a SELECTOR resolved through the same
+    # ResolvedResourceBinding authorizer as ordinary writes (R1 item 9).
     assert properties == {
-        "prompt", "subagent_id", "max_seconds", "retry_of", "continue_from", "root", "bucket",
-        "skill_name", "directory_strategy", "scope_paths", "access",
+        "prompt", "subagent_id", "max_seconds", "retry_of", "continue_from", "continue_carrier", "root",
+        "bucket", "skill_name", "directory_strategy", "scope_paths", "access",
     }
+    assert entry.schema["parameters"]["properties"]["continue_carrier"]["enum"] == ["auto", "packet"]
     assert entry.schema["parameters"]["properties"]["root"]["enum"] == ["active_workspace", "skill_payload"]
     assert entry.schema["parameters"]["properties"]["access"]["enum"] == ["readonly", "workspace_write"]
     assert not properties & {"mode", "isolation", "scope", "write_surface", "cwd"}

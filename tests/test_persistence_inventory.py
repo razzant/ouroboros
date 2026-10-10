@@ -4,7 +4,8 @@ The scanner AST-walks every runtime module (``ouroboros/``, ``supervisor/``,
 ``server.py``, ``launcher.py``) and collects every data-relative path it
 constructs: ``/``-join chains rooted at a data-root expression, chains whose
 leading literal is a known top-level data entity, ``pathlib.Path("literal")``
-chain bases, and ``drive_path("literal")`` calls.
+chain bases, ``drive_path("literal")`` calls, and source-handle stores with
+literal or constant category, source id and extension arguments.
 
 A segment is resolved to the name the SOURCE STATES — a module or imported
 string constant, a literal ``Path`` chain, the literal text of an f-string, a
@@ -165,20 +166,25 @@ def _literal_path_chain(node: ast.expr) -> str | None:
     return _normalize(parts) or None
 
 
-def _module_constants(tree: ast.AST) -> dict[str, str]:
+def _module_constants(tree: ast.AST, *, exact_strings: bool = False) -> dict[str, str]:
     """``NAME`` -> its literal string/path value, when the file binds it once.
 
     A name the file rebinds (or binds to something non-literal) resolves to
     nothing: an ambiguous constant must not become a claimed file name.
+    ``exact_strings`` limits source-store arguments to module string literals,
+    excluding path expressions, partially known f-strings and function locals.
     """
     seen: dict[str, set] = {}
-    for node in ast.walk(tree):
+    for node in (_own_nodes(tree) if exact_strings else ast.walk(tree)):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         value = node.value
         literal = None
-        if value is not None:
+        if exact_strings:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                literal = value.value
+        elif value is not None:
             literal = _literal_segment(value)
             if literal is None:
                 literal = _literal_path_chain(value)
@@ -274,6 +280,7 @@ class _PathResolver:
     def __init__(self, root: pathlib.Path) -> None:
         self.trees: dict[pathlib.Path, ast.AST] = {}
         self.consts: dict[pathlib.Path, dict[str, str]] = {}
+        self.source_consts: dict[pathlib.Path, dict[str, str]] = {}
         repo_wide: dict[str, set] = {}
         for path in _scanned_files(root):
             try:
@@ -282,12 +289,17 @@ class _PathResolver:
                 continue
             self.trees[path] = tree
             self.consts[path] = _module_constants(tree)
+            self.source_consts[path] = _module_constants(tree, exact_strings=True)
             for name, value in self.consts[path].items():
                 repo_wide.setdefault(name, set()).add(value)
         self.repo_consts = {
             name: next(iter(values))
             for name, values in repo_wide.items()
             if len(values) == 1
+        }
+        self.source_modules = {
+            ".".join(path.relative_to(root).with_suffix("").parts): values
+            for path, values in self.source_consts.items()
         }
         self.functions = {
             path: [n for n in ast.walk(tree)
@@ -396,6 +408,11 @@ class _PathResolver:
     def _locals(self, scope: ast.AST, consts: dict[str, str],
                 nodes: list[ast.AST]) -> dict[str, str]:
         local: dict[str, str] = {}
+        if self.current.name == "image_preparation.py" and getattr(scope, "name", "") == "retain_original":
+            # Both callers (context.build_user_content and tools.vision's loader)
+            # pass their data owner's uploads/views. Bind only this parameter,
+            # never a generic directory name in other writers.
+            local["directory"] = "uploads/views"
         created_dirs = {node.func.value.id for node in nodes
                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and node.func.attr == "mkdir" and isinstance(node.func.value, ast.Name)}
@@ -485,11 +502,57 @@ class _PathResolver:
 
     # -- the scan -----------------------------------------------------------
 
+    def _source_handle_path(self, node: ast.Call, scope: ast.AST) -> str | None:
+        """Name literal source-store calls by the artifact writer's contract.
+
+        Unlike a path f-string, a dynamic source id passes through sanitation
+        and truncation before becoming a filename. Only exact strings can be
+        resolved here; a guessed wildcard must not stand in for those bytes.
+        """
+        shadowed = ({arg.arg for arg in ast.walk(scope.args) if isinstance(arg, ast.arg)}
+                    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else set())
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            shadowed.update(node.id for node in self.own_nodes(scope)
+                            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
+        own_bindings = {node.id for node in self.own_nodes(self.trees[self.current])
+                        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+        imports = {}
+        for item in self.own_nodes(self.trees[self.current]) + self.own_nodes(scope):
+            if isinstance(item, ast.ImportFrom) and item.level == 0:
+                for alias in item.names:
+                    imports.setdefault(alias.asname or alias.name, set()).add((item.module, alias.name))
+
+        def exact_string(value: ast.expr) -> str | None:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return value.value
+            if isinstance(value, ast.Name) and value.id not in shadowed:
+                if value.id in self.source_consts[self.current]:
+                    return self.source_consts[self.current][value.id]
+                if value.id not in own_bindings and len(imports.get(value.id, ())) == 1:
+                    module, name = next(iter(imports[value.id]))
+                    return self.source_modules.get(module, {}).get(name)
+            return None
+
+        args = {arg.arg: exact_string(arg.value) for arg in node.keywords}
+        category, source_id, extension = (args.get(key) for key in
+                                          ("category", "source_id", "extension"))
+        if category is None or source_id is None or extension is None:
+            return None
+        # artifacts.store_actor_source_bytes owns this layout and sanitation.
+        category = category.strip()
+        if category not in {"context_checkpoints", "tool_results", "delegated_activity"}:
+            return None
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_id or "source").strip("._")
+        safe_id = safe_id[:160] or "source"
+        safe_extension = re.sub(r"[^A-Za-z0-9]+", "", extension or "bin")[:12] or "bin"
+        return (f"task_results/artifacts/*/source_handles/{category}/"
+                f"{safe_id}-*.{safe_extension}")
+
     def paths(self) -> set[str]:
         found: set[str] = set()
         for path in self.trees:
             self.current = path
-            for _scope, consts, nodes, local in self._scopes(path):
+            for scope, consts, nodes, local in self._scopes(path):
                 consumed: set[int] = set()
                 for node in nodes:
                     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
@@ -510,6 +573,10 @@ class _PathResolver:
                             rel = _normalize([literal])
                             if rel:
                                 found.add(SUBROOT_ALIASES.get(rel, rel))
+                    elif isinstance(node, ast.Call) and _call_name(node) == "store_actor_source_bytes":
+                        rel = self._source_handle_path(node, scope)
+                        if rel:
+                            found.add(rel)
         return found
 
 
@@ -520,9 +587,12 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
     # project id, then appends its history beside that shelf.  Keep these
     # canonical dynamic siblings visible to the inventory audit even though
     # the AST resolver cannot expand the address object's validated prefix.
+    # rebuild_knowledge_index writes shelf / INDEX_FILE for either shelf;
+    # context's shared reader no longer spells the project index path itself.
     if (root / "ouroboros" / "knowledge.py").exists():
         paths.update({
             "projects/*/knowledge/*.md",
+            "projects/*/knowledge/index-full.md",
             "projects/*/knowledge_history.jsonl",
         })
     return frozenset(paths)
@@ -587,7 +657,65 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 300 -> 303: state-initialization witness plus named review source and review_inputs.
 # 303 -> 305: immutable retention names exact text-CAS manifest versions and the
 # existing blob copy destination; both stay under the documented observability store.
-EXPECTED_SCAN_PATHS = 310
+# 308 -> 312 (memory chronicle store): ``memory/chronicle`` with its append-only
+# ``records.jsonl``, the disposable ``index.sqlite3`` and the ``.publication.lock``; one
+# section-6 row each (the directory is answered by the deeper rows).
+# 312 -> 313 (memory legacy import): ``memory/.consolidation.lock``, the legacy
+# writer's flock that the one-time chronicle import also takes, now spelled from the data
+# root; its own section-6 row.
+# 313 -> 312 (memory view): the request no longer reads ``memory/dialogue_summary.md``
+# (the retired flat summary is a chronicle legacy record, imported with the blocks; its row merged
+# into theirs).
+# 312 -> 311 (memory writers): the removed memory pressure upkeep was the only code
+# spelling ``memory/knowledge/overview.md``; the mind still writes the note through the knowledge
+# shelf, whose section-6 row covers it.
+# 311 -> 312 (memory writers): ``memory/chronicle/.fallback.lock``, the fallback memory
+# writer's no-wait lock between two roots' drafts; its own section-6 row (its refusal receipts live in the
+# journal's scan state, the ``records.jsonl`` row).
+# 312 -> 314 (target merge 8d612997c): the two paths the target added on its own
+# 308 -> 310 step land beside the memory change's four.
+# 314 -> 315 (C4 restart/exit): ``state/owned_processes.json``, the installation's ownership set the
+# exit stop reads instead of walking data/state; its own section-2 row.
+# 315 -> 318 (C3 current obligations): state/obligations/*.json, its shared
+# state/obligations.lock, and state/migrations.json; section-2 rows own all three.
+# 318 -> 320 (owned-stop review fix): ``state/owned_processes.pending`` and its lock-free
+# ``*.*.json`` registrations written when the custody lock is held; one section-2 row.
+# 320 -> 321 (obligations rebuild): ``state/obligations/rebuild.owed``, left by a transition whose
+# set write failed so the next start rebuilds the sets; it joins the obligations section-2 row.
+# 321 -> 322 (#1536 reentry): ``task_results/artifacts/*/source_handles/
+# context_checkpoints/presence-reentry-*.json``, retained by presence_continuation
+# through store_actor_source_bytes and resolved by its digest reader; its own section-7 row.
+# 322 -> 337 (#1536 source-store call facts): literal/constant arguments expose
+# presence-transport-queue plus these existing context checkpoints: acceptance,
+# acceptance-artifact-inventory, acceptance-operation, acceptance-packet,
+# acceptance_historical, attachments, completion, historical-acceptance-intent,
+# historical_owner_request, plan-spec, task_input, terminal-delivery and view;
+# tool_results also gains acceptance_tool_trajectory. Existing section-7 rows
+# cover these immutable sources; no stale-row or unresolved-path exemption.
+# Own-body candidates add two existing-owner state paths alongside the retained source store.
+# 339 -> 345 (review ledger): ``state/review_ledger`` with its per-wave ``<record_id>.json``
+# records, the hot ``index.jsonl`` and its rotated ``index.<stamp>[_n].jsonl`` segments
+# (``ouroboros/review_ledger.py``; one section-4 row), plus ``locks/review_ledger.lock``,
+# which the existing ``locks/**`` sidecar row covers.
+# 345 -> 347 (2026-10-07): the isolated review checkout of a frozen review subject,
+# ``state/review_checkouts/<token>`` and its ``repo`` worktree
+# (``ouroboros/tools/review_subject.py`` ``isolated_checkout``; one section-4 row).
+# 347 -> 346 (2026-10-08): the scope-delivery migration disclosure
+# ``state/scope_delivery_migration.json`` is gone with the scope role — the one
+# brief has two parts and no separate scope wave to migrate (its PERSISTENCE.md row
+# was removed with the writer).
+# 346 -> 348 (review pool, PR-3): the review-lane -> review-pool migration receipt
+# ``state/review_migrations/<ts>-slots-to-pool.json`` and its directory
+# (``ouroboros/review_pool_receipts.py`` ``persist_receipts``, written by the process that
+# saves the migrated document — FIX6b moved it there from the supervisor boot; one section-2 row).
+# 348 -> 349 (#1610): first/latest usable author inputs retained by
+# ``context_input_selection._historical_anchor`` in
+# ``task_results/artifacts/*/source_handles/context_checkpoints/historical-author-input-*.json``
+# (one section-7 row; evidence, not current task authority).
+# 349 -> 351 (#1563 saved work): the rolling per-attempt working checkpoint,
+# ``task_results/artifacts/<task>/source_handles/working`` and its ``*.json`` file
+# (``ouroboros/working_checkpoint.py``; one row beside the source-handle rows).
+EXPECTED_SCAN_PATHS = 351
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -604,6 +732,8 @@ SENTINELS = frozenset({
     "logs/chat.jsonl",
     "memory/identity.md",
     "task_results/artifacts/*",
+    "task_results/artifacts/*/source_handles/context_checkpoints/presence-reentry-*.json",
+    "task_results/artifacts/*/source_handles/context_checkpoints/presence-transport-queue-*.json",
     "task_trees/*/blackboard.jsonl",
     "uploads",
     # stage-2: names that live in constants, helper returns or f-strings
@@ -747,6 +877,7 @@ def _covers(scan_path: str, pattern: str, scan_prefix_ok: bool = True) -> bool:
 
 def test_scan_is_populated_and_pinned():
     paths = scan_data_paths()
+    assert "uploads/views/*_*" in paths, "the shared original-retention writer must remain scanned"
     missing_sentinels = sorted(SENTINELS - paths)
     assert not missing_sentinels, (
         f"scanner regressed — sentinel paths vanished: {missing_sentinels}"
@@ -793,6 +924,9 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # "none in this tree ... nothing reads or recreates it". Confirmed by grep —
     # the string `project_source_locks` appears in no .py file.
     "state/project_source_locks",
+    # The retired compactor's archive: "none since the usage store" — kept as
+    # evidence, read only by the explicit history audit (model_send_seal).
+    "archive/usage_ledger/segment_*.jsonl",
 })
 
 
@@ -956,3 +1090,78 @@ def test_resolved_observability_root_matches_real_writer_outputs(tmp_path):
         assert any(fnmatch.fnmatchcase(relative, path) for path in paths)
     assert {"observability/blobs/*.*.gz", "observability/calls/*/*.json"} <= paths
     assert not any(path.startswith(("blobs/", "calls/")) for path in paths)
+
+
+def test_literal_source_handle_calls_match_real_writer_outputs(tmp_path):
+    """Call-site names match real writes, including sanitized/capped extensions."""
+    from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+
+    cases = [
+        {"category": " context_checkpoints ", "source_id": " .queue / Ω * .", "extension": ".j-s_o+n"},
+        {"category": "tool_results", "source_id": "inventory-tool", "extension": "abcdefghijklmnop"},
+        {"category": "context_checkpoints", "source_id": "...", "extension": "!"},
+        {"category": "context_checkpoints", "source_id": "presence-transport-queue", "extension": "json"},
+    ]
+    module = tmp_path / "ouroboros" / "synthetic_writer.py"
+    module.parent.mkdir(parents=True)
+    source = "from ouroboros.artifacts import store_actor_source_bytes\n"
+    calls = []
+    for index, args in enumerate(cases):
+        source += "".join(f"{key.upper()}_{index} = {value!r}\n" for key, value in args.items())
+        calls.append(
+            f"def write_{index}(root):\n"
+            f'    return store_actor_source_bytes(root, "inventory", category=CATEGORY_{index}, '
+            f'source_id=SOURCE_ID_{index}, extension=EXTENSION_{index}, data=b"retained")\n'
+        )
+    constants = module.with_name("source_constants.py")
+    constants.write_text(source, encoding="utf-8")
+    source = "from ouroboros.source_constants import CATEGORY_0 as IMPORTED_CATEGORY\n" + source
+    calls[0] = calls[0].replace("category=CATEGORY_0", "category=IMPORTED_CATEGORY")
+    module.write_text(source + "".join(calls), encoding="utf-8")
+    paths = scan_data_paths(tmp_path)
+    assert len(paths) == len(cases)
+    root = tmp_path / "data"
+    for args in cases:
+        ref = store_actor_source_bytes(root, "inventory", data=b"retained", **args)
+        assert read_actor_source_bytes(root, "inventory", ref) == b"retained"
+        relative = f'task_results/artifacts/inventory/{ref["path"]}'
+        assert any(fnmatch.fnmatchcase(relative, path) for path in paths), (relative, paths)
+
+    queue_path = "task_results/artifacts/*/source_handles/context_checkpoints/presence-transport-queue-*.json"
+    row = f"| `{queue_path}` | writer | schema | retained | loss |\n"
+    assert queue_path in paths and stale_rows(row, paths) == []
+    # Removing just this writer must stale its exact row even while sibling
+    # source stores remain. Reparse because the fixture source has changed.
+    module.write_text(source + "".join(calls[:-1]), encoding="utf-8")
+    assert stale_rows(row, _PathResolver(tmp_path).paths()) == [queue_path]
+
+
+def test_dynamic_source_handle_arguments_do_not_certify_named_rows(tmp_path):
+    module = tmp_path / "ouroboros" / "synthetic_writer.py"
+    module.parent.mkdir(parents=True)
+    module.with_name("foreign_constants.py").write_text(
+        'DYNAMIC_ID = "presence-transport-queue"\n'
+        'REBOUND_ID = "presence-transport-queue"\n'
+        'UNKNOWN_ID = "presence-transport-queue"\n', encoding="utf-8")
+    module.write_text(
+        'from ouroboros.foreign_constants import DYNAMIC_ID\n'
+        'from ouroboros.missing_module import UNKNOWN_ID\n'
+        'CATEGORY = "context_checkpoints"\n'
+        'DYNAMIC_ID = f"queue-{unknown}"\n'
+        'REBOUND_ID = "first"\nREBOUND_ID = "second"\n'
+        'CONDITIONAL_ID = "presence-transport-queue"\nif unknown:\n    CONDITIONAL_ID = unknown\n'
+        'SHADOWED_ID = "presence-transport-queue"\n'
+        'def write(root, source_id, category, extension, SHADOWED_ID):\n'
+        '    store_actor_source_bytes(root, "inventory", category=CATEGORY, source_id=source_id, extension="json")\n'
+        '    store_actor_source_bytes(root, "inventory", category=CATEGORY, source_id=DYNAMIC_ID, extension="json")\n'
+        '    store_actor_source_bytes(root, "inventory", category=CATEGORY, source_id=f"queue-{source_id}", extension="json")\n'
+        '    store_actor_source_bytes(root, "inventory", category=CATEGORY, source_id=REBOUND_ID, extension="json")\n'
+        '    store_actor_source_bytes(root, "inventory", category=CATEGORY, source_id=CONDITIONAL_ID, extension="json")\n'
+        '    store_actor_source_bytes(root, "inventory", category=CATEGORY, source_id=UNKNOWN_ID, extension="json")\n'
+        '    store_actor_source_bytes(root, "inventory", category=CATEGORY, source_id=SHADOWED_ID, extension="json")\n'
+        '    store_actor_source_bytes(root, "inventory", category=category, source_id="queue", extension="json")\n'
+        '    store_actor_source_bytes(root, "inventory", category=CATEGORY, source_id="queue", extension=extension)\n'
+        '    store_actor_source_bytes(root, "inventory", category="invalid", source_id="queue", extension="json")\n',
+        encoding="utf-8",
+    )
+    assert scan_data_paths(tmp_path) == frozenset()

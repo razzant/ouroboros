@@ -8,6 +8,8 @@ const page = (messages, cursor, next = null) => ({ messages, page_cursor: cursor
   has_more: next !== null, window: { complete: !next, truncated_by: next ? ['quota'] : [] } });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+// A room is opened the way app.js opens a Project panel: created, shown at its
+// newest message (owner decision 2026-10-05), painted by the first recent read.
 async function probe(framesBeforeResponse, sendStatus = '') {
   let answerRecent;
   const pendingRecent = new Promise(resolve => { answerRecent = resolve; });
@@ -17,7 +19,7 @@ async function probe(framesBeforeResponse, sendStatus = '') {
     if (!String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     const cursor = new URL(String(url), 'http://local').searchParams.get('cursor');
     calls.push(cursor);
-    const value = cursor ? page(Array.from({ length: 15 }, (_, i) => row(String(100 + i), '12')), 'saved:3')
+    const value = cursor ? page(Array.from({ length: 15 }, (_, i) => row(String(100 + i), '12')), cursor)
       : await pendingRecent;
     return { ok: true, json: async () => value };
   });
@@ -42,11 +44,6 @@ async function probe(framesBeforeResponse, sendStatus = '') {
     stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
       gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {} },
     chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true,
-    initialScrollState: { scrollTop: 2400, stick: false, historyAnchor: { id: 'chat:104', offset: 80 },
-      history: { focus: 3, pages: Array.from({ length: 4 }, (_, index) => ({
-        id: `history-page-1-${index}`, chain: 1, index, requestCursor: `saved:${index}`,
-        nextCursor: index < 3 ? `saved:${index + 1}` : null, hasMore: index < 3, rows: 15,
-      })) } },
   });
   feed = document.byId.get('chat-messages');
   Object.defineProperty(feed, 'scrollHeight', { configurable: true, get() { return this.children.length * 100; }, set() {} });
@@ -54,9 +51,8 @@ async function probe(framesBeforeResponse, sendStatus = '') {
   Object.defineProperty(feed, 'scrollTop', { configurable: true, get() { return top; },
     set(value) { top = Math.max(0, Math.min(Number(value), this.scrollHeight - this.clientHeight)); } });
   async function frame() { const batch = frames; frames = []; for (const fn of batch) fn(); await tick(); }
-  instance.restoreScrollPosition();
+  const shown = instance.showLatest();
   const painted = instance.refreshHistory({ revision: 1 });
-  const pendingBookmark = instance.getScrollState();
   await tick();
   for (let i = 0; i < framesBeforeResponse; i++) await frame();
   const input = document.byId.get('chat-input'), files = document.byId.get('chat-file-input');
@@ -66,47 +62,39 @@ async function probe(framesBeforeResponse, sendStatus = '') {
       files.files = [{ name: 'kept.txt', type: 'text/plain' }];
       for (const listener of files.listeners.get('change')) listener({ target: files });
     }
-    input.value = 'Sent while the saved place loads';
+    input.value = 'Sent while the room loads';
     for (const listener of input.listeners.get('keydown')) listener({ key: 'Enter', target: input, preventDefault() {} });
     for (let i = 0; i < 5; i++) await tick();
   }
   answerRecent(page(Array.from({ length: 15 }, (_, i) => row(String(900 + i), '21')), 'latest:0', 'older:1'));
   for (let i = 0; i < 35; i++) await frame();
-  await painted;
-  const messages = feed.children.filter(node => node.dataset.historyId);
-  const target = messages.find(node => node.dataset.historyId === 'chat:104');
-  const result = { pendingBookmark, framesBeforeResponse, requests: calls, scrollTop: feed.scrollTop,
+  await painted; await shown;
+  const result = { requests: calls, scrollTop: feed.scrollTop,
     bottom: feed.scrollHeight - feed.clientHeight,
     echo: (rows => (at => at < 0 ? null : at - rows.length)(rows.map(node => node.dataset.clientMessageId).lastIndexOf('sent-1')))(
       feed.children.filter(node => !node.classList.contains('typing-bubble'))),
     draft: input.value, staged: instance.hasPendingWork(),
-    targetOffset: target?.getBoundingClientRect().top, savedOffset: 80,
-    mountedHistoryIds: messages.map(node => node.dataset.historyId),
-    gapMarker: feed.querySelector('.chat-load-newer') !== null,
-    historyNote: (feed.parentNode.querySelector('.chat-panel-statusbar').querySelector('.chat-load-older-note') || feed.querySelector('.chat-load-older').querySelector('.chat-load-older-note'))?.textContent };
+    mountedHistoryIds: feed.children.filter(node => node.dataset.historyId).map(node => node.dataset.historyId) };
   instance.destroy();
   ElementStub.prototype.getBoundingClientRect = oldRect;
   restoreDom(prior); globalThis.WebSocket = oldSocket;
   return result;
 }
-for (const frames of [0, 60]) test(`saved deep page waits for data (${frames} frames), not a frame deadline`, async () => {
+for (const frames of [0, 60]) test(`a reopened room lands at its newest message once data arrives (${frames} frames)`, async () => {
     const result = await probe(frames);
-    assert.equal(result.targetOffset, 80);
-    assert.equal(result.pendingBookmark.historyAnchor.id, 'chat:104', 'close while pending retains the original target');
-    assert.equal(result.pendingBookmark.scrollTop, 2400);
-    assert.deepEqual(result.requests, [null, 'saved:3']);
-    assert.match(result.historyNote, /Shown messages may have gaps/);
+    assert.deepEqual(result.requests, [null], 'only the recent read: no saved page is fetched');
+    assert.equal(result.scrollTop, result.bottom);
+    assert.equal(result.mountedHistoryIds.at(-1), 'chat:914');
 });
-for (const status of ['sent', 'queued']) test(`an accepted Send (${status}) supersedes a saved place still loading`, async () => {
+for (const status of ['sent', 'queued']) test(`an accepted Send (${status}) while the room loads stays at the newest message`, async () => {
     const result = await probe(0, status);
     assert.equal(result.echo, -1, 'the local echo is the newest row');
-    assert.equal(result.scrollTop, result.bottom, 'the late read cannot pull the reader back to the old place');
-    assert.notEqual(result.targetOffset, 80);
+    assert.equal(result.scrollTop, result.bottom);
 });
-test('a Send that fails keeps the saved place, the draft and the attachment', async () => {
+test('a Send that fails keeps the draft and the attachment', async () => {
     const result = await probe(0, 'failed');
-    assert.equal(result.targetOffset, 80);
-    assert.deepEqual([result.echo, result.draft, result.staged], [null, 'Sent while the saved place loads', true]);
+    assert.deepEqual([result.echo, result.draft, result.staged], [null, 'Sent while the room loads', true]);
+    assert.equal(result.scrollTop, result.bottom);
 });
 
 
@@ -136,8 +124,8 @@ test('canonical legacy origin adopts the retained node despite a different sourc
 });
 
 for (const shallow of [false, true]) test(shallow
-    ? 'a partial recent window whose present ↓ need not read still lets a retained room reopen at its live place'
-    : 'a clean latest read after a source-unavailable recent window restores readiness for a retained reopen', async () => {
+    ? 'a partial recent window whose present ↓ need not read still lets a retained room reopen at its newest message'
+    : 'a clean latest read after a source-unavailable recent window lets a retained room reopen at its newest message', async () => {
     const span = (from, to) => ({ from, to, chain: 'c', gaps: [] });
     const coverage = (chat, progress) => ({ v: 1, view: 'v', upper: { chat: chat.to, progress: 0 }, spans: { chat, progress } });
     const empty = { from: 0, to: 0, chain: 'empty', gaps: [] };
@@ -179,11 +167,10 @@ for (const shallow of [false, true]) test(shallow
             assert.notEqual(status().button, 'Retry loading messages', 'the clean latest window supersedes the failed recent read');
             assert.doesNotMatch(status().note, /could not be loaded/);
         }
-        // A hidden pending-work room reopens at the same revision without another read.
+        // A hidden pending-work room reopens at the newest message, at the same revision without another read.
         const before = calls.length;
-        instance.restoreScrollPosition();
+        await instance.showLatest();
         await instance.refreshHistory({ revision: 2 });
         assert.equal(calls.length, before);
-        assert.ok('disclosures' in instance.getScrollState(), 'the reopened reading intent was applied, not left pending');
     } finally { instance.destroy(); restoreDom(prior); }
 });

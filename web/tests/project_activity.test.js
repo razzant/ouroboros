@@ -87,7 +87,7 @@ test('partial or disconnected census never clears a previous active row', () => 
     const uncertain = buildProjectActivityIndex([...partial.rows.values()]);
     assert.equal(uncertain.byProject.get('p').state, 'unknown');
     assert.equal(uncertain.byProject.get('p').motion, false);
-    assert.equal(uncertain.byProject.get('p').label, 'Activity status unavailable');
+    assert.equal(uncertain.byProject.get('p').label, 'Activity unconfirmed');
     const disconnected = reconcileProjectActivityCensus(partial.rows, {});
     assert.equal(disconnected.rows.has('live'), true);
     const disconnectedIndex = buildProjectActivityIndex([...disconnected.rows.values()]);
@@ -110,7 +110,7 @@ test('a partial census marks only omissions unknown and does not mutate producer
     assert.equal(index.byProject.get('p').state, 'unknown');
     assert.equal(index.byProject.get('p').motion, false);
     assert.equal(index.byProject.get('q').motion, true);
-    assert.match(index.aggregate.label, /Thinking.*Activity status unavailable/);
+    assert.match(index.aggregate.label, /Thinking.*Activity unconfirmed/);
     assert.equal(Object.hasOwn(one, '_activityUnconfirmed'), false);
     assert.equal(Object.hasOwn(two, '_activityUnconfirmed'), false);
     const restored = reconcileProjectActivityCensus(partial.rows, { active_chat_activities: [one] });
@@ -149,7 +149,7 @@ test('model waits use the existing current-attempt rule and questions end on the
 });
 
 test('budget-paused work is a stationary wait, not a queue', () => { const s=summarizeProjectActivities([activity({phase:'budget_paused'})]); assert.equal(s.state,'waiting'); assert.equal(s.motion,false); assert.equal(s.label,'Paused'); });
-test('budget-pausing work (#1196) is stationary and never a false terminal or motion', () => { const s=summarizeProjectActivities([activity({phase:'budget_pausing'})]); assert.equal(s.state,'waiting'); assert.equal(s.motion,false); assert.equal(s.label,'Pausing'); });
+test('budget-pausing work (#1196) is stationary and never a false terminal or motion', () => { const s=summarizeProjectActivities([activity({phase:'budget_pausing'})]); assert.equal(s.state,'waiting'); assert.equal(s.motion,false); assert.equal(s.label,'Pausing…'); });
 
 test('model wait rows pass the same admission as the chat card: malformed waits cannot stop motion', () => {
     // Missing wait_id/revision/reason: the card would drop this row, so must the sidebar.
@@ -173,9 +173,9 @@ test('a row whose owner-question detail could not be read is static unknown, nev
     const s = summarizeProjectActivities([row]);
     assert.equal(s.motion, false);
     assert.equal(s.state, 'unknown');
-    assert.match(s.label, /Activity status unavailable/);
+    assert.match(s.label, /Activity unconfirmed/);
     // Beside an independently confirmed working row the project still moves, and the gap stays named.
     const mixed = summarizeProjectActivities([row, activity({ activity_id: 'b', project_id: 'p', phase: 'working' })]);
     assert.equal(mixed.motion, true);
-    assert.match(mixed.label, /Activity status unavailable/);
+    assert.match(mixed.label, /Activity unconfirmed/);
 });

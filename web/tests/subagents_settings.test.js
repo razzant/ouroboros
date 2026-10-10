@@ -12,7 +12,9 @@ import {
     serializeRouteSpec,
 } from '../modules/route_editor_primitives.js';
 import {
+    ALLOW_EMPTY_REVIEW_POOL,
     MAX_AVAILABLE_SUBAGENTS,
+    REVIEW_POOL_DEFAULT_EFFORT,
     availableSubagentsHasExplicitDraft,
     availableSubagentRowMarkup,
     availableSubagentsLoadValue,
@@ -21,13 +23,16 @@ import {
     buildAvailableSubagentsSetting,
     createAvailableSubagentsEditor,
     generatedPreviewCanReplace,
+    lastReviewRunText,
     parseAvailableSubagentsSetting,
     renderSubagentsSection,
+    reviewCostText,
+    reviewPoolErrors,
+    reviewPoolRows,
     subagentSettingsFingerprint,
     validateAvailableSubagentsSetting,
 } from '../modules/subagents_settings.js';
-import { buildReviewerSlotsSetting } from '../modules/reviewer_slots.js';
-import { rowMeta, rowStatus, sessionRouteVerdict } from '../modules/subagent_status_primitives.js';
+import { reviewTwinAllowed, rowMeta, rowStatus, rowTaskRun, sessionRouteVerdict } from '../modules/subagent_status_primitives.js';
 import { revealNewRow } from '../modules/ui_helpers.js';
 
 const CONTRACT_FIXTURE = JSON.parse(fs.readFileSync(
@@ -62,6 +67,18 @@ function sessionRow(overrides = {}) {
 function setting(items = [apiRow(), sessionRow()]) {
     return { enabled: true, items };
 }
+
+// An edited catalog is judged for its review pool too; this row keeps that
+// pool non-empty on its own engine, so the twin rules under test stay alone.
+function poolReviewer(overrides = {}) {
+    return apiRow({
+        subagent_id: 'pool_reviewer', recommended_use: 'Reviews changes.',
+        route: { kind: ROUTE_KIND_API_MODEL, target_id: 'anthropic/claude-opus-5' },
+        review_eligible: true, ...overrides,
+    });
+}
+
+const EMPTY_POOL_ERROR = 'No row is marked Reviewer. Mark at least one row, or tick “Save without reviewers”.';
 
 test('canonical parser accepts object or JSON and refuses unknown saved fields', () => {
     const objectResult = parseAvailableSubagentsSetting(setting());
@@ -191,7 +208,7 @@ test('loaded saved rows remain collectible when live status is unavailable', () 
     });
 });
 
-test('validation protects stable unique IDs, route shape, effort and ten-row limit', () => {
+test('validation protects stable unique IDs, route shape, effort and the row limit', () => {
     assert.deepEqual(validateAvailableSubagentsSetting(setting()), []);
     assert.match(validateAvailableSubagentsSetting(setting([
         apiRow(), apiRow({ name: 'duplicate' }),
@@ -214,9 +231,33 @@ test('validation protects stable unique IDs, route shape, effort and ten-row lim
     assert.match(validateAvailableSubagentsSetting(setting([
         sessionRow({ route: { kind: ROUTE_KIND_AGENT_SESSION, target_id: 'codex=' } }),
     ])).join(' '), /harness=model/);
+    // The ceiling is the catalog's (MAX_CONFIGURED_SUBAGENTS, 26 since the review
+    // pool joined the catalog); the message quotes the module constant.
     const tooMany = Array.from({ length: MAX_AVAILABLE_SUBAGENTS + 1 }, (_, index) =>
         apiRow({ subagent_id: `actor_${index}` }));
-    assert.match(validateAvailableSubagentsSetting(setting(tooMany)).join(' '), /at most 10/);
+    assert.match(validateAvailableSubagentsSetting(setting(tooMany)).join(' '),
+        new RegExp(`at most ${MAX_AVAILABLE_SUBAGENTS}\\b`));
+});
+
+test('the catalog holds 26 rows: they load and save, and a 27th is refused on read and on save', () => {
+    assert.equal(MAX_AVAILABLE_SUBAGENTS, 26);
+    const rows = (length) => Array.from({ length }, (_, index) => apiRow({
+        subagent_id: `actor_${index}`, route: { kind: ROUTE_KIND_API_MODEL, target_id: `openai/model-${index}` },
+    }));
+    const full = parseAvailableSubagentsSetting(setting(rows(26)));
+    assert.equal(full.error, '');
+    assert.equal(full.setting.items.length, 26);
+    assert.deepEqual(validateAvailableSubagentsSetting(full.setting, { uniqueEngines: true }), []);
+    assert.match(parseAvailableSubagentsSetting(setting(rows(27))).error, /more than 26 rows/);
+    assert.deepEqual(validateAvailableSubagentsSetting(setting(rows(27))), ['Available subagents supports at most 26 rows.']);
+    // A full catalog offers neither Add nor Duplicate a 27th row.
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(full.setting);
+    dom.toolbar.add.emit('click', '');
+    dom.row(25).querySelector('[data-subagent-duplicate]').emit('click');
+    assert.equal(editor.setting.items.length, 26);
+    editor.destroy();
 });
 
 test('Settings loads the backend migration candidate when no new setting is materialized', () => {
@@ -403,7 +444,7 @@ test('API and session rows render different controls; account belongs only to se
     const sessionHtml = availableSubagentRowMarkup(sessionRow(), state);
     assert.match(sessionHtml, /aria-label="Agent session model for Subagent 1"/);
     assert.match(sessionHtml, /data-subagent-field="account"/);
-    assert.match(sessionHtml, /Account: koshak \(pinned\)/);
+    assert.match(sessionHtml, />Account <select[^>]*data-subagent-field="account"[\s\S]*>koshak \(pinned\)</);
 });
 
 test('saved unavailable session route and account remain selectable', () => {
@@ -416,7 +457,7 @@ test('saved unavailable session route and account remain selectable', () => {
     const html = availableSubagentRowMarkup(sessionRow(), state);
     assert.match(html, /codex \(not in discovery\)/);
     assert.match(html, /gpt-5.6-sol-high \(not in discovery\)/);
-    assert.match(html, /Account: koshak \(not in discovery\)/);
+    assert.match(html, />koshak \(not in discovery\)</);
     assert.match(html, /currently unavailable/);
 });
 
@@ -566,19 +607,19 @@ test('last actual execution uses the one typed receipt and only its exact actor 
         },
     };
     const matching = availableSubagentRowMarkup(sessionRow(), state);
-    assert.match(matching, /Last actual run: codex session/);
+    assert.match(matching, /<dt>Last task run<\/dt><dd>Settings not reported · codex session/);
     assert.match(matching, /GPT-5\.6 Sol High/);
     assert.match(matching, /account koshak/);
 
     const other = availableSubagentRowMarkup(sessionRow({ subagent_id: 'other' }), state);
-    assert.doesNotMatch(other, /Last actual run:/);
+    assert.match(other, /<div hidden data-subagent-last-task><dt>Last task run<\/dt><dd><\/dd>/);
 
     state.snapshot.subagent_last_delegation.applied_model = '';
     state.snapshot.subagent_last_delegation.applied_profile = '';
     const oldReceipt = availableSubagentRowMarkup(sessionRow(), state);
-    assert.match(oldReceipt, /Last actual run: codex session · model not disclosed/);
-    assert.doesNotMatch(oldReceipt, /Last actual run:[^<]*gpt-5\.6-sol-high/);
-    assert.doesNotMatch(oldReceipt, /Last actual run:[^<]*account koshak/);
+    assert.match(oldReceipt, /<dd>Settings not reported · codex session · model not disclosed/);
+    assert.doesNotMatch(oldReceipt, /Last task run<\/dt><dd>[^<]*gpt-5\.6-sol-high/);
+    assert.doesNotMatch(oldReceipt, /Last task run<\/dt><dd>[^<]*account koshak/);
 });
 
 test('preview replaces only a clean generated baseline', () => {
@@ -627,16 +668,16 @@ test('dated API failures stay informational and bind to the exact execution choi
             failure_code: 'quota_exhausted', ts: '2026-09-18T12:00:00Z', occurred_at: '2026-09-18T12:00:00Z',
             identity: { ...row.route, credential_profile_id: '', effort: 'high', processing_preference: 'standard' } },
     } } } };
-    const meta = rowMeta(row, state, []);
-    assert.equal(meta.tone, '');
-    assert.match(meta.text, /Last run: API model.*failed \(quota_exhausted\).*2026-09-18/);
-    assert.equal(rowMeta({ ...row, recommended_use: 'Changed description' }, state, []).text, meta.text);
+    const run = rowTaskRun(row, state);
+    assert.deepEqual(rowMeta(row, state, []), { text: '', tone: '' }, 'a past failure is history, not a current meta line');
+    assert.match(run, /^API model.*failed \(quota_exhausted\).*2026-09-18/);
+    assert.equal(rowTaskRun({ ...row, recommended_use: 'Changed description' }, state), run);
     for (const changed of [
         { ...row, effort: 'low' },
         { ...row, processing_preference: 'flex' },
         { ...row, route: { ...row.route, target_id: 'another-model' } },
         { ...row, route: { ...row.route, credential_profile_id: 'another-account' } },
-    ]) assert.match(rowMeta(changed, state, []).text, /Earlier settings:/);
+    ]) assert.match(rowTaskRun(changed, state), /^Earlier settings · /);
     const oldStatus = rowStatus(row, state);
     delete state.snapshot.subagent_last_delegation;
     assert.deepEqual(rowStatus(row, state), oldStatus, 'history never changes live admission/status');
@@ -675,29 +716,6 @@ test('shared route primitive preserves each semantic owner account spelling', ()
     }), sessionRow().route);
 });
 
-test('reviewer structured bytes keep api_chat and profile_id after extraction', () => {
-    const reviewer = buildReviewerSlotsSetting({
-        triad: [{
-            slot_id: 'triad_1',
-            route: {
-                kind: 'agent_session',
-                target_id: 'codex=gpt-5.6-sol-high',
-                profile_id: 'koshak',
-            },
-            effort: 'high',
-        }],
-        scope: [{
-            slot_id: 'scope_1',
-            route: { kind: 'api_chat', target_id: 'openai/gpt-5.6-sol' },
-        }],
-        advisory: { enabled: true, route: { kind: 'api_chat', target_id: '' }, effort: 'low' },
-    });
-    const parsed = JSON.parse(reviewer);
-    assert.equal(parsed.triad[0].route.profile_id, 'koshak');
-    assert.equal(parsed.triad[0].route.credential_profile_id, undefined);
-    assert.equal(parsed.scope[0].route.kind, 'api_chat');
-});
-
 test('Settings section keeps global task-authority controls beside the actor list', () => {
     const html = renderSubagentsSection();
     assert.match(html, /<h3>Available subagents<\/h3>/);
@@ -708,6 +726,8 @@ test('Settings section keeps global task-authority controls beside the actor lis
     assert.match(html, /id="s-subagent-worktree-root"/);
     assert.match(html, /id="s-subagent-projects-root"/);
     assert.doesNotMatch(html, /chooses one by its stable ID/);
+    assert.match(html, /Rows marked Reviewer form the review pool/);
+    assert.doesNotMatch(html, /review lane|triad|scope review/i);
 });
 
 test('revealNewRow scrolls the shortest distance and focuses the named field without a second scroll', () => {
@@ -731,15 +751,15 @@ const QUIET_STATE = Object.freeze({
     dirty: false, baseline: 'saved', saveAttempted: false,
 });
 
-test('the card head carries the ordinal, the route mark, a two-word status and the actions', () => {
-    // docs/DESIGN.md §6 row anatomy on the compact card: one primary thing (the
-    // ordinal), the harness mark, a dot + short words for the two status axes
-    // (intent · availability, full sentences in the title), actions docked right.
+test('the card head carries the ordinal, the route mark, one availability word and the actions', () => {
+    // docs/DESIGN.md §6 row anatomy on the open card: one primary thing (the
+    // ordinal), the harness mark, a dot + one availability word (the sentence in
+    // its title; saved/draft intent is one editor fact), Reviewer and actions docked right.
     const html = availableSubagentRowMarkup(sessionRow(), QUIET_STATE, 2);
     const head = html.slice(html.indexOf('available-subagent-head'), html.indexOf('available-subagent-purpose'));
     assert.match(head, /class="available-subagent-heading"[^>]*>Subagent 3</);
     assert.match(head, /available-subagent-route-identity-wrap/);
-    assert.match(head, /class="settings-inline-status" data-subagent-status data-tone="neutral" title="Saved intent · Agent session · live availability not checked">Saved · Not checked</);
+    assert.match(head, /class="settings-inline-status" data-subagent-status data-tone="neutral" title="Agent session · live availability not checked">Not checked</);
     assert.match(head, /data-subagent-duplicate/);
     assert.match(head, /data-subagent-remove/);
     assert.match(html, /<textarea\b[^>]*data-subagent-field="recommended_use" rows="1"/);
@@ -750,7 +770,7 @@ test('the card head carries the ordinal, the route mark, a two-word status and t
     // An API model's availability is only known when a child starts: the
     // second word says that instead of repeating the route mark beside it.
     const api = availableSubagentRowMarkup(apiRow(), { ...QUIET_STATE, dirty: true }, 0);
-    assert.match(api, /data-tone="neutral" title="Draft intent · OpenRouter API model · availability is checked when a child starts">Draft · Checked at start</);
+    assert.match(api, /data-tone="neutral" title="OpenRouter API model · availability is checked when a child starts">Checked at start</);
 });
 
 test('a fresh row invites instead of erroring until the owner tries to save', () => {
@@ -795,11 +815,11 @@ test('validate() stays pure and names rows the way the cards do', () => {
 test('sessionRouteVerdict decides label, tone and sentence together', () => {
     const unchecked = sessionRouteVerdict(sessionRow(), { catalogKnown: false, accountsKnown: false });
     assert.deepEqual(unchecked, {
-        label: 'Not checked', tone: 'neutral', text: 'Agent session · live availability not checked',
+        label: 'Not checked', tone: 'neutral', text: 'Agent session · live availability not checked', reason: '',
     });
     const gone = { catalogKnown: true, accountsKnown: true, quotaKnown: true, snapshot: { harnesses: [] } };
     const missing = sessionRouteVerdict(sessionRow(), gone);
-    assert.deepEqual(missing, { label: 'Unavailable', tone: 'warn', text: 'codex · currently unavailable' });
+    assert.deepEqual(missing, { label: 'Unavailable', tone: 'warn', text: 'codex · currently unavailable', reason: '' });
 });
 
 test('the verdict reads a reviewer row pin, spelled profile_id, not only the roster spelling', () => {
@@ -825,6 +845,52 @@ test('the verdict reads a reviewer row pin, spelled profile_id, not only the ros
     assert.match(live.text, /pinned account koshak currently unavailable/);
 });
 
+function pinnedAccountState(verification) {
+    return {
+        ...QUIET_STATE, catalogKnown: true, accountsKnown: true, quotaKnown: true, statusError: '',
+        snapshot: {
+            harnesses: [{ id: 'codex', status: 'ok', enabled: true, models: [{ id: 'gpt-5.6-sol-high' }] }],
+            profiles: { harnessAccounts: [], profiles: [{
+                profile: { harness_id: 'codex', profile_id: 'koshak', enabled: true }, status: { verification },
+            }] },
+            quota: [{ subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'fresh', constraints: [] }],
+        },
+    };
+}
+const PINNED_UNAVAILABLE = 'codex · pinned account koshak currently unavailable';
+
+test('a row that will not run says why in a visible line and keeps its title', () => {
+    // A phone, the Telegram mini app or a touch screen has no hover: the title alone hid the reason.
+    const blocked = availableSubagentRowMarkup(sessionRow(), pinnedAccountState('failed'), 0);
+    assert.match(blocked, new RegExp(`data-subagent-status data-tone="warn" title="${PINNED_UNAVAILABLE}">Unavailable<`));
+    assert.match(blocked, new RegExp(
+        `<div class="available-subagent-status-reason" data-subagent-status-reason>${PINNED_UNAVAILABLE}</div>`));
+    // A row that runs, one not checked yet and an API row checked when a child starts carry no reason line.
+    for (const html of [
+        availableSubagentRowMarkup(sessionRow(), pinnedAccountState('passed'), 0),
+        availableSubagentRowMarkup(sessionRow(), QUIET_STATE, 0),
+        availableSubagentRowMarkup(apiRow(), pinnedAccountState('failed'), 0),
+    ]) assert.match(html, /<div class="available-subagent-status-reason" data-subagent-status-reason hidden><\/div>/);
+});
+
+test('the status reason line follows a live status change in place', async () => {
+    const store = {
+        error: '', snapshot: pinnedAccountState('failed').snapshot,
+        facet: () => 'ok', subscribe: () => () => {}, refresh: async () => {},
+    };
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ store, doc: dom.doc, win: null });
+    editor.load(setting([sessionRow()]));
+    await editor.reloadStatus();
+    assert.equal(dom.row(0).status.textContent, 'Unavailable');
+    assert.deepEqual({ ...dom.row(0).reason }, { textContent: PINNED_UNAVAILABLE, hidden: false });
+
+    store.snapshot = pinnedAccountState('passed').snapshot;
+    await editor.reloadStatus();
+    assert.equal(dom.row(0).status.textContent, 'Available');
+    assert.deepEqual({ ...dom.row(0).reason }, { textContent: '', hidden: true });
+});
+
 test('an unpinned verdict intersects the usable accounts with the accounts carrying the model', () => {
     // The live defect this pins: `gpt-5.4` was listed only by `gptopro6`, whose
     // login is not verified, while a sibling account passed — "some account
@@ -844,9 +910,8 @@ test('an unpinned verdict intersects the usable accounts with the accounts carry
     const orphaned = sessionRouteVerdict(row, {
         ...facets, snapshot: snapshot([{ id: 'gpt-5.4', credential_profile_id: 'gptopro6' }]),
     });
-    assert.deepEqual(orphaned, {
-        label: 'No account', tone: 'warn', text: 'codex · no usable account currently carries gpt-5.4',
-    });
+    assert.deepEqual(orphaned, { label: 'No account', tone: 'warn', text: 'codex · no usable account currently carries gpt-5.4',
+        reason: 'codex · no usable account currently carries gpt-5.4' });
     // The verified account carries it: the verdict is the one it always was.
     const carried = sessionRouteVerdict(row, {
         ...facets, snapshot: snapshot([{ id: 'gpt-5.4', credential_profile_id: 'koshak' }]),
@@ -864,11 +929,11 @@ test('an unpinned verdict intersects the usable accounts with the accounts carry
         'codex · no usable account currently');
 });
 
-test('the head dot takes the worse of the two status axes', () => {
-    // docs/ARCHITECTURE.md §3: intent · availability, one dot whose tone is the
-    // worse of the two — an unsaved draft is never shown as green success even
-    // when its session is available now, and a saved API row stays neutral
-    // because an API model is only checked when a child starts.
+test('the card status is availability alone; saved/draft intent never repeats per card', () => {
+    // docs/DESIGN.md §6: saved/draft intent is ONE editor fact (the toolbar), so a
+    // card's word and tone follow availability only, whether the draft is saved,
+    // edited or generated; a saved API row stays neutral because an API model is
+    // only checked when a child starts.
     const live = {
         catalogKnown: true, accountsKnown: true, quotaKnown: true, statusError: '',
         dirty: false, baseline: 'saved', saveAttempted: false,
@@ -882,12 +947,12 @@ test('the head dot takes the worse of the two status axes', () => {
         },
     };
     assert.match(availableSubagentRowMarkup(sessionRow(), live, 0),
-        /data-tone="ok" title="Saved intent · codex · available now[^"]*">Saved · Available</);
+        /data-tone="ok" title="codex · available now[^"]*">Available</);
     assert.match(availableSubagentRowMarkup(sessionRow(), { ...live, dirty: true }, 0),
-        /data-tone="neutral" title="Draft intent · codex · available now[^"]*">Draft · Available</);
+        /data-tone="ok" title="codex · available now[^"]*">Available</);
     assert.match(availableSubagentRowMarkup(sessionRow(), { ...live, baseline: 'generated' }, 0),
-        /data-tone="neutral"[^>]*>Generated · Available</);
-    assert.match(availableSubagentRowMarkup(apiRow(), live, 0), /data-tone="neutral"[^>]*>Saved · Checked at start</);
+        /data-tone="ok"[^>]*>Available</);
+    assert.match(availableSubagentRowMarkup(apiRow(), live, 0), /data-tone="neutral"[^>]*>Checked at start</);
 });
 
 test('actor access defaults to full and round-trips an explicit lower choice', () => {
@@ -914,19 +979,19 @@ test('session access uses a named native select with a readable capability expla
     const html = availableSubagentRowMarkup(sessionRow({ access: 'full' }), QUIET_STATE);
     assert.match(html, /<select class="ui-control"[^>]*data-subagent-field="access"/);
     assert.match(html, /value="full" selected>Full system access/);
-    assert.match(html, /Full system access \(default\)/);
-    assert.match(html, /Full system access can reach outside the working folder/);
+    assert.match(html, /<dt>Access<\/dt><dd id="actor-codex_builder-access-help">Full system access \(the default\)/);
+    assert.match(html, /can reach outside the working folder/);
     assert.match(html, /The selected agent must support it/);
     assert.doesNotMatch(availableSubagentRowMarkup(apiRow(), QUIET_STATE), /data-subagent-field="access"/);
     const row = sessionRow({ effort: 'high', processing_preference: 'standard' });
     const receipt = { selected_subagent_id: row.subagent_id, route: 'codex', applied_model: 'observed',
         outcome: 'succeeded', identity: { ...row.route, access: 'full', effort: 'high', processing_preference: 'standard' } };
     const history = { ...QUIET_STATE, snapshot: { subagent_last_delegation: receipt } };
-    assert.match(rowMeta(row, history, []).text, /Last run:/);
-    assert.match(rowMeta({ ...row, access: 'workspace_write' }, history, []).text, /Earlier settings:/);
+    assert.match(rowTaskRun(row, history), /^codex session · observed/);
+    assert.match(rowTaskRun({ ...row, access: 'workspace_write' }, history), /^Earlier settings · codex session/);
     const both = availableSubagentRowMarkup(row, history);
     assert.match(both, /data-subagent-field="access"/);
-    assert.match(both, /data-run-history/);
+    assert.match(both, /data-subagent-last-task><dt>Last task run<\/dt><dd>codex session · observed/);
 });
 
 // A small event surface for the real editor binder. Only the controls this
@@ -940,8 +1005,11 @@ function accessEditorDom() {
         toggle(checked) { this.listeners.change({ target: { checked } }); },
     });
     let rows = [];
-    // The toolbar controls the real binder wires beside the rows.
-    const toolbar = { add: field('add'), listEnabled: field('listEnabled') };
+    // The toolbar controls the real binder wires beside the rows, and the
+    // review-pool lines the painter fills in place.
+    const toolbar = { add: field('add'), listEnabled: field('listEnabled'), allowEmpty: field('allowEmpty') };
+    const pool = Object.fromEntries(['count', 'stays', 'empty', 'empty-text', 'confirm', 'note', 'history', 'history-text']
+        .map((name) => [name, { textContent: '', hidden: false }]));
     const container = {
         scrollTop: 0,
         toolbar,
@@ -951,11 +1019,21 @@ function accessEditorDom() {
                     .map((entry) => [entry[1], field(entry[1])]));
                 const duplicate = field('duplicate');
                 const meta = { dataset: {}, toggleAttribute() {}, textContent: '' };
+                const facts = { textContent: '' };
+                const notes = { textContent: '', hidden: true };
+                const status = { dataset: {}, textContent: '', title: '' };
+                const reason = { textContent: '', hidden: true };
+                const lastReview = { hidden: true, dd: { textContent: '' }, querySelector() { return this.dd; } };
                 return {
-                    dataset: { subagentRow: match[1] }, toggleAttribute() {}, meta,
+                    dataset: { subagentRow: match[1] }, toggleAttribute() {}, meta, facts, notes, status, reason, lastReview, html: match[2],
                     querySelector(selector) {
                         if (selector === '[data-subagent-duplicate]') return duplicate;
                         if (selector === '[data-subagent-meta]') return meta;
+                        if (selector === '[data-subagent-review-facts]') return facts;
+                        if (selector === '[data-subagent-review-notes]') return notes;
+                        if (selector === '[data-subagent-status]') return status;
+                        if (selector === '[data-subagent-status-reason]') return reason;
+                        if (selector === '[data-subagent-last-review]') return lastReview;
                         return fields.get(selector.match(/data-subagent-field="([^"]+)"/)?.[1]) || null;
                     },
                     querySelectorAll: (selector) => selector === '[data-subagent-field]' ? [...fields.values()] : [],
@@ -965,13 +1043,16 @@ function accessEditorDom() {
         querySelector(selector) {
             if (selector === '[data-subagent-add]') return toolbar.add;
             if (selector === '[data-subagents-enabled]') return toolbar.listEnabled;
+            if (selector === '[data-review-pool-allow-empty]') return toolbar.allowEmpty;
+            const line = selector.match(/^\[data-review-pool-([a-z-]+)\]$/)?.[1];
+            if (line) return pool[line] || null;
             const key = selector.match(/data-subagent-row="([^"]+)"/)?.[1];
             return rows.find((row) => row.dataset.subagentRow === key) || null;
         },
         querySelectorAll: (selector) => selector === '[data-subagent-row]' ? rows : [],
     };
     return {
-        doc: { getElementById: () => container }, toolbar,
+        doc: { getElementById: () => container }, toolbar, pool,
         row: (index = 0) => rows[index],
     };
 }
@@ -980,7 +1061,7 @@ test('access edit saves and clones the lower choice, resets for API and restores
     const dom = accessEditorDom();
     const changes = [];
     const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null, onChange: (value) => changes.push(value) });
-    editor.load(setting([sessionRow()]));
+    editor.load(setting([sessionRow(), poolReviewer()]));
     const control = (name, index = 0) => dom.row(index).querySelector(`[data-subagent-field="${name}"]`);
     control('access').emit('change', 'workspace_write');
     assert.equal(editor.dirty, true);
@@ -988,7 +1069,7 @@ test('access edit saves and clones the lower choice, resets for API and restores
     assert.equal(changes.at(-1).items[0].route.access, undefined);
     assert.match(control('access').attributes['aria-describedby'], /-access-help/);
     dom.row().querySelector('[data-subagent-duplicate]').emit('click');
-    assert.equal(editor.setting.items.length, 2);
+    assert.equal(editor.setting.items.length, 3);
     assert.equal(editor.setting.items[1].access, 'workspace_write');
     assert.notEqual(editor.setting.items[0].subagent_id, editor.setting.items[1].subagent_id);
     control('route', 1).emit('change', 'api');
@@ -1004,7 +1085,7 @@ test('access edit saves and clones the lower choice, resets for API and restores
 test('Duplicate is born a judged draft that names its twin until one engine field changes', () => {
     const dom = accessEditorDom();
     const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
-    editor.load(setting([sessionRow({ subagent_id: 'fast-scout', effort: 'high' })]));
+    editor.load(setting([sessionRow({ subagent_id: 'fast-scout', effort: 'high' }), poolReviewer()]));
     assert.deepEqual(editor.validate(), []);
     const control = (name, index) => dom.row(index).querySelector(`[data-subagent-field="${name}"]`);
 
@@ -1028,7 +1109,7 @@ test('Duplicate is born a judged draft that names its twin until one engine fiel
 test('twins saved earlier are hinted, never Save-blocking, until the roster is edited', () => {
     const dom = accessEditorDom();
     const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
-    editor.load(setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two' }), sessionRow()]));
+    editor.load(setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two' }), sessionRow(), poolReviewer()]));
     // Untouched: an unrelated Settings save must go through, so nothing blocks...
     assert.deepEqual(editor.validate(), []);
     editor.noteSaveAttempt();
@@ -1039,7 +1120,7 @@ test('twins saved earlier are hinted, never Save-blocking, until the roster is e
     assert.doesNotMatch(dom.row(0).meta.textContent, /same engine/);
     // Any roster edit - here another row's words - makes the save judge the whole roster.
     dom.row(2).querySelector('[data-subagent-field="recommended_use"]').emit('input', 'New words.');
-    assert.deepEqual(editor.validate(), ['Subagent 2 runs the same engine as Subagent 1 — change its model, effort, access, account or processing, or remove it.']);
+    assert.deepEqual(editor.validate(), ['Subagent 2 runs the same engine as Subagent 1 — change its model, effort, access, account or processing, mark both as Reviewer for a repeated review, or remove it.']);
     editor.noteSaveAttempt();
     assert.equal(dom.row(1).meta.dataset.tone, 'error');
     editor.destroy();
@@ -1048,7 +1129,7 @@ test('twins saved earlier are hinted, never Save-blocking, until the roster is e
 test('the row switch is not an engine facet: switching a twin off keeps the twin, so that edit is judged', () => {
     const dom = accessEditorDom();
     const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
-    editor.load(setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two' })]));
+    editor.load(setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two' }), poolReviewer()]));
     assert.deepEqual(editor.validate(), [], 'twins saved earlier never block an untouched roster');
     dom.row(1).querySelector('[data-subagent-field="enabled"]').toggle(false);
     assert.match(editor.validate()[0], /^Subagent 2 runs the same engine as Subagent 1/);
@@ -1066,7 +1147,7 @@ test('engine uniqueness is a SAVE rule: a roster saved with twins still loads, a
     assert.equal(parsed.error, '', 'an existing install never turns invalid on read');
     assert.deepEqual(validateAvailableSubagentsSetting(parsed.setting), []);
     assert.deepEqual(validateAvailableSubagentsSetting(parsed.setting, { uniqueEngines: true }),
-        ['Subagent 2 runs the same engine as Subagent 1 — change its model, effort, access, account or processing, or remove it.']);
+        ['Subagent 2 runs the same engine as Subagent 1 — change its model, effort, access, account or processing, mark both as Reviewer for a repeated review, or remove it.']);
     // The engine is judged under the processing it inherits: an unset row IS a fast row under a global fast.
     const inherits = setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two', processing_preference: 'fast' })]);
     assert.deepEqual(validateAvailableSubagentsSetting(inherits, { uniqueEngines: true }), []);
@@ -1099,10 +1180,10 @@ test('the roster picker offers only credentialed providers and keeps a saved key
     assert.doesNotMatch(html, /value="api:anthropic"/, 'a provider with no key is not offered');
     // The model field holds the model ALONE; the editor composes the prefix.
     assert.match(html, /data-subagent-field="model"[^>]*value="gpt-x"/);
-    // The chip names the provider, and the exact stored id rides the meta line.
+    // The chip names the provider, and the exact stored id is a Details fact, never a standing caption.
     assert.match(html, />API · OpenAI<\/span>/);
-    assert.match(html, /data-subagent-meta[^>]*>stored as openai::gpt-x</);
-    assert.match(html, /title="Saved intent · OpenAI API model · availability is checked when a child starts"/);
+    assert.match(html, /<div data-subagent-stored><dt>Stored as<\/dt><dd>openai::gpt-x<\/dd>/);
+    assert.match(html, /title="OpenAI API model · availability is checked when a child starts"/);
 
     // A saved provider whose key is gone stays selectable and says why.
     const keyless = availableSubagentRowMarkup(
@@ -1115,15 +1196,15 @@ test('the roster row status and meta name the source, never a bare channel', () 
     const base = { ...QUIET_STATE, providerProfiles: { openai: { label: 'OpenAI' } } };
     const row = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'openai::gpt-x' } });
     assert.equal(rowStatus(row, base).text,
-        'Saved intent · OpenAI API model · availability is checked when a child starts');
-    assert.deepEqual(rowMeta(row, base, []), { text: 'stored as openai::gpt-x', tone: '' });
+        'OpenAI API model · availability is checked when a child starts');
+    assert.deepEqual(rowMeta(row, base, []), { text: '', tone: '' }, 'the stored spelling lives in Details');
     // An empty provider draft is still an invitation, not a stored id.
     assert.match(rowMeta(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'openai::' } }), base, []).text, /Choose how this subagent runs/);
     // A subscription row answers to its source, not to an API provider.
     const subscription = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::codex-models=gpt' } });
     assert.match(rowStatus(subscription, base).text, /Subscription model/);
-    assert.deepEqual(rowMeta(subscription, base, []),
-        { text: 'stored as claudexor::codex-models=gpt', tone: '' });
+    assert.match(availableSubagentRowMarkup(subscription, base, 0),
+        /<dt>Stored as<\/dt><dd>claudexor::codex-models=gpt<\/dd>/);
     // A session already spells harness and model in its own controls.
     assert.deepEqual(rowMeta(sessionRow(), base, []), { text: '', tone: '' });
     // An error and the fresh-row invitation still outrank the disclosure.
@@ -1229,5 +1310,269 @@ test('duplicate carries the row switch and the two enabled axes stay independent
     dom.toolbar.listEnabled.toggle(true);
     assert.equal(editor.collect().OUROBOROS_SUBAGENTS.enabled, true);
     assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].enabled, false);
+    editor.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// The review pool: a row marked Reviewer reviews. The mark, its price or
+// non-money equivalent, the repeat caption, the last run and the empty-pool
+// refusal are visible text on the card and the toolbar, never only a tooltip.
+// ---------------------------------------------------------------------------
+
+test('review fields parse strictly and only their non-default values are written', () => {
+    const marked = apiRow({ review_eligible: true, delivery: 'packet', minted_from: 'review_lane' });
+    assert.deepEqual(parseAvailableSubagentsSetting(setting([marked])).setting, setting([marked]));
+    const defaults = parseAvailableSubagentsSetting(setting([apiRow({ review_eligible: false, delivery: 'native' })]));
+    assert.deepEqual(defaults.setting, setting([apiRow()]), 'an untouched row keeps its exact bytes');
+    for (const [row, error] of [
+        [apiRow({ review_eligible: 'yes' }), /^row 1 reviewer mark must be true or false$/],
+        [apiRow({ review_eligible: true, delivery: 'tools' }), /^row 1 delivery must be native or packet$/],
+        [sessionRow({ review_eligible: true, delivery: 'packet' }), /^row 1 delivery requires an API model$/],
+        [apiRow({ minted_from: 'elsewhere' }), /^row 1 has an unknown origin$/],
+        [apiRow({ review_eligible: true, coupling_focus: true }), /^row 1 has unknown field: coupling_focus$/],
+    ]) {
+        const parsed = parseAvailableSubagentsSetting(setting([row]));
+        assert.equal(parsed.setting, null);
+        assert.match(parsed.error, error);
+    }
+});
+
+test('every card carries the Reviewer box and its Review cost; a marked API row shows its delivery and price', () => {
+    const plain = availableSubagentRowMarkup(apiRow(), QUIET_STATE, 0);
+    assert.match(plain, /<label class="available-subagent-reviewer"><input class="ui-checkbox" type="checkbox" data-subagent-field="review_eligible" aria-label="Subagent 1 reviews"> Reviewer<\/label>/);
+    assert.match(plain, /<dt>Review cost<\/dt><dd data-subagent-review-facts>price appears after saving</);
+    assert.match(plain, /data-subagent-delivery-field hidden>/, 'the delivery waits, rendered, for the mark');
+
+    const marked = availableSubagentRowMarkup(apiRow({ review_eligible: true }), QUIET_STATE, 0);
+    assert.match(marked, /aria-label="Subagent 1 reviews" checked> Reviewer/);
+    assert.doesNotMatch(marked, /In the review pool/, 'the checked box already says it');
+    assert.match(marked, /<select class="ui-control" data-subagent-field="delivery" aria-label="Review delivery for Subagent 1">/);
+    assert.match(marked, /<option value="native" selected>Reads the work itself<\/option>[\s\S]*data-subagent-delivery-cost>price appears after saving</);
+    assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, delivery: 'packet' }), QUIET_STATE, 0),
+        /<option value="packet" selected>Packet — for models without tool calling<\/option>/);
+    // Effort left to the route reviews at the pool default, and its select says so.
+    assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, effort: '' }), QUIET_STATE, 0),
+        new RegExp(`<option value="" selected>Default \\(reviews at ${REVIEW_POOL_DEFAULT_EFFORT}\\)</option>`));
+    assert.equal(REVIEW_POOL_DEFAULT_EFFORT, 'high');
+    // A session is spoken as a seat and time, and has no packet delivery.
+    const session = availableSubagentRowMarkup(sessionRow({ review_eligible: true }), QUIET_STATE, 0);
+    assert.match(session, /data-subagent-review-facts>uses a session seat and time</);
+    assert.doesNotMatch(session, /data-subagent-field="delivery"/);
+    assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, enabled: false }), QUIET_STATE, 0),
+        /data-subagent-review-exception>Switched off, so not in the review pool\.</);
+});
+
+test('a price is the route tariff or plainly unknown, and a seat is spoken as time, never as $0', () => {
+    const api = apiRow();
+    assert.equal(reviewCostText(sessionRow()), 'uses a session seat and time');
+    assert.equal(reviewCostText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::codex-models=gpt' } })),
+        'uses a session seat and time');
+    assert.equal(reviewCostText(api), 'price appears after saving');
+    assert.equal(reviewCostText(api, { usd_per_review: null, basis: 'unknown' }), 'cost unknown');
+    assert.equal(reviewCostText(api, { usd_per_review: 0.5, basis: 'unknown' }), 'cost unknown');
+    assert.equal(reviewCostText(api, { usd_per_review: null, basis: 'route_tariff' }), 'cost unknown');
+    assert.equal(reviewCostText(api, { usd_per_review: 0, basis: 'route_tariff' }), 'no API cost per review');
+    // One full call of the row, never a cap on a whole review: a reading reviewer makes several.
+    assert.equal(reviewCostText(api, { usd_per_review: 1.234, basis: 'route_tariff' }),
+        '≈$1.23 per full call (route tariff); a reading reviewer makes several');
+    assert.equal(reviewCostText(apiRow({ delivery: 'packet' }), { usd_per_review: 0.0042, basis: 'route_tariff' }),
+        '≈$0.0042 per full call (route tariff)');
+});
+
+test('a minted row names its origin, and a copy keeps the mark but never the origin', () => {
+    assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, minted_from: 'review_lane' }), QUIET_STATE, 0),
+        /<div data-subagent-minted><dt>Origin<\/dt><dd>From a former review lane<\/dd>/);
+    assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, minted_from: 'factory_default' }), QUIET_STATE, 0),
+        /data-subagent-minted><dt>Origin<\/dt><dd>Factory reviewer</);
+    assert.doesNotMatch(availableSubagentRowMarkup(apiRow({ review_eligible: true }), QUIET_STATE, 0), /data-subagent-minted/);
+
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(setting([apiRow({ review_eligible: true, minted_from: 'review_lane' })]));
+    dom.row(0).querySelector('[data-subagent-duplicate]').emit('click');
+    assert.equal(editor.setting.items[1].minted_from, undefined);
+    assert.equal(editor.setting.items[1].review_eligible, true);
+    // Two marked rows on one engine are a repeated review, not a copy slip.
+    assert.deepEqual(editor.validate(), []);
+    assert.equal(dom.row(1).notes.textContent, 'Repeat of Subagent 1: another independent run of the same model, not a different reviewer.');
+    assert.equal(dom.row(1).notes.hidden, false);
+    assert.equal(dom.row(0).notes.hidden, true);
+    editor.destroy();
+});
+
+test('two marked rows on one engine are a repeat; a twin only one of which reviews is still a copy slip', () => {
+    const twins = (first, second) => validateAvailableSubagentsSetting(setting([
+        apiRow({ subagent_id: 'one', ...first }), apiRow({ subagent_id: 'two', ...second }),
+    ]), { uniqueEngines: true });
+    assert.deepEqual(twins({ review_eligible: true }, { review_eligible: true }), []);
+    assert.deepEqual(twins({ review_eligible: true, minted_from: 'review_lane' }, {}), [],
+        'a review row minted beside the owner delegation row is no slip');
+    assert.match(twins({ review_eligible: true }, {})[0], /^Subagent 2 runs the same engine as Subagent 1 — .* mark both as Reviewer for a repeated review, or remove it\.$/);
+    assert.match(twins({ review_eligible: true, minted_from: 'factory_default' }, { minted_from: 'review_lane' })[0], /same engine as Subagent 1/);
+    assert.equal(reviewTwinAllowed({ review_eligible: true }, { review_eligible: true }), true);
+    assert.equal(reviewTwinAllowed({}, {}), false);
+
+    const repeat = setting([apiRow({ subagent_id: 'one', review_eligible: true }), apiRow({ subagent_id: 'two', review_eligible: true })]);
+    const state = { ...QUIET_STATE, setting: repeat };
+    assert.doesNotMatch(rowMeta(repeat.items[1], state, []).text, /same engine/);
+    assert.match(availableSubagentRowMarkup(repeat.items[1], state, 1),
+        /data-subagent-review-notes>Repeat of Subagent 1: another independent run of the same model, not a different reviewer\.</);
+    const slip = setting([apiRow({ subagent_id: 'one', review_eligible: true }), apiRow({ subagent_id: 'two' })]);
+    const slipState = { ...QUIET_STATE, setting: slip };
+    assert.match(rowMeta(slip.items[1], slipState, []).text, /^Runs the same engine as Subagent 1/);
+    assert.doesNotMatch(availableSubagentRowMarkup(slip.items[1], slipState, 1), /Repeat of/);
+});
+
+test('Last review names what actually ran and the review record it wrote', () => {
+    assert.equal(lastReviewRunText(null), '');
+    assert.equal(lastReviewRunText({}), '');
+    assert.equal(lastReviewRunText({ observed_model: 'openai/gpt-5.6-sol', record_id: 'rev_42', status: 'ok' }),
+        'openai/gpt-5.6-sol · record rev_42');
+    assert.equal(lastReviewRunText({ effective: { route: 'agent_session:codex', model: 'gpt-5.6-sol-high', credential_profile_id: 'koshak' } }),
+        'codex session · gpt-5.6-sol-high · account koshak');
+});
+
+test('review-pool facts price saved rows by their loaded route; an edited route waits for its save', () => {
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(setting([apiRow({ review_eligible: true }), sessionRow()]));
+    editor.setReviewPool({
+        row_costs: {
+            api_scout: { usd_per_review: 0.42, basis: 'route_tariff' },
+            codex_builder: { usd_per_review: null, basis: 'subscription_seat' },
+        },
+        pool: [{ subagent_id: 'api_scout', last_execution: { observed_model: 'openai/gpt-5.6-luna', record_id: 'rev_7' } }],
+        last_executions: { codex_builder: { effective: { route: 'agent_session:codex', model: 'gpt-5.6-sol-high' } } },
+    });
+    assert.equal(dom.row(0).facts.textContent,
+        '≈$0.42 per full call (route tariff); a reading reviewer makes several');
+    assert.deepEqual([dom.row(0).lastReview.hidden, dom.row(0).lastReview.dd.textContent], [false, 'openai/gpt-5.6-luna · record rev_7']);
+    assert.equal(dom.row(1).facts.textContent, 'uses a session seat and time');
+    assert.equal(dom.row(1).lastReview.dd.textContent, 'codex session · gpt-5.6-sol-high');
+    assert.equal(dom.pool.count.textContent, 'Reviewers: 1');
+
+    // The saved price belongs to the saved route, not to the edited one.
+    dom.row(0).querySelector('[data-subagent-field="model"]').emit('input', 'openai/gpt-5.6-sol');
+    assert.equal(dom.row(0).facts.textContent, 'price appears after saving');
+
+    // A failed read, or a pool error, prices nothing and says why.
+    editor.load(setting([apiRow({ review_eligible: true })]));
+    editor.setReviewPool({ load_error: 'Review pool facts could not be read: HTTP 503' });
+    assert.equal(dom.row(0).facts.textContent, 'cost unknown');
+    assert.equal(dom.pool.note.textContent, 'Review pool facts could not be read: HTTP 503');
+    assert.equal(dom.pool.note.hidden, false);
+    editor.setReviewPool({ config_error: 'row 2 route is malformed', pool: [], row_costs: {} });
+    assert.equal(dom.pool.note.textContent, 'The saved review pool has an error: row 2 route is malformed');
+    assert.equal(dom.row(0).facts.textContent, 'cost unknown');
+    editor.setReviewPool({ row_costs: {}, pool: [], migration: { snapshot: 'state/review_lanes_snapshot.json', reported: false } });
+    assert.deepEqual([dom.pool.note.hidden, dom.pool['history-text'].textContent], [true,
+        'Rows whose origin is “From a former review lane” were converted from your review lanes; snapshot state/review_lanes_snapshot.json keeps their previous value.']);
+    editor.destroy();
+});
+
+test('the pool note says what the migration did to the owner\'s review settings and when no pool row has credentials', () => {
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(setting([apiRow({ review_eligible: true })]));
+    const snapshot = 'state/review_migrations/20261008T101010Z-slots-to-pool.json';
+    const receipt = (fields) => ({ snapshot, reported: true, trigger: 'lanes_key', error: '', source: 'document', ...fields });
+    const pool = [{ subagent_id: 'api_scout', route: { target_id: 'openai/gpt-5.6-sol' }, cost: { basis: 'per_review' } }];
+
+    // A completed conversion is provenance behind "Reviewer origin"; what still acts stays visible.
+    editor.setReviewPool({ row_costs: {}, pool, migration: receipt({ outcome: 'converted' }) });
+    assert.deepEqual([dom.pool.note.hidden, dom.pool.history.hidden, dom.pool['history-text'].textContent], [true, false,
+        `Rows whose origin is “From a former review lane” were converted from your review lanes; snapshot ${snapshot} keeps their previous value.`]);
+    editor.setReviewPool({ row_costs: {}, pool, migration: receipt({ outcome: 'factory', trigger: 'never_configured' }) });
+    assert.equal(dom.pool['history-text'].textContent,
+        `This install had no review settings, so factory reviewers were set up (rows whose origin is “Factory reviewer”); snapshot ${snapshot}.`);
+    editor.setReviewPool({ row_costs: {}, pool, migration: receipt({ outcome: 'factory', trigger: 'never_configured', source: 'environment' }) });
+    assert.equal(dom.pool.note.textContent, 'The catalog from the environment runs instead of these rows.');
+    editor.setReviewPool({ row_costs: {}, pool, migration: receipt({ outcome: 'error', error: 'OUROBOROS_REVIEWER_SLOTS: row 2 has no model', source: 'error' }) });
+    assert.equal(dom.pool.note.textContent,
+        `Review migration failed: OUROBOROS_REVIEWER_SLOTS: row 2 has no model; your lanes were kept; snapshot ${snapshot}. Mark reviewers here and save to finish.`);
+    editor.setReviewPool({ row_costs: {}, pool, migration: receipt({ outcome: 'error', error: 'bad lanes', snapshot: '', source: 'error' }) });
+    assert.equal(dom.pool.note.textContent,
+        'Review migration failed: bad lanes; your lanes were kept; no snapshot was written. Mark reviewers here and save to finish.');
+    // A receipt of an earlier document the owner has since re-saved says nothing.
+    editor.setReviewPool({ row_costs: {}, pool, migration: receipt({ outcome: 'converted', source: 'history' }) });
+    assert.deepEqual([dom.pool.note.hidden, dom.pool.history.hidden], [true, true]);
+
+    // VD3-08: every pool row without credentials is the loud fact; some rows is a shorter one.
+    editor.setReviewPool({ row_costs: {}, pool, migration: null, pool_without_credentials: ['api_scout'] });
+    assert.equal(dom.pool.note.textContent,
+        'No pool row has credentials: none of the 1 reviewer model has an API key in this install, so every review will fail until a key is added or a reviewer with one is marked.');
+    const two = [...pool, { subagent_id: 'critic', route: { target_id: 'anthropic/claude-fable-5' }, cost: { basis: 'per_review' } }];
+    editor.setReviewPool({ row_costs: {}, pool: two, migration: null, pool_without_credentials: ['critic'] });
+    assert.equal(dom.pool.note.textContent, 'No credentials in this install for critic: those seats cannot answer.');
+    // Both facts stand side by side; a pool error still comes first.
+    editor.setReviewPool({ row_costs: {}, pool, migration: receipt({ outcome: 'error', error: 'bad' }), pool_without_credentials: ['api_scout'] });
+    assert.match(dom.pool.note.textContent, /^Review migration failed: bad; .* No pool row has credentials: /);
+    editor.destroy();
+});
+
+test('an edited catalog with rows but no Reviewer is refused until the owner saves without reviewers', () => {
+    assert.deepEqual(reviewPoolErrors(setting([apiRow()]), { judged: true }), [EMPTY_POOL_ERROR]);
+    assert.deepEqual(reviewPoolErrors(setting([apiRow()]), { judged: false }), [], 'an untouched saved catalog is not judged');
+    assert.deepEqual(reviewPoolErrors(setting([]), { judged: true }), [], 'no rows leaves nothing to mark');
+    assert.deepEqual(reviewPoolErrors(setting([apiRow()]), { judged: true, allowEmpty: true }), []);
+    // A pool of switched-off reviewers reviews nothing either: the server refuses it the same way.
+    assert.deepEqual(reviewPoolErrors(setting([apiRow({ review_eligible: true, enabled: false })]), { judged: true }),
+        ['Every row marked Reviewer is switched off. Switch one on, or tick “Save without reviewers”.']);
+    assert.deepEqual(reviewPoolErrors(setting([
+        apiRow({ review_eligible: true, enabled: false }), sessionRow({ review_eligible: true }),
+    ]), { judged: true }), [], 'one reviewer switched on is a pool');
+    assert.deepEqual(reviewPoolRows(setting([
+        apiRow({ review_eligible: true }), sessionRow({ review_eligible: true, enabled: false }), apiRow({ subagent_id: 'plain' }),
+    ])).map((row) => row.subagent_id), ['api_scout']);
+
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(setting([apiRow(), sessionRow()]));
+    assert.deepEqual(editor.validate(), [], 'loading is not saving');
+    assert.equal(dom.pool.count.textContent, 'Reviewers: 0');
+    assert.equal(dom.pool.empty.hidden, false);
+    assert.equal(dom.pool['empty-text'].textContent, 'No row is marked Reviewer, so reviews will not run and will report “not performed”.');
+    assert.equal(dom.pool.confirm.hidden, false);
+    assert.equal(dom.pool.stays.hidden, true);
+
+    dom.row(1).querySelector('[data-subagent-field="recommended_use"]').emit('input', 'Edited.');
+    assert.deepEqual(editor.validate(), [EMPTY_POOL_ERROR]);
+    assert.equal(editor.allowEmptyReviewPool, false);
+    assert.equal(ALLOW_EMPTY_REVIEW_POOL in editor.collect(), false);
+
+    dom.toolbar.allowEmpty.toggle(true);
+    assert.deepEqual(editor.validate(), []);
+    assert.equal(editor.allowEmptyReviewPool, true);
+    assert.equal(editor.collect()[ALLOW_EMPTY_REVIEW_POOL], true);
+
+    // A marked row makes the confirmation moot: the flag never rides a non-empty pool.
+    dom.row(0).querySelector('[data-subagent-field="review_eligible"]').toggle(true);
+    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].review_eligible, true);
+    assert.equal(ALLOW_EMPTY_REVIEW_POOL in editor.collect(), false);
+    assert.deepEqual(editor.validate(), []);
+    assert.equal(dom.pool.count.textContent, 'Reviewers: 1');
+    assert.equal(dom.pool.empty.hidden, true);
+    dom.toolbar.listEnabled.toggle(false);
+    assert.deepEqual([dom.pool.stays.textContent, dom.pool.stays.hidden], ['Delegation is off; rows marked Reviewer still review.', false]);
+    assert.ok(dom.row(0).querySelector('[data-subagent-field="delivery"]'), 'every API card carries its delivery, shown while marked');
+    dom.row(0).querySelector('[data-subagent-field="delivery"]').emit('change', 'packet');
+    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].delivery, 'packet');
+    dom.row(0).querySelector('[data-subagent-field="delivery"]').emit('change', 'native');
+    assert.equal('delivery' in editor.collect().OUROBOROS_SUBAGENTS.items[0], false);
+
+    // A reload forgets the confirmation: it answered one save.
+    editor.load(setting([apiRow(), sessionRow()]));
+    assert.equal(editor.allowEmptyReviewPool, false);
+
+    // Switching the only reviewer off empties the pool: the same confirmation is asked.
+    editor.load(setting([apiRow({ review_eligible: true }), sessionRow()]));
+    assert.equal(dom.pool.confirm.hidden, true);
+    dom.row(0).querySelector('[data-subagent-field="enabled"]').toggle(false);
+    assert.equal(dom.pool['empty-text'].textContent,
+        'Every row marked Reviewer is switched off, so reviews will not run and will report “not performed”.');
+    assert.equal(dom.pool.confirm.hidden, false);
+    assert.deepEqual(editor.validate(), ['Every row marked Reviewer is switched off. Switch one on, or tick “Save without reviewers”.']);
+    dom.toolbar.allowEmpty.toggle(true);
+    assert.equal(editor.collect()[ALLOW_EMPTY_REVIEW_POOL], true);
     editor.destroy();
 });

@@ -134,3 +134,63 @@ def test_wait_polls_without_materializing_and_finishes_with_one_full_read(tmp_pa
     assert calls, "no reads recorded"
     assert calls[-1] is True
     assert all(flag is False for flag in calls[:-1])
+
+
+def test_warm_child_lookup_reads_only_selected_bodies_and_detects_in_place_repair(tmp_path, monkeypatch):
+    from ouroboros import task_result_facts as scan
+
+    monkeypatch.setattr(scan, "_RAW_TS_MEMO", {})
+    for number in range(240):
+        _write_result(tmp_path, {"task_id": f"foreign-{number}", "status": "completed",
+            "delegation_role": "subagent", "parent_task_id": "other", "root_task_id": "other",
+            "result": "unrelated full answer " * 1000})
+    _write_result(tmp_path, {"task_id": "child", "status": "completed", "delegation_role": "subagent",
+                            "parent_task_id": "owner", "root_task_id": "owner", "result": "selected answer"})
+    reader, reads = scan.read_json_dict, []
+    monkeypatch.setattr(scan, "read_json_dict", lambda path: (reads.append(path.name), reader(path))[1])
+    assert [row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="owner", scope="direct")] == ["child"]
+    reads.clear()
+    rows = find_child_tasks(tmp_path, parent_task_id="owner", scope="direct")
+    assert reads == ["child.json"] and rows[0]["result"] == "selected answer"
+    changed = tmp_path / "task_results/foreign-0.json"
+    before = changed.parent.stat().st_mtime_ns
+    changed.write_text(changed.read_text(encoding="utf-8").replace('"other"', '"owner"'), encoding="utf-8")
+    assert changed.parent.stat().st_mtime_ns == before
+    reads.clear()
+    assert {row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="owner", scope="direct")} == {"child", "foreign-0"}
+    assert set(reads) == {"child.json", "foreign-0.json"}
+    assert reads.count("foreign-0.json") == 2  # Changed compact fact, then authoritative full row.
+    changed.unlink()
+    assert [row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="owner", scope="direct")] == ["child"]
+
+
+def test_child_selection_preserves_whole_scan_quarantine_for_unrelated_bad_rows(tmp_path, monkeypatch):
+    from ouroboros import task_results
+
+    _write_result(tmp_path, {"task_id": "child", "status": "completed", "delegation_role": "subagent", "parent_task_id": "owner"})
+    directory = tmp_path / "task_results"
+    (directory / "old.json").write_text(json.dumps({"task_id": "old", "status": "completed"}), encoding="utf-8")
+    (directory / "torn.json").write_text("{broken", encoding="utf-8")
+    events = []
+    monkeypatch.setattr(task_results, "_emit_quarantine_event", lambda _root, rows: events.append(rows) if rows else None)
+    assert [row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="owner", scope="direct")] == ["child"]
+    assert len(events) == 1 and {row["task_id"] for row in events[0]} == {"old", "torn"}
+    assert not (directory / "old.json").exists() and not (directory / "torn.json").exists()
+
+
+def test_compact_child_selection_matches_complete_reader_with_retry_and_subtree(tmp_path, monkeypatch):
+    from ouroboros.task_results import list_task_results
+
+    records = [
+        {"task_id": "direct", "parent_task_id": "owner", "root_task_id": "owner"},
+        {"task_id": "deep", "parent_task_id": "direct", "root_task_id": "owner"},
+        {"task_id": "foreign", "parent_task_id": "elsewhere", "root_task_id": "elsewhere"},
+        {"task_id": "old", "parent_task_id": "elsewhere", "root_task_id": "elsewhere", "retry_task_id": "direct"},
+    ]
+    for row in records:
+        _write_result(tmp_path, {"status": "completed", "delegation_role": "subagent", "result": row["task_id"], **row})
+    for scope in ("direct", "subtree"):
+        expected = find_child_tasks(tmp_path, parent_task_id="owner", root_task_id="owner", scope=scope, materialize_artifacts=False)
+        with monkeypatch.context() as complete:
+            complete.setattr(task_status, "selected_task_results", lambda root, predicate: [row for row in list_task_results(root) if predicate(row)])
+            assert find_child_tasks(tmp_path, parent_task_id="owner", root_task_id="owner", scope=scope, materialize_artifacts=False) == expected

@@ -21,10 +21,18 @@ _NEWLY_RETIRED_SHIPPED_HEAVY_DEFAULTS = (
     "gigachat::GigaChat-2-Max",
     "minimax::MiniMax-M3",
 )
-_LOCAL_HEAVY_VALUES_THAT_MUST_SURVIVE_GLOBAL_RETIREMENT = (
-    "google/gemini-3.1-flash-lite",
+# The ids a deleted "retired model" table used to rewrite in place (to gpt-5.5,
+# gpt-5.5-pro or gemini-3.5-flash), claiming a retirement the provider catalogs never
+# showed. A saved id now stays as written unless it equals one of OUR former shipped
+# defaults for that slot -- the kept migrations pinned below by name.
+_FORMERLY_REMAPPED_IDS = (
+    "openai/gpt-5.4",
     "openai::gpt-5.4",
     "openai/gpt-5.4-pro",
+    "openai::gpt-5.4-pro",
+    "google/gemini-3.1-flash-lite",
+    "google/gemini-3.1-pro-preview",
+    "google/gemini-3-flash-preview",
 )
 
 
@@ -88,20 +96,14 @@ _PROVIDER_ENV_KEYS = (
 )
 
 
-def _read_time_review_models(monkeypatch, provider_env: dict) -> tuple[list, list]:
-    """ABI 7.0 (ABI-10): the retired comma keys are never INTRODUCED into
-    settings — the direct-provider review adaptation lives on the READ side
-    (`get_review_models`/`get_scope_review_models` over the derived env plane).
-    Returns (triad, scope) as that install class resolves them."""
-    from ouroboros.config import get_review_models, get_scope_review_models
+def _factory_pool_models(provider_env: dict) -> list:
+    """ABI 7.0 (ABI-10) / PR-3: the retired comma keys are never INTRODUCED into
+    settings — the direct-provider review adaptation is the factory review POOL
+    (``factory_review_rows``: catalog rows minted for that install class), not a
+    read-time substitution. Returns the pool's model ids."""
+    from ouroboros.subscription_install_presets import factory_review_rows
 
-    for key in (*_PROVIDER_ENV_KEYS, "OUROBOROS_REVIEW_MODELS",
-                "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
-                "OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT"):
-        monkeypatch.delenv(key, raising=False)
-    for key, value in provider_env.items():
-        monkeypatch.setenv(key, value)
-    return list(get_review_models() or []), list(get_scope_review_models() or [])
+    return [row["route"]["target_id"] for row in factory_review_rows(provider_env)]
 
 
 def test_apply_runtime_provider_defaults_autofills_official_openai_models():
@@ -119,9 +121,6 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
         "OUROBOROS_MODEL_HEAVY",
         "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACKS",
-        # v6.82.0: deep self-review is a per-provider slot too, so a direct-only
-        # install never keeps an unreachable OpenRouter-form id for it.
-        "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.6-terra"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == ""
@@ -170,12 +169,9 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     assert "OUROBOROS_REVIEW_MODELS" not in normalized
 
 
-def test_openai_only_review_models_resolve_at_read_time(monkeypatch):
-    triad, scope = _read_time_review_models(monkeypatch, {
-        "OPENAI_API_KEY": "sk-openai", "OUROBOROS_MODEL": "openai::gpt-5.6-terra",
-    })
-    assert triad and all(m.startswith("openai::") for m in triad)
-    assert scope and all(m.startswith("openai::") for m in scope)
+def test_openai_only_factory_pool_stays_on_openai():
+    pool = _factory_pool_models({"OPENAI_API_KEY": "sk-openai", "OUROBOROS_MODEL": "openai::gpt-5.6-terra"})
+    assert pool and all(m.startswith("openai::") for m in pool)
 
 
 def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
@@ -194,9 +190,6 @@ def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
         "OUROBOROS_MODEL_HEAVY",
         "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACKS",
-        # v6.82.0: deep self-review is a per-provider slot too, so a direct-only
-        # install never keeps an unreachable OpenRouter-form id for it.
-        "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
         # ABI-10: only the comma key the payload actually CARRIED normalizes;
         # absent retired keys are never introduced.
         "OUROBOROS_REVIEW_MODELS",
@@ -292,7 +285,7 @@ def test_every_newly_retired_product_heavy_is_cleared_before_actor_migration(shi
     "saved_heavy",
     (
         *_NEWLY_RETIRED_SHIPPED_HEAVY_DEFAULTS,
-        *_LOCAL_HEAVY_VALUES_THAT_MUST_SURVIVE_GLOBAL_RETIREMENT,
+        *_FORMERLY_REMAPPED_IDS,
     ),
 )
 def test_local_override_preserves_exact_heavy_value_as_explicit_local_actor(saved_heavy):
@@ -308,28 +301,6 @@ def test_local_override_preserves_exact_heavy_value_as_explicit_local_actor(save
     assert [(row.subagent_id, row.route.target_id) for row in resolution.config.items] == [
         ("legacy-heavy", f"{saved_heavy} (local)"),
     ]
-
-
-def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():
-    old_main = "openai/gpt-" + "5.4"
-    old_pro = "openai/gpt-" + "5.4-pro"
-    old_mini = "openai/gpt-" + "5.4-mini"
-    normalized, changed, changed_keys = apply_runtime_provider_defaults({
-        "OPENROUTER_API_KEY": "sk-or",
-        "OUROBOROS_REVIEW_MODELS": f"{old_main},{old_mini}",
-        "OUROBOROS_SCOPE_REVIEW_MODEL": old_pro,
-        "OUROBOROS_SCOPE_REVIEW_MODELS": f"{old_pro},{old_mini}",
-    })
-
-    assert changed
-    assert "OUROBOROS_REVIEW_MODELS" in changed_keys
-    assert "OUROBOROS_SCOPE_REVIEW_MODELS" in changed_keys
-    # gpt-5.4 and gpt-5.4-pro are genuinely retired -> 5.5 / 5.5-pro. But gpt-5.4-mini
-    # is a LIVE model (the 5.5 family has no mini lane), so it must pass through
-    # unchanged rather than be rewritten to a non-existent gpt-5.5-mini.
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,openai/gpt-5.4-mini"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.5-pro"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.5-pro,openai/gpt-5.4-mini"
 
 
 def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_only():
@@ -405,9 +376,6 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
         "OUROBOROS_MODEL_HEAVY",
         "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_FALLBACKS",
-        # v6.82.0: deep self-review is a per-provider slot too, so a direct-only
-        # install never keeps an unreachable OpenRouter-form id for it.
-        "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
     }
     assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == ""
@@ -603,13 +571,10 @@ def test_apply_runtime_provider_defaults_cloudru_only_elevates_to_direct():
     assert "OUROBOROS_SCOPE_REVIEW_MODEL" not in normalized
 
 
-def test_cloudru_only_review_models_resolve_at_read_time(monkeypatch):
-    triad, scope = _read_time_review_models(monkeypatch, {
-        "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cr-key",
-        "OUROBOROS_MODEL": "cloudru::zai-org/GLM-4.6",
-    })
-    assert triad and all(m.startswith("cloudru::") for m in triad)
-    assert scope and all(m.startswith("cloudru::") for m in scope)
+def test_cloudru_only_factory_pool_stays_on_cloudru():
+    pool = _factory_pool_models({"CLOUDRU_FOUNDATION_MODELS_API_KEY": "cr-key",
+                                 "OUROBOROS_MODEL": "cloudru::zai-org/GLM-4.6"})
+    assert pool and all(m.startswith("cloudru::") for m in pool)
 
 
 def test_apply_runtime_provider_defaults_minimax_only_uses_current_models():
@@ -623,20 +588,16 @@ def test_apply_runtime_provider_defaults_minimax_only_uses_current_models():
     assert "OUROBOROS_MODEL_HEAVY" not in normalized
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "minimax::MiniMax-M2.7"
     assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "minimax::MiniMax-M2.7"
-    # Deep self-review stays empty: MiniMax guarantees only a 512K window floor,
-    # below the 1M target deep review sizes against (clear-instead-of-fill).
-    assert not normalized.get("OUROBOROS_MODEL_DEEP_SELF_REVIEW")
+    # The retired deep-review key is never introduced (PR-3: the read seam migrates it).
+    assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in normalized
     # ABI-10: retired comma keys are never introduced into settings.
     assert "OUROBOROS_REVIEW_MODELS" not in normalized
     assert "OUROBOROS_SCOPE_REVIEW_MODEL" not in normalized
 
 
-def test_minimax_only_review_models_resolve_at_read_time(monkeypatch):
-    triad, scope = _read_time_review_models(monkeypatch, {
-        "MINIMAX_API_KEY": "minimax-key", "OUROBOROS_MODEL": "minimax::MiniMax-M3",
-    })
-    assert triad == ["minimax::MiniMax-M3", "minimax::MiniMax-M2.7", "minimax::MiniMax-M2.7"]
-    assert scope and all(m.startswith("minimax::") for m in scope)
+def test_minimax_only_factory_pool_is_the_provider_role_panel():
+    pool = _factory_pool_models({"MINIMAX_API_KEY": "minimax-key", "OUROBOROS_MODEL": "minimax::MiniMax-M3"})
+    assert pool == ["minimax::MiniMax-M3", "minimax::MiniMax-M2.7", "minimax::MiniMax-M2.7"]
 
 
 def test_apply_runtime_provider_defaults_cloudru_migrates_populated_shipped_defaults():
@@ -686,13 +647,10 @@ def test_apply_runtime_provider_defaults_gigachat_only_elevates_to_direct():
     assert "OUROBOROS_SCOPE_REVIEW_MODEL" not in normalized
 
 
-def test_gigachat_only_review_models_resolve_at_read_time(monkeypatch):
-    triad, scope = _read_time_review_models(monkeypatch, {
-        "GIGACHAT_USER": "user", "GIGACHAT_PASSWORD": "pass",
-        "OUROBOROS_MODEL": "gigachat::GigaChat-2-Max",
-    })
-    assert triad and all(m.startswith("gigachat::") for m in triad)
-    assert scope and all(m.startswith("gigachat::") for m in scope)
+def test_gigachat_only_factory_pool_stays_on_gigachat():
+    pool = _factory_pool_models({"GIGACHAT_USER": "user", "GIGACHAT_PASSWORD": "pass",
+                                 "OUROBOROS_MODEL": "gigachat::GigaChat-2-Max"})
+    assert pool and all(m.startswith("gigachat::") for m in pool)
 
 
 def test_apply_runtime_provider_defaults_gigachat_credentials_migrates_shipped_defaults():
@@ -809,71 +767,24 @@ def test_local_only_install_keeps_a_slot_the_owner_routed_to_local(monkeypatch):
     assert settings["OUROBOROS_MODEL_LIGHT"] == ""
 
 
-def test_direct_only_install_gets_a_reachable_deep_review_model():
-    """The deep self-review slot ships an OpenRouter-form default. A direct-only
-    install has no OpenRouter credential, so that id is unreachable — the
-    provider-defaults path must migrate this slot like the other four."""
+def test_the_retired_deep_review_key_is_left_to_the_read_seam():
+    """``OUROBOROS_MODEL_DEEP_SELF_REVIEW`` is a retired setting (PR-3): the settings
+    read seam migrates a stored value into a catalog row and drops the key, so the
+    provider-defaults path neither fills it for a direct-only install nor rewrites a
+    value it still finds on a raw document — the migration reads what the owner saved."""
     from ouroboros.config import SETTINGS_DEFAULTS
-    from ouroboros.provider_models import ANTHROPIC_DIRECT_DEFAULTS, OPENAI_DIRECT_DEFAULTS
 
-    for key, expected in (
-        ("OPENAI_API_KEY", OPENAI_DIRECT_DEFAULTS["deep_self_review"]),
-        ("ANTHROPIC_API_KEY", ANTHROPIC_DIRECT_DEFAULTS["deep_self_review"]),
-    ):
-        # Driven from the FULL shipped defaults dict, which is what a real install
-        # carries: the OpenRouter-form deep default is migrated into a direct
-        # spelling before the comparison, so the guard must recognise BOTH forms or
-        # the slot silently keeps a `-pro` id that 404s on api.openai.com.
-        populated = dict(SETTINGS_DEFAULTS)
-        populated[key] = "sk-test"
-        normalized, changed, changed_keys = apply_runtime_provider_defaults(populated)
-        assert changed
-        assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" in changed_keys
-        assert normalized["OUROBOROS_MODEL_DEEP_SELF_REVIEW"] == expected
-        assert "/" not in expected.split("::", 1)[1]
-
-    # A sub-floor provider gets NO auto-filled deep slot: deep review sizes against
-    # a fixed 1M window; Cloud.ru/GigaChat are documented below that floor, and
-    # MiniMax guarantees only a 512K minimum ("up to 1M"), so filling the slot
-    # would advertise a review doomed to overflow its route.
-    # A sub-floor provider must end up with NO deep slot at all: the shipped
-    # OpenRouter-form default is unreachable for it, and auto-filling its own model
-    # would advertise a review doomed to overflow the 1M window deep review sizes
-    # against. Driven from a FULL defaults dict and the credentials each provider
-    # is actually recognised by (GigaChat authenticates with GIGACHAT_CREDENTIALS,
-    # not an API-key spelling — a wrong key silently skips the direct path
-    # entirely and makes this assertion vacuous).
-    for creds in ({"CLOUDRU_FOUNDATION_MODELS_API_KEY": "sk-test"},
-                  {"GIGACHAT_CREDENTIALS": "Z2ln-test"},
+    assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in SETTINGS_DEFAULTS
+    for creds in ({"OPENAI_API_KEY": "sk-test"}, {"ANTHROPIC_API_KEY": "sk-test"},
                   {"MINIMAX_API_KEY": "minimax-test"}):
-        populated = dict(SETTINGS_DEFAULTS)
-        populated.update(creds)
+        populated = {**SETTINGS_DEFAULTS, **creds}
         normalized, _changed, changed_keys = apply_runtime_provider_defaults(populated)
         assert "OUROBOROS_MODEL" in changed_keys, "the ordinary slots still normalize"
-        assert not normalized.get("OUROBOROS_MODEL_DEEP_SELF_REVIEW"), normalized.get(
-            "OUROBOROS_MODEL_DEEP_SELF_REVIEW"
-        )
-        # An EXPLICIT owner choice in that slot is never cleared.
-        explicit = dict(populated)
-        explicit["OUROBOROS_MODEL_DEEP_SELF_REVIEW"] = "openrouter::owner/pick"
-        kept, _c, _k = apply_runtime_provider_defaults(explicit)
-        assert kept["OUROBOROS_MODEL_DEEP_SELF_REVIEW"] == "openrouter::owner/pick"
-
-
-def test_upgraded_direct_install_migrates_the_prior_deep_review_default():
-    """An upgraded install still carries v6.81's OpenRouter-form deep value, which
-    is just as unreachable without an OpenRouter credential as the other slots."""
-    from ouroboros.provider_models import ANTHROPIC_DIRECT_DEFAULTS, OPENAI_DIRECT_DEFAULTS
-
-    for key, expected in (
-        ("OPENAI_API_KEY", OPENAI_DIRECT_DEFAULTS["deep_self_review"]),
-        ("ANTHROPIC_API_KEY", ANTHROPIC_DIRECT_DEFAULTS["deep_self_review"]),
-    ):
-        normalized, _changed, changed_keys = apply_runtime_provider_defaults({
-            key: "sk-test", "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "openai/gpt-5.5-pro",
-        })
-        assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" in changed_keys
-        assert normalized["OUROBOROS_MODEL_DEEP_SELF_REVIEW"] == expected
+        assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in normalized
+        stale = {**populated, "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "openai/gpt-5.5-pro"}
+        kept, _c, kept_keys = apply_runtime_provider_defaults(stale)
+        assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in kept_keys
+        assert kept["OUROBOROS_MODEL_DEEP_SELF_REVIEW"] == "openai/gpt-5.5-pro"
 
 
 def test_a_fresh_local_first_install_still_authors_safety_light(tmp_path, monkeypatch):

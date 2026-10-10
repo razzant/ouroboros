@@ -437,6 +437,7 @@ class ClaudexorRuntimeManager:
         self._lock = threading.Lock()
         self._installing = False
         self._last_error = ""
+        self._launch_probe: dict[str, Any] = {}
         self._pin_error = ""
         self._pin_error_code = ""
         if pin is _DEFAULT_PIN:
@@ -527,13 +528,13 @@ class ClaudexorRuntimeManager:
                             self._install(self._pin)
                         else:
                             self._last_error = ""
-                            return command
+                            return self._daemon_command(command)
                     else:
                         self._install(self._pin)
                     command = self._managed_command(probe=True)
                     if command:
                         self._last_error = ""
-                        return command
+                        return self._daemon_command(command)
                     raise ClaudexorRuntimeError(
                         "runtime_install_failed",
                         "the exact managed runtime was not selectable after installation",
@@ -1259,6 +1260,26 @@ class ClaudexorRuntimeManager:
             self._probe(command, pin)
         return command
 
+    def _daemon_command(self, command: list[str]) -> list[str]:
+        """Apply the engine's heap recommendation only to the actual spawn.
+
+        The daemon inherits NODE_OPTIONS unchanged from this same environment;
+        an operator's heap option wins. Explicit/external commands bypass this.
+        """
+        if "launch" not in self._launch_probe:
+            return command
+        launch = self._launch_probe["launch"]
+        args = launch.get("nodeArgs") if isinstance(launch, dict) else None
+        if not isinstance(args, list) or not all(
+            isinstance(arg, str) and re.fullmatch(r"--max-old-space-size=\d{3,6}", arg, flags=re.ASCII)
+            for arg in args
+        ):
+            self._last_error = "runtime_launch_invalid: engine heap arguments ignored"
+            return command
+        if "--max-old-space-size" in os.environ.get("NODE_OPTIONS", ""):
+            return command
+        return [command[0], *args, command[-1]]
+
     def _managed_cli_command(self, *, require_npm: bool = True) -> list[str]:
         pin = self._pin
         if pin is None or pin.cli_entrypoint is None or not self._managed_metadata():
@@ -1427,7 +1448,7 @@ class ClaudexorRuntimeManager:
         env.pop("CLAUDEXOR_BUILD_SHA", None)
         try:
             completed = subprocess.run(
-                [*command, "--probe"],
+                [command[0], command[-1], "--probe"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1467,6 +1488,7 @@ class ClaudexorRuntimeManager:
                 "runtime_probe_identity_mismatch",
                 "runtime probe identity does not match the reviewed version/build SHA",
             )
+        self._launch_probe = probe
         return node_version
 
     @staticmethod

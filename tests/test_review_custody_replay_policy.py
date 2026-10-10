@@ -65,7 +65,9 @@ def test_keyed_terminal_api_error_is_replayed_while_sibling_is_late(tmp_path):
     assert late_started.wait(1.0)
     assert getattr(ctx, "_review_settled_attempts", {})
     second = run_custodied_review_slots(**args)
-    assert calls == ["fast", "late"]
+    # Both slots run on independent workers; custody guarantees one call each,
+    # not which worker the scheduler enters first.
+    assert sorted(calls) == ["fast", "late"]
     assert {actor.slot_id: actor.operation_state for actor in second} == {
         "fast": "settled", "late": "in_flight",
     }

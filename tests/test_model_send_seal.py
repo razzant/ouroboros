@@ -13,7 +13,9 @@ from __future__ import annotations
 import copy
 import gzip
 import json
+import os
 import pathlib
+import sys
 from typing import Any, Dict
 
 import pytest
@@ -21,14 +23,12 @@ import pytest
 from ouroboros import model_send_seal as seal_mod
 from ouroboros import usage_accounting as ua
 from ouroboros.llm import LLMClient, _canonical_candidate_bytes
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
 def data_root(tmp_path, monkeypatch):
-    from tests.fixtures_usage_compaction import age_fixture_clock
-
     root = tmp_path / "data"
-    age_fixture_clock(monkeypatch)  # the fold horizon: fresh rows must still fold here
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     monkeypatch.setenv("TOTAL_BUDGET", "100")
@@ -78,8 +78,7 @@ def _payload() -> Dict[str, Any]:
 
 
 def _rows(root: pathlib.Path):
-    path = root / ua.LEDGER_REL
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return ledger_rows(root)
 
 
 def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None):
@@ -260,6 +259,8 @@ def test_corrupted_blob_yields_reconstruction_fact_and_does_not_block(data_root,
 
     # Observability invariant: the call itself was NOT blocked.
     assert final["state"] == "settled"
+    assert not _violation_files(data_root)
+    seal_mod.reconcile_model_send_seals(data_root)
     files = _violation_files(data_root)
     assert len(files) == 1
     fact = json.loads(files[0].read_text())
@@ -283,6 +284,8 @@ def test_tampered_seal_digest_yields_content_divergence_fact(data_root, monkeypa
     _tampering_persist(monkeypatch, rewrite_seal)
     final = _dispatch(data_root, "task-tampered-digest")
     assert final["state"] == "settled"
+    assert not _violation_files(data_root)
+    seal_mod.reconcile_model_send_seals(data_root)
     [file] = _violation_files(data_root)
     fact = json.loads(file.read_text())
     assert fact["kind"] == "content_divergence"
@@ -300,10 +303,12 @@ def test_missing_seal_block_yields_reconstruction_fact(data_root, monkeypatch):
     _tampering_persist(monkeypatch, drop_seal)
     final = _dispatch(data_root, "task-missing-seal")
     assert final["state"] == "settled"
+    assert not _violation_files(data_root)
+    seal_mod.reconcile_model_send_seals(data_root)
     [file] = _violation_files(data_root)
     fact = json.loads(file.read_text())
     assert (fact["kind"], fact["divergence_class"]) == (
-        "reconstruction_divergence", "seal_unreadable",
+        "unlogged_attempt", "missing_seal_record",
     )
 
 
@@ -318,6 +323,8 @@ def test_undisclosed_exclusion_class_is_a_violation_of_the_closed_enum(data_root
     _tampering_persist(monkeypatch, smuggle_class)
     final = _dispatch(data_root, "task-undisclosed")
     assert final["state"] == "settled"
+    assert not _violation_files(data_root)
+    seal_mod.reconcile_model_send_seals(data_root)
     [file] = _violation_files(data_root)
     fact = json.loads(file.read_text())
     assert (fact["kind"], fact["divergence_class"]) == (
@@ -335,6 +342,8 @@ def test_foreign_serializer_basis_is_never_reinterpreted(data_root, monkeypatch)
 
     _tampering_persist(monkeypatch, rewrite_basis)
     _dispatch(data_root, "task-basis")
+    assert not _violation_files(data_root)
+    seal_mod.reconcile_model_send_seals(data_root)
     [file] = _violation_files(data_root)
     fact = json.loads(file.read_text())
     assert (fact["kind"], fact["divergence_class"]) == (
@@ -349,7 +358,7 @@ def test_foreign_serializer_basis_is_never_reinterpreted(data_root, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_verification_adds_one_projection_and_no_extra_raw_serialization(data_root, monkeypatch):
+def test_dispatch_persists_once_without_a_readback_projection(data_root, monkeypatch):
     """The note budgets ONE read-back and ONE projection per attempt: the raw
     candidate is never serialized again for the compare (the seam digests are
     reused), and the CAS-basis projection pipeline runs exactly once more than
@@ -374,7 +383,7 @@ def test_verification_adds_one_projection_and_no_extra_raw_serialization(data_ro
     assert len(canonical_calls) == 4, len(canonical_calls)
     # persist_call redacts once for the CAS write; verification reconstructs
     # once. Nothing else may redact this candidate.
-    assert len(redact_calls) == 2, len(redact_calls)
+    assert len(redact_calls) == 1, len(redact_calls)
     assert not _violation_files(data_root)
 
 
@@ -420,24 +429,20 @@ def test_sweep_flags_a_synthetic_orphan_seal(data_root):
     assert list((data_root / "observability" / "calls" / "task-orphan").glob("*.json"))
 
 
-def test_a_compacted_attempt_is_recorded_history_not_an_orphan_seal(data_root):
-    """Compaction folds a terminal attempt out of the LIVE replay and into an
-    archive segment, on purpose. Asking the live file alone would make every
-    folded attempt a durable orphan_seal fact on the monetary/dispatch
-    invariant, at every startup, for history that is perfectly well recorded
-    (``docs/USAGE_COMPACTION.md`` §10: the verdict consults the
-    union)."""
-    from ouroboros import usage_compaction as uc
+def test_an_attempt_folded_before_the_store_is_recorded_history_not_an_orphan_seal(data_root):
+    """The retired compaction folded terminal attempts out of the journal into
+    archive segments; the store imported only their aggregate. Asking the
+    store alone would make every such attempt a durable orphan_seal fact at
+    every startup, for history that is perfectly well recorded: the audit
+    consults the retained evidence (``docs/USAGE_STORE.md``)."""
+    from tests.fixtures_usage_store import fold_into_archive
 
     attempt_ids = [_dispatch(data_root, "task-folded-%d" % index)["attempt_id"] for index in range(2)]
     assert seal_mod.reconcile_model_send_seals(data_root)["orphan_seals"] == 0
 
-    with ua._locked(data_root) as heartbeat:
-        receipt = uc.compact_usage_ledger_locked(data_root, heartbeat=heartbeat)
-    assert receipt is not None and receipt["folded_attempt_count"] == len(attempt_ids)
+    fold_into_archive(data_root, attempt_ids)
     live_ids = {str(row.get("attempt_id")) for row in _rows(data_root)}
-    assert not live_ids & set(attempt_ids), "the fold must remove them from the live replay"
-    assert all(uc.usage_attempt_recorded(data_root, attempt_id) for attempt_id in attempt_ids)
+    assert not live_ids & set(attempt_ids), "the fold must remove them from the store"
 
     report = seal_mod.reconcile_model_send_seals(data_root)
     assert report["seals"] == len(attempt_ids)
@@ -446,21 +451,23 @@ def test_a_compacted_attempt_is_recorded_history_not_an_orphan_seal(data_root):
     assert _violation_events(data_root) == []
 
 
+@pytest.mark.skipif(sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="chmod-based unreadability needs a non-root POSIX user")
 def test_an_unreadable_archive_is_unknown_not_an_orphan_accusation(data_root):
-    """The join's own typed corruption is the sweep's existing UNKNOWN case: a
-    tampered or unreadable segment means the history question has no answer,
-    and no answer may become a durable accusation."""
-    from ouroboros import usage_compaction as uc
+    """Retained evidence that cannot be read is the sweep's UNKNOWN case: the
+    history question has no answer, and no answer may become a durable
+    accusation."""
+    from tests.fixtures_usage_store import ARCHIVE_SEGMENT_REL, fold_into_archive
 
-    _dispatch(data_root, "task-archive-unknown")
-    with ua._locked(data_root) as heartbeat:
-        assert uc.compact_usage_ledger_locked(data_root, heartbeat=heartbeat) is not None
-    [segment] = (data_root / "archive" / "usage_ledger").glob("*.jsonl")
-    segment.write_text("not a ledger\n", encoding="utf-8")
-    uc._SEGMENT_CACHE.clear()
-    uc._CHAIN_UNION_CACHE.clear()
-
-    report = seal_mod.reconcile_model_send_seals(data_root)
+    attempt_id = _dispatch(data_root, "task-archive-unknown")["attempt_id"]
+    fold_into_archive(data_root, [attempt_id])
+    segment = data_root / ARCHIVE_SEGMENT_REL
+    segment.chmod(0)
+    try:
+        report = seal_mod.reconcile_model_send_seals(data_root)
+    finally:
+        segment.chmod(0o644)
+    assert report["status"] == "unknown"
     assert report["orphan_seals"] == 0 and report["facts_written"] == 0
     assert _violation_files(data_root) == []
 
@@ -549,8 +556,12 @@ def test_promotion_marks_the_canonical_copy(data_root, tmp_path):
 
 
 def test_sweep_skips_every_conclusion_on_an_unreadable_ledger(data_root):
+    from ouroboros import usage_store
+
     _dispatch(data_root, "task-sweep-corrupt-ledger")
-    (data_root / ua.LEDGER_REL).write_text("not-json\n{}\n", encoding="utf-8")
+    store = data_root / usage_store.STORE_REL
+    store.write_bytes(b"not a database\n" * 512)  # a damaged store: unknown, never an accusation
+    usage_store.forget(data_root)
     report = seal_mod.reconcile_model_send_seals(data_root)
     assert report == {
         "status": "unknown", "manifests_checked": 0,
@@ -571,6 +582,6 @@ def test_sweep_rides_the_startup_family(data_root, monkeypatch):
     )
     # Neighbour sweep steps degrade fail-soft on this synthetic root.
     maintenance._startup_custody_sweep()
-    # Historical reconciliation moved out of the synchronous custody sweep;
-    # the supervisor launches its session child after readiness.
+    # Historical reconciliation belongs to the explicit owner/rebuild job;
+    # no startup path launches it.
     assert calls == []

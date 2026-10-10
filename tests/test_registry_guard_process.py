@@ -237,6 +237,7 @@ def test_git_protected_roots_preserve_order_and_duplicate_semantics(tmp_path):
     stub._ctx = SimpleNamespace(
         system_repo_dir=roots["system"],
         repo_dir=roots["system"],
+        serving_repo_dir=roots["system"],
         drive_root=roots["drive"],
         task_metadata={
             "drive_root": str(roots["meta-drive"]),
@@ -249,11 +250,19 @@ def test_git_protected_roots_preserve_order_and_duplicate_semantics(tmp_path):
     assert registry_guards._git_protected_roots(stub) == [
         roots["system"],
         roots["system"],
+        roots["system"],
         roots["drive"],
         roots["meta-drive"],
         roots["child-drive"],
         roots["headless-drive"],
         roots["budget-drive"],
+    ]
+
+    # A bound candidate executes from a different checkout but the serving body
+    # remains a protected root. Preserve both and their positional order.
+    stub._ctx.repo_dir = tmp_path / "candidate"
+    assert registry_guards._git_protected_roots(stub)[:4] == [
+        roots["system"], tmp_path / "candidate", roots["system"], roots["drive"],
     ]
 
 

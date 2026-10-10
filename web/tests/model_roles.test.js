@@ -116,9 +116,9 @@ test('context Auto uses the exact advertised maximum, while manual values stay a
 test('the same role sheets are loaded by both actual UI hosts', () => {
     for (const file of ['index.html', 'onboarding_template.html']) {
         const html = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
-        for (const sheet of ['model_roles.css', 'reviewer_slots.css']) {
-            assert.ok(html.includes(`href="/static/${sheet}"`), `${file} loads ${sheet}`);
-        }
+        assert.ok(html.includes('href="/static/model_roles.css"'), `${file} loads model_roles.css`);
+        // The review lanes editor is retired: reviewers are rows of the subagent catalog.
+        assert.ok(!html.includes('reviewer_slots.css'), `${file} still loads the retired review lanes sheet`);
     }
 });
 

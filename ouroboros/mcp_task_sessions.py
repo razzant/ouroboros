@@ -39,6 +39,16 @@ specific to this pinned core and assumes the owner has not set
 Each bridge process inherits a containment marker scoped to this installation
 and task before it exists, so task Stop, cancel and Panic find its live members
 in the process table without a ledger row having been written first.
+
+A session is published before its worker starts, so Stop can meet it unstarted
+or mid-launch. Revocation and the launch decision share ``_lock``: a revoked
+session never launches, and a launch already admitted is scanned again once
+its worker has unwound. Only that later scan, over a fresh container on the
+original marker, may report the closure ``confirmed``; a scan while the worker
+still runs is provisional. A call whose connection closes before any answer
+was possibly submitted: its effect is unknown, nothing resends it, and the
+session closes. A tool error the server answers is an ordinary result over a
+live session.
 """
 
 from __future__ import annotations
@@ -48,6 +58,7 @@ import collections
 import concurrent.futures
 import dataclasses
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -59,6 +70,7 @@ from typing import Any
 
 from ouroboros import browser_policy
 from ouroboros.process_containment import (
+    CONTAINMENT_ENV_PREFIX,
     MARKER_MEMBER,
     ProcessContainer,
     pid_is_zombie,
@@ -80,6 +92,7 @@ _STATE_TOOL = "browser_tabs"
 _STATE_ARGS = {"action": "list"}
 _SCRIPT_TOOLS = frozenset({"browser_evaluate", "browser_run_code_unsafe"})
 _CLOSE_GRACE_SEC = 5
+_EXIT_GRACE_SEC = 2
 _GUARD_ENV = "OUROBOROS_BROWSER_GUARD"
 _GUARD_FACTS_LIMIT = 64 * 1024 * 1024  # Larger request facts are refused, not judged partially.
 # Loaded by upstream as ``const { default: func } = require(initPage)``. It runs
@@ -159,12 +172,26 @@ class BrowserBridgeTimeout(TimeoutError):
     """A dispatched bridge call timed out; its close receipt must reach the caller."""
 
 
+class BrowserBridgeBroken(RuntimeError):
+    """The connection closed under a call before it answered; the session is closed.
+
+    ``submitted`` is true for the action itself, whose effect is then unknown;
+    an observation that broke this way dispatched no action.
+    """
+
+    def __init__(self, text: str, *, submitted: bool, closure: str):
+        super().__init__(text)
+        self.submitted = submitted
+        self.closure = closure
+
+
 def _owner(ctx: Any) -> tuple[str, str]:
     task = str(getattr(ctx, "task_id", "") or "")
     attempt = getattr(ctx, "task_attempt", None)
-    if not task or attempt in (None, "") or not getattr(ctx, "task_lifecycle_bound", False):
+    if not task or not getattr(ctx, "task_lifecycle_bound", False):
         raise RuntimeError("MCP browser bridge requires a bound task and attempt")
-    return task, str(attempt)
+    # Direct turns omit _attempt; the lifecycle's initial attempt is one.
+    return task, str(1 if attempt in (None, "") else attempt)
 
 
 def _data_root(ctx: Any) -> pathlib.Path:
@@ -298,20 +325,26 @@ class TaskBrowserSession:
         self.close_outcome = "unconfirmed: not closed"
         self._loop: asyncio.AbstractEventLoop | None = None
         self._session: Any = None
+        self._read_stream: Any = None
         self._closing = asyncio.Event()
         self._call_lock = threading.Lock()
         self._reap_lock = threading.Lock()
-        self._reaped = False
         self._started = False
+        self._launched = False  # The worker passed its launch admission (under ``_lock``).
+        self._served_out = False  # The worker's loop is closed: it can launch nothing more.
         self.scratch: tempfile.TemporaryDirectory | None = None
         self.guard_dir = _private_socket_dir()
         self.guard_armed = False
         self._blocked: collections.deque = collections.deque(maxlen=20)
+        self._blocked_omitted = 0
 
     def start(self, timeout: int) -> list[dict]:
-        if not self._started:
-            self._started = True
-            self.thread.start()
+        with _lock:  # Stop may meet the published session before this start.
+            if not self._started:
+                if self.revoked:
+                    raise RuntimeError("MCP browser task session was revoked before it started")
+                self._started = True
+                self.thread.start()
         return self.ready.result(timeout=timeout)
 
     def _run(self) -> None:
@@ -323,11 +356,7 @@ class TaskBrowserSession:
             if not self.ready.done():
                 self.ready.set_exception(exc)
         finally:
-            with _lock:
-                if not self.revoked:
-                    _failed_opens[(self.key[0], self.attempt, self.cfg.id)] = (
-                        self.cfg, "session ended after discovery or during startup")
-                self.revoked = True
+            self._ended_unexpectedly()
             pending = asyncio.all_tasks(loop)
             for task in pending:
                 task.cancel()  # A caller waiting on one gets CancelledError, not a hang.
@@ -335,17 +364,40 @@ class TaskBrowserSession:
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
-            self._reap()
+            with _lock:
+                self._served_out = True
+            self._reap()  # The final scan: nothing of this worker can launch after it.
             if self.scratch is not None:
                 self.scratch.cleanup()
             self.guard_dir.cleanup()
 
+    def _ended_unexpectedly(self) -> None:
+        """Revoke a session that ended without a host close; its attempt does not respawn it."""
+        with _lock:
+            if not self.revoked:
+                _failed_opens[(self.key[0], self.attempt, self.cfg.id)] = (
+                    self.cfg, "session ended after discovery or during startup")
+            self.revoked = True
+
     def _reap(self) -> str:
+        """Scan the marked tree; only a scan once the worker can launch nothing more confirms.
+
+        ``ProcessContainer.reap`` consumes the marker it scans, and the same object
+        scanned again sees nothing and answers "" — so every later scan gets a fresh
+        container over the original marker instead of reading that as a close.
+        """
         with self._reap_lock:
-            if not self._reaped:
-                self._reaped = True
-                outcome = self.container.reap()
-                self.close_outcome = "confirmed" if not outcome else f"unconfirmed: {outcome}"
+            if self.close_outcome != "confirmed":
+                with _lock:
+                    final = (self._served_out or (self.revoked and not self._launched)
+                             or (self._started and not self.thread.is_alive()))
+                container = self.container
+                self.container = ProcessContainer.for_scope(self.token[len(CONTAINMENT_ENV_PREFIX):])
+                outcome = container.reap()
+                if outcome:
+                    self.close_outcome = f"unconfirmed: {outcome}"
+                else:
+                    self.close_outcome = "confirmed" if final else "unconfirmed: session worker did not exit"
             return self.close_outcome
 
     async def _answer_guard(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -371,8 +423,12 @@ class TaskBrowserSession:
                 if self.revoked:
                     reason = "BROWSER_SESSION_REVOKED: the task's browser session is closing"
                 if reason:
-                    self._blocked.append(f"{reason} — {str(facts.get('method') or '?')[:10]} "
-                                         f"{str(facts.get('url') or '?')[:200]}")
+                    from ouroboros.utils import truncate_within_limit
+
+                    if len(self._blocked) == self._blocked.maxlen:
+                        self._blocked_omitted += 1
+                    self._blocked.append(truncate_within_limit(
+                        f"{reason} — {facts.get('method') or '?'} {facts.get('url') or '?'}", 400))
                 answer = {"block": reason}
             writer.write(json.dumps(answer).encode("utf-8") + b"\n")
             await writer.drain()
@@ -382,7 +438,9 @@ class TaskBrowserSession:
             writer.close()
 
     async def _serve(self) -> None:
+        from mcp.types import Implementation
         from ouroboros.mcp_client import ClientSession, _transport_factory
+        from ouroboros.version import get_version
 
         if not self.cfg.cwd:
             self.scratch = tempfile.TemporaryDirectory(prefix="ouroboros-mcp-browser-")
@@ -392,13 +450,19 @@ class TaskBrowserSession:
             self._answer_guard, path=str(guard / "g.sock"), limit=_GUARD_FACTS_LIMIT)
         # The SDK starts the server in its own session; the marker is inherited
         # from birth and survives that and a descendant's later setsid. The
-        # host's guard replaces any init page the entry's own env names.
+        # host's guard replaces any init page the entry's own env names. The
+        # marker is the session's own string: a scan cannot consume it.
         cfg = dataclasses.replace(
             self.cfg,
             cwd=self.cfg.cwd or (self.scratch.name if self.scratch is not None else ""),
-            env={**self.cfg.env, **self.container.containment_env(),
+            env={**self.cfg.env, self.token: "1",
                  "PLAYWRIGHT_MCP_INIT_PAGE": str(guard / "guard.cjs"), _GUARD_ENV: str(guard / "g.sock")},
         )
+        with _lock:  # Revocation and this launch decision are one step.
+            if self.revoked:
+                server.close()
+                raise RuntimeError("MCP browser task session was revoked before its server launched")
+            self._launched = True
         async with server, _transport_factory(cfg) as streams:
             pids = pids_with_env_marker(self.token)
             if not pids:
@@ -406,7 +470,11 @@ class TaskBrowserSession:
             for pid in pids:  # The generation reaper's durable record.
                 record_process(self.data_root, pid=pid, cmd=[cfg.command, *cfg.args],
                                purpose="mcp_browser_bridge", scope="task", owner_task_id=self.key[0])
-            async with ClientSession(streams[0], streams[1]) as session:
+            client_kwargs = (
+                {"client_info": Implementation(name="Ouroboros", version=get_version())}
+                if "client_info" in inspect.signature(ClientSession).parameters else {}
+            )
+            async with ClientSession(streams[0], streams[1], **client_kwargs) as session:
                 await session.initialize()
                 tools, cursor = [], None
                 for _page in range(50):
@@ -420,7 +488,7 @@ class TaskBrowserSession:
                     raise RuntimeError(f"MCP browser server does not list its {_STATE_TOOL} tool")
                 if self.revoked:
                     raise RuntimeError("MCP browser task session was revoked while starting")
-                self._session = session
+                self._session, self._read_stream = session, streams[0]
                 self.ready.set_result(tools)
                 while not self._closing.is_set():
                     # The SDK reader exits on stdio EOF without waking our close event.
@@ -461,7 +529,41 @@ class TaskBrowserSession:
                 f"The task session was closed: {outcome}"
             ) from exc
         except concurrent.futures.CancelledError as exc:
-            raise RuntimeError(f"MCP browser session closed during {name!r}; its effect is unknown") from exc
+            raise self._broken(name, dispatch, "the session closed during the call") from exc
+        except Exception as exc:
+            if not self._connection_closed(exc):
+                raise  # The server answered with an error over a live connection.
+            raise self._broken(name, dispatch, f"{type(exc).__name__}: {exc}") from exc
+
+    def _connection_closed(self, exc: BaseException) -> bool:
+        """Whether a call failed because its connection closed, not on the server's own answer.
+
+        The SDK fails every pending request with ``CONNECTION_CLOSED`` once the
+        server's output has ended; a live server may send that code too, so
+        the transport's read side must also be closed.
+        """
+        import anyio
+        from mcp.shared.exceptions import McpError
+        from mcp.types import CONNECTION_CLOSED
+
+        if isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream)):
+            return True
+        read = self._read_stream
+        return (isinstance(exc, McpError) and exc.error.code == CONNECTION_CLOSED
+                and read is not None and read.statistics().open_send_streams == 0)
+
+    def _broken(self, name: str, submitted: bool, cause: str) -> BrowserBridgeBroken:
+        """Close a session whose connection closed under ``name``; nothing is resent."""
+        self._ended_unexpectedly()
+        outcome = self.stop()
+        if submitted:
+            text = (f"MCP browser call {name!r} was submitted, then the connection closed before any "
+                    f"answer ({cause}). Whether it took effect is unknown; it was not resent. "
+                    f"The task session was closed: {outcome}")
+        else:
+            text = (f"MCP browser connection closed during {name!r} ({cause}). "
+                    f"The task session was closed: {outcome}")
+        return BrowserBridgeBroken(text, submitted=submitted, closure=outcome)
 
     def _observe(self, timeout: int) -> dict[str, Any]:
         return _page_state(self._request(_STATE_TOOL, dict(_STATE_ARGS), timeout))
@@ -501,6 +603,7 @@ class TaskBrowserSession:
                     "the action was not dispatched"
                 )
             self._blocked.clear()  # Earlier refusals were background requests between calls.
+            self._blocked_omitted = 0
             result = _tool_result_from_call_result(self._request(name, args, timeout, dispatch=True))
             blocked = [self._blocked.popleft() for _ in range(len(self._blocked))]
             try:
@@ -516,11 +619,18 @@ class TaskBrowserSession:
             note = ("⚠️ BROWSER_REQUEST_BLOCKED: the host request guard aborted these requests during the call; "
                     "the page saw a network failure for each:\n" + "\n".join(f"- {line}" for line in blocked)
                     ) if blocked else ""
+            if self._blocked_omitted:
+                note += f"\nEarlier blocked-request diagnostics omitted: {self._blocked_omitted}."
             return result, advice, note
 
     def stop(self) -> str:
-        """Revoke new calls, close the connection, then scan the marked tree."""
-        self.revoked = True
+        """Revoke new calls and launches, close the connection, then scan the marked tree.
+
+        A scan while the worker still runs is provisional; the worker's own exit
+        scans again, so a later call reads the closure it reached.
+        """
+        with _lock:
+            self.revoked = True
         loop = self._loop
         if loop is not None:
             try:
@@ -529,12 +639,10 @@ class TaskBrowserSession:
                 pass  # The loop already ended.
         if self._started:
             self.thread.join(timeout=_CLOSE_GRACE_SEC)
-        outcome = self._reap()
+        self._reap()
         if self._started:
-            self.thread.join(timeout=2)
-        if self.thread.is_alive():
-            outcome = self.close_outcome = "unconfirmed: session worker did not exit"
-        return outcome
+            self.thread.join(timeout=_EXIT_GRACE_SEC)
+        return self.close_outcome
 
 
 def _foreign_live_members(data_root: pathlib.Path, task_id: str) -> str:
@@ -601,18 +709,39 @@ def _close(session: TaskBrowserSession) -> dict:
     return {"server": session.cfg.id, "closure": outcome}
 
 
-def stop_task(ctx: Any) -> list[dict]:
-    """Task end: refuse new sessions for this attempt, then close the held ones."""
+def stop_task(ctx: Any, *, end_attempt: bool = True) -> list[dict]:
+    """Close held sessions; only terminal cleanup ends admission for this attempt.
+
+    A serialized pause releases its worker and may resume on another process.
+    Close its process-local connection without ending the retained attempt.
+    Warm in-process waits do not call this cleanup.
+    """
     try:
         owner = _owner(ctx)
     except RuntimeError:
         return []  # An unbound context cannot have opened a bridge.
     with _lock:
-        _ended_attempts.add(owner)
+        if end_attempt:
+            _ended_attempts.add(owner)
         for key in [key for key in _failed_opens if key[0] == owner[0]]:
             _failed_opens.pop(key, None)
         found = [session for key, session in _sessions.items() if key[0] == owner[0]]
     return [_close(session) for session in found]
+
+
+def release_stale(cfg: Any, ctx: Any) -> dict | None:
+    """Close this attempt's session opened with ``cfg`` once that entry is no longer current.
+
+    A discovery captures its configuration before it opens; a Settings change
+    in between finds nothing to revoke yet, so the refresh that sees its own
+    listing discarded disposes of exactly the session it opened.
+    """
+    task, attempt = _owner(ctx)
+    with _lock:
+        session = _sessions.get((task, cfg.id))
+    if session is None or session.attempt != attempt or session.cfg != cfg:
+        return None
+    return _close(session)
 
 
 def revoke_changed(configs: list[Any]) -> list[dict]:

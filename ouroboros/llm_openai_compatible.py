@@ -38,7 +38,7 @@ from ouroboros.request_wire_recovery import (
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
-from ouroboros._usage_response import observed_processing_mode
+from ouroboros._usage_response import observed_processing_mode, provider_cost_value
 
 
 # The moved warnings keep the logger identity they were emitted under.
@@ -55,16 +55,23 @@ _RESPONSE_METADATA_LABEL_MAX_CHARS = 160
 def _project_openai_family_system(target: Dict[str, Any], messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The OpenAI-family send copy of a declared leading system message.
 
-    OpenAI's public API caches the whole leading system section plus tools as ONE unit
-    (``llm_attempt.openai_family_model``): keep only the builder-declared stable governance
-    blocks there and carry the mutable context as a host notice before the task, so a new
-    conversation is served the prefix its predecessors already cached. Runs before the
-    direct/OpenRouter branch split and the marker strip, so direct OpenAI, OpenRouter and
-    the prospective wrap-up candidate project the same copy; the canonical transcript keeps
-    its single system message. The shape that was sent rides ``target["wire_layout"]``
-    (per-call, never a thread-local) into ``usage`` in ``_normalize_remote_response``.
+    Without explicit breakpoints OpenAI looks a cache up only at the end of the leading
+    system group (``llm_attempt.openai_family_model``): keep only the builder-declared stable
+    governance blocks there and carry the mutable context as a host notice before the task,
+    so a new conversation is served the prefix its predecessors already cached. OpenRouter
+    turns the block markers into explicit breakpoints for this family, so there each marked
+    leading block also stays its own system item and is reused independently. Runs before
+    the direct/OpenRouter branch split and the marker strip, so direct OpenAI, OpenRouter
+    and the prospective wrap-up candidate project from one function; the canonical
+    transcript keeps its single system message. The shape that was sent rides
+    ``target["wire_layout"]`` (per-call, never a thread-local) into ``usage`` in
+    ``_normalize_remote_response``.
     """
-    return project_declared_system_prefix(target, messages) if openai_family_route(target) else messages
+    if not openai_family_route(target):
+        return messages
+    keep_marked = bool(target.get("supports_openrouter_extensions")) and supports_message_cache_control(
+        str(target.get("resolved_model") or ""))
+    return project_declared_system_prefix(target, messages, keep_marked=keep_marked)
 
 
 def _bounded_response_metadata_label(value: Any) -> Optional[str]:
@@ -124,17 +131,9 @@ class _OpenAICompatibleLaneMixin:
         messages = self._normalize_system_message_placement(messages)
         resolved_model = str(target.get("resolved_model") or "")
         provider = str(target.get("provider") or "")
-        # Blind models receive an explicit image placeholder on both branches,
-        # preserving canonical blocks. Check qualified and bare identities:
-        # direct names lose their provider prefix, while a compatible route's
-        # vendor-prefixed bare name may carry the only recognizable vision prefix.
-        # OpenRouter's two spellings coincide; vision-capable models pass unchanged.
-        from ouroboros.provider_models import supports_vision
-        if not (
-            supports_vision(str(target.get("usage_model") or resolved_model))
-            or supports_vision(resolved_model)
-        ):
-            messages = self._replace_image_blocks_with_placeholder(messages)
+        # Image blocks are encoded as received: whether this route gets pixels,
+        # a caption or a marker was decided by the send policy (vision_routing),
+        # never by this builder from a model name.
         messages = _project_openai_family_system(target, messages)
         # Official direct OpenAI Chat uses the current completion-token carrier:
         # provider-wide; model names are not capability authority across routes.
@@ -182,10 +181,14 @@ class _OpenAICompatibleLaneMixin:
                 cache_identity = self._prompt_cache_identity(
                     str(target.get("usage_model") or resolved_model),
                     clean_messages,
+                ) or self._explicit_cache_affinity_identity(
+                    str(target.get("usage_model") or resolved_model), cache_affinity,
                 )
                 if cache_identity:
                     # OpenAI's named affinity key keeps requests sharing the
-                    # stable governance prefix on the same cache bucket.
+                    # stable governance prefix on the same cache bucket; a
+                    # request without a leading system (a Light prompt) uses
+                    # its caller-declared affinity instead.
                     kwargs["prompt_cache_key"] = cache_identity
             requested_effort = normalize_reasoning_effort(reasoning_effort)
             if direct_openai:
@@ -400,8 +403,16 @@ class _OpenAICompatibleLaneMixin:
         prompt_cache_ttl: Optional[str] = None,
         wire_completion: Any = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Normalize an OpenAI-compatible response; skip_cost_fetch keeps no_proxy pure."""
-        usage = resp_dict.get("usage") or {}
+        """Normalize a reply without generation lookup; skip_cost_fetch also skips tariffs."""
+        usage = dict(resp_dict.get("usage") or {})
+        price_candidates = (
+            usage.get("cost"), usage.get("total_cost"), resp_dict.get("total_cost_usd"),
+        )
+        usage["cost"] = next((cost for value in price_candidates
+                              if (cost := provider_cost_value(value)) is not None), None)
+        usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
+        if usage["cost"] is None and any(value is not None for value in price_candidates):
+            usage["cost_invalid"] = True
         if "service_tier" in resp_dict:
             usage["service_tier"] = resp_dict["service_tier"]
         attach_processing_receipt(target, usage)
@@ -535,14 +546,6 @@ class _OpenAICompatibleLaneMixin:
                 if cache_write:
                     usage["cache_write_tokens"] = int(cache_write)
 
-        if target.get("supports_openrouter_extensions") and not skip_cost_fetch:
-            if usage.get("cost") is None:
-                gen_id = resp_dict.get("id") or ""
-                if gen_id:
-                    cost = self._fetch_generation_cost(gen_id, target)
-                    if cost is not None:
-                        usage["cost"] = cost
-
         usage["provider"] = str(target.get("provider") or "openrouter")
         usage["resolved_model"] = str(target.get("usage_model") or target.get("resolved_model") or "")
         if prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
@@ -551,7 +554,8 @@ class _OpenAICompatibleLaneMixin:
         _write_split = self._cache_write_split(usage)
         if _write_split and not usage.get("cache_write_tokens_by_ttl"):
             usage["cache_write_tokens_by_ttl"] = _write_split
-        if usage.get("cost") is None and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
+        if (usage.get("cost") is None and not usage.get("cost_invalid")
+                and (usage.get("prompt_tokens") or usage.get("completion_tokens"))):
             from ouroboros.pricing import estimate_cost_optional
 
             estimated_cost = estimate_cost_optional(

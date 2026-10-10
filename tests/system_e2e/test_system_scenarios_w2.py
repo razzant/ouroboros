@@ -13,7 +13,7 @@ polling (``wait_until`` over ``ArtifactOracle`` readers), keyless throughout:
   fanout receipt in the parent's forked drive, quiescence (the child's terminal
   ``task_done`` precedes the parent's; the parent's terminal is clean, not the
   degraded ``children_unabsorbed`` path), the child result reaching the parent
-  verbatim (marker in the parent's durable ``wait_tasks`` tool row), the
+  verbatim (marker in the complete ``wait_tasks`` result its durable row references), the
   authoritative disposition row on the task-tree ledger, and the root cost rollup
   keys on the parent's terminal event.
 * S7 — CANCELLATION (single): a keepalive task is cancelled over the same HTTP
@@ -284,8 +284,8 @@ def _s6_dispose_step(body: dict) -> dict:
     text = body_text(body)
     ids = _CHILD_ID_RE.findall(text)
     shas = _CHILD_SHA_RE.findall(text)
-    if not ids or not shas:
-        return {"final": "E2E_SCRIPT_ERROR: missing child id or exact result hash for the disposition"}
+    if not ids or not shas or S6_CHILD_MARKER not in text:
+        return {"final": "E2E_SCRIPT_ERROR: missing child id, exact result hash or full result for the disposition"}
     return {"tool": "tree_note", "arguments": {
         "kind": "decision",
         "text": "Absorbed the scout child's listing into the final answer.",
@@ -365,12 +365,18 @@ def test_s6_subagent_tree_lineage_quiescence_and_child_result_handoff(
             fanouts = parent_drive.events("swarm_fanout")
             assert fanouts and fanouts[0].get("task_ids") == [child_id], fanouts
 
-            # The child's result reached the parent VERBATIM: the durable wait_tasks
-            # tool row in the parent drive carries the child marker.
+            # Read the complete durable wait_tasks result through its verified
+            # reference; the tools.jsonl preview may omit the child's answer.
             wait_rows = [row for row in parent_drive.tools_rows()
                          if "wait_tasks" in str(row.get("tool") or row.get("name") or "")]
             assert wait_rows, "wait_tasks call missing from the parent tools log"
-            wait_blob = json.dumps(wait_rows)
+            from ouroboros.observability import read_call_payload
+
+            wait_blob = json.dumps([
+                read_call_payload(parent_drive.data_root, task_id=parent_id,
+                                  call_id=row["result_ref"]["call_id"])[1]
+                for row in wait_rows if row.get("type") == "tool_call"
+            ])
             assert child_id in wait_blob, wait_rows
             assert S6_CHILD_MARKER in wait_blob, "child result text never reached the parent"
 
@@ -705,6 +711,7 @@ data = pathlib.Path(sys.argv[2])
 from supervisor import git_ops
 git_ops.init(clone, data, "")
 from supervisor.update_merge import (
+    UPDATE_TX_SCHEMA_VERSION,
     finalize_managed_update_on_boot,
     read_update_tx_strict,
     rollback_managed_update,
@@ -762,7 +769,7 @@ report["null_stamp"] = {
 
 # Phase B: FUTURE-schema marker -> typed newer-version refusal from BOTH the
 # rollback and the boot finalizer; the raw marker stays byte-identical.
-marker.write_text(json.dumps({"_schema_version": 2, "pre_update_sha": head0,
+marker.write_text(json.dumps({"_schema_version": UPDATE_TX_SCHEMA_VERSION + 1, "pre_update_sha": head0,
                               "phase": "pending_boot_smoke"}), encoding="utf-8")
 future_before = marker.read_bytes()
 ok, msg = rollback_managed_update("e2e_w2_future_probe")

@@ -476,16 +476,19 @@ body.resizing-panels { user-select: none; }
 
 .project-handoff-heading {
     display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    padding: var(--space-3);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
 }
+
+.project-handoff-phase { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-2); }
+.project-handoff .chat-quiz-project { margin-top: var(--space-3); }
 
 .project-handoff-title {
     min-width: 0;
     overflow-wrap: anywhere;
-    font-size: var(--type-body);
+    font-size: var(--type-section);
+    font-weight: 600;
     color: var(--text-primary);
 }
 
@@ -501,6 +504,7 @@ body.resizing-panels { user-select: none; }
 
 .project-handoff > .sender { display: none; }
 .project-handoff .message { padding: 0; }
+.chat-bubble.system.project-handoff .msg-time { color: var(--text-meta); }
 
 .nav-section {
     display: flex;
@@ -1304,6 +1308,13 @@ body.resizing-panels { user-select: none; }
     max-width: none;
     text-align: left;
     overflow-wrap: anywhere;
+}
+/* Main's header floats over messages; Project's status bar is in normal flow.
+   Keep the reading backing local to the overlay, never a filled Project row. */
+.chat-page-header > .chat-history-status {
+    justify-self: start;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     background: var(--bg-primary);
 }
 
@@ -1910,8 +1921,12 @@ body.resizing-panels { user-select: none; }
     background: var(--accent-10);
 }
 
-.chat-live-card:not([data-finished="1"]) .chat-live-phase:is(.working, .thinking, .progress, .calling, .context) {
+.chat-live-phase[data-motion="1"], .chat-live-phase-secondary[data-motion="1"] {
     animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .chat-live-phase[data-motion="1"], .chat-live-phase-secondary[data-motion="1"] { animation: none; }
 }
 
 /* Phase pills are status chips with class-named tones; the triple is the
@@ -2813,19 +2828,25 @@ body.resizing-panels { user-select: none; }
    it opens: `#` = `##`, `###` one step down, deeper levels at the reading
    size; all in the bubble's own ink, with clearly more space above than below.
    `:where` keeps the rich scope weightless, so these rules win over the
-   compact ones above by order and the first/last-child rules below still apply. */
-.chat-bubble .message:where(.ui-rich-content) :is(.md-h1, .md-h2, .md-h3) {
+   compact ones above by order and the first/last-child rules below still apply.
+   A delivered document in the reader reads on the same ladder (DESIGN
+   "Document reading"). */
+.chat-bubble .message:where(.ui-rich-content) :is(.md-h1, .md-h2, .md-h3),
+.document-reader-markdown :is(.md-h1, .md-h2, .md-h3) {
     color: inherit;
     font-weight: 600;
     line-height: var(--line-title);
     text-wrap: balance;
     margin-block: var(--space-5) var(--space-2);
 }
-.chat-bubble .message:where(.ui-rich-content) :is(.md-h1, .md-h2) { font-size: var(--md-heading-major); }
-.chat-bubble .message:where(.ui-rich-content) .md-h3 { font-size: var(--md-heading-minor); }
+.chat-bubble .message:where(.ui-rich-content) :is(.md-h1, .md-h2),
+.document-reader-markdown :is(.md-h1, .md-h2) { font-size: var(--md-heading-major); }
+.chat-bubble .message:where(.ui-rich-content) .md-h3,
+.document-reader-markdown .md-h3 { font-size: var(--md-heading-minor); }
 /* h4-h6 carry .md-h3 (the compact demotion); `:where` keeps this rule no
    stronger than the class rule it follows. */
-.chat-bubble .message:where(.ui-rich-content) :where(h4, h5, h6).md-h3 {
+.chat-bubble .message:where(.ui-rich-content) :where(h4, h5, h6).md-h3,
+.document-reader-markdown :where(h4, h5, h6).md-h3 {
     font-size: inherit;
     margin-block: var(--space-4) var(--space-1);
 }
@@ -4815,6 +4836,14 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     margin-bottom: 8px;
 }
 
+/* A failed review run's recorded reason: meta under its outcome line. */
+.skills-review-reason {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
 .skills-badge {
     padding: 2px 8px;
     border-radius: var(--radius-xs);
@@ -6637,11 +6666,11 @@ textarea.chat-input {
     }
 }
 
-/* Review lanes (6.2) + agent accounts (D30).
+/* Agent accounts (D30).
    Borders read the theme's --divider like every other panel surface. They used
    to name --border, which this dark-only :root never declares, so all three
    rules silently took their literal grey fallback instead of the token. */
-/* === design-system:migrated-begin (harness accounts + reviewer slots + Dashboard Updates tab) ===
+/* === design-system:migrated-begin (harness accounts + Dashboard Updates tab) ===
    Down to the matching end marker: docs/DESIGN.md tokens only, guarded by
    tests/test_web_typography_static.py. The rest of this file is a later pass. */
 /* Subsection rhythm: a group is its head (heading + that group's own Add
@@ -6719,6 +6748,36 @@ textarea.chat-input {
     line-height: var(--line-meta);
 }
 .agent-family-rows { display: flex; flex-direction: column; gap: 8px; }
+.harness-maintenance-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    min-width: 0;
+}
+.harness-maintenance-line {
+    flex: 1 1 auto;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--text-meta);
+    overflow-wrap: anywhere;
+}
+.harness-maintenance-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.harness-maintenance-notice,
+.harness-maintenance-details {
+    flex-basis: 100%;
+    min-width: 0;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--text-meta);
+    overflow-wrap: anywhere;
+}
+.harness-maintenance-notice[data-tone="warn"] { color: var(--status-warn-fg); }
+.harness-maintenance-details summary { color: var(--text-primary); cursor: pointer; }
+.harness-maintenance-details dl { margin: var(--space-2) 0; }
+.harness-maintenance-details dt { color: var(--text-meta); }
+.harness-maintenance-details dd { margin: 0 0 var(--space-1); color: var(--text-primary); }
+.harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Account rows are purpose-built (identity left, actions right), not the
    settings key/value grid — .settings-custom-secret-row's 0.65fr/1.35fr
    columns inverted the proportions and its align-items:end sank the text.
@@ -7204,12 +7263,111 @@ textarea.chat-input {
     background: var(--ui-card-bg);
 }
 
+/* Whole images on both sides (owner choice): a tile letterboxes, never crops. */
 .chat-gallery-item .chat-photo {
     display: block;
     width: 100%;
     aspect-ratio: 4 / 3;
-    object-fit: cover;
+    object-fit: contain;
     border-radius: 0;
+}
+
+/* One photo alone keeps its own ratio up to the token height, whoever sent it:
+   an Ouroboros single-photo bubble or an owner bubble with one image. */
+.chat-bubble:not(.is-multiple) .chat-gallery-grid:not(.is-multiple) .chat-gallery-item {
+    justify-self: start;
+    width: fit-content;
+    max-width: 100%;
+}
+
+.chat-bubble:not(.is-multiple) .chat-gallery-grid:not(.is-multiple) .chat-photo {
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: var(--chat-photo-max-height);
+    /* A tiny, very narrow or very short photo still gets a box its always-present
+       actions fit in (the figure clips what overflows it); scale-down shows the
+       photo whole at its own size and ratio inside that box, never enlarged. */
+    min-width: var(--chat-photo-min-box);
+    min-height: var(--chat-photo-min-box);
+    aspect-ratio: auto;
+    object-fit: scale-down;
+}
+
+/* Owner attachments: one block above the caption inside the owner's bubble
+   (DESIGN "Chat attachments"); the photo grid, players and file cards are the
+   shared delivery atoms above, composed — not restyled. */
+.chat-bubble.has-attachments {
+    max-width: min(80%, var(--chat-media-bubble-max));
+}
+
+.chat-bubble.has-attachments.has-wide-media {
+    width: min(80%, var(--chat-media-bubble-max));
+}
+
+.chat-attachments {
+    display: grid;
+    /* One column the bubble's width: no child's min-content (a player's control
+       row, a long nowrap title) may widen it past the bubble's edge. */
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+    min-width: 0;
+    white-space: normal;
+}
+
+.chat-attachments + .message { margin-top: var(--space-2); }
+
+.chat-attachments .chat-gallery-grid.is-multiple {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.chat-attachments .chat-file-card { min-width: 0; }
+
+/* A long name wraps to two lines instead of widening the bubble; the dialog a
+   tap opens shows it whole (touch has no hover title). */
+.chat-attachments .chat-file-name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.chat-file-item.is-unavailable .chat-file-name { color: var(--text-meta); }
+.chat-file-card:disabled .chat-file-more { visibility: hidden; }
+
+.chat-attachment-player .chat-media-player { min-width: 0; }
+
+/* The shared player keeps its controls inside the bubble: they wrap, and a video's
+   progress bar takes its own row (the player's narrow layout below). */
+.chat-attachment-player .chat-media-controls { flex-wrap: wrap; }
+.chat-attachment-player .chat-media-player:not(.is-audio) .chat-media-progress { order: 2; flex-basis: 100%; }
+
+.attach-badge .attach-thumb {
+    flex: 0 0 auto;
+    width: var(--chat-attach-thumb-size);
+    height: var(--chat-attach-thumb-size);
+    border-radius: var(--radius-xs);
+    object-fit: cover;
+}
+
+/* Touch: actions are always visible (no hover), and big enough for a finger. */
+@media (pointer: coarse) {
+    .chat-photo-actions summary,
+    .attach-remove {
+        min-width: var(--touch-target-min);
+        min-height: var(--touch-target-min);
+    }
+}
+
+@container chatcol (max-width: 620px) {
+    .chat-bubble.has-attachments,
+    .chat-bubble.has-attachments.has-wide-media {
+        width: auto;
+        max-width: 100%;
+    }
+
+    .chat-attachments .chat-gallery-grid.is-multiple { grid-template-columns: minmax(0, 1fr); }
 }
 
 .chat-gallery-item figcaption,
@@ -7306,8 +7464,10 @@ textarea.chat-input {
 
 .chat-file-more { color: var(--text-meta); }
 
-.chat-file-dialog {
-    width: min(420px, calc(100vw - 32px));
+/* The file dialog and the document reader (below) are one modal surface; the
+   buttons of both are `.btn.btn-default`. */
+.chat-file-dialog,
+.document-reader {
     padding: 0;
     border: 1px solid var(--ui-card-border);
     border-radius: var(--radius-lg);
@@ -7316,7 +7476,10 @@ textarea.chat-input {
     box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
 }
 
-.chat-file-dialog::backdrop { background: rgba(0, 0, 0, 0.64); }
+.chat-file-dialog { width: min(420px, calc(100vw - 32px)); }
+
+.chat-file-dialog::backdrop,
+.document-reader::backdrop { background: rgba(0, 0, 0, 0.64); }
 
 .chat-file-dialog-panel { padding: 18px; }
 
@@ -7332,7 +7495,6 @@ textarea.chat-input {
     gap: 8px;
 }
 
-.chat-file-dialog-actions button,
 .chat-media-controls button,
 .chat-media-rate-menu {
     min-height: 32px;
@@ -7343,8 +7505,179 @@ textarea.chat-input {
     cursor: pointer;
 }
 
-.chat-file-dialog-actions button { padding: 6px 12px; }
-.chat-file-dialog-actions button:disabled { cursor: default; opacity: 0.45; }
+/* Delivered-document reader (document_reader.js, DESIGN "Document reading"):
+   a modal reading surface over the conversation, a full sheet on a phone. Its
+   chrome is the file dialog's above; its buttons are `.btn.btn-default`. */
+.chat-file-more.is-read {
+    color: var(--accent-light);
+    font-size: var(--type-meta);
+    font-weight: 600;
+}
+
+.document-reader {
+    width: min(var(--document-reader-size), calc(100vw - 2 * var(--space-5)));
+    max-width: none;
+    /* `vh` first for an engine without `dvh`. */
+    height: min(var(--document-reader-size), calc(100vh - 2 * var(--space-5)));
+    height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5)));
+    max-height: none;
+    overflow: hidden;
+    /* Opaque: the conversation must not show through the text being read. */
+    background: var(--bg-primary);
+}
+
+.document-reader-panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.document-reader-head {
+    display: grid;
+    grid-template-areas: "identity actions close";
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5);
+    border-bottom: 1px solid var(--surface-border);
+}
+
+.document-reader-identity { grid-area: identity; min-width: 0; }
+.document-reader-actions { grid-area: actions; }
+.document-reader-close { grid-area: close; }
+
+.document-reader-title {
+    margin: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: var(--type-section);
+    font-weight: 600;
+    line-height: var(--line-title);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.document-reader-meta {
+    margin-top: var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+
+.document-reader-actions,
+.document-reader-views {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+/* The chosen view, in the theme choice's selected paint (ui.css). */
+.document-reader-views .btn[aria-pressed="true"] {
+    color: var(--text-primary);
+    border-color: var(--focus-accent-border);
+    background: var(--accent-12);
+}
+
+/* Opened by a pointer, the focused reading region shows its ring from the first
+   key; until then no ring at all, the engine's own included. */
+.document-reader-body:focus { outline: none; }
+
+.document-reader-body:focus-visible:not(.is-quiet-focus) {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
+}
+
+.document-reader-notice {
+    padding: var(--space-2) var(--space-5);
+    border-bottom: 1px solid var(--status-warn-border);
+    background: var(--status-warn-bg);
+    color: var(--status-warn-fg);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+
+.document-reader-notice p { margin: 0; }
+
+.document-reader-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: var(--space-5);
+    overflow: auto;
+    overscroll-behavior: contain;
+}
+
+/* One reading measure, centred; code and tables scroll inside their own wrappers. */
+.document-reader-markdown,
+.document-reader-source,
+.document-reader-status {
+    max-width: var(--document-reader-measure);
+    margin: 0 auto;
+}
+
+.document-reader-markdown {
+    color: var(--text-primary);
+    font-size: var(--type-section);
+    line-height: var(--line-body);
+}
+
+.document-reader-markdown p { margin-block: var(--space-3); }
+/* Headings take the chat reading ladder (with the rich-answer rules above). */
+.document-reader-markdown > :first-child { margin-block-start: 0; }
+
+/* A relative or refused link has no destination here: it reads as its words. */
+.document-reader-markdown a.md-link:not([href]) {
+    color: inherit;
+    text-decoration: none;
+}
+
+.document-reader-source {
+    margin-block: 0;
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    tab-size: 4;
+}
+
+.document-reader-status {
+    display: grid;
+    justify-items: start;
+    gap: var(--space-3);
+    color: var(--text-meta);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+}
+
+.document-reader-status p { margin: 0; }
+.document-reader-status.is-error { color: var(--text-primary); }
+
+/* A phone reads the document on a full sheet; Close returns to the same place in the chat. */
+@media (max-width: 620px) {
+    .document-reader {
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh;
+        margin: 0;
+        border: 0;
+        border-radius: 0;
+    }
+
+    .document-reader-head {
+        grid-template-areas: "identity close" "actions actions";
+        grid-template-columns: minmax(0, 1fr) auto;
+        padding: calc(var(--space-2) + env(safe-area-inset-top, 0px)) var(--space-3) var(--space-2);
+    }
+
+    .document-reader-notice { padding-inline: var(--space-3); }
+
+    .document-reader-body {
+        padding: var(--space-4) var(--space-3) calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+    }
+}
 
 .chat-media-player {
     overflow: hidden;
@@ -7780,8 +8113,7 @@ textarea.chat-input {
 
 
 
-.form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox),
-.reviewer-slot-controls input:not(.ui-control):not(.ui-checkbox), .reviewer-slot-controls select:not(.ui-control):not(.ui-checkbox) {
+.form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox) {
     padding: 8px 12px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--divider);

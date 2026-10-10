@@ -95,6 +95,7 @@ def run_chat_viewport_smoke(
     """Live card growth follows bottom or preserves the visible descendant."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
     from tests.ci_evidence import output_dir
 
@@ -148,23 +149,56 @@ def run_chat_viewport_smoke(
         page.evaluate(_SETTLE_TWO_FRAMES)
         return result
 
+    def feed_wheel_point(page):
+        # .chat-live-card is overflow:hidden (web/style.css). WebKit treats
+        # that as a scrollport and does not chain the wheel to #chat-messages.
+        # The feed center is often that card. Cards are flex-start, so aim
+        # at a point on the feed that is not inside such a scrollport.
+        return page.locator("#chat-messages").evaluate(
+            """feed => {
+                const box = feed.getBoundingClientRect();
+                const y = box.top + box.height / 2;
+                const blocksWheel = node => {
+                    for (let el = node; el && el !== feed; el = el.parentElement) {
+                        const overflow = getComputedStyle(el).overflowY;
+                        if (overflow === 'hidden' || overflow === 'auto' || overflow === 'scroll') return true;
+                    }
+                    return false;
+                };
+                for (let x = box.right - 4; x > box.left + 4; x -= 8) {
+                    const hit = document.elementFromPoint(x, y);
+                    if (hit && (hit === feed || feed.contains(hit)) && !blocksWheel(hit)) return {x, y};
+                }
+                return {x: box.left + box.width / 2, y};
+            }"""
+        )
+
     def read_to_latest(page):
         # Follow is reading intent: the reader's own wheel reaches the live edge.
         # A scripted scroll (set_remaining) moves the view but decides nothing.
         deadline = time.monotonic() + 30
         evidence.checkpoint("read_to_latest:prepare")
-        box = page.locator("#chat-messages").bounding_box()
-        evidence.point = {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2}
-        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
         # A native wheel impulse can finish short of the edge. Keep reading,
         # but never accept a settled gesture that made no progress toward it.
+        # A wheel the engine swallows (seen, no scroll after two frames) is
+        # not that gesture: retry it inside the same 30s deadline.
         while True:
+            point = feed_wheel_point(page)
+            evidence.point = point
+            page.mouse.move(point["x"], point["y"])
             before = jump_state(page)
             page.evaluate("""() => {
                 const feed = document.querySelector('#chat-messages');
-                const state = window.__viewportWheel = {seen: false, scrolls: 0, settled: false};
-                const wheel = () => { state.seen = true; };
-                const scroll = () => { state.scrolls++; state.settled = false; };
+                const state = window.__viewportWheel = {seen: false, scrolls: 0, settled: false, quiet: false};
+                const wheel = () => {
+                    state.seen = true;
+                    const mark = state.scrolls;
+                    requestAnimationFrame(() => requestAnimationFrame(() => {
+                        if (mark === state.scrolls) state.quiet = true;
+                    }));
+                };
+                const scroll = () => { state.scrolls++; state.settled = false; state.quiet = false; };
                 const end = () => {
                     if (!state.seen || !state.scrolls) return;
                     const count = state.scrolls;
@@ -187,10 +221,21 @@ def run_chat_viewport_smoke(
                 remaining_ms = (deadline - time.monotonic()) * 1000
                 assert remaining_ms > 0, "reading did not reach the live edge within 30 seconds"
                 page.wait_for_function(
-                    "atEdge => window.__viewportWheel.seen && (atEdge || window.__viewportWheel.settled)",
-                    arg=before["remaining"] <= 1, timeout=remaining_ms,
+                    """() => {
+                        const state = window.__viewportWheel;
+                        const feed = document.querySelector('#chat-messages');
+                        if (!state || !state.seen) return false;
+                        const remaining = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+                        if (remaining <= 1 || state.settled) return true;
+                        return state.quiet && state.scrolls === 0;
+                    }""",
+                    timeout=remaining_ms,
                 )
                 after = jump_state(page)
+                if after["remaining"] > 1 and page.evaluate(
+                    "() => { const s = window.__viewportWheel; return !s || s.scrolls === 0; }"
+                ):
+                    continue
                 assert before["remaining"] <= 1 or after["remaining"] < before["remaining"], (before, after)
                 if after["remaining"] <= 1:
                     break
@@ -505,15 +550,36 @@ def run_chat_viewport_smoke(
                 state = jump_state(page)
                 assert state["remaining"] <= 6 and state["dotHidden"], state
 
-                box = page.locator("#chat-messages").bounding_box()
-                page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                page.mouse.wheel(0, -300)
-                page.wait_for_function(
-                    """() => {
-                        const messages = document.querySelector('#chat-messages');
-                        return messages.scrollHeight - messages.scrollTop - messages.clientHeight >= 298;
-                    }"""
-                )
+                # The reader's own wheel leaves the live edge. Aim it outside any
+                # card scrollport (WebKit swallows a wheel there, see
+                # feed_wheel_point); only a wheel that moved nothing at all is
+                # retried, inside one 30 s deadline.
+                page.evaluate("""() => {
+                    window.__readerScrolls = 0;
+                    document.querySelector('#chat-messages').addEventListener(
+                        'scroll', () => { window.__readerScrolls += 1; }, {passive: true});
+                }""")
+                deadline = time.monotonic() + 30
+                while True:
+                    point = feed_wheel_point(page)
+                    evidence.point = point
+                    page.mouse.move(point["x"], point["y"])
+                    scrolls_before = page.evaluate("() => window.__readerScrolls")
+                    page.mouse.wheel(0, -300)
+                    remaining_ms = (deadline - time.monotonic()) * 1000
+                    assert remaining_ms > 0, "the reader's wheel did not leave the live edge within 30 seconds"
+                    try:
+                        page.wait_for_function(
+                            """() => {
+                                const messages = document.querySelector('#chat-messages');
+                                return messages.scrollHeight - messages.scrollTop - messages.clientHeight >= 298;
+                            }""",
+                            timeout=min(5_000, remaining_ms),
+                        )
+                        break
+                    except PlaywrightTimeoutError:
+                        moved = page.evaluate("() => window.__readerScrolls") != scrolls_before
+                        assert not moved, "the reader's wheel moved the feed but did not leave the live edge"
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 hidden_top = page.locator("#chat-messages").evaluate("node => node.scrollTop")
                 page.evaluate(
@@ -816,6 +882,18 @@ def run_chat_viewport_smoke(
                     '.chat-live-card[data-finished="0"]'
                 ).evaluate_all("cards => cards.map(card => card.dataset.taskId)")
                 cancel_active_ids.append("vp-cancel-noop")
+                set_remaining(page, 300)
+                authority_anchor = visible_card_anchor(page)
+                emit_frame(page, {**cancel_authority, "cancelable": True})
+                assert page.locator(
+                    '.chat-live-card[data-task-id="vp-cancel-authority"] [data-cancel-run]'
+                ).count() == 1
+                assert abs(card_top(page, authority_anchor["id"]) - authority_anchor["top"]) <= 6
+                assert not jump_state(page)["dotHidden"]
+                # A complete census that already lists this card mounts Stop
+                # through syncCancelRunButton, which is not remote content.
+                # The cancelable frame is then a duplicate and never sets the
+                # activity bit. Install the census only after that bit is observed.
                 page.route(
                     "**/api/state",
                     lambda route: route.fulfill(
@@ -828,14 +906,6 @@ def run_chat_viewport_smoke(
                         } for task_id in cancel_active_ids]}),
                     ),
                 )
-                set_remaining(page, 300)
-                authority_anchor = visible_card_anchor(page)
-                emit_frame(page, {**cancel_authority, "cancelable": True})
-                assert page.locator(
-                    '.chat-live-card[data-task-id="vp-cancel-authority"] [data-cancel-run]'
-                ).count() == 1
-                assert abs(card_top(page, authority_anchor["id"]) - authority_anchor["top"]) <= 6
-                assert not jump_state(page)["dotHidden"]
                 button.click()
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 page.wait_for_timeout(800)  # drain the prior task_done history debounce

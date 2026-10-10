@@ -237,6 +237,8 @@ def test_checkout_and_reset_preserves_local_head_on_managed_restart(monkeypatch,
     monkeypatch.setattr(git_ops, "update_state", lambda mutator, **_kw: mutator(saved_state) or saved_state)
 
     def fake_git_capture(cmd):
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return 0, "before-head", ""
         raise AssertionError(cmd)
 
     monkeypatch.setattr(git_ops, "git_capture", fake_git_capture)
@@ -302,7 +304,8 @@ def test_checkout_and_reset_cleans_untracked_after_managed_restart_rescue(monkey
         },
     )
     monkeypatch.setattr(git_ops, "append_jsonl", lambda _path, _payload: None)
-    monkeypatch.setattr(git_ops, "git_capture", lambda cmd: (_ for _ in ()).throw(AssertionError(cmd)))
+    monkeypatch.setattr(git_ops, "git_capture", lambda cmd: (0, "before-head", "") if cmd == ["git", "rev-parse", "HEAD"]
+                        else (_ for _ in ()).throw(AssertionError(cmd)))
 
     calls = []
 
@@ -360,7 +363,8 @@ def test_checkout_and_reset_does_not_rescue_for_only_managed_ahead_commits(monke
         "_create_rescue_snapshot",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ahead-only restart should not rescue")),
     )
-    monkeypatch.setattr(git_ops, "git_capture", lambda cmd: (_ for _ in ()).throw(AssertionError(cmd)))
+    monkeypatch.setattr(git_ops, "git_capture", lambda cmd: (0, "before-head", "") if cmd == ["git", "rev-parse", "HEAD"]
+                        else (_ for _ in ()).throw(AssertionError(cmd)))
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None):
         if cmd == ["git", "rev-parse", "--verify", "ouroboros"]:
@@ -395,6 +399,8 @@ def test_checkout_and_reset_blocks_when_status_read_is_unreadable(monkeypatch, t
     monkeypatch.setattr(git_ops, "append_jsonl", lambda path, payload: events.append(payload))
 
     def fake_capture(cmd, *, timeout=None):
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return 0, "before-head", ""
         if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
             return 0, "ouroboros", ""
         if cmd == ["git", "status", "--porcelain"]:
@@ -566,6 +572,8 @@ def test_checkout_and_reset_applies_explicit_update_intent(monkeypatch, tmp_path
     monkeypatch.setattr(git_ops, "update_state", lambda mutator, **_kw: mutator(saved_state) or saved_state)
 
     def fake_git_capture(cmd):
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return 0, "before-head", ""
         if cmd == ["git", "rev-parse", "--verify", "remote-sha^{commit}"]:
             return 0, "remote-sha", ""
         if cmd == ["git", "rev-list", "--left-right", "--count", "ouroboros...remote-sha"]:
@@ -638,6 +646,8 @@ def test_checkout_and_reset_preserves_ahead_head_before_update_intent(monkeypatc
     capture_calls = []
 
     def fake_git_capture(cmd):
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return 0, "before-head", ""
         capture_calls.append(cmd)
         if cmd == ["git", "rev-parse", "--verify", "remote-sha^{commit}"]:
             return 0, "remote-sha", ""
@@ -695,6 +705,8 @@ def test_checkout_and_reset_blocks_when_update_ahead_check_fails(monkeypatch, tm
     monkeypatch.setattr(git_ops._update_source, "official_ref_has_constitution", lambda *_a, **_k: True)
 
     def fake_git_capture(cmd):
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return 0, "before-head", ""
         if cmd == ["git", "rev-parse", "--verify", "remote-sha^{commit}"]:
             return 0, "remote-sha", ""
         if cmd == ["git", "rev-list", "--left-right", "--count", "ouroboros...remote-sha"]:
@@ -754,6 +766,7 @@ def test_checkout_and_reset_invalid_update_intent_never_falls_back_to_branch_tip
         "git_capture",
         lambda cmd: (1, "", "unknown revision")
         if cmd == ["git", "rev-parse", "--verify", "missing-sha^{commit}"]
+        else (0, "before-head", "") if cmd == ["git", "rev-parse", "HEAD"]
         else (_ for _ in ()).throw(AssertionError(cmd)),
     )
     monkeypatch.setattr(
@@ -797,6 +810,7 @@ def test_checkout_and_reset_rejects_orphan_or_mismatched_update_intent(
         "git_capture",
         lambda cmd: (0, "intent-sha", "")
         if cmd == ["git", "rev-parse", "--verify", "intent-sha^{commit}"]
+        else (0, "before-head", "") if cmd == ["git", "rev-parse", "HEAD"]
         else (_ for _ in ()).throw(AssertionError(cmd)),
     )
     monkeypatch.setattr(
@@ -847,6 +861,7 @@ def test_checkout_and_reset_rejects_target_without_constitution(monkeypatch, tmp
         "git_capture",
         lambda cmd: (0, "target-sha", "")
         if cmd == ["git", "rev-parse", "--verify", "target-sha^{commit}"]
+        else (0, "before-head", "") if cmd == ["git", "rev-parse", "HEAD"]
         else (_ for _ in ()).throw(AssertionError(cmd)),
     )
     monkeypatch.setattr(

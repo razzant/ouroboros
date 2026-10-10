@@ -58,6 +58,8 @@ def _terminal(root, task_id="saved", *, family="headless", phase="completed"):
 
 
 def _recovery(root, repo):
+    from ouroboros.startup_migrations import prepare_startup_state
+    prepare_startup_state(root)
     return maintenance._run_startup_task_recovery(root, repo, skip_live_data=False, prior_worker_pids=set())
 
 
@@ -126,9 +128,10 @@ def test_orphan_exclusion_filters_before_effective_materialization(roots, monkey
         write_task_result(root, tid, "running", result="original")
     read = []
     def effective(root, tid, materialize_artifacts=True):
+        tid = tid["task_id"]
         read.append((tid, materialize_artifacts))
         return {"task_id": tid, "status": "failed", "result": "proven orphan"}
-    monkeypatch.setattr("ouroboros.task_status.load_effective_task_result", effective)
+    monkeypatch.setattr("ouroboros.task_status.effective_task_result", effective)
     assert reconcile_orphaned_running_tasks(root, exclude_task_ids={"live"}) == 1
     assert read == [("dead", False)]  # decide and persist on the status-only projection: no file work
     assert load_task_result(root, "live")["status"] == "running"
@@ -489,7 +492,7 @@ def test_real_supervisor_orders_custody_recovery_before_prune(roots, monkeypatch
     monkeypatch.setattr(server, "_startup_prune_sweeps", lambda **kw: order.append(("prune", kw["preserve_task_sources"])))
     server._run_supervisor({})
     assert server._supervisor_error is None
-    assert order == ["migrate", "capture-pids", "restore", "kill", "spawn", "custody", "recover", ("prune", True)]
+    assert order == ["capture-pids", "restore", "kill", "spawn", "custody", "recover", ("prune", True)]
 
 
 def test_supervisor_init_failure_keeps_boot_recovery_owner():
@@ -541,9 +544,9 @@ def test_orphan_reconcile_closes_the_open_quiz_and_its_paired_wait(roots, monkey
                                 options=["A", "B"], wait_for_answer=True)
         write_task_result(root, tid, "running", owner_wait={"state": "waiting", "quiz_id": f"{tid}-q"})
     monkeypatch.setattr(
-        "ouroboros.task_status.load_effective_task_result",
-        # The reconciler decides on a status-only read and re-reads the row it heals.
-        lambda _root, tid, materialize_artifacts=True: {"task_id": tid, "status": "failed", "result": "proven orphan"},
+        "ouroboros.task_status.effective_task_result",
+        # The reconciler reuses the addressed row for its status-only decision.
+        lambda _root, row, materialize_artifacts=True: {"task_id": row["task_id"], "status": "failed", "result": "proven orphan"},
     )
 
     assert reconcile_orphaned_running_tasks(root) == 2
@@ -930,3 +933,47 @@ def test_the_fence_is_the_same_on_either_side_of_the_reap(roots):
         "replay_intent": None,
         "replay_result": SERVER_STOPPED_CANCEL,
     }
+
+
+def test_startup_defers_all_trees_while_recovery_is_unresolved(roots, monkeypatch):
+    root, _repo = roots
+    for task_id in ("old-root", "new-root", "independent"):
+        write_task_result(root, task_id, "completed", result="saved")
+        tree = root / "task_trees" / task_id
+        tree.mkdir(parents=True)
+        (tree / "ledger.json").write_text("{}", encoding="utf-8")
+    write_task_result(root, "old-root", "completed", superseded_by="new-root", retry_task_id="new-root")
+    write_task_result(root, "new-root", "completed", original_task_id="old-root", timeout_retry_from="old-root")
+    child = headless.prepare_task_drive(root, "old-child", "empty")
+    write_task_result(root, "old-child", "completed", root_task_id="old-root", parent_task_id="old-root")
+    write_task_result(child, "old-child", "completed", root_task_id="old-root", parent_task_id="old-root")
+    # A retry can occupy its predecessor's physical execution root.
+    write_task_result(child, "new-child", "completed", root_task_id="new-root", parent_task_id="new-root")
+    write_task_result(root, "new-child", "completed", root_task_id="new-root", parent_task_id="new-root")
+    monkeypatch.setattr("ouroboros.retention.age_cutoff", lambda *a, **kw: 4_000_000_000)
+    report = {"unresolved": ["old-child"], "protected": [], "errors": []}
+    maintenance._startup_prune_sweeps(preserve_task_sources=True, recovery_report=report)
+    assert (root / "task_trees/old-root").exists() and (root / "task_trees/new-root").exists()
+    assert (root / "task_trees/independent").exists()
+    assert child.exists()
+
+
+@pytest.mark.parametrize("gap", ["enumeration", "missing", "schema"])
+def test_unknown_startup_recovery_keeps_coarse_tree_and_temp_preservation(roots, monkeypatch, gap):
+    root, _repo = roots
+    tree = root / "task_trees/independent"
+    tree.mkdir(parents=True)
+    write_task_result(root, "independent", "completed", result="saved")
+    write_task_result(root, "unresolved", "completed", root_task_id="unresolved")
+    report = {"unresolved": ["unresolved"], "protected": [], "errors": []}
+    if gap == "enumeration":
+        report["unresolved"] = ["*"]
+        report["errors"] = ["directory unavailable"]
+    elif gap == "missing":
+        (root / "task_results/unresolved.json").unlink()
+    else:
+        (root / "task_results/unresolved.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(maintenance, "_STARTUP_TEMP_SWEEP_OWED", [False])
+    monkeypatch.setattr("ouroboros.retention.age_cutoff", lambda *a, **kw: 4_000_000_000)
+    maintenance._startup_prune_sweeps(preserve_task_sources=True, recovery_report=report)
+    assert tree.exists() and maintenance._STARTUP_TEMP_SWEEP_OWED == [False]

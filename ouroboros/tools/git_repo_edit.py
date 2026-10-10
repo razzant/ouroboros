@@ -11,6 +11,7 @@ import pathlib
 import subprocess
 from typing import Dict, List, Optional
 
+from ouroboros.reference_books import book_balance_note
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tool_access import ResolvedResourceBinding, canonical_data_root
 from ouroboros.tools.tool_result import publish_no_effect
@@ -253,8 +254,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
     else:
         result = (
             f"✅ Written {len(written)} file(s): {summary}\n"
-            "Files are on disk but NOT committed. Run commit_reviewed when ready.\n"
-            "⚠️ Advisory pre-review is now stale — run preflight_review before commit_reviewed."
+            "Files are on disk but NOT committed. Run commit_reviewed when ready."
         )
     result += f"\nResolved root: {binding_items[0].base_path}"
     if syntax_bypass_notes:
@@ -272,6 +272,9 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
             "\nℹ️ Native seed boundary: system_repo/skills changed; the installed "
             "data/skills/native copy remains unchanged until launcher reseed."
         )
+    book_note = book_balance_note(binding_items[0].base_path, written_paths) if system_target else ""
+    if book_note:
+        result += "\n" + book_note
     protected_written = _git().protected_paths_in(written_paths) if system_target else []
     if protected_written and _git().mode_allows_protected_write(_git()._current_runtime_mode()):
         result += "\n\n" + _git().core_patch_notice(protected_written)
@@ -460,7 +463,7 @@ def _str_replace_editor(
         from ouroboros.tools.edit_ops import workspace_edit_note
         result += "\n" + workspace_edit_note(ctx)
     elif system_target:
-        result += "\nRun commit_reviewed when ready.\n⚠️ Advisory pre-review is now stale — run preflight_review before commit_reviewed."
+        result += "\nRun commit_reviewed when ready."
     elif data_skill_target is not None:
         result += "\nRun skill_review for this skill before enabling or declaring it ready."
     if system_target and pathlib.PurePosixPath(rel_path).parts[:1] == ("skills",):
@@ -468,6 +471,9 @@ def _str_replace_editor(
             "\nℹ️ Native seed boundary: system_repo/skills changed; the installed "
             "data/skills/native copy remains unchanged until launcher reseed."
         )
+    book_note = book_balance_note(binding.base_path, [rel_path]) if system_target and binding is not None else ""
+    if book_note:
+        result += "\n" + book_note
     if system_target and _git().is_protected_runtime_path(norm) and _git().mode_allows_protected_write(_git()._current_runtime_mode()):
         result += "\n\n" + _git().core_patch_notice([norm])
     return result

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import types
+from tests._usage_store_testing import ledger_rows
 
 
 def _probe_client(monkeypatch, *, failure: BaseException | None = None):
@@ -168,10 +168,7 @@ def test_local_model_capability_checks_are_accounted_and_inherit_task_scope(
     assert len(provider_calls) == 2
     assert current_usage_scope() is None
 
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "state" / "usage_attempts.jsonl").read_text().splitlines()
-    ]
+    rows = ledger_rows(tmp_path)
     settled = [row for row in rows if row.get("state") == "settled"]
     assert len(settled) == 4
     for row in settled[:2]:

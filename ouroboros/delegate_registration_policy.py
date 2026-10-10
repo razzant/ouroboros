@@ -109,9 +109,10 @@ STARTED_STR_FIELDS: Tuple[Tuple[str, str], ...] = tuple(
         "authority_source", "access", "mode", "isolation",
         "selected_subagent_id", "config_fingerprint", "work_order_fingerprint",
         "work_order_coverage", "authority_fingerprint",
-        # #1196: the prior run this start explicitly continues (a confirmed
-        # wall-clock expiry), "" for every ordinary start.
-        "continuation_of",
+        # The prior run this start explicitly continues ("" for every ordinary
+        # start) and, when it continues IN that run's snapshot, its own capture
+        # identity and the task that keeps the snapshot's baseline and lock.
+        "continuation_of", "capture_id", "snapshot_task_id",
     )
 )
 # None means an old row omitted the choice; '' is a captured default choice.
@@ -122,13 +123,13 @@ STARTED_OPTION_FIELDS = ("effort", "processing_preference")
 STARTED_PROGRESS_FLAGS: Tuple[str, ...] = (
     "ledger_recorded", "settled", "containment_disclosed", "unread_disclosed",
     "output_artifact", "output_complete", "output_sha", "output_consumed",
-    "patch_captured", "patch_disposed", "patch_apply_pending")
+    "patch_captured", "patch_disposed", "patch_apply_pending", "superseded_by")
 # Binding/authority facts are FIRST-WINS (R1-2): a later idempotent STARTED row
 # may be minted by a context that no longer knows the original binding; the
 # first recorded fact is authoritative and is never erased or retargeted.
 STARTED_FIRST_WINS_FACTS: Tuple[str, ...] = (
     "snapshot_id", "execution_root", "execution_binding_fingerprint", "baseline_sha", "target_root",
-    "authority_source", "resource_ref", "selected_subagent_id",
+    "capture_id", "snapshot_task_id", "authority_source", "resource_ref", "selected_subagent_id",
     "config_fingerprint", "work_order_fingerprint", "work_order_coverage",
     "authority_fingerprint", "work_order_source_request", "category", "source",
     *REVIEW_ATTRIBUTION_KEYS)

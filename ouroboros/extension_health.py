@@ -16,7 +16,7 @@ import pathlib
 from typing import Any, Dict, List, Optional
 
 from ouroboros.contracts.schema_versions import with_schema_version
-from ouroboros.skill_loader import skill_state_dir
+from ouroboros.skill_loader import skill_state_dir, skill_state_dir_path
 from ouroboros.utils import append_jsonl, read_json_dict, update_json_locked, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -37,7 +37,8 @@ def health_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
 
 
 def read_extension_health(drive_root: pathlib.Path, skill_name: str) -> Optional[Dict[str, Any]]:
-    return read_json_dict(health_path(drive_root, skill_name))
+    # Non-creating: a missing state dir reads like a missing file (None).
+    return read_json_dict(skill_state_dir_path(pathlib.Path(drive_root), skill_name) / HEALTH_FILENAME)
 
 
 def record_extension_health(

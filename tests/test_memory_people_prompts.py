@@ -74,6 +74,63 @@ def test_system_memory_section_keeps_its_earlier_obligations():
     assert "stale unless recently verified" in memory
 
 
+def test_system_states_the_chronicle_contract_and_each_writer_in_one_home():
+    """The chronicle's writers in the mind's own prompt: the mind seals, marks and reads
+    by address; the overview is the mind's; a Light helper drafts one page or part only
+    while the wakes are off; an offer to fold the old retelling is settled by a global
+    mark. A delegated child's start and its drafts live in Delegation, the
+    self-contained assignment in Memory. The two claims the chronicle made false
+    (nothing project-related hidden, read-only helpers writing nothing) are gone."""
+    system = _read("prompts/SYSTEM.md")
+    memory, delegation, tools = (_section(system, name) for name in ("Memory", "Delegation", "Tools"))
+    claims = _claims(memory)
+
+    for tool in ("`chronicle_write`", "`memory_mark`", "`memory_read`"):
+        assert tool in memory, tool
+    assert any("overview" in c and "my own words" in c and "helpers do not write it" in c for c in claims)
+    assert any("light helper" in c and "one page or part" in c and "wakes are off" in c for c in claims)
+    assert any("fold" in c and "ordinary background task" in c for c in claims)
+    assert any("global mark" in c and "`memory_mark`" in c for c in claims)
+    # One home each: the child's start and drafts in Delegation, the assignment rule in Memory.
+    assert "never my whole dialogue history" in delegation
+    assert "drafts in its own name, which the integrating mind accepts or rejects" in delegation
+    assert "drafts in its own name" not in memory
+    assert "must stand on its own" in memory and "must stand on its own" not in delegation
+    # The memory tools and the chronicle's own path are named where file writes are ruled out.
+    assert "`chronicle_write`, `memory_mark`" in tools and "`memory/chronicle/*`" in tools
+    assert "chronicle page and part drafts in their own name" in tools
+    # Everything the host guarantees a child at start, its memory marks included (memory_view.ROLE_DEFAULTS).
+    start = next(c for c in _claims(delegation) if "never my whole dialogue history" in c)
+    assert all(part in start for part in ("room's page", "global memory marks", "whole assignment", "verbatim"))
+    assert "which I accept or reject" not in delegation  # a child that schedules a grandchild does not decide
+    flat = " ".join(system.split())
+    assert "nothing project-related is hidden" not in flat
+    assert "Read-only helpers do not write" not in flat
+
+
+def test_system_names_the_natural_moments_to_seal_without_a_command_or_a_host_check():
+    """The sealing rule stands word for word; right after its first sentence one sentence names the natural
+    moments to look at what has closed and seal it — a wake, the end of a root task — and that the view shows
+    what is still unsealed and since when. It is an observation about moments, not a command and not a host
+    check: no threshold, no reminder, no 'must'; the model decides (owner decision 2A)."""
+    memory = _section(_read("prompts/SYSTEM.md"), "Memory")
+    rule = ("People's words and my own replies stay verbatim while their conversation is open and fits; when a "
+            "matter closes — by its sense, not by a calendar — or the host says it no longer fits, I seal it with "
+            "`chronicle_write` as a page in my own words written from those rows, quoting exactly the decisive words "
+            "and my promises; every line of the record says who wrote it — my reply, a child's report, a host fact, "
+            "a helper's draft.")
+    moments = ("A wake and the end of a root task are natural moments to look at what has closed since my last page "
+               "— here and in the live rooms — and seal it; the view shows what is still unsealed and since when.")
+    assert f"{rule} {moments} What must stay in view I mark with `memory_mark`;" in memory
+    assert memory.count("natural moments") == 1
+    assert "natural moments" not in _read("prompts/CONSCIOUSNESS.md")  # one home: the wake text does not restate it
+    # The standing pages line of the view is what "since when" points at: the status sentence about the old
+    # retelling speaks of the story status, not of my pages, so the two do not contradict.
+    claims = _claims(memory)
+    assert any("story status" in c and "old retelling" in c and "not yet all folded" in c for c in claims)
+    assert not any("no page" in c or "pages sealed" in c for c in claims)
+
+
 def test_system_learns_a_person_through_the_relationship_not_only_on_demand():
     human = _section(_read("prompts/SYSTEM.md"), "Environment and My Human")
     claims = _claims(human)

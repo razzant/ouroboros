@@ -518,6 +518,26 @@ def test_guard_policy_runs_off_loop_and_rechecks_revocation(guarded, monkeypatch
         session.revoked = False  # Let fixture close the real transport normally.
 
 
+def test_guard_diagnostics_disclose_overflow_and_truncated_fields(guarded, monkeypatch):
+    import json
+
+    ctx = guarded.ctx
+    guarded.instance.refresh_server("browser", authority=ctx)
+    session = _session(ctx)
+    original, socket_path = session._request, os.path.join(session.guard_dir.name, "g.sock")
+    facts = {"url": guarded.ours + "/api/owner/safety-mode?long=" + "x" * 800, "method": "POST", "post_data": "{}"}
+
+    def request(name, args, timeout, *, dispatch=False):
+        for _ in range(25 if dispatch else 0):  # Blocked during the action: 20 kept, 5 omitted.
+            assert json.loads(_ask_guard(socket_path, (json.dumps(facts) + "\n").encode()))["block"]
+        return original(name, args, timeout, dispatch=dispatch)
+
+    monkeypatch.setattr(session, "_request", request)
+    result = _dispatch(ctx, "browser_snapshot", {})
+    assert "Earlier blocked-request diagnostics omitted: 5" in result.text
+    assert "OMISSION NOTE" in result.text
+
+
 def test_guard_answers_fail_closed_and_close_with_the_session(guarded):
     import json
 
@@ -594,18 +614,24 @@ def test_task_end_reaps_detached_descendant_and_ends_the_attempt(tmp_path, monke
     cfg, ctx = mcp_client.normalize_server_config(_entry(_server(tmp_path))), _ctx(tmp_path)
     events = []
     monkeypatch.setattr(services, "stop_task_services", lambda _ctx: [])
+    finalize_services = loop_budget._finalize_task_services
     monkeypatch.setattr(loop_budget, "_loop", lambda: SimpleNamespace(
-        _emit_checkpoint_event=lambda *args: events.append(args[-1])))
+        _emit_checkpoint_event=lambda *args: events.append(args[-1]),
+        _finalize_task_services=finalize_services))
+    exit_ctx = loop_budget._LoopExitContext(
+        tools=SimpleNamespace(_ctx=ctx), drive_root=tmp_path, task_id=ctx.task_id,
+        event_queue=None, drive_logs=tmp_path / "logs", accumulated_usage={}, llm_trace={},
+    )
     try:
         assert "browser_tabs" in {tool["name"] for tool in mcp_task_sessions.discover(cfg, ctx, 15)}
         mcp_task_sessions.call(cfg, "mcp_browser__browser_snapshot", "browser_snapshot", {}, ctx, 10)
         marker = _session(ctx).token
         assert len(_live(marker)) >= 2  # the server and its detached "browser"
+        # Pre-acceptance service finalization cannot terminate an active bridge.
+        assert not finalize_services(exit_ctx)
+        assert _live(marker)
     finally:
-        loop_budget._finalize_task_services(loop_budget._LoopExitContext(
-            tools=SimpleNamespace(_ctx=ctx), drive_root=tmp_path, task_id=ctx.task_id,
-            event_queue=None, drive_logs=tmp_path / "logs", accumulated_usage={}, llm_trace={},
-        ))
+        loop_budget._cleanup_loop_resources(None, exit_ctx)
     assert events[0]["bridges"] == [{"server": "browser", "closure": "confirmed"}]
     assert not _live(marker)
     with pytest.raises(RuntimeError, match="ended"):
@@ -613,18 +639,19 @@ def test_task_end_reaps_detached_descendant_and_ends_the_attempt(tmp_path, monke
 
 
 @posix_bridge
-def test_unconfirmed_close_refuses_reopen_by_a_later_attempt(tmp_path, policy, safety):
+def test_unconfirmed_close_refuses_reopen_by_a_later_attempt(tmp_path, monkeypatch, policy, safety):
     pytest.importorskip("mcp")
     cfg, ctx = mcp_client.normalize_server_config(_entry(_server(tmp_path))), _ctx(tmp_path)
     mcp_task_sessions.discover(cfg, ctx, 15)
     session = _session(ctx)
-    actual_reap = session.container.reap
+    actual_reap = mcp_task_sessions.ProcessContainer.reap
 
-    def uncertain_reap():
-        actual_reap()  # keep the fixture clean while reporting no proof
+    def uncertain_reap(container):
+        actual_reap(container)  # keep the fixture clean while reporting no proof
         return "process identity could not be confirmed"
 
-    session.container.reap = uncertain_reap
+    # Every scan, the worker's own and each rescan on a fresh container, stays uncertain.
+    monkeypatch.setattr(mcp_task_sessions.ProcessContainer, "reap", uncertain_reap)
     assert mcp_task_sessions.stop_task(ctx)[0]["closure"].startswith("unconfirmed:")
     assert _session(ctx) is session
     retry = _ctx(tmp_path, attempt=2)

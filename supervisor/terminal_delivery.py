@@ -21,6 +21,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional
 
+from ouroboros.observability import without_finalization_timing
 from ouroboros.utils import update_json_locked, utc_now_iso
 from ouroboros.task_finalization import (
     HOST_AUTHORED_TERMINAL_ORIGINS, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL,
@@ -307,12 +308,10 @@ def register_pending_delivery(drive_root: Any, event: Dict[str, Any]) -> bool:
         if did in pending:
             if not isinstance(pending.get(did), dict):
                 # A malformed row cannot count as durably owed: replay cannot send it.
-                raise ValueError(
-                    f"terminal-delivery registry pending row for {did} is malformed"
-                )
+                raise ValueError(f"terminal-delivery registry pending row for {did} is malformed")
             return None
-        pending[did] = {**{k: v for k, v in event.items() if k != "type"},
-                        "registered_at": utc_now_iso()}
+        pending[did] = {**without_finalization_timing(event), "registered_at": utc_now_iso()}
+        pending[did].pop("type", None)
         if len(pending) > _PENDING_CAP:
             for stale in list(pending)[: len(pending) - _PENDING_CAP]:
                 row = pending.pop(stale, None)

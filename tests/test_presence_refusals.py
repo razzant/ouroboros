@@ -103,6 +103,7 @@ def test_receipt_write_retry_and_conflict_do_not_share_disposition(tmp_path, mon
 def test_missing_work_is_rejected_without_losing_original_error(tmp_path):
     app, binding, _ctx = _presence_app(tmp_path, _answer)
     request = _request(app)
+    request.method = "GET"
     request.path_params = {"work_ref": "missing-work"}
     request.query_params = {"binding_id": binding}
     response = asyncio.run(host_service._api_presence_work(request))
@@ -744,10 +745,10 @@ def test_inline_turn_repeats_a_dispatched_transport_death_as_a_no_effect_attempt
 
     # Exactly two physical attempts: the dead send stays unresolved at its bound, the repeat settles.
     assert llm.calls == 2
-    by_attempt = {}
-    for row in _ledger(tmp_path):
-        by_attempt.setdefault(row["attempt_id"], []).append(row["state"])
-    assert list(by_attempt.values()) == [["reserved", "dispatched", "unresolved"], ["reserved", "dispatched", "settled"]]
+    # Failure evidence advances the first row's revision without adding a call.
+    attempts = _ledger(tmp_path)
+    assert [(row["state"], row["revision"]) for row in attempts] == [("unresolved", 4), ("settled", 3)]
+    assert attempts[0]["physical_failure"]["stage"] == "raised_exception"
     assert ua.usage_projection(tmp_path)["unresolved_upper_bound_usd"] == 1.0
     # No effect between them: the repeat is the same logical request, and before either send
     # no tool had run and nothing had been spoken; the transport heard the answer once, after it landed.
@@ -758,7 +759,7 @@ def test_inline_turn_repeats_a_dispatched_transport_death_as_a_no_effect_attempt
     api_errors = _events(tmp_path / "logs", "llm_api_error")
     assert [(row["error_kind"], row["retry_same_request"], row["transport_cause_type"]) for row in api_errors] == [
         ("provider_outcome_unknown", True, "ReadError")]
-    assert api_errors[0]["physical_attempt_id"] == next(iter(by_attempt))
+    assert api_errors[0]["physical_attempt_id"] == attempts[0]["attempt_id"]
     assert _events(tmp_path / "logs", "llm_non_retryable_same_request") == []
     assert _events(tmp_path / "logs", "llm_retry_deadline_exhausted") == []
     usage, trace = captured["usage"], captured["trace"]

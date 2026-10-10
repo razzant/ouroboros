@@ -112,7 +112,7 @@ def test_the_contract_objective_rides_the_run_instructions_structurally(tmp_path
     assert instructions.index("git commit") < instructions.index("HOST TASK CONTRACT AUTHORITY")
 
 
-def test_direct_start_request_carries_complete_normalized_contract_authority(tmp_path, monkeypatch):
+def test_direct_start_carries_assignment_and_a_predecessor_brief(tmp_path, monkeypatch):
     context = " \nAPI_CONTEXT_EXACT\n "
     contract = {
         "objective": "delegate the Cat build",
@@ -124,6 +124,9 @@ def test_direct_start_request_carries_complete_normalized_contract_authority(tmp
         "allowed_resources": {"network": False},
         "predecessor_authority": {
             "source": {"kind": "task_result", "task_id": "cat-old"},
+            "result": "Keep the existing tower",
+            "origin_message_text": "Claudexor only; build three levels",
+            "verification_receipts": [{"evidence": "OLD_RECEIPT_BODY"}],
             "task_contract": {
                 "objective": "CLAUDEXOR_ONLY; L1 MUST ASK L2 TO SPAWN L3",
                 "context": "never use native/API fallback",
@@ -132,16 +135,26 @@ def test_direct_start_request_carries_complete_normalized_contract_authority(tmp
     }
 
     request = _start_with_contract(tmp_path, monkeypatch, contract)
-    marker = "HOST TASK CONTRACT AUTHORITY (complete normalized JSON; exact strings are authority):\n"
+    assert "OLD_RECEIPT_BODY" not in request["instructions"]
+    marker = "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
     payload = request["instructions"].split(marker, 1)[1]
-    normalized = json.loads(payload)
+    normalized, end = json.JSONDecoder().raw_decode(payload)
+    # The owner's words that caused the work follow the contract.
+    assert payload[end:].startswith("\n\n") and "words of my human" in payload[end:]
 
     assert normalized["context"] == context
     assert normalized["constraints"] == contract["constraints"]
     assert normalized["acceptance_claims"][0]["claim"] == "L1 asks L2 to spawn L3"
     assert normalized["delegation_budget"]["intent_note"] == "L1\nL2\nL3"
     assert normalized["allowed_resources"]["network"] is False
-    assert normalized["predecessor_authority"] == contract["predecessor_authority"]
+    brief = normalized["predecessor_authority"]
+    for key in ("source", "result", "origin_message_text", "task_contract"):
+        assert brief[key] == contract["predecessor_authority"][key]
+    assert "verification_receipts" not in brief
+    assert brief["omitted_fields"]["verification_receipts"] > 0
+    assert "OLD_RECEIPT_BODY" in json.dumps(contract)  # the caller is untouched
+    assert "get_task_result" in payload[end:] and "launching task" in payload[end:]
+    assert "delegate_answer" in payload[end:] and "input_required" in payload[end:]
 
 
 def test_a_missing_contract_contributes_nothing(tmp_path, monkeypatch):

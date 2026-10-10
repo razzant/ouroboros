@@ -20,11 +20,13 @@ function fixture(t, exact = true) {
         ownerDocument.listeners.get(event.type)?.(event);
     };
     const bookmark = { scrollTop: 2400, stick: false, historyAnchor: { historyId: 'chat:old', offset: 80 } };
-    const reading = createChatReadingPosition({ initial: bookmark, feed, visible: () => visible,
-        alive: () => true, ready: () => ready, anchors: { serialize: () => null, capture: () => null,
+    const reading = createChatReadingPosition({ feed, visible: () => visible,
+        alive: () => true, ready: () => ready, anchors: { serialize: () => bookmark.historyAnchor, capture: () => null,
             restore: () => { restored++; feed.scrollTop = 80; return typeof exact === 'function' ? exact() : exact; } },
-        fallback: () => false, changed() { changes++; }, afterWrite() {}, activity() {}, updateButton() {},
+        changed() { changes++; }, afterWrite() {}, activity() {}, updateButton() {},
     });
+    // A reader away from the bottom whose place awaits data (a window shown again).
+    reading.top = bookmark.scrollTop; reading.stick = false; reading.request();
     return { reading, feed, frames, bookmark, gesture: event => dispatch({ target: feed, ...event }),
         ready: () => { ready = true; }, hide: () => { visible = false; },
         changed: () => changes, restored: () => restored, frame: () => { const work = frames.splice(0); work.forEach(callback => callback()); } };
@@ -51,12 +53,12 @@ test('an exact second positioning pass clears the earlier approximation', t => {
     assert.equal(f.reading.approximate, false);
 });
 
-test('a failed or delayed read schedules no layout polling and exports the original target', t => {
+test('a failed or delayed read schedules no layout polling and keeps the original target', t => {
     const f = fixture(t);
     f.reading.request();
     for (let i = 0; i < 100; i++) f.frame();
     assert.equal(f.frames.length, 0);
-    assert.deepEqual(f.reading.export(), f.bookmark);
+    assert.deepEqual(f.reading.target, f.bookmark);
     f.reading.mutate(() => { f.feed.scrollHeight = 400; });
     assert.equal(f.reading.stick, false, 'short/empty layout cannot opt the reader into follow');
     f.ready(); f.reading.position(); f.frame(); f.frame();
@@ -65,29 +67,19 @@ test('a failed or delayed read schedules no layout polling and exports the origi
     assert.equal(f.restored(), 2);
 });
 
-test('only the cross-instance saved place is restoring; a reshow of the live room is not', t => {
-    const f = fixture(t);
-    assert.equal(f.reading.restoring, true);
-    f.reading.request();
-    assert.equal(f.reading.restoring, true, 'a reshow while pending keeps the saved place');
-    f.reading.cancel();
-    f.reading.request();
-    assert.deepEqual([f.reading.pending, f.reading.restoring], [true, false]);
-});
-
 test('wheel/latest/question cancellation wins even between positioning frames', t => {
     const f = fixture(t); f.ready(); f.reading.position(); f.frame();
     f.reading.cancel(); f.feed.scrollTop = 210;
     f.frame();
     assert.equal(f.feed.scrollTop, 210);
-    assert.equal(f.reading.export(), null);
+    assert.equal(f.reading.target, null);
     f.reading.followAfterLayout(); f.reading.cancel(); f.frame();
     assert.equal(f.feed.scrollTop, 210, 'a superseded latest layout cannot pull the reader');
 });
 
 test('hidden/disposed layout retains intent for a later data-aware show', t => {
     const f = fixture(t); f.ready(); f.reading.position(); f.hide(); f.frame();
-    assert.deepEqual(f.reading.export(), f.bookmark);
+    assert.deepEqual(f.reading.target, f.bookmark);
     assert.equal(f.restored(), 0);
 });
 

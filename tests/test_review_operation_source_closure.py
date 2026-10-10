@@ -187,8 +187,7 @@ def test_full_operation_sources_survive_author_drive_cleanup(tmp_path, monkeypat
         # The ordinary next owner turn also receives an exact readable source,
         # even with consciousness disabled and the author drive already removed.
         from supervisor import message_bus
-        from ouroboros.context import build_recent_sections
-        from ouroboros.memory import Memory
+        from ouroboros import chat_chain, memory_view
         from ouroboros.tools.tool_context import ToolContext
 
         monkeypatch.setattr(message_bus, 'DATA_DIR', canonical)
@@ -211,14 +210,25 @@ def test_full_operation_sources_survive_author_drive_cleanup(tmp_path, monkeypat
                                task_metadata={'budget_drive_root': str(canonical)})
         receiver = ToolRegistry(repo_dir=repo, drive_root=receiver_root)
         receiver.set_context(consumer)
+        # The memory view of the next turn: the room's lane-2 line names the late review by type
+        # and a readable address (no JSON in the view); Main names that room in one line.
+        views = {}
         for room in (1, 42):
-            context = '\n'.join(build_recent_sections(Memory(canonical), None, task_id='next-owner', thread_chat_id=room))
-            assert 'source-author' in context and panel['applied_source_ref']['sha256'] in context
-            evidence = json.loads(context.split('[Late review evidence: ', 1)[1].splitlines()[0][:-1])
-            assert evidence['reviewed_revision'] == ('delivered' if emitted == 'answer A' else 'different')
-            retained = read_late_source(receiver, evidence['read'])
-            assert 'answer A' in retained and 'Original critique of A' in retained
-            assert late['emitted_answer']['delivered'][0]['source_ref']['sha256'] in retained
+            task = {'id': 'next-owner', 'chat_id': room}
+            spec = memory_view.view_spec_for_task(task, canonical)
+            views[room] = memory_view.render_room(memory_view.capture_memory_view(canonical, task, spec))
+        assert '### Project Room [chat_id=42] — open' in views[1] and 'late review evidence' not in views[1]
+        line = next(text for text in views[42].splitlines() if 'late review evidence: ' in text)
+        assert '{' not in line and line.startswith('[') and f'; host; task {task_id}] ' in line
+        address = line.split('late review evidence: ', 1)[1].split(';', 1)[0]
+        row, status = chat_chain.resolve_row(canonical, chat_chain.parse_address(address))
+        assert row is not None, status
+        evidence = row['late_evidence']
+        assert evidence['reviewed_revision'] == ('delivered' if emitted == 'answer A' else 'different')
+        assert 'source-author' in json.dumps(evidence) and panel['applied_source_ref']['sha256'] in json.dumps(evidence)
+        retained = read_late_source(receiver, evidence['read'])
+        assert 'answer A' in retained and 'Original critique of A' in retained
+        assert late['emitted_answer']['delivered'][0]['source_ref']['sha256'] in retained
 
         # Settlement itself launches no cognition. A later explicitly admitted
         # wake receives the fact and can open the original subject and critique.

@@ -585,7 +585,6 @@ def test_extensions_index_rows_expose_loader_content_hash(monkeypatch, tmp_path)
     """§7.2: /api/extensions rows carry the loader content hash; collision rows
     (whose loader hash never existed) carry the empty string."""
     import ouroboros.gateway.extensions as extensions_api
-    import supervisor.queue as supervisor_queue
     from ouroboros.contracts.skill_manifest import SkillManifest
     from ouroboros.skill_loader import LoadedSkill, SkillReviewState
 
@@ -619,7 +618,6 @@ def test_extensions_index_rows_expose_loader_content_hash(monkeypatch, tmp_path)
         "snapshot",
         lambda: {"tools": [], "routes": [], "ws_handlers": [], "ui_tabs": []},
     )
-    monkeypatch.setattr(supervisor_queue, "sync_skill_schedules", lambda *_a, **_kw: None)
     monkeypatch.setattr(
         "ouroboros.tools.github.github_token_from_env_or_settings", lambda: ""
     )

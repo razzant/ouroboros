@@ -14,7 +14,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 # (path, qualified function, shape): (number of sites, reason)
 EXCEPTIONS = {
-    ("ouroboros/upgrade_notices.py", "startup_upgrade_notices", "call"): (1, "Host notice uses literal system role and a type from its finite owed-notice tuples; test_reviewer_delivery_defaults pins both emitted types."),
+    ("ouroboros/upgrade_notices.py", "startup_upgrade_notices", "call"): (1, "Host notice uses literal system role and a type from its finite owed-notice tuples; test_reviewer_delivery_defaults and test_legacy_memory_notice pin all three emitted types."),
     ("supervisor/message_bus.py", "_send_markdown", "call"): (1, "Forwards the caller's role/type to the bridge."),
     ("supervisor/message_bus.py", "send_with_budget", "call"): (1, "Forwards caller authorship, not a producer of new text."),
     ("supervisor/message_bus.py", "send_with_budget", "envelope"): (1, "Persists the caller's role/type for progress history."),

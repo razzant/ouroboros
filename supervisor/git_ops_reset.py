@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -308,6 +309,7 @@ def _admission_gate_for_unsynced_tree(
 
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
+    before_head = _go().git_capture(["git", "rev-parse", "HEAD"])[1].strip()
     managed_meta = _go()._read_managed_repo_meta()
     fetch_remote = ""
     target_ref = ""
@@ -450,13 +452,13 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             if policy == "rescue_and_reset":
                 _go()._run_git_resilient(["git", "clean", "-fd"], cwd=str(_go().REPO_DIR), check=True)
 
-    # Checkout may not update mtimes; remove stale bytecode.
-    for p in _go().REPO_DIR.rglob("__pycache__"):
-        shutil.rmtree(p, ignore_errors=True)
     st = {"current_branch": branch, "current_sha": subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=str(_go().REPO_DIR),
         capture_output=True, text=True, check=True,
     ).stdout.strip()}
+    if before_head and st["current_sha"] != before_head:
+        for p in _go().REPO_DIR.rglob("__pycache__"):
+            shutil.rmtree(p, ignore_errors=True)
     _record_checkout_facts(st)
     if update_intent_target and st["current_sha"] != update_intent_target:
         return False, f"Update intent checkout landed on {st['current_sha']} but expected {update_intent_target}"
@@ -465,6 +467,31 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
     if update_intent_target and str(reason or "") != "ui_update_apply":
         _go()._clear_update_intent()
     return True, "ok"
+
+
+def _dependency_install_plan(repo_dir: pathlib.Path) -> Tuple[List[str], str, pathlib.Path]:
+    """``(command, source, lock path)`` of the one runtime-dependency install for ``repo_dir``."""
+    from ouroboros.platform_layer import pip_install_target_args
+
+    req_path = repo_dir / "requirements-runtime.lock"
+    if not req_path.exists():
+        # Preserve upgrades from managed repositories created before uv locks.
+        req_path = repo_dir / "requirements.txt"
+    # The sixth and last pip call site. On a packaged install `sys.executable` IS the
+    # bundled interpreter, so an unflagged install wrote into the signed bundle.
+    cmd: List[str] = [sys.executable, "-m", "pip", "install", "-q",
+                      *pip_install_target_args(sys.executable)]
+    if req_path.exists():
+        return cmd + ["-r", str(req_path)], f"requirements:{req_path}", req_path
+    return cmd + ["openai>=1.0.0", "requests"], "fallback:minimal", req_path
+
+
+def runtime_dependency_command(repo_dir: pathlib.Path) -> Optional[List[str]]:
+    """The same install command for a body switch that runs with no launcher; ``None`` where
+    this chokepoint installs nothing (a frozen bundle, an active test boundary)."""
+    if getattr(sys, 'frozen', False) or os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1":
+        return None
+    return _dependency_install_plan(pathlib.Path(repo_dir))[0]
 
 
 def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
@@ -484,24 +511,16 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         log.info("Skipping dependency sync under an active test boundary (%s).", reason)
         return True, "pytest:suppressed"
 
-    from ouroboros.platform_layer import pip_install_target_args
-
-    req_path = _go().REPO_DIR / "requirements-runtime.lock"
-    if not req_path.exists():
-        # Preserve upgrades from managed repositories created before uv locks.
-        req_path = _go().REPO_DIR / "requirements.txt"
-    # The sixth and last pip call site. On a packaged install `sys.executable` IS the
-    # bundled interpreter, so an unflagged install wrote into the signed bundle.
-    cmd: List[str] = [sys.executable, "-m", "pip", "install", "-q",
-                      *pip_install_target_args(sys.executable)]
-    source = ""
-    if req_path.exists():
-        cmd += ["-r", str(req_path)]
-        source = f"requirements:{req_path}"
-    else:
-        cmd += ["openai>=1.0.0", "requests"]
-        source = "fallback:minimal"
+    cmd, source, req_path = _dependency_install_plan(_go().REPO_DIR)
     try:
+        from ouroboros.startup_migrations import watermarks, stamp
+        fingerprint = _dependency_fingerprint(req_path, cmd)
+        try:
+            synced = watermarks(_go().DRIVE_ROOT).get("dependencies")
+        except ValueError:
+            synced = None  # an unreadable watermark file means "not known synced": sync
+        if synced == fingerprint:
+            return True, "unchanged:" + source
         from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
         from ouroboros.tools.shell import _active_subprocesses, _subprocess_lock
 
@@ -521,6 +540,10 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
                 _active_subprocesses.discard(proc)
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, cmd)
+        try:
+            stamp(_go().DRIVE_ROOT, dependencies=fingerprint)
+        except Exception:
+            log.warning("Dependency fingerprint not recorded; the next sync runs pip again", exc_info=True)
         _go().append_jsonl(
             _go().DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
@@ -551,8 +574,18 @@ def import_test() -> Dict[str, Any]:
         cwd=str(_go().REPO_DIR),
         capture_output=True, text=True,
     )
+    if r.returncode != 0:
+        _forget_dependency_fingerprint()  # a broken environment is re-synced next time, never skipped
     return {"ok": (r.returncode == 0), "stdout": r.stdout, "stderr": r.stderr,
             "returncode": r.returncode}
+
+
+def _forget_dependency_fingerprint() -> None:
+    try:
+        from ouroboros.startup_migrations import stamp
+        stamp(_go().DRIVE_ROOT, dependencies=None)
+    except Exception:
+        log.warning("Dependency fingerprint not cleared after a failed import test", exc_info=True)
 
 
 def safe_restart(
@@ -635,3 +668,25 @@ def _record_checkout_facts(facts: dict) -> None:
         _go().update_state(lambda live: live.update(facts))
     except StateUnavailable:
         log.warning("Checkout facts not recorded in state: runtime state unavailable", exc_info=True)
+        return
+    try:
+        from ouroboros.startup_migrations import stamp
+        stamp(_go().DRIVE_ROOT, observed_state_sha=facts.get("current_sha"))
+    except Exception:
+        # Bookkeeping never fails a checkout: without the stamp the next start re-imports.
+        log.warning("Observed checkout SHA not stamped; the next start re-imports the obligation sets", exc_info=True)
+
+
+def _dependency_fingerprint(req_path, cmd):
+    """Actual requirement bytes, install target/environment and interpreter."""
+    import hashlib
+    import json
+    import site
+    import sysconfig
+    source = req_path.read_bytes() if req_path.exists() else b"openai>=1.0.0\nrequests"
+    facts = {"requirements_sha256": hashlib.sha256(source).hexdigest(), "command": cmd,
+             "interpreter": [sys.executable, sys.version, sys.prefix, sys.base_prefix],
+             "target": [site.getuserbase(), sysconfig.get_path("purelib")],
+             "environment": {key: os.environ.get(key, "") for key in
+                             ("PYTHONUSERBASE", "PIP_TARGET", "PIP_PREFIX", "PIP_USER", "PIP_CONFIG_FILE", "VIRTUAL_ENV")}}
+    return hashlib.sha256(json.dumps(facts, sort_keys=True).encode("utf-8")).hexdigest()

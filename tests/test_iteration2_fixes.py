@@ -64,24 +64,29 @@ _PNG_1x1 = _real_png_1x1()
 def test_apply_all_model_one_low_reviewer_by_default(monkeypatch):
     from devtools.benchmarks.terminal_bench.run_tb import apply_all_model
 
-    for k in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW"):
-        monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("OUROBOROS_REVIEW_MODELS", raising=False)
+    for k in ("OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW"):
+        monkeypatch.setenv(k, "xhigh")  # retired review-effort keys an older pin left behind
     apply_all_model("google/gemini-3.5-flash")
-    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash"  # one reviewer, no commas
-    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "low"
-    assert os.environ["OUROBOROS_EFFORT_SCOPE_REVIEW"] == "low"
+    # The review pool is the roster: ONE packet review seat on the solve model (no comma key);
+    # the seat carries the effort, and the retired review-effort keys are dropped, never pinned.
+    assert not {"OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEWER_SLOTS", "OUROBOROS_EFFORT_REVIEW",
+                "OUROBOROS_EFFORT_SCOPE_REVIEW"} & set(os.environ)
     actors = json.loads(os.environ["OUROBOROS_SUBAGENTS"])
-    assert [row["route"]["target_id"] for row in actors["items"]] == ["google/gemini-3.5-flash"]
+    assert [row["route"]["target_id"] for row in actors["items"]] == ["google/gemini-3.5-flash"] * 2
+    [seat] = [row for row in actors["items"] if row.get("review_eligible")]
+    assert (seat["delivery"], seat["effort"]) == ("packet", "low")
 
 
 def test_apply_all_model_configurable_slots_and_effort(monkeypatch):
     from devtools.benchmarks.terminal_bench.run_tb import apply_all_model
 
-    for k in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW"):
-        monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("OUROBOROS_REVIEW_MODELS", raising=False)
+    monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "low")  # a retired key an older pin left behind
     apply_all_model("m", review_slots=3, review_effort="medium")
-    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "m,m,m"
-    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "medium"
+    seats = [row for row in json.loads(os.environ["OUROBOROS_SUBAGENTS"])["items"] if row.get("review_eligible")]
+    assert [(row["route"]["target_id"], row["effort"]) for row in seats] == [("m", "medium")] * 3
+    assert "OUROBOROS_EFFORT_REVIEW" not in os.environ  # the effort lives on the seats alone
 
 
 # ------------------------- #2 timeout resolver SSOT -------------------------

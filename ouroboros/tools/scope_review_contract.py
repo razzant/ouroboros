@@ -126,26 +126,3 @@ def classify_scope_findings(items: list) -> tuple[List[dict], List[dict]]:
         else:
             advisory_findings.append(finding)
     return critical_findings, advisory_findings
-
-
-def build_scope_block_message(
-    critical_findings: List[dict], advisory_findings: List[dict]
-) -> str:
-    """Format critical plus advisory findings into the blocking message."""
-    crit_lines = "\n".join(
-        f"  CRITICAL: [scope:{finding['item']}] {finding['reason']}"
-        for finding in critical_findings
-    )
-    advisory_section = ""
-    if advisory_findings:
-        advisory_lines = "\n".join(
-            f"  WARN: [scope:{finding['item']}] {finding['reason']}"
-            for finding in advisory_findings
-        )
-        advisory_section = f"\n\nAdvisory warnings:\n{advisory_lines}"
-    return (
-        "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer found critical completeness issues.\n"
-        "Commit has NOT been created. Fix the issues and try again.\n\n"
-        + crit_lines
-        + advisory_section
-    )

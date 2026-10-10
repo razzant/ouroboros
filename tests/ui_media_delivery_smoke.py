@@ -239,12 +239,15 @@ def run_media_delivery_smoke(direct_server_with_data):
                         window.__blobDownload = true;
                         return originalCreate.call(URL, blob);
                     };
+                    // A live text file opens the reader; its Download is the card's own blob path.
                     const liveCard = [...document.querySelectorAll('.chat-file-card')].find((node) => node.innerText.includes('live.txt'));
                     liveCard.click();
                     window.pywebview = undefined;
-                    [...document.querySelectorAll('.chat-file-dialog')].at(-1)
-                        .querySelector('[data-file-action="download"]').click();
+                    const reader = document.querySelector('dialog.document-reader[open]');
+                    reader.querySelector('[data-reader-action="download"]').click();
                     await new Promise((resolve) => setTimeout(resolve, 20));
+                    const readerText = reader.querySelector('.document-reader-source')?.textContent;
+                    reader.querySelector('[data-reader-action="close"]').click();
                     URL.createObjectURL = originalCreate;
                     return {
                         audio: document.querySelectorAll('.chat-media-player.is-audio').length,
@@ -256,13 +259,14 @@ def run_media_delivery_smoke(direct_server_with_data):
                         liveLinks: [...document.querySelectorAll('.chat-links-title')]
                             .find((node) => node.textContent === 'Live links')?.parentElement.querySelectorAll('a').length,
                         bridge: window.__bridgeDownload === true, blob: window.__blobDownload === true,
-                        copied: window.__copied,
+                        copied: window.__copied, readerText, readerClosed: !document.querySelector('dialog.document-reader'),
                     };
                 }""")
                 assert result == {
                     "audio": 2, "speed": 1.5, "fullscreen": True,
                     "liveGroups": 2, "liveGalleryItems": 2, "liveLinks": 1,
                     "bridge": True, "blob": True, "copied": "raw **message** text",
+                    "readerText": "hello", "readerClosed": True,
                 }
                 # V-4 regression pins. The chat bubble's `white-space: pre-wrap`
                 # used to be inherited by structural card markup, so every

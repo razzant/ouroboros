@@ -12,6 +12,7 @@ import pytest
 
 from ouroboros import usage_accounting as ua
 from ouroboros.llm import LLMClient, _canonical_candidate_bytes
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
@@ -46,8 +47,7 @@ class _Response:
 
 
 def _rows(root: Path):
-    path = root / ua.LEDGER_REL
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return ledger_rows(root)
 
 
 def _final_rows(root: Path):
@@ -149,7 +149,7 @@ def test_remote_candidate_manifest_matches_exact_post_transform_send(data_root):
     })
     rows = _rows(data_root)
     final = rows[-1]
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "settled"]
+    assert [row["state"] for row in rows] == ["settled"]
     assert all(row["candidate_raw_sha256"] == hashlib.sha256(raw).hexdigest() for row in rows)
     assert all(row["candidate_raw_size_bytes"] == len(raw) for row in rows)
     assert all(row["candidate_context_sha256"] == hashlib.sha256(context_bytes).hexdigest() for row in rows)
@@ -329,7 +329,7 @@ def test_local_transport_timeout_is_separate_from_physical_candidate(
     assert not _has_capsule(physical) and messages == original
     raw = _canonical_candidate_bytes(physical)
     rows = _rows(data_root)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "settled"]
+    assert [row["state"] for row in rows] == ["settled"]
     assert all(row["candidate_raw_sha256"] == hashlib.sha256(raw).hexdigest() for row in rows)
     assert all(row["candidate_raw_size_bytes"] == len(raw) for row in rows)
     assert rows[0]["reservation_upper_bound_usd"] == rows[-1]["cost_usd"] == 0.0
@@ -557,7 +557,7 @@ def test_precondition_releases_before_dispatch_and_does_not_claim_send(data_root
             _target(),
         )
     assert provider_calls == 0
-    assert [row["state"] for row in _rows(data_root)] == ["reserved", "released"]
+    assert [row["state"] for row in _rows(data_root)] == ["released"]
     assert _rows(data_root)[-1]["candidate_manifest_ref"]
     capture = ua.physical_attempt_capture_from_exception(caught.value)
     assert capture is not None and capture.state == "released"
@@ -586,7 +586,7 @@ def test_attempt_limit_keeps_persisted_manifest_on_release_and_capture(data_root
         )
 
     assert provider_calls == 0
-    assert [row["state"] for row in _rows(data_root)] == ["reserved", "released"]
+    assert [row["state"] for row in _rows(data_root)] == ["released"]
     final = _rows(data_root)[-1]
     assert final["candidate_manifest_ref"]
     assert _manifest(final["candidate_manifest_ref"])["call_id"] == final["attempt_id"]
@@ -708,7 +708,7 @@ def test_candidate_persistence_failure_releases_without_send_or_limit_claim(
             _target(),
         )
     assert provider_calls == 0
-    assert [row["state"] for row in _rows(data_root)] == ["reserved", "released"]
+    assert [row["state"] for row in _rows(data_root)] == ["released"]
     assert "candidate_manifest_ref" not in _rows(data_root)[-1]
     capture = ua.physical_attempt_capture_from_exception(caught.value)
     assert capture is not None and capture.candidate_manifest_ref is None

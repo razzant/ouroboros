@@ -11,8 +11,9 @@ from __future__ import annotations
 import pytest
 
 
-# The exact string the convergence rule must contain (module-level so both
-# review.py and scope_review.py share a single source of truth).
+# The exact string the convergence rule must contain (module-level: the packet
+# seat and the two-part brief render history through ONE owner,
+# review_helpers.build_review_history_section / review_history_with_obligations).
 _EXPECTED_RULE_SUBSTRING = (
     "CONVERGENCE RULE (attempt 3+): Do NOT raise new critical findings on "
     "code that was not changed between this attempt and the previous attempt."
@@ -36,11 +37,12 @@ def _make_history(n_rounds: int) -> list:
     "module_path, func_name",
     [
         ("ouroboros.tools.review", "_build_review_history_section"),
-        ("ouroboros.tools.scope_review", "_build_review_history_section"),
+        ("ouroboros.tools.review_helpers", "build_review_history_section"),
     ],
 )
 class TestConvergenceRuleInjection:
-    """Runs the same contract against both review.py and scope_review.py."""
+    """Runs the same contract through the packet seat's binding (review.py) and the
+    owner the two-part brief (review_brief_coupling.py) renders with."""
 
     def _fn(self, module_path, func_name):
         import importlib
@@ -91,101 +93,99 @@ class TestConvergenceRuleInjection:
         assert important_idx < convergence_idx
 
 
-class TestScopeOnlyRetryPath:
-    """v4.39.0: when a commit is blocked only by scope review across retries
-    (triad passes every time), `review_history` stays empty but
-    `scope_review_history` grows. The convergence rule must still fire in
-    the scope reviewer prompt from the 3rd scope-only attempt onward —
-    otherwise the anti-thrashing fix is incomplete for this path.
+class TestCouplingOnlyRetryPath:
+    """When a commit is blocked only by the coupling question across retries
+    (Part 1 passes every time), `review_history` stays empty but the subject's
+    `coupling_history` grows. The convergence rule must still fire in the
+    two-part brief from the 3rd coupling-only attempt onward — otherwise the
+    anti-thrashing fix is incomplete for this path.
 
-    We don't spin up a real git repo: the retrieving brief carries pointers,
-    not evidence, so only the checklist and governance loaders are stubbed and
+    We don't spin up a real git repo: the brief carries pointers, not
+    evidence, so only the checklist and governance loaders are stubbed and
     the builder still emits the history/rule section.
     """
 
-    def _scope_prompt(self, review_history, scope_review_history, tmp_path, monkeypatch):
+    def _brief(self, review_history, coupling_history, tmp_path, monkeypatch):
         import pathlib
-        from ouroboros.tools import scope_review_session as session
+        from ouroboros.tools import review_brief_coupling as brief_mod
 
         monkeypatch.setattr(
             "ouroboros.tools.review_helpers.load_checklist_section",
-            lambda name: "(scope checklist)",
+            lambda name, checklist_path=None: "(checklist)",
         )
-        monkeypatch.setattr(session, "load_checklist_section", lambda name: "(scope checklist)")
+        monkeypatch.setattr(brief_mod, "load_checklist_section", lambda name: "(coupling checklist)")
         monkeypatch.setattr(
             "ouroboros.tools.review_helpers.load_governance_doc",
             lambda rd, rel, **_kw: "(governance doc)",
         )
-        brief, _manifest = session.build_scope_session_task(
+        brief, _manifest = brief_mod.build_retrieving_brief(
             pathlib.Path(tmp_path),
-            session.ScopeBriefInputs(
+            brief_mod.BriefInputs(
                 commit_message="test commit message",
-                intent=session.ScopeIntentContext(
+                intent=brief_mod.BriefIntent(
                     review_history=review_history,
-                    scope_review_history=scope_review_history,
+                    coupling_history=coupling_history,
                 ),
             ),
         )
         return brief or ""
 
-    def test_scope_only_third_attempt_fires_rule(self, tmp_path, monkeypatch):
-        """Triad passed (review_history empty) but 2 prior scope-only blocks
-        exist. The scope reviewer prompt on attempt 3 MUST carry the
-        convergence rule."""
-        scope_rounds = [
+    def test_coupling_only_third_attempt_fires_rule(self, tmp_path, monkeypatch):
+        """Part 1 passed (review_history empty) but 2 prior coupling-only blocks
+        exist. The brief on attempt 3 MUST carry the convergence rule."""
+        coupling_rounds = [
             {"attempt": 1, "commit_message": "m", "critical": ["s1"]},
             {"attempt": 2, "commit_message": "m", "critical": ["s2"]},
         ]
-        out = self._scope_prompt([], scope_rounds, tmp_path, monkeypatch)
+        out = self._brief([], coupling_rounds, tmp_path, monkeypatch)
         assert "CONVERGENCE RULE" in out, (
-            "Scope-only retry on attempt 3 did not carry the convergence "
+            "Coupling-only retry on attempt 3 did not carry the convergence "
             "rule; anti-thrashing fix incomplete for this path."
         )
 
-    def test_scope_only_first_attempt_no_rule(self, tmp_path, monkeypatch):
-        """First scope-only attempt (no prior scope rounds) must NOT carry
+    def test_coupling_only_first_attempt_no_rule(self, tmp_path, monkeypatch):
+        """First coupling-only attempt (no prior coupling rounds) must NOT carry
         the rule — only kicks in from attempt 3."""
-        out = self._scope_prompt([], [], tmp_path, monkeypatch)
+        out = self._brief([], [], tmp_path, monkeypatch)
         assert "CONVERGENCE RULE" not in out
 
-    def test_rule_not_duplicated_when_triad_history_fires_it(self, tmp_path, monkeypatch):
-        """If `review_history` already triggers the rule (>=2 triad rounds),
-        we don't want a second copy from the scope-only path."""
+    def test_rule_not_duplicated_when_part_one_history_fires_it(self, tmp_path, monkeypatch):
+        """If `review_history` already triggers the rule (>=2 Part-1 rounds),
+        we don't want a second copy from the coupling-only path."""
         triad_rounds = [
             {"attempt": 1, "commit_message": "m",
              "critical": ["c1"], "advisory": []},
             {"attempt": 2, "commit_message": "m",
              "critical": ["c2"], "advisory": []},
         ]
-        scope_rounds = [
+        coupling_rounds = [
             {"attempt": 1, "commit_message": "m", "critical": ["s1"]},
             {"attempt": 2, "commit_message": "m", "critical": ["s2"]},
         ]
-        out = self._scope_prompt(triad_rounds, scope_rounds, tmp_path, monkeypatch)
+        out = self._brief(triad_rounds, coupling_rounds, tmp_path, monkeypatch)
         # Must appear at least once.
         assert "CONVERGENCE RULE" in out
-        # And not more than once — the scope-only path must skip when the
-        # triad path already emitted it.
+        # And not more than once — one brief carries the rule once.
         assert out.count("CONVERGENCE RULE") == 1, (
             f"Expected the convergence rule to appear exactly once; got "
             f"{out.count('CONVERGENCE RULE')} copies. This would spam the "
-            f"scope reviewer with identical reminders."
+            f"reviewer with identical reminders."
         )
 
 
 class TestConvergenceRuleSharedConstant:
-    """Single source of truth: both review.py and scope_review.py must render
-    the same rule text because they both import `_CONVERGENCE_RULE_TEXT` from
-    the shared helpers module."""
+    """Single source of truth: the packet seat and the two-part brief render
+    the same rule text because both import `_CONVERGENCE_RULE_TEXT` from the
+    shared helpers module."""
 
     def test_shared_constant_exists(self):
         from ouroboros.tools.review_helpers import _CONVERGENCE_RULE_TEXT
         assert "CONVERGENCE RULE" in _CONVERGENCE_RULE_TEXT
         assert "previous attempt" in _CONVERGENCE_RULE_TEXT
 
-    def test_triad_and_scope_emit_identical_rule_line(self):
+    def test_packet_and_brief_emit_identical_rule_line(self):
         from ouroboros.tools.review import _build_review_history_section as rh
-        from ouroboros.tools.scope_review import _build_review_history_section as sh
+        from ouroboros.tools.review_helpers import build_review_history_section as sh
 
         def _extract_convergence_line(section: str) -> str:
             for line in section.splitlines():

@@ -6,11 +6,15 @@ separate facts on the calling task's result record (``merge_receipts``):
 
 - requested: the explicit method and the head the caller expects (``gh pr merge
   --match-head-commit``, never ``--auto`` or ``--admin``);
-- review: what the caller DECLARES was reviewed (head, base, full/delta, verdict)
-  beside what the host can observe (each named review task's record: completed
-  or not, the digest of its stored result, its model) and whether the PR carries
-  a well-formed CONTRIBUTING checklist — declaration and observation are never
-  merged into one "reviewed" claim, and a delta review never covers a whole PR;
+- review: the host review record the caller names (``review_record_id``: its
+  subject root/kind/base/head/tree, aggregate and per-question verdicts, panel
+  size), which then supplies the reviewed subject, and/or what the caller
+  DECLARES was reviewed (head, base, full/delta, verdict; ``declared_only`` when
+  no record backs it), beside what the host can observe (each named review
+  task's record: completed or not, the digest of its stored result, its model)
+  and whether the PR carries a well-formed CONTRIBUTING checklist — declaration
+  and observation are never merged into one "reviewed" claim, a delta review
+  never covers a whole PR, and only a committed ``base..head`` record can;
 - outcome: GitHub's readback — merged (commit, tree, parents), queued/auto-merge
   (NOT merged), refused, or unknown — and whether this call's own effect or
   another actor's merge produced it.
@@ -28,18 +32,21 @@ page leave no receipt; nothing here parses shell commands.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
+from ouroboros import review_ledger
 from ouroboros.utils import update_json_locked, utc_now_iso
 
 RECEIPTS_KEY = "merge_receipts"
 _RECEIPTS_CAP = 50
 METHODS = ("merge", "squash", "rebase")
 REVIEW_SCOPES = ("full", "delta")
+COMMITTED_SUBJECT_KIND = "base..head"  # the one review-ledger subject that names a committed range
 _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 _VERDICT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_ -]{0,39}$")
 _PR_URL_RE = re.compile(r"^https://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)")
@@ -203,23 +210,79 @@ def observe_review_tasks(drive_root: Any, task_ids: List[str]) -> List[Dict[str,
     return rows
 
 
-def review_coverage(declared: Optional[Dict[str, Any]], observed: List[Dict[str, Any]], head_sha: str) -> Dict[str, Any]:
-    """Whether the DECLARED review subject is the head being merged, with every gap named."""
+def load_review_record(drive_root: Any, record_id: str) -> Optional[Dict[str, Any]]:
+    """The host review record ``record_id`` reduced to what a receipt binds; ``None`` = no such record.
+
+    Reader: ``review_ledger.load_record(drive_root, record_id)`` returns a mapping or a
+    dataclass (``None``, ``LookupError`` or ``FileNotFoundError`` = absent) and raises
+    for a record that exists but cannot be read; a non-mapping record raises here.
+    Unreadable is never reported as absent. The private ``root`` stays on the task
+    record and never reaches the PR body.
+    """
+    try:
+        record = review_ledger.load_record(drive_root, record_id)
+    except (LookupError, FileNotFoundError):
+        return None
+    if record is None:
+        return None
+    if dataclasses.is_dataclass(record) and not isinstance(record, type):
+        record = dataclasses.asdict(record)
+    if not isinstance(record, dict):
+        raise TypeError(f"the review record is a {type(record).__name__}, not a mapping")
+    subject, verdict, panel = (record.get(key) if isinstance(record.get(key), dict) else {}
+                               for key in ("subject", "verdict", "panel"))
+    questions = verdict.get("per_question") if isinstance(verdict.get("per_question"), dict) else {}
+    return {"record_id": str(record.get("record_id") or record_id),
+            "revision": record.get("revision") if isinstance(record.get("revision"), int) else None,
+            "state": str(record.get("state") or "unknown"),
+            "subject": {"root_kind": str(subject.get("root_kind") or ""), "root": str(subject.get("root") or ""),
+                        "kind": str(subject.get("kind") or ""), "base": _sha(subject.get("base")),
+                        "head": _sha(subject.get("head")), "tree_sha": _sha(subject.get("tree_sha"))},
+            "verdict": {"aggregate": str(verdict.get("aggregate") or "unknown"),
+                        "per_question": {str(q): str(v) for q, v in questions.items()}},
+            "panel": {"seats": _count(panel.get("seats")), "distinct_models": _count(panel.get("distinct_models"))}}
+
+
+def _count(value: Any) -> Any:
+    """A panel size as a count, or ``"unknown"`` — never zero for a missing fact."""
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else "unknown"
+
+
+def record_approves(record: Optional[Dict[str, Any]]) -> bool:
+    """A record reads green only once settled with an aggregate PASS (a fact, never a gate)."""
+    return bool(record) and record.get("state") == "settled" and (record.get("verdict") or {}).get("aggregate") == "PASS"
+
+
+def review_coverage(declared: Optional[Dict[str, Any]], observed: List[Dict[str, Any]], head_sha: str,
+                    record: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Whether the reviewed subject — the host record, else the declaration — is the head being merged.
+
+    Every gap is named, never filled: only a committed ``base..head`` record can
+    cover a commit, so an index/worktree record at the same HEAD is a gap.
+    """
     gaps = [f"review_task_{row['status'] or 'unknown'}:{index}"
             for index, row in enumerate(observed) if row.get("status") != "completed"]
-    if not declared:
+    if record:
+        subject = record.get("subject") or {}
+        reviewed = _sha(subject.get("head"))
+        if subject.get("kind") != COMMITTED_SUBJECT_KIND:
+            gaps.append("subject_kind_not_committed")
+    elif not declared:
         return {"status": "not_declared", "gaps": gaps + ["no_review_declared"]}
-    reviewed = _sha(declared.get("reviewed_head_sha"))
-    if declared.get("scope") == "delta":
+    else:
+        reviewed = _sha(declared.get("reviewed_head_sha"))
+    if not record and declared.get("scope") == "delta":
         status = "delta_only"  # a delta review never certifies the whole PR
     elif not reviewed:
         status = "unknown"
-        gaps.append("reviewed_head_not_declared")
+        gaps.append("reviewed_head_not_recorded" if record else "reviewed_head_not_declared")
     elif head_sha and (head_sha.startswith(reviewed) or reviewed.startswith(head_sha)):
         status = "covers_head"
     else:
         status = "changes_after_review"
-    if not observed:
+    if not observed and not record:
         gaps.append("no_host_observed_review_record")
     if status == "covers_head" and gaps:
         status = "unknown"
@@ -249,7 +312,7 @@ def public_block(receipt: Dict[str, Any]) -> str:
     """The cleaned PR-body block: typed facts only — no task ids, paths, accounts or prompts."""
     review, outcome = receipt.get("review") or {}, receipt.get("outcome") or {}
     declared, coverage = review.get("declared") or {}, receipt.get("coverage") or {}
-    observed = review.get("host_observed") or []
+    observed, record = review.get("host_observed") or [], review.get("record") or {}
     lines = [f"<!-- ouroboros:merge-receipt {receipt['receipt_id']} -->", "### Ouroboros merge receipt", "",
              f"- Outcome: **{outcome.get('status', 'unknown')}**"
              + (f" — merge commit `{outcome['merge_sha']}`" if outcome.get("merge_sha") else ""),
@@ -260,15 +323,25 @@ def public_block(receipt: Dict[str, Any]) -> str:
     current = receipt.get("observed_after") or receipt.get("observed_before") or {}
     lines.append(f"- Observed PR head `{current.get('head_sha') or 'unavailable'}`, "
                  f"base `{current.get('base_sha') or 'unavailable'}`")
+    if record:
+        subject, verdict, panel = (record.get(key) or {} for key in ("subject", "verdict", "panel"))
+        questions = ", ".join(f"{q} {v}" for q, v in (verdict.get("per_question") or {}).items())
+        lines.append(f"- Review record (host review ledger): `{subject.get('kind') or 'unknown'}` subject, "
+                     f"head `{subject.get('head') or 'not recorded'}`, base `{subject.get('base') or 'not recorded'}`, "
+                     f"tree `{subject.get('tree_sha') or 'not recorded'}`; verdict "
+                     f"**{verdict.get('aggregate') or 'unknown'}**" + (f" ({questions})" if questions else "")
+                     + ("" if record.get("state") == "settled" else f", record {record.get('state') or 'unknown'}")
+                     + f"; panel {panel.get('seats', 'unknown')} seats, "
+                     f"{panel.get('distinct_models', 'unknown')} distinct models")
     if declared:
         lines.append(f"- Declared review: head `{declared.get('reviewed_head_sha') or 'not stated'}`, "
                      f"base `{declared.get('reviewed_base_sha') or 'not stated'}`, "
                      f"{declared.get('scope', 'full')} scope, verdict {declared.get('verdict') or 'not stated'} "
-                     "(declared by the merging agent)")
-    else:
+                     "(declared by the merging agent" + ("" if record else "; no host review record") + ")")
+    elif not record:
         lines.append("- ⚠️ **No review was declared for this merge.**")
     done = sum(1 for row in observed if row.get("status") == "completed")
-    lines += [f"- Host-observed review records: {done} completed of {len(observed)} named",
+    lines += [f"- Host-observed review tasks: {done} completed of {len(observed)} named",
               f"- Coverage: **{coverage.get('status', 'unknown')}**"
               + (f" — gaps: {', '.join(g.split(':')[0] for g in coverage.get('gaps') or [])}" if coverage.get("gaps") else ""),
               f"- CONTRIBUTING checklist in this PR: {review.get('contributor_evidence', 'absent')}",
@@ -295,12 +368,19 @@ def upsert_body(body: str, block: str) -> str:
 
 def card_row_text(receipt: Dict[str, Any]) -> str:
     outcome, coverage = receipt.get("outcome") or {}, receipt.get("coverage") or {}
+    review = receipt.get("review") or {}
+    record = review.get("record") or {}
     loud = "⚠️ " if (coverage.get("status") != "covers_head" or coverage.get("gaps")
-                     or outcome.get("status") != "merged") else "✅ "
+                     or outcome.get("status") != "merged" or (record and not record_approves(record))) else "✅ "
+    if record:
+        source = f"; review source: record, verdict {(record.get('verdict') or {}).get('aggregate') or 'unknown'}" + (
+            "" if record.get("state") == "settled" else f" ({record.get('state') or 'unknown'})")
+    else:
+        source = "; review source: declaration" if review.get("declared") else ""
     return (f"{loud}PR #{receipt['number']} merge: {outcome.get('status', 'unknown')}"
             + (f" as {outcome['merge_sha'][:12]}" if outcome.get("merge_sha") else "")
             + f"; review coverage {coverage.get('status', 'unknown')}"
-            + (f" ({', '.join(coverage['gaps'])})" if coverage.get("gaps") else ""))
+            + (f" ({', '.join(coverage['gaps'])})" if coverage.get("gaps") else "") + source)
 
 
 # --- orchestration ---------------------------------------------------------------------
@@ -355,7 +435,11 @@ def _outcome(pr: Optional[Dict[str, Any]], gh_api: Gh, *, own_effect_ok: bool, e
 
 
 def _publish(ctx: Any, gh: Gh, gh_api: Gh, receipt: Dict[str, Any], drive_root: Any, task_id: str) -> Dict[str, Any]:
-    """PR body block (confirmed by readback) and the task-card row, each with its own gap."""
+    """PR body block (confirmed by readback) and the task-card row, each with its own gap.
+
+    The read/PATCH/readback is not atomic: a concurrent body edit can be overwritten.
+    The receipt row stays authoritative; the body block is its projection.
+    """
     block = public_block(receipt)
     body_status: Dict[str, Any] = {"status": "gap"}
     # Re-read at the publication boundary, not the pre-merge snapshot. An edit
@@ -411,25 +495,30 @@ def _publish(ctx: Any, gh: Gh, gh_api: Gh, receipt: Dict[str, Any], drive_root: 
 
 
 def _recompute_coverage(receipt: Dict[str, Any], gh_api: Gh) -> None:
-    """Coverage follows the observed subject, never the earlier requested head."""
+    """Coverage follows the observed subject, never the earlier requested head.
+
+    A bound host record supplies the reviewed base and tree itself; a declaration
+    is compared with the tree GitHub reports for the head being merged.
+    """
     review = receipt.get("review") or {}
-    declared = review.get("declared") or {}
+    declared, record = review.get("declared") or {}, review.get("record") or {}
+    subject = record.get("subject") or {}
     outcome = receipt.get("outcome") or {}
     observed = receipt.get("observed_after") or {}
     head = outcome.get("observed_head_sha") if outcome.get("status") == "merged" else observed.get("head_sha")
-    coverage = review_coverage(declared, review.get("host_observed") or [], head or "")
+    coverage = review_coverage(declared, review.get("host_observed") or [], head or "", record)
     gaps = coverage["gaps"]
     if not head:
         gaps.append("observed_head_unavailable")
-    if declared:
+    if declared or record:
         base = observed.get("base_sha")
         if outcome.get("status") == "merged":
             parents = outcome.get("merge_parents") or []
             base = parents[0] if parents and receipt["requested"]["method"] != "rebase" else ""
             tree = outcome.get("merge_tree")
             match = _PR_URL_RE.match(str(receipt.get("repo", {}).get("url") or ""))
-            reviewed_tree = ""
-            if head and match:
+            reviewed_tree = _sha(subject.get("tree_sha")) if record else ""
+            if not record and head and match:
                 result = gh_api(["api", f"repos/{match.group(2)}/{match.group(3)}/commits/{head}",
                                  "--hostname", match.group(1)], timeout=30)
                 try:
@@ -443,13 +532,13 @@ def _recompute_coverage(receipt: Dict[str, Any], gh_api: Gh) -> None:
                 gaps.append("merged_tree_differs_from_reviewed_head")
             coverage["observed_tree"] = tree or ""
             coverage["reviewed_head_tree"] = reviewed_tree
-        reviewed_base = _sha(declared.get("reviewed_base_sha"))
+        reviewed_base = _sha(subject.get("base") if record else declared.get("reviewed_base_sha"))
         if not reviewed_base:
-            gaps.append("reviewed_base_not_declared")
+            gaps.append("reviewed_base_not_recorded" if record else "reviewed_base_not_declared")
         elif not base:
             gaps.append("merged_base_unavailable" if outcome.get("status") == "merged" else "base_unavailable")
         elif base != reviewed_base:
-            gaps.append("base_changed_since_review")
+            gaps.append("reviewed_base_differs" if record else "base_changed_since_review")
         coverage["observed_base_sha"] = base or ""
     if outcome.get("status") == "merged" and head != receipt["requested"]["expected_head_sha"]:
         gaps.append("merged_head_differs")
@@ -491,6 +580,18 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
     operation_id = current_tool_operation(ctx, "pr_merge")
     if method not in METHODS or not expected or number <= 0:
         return {"refused": "arguments", "detail": f"method must be one of {METHODS}; expected_head_sha a hex SHA"}
+    record_id, record = str(review.get("record_id") or "").strip(), None
+    if record_id:
+        try:
+            record = load_review_record(drive_root, record_id)
+        except Exception as exc:
+            return {"refused": "review_record_unreadable",
+                    "detail": f"review_record_id={record_id!r} could not be read ({type(exc).__name__}: {exc}); "
+                              "retry, or omit it and declare the review instead; nothing was merged"}
+        if record is None:
+            return {"refused": "arguments",
+                    "detail": f"review_record_id={record_id!r} names no review record; pass the id the review "
+                              "returned, or omit it and declare the review instead; nothing was merged"}
     pr = _read_pr(gh, number)
     if pr is None:
         return {"refused": "pr_unreadable", "detail": "the pull request could not be read; nothing was merged"}
@@ -510,9 +611,10 @@ def run_pr_merge(ctx: Any, gh: Gh, gh_api: Gh, *, drive_root: Any, task_id: str,
             "repo": repo, "number": int(number),
             "launch_operation_ids": [operation_id] if operation_id else [],
             "requested": {"method": method, "expected_head_sha": expected}, "observed_before": observed,
-            "review": {"declared": declared, "host_observed": host_observed,
+            "review": {"declared": declared, "record": record, "declared_only": bool(declared) and record is None,
+                       "host_observed": host_observed,
                        "contributor_evidence": contributor_evidence(pr.get("body") or "", pr.get("comments") or [])},
-            "coverage": review_coverage(declared, host_observed, observed["head_sha"]),
+            "coverage": review_coverage(declared, host_observed, observed["head_sha"], record),
         }
         try:
             claimed = write_receipt(drive_root, task_id, receipt, claim=True)

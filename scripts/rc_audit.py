@@ -9,7 +9,7 @@ audited install — it never writes, moves, creates, or locks anything there
 
 Scope combines the ABI retirement inventories, emitted as one machine-readable
 JSON document (``--scope``): abi "7.0", sources (tree SHA + the SHA the feeder inventories
-were frozen at), and ``checks[]`` of exactly five classes:
+were frozen at), and ``checks[]`` of exactly six classes:
 
 - ``gateway-alias`` — the five removed gateway compat aliases, listed in
   ``_GATEWAY_ALIASES`` below. Stored rows stay read-tolerated BY DESIGN, so on-disk hits are notes; live clients are
@@ -19,9 +19,15 @@ were frozen at), and ``checks[]`` of exactly five classes:
   (``RETIRED_IN_THIS_ABI``) from ones that were already inert.
 - ``comma-list`` — the ABI-10 reviewer comma-list / route keys
   (``RETIRED_COMMA_LIST_SETTING_KEYS``, snapped from settings_defaults at
-  execution time): migration is "move the config to the structured
-  OUROBOROS_REVIEWER_SLOTS BEFORE upgrade" or accept the shipped default
-  panel.
+  execution time): migration is "move the config to the review pool —
+  reviewer rows of the subagent catalog — BEFORE upgrade" or accept the
+  shipped default panel.
+- ``migrated-setting`` — the review-lane keys (``REVIEW_POOL_MIGRATED_SETTING_KEYS``:
+  ``OUROBOROS_REVIEWER_SLOTS`` and its effort / deep-review surface keys).
+  They are inside ``RETIRED_SETTING_KEYS`` too, but a stored value is NOT
+  lost: ``ouroboros/review_pool_migration.py`` turns it into reviewer rows of
+  ``OUROBOROS_SUBAGENTS`` on load (the snapshot lands under
+  ``state/review_migrations/``). On-disk hits are notes; no action required.
 - ``plugin-api`` — ABI-1 admission facts: absent manifest field ≡ LEGACY
   "1.3" (hash-bound grandfather keeps an existing PASS loading; a NEW PASS
   is refused via ``extension_new_pass_admission_error``).
@@ -55,7 +61,8 @@ only, enforcement-independent),
 sanitisation, review-staleness hash and admission-state read —
 provenance-gated exactly like the runtime,
 resolving state paths without creating them),
-``RETIRED_SETTING_KEYS`` / ``RETIRED_COMMA_LIST_SETTING_KEYS``. None of the
+``RETIRED_SETTING_KEYS`` / ``RETIRED_COMMA_LIST_SETTING_KEYS`` /
+``REVIEW_POOL_MIGRATED_SETTING_KEYS``. None of the
 imported modules touches config paths at import time. Review-exempt dev/ops
 tool: not part of the runtime gate.
 """
@@ -101,6 +108,8 @@ from ouroboros.settings_defaults import (  # noqa: E402
     RETIRED_COMMA_LIST_SETTING_KEYS,
     RETIRED_SETTING_KEYS,
     RETIRED_SETTING_SUCCESSORS,
+    REVIEW_POOL_MIGRATED_SETTING_KEYS,
+    REVIEW_POOL_MIGRATION_CLASS_LINE,
 )
 from ouroboros.skill_loader import (  # noqa: E402
     SkillPayloadUnreadable,
@@ -267,15 +276,16 @@ def build_scope() -> Dict[str, Any]:
     """The machine-readable scope document (design-note schema)."""
     # Fail closed on classification drift: the comma-list class must stay a
     # subset of the retirement SSOT it classifies.
-    stray = sorted(set(RETIRED_COMMA_LIST_SETTING_KEYS) - set(RETIRED_SETTING_KEYS))
-    if stray:
-        raise RuntimeError(
-            f"RETIRED_COMMA_LIST_SETTING_KEYS drifted out of RETIRED_SETTING_KEYS: {stray}"
-        )
+    for name, keys in (("RETIRED_COMMA_LIST_SETTING_KEYS", RETIRED_COMMA_LIST_SETTING_KEYS),
+                       ("REVIEW_POOL_MIGRATED_SETTING_KEYS", REVIEW_POOL_MIGRATED_SETTING_KEYS)):
+        stray = sorted(set(keys) - set(RETIRED_SETTING_KEYS))
+        if stray:
+            raise RuntimeError(f"{name} drifted out of RETIRED_SETTING_KEYS: {stray}")
     checks: List[Dict[str, Any]] = list(_GATEWAY_ALIASES)
     comma = set(RETIRED_COMMA_LIST_SETTING_KEYS)
+    migrated = set(REVIEW_POOL_MIGRATED_SETTING_KEYS)
     for key in RETIRED_SETTING_KEYS:
-        if key in comma:
+        if key in comma or key in migrated:
             continue
         checks.append({
             "id": "retired-setting",
@@ -294,9 +304,17 @@ def build_scope() -> Dict[str, Any]:
         checks.append({
             "id": "comma-list",
             "key": key,
-            "replacement": "reviewer slots (OUROBOROS_REVIEWER_SLOTS)",
-            "migration": "move config to slots BEFORE upgrade; an install carrying "
-                         "only comma keys gets the shipped default panel",
+            "replacement": "the review pool — reviewer rows of the subagent catalog "
+                           "(OUROBOROS_SUBAGENTS, Settings → Agents)",
+            "migration": "move config to the review pool BEFORE upgrade; an install "
+                         "carrying only comma keys gets the shipped default panel",
+        })
+    for key in REVIEW_POOL_MIGRATED_SETTING_KEYS:
+        checks.append({
+            "id": "migrated-setting",
+            "key": key,
+            "behavior": "migrated-on-load",
+            "migration": REVIEW_POOL_MIGRATION_CLASS_LINE,
         })
     checks.append({
         "id": "plugin-api",
@@ -352,17 +370,25 @@ def _audit_settings(data_root: pathlib.Path, findings: List[Dict[str, str]]) -> 
     if not isinstance(settings, dict):
         raise InstallUnreadable("settings.json is not a JSON object")
     comma = set(RETIRED_COMMA_LIST_SETTING_KEYS)
+    migrated = set(REVIEW_POOL_MIGRATED_SETTING_KEYS)
     for key in RETIRED_SETTING_KEYS:
         if key not in settings:
             continue
-        if key in comma:
+        if key in migrated:
+            findings.append(_finding(
+                "migrated-setting", SEV_NOTE, f"settings.json:{key}",
+                "review-lane key present; after upgrade " + REVIEW_POOL_MIGRATION_CLASS_LINE,
+                "nothing to do before upgrading; after it, adjust the reviewer rows "
+                "in Settings → Agents",
+            ))
+        elif key in comma:
             findings.append(_finding(
                 "comma-list", SEV_INCOMPATIBLE, f"settings.json:{key}",
                 "retired reviewer comma-list/route key present; stripped on load "
                 "after upgrade — the value never reaches effective settings",
-                "move the reviewer configuration to the structured "
-                "OUROBOROS_REVIEWER_SLOTS BEFORE upgrading; otherwise the install "
-                "gets the shipped default panel",
+                "move the reviewer configuration to the review pool — reviewer rows "
+                "of the subagent catalog (OUROBOROS_SUBAGENTS, Settings → Agents) — "
+                "BEFORE upgrading; otherwise the install gets the shipped default panel",
             ))
         else:
             findings.append(_finding(

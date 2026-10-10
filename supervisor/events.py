@@ -1,4 +1,15 @@
-"""Dispatch worker EVENT_Q messages to supervisor handlers."""
+"""Dispatch worker EVENT_Q messages to supervisor handlers.
+
+Dispatch is by ``EVENT_HANDLERS``. An event type with no registered handler is
+not an error: the row is truncated and logged as ``unknown_worker_event``, so a
+new worker event needs its handler registered here first;
+``tests/test_worker_event_registry.py`` pins the registry by an AST scan of the
+emitter call sites.
+
+``_compose_subagent_text`` (re-exported from ``events_subagent_admission``)
+writes the subagent task text frozen into the queued task at schedule time; its
+``[WRITE SURFACE]`` block states where changes land, not how they are executed.
+"""
 
 from __future__ import annotations
 

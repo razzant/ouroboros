@@ -23,8 +23,17 @@ pytestmark = pytest.mark.serial
 
 @pytest.fixture(autouse=True)
 def reader_coverage(monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros import task_status
     from ouroboros.tools import delegate
 
+    # This test has no supervisor refreshing its synthetic queue. Keep only
+    # the ownership clock fixed while exercising slow, paged EOF reads; the
+    # separate retry-consumer tests still test stale-snapshot rejection.
+    clock = task_status.time
+    now = clock.time()
+    monkeypatch.setattr(task_status, "time", SimpleNamespace(
+        time=lambda: now, monotonic=clock.monotonic, sleep=clock.sleep))
     coverage = {}
     monkeypatch.setattr(delegate_output, "_READ_COVERAGE", coverage)
     monkeypatch.setattr(delegate, "_READ_COVERAGE", coverage)

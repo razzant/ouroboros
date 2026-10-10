@@ -8,6 +8,7 @@ import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
+import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
 import {
     classifyReviewLifecycle,
     classifyReviewLifecyclePointer,
@@ -129,6 +130,9 @@ const SUBSTRATE_NOTE = {
     native_only: 'no harness run recorded',
 };
 
+// A well-formed `executor_observation` (this task, run/attempt/harness ids, integer
+// revision) without execution evidence yields a progress chip labelled `last update`
+// that keeps the requested/observed model source; `sourceTs` and revision let keepStickyExecutorChip drop older updates.
 export function executorChip(evt) {
     const raw = evt?.executor_observation;
     const observation = raw && raw.task_id === String(evt?.subagent_task_id || evt?.task_id || '')
@@ -1023,13 +1027,8 @@ export function summarizeLogEvent(evt) {
         evt.ceiling_sec != null ? `ceiling ${evt.ceiling_sec}s` : ''] });
 
     if (t === 'worker_sha_verify') {
-        return view(evt.ok ? 'ok' : 'warn', evt.ok ? 'Worker SHA verified' : 'Worker SHA mismatch', {
-            meta: [
-                evt.expected_sha ? `exp ${String(evt.expected_sha).slice(0, 8)}` : '',
-                evt.observed_sha ? `got ${String(evt.observed_sha).slice(0, 8)}` : '',
-                evt.worker_pid ? `pid ${evt.worker_pid}` : '',
-            ],
-        });
+        const result = workerShaLogView(evt);
+        return view(result.phase, result.headline, result);
     }
 
     if (t === 'worker_boot') return view('boot', 'Worker booted', {
@@ -1534,7 +1533,7 @@ function summarizeChatLiveEventView(evt) {
 export function duplicateLogEventKey(evt) {
     const t = evt.type || evt.event || '';
     if (t === 'startup_verification') return `${t}:${evt.git_sha || ''}:${evt.issues_count || 0}`;
-    if (t === 'worker_sha_verify') return `${t}:${evt.expected_sha || ''}:${evt.observed_sha || ''}:${evt.ok ? 1 : 0}`;
+    if (t === 'worker_sha_verify') return `${t}:${evt.expected_sha || ''}:${evt.observed_sha || ''}:${workerShaRelation(evt)}`;
     if (t === 'deps_sync_ok') return `${t}:${evt.reason || ''}:${evt.source || ''}`;
     return '';
 }

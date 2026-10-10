@@ -16,10 +16,10 @@
 // (url-only `oauth_url`/`chatgpt` vs `oauth_url_input`; 3.3.7 final
 // contract) — no harness-name branches, no boolean sidecar.
 //
-// This machinery used to be welded into the Providers-tab section
-// (`harness_accounts.js`). It is extracted so the onboarding wizard mounts the
-// SAME flow instead of reimplementing device codes, backoff and the
-// verify-race — and so both surfaces inherit every fix once.
+// Shared by the Providers tab and the onboarding wizard, so both inherit every fix.
+// Start, Retry and Close run through one ordered queue; a new login begins only
+// once release of the previous job is proven (`loginReleaseProven`) — a 2xx cancel
+// alone is not proof.
 //
 // TWO render modes:
 //   * `full`    — exactly what Settings renders today: link/device code,

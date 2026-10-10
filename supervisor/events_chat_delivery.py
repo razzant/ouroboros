@@ -14,6 +14,7 @@ import time
 from collections import deque
 from typing import Any, Dict
 from ouroboros.utils import utc_now_iso
+from ouroboros.observability import emit_finalization_timing, timed_phase
 
 log = logging.getLogger(__name__)
 
@@ -177,6 +178,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
                 row = {**answer, "text": custody, "log_text": custody,
                        "role": "system", "system_type": "custody_notice"}
                 row.pop("terminal_origin", None)
+                row.pop("_finalization_timing", None)
                 _handle_send_message(answer, ctx)
                 _handle_send_message(row, ctx)
                 return
@@ -188,6 +190,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
                                      "card_row": "timeline", "card_row_id": row_id}}
             row.pop("terminal_host_notice", None)
             row.pop("terminal_origin", None)
+            row.pop("_finalization_timing", None)
             # Owe the row before the answer send clears its bundled outbox row.
             register_pending_delivery(ctx.DRIVE_ROOT, row)
             _handle_send_message(answer, ctx)
@@ -321,19 +324,20 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
             retained_chat = supplement_chat(ctx.DRIVE_ROOT, evt)
             if retained_chat is not None:
                 chat_id = retained_chat
-        ctx.send_with_budget(
-            chat_id,
-            str(evt.get("text") or ""),
-            log_text=(str(log_text) if isinstance(log_text, str) else None),
-            fmt=fmt,
-            is_progress=is_progress,
-            task_id=task_id,
-            progress_meta=progress_meta,
-            ts=(str(raw_ts) if raw_ts else None),
-            # S3 (Q4): a typed system receipt keeps its role/type end to end.
-            role=str(evt.get("role") or ""),
-            system_type=system_type,
-        )
+        with timed_phase("sender", timing=evt.get("_finalization_timing") or {}):
+            ctx.send_with_budget(
+                chat_id,
+                str(evt.get("text") or ""),
+                log_text=(str(log_text) if isinstance(log_text, str) else None),
+                fmt=fmt,
+                is_progress=is_progress,
+                task_id=task_id,
+                progress_meta=progress_meta,
+                ts=(str(raw_ts) if raw_ts else None),
+                # S3 (Q4): a typed system receipt keeps its role/type end to end.
+                role=str(evt.get("role") or ""),
+                system_type=system_type,
+            )
         # Register only after send; a failed first copy must not suppress retry.
         if delivery_id:
             _DELIVERED_MESSAGE_IDS.append(delivery_id)
@@ -347,6 +351,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
                 from supervisor.terminal_delivery import record_cancel_receipt_delivery
 
                 record_cancel_receipt_delivery(ctx.DRIVE_ROOT, task_id, delivery_id, chat_id)
+        emit_finalization_timing(evt, getattr(ctx, "DRIVE_ROOT", None))
     except Exception as e:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",

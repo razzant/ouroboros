@@ -237,12 +237,12 @@ def test_racing_named_upload_rejoin_keeps_only_the_accepted_copy(tmp_path, monke
     source = tmp_path / "state/skills/a2a/input.pdf"
     source.write_bytes(b"complete attachment")
     barrier = threading.Barrier(2)
-    original = host_service.store_chat_upload
+    original = host_service.store_upload
     def copy(*args, **kwargs):
         result = original(*args, **kwargs)
         barrier.wait(timeout=5)
         return result
-    monkeypatch.setattr(host_service, "store_chat_upload", copy)
+    monkeypatch.setattr(host_service, "store_upload", copy)
     body = {"chat_id": CHAT, "client_message_id": MSG, "text": "one message",
             "attachments": [{"path": str(source)}]}
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -334,3 +334,30 @@ def test_cancelled_named_acceptance_settles_before_upload_cleanup(tmp_path, monk
     from pathlib import Path
     stored = Path(message["task_metadata"]["chat_attachment_uploads"][0]["path"])
     assert stored.read_bytes() == source.read_bytes()
+
+
+def test_solitary_inline_photo_retains_a_staged_original_after_acceptance(tmp_path, monkeypatch):
+    import base64
+    from pathlib import Path
+    from ouroboros.artifacts import stage_task_attachments
+    from ouroboros.context import build_user_content
+    from tests.test_live_image_delivery import pixels, image_blocks, decode_block
+
+    raw = pixels(size=(9000, 24))
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    client = _client(tmp_path, bridge)
+    body = {"chat_id": CHAT, "client_message_id": MSG, "image_base64": base64.b64encode(raw).decode(),
+            "image_mime": "image/png", "text": ""}
+    response = client.post("/chat/inject", headers=_headers(), json=body)
+    assert response.status_code == 202, response.text
+    message = bridge.get_updates(0, timeout=0)[0]["message"]
+    uploads = message["task_metadata"]["chat_attachment_uploads"]
+    assert len(uploads) == 1 and Path(uploads[0]["path"]).read_bytes() == raw
+    manifest = stage_task_attachments(tmp_path, "photo-task", uploads)
+    content = build_user_content({"id": "photo-task", "drive_root": tmp_path, "attachment_images": manifest})
+    block = image_blocks([{"content": content}])[0]
+    assert Path(block["_source_path"]).read_bytes() == raw
+    assert decode_block(block) == raw
+    assert client.post("/chat/inject", headers=_headers(), json=body).json()["rejoined"] is True
+    assert bridge._inbox.empty()

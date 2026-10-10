@@ -192,6 +192,28 @@ def test_ouroboros_internal_settings_are_not_skill_grantable():
     assert "OUROBOROS_RUNTIME_MODE" not in requested_core_setting_keys(["OUROBOROS_RUNTIME_MODE"])
 
 
+def test_requested_core_setting_keys_reads_settings_only_when_keys_are_requested(monkeypatch):
+    """A skill that declares no env keys costs no settings read (the Skills
+    list calls this once per skill); a declared key still classifies against
+    the live settings."""
+    import ouroboros.config as config
+
+    reads: list[int] = []
+
+    def counted_load_settings():
+        reads.append(1)
+        return {}
+
+    monkeypatch.setattr(config, "load_settings", counted_load_settings)
+
+    assert requested_core_setting_keys([]) == []
+    assert requested_core_setting_keys(None) == []  # type: ignore[arg-type]
+    assert reads == []
+
+    assert requested_core_setting_keys(["TELEGRAM_BOT_TOKEN"]) == ["TELEGRAM_BOT_TOKEN"]
+    assert len(reads) == 1
+
+
 # ---------------------------------------------------------------------------
 # SkillToken redaction + serialization/copy block
 # ---------------------------------------------------------------------------

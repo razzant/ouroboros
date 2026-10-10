@@ -329,7 +329,7 @@ def test_triad_review_prompt_reaches_architecture_md_by_navigation():
         touched_paths=["web/modules/chat.js"],
         usable_window_tokens=200_000,
         delivery="packet",
-        checklist_section_text="## Repo Commit Checklist\n",
+        checklist_section_text="## Change Review Checklist\n",
         already_inline=("BIBLE.md", "docs/CHECKLISTS_ARCHIVE.md"),
     )
     # The map is named, addressable and never inlined whole.
@@ -400,7 +400,7 @@ def test_wake_context_logs_warning_when_architecture_md_missing(tmp_path, caplog
         f"Warning message must indicate the file is missing/unavailable, got: {arch_warnings}"
     )
 def test_development_md_contains_core_governance_invariant():
-    """docs/DEVELOPMENT.md must contain the core governance artifact invariant rule."""
+    """docs/DEVELOPMENT.md must keep the Core Governance Artifacts chapter naming the governance files."""
     import pathlib
     dev_md = pathlib.Path(__file__).resolve().parent.parent / "docs" / "DEVELOPMENT.md"
     assert dev_md.exists(), "docs/DEVELOPMENT.md must exist"
@@ -410,11 +410,9 @@ def test_development_md_contains_core_governance_invariant():
         "Core Governance Artifacts",
         "BIBLE.md",
         "docs/ARCHITECTURE.md",
-        "first-class context",
     ]
     for phrase in required_phrases:
         assert phrase in content, (
-            f"docs/DEVELOPMENT.md must contain '{phrase}' as part of the "
-            "core governance artifact invariant. "
-            "This ensures the rule is documented and checkable."
+            f"docs/DEVELOPMENT.md must name '{phrase}' in the "
+            "core governance artifact chapter."
         )

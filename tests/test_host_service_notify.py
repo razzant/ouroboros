@@ -147,13 +147,13 @@ def test_an_unconfirmed_write_is_the_same_503(tmp_path: pathlib.Path, chat, monk
 
 
 def test_the_next_turn_reads_a_notice_as_a_host_fact(tmp_path: pathlib.Path, chat) -> None:
-    from ouroboros.memory import Memory
+    from tests._memory_view_context import room_text
 
     client, _app = _client(tmp_path)
     assert client.post("/notify", headers=HEADERS, json={"text": "Meeting in 15 min"}).status_code == 200
-    memory = Memory(drive_root=tmp_path)
-    entries, _coverage = memory.read_unconsolidated_chat(memory.load_dialogue_meta(), 50)
-    assert "[skill_notice] Notice · cal" in memory.summarize_chat(entries)
+    rendered = room_text(tmp_path)  # the room of Main's next turn: a notice shows by its words
+    [line] = [line for line in rendered.splitlines() if "Notice · cal" in line]
+    assert "; host" in line.split("]", 1)[0] and "; Ouroboros;" not in line, line
 
 
 def test_notify_token_discovery_does_not_hold_the_asgi_loop(tmp_path: pathlib.Path, chat, monkeypatch) -> None:

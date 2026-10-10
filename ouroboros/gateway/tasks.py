@@ -21,6 +21,7 @@ from ouroboros.gateway.contracts import TaskCreateRequest
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.depth_evidence import parse_task_depth
 from ouroboros.project_naming import admission_names
+from ouroboros.settings_scales import requested_effort
 from supervisor.log_addressing import ProjectThreadConflict, ingress_chat_id
 # Re-exported SSE surface (split out by the 1600-line module gate): route
 # wiring, the CLI, and long-standing monkeypatch pins address these names on
@@ -303,7 +304,7 @@ def _enqueue_api_task_durably(
     """Atomically enqueue, snapshot, and publish the scheduled task result."""
     from supervisor import queue
 
-    with queue._queue_lock:
+    with queue.prepared_root_billing(task), queue._queue_lock:  # the ledger read happens before the lock
         admitted = queue.enqueue_task(task)
         if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
             admitted.update(_admission_never_admitted=True, _admission_owner_token=admission_token)
@@ -365,7 +366,7 @@ def _complete_api_task_admission(
         "artifacts": artifacts,
         "artifact_status": ARTIFACT_STATUS_PENDING if workspace_root else "",
         "metadata": metadata,
-        **{key: task[key] for key in ("attachment_manifest", "attachment_manifest_ref") if key in task},
+        **{key: task[key] for key in ("attachment_manifest", "attachment_manifest_ref", "reasoning_effort") if key in task},
         "api_admission": {"token": admission_token, "status": "accepted"},
         "result": "Task accepted and durably scheduled.",
     }
@@ -571,11 +572,15 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
         return json_error("delegation_role=subagent is only allowed through the internal schedule_subagent tool", 400)
     if str(body.get("parent_task_id") or "").strip() or str(body.get("root_task_id") or "").strip():
         return json_error("parent_task_id and root_task_id are internal lineage fields; external tasks must start as roots", 400)
-    for _top_level_only in ("project_id", "title"):
-        # Top-level fields; silently dropping either from metadata would let a
-        # caller believe isolation is active, or a name was accepted, when it was not.
+    for _top_level_only in ("project_id", "title", "reasoning_effort"):
+        # Top-level fields; silently dropping one from metadata would let a caller
+        # believe isolation, a name or a starting effort was accepted when it was not.
         if _top_level_only in raw_metadata:
             return json_error(f"{_top_level_only} must be a top-level field, not metadata", 400)
+    try:  # an explicit starting effort; absent = the task type's configured effort
+        effort = {"reasoning_effort": requested_effort(body["reasoning_effort"])} if "reasoning_effort" in body else {}
+    except ValueError as exc:
+        return json_error(str(exc), 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
     allowed_resources, resource_policy, disabled_tools, acceptance_claims, policy_error = (
         _fold_contract_policies(body, raw_metadata, metadata)
@@ -703,6 +708,7 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
         "expected_output": str(body.get("expected_output") or ""),
         "constraints": str(body.get("constraints") or ""),
         "context_requires_self_body_docs": normalize_bool(body.get("context_requires_self_body_docs")),
+        **effort,
         "allowed_resources": allowed_resources,
         "resource_policy": resource_policy,
         "disabled_tools": disabled_tools,
@@ -778,9 +784,9 @@ _LIST_ROW_OMITTED_FIELDS = frozenset({
 })
 
 # The raw creation-ts sort scan and the ABI-2 malformed-candidate admission
-# live in ouroboros/gateway/task_list_scan.py (module-size split); imported
+# live in ouroboros/task_result_facts.py (module-size split); imported
 # here so this module keeps the endpoint wiring surface.
-from ouroboros.gateway.task_list_scan import (  # noqa: E402
+from ouroboros.task_result_facts import (  # noqa: E402
     _quarantine_malformed_candidates,
     _raw_sorted_result_names,
 )
@@ -871,7 +877,7 @@ def _tasks_list_payload(
         ))))
     # ABI-2: a candidate whose bytes failed to parse is NOT silently dropped —
     # it reaches the same admission reader (quarantine + the batched event)
-    # even beyond the slice window (see task_list_scan).
+    # even beyond the slice window (see task_result_facts).
     quarantined.extend(_quarantine_malformed_candidates(results_dir, malformed_names))
     emit_quarantine_event(drive_root, quarantined)
     # Re-sort the slice by effective ts: the child-drive merge may have replaced

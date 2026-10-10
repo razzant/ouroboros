@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -624,36 +625,160 @@ def _unrecognised_review_models(models: Any) -> list:
         return []
 
 
-def _candidate_reviewer_rows(settings: Dict[str, Any], family: str) -> list:
-    """Resolve candidate rows once with their candidate roster, retaining account identity."""
-    from ouroboros.reviewer_slot_config import _default_config, parse_reviewer_slots, roster_env_override
-    raw = str(settings.get("OUROBOROS_REVIEWER_SLOTS") or "").strip()
+REVIEW_LANES_KEY = "OUROBOROS_REVIEWER_SLOTS"
+ALLOW_EMPTY_REVIEW_POOL = "allow_empty_review_pool"
+
+
+def _catalog_document(raw: Any) -> Dict[str, Any]:
+    """The stored catalog as a plain object for display and price facts ({} when
+    unreadable); whether it is VALID is package A's judgement (``review_pool_state``)."""
     try:
-        with roster_env_override(str(settings.get("OUROBOROS_SUBAGENTS") or "")):
-            config = parse_reviewer_slots(raw) if raw else _default_config()
-        return list(getattr(config, family))
+        payload = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
     except ValueError:
-        return []  # Refused at the API boundary already; never probe garbage.
+        payload = None
+    payload = payload if isinstance(payload, dict) else {}
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    return {**payload, "items": [item for item in items if isinstance(item, dict)]}
 
 
-def _candidate_scope_models(settings: Dict[str, Any]) -> list:
-    """Scope-review API model candidates from CANDIDATE settings (6.1-aware).
-
-    The structured reviewer-slot value wins when present and parseable: its
-    api_chat scope rows carry provider model ids, which is what
-    ``_unrecognised_review_models`` can check against a provider catalog. A
-    retrieving (session) row's target is a harness route spec, not a model id,
-    so it is not a candidate here. Otherwise the live derived config
-    (ABI 7.0/ABI-10: the comma settings keys are retired)."""
-    return [r.target_id for r in _candidate_reviewer_rows(settings, "scope") if not r.is_session]
+def _candidate_pool_api_models(settings: Dict[str, Any]) -> list:
+    """Provider model ids of the API rows marked Reviewer (a session target is a route spec)."""
+    rows = _catalog_document(settings.get("OUROBOROS_SUBAGENTS"))["items"]
+    return [str(row["route"].get("target_id") or "") for row in rows
+            if row.get("review_eligible") is True and isinstance(row.get("route"), dict)
+            and row["route"].get("kind") == "api_model"]
 
 
-def _candidate_triad_models(settings: Dict[str, Any]) -> list:
-    """Triad api-row candidates from CANDIDATE settings (6.1-aware mirror of
-    ``_candidate_scope_models``; session rows are never provider model ids)."""
-    # ABI 7.0 (ABI-10): no comma settings key to read — without a structured
-    # value the candidate set is the live derived triad.
-    return [r.target_id for r in _candidate_reviewer_rows(settings, "triad") if not r.is_session]
+def review_pool_save_judgement(raw: Any, stored: Dict[str, Any], *, allow_empty: bool) -> str:
+    """The empty-pool rule of a catalog save ('' = acceptable). It judges only a save that
+    CHANGES the catalog a Settings read showed — the stored one, else the unsaved candidate
+    offered in its place, whose pool was already the install's — or retires stored review
+    lanes, so no pool empties silently; ``allow_empty_review_pool`` confirms one."""
+    from ouroboros.configured_subagents import (
+        SUBAGENTS_SETTING, configured_subagents_dict, normalize_configured_subagents,
+        resolve_settings_subagent_candidate,
+    )
+
+    def canonical(value: Any) -> str:
+        try:
+            return normalize_configured_subagents(value)[1]
+        except ValueError:
+            return ""  # nothing readable: this save authors the catalog
+
+    shown = stored.get(SUBAGENTS_SETTING)
+    if shown in (None, ""):
+        config = resolve_settings_subagent_candidate(apply_runtime_provider_defaults(dict(stored))[0])[0].config
+        shown = configured_subagents_dict(config) if config is not None else None
+    posted = canonical(raw)
+    if allow_empty or (posted == canonical(shown) and not str(stored.get(REVIEW_LANES_KEY) or "").strip()):
+        return ""
+    from ouroboros.reviewer_slot_config import review_pool_save_error
+
+    return review_pool_save_error(posted, allow_empty=False)
+
+
+def _review_pool_costs(items: list, snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """The price of every catalog row. A session, or a model call through a subscription,
+    uses a seat and time; an API row's ``usd_per_review`` is ``review_row_call_usd``: one
+    full call of the row, the number ``## Review`` shows for its seat (a reading reviewer
+    makes several); a route without a tariff stays unknown — there are no price tables."""
+    from ouroboros.model_slots import resolve_processing_preference
+    from ouroboros.provider_models import provider_for_model
+    from ouroboros.tools.review_helpers import review_row_call_usd
+
+    costs: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        row_id, route = str(item.get("subagent_id") or ""), item.get("route") or {}
+        target = str(route.get("target_id") or "")
+        seat = route.get("kind") == "agent_session" or provider_for_model(target) == "claudexor"
+        usd = None if seat or not target else review_row_call_usd({
+            "slot_id": row_id, "model": target, "profile_id": str(route.get("credential_profile_id") or ""),
+            "processing_preference": resolve_processing_preference(
+                override=item.get("processing_preference") or None, settings=snapshot)})
+        costs[row_id] = ({"usd_per_review": None, "basis": "subscription_seat" if seat else "unknown"}
+                         if usd is None else {"usd_per_review": float(usd), "basis": "route_tariff"})
+    return costs
+
+
+def review_pool_rows(items: list, slots: list, handles: Dict[str, str],
+                     last_executions: Dict[str, Any], costs: Dict[str, Dict[str, Any]]) -> tuple:
+    """(pool, excluded) of ``GET /api/review-pool``: pool slots in catalog order, each joined with its row's facts."""
+    from ouroboros.route_spec import ROUTE_KIND_AGENT_SESSION, RouteSpec, compound_session_effort
+
+    by_id = {str(item.get("subagent_id") or ""): item for item in items}
+    pool = []
+    for slot in slots:
+        row_id = str(getattr(slot, "subagent_id", "") or getattr(slot, "slot_id", "") or "")
+        item = by_id.get(row_id, {})
+        route = item.get("route") or {}
+        target = str(route.get("target_id") or "")
+        session = route.get("kind") == ROUTE_KIND_AGENT_SESSION
+        compound = session and compound_session_effort(RouteSpec(ROUTE_KIND_AGENT_SESSION, target))
+        pool.append({
+            "subagent_id": row_id, "handle": handles.get(row_id, row_id),
+            "route": {"kind": str(route.get("kind") or ""), "target_id": target,
+                      "credential_profile_id": str(route.get("credential_profile_id") or "")},
+            "effort": str(getattr(slot, "effort", "") or ""),
+            "effort_source": "row" if item.get("effort") else ("compound" if compound else "default"),
+            "delivery": "session" if session else ("packet" if item.get("delivery") == "packet" else "native"),
+            "processing_preference": str(item.get("processing_preference") or ""),
+            "access": str(item.get("access") or ("full" if session else "")),
+            "enabled": item.get("enabled") is not False, "review_eligible": True,
+            "minted_from": str(item.get("minted_from") or ""),
+            "cost": costs.get(row_id) or {"usd_per_review": None, "basis": "unknown"}, "last_execution": last_executions.get(row_id),
+        })
+    pooled = {row["subagent_id"] for row in pool}
+    excluded = [{"subagent_id": row_id, "reason": "row_disabled"} for row_id, item in by_id.items()
+                if item.get("review_eligible") is True and item.get("enabled") is False and row_id not in pooled]
+    return pool, excluded
+
+
+def review_pool_payload(snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The body of ``GET /api/review-pool`` (contract §1.4) for one settings snapshot; ``row_costs`` prices
+    every catalog row (an unmarked row shows its price too); ``migration`` is the lanes-to-pool receipt deciding
+    THIS document: ``{snapshot, reported, trigger, outcome: converted|factory|error, error, source: document|
+    environment|error|history}``; ``pool_without_credentials``: pool rows whose model has no credentials here."""
+    from ouroboros import config as _config
+    from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS, SUBAGENTS_SETTING, parse_configured_subagents, roster_handles
+    from ouroboros.provider_models import model_has_credentials_in_settings
+    from ouroboros.review_pool_receipts import document_as_read
+    from ouroboros.reviewer_slot_config import review_pool_slots, review_pool_state, reviewer_slot_last_executions
+    from ouroboros.server_maintenance import review_pool_migration_payload
+    from ouroboros.settings_integrity import runtime_environ
+
+    env = dict(runtime_environ() if snapshot is None else snapshot)
+    # The receipt is judged against the settings DOCUMENT, not the process projection the pool
+    # runs from: the projection carries only the live settings keys, so a lane value a refused
+    # migration kept in the document is absent from it and the current receipt would read as
+    # history (VD3-06). The retained lanes never return to the runtime configuration here.
+    settings_document = env if snapshot is not None else document_as_read(_config.SETTINGS_PATH, env)
+    raw = str(env.get(SUBAGENTS_SETTING) or "")
+    document = _catalog_document(raw)
+    items = document["items"]
+    payload: Dict[str, Any] = {
+        "limits": {"rows": MAX_CONFIGURED_SUBAGENTS},
+        "catalog": {"present": bool(raw.strip()), "enabled": bool(raw.strip()) and document.get("enabled") is not False,
+                    "rows": len(items), "eligible": sum(1 for item in items if item.get("review_eligible") is True)},
+        "pool": [], "excluded": [], "last_executions": reviewer_slot_last_executions(), "row_costs": {},
+        "config_error": "", "migration": review_pool_migration_payload(env, document=settings_document),
+        "pool_without_credentials": [],
+    }
+    state = review_pool_state(raw)
+    try:
+        if state.get("state") == "error":
+            raise ValueError(str(state.get("error") or "the review pool could not be read"))
+        slots = review_pool_slots(env)
+        handles = roster_handles(parse_configured_subagents(raw), env) if items else {}
+    except ValueError as exc:
+        payload["config_error"] = str(exc)
+        return payload
+    payload["row_costs"] = _review_pool_costs(items, env)
+    payload["pool"], payload["excluded"] = review_pool_rows(
+        items, slots, handles, payload["last_executions"], payload["row_costs"])
+    payload["pool_without_credentials"] = [row["subagent_id"] for row in payload["pool"]  # seats log in themselves
+                                           if row["cost"]["basis"] != "subscription_seat"
+                                           and not model_has_credentials_in_settings(row["route"]["target_id"], env)]
+    return payload
 
 
 @owner_write_guard
@@ -769,28 +894,29 @@ def _api_owner_safety_mode_sync(request: Request, body: Any) -> JSONResponse:
 
 
 async def api_acknowledge_capability(request: Request) -> JSONResponse:
-    """Record a route-fingerprinted owner acknowledgement of a model's context
-    window (Capability Evidence: ASSERTED). Auditable and NON-generic — it covers
-    only the exact provider+model+base_url+headers/options it was issued for, and
-    is invalidated by any route change. CI/headless may supply the same ack via
-    config, but it must carry the same fingerprint (no repo-wide trust flag).
+    """Acknowledge a context window or response maximum for an exact route.
+    Provider, model, endpoint and applicable headers/options bind the assertion;
+    headless acknowledgements need the same fingerprint, never repo-wide trust.
 
-    NOT an owner SETTINGS write, and deliberately unguarded by
-    ``owner_write_guard``: `record_owner_ack` writes its own route-fingerprinted
-    evidence file and never touches settings.json, so it holds no settings lock
-    and answers no `settings_locked`. It wore the decorator for one release,
-    where it translated exceptions that cannot be raised while implying to every
-    reader that the endpoint was lock-guarded — under a genuinely held lock the
-    five settings writers refused 503 and this one recorded its acknowledgement
-    and answered 200. Widening the settings lock to cover an unrelated ledger
-    would have made the decorator true at the price of coupling a capability ack
-    to whether some settings save is in flight; the decorator was the wrong
-    claim, so the claim went."""
+    Context and output acknowledgements have independent records and timestamps.
+    They write the evidence store, never settings.json, so this endpoint deliberately
+    has no ``owner_write_guard`` or settings lock and cannot answer ``settings_locked``."""
     body = await _json_body_or_empty(request)
     provider = str((body or {}).get("provider") or "").strip()
     model = str((body or {}).get("model") or "").strip()
     if not provider or not model:
         return json_error("'provider' and 'model' are required", 400)
+    if "max_output_tokens" in (body or {}):
+        from ouroboros.response_limits import record_response_ack
+        try:
+            record = await asyncio.to_thread(record_response_ack, request_drive_root(request),
+                provider=provider, model=model, base_url=str(body.get("base_url") or ""),
+                options=body.get("options"), max_output_tokens=body["max_output_tokens"],
+                expected_route_fp=str(body.get("route_fp") or ""))
+            _owner_audit(request, "response_cap_ack", record)
+            return JSONResponse({"ok": True, "ack": record})
+        except (ValueError, TypeError) as exc:
+            return json_error(str(exc), 400)
     try:
         window_tokens = int((body or {}).get("window_tokens") or 0)
     except (TypeError, ValueError):
@@ -817,90 +943,35 @@ async def api_acknowledge_capability(request: Request) -> JSONResponse:
         return json_exception(exc)
 
 
-async def api_reviewer_slots(request: Request) -> JSONResponse:
-    """GET /api/reviewer-slots — the effective slot rows plus «выполняется как».
+async def api_review_pool(request: Request) -> JSONResponse:
+    """GET /api/review-pool — the review pool as Settings → Agents shows it.
 
-    One read for Agents → Review lanes: the parsed SSOT rows (structured or
-    the shipped default panel, labeled by ``source``), the real row limits, and
-    the D22 last-execution projection keyed by slot_id — what each saved row
-    REALLY ran as last time (the UI face of capability_delta). A malformed
-    structured value comes back as a typed ``config_error`` instead of a 500:
-    the page must render the error beside the editor that can fix it.
+    The pool is the enabled catalog rows marked Reviewer, in catalog order, each
+    with its effective effort and delivery, its per-review price, and what it
+    REALLY ran as last time. A catalog that cannot be read comes back as a typed
+    ``config_error`` with an empty pool instead of a 500: the page renders the
+    error beside the editor that can fix it. The price estimate may refresh a
+    route tariff over the network, so the read runs off the event loop.
     """
-    from ouroboros.reviewer_slot_config import (
-        SCOPE_SLOT_LIMIT,
-        TRIAD_SLOT_LIMIT,
-        deep_review_slot,
-        load_reviewer_slot_config,
-        reviewer_slot_last_executions,
-        synthesized_deep_review_slot,
-    )
-
-    payload: Dict[str, Any] = {
-        "limits": {"triad": TRIAD_SLOT_LIMIT, "scope": SCOPE_SLOT_LIMIT, "advisory": 1, "deep_review": 1},
-        "last_executions": reviewer_slot_last_executions(),
-    }
     try:
-        config = load_reviewer_slot_config()
-    except ValueError as exc:
-        payload["config_error"] = str(exc)
-        # The deep-review singleton stays visible beside the error as a
-        # legacy-derived REPAIR PLACEHOLDER — the row synthesized from the model
-        # key, labeled `synthesized_from` — NOT the effective runtime row: with
-        # the structured value unparseable no row is effective at all
-        # (`deep_review_slot()` raises) until the setting is repaired; the
-        # placeholder only gives the repair save a real row to start from.
-        synthesized = synthesized_deep_review_slot()
-        payload["deep_review"] = {"route": {"kind": synthesized.kind, "target_id": synthesized.target_id},
-                                  "effort": "", "synthesized_from": "OUROBOROS_MODEL_DEEP_SELF_REVIEW"}
-        return JSONResponse(payload)
-    # The stored form must round-trip: an actor row comes back as its
-    # subagent_id REFERENCE (with the resolved route only as read-only
-    # disclosure), and a direct row must round-trip profile_id (the Q2 manual
-    # credential pin) — else a save after a load silently rewrites the
-    # reference into an inline route or wipes the owner's pin.
-    def _row(r):
-        route = {"kind": r.kind, "target_id": r.target_id}
-        if r.profile_id:
-            route["profile_id"] = r.profile_id
-        if getattr(r, "subagent_id", ""):
-            return {
-                "slot_id": r.slot_id, "subagent_id": r.subagent_id,
-                "effort": r.effort, "processing_preference": r.processing_preference,
-                "resolved_route": route,
-            }
-        return {"slot_id": r.slot_id, "route": route, "effort": r.effort,
-                "processing_preference": r.processing_preference,
-                # '' round-trips a pre-#1334 bare row as bare (still packet).
-                **({"delivery": r.delivery} if getattr(r, "delivery", "") else {})}
-
-    payload["source"] = config.source
-    payload["triad"] = [_row(r) for r in config.triad]
-    payload["scope"] = [_row(r) for r in config.scope]
-    # The deep self-review singleton: the saved row, or the native api row
-    # synthesized from the legacy model key — disclosed as such so the editor
-    # can say the row is not saved yet (saving materializes the migration).
-    payload["deep_review"] = {k: v for k, v in _row(deep_review_slot(config)).items() if k != "slot_id"}
-    if config.deep_review is None:
-        payload["deep_review"]["synthesized_from"] = "OUROBOROS_MODEL_DEEP_SELF_REVIEW"
-    advisory_route = {"kind": config.advisory.kind, "target_id": config.advisory.target_id}
-    if config.advisory.profile_id:
-        advisory_route["profile_id"] = config.advisory.profile_id
-    payload["advisory"] = {
-        "enabled": config.advisory.enabled,
-        "effort": config.advisory.effort,
-        "processing_preference": config.advisory.processing_preference,
-    }
-    if getattr(config.advisory, "subagent_id", ""):
-        payload["advisory"]["subagent_id"] = config.advisory.subagent_id
-        payload["advisory"]["resolved_route"] = advisory_route
-    else:
-        payload["advisory"]["route"] = advisory_route
-    return JSONResponse(payload)
+        return JSONResponse(await asyncio.to_thread(review_pool_payload))
+    except Exception as exc:
+        return json_exception(exc)
 
 
 async def api_settings_get(request: Request) -> JSONResponse:
     settings, _, _ = apply_runtime_provider_defaults(load_settings())
+    if request.query_params.get("websearch_preview") == "1":
+        from ouroboros.search_routes import resolve_web_search_route
+        return JSONResponse(resolve_web_search_route(settings=settings,
+            backend=request.query_params.get("backend"), model=request.query_params.get("model")))
+    if request.query_params.get("response_limit_preview") == "1":
+        from ouroboros.response_limits import response_limit_preview
+        model = str(request.query_params.get("model") or settings.get("OUROBOROS_MODEL") or "")
+        route = _active_main_route(settings, model_override=model,
+            use_local_override=request.query_params.get("local") == "true")
+        return JSONResponse(await asyncio.to_thread(response_limit_preview, request_drive_root(request), route,
+            account=request.query_params.get("account", ""), settings=settings))
     safe = {k: v for k, v in settings.items()}
     for key in SECRET_SETTING_KEYS:
         if safe.get(key):
@@ -1087,43 +1158,6 @@ def _api_settings_post_sync(request: Request, body: Any) -> JSONResponse:
         return _api_settings_post_locked(request, body)
 
 
-def _check_reviewer_slots_against_incoming_roster(body: dict) -> str:
-    """Validate reviewer slots under the POST-SAVE Available-subagents roster.
-
-    S4 atomicity: adding a roster row plus its reviewer reference in ONE save
-    validates against the incoming roster (context-local override — never a
-    process-env mutation a concurrent dispatch could observe), and a
-    roster-only save re-validates the STORED slots so a still-referenced
-    actor cannot be removed out from under them. An EXPLICITLY cleared slots
-    value ('' present in the body) is a clear, not a fallback to the stored
-    value — presence and emptiness are tracked separately. Returns the
-    save-time disclosure ('' when none: the one-time R12 notice when this save
-    first gives the triad a retrieving row); raises ValueError on malformed."""
-    subagents_key = "OUROBOROS_SUBAGENTS"
-    slots_key = "OUROBOROS_REVIEWER_SLOTS"
-    roster_changed = subagents_key in body
-    stored = str((load_settings() or {}).get(slots_key) or "").strip()
-    if slots_key in body:
-        slots_to_check = str(body.get(slots_key) or "").strip()
-        if not slots_to_check:
-            return ""  # explicit clear: nothing to validate
-    elif roster_changed:
-        slots_to_check = stored
-        if not slots_to_check:
-            return ""
-    else:
-        return ""
-    from ouroboros.reviewer_slot_config import reviewer_slot_save_check
-
-    # The stored value decides whether this save first introduces a retrieving
-    # triad row (the one-time R12 disclosure); a roster-only save keeps it.
-    return reviewer_slot_save_check(
-        slots_to_check,
-        subagents_raw=(str(body.get(subagents_key) or "") if roster_changed else None),
-        previous_raw=stored,
-    )
-
-
 def _network_settings_error(request: Request, current: dict, old_settings: dict) -> JSONResponse | None:
     """Validate the existing save-time bind/password contract before persistence."""
     try:
@@ -1183,6 +1217,8 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
     try:
         if not isinstance(body, dict):
             return unsaved_error("JSON body must be an object.", 400)
+        body = dict(body)  # the owner's empty-pool confirmation is a request flag, never a setting
+        allow_empty_pool = body.pop(ALLOW_EMPTY_REVIEW_POOL, None) is True
         channel_key = "OUROBOROS_UPDATE_CHANNEL"
         if channel_key in body:
             from ouroboros.update_channels import UPDATE_CHANNEL_BRANCHES
@@ -1229,11 +1265,10 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 return unsaved_error(f"{bound_key} must be a positive integer or 'unlimited'.", 400)
             body = dict(body)
             body[bound_key] = UNLIMITED if bound is None else bound
-        # Available-subagents roster first (S4 atomicity): reviewer
-        # references must validate against the roster THIS save produces —
-        # not the stale process env (see the check helper below).
+        # The catalog is judged as THIS save produces it: twins, then the review pool.
         subagents_key = "OUROBOROS_SUBAGENTS"
-        if subagents_key in body and body.get(subagents_key) not in (None, ""):
+        catalog_saved = subagents_key in body and body.get(subagents_key) not in (None, "")
+        if catalog_saved:
             from ouroboros.configured_subagents import (
                 normalize_configured_subagents, roster_save_error,
             )
@@ -1243,18 +1278,16 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 )
             except ValueError as exc:
                 return unsaved_error(str(exc), 400)
+            stored_for_rules = load_settings()
             # Twins are refused only when THIS save changes the roster.
-            twin_error = roster_save_error(canonical_subagents, load_settings(), body)
+            twin_error = roster_save_error(canonical_subagents, stored_for_rules, body)
             if twin_error:
                 return unsaved_error(twin_error, 400)
+            pool_error = review_pool_save_judgement(canonical_subagents, stored_for_rules, allow_empty=allow_empty_pool)
+            if pool_error:
+                return unsaved_error(pool_error, 400, code="empty_review_pool")
             body = dict(body)
             body[subagents_key] = canonical_subagents
-        # Reviewer-slot SSOT (6.1): 400 on malformed; save-time disclosure returned;
-        # validated against the roster THIS save produces (S4 — see helper).
-        try:
-            _reviewer_slots_warning = _check_reviewer_slots_against_incoming_roster(body)
-        except ValueError as exc:
-            return unsaved_error(str(exc), 400)
         parsed_budget: dict[str, float] = {}
         for budget_key in BUDGET_SETTING_KEYS:
             if budget_key not in body:
@@ -1316,10 +1349,15 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
         if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_startup_ready_provider(current):
             return unsaved_error("Local-only setups must route at least one model to the local runtime.", 400)
+        # A catalog save retires the former review lanes: the pool replaces them.
+        if catalog_saved:
+            current.pop(REVIEW_LANES_KEY, None)
         all_changed = [
             k for k in current
             if str(current.get(k, "") or "") != str(old_effective_settings.get(k, "") or "")
         ]
+        if catalog_saved and str(old_effective_settings.get(REVIEW_LANES_KEY) or "").strip():
+            all_changed.append(REVIEW_LANES_KEY)
         if runtime_changed:
             all_changed.append("OUROBOROS_RUNTIME_MODE")
 
@@ -1364,8 +1402,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
 
         # Tolerate stubbed side effects returning None (test harnesses).
         warnings = list(side_effect_warnings or [])
-        if _reviewer_slots_warning:
-            warnings.append(_reviewer_slots_warning)
         if provider_defaults_changed:
             change_kind = classify_runtime_provider_change(old_effective_settings, current)
             if change_kind == "direct_normalize":
@@ -1444,21 +1480,19 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             resp["immediate_changed"] = True
         if next_task_changed:
             resp["next_task_changed"] = True
-        if warnings:
-            resp["warnings"] = warnings
-        if any(k.startswith("OUROBOROS_SCOPE_REVIEW_MODEL") or k == "OUROBOROS_REVIEW_MODELS"
-               or k == "OUROBOROS_REVIEWER_SLOTS" for k in all_changed):
-            _unknown = _unrecognised_review_models(
-                _candidate_scope_models(current) + _candidate_triad_models(current)
-            )
+        if subagents_key in all_changed:
+            _unknown = _unrecognised_review_models(_candidate_pool_api_models(current))
             if _unknown:
                 warnings.append(
                     "Unrecognised review model id(s) the provider catalog does not list: "
                     + ", ".join(sorted(set(_unknown)))
-                    + ". Review calls to these slots will fail with 'not a valid model ID' "
+                    + ". Review calls to these reviewers will fail with 'not a valid model ID' "
                     "and can break the review quorum — check for a truncated value."
                 )
-                resp["warnings"] = warnings
+        from ouroboros.subagent_runtime import review_pool_save_warning
+        warnings.extend(filter(None, [review_pool_save_warning(current)]))
+        if warnings:
+            resp["warnings"] = warnings
         return JSONResponse(resp)
     except Exception as e:
         if boundary.committed:

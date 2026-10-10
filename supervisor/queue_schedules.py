@@ -735,6 +735,11 @@ def _task_from_schedule(record: Dict[str, Any], *, task_id: str = "") -> Dict[st
     for key in ("attachments", "context", "expected_output", "constraints", "deadline_at", "project_id"):
         if key in template:
             task[key] = template[key]
+    from ouroboros.settings_scales import EFFORT_SCALE
+
+    # The explicit start the upsert checked; a hand-edited unknown tier keeps the default.
+    if template.get("reasoning_effort") in EFFORT_SCALE:
+        task["reasoning_effort"] = template["reasoning_effort"]
     allowed_resources = normalize_allowed_resources(template.get("allowed_resources") or metadata.get("allowed_resources") or {})
     if allowed_resources:
         task["allowed_resources"] = allowed_resources

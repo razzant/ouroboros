@@ -48,7 +48,9 @@ def test_pause_during_sent_late_acceptance_collects_it_once_and_releases_when_no
         late, tmp_path, monkeypatch, registered):  # noqa: F811
     """Pause is accepted after delivery (with and without a RUNNING row); the already
     dispatched panel finishes and is collected once — never re-sent — and the delivered
-    answer stays exactly as it was. Nothing was left to defer, so the Pause releases itself."""
+    answer stays exactly as it was. Owner 2026-10-08 (full variant): with no writer left
+    the tree reads Paused while its launched reviewers finish separately; a live writer
+    keeps it Pausing. Nothing was left to defer, so the Pause releases itself."""
     from ouroboros.owner_pause import read_fence
     from supervisor.owner_pause_control import request_owner_pause
     from tests._budget_pause_exact_helpers import _install_queue
@@ -67,9 +69,14 @@ def test_pause_during_sent_late_acceptance_collects_it_once_and_releases_when_no
         if registered:
             workers.RUNNING[f.tid] = {"task": f.task, "attempt": 1, "worker_id": 0}
         pause = request_owner_pause(f.tid, request_id="late-acceptance-pause")
-        assert pause["ok"] and pause["state"] == "requested", pause
-        assert _census(f.root)[f.tid] == "budget_pausing"
-        assert _tick(q) == [] and read_fence(f.root, f.tid)["state"] == "requested"  # sent work still settling
+        expected = "requested" if registered else "paused"
+        assert pause["ok"] and pause["state"] == expected, pause
+        assert _census(f.root)[f.tid] == ("budget_pausing" if registered else "budget_paused")
+        _tick(q)
+        fence = read_fence(f.root, f.tid)
+        assert fence["state"] == expected  # a live writer keeps Pausing; reviewers alone never do
+        if not registered:
+            assert fence["finishing_reviews"], fence  # still finishing, shown separately
     finally:
         workers.RUNNING.clear()
         release.set()
@@ -120,7 +127,7 @@ def test_pause_defers_an_unsent_automatic_late_review_until_resume(late, tmp_pat
 
 
 _PREPARER = '''
-import json, sys, time
+import json, sys, threading, time
 from pathlib import Path
 from types import SimpleNamespace
 from ouroboros import acceptance_late, review_operation
@@ -129,12 +136,24 @@ from ouroboros.llm import LLMClient
 root, task_id, output = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
 acceptance_late._historical_writer_live = lambda *_a, **_kw: True
 review_operation._CONTROL_RECHECK_SEC = 3600.0
+# Retaining the pointer does not mean the worker has finished its first control
+# read. Publish readiness only after that read, before the parent installs a rail.
+ready = threading.Event()
+control = review_operation.ReviewOperation.control
+def checked_control(self):
+    result = control(self)
+    if not ready.is_set():
+        assert result is None, result
+        ready.set()
+    return result
+review_operation.ReviewOperation.control = checked_control
 LLMClient.chat = lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("unexpected paid send"))
 ctx = SimpleNamespace(task_id=task_id, task_attempt=1, drive_root=root, budget_drive_root=root,
     task_metadata={"root_task_id": task_id, "budget_drive_root": str(root)}, event_queue=None, pending_events=[])
 row = load_task_result(root, task_id, strict=True)
 result = acceptance_late.run_historical_acceptance(ctx, task_id=task_id,
     debt_id=row["acceptance_debt"]["debt_id"], automatic=True)
+assert ready.wait(10), 'preparation worker did not reach its control wait'
 temporary = output.with_suffix('.tmp')
 temporary.write_text(json.dumps(result), encoding="utf-8")
 temporary.replace(output)

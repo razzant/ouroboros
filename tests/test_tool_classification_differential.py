@@ -340,6 +340,13 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {
+    # Body-candidate admission adds these two markers after the retired golden
+    # source. Pin what the live classifier actually answers; do not backfill a
+    # historical answer from a checkout that never emitted these strings.
+    "CANDIDATE_ALREADY_BOUND": (False, "ok"),
+    "IN_PLACE_REQUIRES_CYBER_PRO": (False, "ok"),
+    "native:ACCESS_BLOCKED:CANDIDATE_ALREADY_BOUND": (True, "blocked"),
+    "native:ACCESS_BLOCKED:IN_PLACE_REQUIRES_CYBER_PRO": (True, "blocked"),
     # Declared-source admission is a new native argument refusal. The retired
     # text adapter never recognized this marker; do not fabricate its golden.
     "INPUT_SOURCE_SELECTION_UNSUPPORTED": (False, "ok"),
@@ -358,11 +365,25 @@ CURRENT_PRODUCER_CONTRACTS = {
     # Owner Batch4: a call the owner's Pause fenced before its launch handoff never
     # ran; it is the substrate's answer, homed with the other runtime refusals.
     "OWNER_PAUSE_NOT_STARTED": (True, "blocked"),
+    # git_managed_postcommit: a managed merge whose post-commit gates Pause refused, and a
+    # retained commit whose binding changed before Resume. Both publish typed results; the
+    # bare texts carry no marker the adapter types, as for CANDIDATE_ALREADY_BOUND above.
+    "OWNER_PAUSE": (False, "ok"),
+    "native:LEGACY_BLOCKED:OWNER_PAUSE": (True, "blocked"),
+    "MANAGED_UPDATE_POSTCOMMIT_CHANGED": (False, "ok"),
+    "native:LEGACY_TOOL_ERROR:MANAGED_UPDATE_POSTCOMMIT_CHANGED": (True, "error"),
     "OWNER_LAUNCH_AUTHORITY_UNAVAILABLE": (True, "unavailable"),
     "STOP_ACTION_CONFLICT": (True, "blocked"),
     "SAFETY_ADVICE": (False, "ok"),
     "LIGHT_MODE_REPO_CHANGED": (False, "ok"),
     "BROWSER_ACTION_OUTCOME_UNKNOWN": (True, "error"),
+    # Browser-bridge producers added after the frozen historical corpus. Pin
+    # their live refusal/timeout semantics without inventing historical rows.
+    "BROWSER_REQUEST_BLOCKED": (True, "blocked"),
+    "MCP_TOOL_TIMEOUT": (True, "timeout"),
+    # tools/vision.py `_no_image_route`: no configured model could take the image at all,
+    # told apart from VLM_NO_VISION_MODEL (every candidate confirmed unable); same VLM family answer.
+    "VLM_NO_MODEL": (True, "vlm_error"),
     # The actual skill-metadata target refusal publishes its specific native
     # code; standalone historical-style text retains the generic blocked code.
     "SKILL_PAYLOAD_BLOCKED": (True, "blocked"),
@@ -371,6 +392,11 @@ CURRENT_PRODUCER_CONTRACTS = {
     # acknowledge these requested apply/discard operations as completed.
     "INTEGRATE_DELEGATED_APPLY_UNCONFIRMED": (True, "integration_blocked"),
     "INTEGRATE_DELEGATED_DISCARD_UNCONFIRMED": (True, "integration_blocked"),
+    # delegate_continuation.disposition_refusal: a captured result whose snapshot a
+    # continuation took over, or may be taking over (a pending hand-over), is not
+    # applied or rejected alone; nothing changes. Its peers' answer, asserted live.
+    "INTEGRATE_DELEGATED_CONTINUATION_PENDING": (True, "integration_blocked"),
+    "INTEGRATE_DELEGATED_SUPERSEDED": (True, "integration_blocked"),
     # A reject request cannot undo direct effects already in the folder.
     # The refusal belongs to this disposition, not to the earlier write.
     "INTEGRATE_DIRECTORY_ALREADY_APPLIED": (True, "integration_blocked"),
@@ -423,13 +449,13 @@ CURRENT_PRODUCER_CONTRACTS = {
     # voice (delegated, Presence, agent-to-agent) through native ACCESS_BLOCKED.
     "MAIN_NOTICE_BLOCKED": (True, "blocked"),
     "native:ACCESS_BLOCKED:MAIN_NOTICE_BLOCKED": (True, "blocked"),
-    # #1401: the task browser bridge's dispatched call that timed out publishes the
-    # native MCP_TIMEOUT code with the MCP_TOOL_TIMEOUT line (approved delta A.3).
-    # Its request guard's note rides a typed result as a host annotation, so the
-    # action keeps its own status; standalone, the line reads as the denial it reports.
-    "MCP_TOOL_TIMEOUT": (True, "timeout"),
-    "native:MCP_TIMEOUT:MCP_TOOL_TIMEOUT": (True, "timeout"),
-    "BROWSER_REQUEST_BLOCKED": (True, "blocked"),
+    # #1074: an admitted, absent path is a discovery miss — a successful call with
+    # a warning, the list_files/read_file parity. search_code's miss is a new
+    # identifier; the image loader now publishes the already-recorded
+    # FILE_NOT_FOUND text natively as LEGACY_WARNING (the plain answer is unchanged).
+    "SEARCH_NOT_FOUND": (False, "ok"),
+    "FILE_NOT_FOUND": (False, "ok"),
+    "native:LEGACY_WARNING:FILE_NOT_FOUND": (False, "ok"),
 }
 
 
@@ -719,14 +745,13 @@ _RESIDUAL_TEXT_INSPECTIONS: Mapping[str, tuple[int, str]] = MappingProxyType({
     # The row is gone rather than zeroed: a module absent from this inventory may
     # hold none at all, which is exactly the claim now.
     "ouroboros/memory.py": (1, "tools.jsonl rows appended by consciousness carry neither status nor code"),
-    "ouroboros/skill_review_prompt.py": (2, "skill review verdict text, not a tool result"),
     "ouroboros/tools/github.py": (12, "private helper-failure checks between two functions of one tool"),
     # Upstream re-homed the skill-publish helper checks into their own module
-    # (skill_publish_github.py) and split the advisory run into
-    # preflight_review_run.py on this tree — redistribution, not growth.
+    # (skill_publish_github.py) — redistribution, not growth. The advisory
+    # pipeline's seven (claude_advisory_review.py, preflight_review_run.py) and
+    # the skill advisory critic's two (skill_review_prompt.py) left with that
+    # pipeline; their rows are gone rather than zeroed.
     "ouroboros/skill_publish_github.py": (7, "private helper-failure checks between two functions of one tool"),
-    "ouroboros/tools/claude_advisory_review.py": (4, "private helper-failure checks between two functions of one tool"),
-    "ouroboros/tools/preflight_review_run.py": (3, "private helper-failure checks between two functions of one tool"),
     # Post-cutoff upstream module: the request-wire custom-tool receipts compose
     # their own ⚠️ argument-error texts; predates the organ, upstream truth.
     "ouroboros/openai_chat_dispatch.py": (2, "private helper-failure checks between two functions of one tool"),

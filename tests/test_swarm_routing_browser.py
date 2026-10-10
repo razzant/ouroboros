@@ -41,6 +41,23 @@ def _send(page, message):
     page.evaluate("message => window.__testSockets[0].send(JSON.stringify(message))", message)
 
 
+# Every owner echo the server sends this page's socket, in arrival order, plus the
+# failure notice a refused chat frame answers its sender with instead.
+_RECORD_ECHOES = """() => {
+    window.__ownerEchoes = [];
+    window.__testSockets[0].addEventListener('message', event => {
+        const frame = JSON.parse(event.data);
+        if (frame.type === 'chat' && (frame.role === 'user' || frame.system_type === 'initialization_notice'))
+            window.__ownerEchoes.push(frame);
+    });
+}"""
+
+
+def _echoes(page, message_id):
+    return page.evaluate("""id => window.__ownerEchoes.filter(frame =>
+        frame.client_message_id === id || frame.system_type === 'initialization_notice')""", message_id)
+
+
 def _annotations(oracle, message_id):
     return [row for row in oracle._jsonl("logs/chat_annotations.jsonl")
             if row.get("client_message_id") == message_id]
@@ -73,8 +90,16 @@ def test_swarm_admission_precedes_model_and_survives_replay_and_reload(
     message_id = uuid.uuid4().hex if caption_only else ""
     token, task_id = _derived_identity(message_id, "swarm", 0) if message_id else ("", "")
     raw = f"  {marker}\nRead the repository, then ask which evidence to use.  \n"
-    caption = f"[user attachment: {marker}.png]"
+    # A wordless send is logged under the host placeholder (the gateway no longer
+    # captions uploads); the marker reaches the model as the image's own label.
+    caption = "(image attached)"
     first_request = []
+
+    def for_this_message(task):
+        # The placeholder objective names no marker; a caption case's id is fixed up front.
+        if caption_only:
+            return (task.get("origin_message_ref") or {}).get("client_message_id") == message_id
+        return marker in str(task.get("objective") or "")
 
     def first_agent_request(body):
         match = bool(body.get("tools")) and marker in body_text(body)
@@ -84,7 +109,7 @@ def test_swarm_admission_precedes_model_and_survives_replay_and_reload(
             # alone could hide a routing actor admitting a root mid-request.
             snapshot = oracle.queue_snapshot()
             admitted = [row["task"] for phase in ("pending", "running") for row in snapshot.get(phase, [])
-                        if marker in str(row.get("task", {}).get("objective") or "")]
+                        if for_this_message(row.get("task", {}))]
             observed_id = admitted[0]["id"] if len(admitted) == 1 else ""
             first_request.append({
                 "body": body, "admitted_roots": admitted, "observed_root_id": observed_id,
@@ -143,6 +168,7 @@ def test_swarm_admission_precedes_model_and_survives_replay_and_reload(
                 try:
                     page.goto(server.base_url, wait_until="domcontentloaded")
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
+                    page.evaluate(_RECORD_ECHOES)
                     if project:
                         # The same existing navigation event is used by the Project reference
                         # annotations and the side navigation, including mobile.
@@ -232,13 +258,20 @@ def test_swarm_admission_precedes_model_and_survives_replay_and_reload(
                     assert "[SWARM_ROUTING_INTENT]" not in body_text(at_call["body"])
                     if project:
                         assert project_binding_for_task(server.data_root, task_id)["source_ref"] == ref
+                    accepted_echo = wait_until(lambda: _echoes(page, message_id), 15)
+                    assert len(accepted_echo) == 1 and accepted_echo[0]["ingress_accepted"] is True
+                    assert accepted_echo[0]["ts"] == canonical["ts"] and accepted_echo[0]["chat_id"] == chat_id
                     before = {"annotations": _annotations(oracle, message_id),
                               "admissions": oracle.supervisor_rows("promote_chat_to_task_admitted")}
                     _send(page, message)
-                    # A second accepted ingress row proves the replay reached the
-                    # server; no fixed sleep can certify this negative assertion.
-                    assert wait_until(lambda: len([r for r in oracle._jsonl("logs/chat.jsonl")
-                        if r.get("client_message_id") == message_id and r.get("direction") == "in"]) >= 2, 15)
+                    # The same message under its id rejoins the accepted row: the server
+                    # re-echoes that row (a mismatch would get the failure notice) and
+                    # writes or dispatches nothing. This socket's second echo is the
+                    # replay's own receipt; no fixed sleep can certify the negatives below.
+                    replay_echoes = wait_until(lambda: rows if len(rows := _echoes(page, message_id)) >= 2 else None, 15)
+                    assert replay_echoes == accepted_echo * 2, replay_echoes
+                    assert len([r for r in oracle._jsonl("logs/chat.jsonl")
+                                if r.get("client_message_id") == message_id and r.get("direction") == "in"]) == 1
                     assert {"annotations": _annotations(oracle, message_id),
                             "admissions": oracle.supervisor_rows("promote_chat_to_task_admitted")} == before
                     assert len(_queued(oracle, task_id)) == 1 and len(_received(oracle, task_id)) == 1
@@ -255,6 +288,7 @@ def test_swarm_admission_precedes_model_and_survives_replay_and_reload(
                     card.wait_for(timeout=30000)
                     assert card.count() == 1
                     assert page.locator('.msg-routing-annotation[data-annotation-status="scheduled"]').count() == 1
+                    assert _echoes(page, message_id) == replay_echoes, "a rejoined replay must never be redelivered"
                     page.screenshot(path=str(evidence / "live.png"), full_page=True, animations="disabled")
                     page.reload(wait_until="domcontentloaded")
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
@@ -272,7 +306,7 @@ def test_swarm_admission_precedes_model_and_survives_replay_and_reload(
                         "raw_ws_text": message["content"], "canonical_owner_row": canonical,
                         "ingress_journey": "direct_ws_caption" if caption_only else "actual_swarm_toggle_composer_file_input",
                         "composer_input_text": raw if not caption_only else None,
-                        "actual_sent_frame_for_replay": message,
+                        "actual_sent_frame_for_replay": message, "replay_echoes": replay_echoes,
                         "canonical_text_sha256": hashlib.sha256(expected.encode("utf-8")).hexdigest(),
                         "existing_ingress_normalization": "web/message_bus trims outer whitespace before canonical admission",
                         "owner_wait": owner_wait, "terminal_status": terminal["status"], "errors": errors,

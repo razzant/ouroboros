@@ -33,6 +33,7 @@ import stat
 from typing import Any, Dict, List
 
 from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
+from ouroboros.observability import stamp_finalization_enqueue
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +177,13 @@ def prepare_terminal_send_event(
     *, presence: bool,
 ) -> Dict[str, Any]:
     """Preserve raw host salvage, then build the one live/replay projection."""
+    timing = usage.get("_finalization_timing")
+    if timing and not presence:
+        timing.update(task_attempt=task.get("_attempt"), task_type=task.get("type"),
+                      is_direct_chat=bool(task.get("_is_direct_chat")),
+                      delegation_role=task.get("delegation_role", ""),
+                      initiator=(task.get("metadata") or {}).get("initiator", ""))
+        send_event["_finalization_timing"] = timing
     if model_execution := model_execution_projection(usage):
         send_event.setdefault("progress_meta", {})["model_execution"] = model_execution
     if not presence and task.get("_is_direct_chat") and (task.get("metadata") or {}).get("_host_operation"):
@@ -306,7 +314,7 @@ def deliver_final_message_live(
         except Exception:
             log.debug("final-answer owed registration failed for %s", tid, exc_info=True)
     try:
-        event_queue.put(dict(final))
+        event_queue.put(stamp_finalization_enqueue(dict(final)))
     except Exception:
         log.warning(
             "Live final-answer delivery failed; keeping buffered delivery",
@@ -815,6 +823,10 @@ def build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | N
     inferred as 0 from the absence of events; a real planned figure exists only as
     the emissions' ``requested_count`` sum, surfaced under that exact name on
     swarm-intent rollups.
+
+    The rollup's ``depth`` block comes from ``depth_evidence.build_depth_summary``
+    (the task contract's request against what the child subtree reached); a read
+    failure there drops only ``depth``, never the fan-out numbers.
 
     OMITTED (no reliable structured source today): ``observed_max_concurrency`` —
     child task results carry only ``ts``/``updated_at``, not a per-child running-start

@@ -26,6 +26,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 from supervisor.state import append_jsonl
+from ouroboros.observability import stamp_finalization_enqueue
 from ouroboros.utils import utc_now_iso
 
 
@@ -402,7 +403,8 @@ def _admit_chat_task(
             except Exception as exc:
                 _pool()._report_binding_failure(task["id"], pid, exc, path="direct_project_turn")
         if not task["text"]:
-            task["text"] = "(image attached)" if image_data else ""
+            from ouroboros.chat_uploads import attachment_placeholder
+            task["text"] = attachment_placeholder(image_data, task_metadata)
         # A Main turn is named lazily: the turn queue below fires the namer on
         # the first non-addressing tool call (owner decision Q7=A, 16.09), so a
         # greeting costs no naming call and a working turn gets a title as its
@@ -526,7 +528,7 @@ def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
 
                 end_dispatch_fence(task_id)  # quiescent actor unwound; the durable row owns the dispatch hold
         for e in remaining:
-            _pool().get_event_q().put(turn_queue.stamp(e))
+            _pool().get_event_q().put(stamp_finalization_enqueue(turn_queue.stamp(e)))
         ok = True
     except Exception as e:
         _report_direct_chat_error(admitted, e)

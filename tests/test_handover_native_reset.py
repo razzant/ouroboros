@@ -74,7 +74,8 @@ def test_main_dual_token_reset_survives_wait_reprepare_and_adopts_new_envelope(
     rows = ledger(ctx.drive_root)
     assert [row["state"] for row in rows].count("released") == 1 + int(quota_wait)
     assert [row["state"] for row in rows].count("settled") == 1
-    final_dispatch = [row for row in rows if row["state"] == "dispatched"][-1]
+    # One current row per attempt: the answered attempt's row keeps its dispatch context.
+    final_dispatch = [row for row in rows if row["state"] == "settled"][-1]
     assert final_dispatch["physical_context"]["route_fp"] == f"capacity-{route['credentialProfileId']}"
     if quota_wait:
         waits = [event for event in list(events.queue) if event.get("type") == "task_model_wait"]

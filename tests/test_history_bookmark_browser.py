@@ -1,11 +1,15 @@
-"""Physical card ownership and actual line disclosures across room recreation."""
+"""Card lines, receipts and Reviews keep their nodes while a room is read; a room
+opened again, recreated or kept, is at its newest message (DESIGN "History edges",
+owner decisions 2026-07-10 and 2026-10-05)."""
 import json
 import pytest
 
 from tests.test_history_continuity_browser import (
     _bookmark_place, _deep_gesture_history, _nested_full_output_history, _open_nested_full_output, _OFFSET,
 )
-from tests.test_chat_history_paging_browser import _open, _open_project, _step, _idle, _screenshot, _FRAMES, _write, _result
+from tests.test_chat_history_paging_browser import (
+    _assert_at_newest, _open, _open_project, _step, _idle, _screenshot, _FRAMES, _write, _result,
+)
 from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
@@ -13,7 +17,10 @@ pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_card_page_and_expanded_long_line_survive_reopen(direct_server_with_data, browser_engine, tmp_path):
+def test_a_deep_place_with_an_open_review_and_line_reopens_at_the_newest_message(direct_server_with_data, browser_engine, tmp_path):
+    """Read pages back, with a Review attempt and a long line of its card expanded, a Project closed and
+    opened again is at its newest message: the recreated room reads its newest page only, no older page
+    again, and claims no approximate place (owner decisions 2026-07-10, 2026-10-05)."""
     from playwright.sync_api import sync_playwright
 
     root = direct_server_with_data['data_dir']
@@ -36,13 +43,7 @@ def test_card_page_and_expanded_long_line_survive_reopen(direct_server_with_data
                     break
                 _step(page, feed, automatic=True)
             card.wait_for(state='attached')
-            supplying = page.evaluate("""id => window.__historyReads.filter(r => r.chatId === id)
-                .find(r => r.body?.messages.some(m => m.task_id === 'deep-review' && m.history_id))?.body.page_cursor""", project['chat_id'])
-            assert supplying
-            # Advance the pager focus while this card's supplying page is retained.
-            _step(page, feed, automatic=True)
-            focused = page.evaluate('() => window.__historyReads.at(-1).body.page_cursor')
-            assert focused != supplying
+            _step(page, feed, automatic=True)  # read on past the card's page while it stays mounted
             if card.get_attribute('data-expanded') != '1':
                 card.locator(':scope > [data-live-summary-button]').click()
             card.locator('[data-review-section-toggle]').click()
@@ -50,157 +51,29 @@ def test_card_page_and_expanded_long_line_survive_reopen(direct_server_with_data
             card.locator('[data-review-attempt-toggle]').first.click()
             detail = card.locator('[data-review-attempt-detail]').first
             detail.wait_for(state='visible')
-
-            def place(node):
-                node.evaluate("""n => {
-                    const feed = n.closest('.chat-messages');
-                    feed.dispatchEvent(new WheelEvent('wheel', {deltaY:-1}));
-                    feed.scrollTop += n.getBoundingClientRect().top - feed.getBoundingClientRect().top - 30;
-                }""")
-                page.evaluate(_FRAMES)
-                return node.evaluate(_OFFSET)
-
-            def reopen():
-                page.locator('#project-panel-close').click()
-                before = page.evaluate('() => window.__historyReads.length')
-                _click_project(page, project)
-                _idle(page, feed)
-                page.evaluate(_FRAMES)
-                return page.evaluate('start => window.__historyReads.slice(start).filter(r => r.cursor).map(r => r.cursor)', before)
-
-            offset = place(detail)
-            _screenshot(page, tmp_path, f'bookmark-review-before-{browser_engine}')
-            cursors = reopen()
-            assert cursors == [supplying], (supplying, focused, cursors)
-            detail.wait_for(state='visible')
-            assert abs(detail.evaluate(_OFFSET) - offset) <= 8
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
-            _screenshot(page, tmp_path, f'bookmark-review-after-{browser_engine}')
-
             line = card.locator('.chat-live-line.expandable').last
             line.locator('[data-live-line-toggle]').click()
-            assert line.get_attribute('data-expanded') == '1'
-            full_text = line.inner_text()
-            assert len(full_text) > 150
-            offset = place(line)
-            anchor = page.evaluate('''async feed => {
-                const {createTimelineAnchors} = await import('/static/modules/chat_render_batch.js');
-                return createTimelineAnchors({messagesDiv:document.querySelector(feed), liveCardRecords:new Map()}).serializeTimelineAnchor();
-            }''', feed)
-            assert anchor['lineKey'] == line.get_attribute('data-live-line-key'), anchor
-            assert anchor['lineExpanded'] is True
-            _screenshot(page, tmp_path, f'bookmark-line-before-{browser_engine}')
-            reopen()
-            assert line.get_attribute('data-expanded') == '1'
-            assert line.inner_text() == full_text
-            assert abs(line.evaluate(_OFFSET) - offset) <= 8
-            _screenshot(page, tmp_path, f'bookmark-line-after-{browser_engine}')
-            page.set_viewport_size({'width': 390, 'height': 844})
-            page.evaluate(_FRAMES)
-            note = page.locator(feed).locator('..').locator('.chat-history-status')
-            assert note.is_visible()
-            box = note.bounding_box()
-            assert box['x'] >= 0 and box['x'] + box['width'] <= 391
-            assert box['y'] >= 0 and box['y'] + box['height'] < 844
-            assert 'Shown messages may have gaps' in note.inner_text()
-            assert page.locator(feed).locator('..').locator('.chat-load-older-note').count() == 1
-            _screenshot(page, tmp_path, f'bookmark-status-narrow-{browser_engine}')
-
-            # The saved Review detail no longer exists in the canonical result.
-            # The same history page/card is still available: fallback is explicit.
-            page.set_viewport_size({'width': 1280, 'height': 850})
-            page.evaluate(_FRAMES)
-            detail.wait_for(state='visible')
-            place(detail)
+            assert line.get_attribute('data-expanded') == '1' and len(line.inner_text()) > 150
+            _bookmark_place(page, detail)
+            _screenshot(page, tmp_path, f'reopen-deep-before-{browser_engine}')
             page.locator('#project-panel-close').click()
-            result_path = root / 'task_results/deep-review.json'
-            result = json.loads(result_path.read_text())
-            result['review_projection']['panels'][0]['panel_id'] = 'replacement-panel'
-            result_path.write_text(json.dumps(result))
+            before = page.evaluate('() => window.__historyReads.length')
             _click_project(page, project)
             _idle(page, feed)
-            note = page.locator(feed).locator('..').locator('.chat-history-status')
-            assert note.is_visible()
-            assert 'Saved position could not be restored exactly.' in note.inner_text()
-            assert page.locator(feed).locator('..').locator('.chat-load-older-note').count() == 1
-            _screenshot(page, tmp_path, f'bookmark-approximate-{browser_engine}')
-            page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
-            page.wait_for_function("feed => !document.querySelector(feed).parentElement.innerText.includes('could not be restored exactly')", arg=feed)
-            _screenshot(page, tmp_path, f'bookmark-approximate-cleared-{browser_engine}')
-            (tmp_path / f'bookmark-reads-{browser_engine}.json').write_text(json.dumps(
-                page.evaluate('() => window.__historyReads'), indent=2))
+            reads = page.evaluate('([n, id]) => window.__historyReads.slice(n).filter(r => r.chatId === id).map(r => r.cursor)',
+                                  [before, project['chat_id']])
+            assert reads and not any(reads), ('the recreated room reads its newest page only', reads)
+            _assert_at_newest(page, feed, 'Gesture message 0899')
+            assert card.count() == 0, 'the card read pages back is not read again'
+            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            _screenshot(page, tmp_path, f'reopen-deep-after-{browser_engine}')
         finally:
             browser.close()
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_expanded_line_rehydrates_full_result_without_another_click(direct_server_with_data, browser_engine, tmp_path):
-    from ouroboros.projects_registry import create_project
-    from playwright.sync_api import sync_playwright
-
-    root = direct_server_with_data['data_dir']
-    project = create_project(root, 'full-line-room', name='Full result history')
-    cid = project['chat_id']
-    full = 'Retained result. ' * 320 + 'UNIQUE_FULL_RESULT_TAIL'
-    lineage = {'subagent_task_id': 'full-child', 'parent_task_id': 'full-parent',
-               'root_task_id': 'full-parent', 'delegation_role': 'subagent', 'subagent_role': 'Archive reader'}
-    _write(root / 'logs/chat.jsonl', [
-        {'direction': 'in', 'chat_id': cid, 'ts': f'2026-09-01T10:{index:02d}:00Z',
-         'client_message_id': f'full-{index}', 'text': f'Full result context {index:02d}'} for index in range(60)])
-    _write(root / 'logs/progress.jsonl', [
-        {'chat_id': cid, 'ts': '2026-09-01T10:30:01Z', 'task_id': 'full-parent', 'content': 'Parent narration'},
-        {'chat_id': cid, 'ts': '2026-09-01T10:30:02Z', 'task_id': 'full-child', **lineage,
-         'subagent_event': 'completed', 'status': 'completed', 'content': 'Child finished',
-         'result': full[:4000], 'result_truncated': True}])
-    _result(root, 'full-parent', chat_id=cid, project_id=project['id'], result='Parent finished.')
-    _result(root, 'full-child', chat_id=cid, project_id=project['id'], result=full, **lineage)
-    with sync_playwright() as pw:
-        browser = getattr(pw, browser_engine).launch(headless=True)
-        try:
-            page = browser.new_page(viewport={'width': 1280, 'height': 850})
-            _open(page, direct_server_with_data['url'])
-            feed = _open_project(page, project)
-            parent = page.locator(f'{feed} .chat-live-card[data-task-id="full-parent"]')
-            child = page.locator(f'{feed} .chat-live-card[data-task-id="full-child"]')
-            for card in (parent, child):
-                if card.get_attribute('data-expanded') != '1':
-                    card.locator(':scope > [data-live-summary-button]').click()
-            line = child.locator(':scope > [data-live-timeline] > .chat-live-line.expandable')
-            assert line.count() == 1
-            assert 'UNIQUE_FULL_RESULT_TAIL' not in line.inner_text()
-            line.locator('[data-live-line-toggle]').click()
-            body = line.locator(':scope > .chat-live-line-body-full')
-            body.get_by_text('UNIQUE_FULL_RESULT_TAIL', exact=False).wait_for(state='visible')
-            assert line.get_attribute('data-expanded') == '1'
-            line.evaluate("""node => {
-                const feed = node.closest('.chat-messages');
-                feed.dispatchEvent(new WheelEvent('wheel', {deltaY:-1}));
-                feed.scrollTop += node.getBoundingClientRect().top - feed.getBoundingClientRect().top - 30;
-            }""")
-            page.evaluate(_FRAMES)
-            offset = line.evaluate(_OFFSET)
-            anchor = page.evaluate('''async feed => {
-                const {createTimelineAnchors} = await import('/static/modules/chat_render_batch.js');
-                return createTimelineAnchors({messagesDiv:document.querySelector(feed), liveCardRecords:new Map()}).serializeTimelineAnchor();
-            }''', feed)
-            assert anchor['lineKey'] == line.get_attribute('data-live-line-key'), anchor
-            assert anchor['lineExpanded'] is True
-            assert anchor['cardChain'][0]['taskId'] == 'full-child'
-            _screenshot(page, tmp_path, f'bookmark-hydration-before-{browser_engine}')
-            page.locator('#project-panel-close').click()
-            _click_project(page, project)
-            _idle(page, feed)
-            body.get_by_text('UNIQUE_FULL_RESULT_TAIL', exact=False).wait_for(state='visible')
-            assert line.get_attribute('data-expanded') == '1'
-            assert full in body.inner_text()
-            assert abs(line.evaluate(_OFFSET) - offset) <= 8
-            _screenshot(page, tmp_path, f'bookmark-hydration-after-{browser_engine}')
-        finally:
-            browser.close()
-
-
-@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_main_coverage_status_remains_readable_away_from_history_control(direct_server_with_data, browser_engine, tmp_path):
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_main_coverage_status_remains_readable_away_from_history_control(direct_server_with_data, browser_engine, theme, tmp_path):
     from playwright.sync_api import sync_playwright
 
     _write(direct_server_with_data['data_dir'] / 'logs/chat.jsonl', [
@@ -210,6 +83,7 @@ def test_main_coverage_status_remains_readable_away_from_history_control(direct_
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
             page = browser.new_page(viewport={'width':1280, 'height':850})
+            page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
             _open(page, direct_server_with_data['url'])
             for _ in range(5):
                 _step(page, '#chat-messages', automatic=True)
@@ -224,13 +98,21 @@ def test_main_coverage_status_remains_readable_away_from_history_control(direct_
                 assert box['x'] >= 0 and box['x'] + box['width'] <= width + 1
                 assert box['y'] >= 0 and box['y'] + box['height'] < 850
                 assert page.locator('#page-chat .chat-load-older-note').count() == 1
-                _screenshot(page, tmp_path, f'main-history-status-{width}-{browser_engine}')
+                style = note.evaluate('e => { const s = getComputedStyle(e); return {bg:s.backgroundColor, radius:s.borderRadius, padding:s.paddingLeft}; }')
+                assert style['bg'] != 'rgba(0, 0, 0, 0)' and style['radius'] != '0px' and style['padding'] != '0px', style
+                _screenshot(page, tmp_path, f'main-history-status-{theme}-{width}-{browser_engine}')
         finally:
             browser.close()
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 def test_late_latest_cannot_erase_newer_physical_coverage(direct_server_with_data, browser_engine, tmp_path):
+    """A late re-anchoring read cannot erase a newer one's coverage. The reader follows the newest
+    message, so a shifted window re-anchors the chain; that read is answered after a newer one, and
+    the gap between them stays disclosed, readable in the narrow panel too. The newest read has moved
+    past the chain, so Load more history shows; one press re-anchors on the newest page and reads on
+    into the missing older rows, and reading on goes only older, to the beginning (owner decisions
+    2026-09-14, 2026-10-05)."""
     from datetime import datetime, timedelta, timezone
     from ouroboros.projects_registry import create_project
     from playwright.sync_api import sync_playwright
@@ -270,13 +152,6 @@ def test_late_latest_cannot_erase_newer_physical_coverage(direct_server_with_dat
             })()''')
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
-            target = page.locator(f'{feed} [data-client-message-id="race-50"]')
-            target.evaluate('''node => {
-                const feed = node.closest('.chat-messages');
-                feed.dispatchEvent(new WheelEvent('wheel', {deltaY:-1}));
-                feed.scrollTop += node.getBoundingClientRect().top - feed.getBoundingClientRect().top - 50;
-            }''')
-            page.evaluate(_FRAMES)
             append(150, 151)
             page.evaluate('chatId => { window.__holdLatest = {chatId, skip:1}; }', project['chat_id'])
 
@@ -302,12 +177,39 @@ def test_late_latest_cannot_erase_newer_physical_coverage(direct_server_with_dat
             assert 'Shown messages may have gaps' in note.inner_text()
             assert 'Beginning' not in note.inner_text()
             _screenshot(page, tmp_path, f'latest-race-gap-{browser_engine}')
-            for _ in range(6):
+            # The gap note stays readable in the narrow panel's persistent chrome.
+            page.set_viewport_size({'width': 390, 'height': 844})
+            page.evaluate(_FRAMES)
+            status = page.locator(feed).locator('..').locator('.chat-history-status')
+            assert status.is_visible() and 'Shown messages may have gaps' in status.inner_text()
+            box = status.bounding_box()
+            assert box['x'] >= 0 and box['x'] + box['width'] <= 391 and box['y'] >= 0 and box['y'] + box['height'] < 844, box
+            _screenshot(page, tmp_path, f'latest-race-gap-narrow-{browser_engine}')
+            page.set_viewport_size({'width': 1280, 'height': 850})
+            page.evaluate(_FRAMES)
+            button = page.locator(f'{feed} .chat-load-older button')
+            assert not button.evaluate('node => node.hidden'), 'the rows behind the newest read are older history'
+            walked = page.evaluate('() => window.__historyReads.length')
+            _step(page, feed)
+            # One press: the latest read re-anchors the chain, and the same press reads the
+            # next older page by its cursor, landing the missing rows.
+            press = page.evaluate('([n, id]) => window.__historyReads.slice(n).filter(r => r.chatId === id)',
+                                  [walked, project['chat_id']])
+            assert [read['cursor'] for read in press][:1] == [None] and len(press) == 2, [read['cursor'] for read in press]
+            assert press[1]['cursor'] == press[0]['body']['next_cursor'] and press[1]['body']['messages']
+            assert page.locator(f'{feed} [data-client-message-id="race-300"]').count() == 1
+            for _ in range(6):  # reading on at the top edge goes only older
                 if note.inner_text() == 'Beginning of saved history':
                     break
-                _step(page, feed)
+                _step(page, feed, automatic=True)
             assert note.inner_text() == 'Beginning of saved history'
-            assert newest.count() == 1
+            assert newest.count() == 1 and button.evaluate('node => node.hidden')
+            walk = page.evaluate('([n, id]) => window.__historyReads.slice(n).filter(r => r.chatId === id)',
+                                 [walked, project['chat_id']])
+            assert all(read['cursor'] == prior['body']['next_cursor'] for prior, read in zip(walk, walk[1:])), \
+                ('every later read is the next older page', [read['cursor'] for read in walk])
+            delivered = {row.get('client_message_id') for read in walk for row in read['body']['messages']}
+            assert {'race-151', 'race-300'} <= delivered, 'the gap is read'
             _screenshot(page, tmp_path, f'latest-race-filled-{browser_engine}')
             (tmp_path / f'latest-race-reads-{browser_engine}.json').write_text(json.dumps(
                 {'held': held, 'reads': page.evaluate('() => window.__historyReads')}, indent=2))
@@ -325,8 +227,12 @@ def _bookmark_reconnect(page):
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 @pytest.mark.parametrize('line_kind', ['receipt', 'narration'])
-def test_nested_line_bookmark_uses_its_source_page(direct_server_with_data, browser_engine, line_kind, tmp_path):
-    """A card's recent progress must not choose the page for its older line."""
+def test_a_card_line_arrives_with_its_source_page_and_a_reopen_reads_only_the_newest(
+        direct_server_with_data, browser_engine, line_kind, tmp_path):
+    """A card's older line comes with the older page of the conversation that holds it, not with
+    the card's recent progress; a live receipt of the same revision keeps its node and selection
+    when the saved row adopts it. Closed and opened again, the room reads only its newest page and
+    is at its newest message (owner decisions 2026-10-05)."""
     from datetime import datetime, timedelta, timezone
     from ouroboros.merge_receipts import card_row_text
     from ouroboros.projects_registry import create_project
@@ -354,7 +260,7 @@ def test_nested_line_bookmark_uses_its_source_page(direct_server_with_data, brow
         {'chat_id': cid, 'task_id': 'source-owner', 'ts': stamp(83), 'content': 'RECENT_OWNER_PROGRESS'}])
     _write(root / 'logs/chat.jsonl', [
         {'chat_id': cid, 'direction': 'in', 'ts': stamp(index),
-         'client_message_id': f'source-{index}', 'text': f'Reading context {index:03d}'} for index in range(100)])
+         'client_message_id': f'source-{index}', 'text': f'Reading context {index:03d}'} for index in range(300)])
     for task in ('source-owner', 'source-filler'):
         _result(root, task, chat_id=cid, project_id=project['id'], result='Completed retained task.',
                 merge_receipts=[receipt] if task == 'source-owner' and line_kind == 'receipt' else [])
@@ -404,12 +310,7 @@ def test_nested_line_bookmark_uses_its_source_page(direct_server_with_data, brow
             else:
                 line.locator('[data-live-line-toggle]').click()
                 assert line.get_attribute('data-expanded') == '1'
-            offset = _bookmark_place(page, line, 1)
-            anchor = page.evaluate('''async feed => {
-                const {createTimelineAnchors} = await import('/static/modules/chat_render_batch.js');
-                return createTimelineAnchors({messagesDiv:document.querySelector(feed), liveCardRecords:new Map()}).serializeTimelineAnchor();
-            }''', feed)
-            assert anchor['lineKey'] == line.get_attribute('data-live-line-key'), anchor
+            _bookmark_place(page, line, 1)
             _screenshot(page, tmp_path, f'source-page-{line_kind}-before-{browser_engine}')
             page.locator('#project-panel-close').click()
             before = page.evaluate('() => window.__historyReads.length')
@@ -417,14 +318,9 @@ def test_nested_line_bookmark_uses_its_source_page(direct_server_with_data, brow
             _idle(page, feed)
             reads = page.evaluate('n => window.__historyReads.slice(n)', before)
             (tmp_path / f'source-page-{line_kind}-{browser_engine}.json').write_text(json.dumps({
-                'source': source, 'anchor': anchor, 'recent': recent, 'supplying': supplying, 'reopen': reads}, indent=2))
-            assert [read['cursor'] for read in reads if read['cursor']] == [supplying['page_cursor']]
-            assert card.get_attribute('data-expanded') == '1'
-            line.wait_for(state='visible')
-            assert all(part.strip() in line.inner_text() for part in text.splitlines())
-            if line_kind == 'narration':
-                assert line.get_attribute('data-expanded') == '1'
-            assert abs(line.evaluate(_OFFSET) - offset) <= 8
+                'source': source, 'recent': recent, 'supplying': supplying, 'reopen': reads}, indent=2))
+            assert not [read['cursor'] for read in reads if read['cursor']], 'the reopen reads only the newest page'
+            _assert_at_newest(page, feed, 'Reading context 299')
             assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
             _screenshot(page, tmp_path, f'source-page-{line_kind}-after-{browser_engine}')
         finally:
@@ -432,7 +328,12 @@ def test_nested_line_bookmark_uses_its_source_page(direct_server_with_data, brow
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_protected_page_bookmark_survives_latest_rebase(direct_server_with_data, browser_engine, tmp_path):
+def test_a_moved_newest_window_leaves_a_reader_in_history_in_place_and_reopen_lands_at_the_newest(
+        direct_server_with_data, browser_engine, tmp_path):
+    """300 messages arrive while the reader is on the first page: the reconnect's newest read moves past
+    their chain, but a reader in older history is not re-anchored, keeps the passage and keeps the rows
+    the newest window let go. Closed and opened again, the room reads its newest page only and is at its
+    newest message, not at that passage (owner decisions 2026-10-05)."""
     from datetime import datetime, timedelta, timezone
     from ouroboros.projects_registry import create_project
     from playwright.sync_api import sync_playwright
@@ -457,26 +358,30 @@ def test_protected_page_bookmark_survives_latest_rebase(direct_server_with_data,
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
-            supplying = page.evaluate('id => window.__historyReads.find(r => r.chatId === id).body.page_cursor', project['chat_id'])
             target = page.locator(f'{feed} [data-client-message-id="rebase-50"]')
             offset = _bookmark_place(page, target, 50)
             append(150, 450)
             before = page.evaluate('() => window.__historyReads.length')
             _bookmark_reconnect(page)
-            page.wait_for_function('n => window.__historyReads.length >= n + 2 && window.__historyReads.slice(n).every(r => r.done)', arg=before)
+            page.wait_for_function('([n, id]) => window.__historyReads.slice(n).some(r => r.chatId === id && r.done)',
+                                   arg=[before, project['chat_id']])
             _idle(page, feed)
-            rebased = page.evaluate('() => window.__historyReads.at(-1).body.page_cursor')
-            assert rebased != supplying
+            page.evaluate(_FRAMES)
+            moved = page.evaluate('([n, id]) => window.__historyReads.slice(n).filter(r => r.chatId === id)',
+                                  [before, project['chat_id']])
+            assert [read['cursor'] for read in moved] == [None], 'one newest read: no re-anchor under a reader in history'
+            assert moved[0]['body']['messages'][0]['client_message_id'] == 'rebase-300', 'the newest window moved on'
             assert abs(target.evaluate(_OFFSET) - offset) <= 8
+            for kept in ('rebase-0', 'rebase-149', 'rebase-449'):
+                assert page.locator(f'{feed} [data-client-message-id="{kept}"]').count() == 1, kept
             _screenshot(page, tmp_path, f'composed-rebase-before-{browser_engine}')
             page.locator('#project-panel-close').click()
             before = page.evaluate('() => window.__historyReads.length')
             _click_project(page, project)
             _idle(page, feed)
             cursors = page.evaluate('n => window.__historyReads.slice(n).filter(r => r.cursor).map(r => r.cursor)', before)
-            assert cursors == [supplying], {'supplying': supplying, 'rebased': rebased, 'restored': cursors}
-            target.wait_for(state='attached')
-            assert abs(target.evaluate(_OFFSET) - offset) <= 8
+            assert cursors == [], cursors
+            _assert_at_newest(page, feed, 'Rebase retained message 0449')
             assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
             _screenshot(page, tmp_path, f'composed-rebase-after-{browser_engine}')
             (tmp_path / f'composed-rebase-reads-{browser_engine}.json').write_text(json.dumps(page.evaluate('() => window.__historyReads'), indent=2))
@@ -486,7 +391,11 @@ def test_protected_page_bookmark_survives_latest_rebase(direct_server_with_data,
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 @pytest.mark.parametrize('line_kind', ['narration', 'full-result'])
-def test_live_origin_expanded_line_survives_history_adoption(direct_server_with_data, browser_engine, line_kind, tmp_path):
+def test_a_live_line_keeps_its_node_through_history_adoption_and_reopens_from_its_saved_row(
+        direct_server_with_data, browser_engine, line_kind, tmp_path):
+    """A live line the reader expanded keeps its node, key and disclosure when its saved row adopts it on
+    a reconnect. Closed and opened again, the room is at its newest message and replays the line from
+    its saved source (owner decisions 2026-10-05)."""
     from ouroboros.projects_registry import create_project
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
     from playwright.sync_api import sync_playwright
@@ -540,7 +449,7 @@ def test_live_origin_expanded_line_survives_history_adoption(direct_server_with_
             assert line.get_attribute('data-live-line-key') == live_key
             assert line.evaluate('n => n === window.__adoptedLine'), 'adoption preserves mounted DOM identity'
             assert line.get_attribute('data-expanded') == '1'
-            offset = _bookmark_place(page, line, 1)
+            _bookmark_place(page, line, 1)
             anchor = page.evaluate('''async feed => {
                 const {createTimelineAnchors} = await import('/static/modules/chat_render_batch.js');
                 return createTimelineAnchors({messagesDiv:document.querySelector(feed), liveCardRecords:new Map()}).serializeTimelineAnchor();
@@ -550,171 +459,30 @@ def test_live_origin_expanded_line_survives_history_adoption(direct_server_with_
             page.locator('#project-panel-close').click()
             _click_project(page, project)
             _idle(page, feed)
+            _assert_at_newest(page, feed, 'Live line context 59')
+            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            for card in (parent, owner):
+                if card.get_attribute('data-expanded') != '1':
+                    card.locator(':scope > [data-live-summary-button]').click()
             assert line.get_attribute('data-live-line-key') != live_key, 'cold replay has its source-owned key'
+            line.locator('[data-live-line-toggle]').click()
             assert line.get_attribute('data-expanded') == '1'
             if line_kind == 'full-result':
                 line.get_by_text('COMPOSED_FULL_RESULT_TAIL', exact=False).wait_for(state='visible')
                 assert full in line.inner_text()
             else:
                 assert row['content'].strip() in line.inner_text()
-            assert abs(line.evaluate(_OFFSET) - offset) <= 8
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
             _screenshot(page, tmp_path, f'composed-{line_kind}-after-{browser_engine}')
         finally:
             browser.close()
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_review_bookmark_waits_for_necessary_task_detail(direct_server_with_data, browser_engine, tmp_path):
-    from ouroboros.projects_registry import create_project
-    from playwright.sync_api import sync_playwright
-
-    root = direct_server_with_data['data_dir']
-    project, _ = _deep_gesture_history(root)
-    other = create_project(root, 'detail-other-room', name='Other detail room')
-    progress = root / 'logs/progress.jsonl'
-    rows = [json.loads(line) for line in progress.read_text().splitlines()]
-    rows = [row for row in rows if row['task_id'] != 'deep-review']
-    # This owner-bound carrier has no inline terminal projection; only the real
-    # owner task-detail GET supplies the saved Review group.
-    rows.insert(0, {'type': 'review_reference', 'chat_id': project['chat_id'], 'task_id': 'review-carrier',
-                    'presentation_owner_task_id': 'deep-review', 'surface': 'task_acceptance',
-                    'state_revision': 'a' * 64, 'ts': '2026-09-01T07:00:00+00:00'})
-    rows.insert(1, {**rows[0], 'task_id': 'unrelated-review', 'presentation_owner_task_id': 'unrelated-review',
-                    'ts': '2026-09-01T07:00:01+00:00'})
-    _result(root, 'unrelated-review', chat_id=project['chat_id'], project_id=project['id'], result='Unrelated task')
-    _write(progress, rows)
-    with sync_playwright() as pw:
-        browser = getattr(pw, browser_engine).launch(headless=True)
-        try:
-            page = browser.new_page(viewport={'width': 1280, 'height': 850})
-            page.add_init_script("""(() => {
-                const fetch = window.fetch.bind(window);
-                window.__detailReads = [];
-                window.__unrelatedReads = [];
-                window.fetch = async (input, init) => {
-                    const url = new URL(typeof input === 'string' ? input : input.url, location.href);
-                    if (url.pathname === '/api/tasks/unrelated-review' && window.__holdUnrelated) {
-                        await new Promise(resolve => { window.__unrelatedReads.push(resolve); });
-                    }
-                    if (url.pathname === '/api/tasks/deep-review') {
-                        const mode = window.__detailMode;
-                        const read = {mode:mode || 'ready', done:false}; window.__detailReads.push(read);
-                        if (mode === 'hold') await new Promise(resolve => { read.release = resolve; });
-                        if (mode === 'error') { read.done = true; throw new TypeError('controlled task-detail failure'); }
-                        const response = await fetch(input, init); read.done = true; return response;
-                    }
-                    return fetch(input, init);
-                };
-            })()""")
-            _open(page, direct_server_with_data['url'])
-            feed = _open_project(page, project)
-            card = page.locator(f'{feed} .chat-live-card[data-task-id="deep-review"]')
-            for _ in range(8):
-                if card.count():
-                    break
-                _step(page, feed, automatic=True)
-            card.wait_for(state='attached')
-            if card.get_attribute('data-expanded') != '1':
-                card.locator(':scope > [data-live-summary-button]').click()
-            card.locator('[data-review-section-toggle]').click()
-            card.locator('[data-review-group-toggle]').click()
-            card.locator('[data-review-attempt-toggle]').first.click()
-            detail = card.locator('[data-review-attempt-detail]').first
-            detail.wait_for(state='visible')
-            assert page.evaluate('() => window.__historyReads.some(r => r.body?.messages.some(m => m.system_type === "review_reference"))')
-            assert page.evaluate('() => window.__historyReads.every(r => !r.body?.messages.some(m => m.presentation_owner_task_id === "deep-review" && m.review_projection))')
-
-            def reopen_held(mode):
-                offset = _bookmark_place(page, detail, 1)
-                anchor = page.evaluate('''async feed => {
-                    const {createTimelineAnchors} = await import('/static/modules/chat_render_batch.js');
-                    return createTimelineAnchors({messagesDiv:document.querySelector(feed), liveCardRecords:new Map()}).serializeTimelineAnchor();
-                }''', feed)
-                assert anchor['reviewKey'] == 'reviewAttemptDetail', anchor
-                page.locator('#project-panel-close').click()
-                page.evaluate('mode => { window.__detailMode = mode; window.__detailReads = []; window.__holdUnrelated = true; window.__unrelatedReads = []; }', mode)
-                _click_project(page, project)
-                _idle(page, feed)
-                page.wait_for_function('() => window.__detailReads.length > 0')
-                # History is ready; hold detail across many paints, without a network deadline.
-                for _ in range(8):
-                    page.evaluate(_FRAMES)
-                if detail.count():
-                    (tmp_path / f'composed-review-unexpected-{browser_engine}.json').write_text(json.dumps(page.evaluate('''() => ({
-                        reads:window.__detailReads.map(({release,...r}) => r),
-                        rows:window.__historyReads.flatMap(r => r.body?.messages || []).filter(m => m.presentation_owner_task_id === 'deep-review'),
-                        mode:window.__detailMode,
-                    })'''), indent=2))
-                assert detail.count() == 0, f'necessary Review detail must be absent while {mode}'
-                return offset
-
-            def release():
-                page.evaluate("""() => {
-                    window.__detailMode = null;
-                    for (const read of window.__detailReads) read.release?.();
-                }""")
-
-            for mode in ('hold', 'error'):
-                offset = reopen_held(mode)
-                assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text(), mode
-                _screenshot(page, tmp_path, f'composed-review-{mode}-{browser_engine}')
-                if mode == 'error':
-                    retry = card.locator('[data-review-hydrate-retry]')
-                    retry.wait_for(state='attached')
-                    page.evaluate('() => { window.__detailMode = null; }')
-                    retry.evaluate('n => n.click()')
-                else:
-                    release()
-                detail.wait_for(state='visible')
-                page.wait_for_function('() => window.__detailReads.every(r => r.done)')
-                page.evaluate(_FRAMES)
-                assert abs(detail.evaluate(_OFFSET) - offset) <= 8, mode
-                assert page.evaluate('() => window.__unrelatedReads.length > 0'), 'an unrelated owner detail is still held'
-                page.evaluate('() => { window.__holdUnrelated = false; window.__unrelatedReads.forEach(resolve => resolve()); }')
-                _screenshot(page, tmp_path, f'composed-review-{mode}-restored-{browser_engine}')
-
-            offset = reopen_held('hold')
-            box = page.locator(feed).bounding_box()
-            page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
-            page.mouse.wheel(0, 360)
-            page.wait_for_timeout(100)
-            page.evaluate(_FRAMES)
-            release()
-            detail.wait_for(state='attached')
-            page.wait_for_function('() => window.__detailReads.every(r => r.done)')
-            page.evaluate(_FRAMES)
-            assert abs(detail.evaluate(_OFFSET) - offset) > 8, 'real wheel cancels the held Review destination'
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
-            page.evaluate('() => { window.__holdUnrelated = false; window.__unrelatedReads.forEach(resolve => resolve()); }')
-            _screenshot(page, tmp_path, f'composed-review-wheel-{browser_engine}')
-
-            # Closing during detail hydration preserves the original destination;
-            # a stale reply cannot write into the other room or consume its bookmark.
-            offset = reopen_held('hold')
-            page.locator('#project-panel-close').click()
-            _open_project(page, other)
-            release()
-            page.evaluate('() => { window.__holdUnrelated = false; window.__unrelatedReads.forEach(resolve => resolve()); }')
-            page.wait_for_function('() => window.__detailReads.every(r => r.done)')
-            assert not page.locator('#project-panel-body').get_by_text('DEEP_REVIEW_DETAIL', exact=False).count()
-            page.locator('#project-panel-close').click()
-            _click_project(page, project)
-            _idle(page, feed)
-            detail.wait_for(state='visible')
-            # Another task-detail consumer can render this Review while its own
-            # hydration still holds the bookmark. Await that owner's completion.
-            card.locator('[data-review-hydrate-status]').wait_for(state='detached')
-            page.evaluate(_FRAMES)
-            assert abs(detail.evaluate(_OFFSET) - offset) <= 8
-            _screenshot(page, tmp_path, f'composed-review-switch-{browser_engine}')
-            (tmp_path / f'composed-review-reads-{browser_engine}.json').write_text(json.dumps(page.evaluate('() => window.__detailReads.map(({release,...read}) => read)'), indent=2))
-        finally:
-            browser.close()
-
-
-@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_live_revisioned_receipt_bookmark_survives_equal_replay(direct_server_with_data, browser_engine, tmp_path):
+def test_a_live_receipt_survives_equal_replay_and_a_reopened_one_takes_only_newer_revisions(
+        direct_server_with_data, browser_engine, tmp_path):
+    """Live receipts of one revision keep their nodes and keys through a saved replay of the same
+    revision. Closed and opened again, the room is at its newest message; its receipts come from
+    the saved rows, and live frames update them in place only with a newer revision."""
     import os
     from pathlib import Path
     from ouroboros.merge_receipts import card_row_text
@@ -772,27 +540,24 @@ def test_live_revisioned_receipt_bookmark_survives_equal_replay(direct_server_wi
             assert line.evaluate('n => n === window.__readingReceipt')
             assert line.get_attribute('data-live-line-key') == live_key
             assert card.get_attribute('data-expanded') == '1'
-            offset = _bookmark_place(page, line, 1)
+            _bookmark_place(page, line, 1)
             _screenshot(page, tmp_path, f'receipt-bookmark-before-{browser_engine}')
             page.locator('#project-panel-close').click()
-            # Reflow the preceding receipt: restoring only the card offset is
-            # observably different from restoring this exact typed row.
-            page.set_viewport_size({'width': 900, 'height': 850})
             _click_project(page, project)
             _idle(page, feed)
+            _assert_at_newest(page, feed, 'Receipt context 59')
+            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
+            if card.get_attribute('data-expanded') != '1':
+                card.locator(':scope > [data-live-summary-button]').click()
             assert lines.count() == 2
             assert line.get_attribute('data-live-line-key') != live_key
             _screenshot(page, tmp_path, f'receipt-bookmark-after-{browser_engine}')
-            restored_offset = line.evaluate(_OFFSET)
             evidence = Path(os.environ.get('HISTORY_UI_EVIDENCE_DIR') or tmp_path)
             (evidence / f'receipt-bookmark-{browser_engine}.json').write_text(json.dumps({
-                'saved_offset': offset, 'restored_offset': restored_offset, 'live_key': live_key,
-                'cold_key': line.get_attribute('data-live-line-key'), 'card_expanded': card.get_attribute('data-expanded'),
+                'live_key': live_key, 'cold_key': line.get_attribute('data-live-line-key'),
+                'card_expanded': card.get_attribute('data-expanded'),
                 'receipt_rows': [r for r in replay['messages'] if r.get('card_row_id')],
             }, indent=2))
-            assert card.get_attribute('data-expanded') == '1'
-            assert abs(restored_offset - offset) <= 8
-            assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
             text = line.inner_text()
             line.evaluate('n => { window.__coldReceipt = n; }')
             for revision in (2, 3):
@@ -883,41 +648,37 @@ _GAP = 'n => n.scrollHeight - n.scrollTop - n.clientHeight'
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_failed_restore_then_latest_keeps_a_retained_room_at_the_present(direct_server_with_data, browser_engine, tmp_path):
-    """Restore error → ↓ → hide/reopen of a room kept by its staged file still follows new replies."""
+def test_a_room_kept_for_a_staged_file_reopens_at_the_newest_message_and_follows_replies(direct_server_with_data, browser_engine, tmp_path):
+    """Read pages back, a room whose composer holds a staged file is hidden, not destroyed; opened again
+    it is at its newest message, reads no older page again, keeps the file, and follows a new reply
+    (owner decision 2026-10-05)."""
     from playwright.sync_api import sync_playwright
-    from tests.test_history_continuity_browser import _FAULT
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
-    project = _retained_room(direct_server_with_data['data_dir'], 'restore-latest', 1200)
+    project = _retained_room(direct_server_with_data['data_dir'], 'kept-room', 1200)
     with sync_playwright() as pw:
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
-            page.add_init_script(f'({_FAULT})()')
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
             for _ in range(3):
                 _step(page, feed, automatic=True)
-            _bookmark_place(page, page.locator(f'{feed} [data-client-message-id="restore-latest-650"]'), 80)
-            page.locator('#project-panel-close').click()
-            page.evaluate('fault => { window.__continuityFault = fault; }', {'chatId': project['chat_id'], 'fail': 'saved'})
-            _click_project(page, project)
-            page.wait_for_function("feed => document.querySelector(`${feed} .chat-load-older button`)?.textContent === 'Retry loading messages'", arg=feed)
-            page.evaluate('() => { window.__continuityFault = null; }')
+            _bookmark_place(page, page.locator(f'{feed} [data-client-message-id="kept-room-650"]'), 80)
             _stage_file(page)
-            page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
-            _idle(page, feed)
-            page.evaluate(_FRAMES)
-            assert page.locator(feed).evaluate(_GAP) <= 8
             page.locator('#project-panel-close').click()
             assert page.locator('.chat-instance-panel[data-pending-work="1"]').count() == 1
+            before = page.evaluate('() => window.__historyReads.length')
             _click_project(page, project)
-            page.evaluate(_FRAMES)
+            _idle(page, feed)
+            cursors = page.evaluate('n => window.__historyReads.slice(n).filter(r => r.cursor).map(r => r.cursor)', before)
+            assert cursors == [], 'no older page is read again'
+            _assert_at_newest(page, feed, 'kept-room message 1199')
+            assert page.locator('#project-panel .attach-name').filter(has_text='kept.txt').count() == 1
             _emit_ws_frame(page, {'type': 'chat', 'chat_id': project['chat_id'], 'role': 'assistant',
                                   'content': 'LIVE_REPLY_AFTER_REOPEN', 'ts': '2026-09-27T22:00:00Z'})
             page.evaluate(_FRAMES)
-            _screenshot(page, tmp_path, f'restore-error-latest-reopen-{browser_engine}')
+            _screenshot(page, tmp_path, f'kept-room-reopen-{browser_engine}')
             assert page.locator(feed).get_by_text('LIVE_REPLY_AFTER_REOPEN', exact=True).count() == 1
             assert page.locator(feed).evaluate(_GAP) <= 8, 'the reopened room keeps following the present'
         finally:

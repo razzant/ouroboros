@@ -166,6 +166,8 @@ def _git_path_fingerprints(root: pathlib.Path, paths: Iterable[str]) -> dict[str
 
     Only regular files need an additional mode fact: symlink targets and absence
     already describe their Git type. Missing mode evidence remains unknown.
+    ``core.filemode=false`` takes the indexed mode (default 100644) and
+    ``core.symlinks=false`` keeps an indexed symlink mode; the index is only read.
     """
     fingerprints = {path: _path_fingerprint(root / path) for path in paths}
     files = {path: row for path, row in fingerprints.items() if row.get("kind") == "file"}
@@ -398,7 +400,11 @@ def capture_mutation_baseline(
 def _predecessor_git_changes(
     results_drive_root: Any, task_id: str, surface: Mapping[str, Any], source: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Bind a host-selected predecessor's exact terminal work at task start."""
+    """Bind a host-selected predecessor's exact terminal work at task start.
+
+    A path is adopted only with exact retained content: a sha256, a missing path
+    or a symlink; a size-only or mode-unknown regular file proves no transfer.
+    """
     from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
 
     previous_id = str(source.get("task_id") or "")

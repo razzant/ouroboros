@@ -206,22 +206,20 @@ def test_legacy_summary_without_positive_row_facts_cannot_claim_exactness():
     assert build_cost_presentation({'accounted_usd': 0, 'cost_final': True}, scope=COST_SCOPE_OWN) is None
 
 
-# Production ledger/compaction fixtures, executed only by the parent's isolated suite.
-from tests import fixtures_usage_compaction as compaction_fixtures
+# Production money fixtures, executed only by the parent's isolated suite.
+from tests import fixtures_usage_store as compaction_fixtures
 
-data_root_any_tier = compaction_fixtures.data_root_any_tier
 data_root = compaction_fixtures.data_root
 
 
-def test_real_compaction_preserves_all_presentation_facts(data_root):
+def test_an_imported_compacted_journal_preserves_all_presentation_facts(data_root):
     from ouroboros import usage_accounting as usage
 
     compaction_fixtures._seed_mixed_ledger(data_root)
     compaction_fixtures._settle(data_root, cost=0, cost_final=True, task_id='zero')
     compaction_fixtures._settle(data_root, cost=0, cost_final=False, task_id='estimated-zero')
     before = usage.usage_breakdown(data_root, root_task_id='root')
-    receipt = compaction_fixtures._compact(data_root)
-    assert receipt is not None
+    compaction_fixtures.fold_into_archive(data_root, compaction_fixtures.foldable_attempt_ids(data_root))
     assert any(row['kind'] == 'usage_baseline_group' for row in compaction_fixtures._ledger_rows(data_root))
     after = usage.usage_breakdown(data_root, root_task_id='root')
     for field in ['priced_rows', 'tracked_nonfinal_rows', 'accounting_open_rows', 'unknown_unmetered',

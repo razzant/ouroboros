@@ -78,15 +78,33 @@ _SIGNAL_EXIT = ExitFact(returncode=-6, descriptor_written=False)
     (b"current fixture startup exited\nTraceback (most recent call last):\n", StartupFailureClass.UNCLASSIFIED),
 ])
 def test_classifier_names_each_class_and_nothing_else(text, expected):
-    assert classify_startup_failure(text, _SIGNAL_EXIT) is expected
+    fact = (ExitFact(1, False) if expected in {
+        StartupFailureClass.WRITER_LEASE_CONTENDED, StartupFailureClass.ENGINE_FLOOR,
+    } else _SIGNAL_EXIT)
+    assert classify_startup_failure(text, fact) is expected
 
 
 def test_classifier_reads_the_last_refusal_and_needs_an_exit():
-    """The terminal banner is the last thing the dying child wrote; a live child has no failure."""
+    """Only markers matching the exit class participate in the last-marker rule."""
     assert classify_startup_failure(_FLOOR_BELOW + _OOM_REACHED, _SIGNAL_EXIT) is StartupFailureClass.HEAP_EXHAUSTED
-    assert classify_startup_failure(_OOM_REACHED + _LEASE_BUSY, _SIGNAL_EXIT) is StartupFailureClass.WRITER_LEASE_CONTENDED
+    assert classify_startup_failure(_FLOOR_BELOW + _LEASE_BUSY, ExitFact(1, False)) is StartupFailureClass.WRITER_LEASE_CONTENDED
+    assert classify_startup_failure(_LEASE_BUSY + _FLOOR_BELOW, ExitFact(1, False)) is StartupFailureClass.ENGINE_FLOOR
     running = ExitFact(returncode=None, descriptor_written=False)
     assert classify_startup_failure(_OOM_REACHED, running) is StartupFailureClass.UNCLASSIFIED
+
+
+@pytest.mark.parametrize("returncode, expected", [
+    (-6, StartupFailureClass.HEAP_EXHAUSTED),
+    (134, StartupFailureClass.HEAP_EXHAUSTED),
+    (1, StartupFailureClass.WRITER_LEASE_CONTENDED),
+    (0, StartupFailureClass.UNCLASSIFIED),
+    (None, StartupFailureClass.UNCLASSIFIED),
+])
+def test_shared_log_refusals_do_not_relabel_heap_exit(returncode, expected):
+    interval = _LEASE_BUSY * 2 + _OOM_REACHED + _LEASE_BUSY * 3
+    assert classify_startup_failure(interval, ExitFact(returncode, True)) is expected
+    assert classify_startup_failure(_LEASE_BUSY, ExitFact(-9, True)) is StartupFailureClass.UNCLASSIFIED
+    assert classify_startup_failure(_OOM_REACHED, ExitFact(1, False)) is StartupFailureClass.UNCLASSIFIED
 
 
 @pytest.mark.parametrize("returncode, descriptor_written, latches, signal, code", [

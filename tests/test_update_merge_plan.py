@@ -182,8 +182,8 @@ def test_build_and_apply_clean_merge(tmp_path, monkeypatch):
     ok, msg = update_merge.apply_managed_merge_update(head, plan["merge_commit"])
     assert ok, msg
     assert (repo / "b.txt").exists()
-    restored, note = update_merge.restore_update_stash(stash_sha, context="test")
-    assert restored, note
+    result = update_merge.restore_update_stash(stash_sha, context="test")
+    assert result.status == "restored", result
     assert (repo / "c.txt").read_text() == "local untracked\n"
     # Base was fast-forwardable, so official history lands as-is: HEAD is the
     # target itself, with no synthetic merge commit carrying local work.
@@ -201,7 +201,8 @@ def test_rollback_managed_update(tmp_path, monkeypatch):
     import supervisor.workers as workers
     gate_calls = []
     monkeypatch.setattr(workers, "close_repo_writer_admission", lambda reason: gate_calls.append(("close", reason)))
-    monkeypatch.setattr(workers, "open_repo_writer_admission", lambda expected_reason="": gate_calls.append(("open", expected_reason)))
+    monkeypatch.setattr(workers, "open_repo_writer_admission_after_update_abort",
+                        lambda expected_reason="": gate_calls.append(("open", expected_reason)) or True)
     # simulate a bad update landed on top.
     (repo / "bad.txt").write_text("bad\n")
     _git(repo, "add", "-A")
@@ -245,7 +246,8 @@ def test_finalize_rolls_back_after_unhealthy_boot(tmp_path, monkeypatch):
     import supervisor.workers as workers
     gate_calls = []
     monkeypatch.setattr(workers, "close_repo_writer_admission", lambda reason: gate_calls.append(("close", reason)))
-    monkeypatch.setattr(workers, "open_repo_writer_admission", lambda expected_reason="": gate_calls.append(("open", expected_reason)))
+    monkeypatch.setattr(workers, "open_repo_writer_admission_after_update_abort",
+                        lambda expected_reason="": gate_calls.append(("open", expected_reason)) or True)
     (repo / "bad.txt").write_text("bad\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "bad update")
@@ -274,7 +276,8 @@ def test_native_host_mismatch_rolls_back_even_when_core_booted(tmp_path, monkeyp
                         lambda: {"ok": False, "stdout": "build_required", "returncode": 1})
     import supervisor.workers as workers
     monkeypatch.setattr(workers, "close_repo_writer_admission", lambda reason: True)
-    monkeypatch.setattr(workers, "open_repo_writer_admission", lambda expected_reason="": True)
+    monkeypatch.setattr(workers, "open_repo_writer_admission_after_update_abort",
+                        lambda expected_reason="": True)
     result = update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
     assert result["finalized"] is False and result["rolled_back"] is True
     assert result["smoke"]["stdout"] == "build_required"
@@ -317,7 +320,8 @@ def test_rollback_still_resets_when_the_forensics_ref_cannot_be_written(tmp_path
     pre = _git(repo, "rev-parse", "HEAD").stdout.strip()
     _wire_git_ops(monkeypatch, repo, tmp_path / "data")
     monkeypatch.setattr(workers, "close_repo_writer_admission", lambda reason: True)
-    monkeypatch.setattr(workers, "open_repo_writer_admission", lambda expected_reason="": True)
+    monkeypatch.setattr(workers, "open_repo_writer_admission_after_update_abort",
+                        lambda expected_reason="": True)
     (repo / "bad.txt").write_text("bad\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "bad update")

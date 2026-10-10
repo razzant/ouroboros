@@ -11,9 +11,38 @@ split, re-cut on the v7next tip); review_state.py re-exports every name.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Optional
+
+
+@dataclass(frozen=True)
+class ReviewStateMutation:
+    """An opt-in mutation result with an explicit changed-state fact.
+
+    Only audited mutators use this result. False permits a save comparison,
+    never a skipped lock/load or omission of load/persistence normalization.
+    """
+
+    value: Any
+    changed: bool
+
+
+class ReviewStateLockError(TimeoutError):
+    """Keep acquisition facts while preserving callers' TimeoutError contract."""
+
+    def __init__(self, lock_path: Any, outcome: Dict[str, Any]) -> None:
+        super().__init__(f"Could not acquire review state lock for {lock_path}")
+        self.lock_outcome = dict(outcome)
+        self.reported_cause = json.dumps(self.lock_outcome, separators=(",", ":"))
+
+
+def _dataclass_mapping(value: Any) -> Dict[str, Any]:
+    """Let the JSON encoder recurse without dataclasses.asdict's deep copies."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: getattr(value, field.name) for field in fields(value)}
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _rs():
@@ -139,10 +168,10 @@ _DEBT_STR_DEFAULTS = {"debt_id": "", "category": "", "summary": "", "severity": 
 _RUN_STR_DEFAULTS = {"snapshot_hash": "", "commit_message": "", "status": "stale", "snapshot_summary": "", "raw_result": "", "reason_kind": "", "bypass_reason": "", "bypassed_by_task": "", "repo_key": _LEGACY_CURRENT_REPO_KEY, "tool_name": _DEFAULT_ADVISORY_TOOL_NAME, "phase": "advisory", "model_used": "", "session_id": "", "review_rebuttal": ""}
 
 
-_ATTEMPT_STR_DEFAULTS = {"commit_message": "", "snapshot_hash": "", "block_reason": "", "block_details": "", "task_id": "", "repo_key": _LEGACY_CURRENT_REPO_KEY, "tool_name": _DEFAULT_TOOL_NAME, "pre_review_fingerprint": "", "post_review_fingerprint": "", "fingerprint_status": "", "scope_model": "", "block_class": "", "rebuttal_sha256": "", "review_contract_fingerprint": "", "review_retry_key": "", "root_task_id": "", "review_owner_session_id": ""}
+_ATTEMPT_STR_DEFAULTS = {"commit_message": "", "snapshot_hash": "", "block_reason": "", "block_details": "", "task_id": "", "repo_key": _LEGACY_CURRENT_REPO_KEY, "tool_name": _DEFAULT_TOOL_NAME, "pre_review_fingerprint": "", "post_review_fingerprint": "", "fingerprint_status": "", "scope_model": "", "block_class": "", "rebuttal_sha256": "", "review_contract_fingerprint": "", "review_retry_key": "", "root_task_id": "", "review_owner_session_id": "", "review_record_id": ""}
 
 
-_ATTEMPT_MERGE_INCOMING_FIRST = ("ts", "commit_message", "status", "snapshot_hash", "block_reason", "block_details", "duration_sec", "task_id", "repo_key", "tool_name", "phase", "pre_review_fingerprint", "post_review_fingerprint", "fingerprint_status", "scope_model", "block_class", "rebuttal_sha256", "review_contract_fingerprint", "review_retry_key", "root_task_id", "review_owner_session_id")
+_ATTEMPT_MERGE_INCOMING_FIRST = ("ts", "commit_message", "status", "snapshot_hash", "block_reason", "block_details", "duration_sec", "task_id", "repo_key", "tool_name", "phase", "pre_review_fingerprint", "post_review_fingerprint", "fingerprint_status", "scope_model", "block_class", "rebuttal_sha256", "review_contract_fingerprint", "review_retry_key", "root_task_id", "review_owner_session_id", "review_record_id")
 
 
 _ATTEMPT_MERGE_INCOMING_LISTS = ("critical_findings", "advisory_findings", "obligation_ids", "readiness_warnings")
@@ -345,6 +374,9 @@ class CommitAttemptRecord:
     # Optional canonical author-finish stance for an advisory commit. Raw
     # reviewer evidence remains in the same attempt row beside this record.
     author_disposition: Dict[str, Any] = field(default_factory=dict)
+    # Review ledger record this attempt's authoritative wave was written to
+    # (``state/review_ledger/<record_id>.json``); "" on rows older than the ledger.
+    review_record_id: str = ""
 
 
 def _attempt_identity_tuple(attempt: CommitAttemptRecord) -> tuple[str, str, str, str]:

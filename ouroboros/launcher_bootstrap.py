@@ -39,6 +39,66 @@ class BootstrapContext:
     log: Any
 
 
+def checkout_sha(repo_dir: pathlib.Path) -> str:
+    """HEAD of the checkout, or "" when Git or the repository is unavailable (never a guess)."""
+    try:
+        shown = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir), capture_output=True,
+                               text=True, encoding="utf-8", check=False)
+    except OSError:
+        return ""
+    return shown.stdout.strip() if shown.returncode == 0 else ""
+
+
+_LOADED_CHECKOUT_SHA = ""  # the checkout whose modules the launcher process imported (its first launch)
+
+
+def remember_loaded_checkout(repo_dir: pathlib.Path) -> str:
+    """Record once, at the launcher's first agent start, which commit its own modules came from."""
+    global _LOADED_CHECKOUT_SHA
+    _LOADED_CHECKOUT_SHA = _LOADED_CHECKOUT_SHA or checkout_sha(repo_dir)
+    return _LOADED_CHECKOUT_SHA
+
+
+def launcher_sources_changed(repo_dir: pathlib.Path, loaded_sha: str | None = None, *,
+                             bundle_dir: pathlib.Path | None = None) -> bool:
+    """True when the landed checkout changed a module the launcher process has loaded.
+
+    The launcher imports its helpers once; a body adoption (or any release) that
+    lands another version of them while the agent is down leaves that process
+    serving stale code, so its exit-42 branch re-executes the launcher exactly
+    then (the same move the seed-bundle first run makes). The comparison is the
+    checkout's own history, not the file system: the commit the launcher imported
+    from (``loaded_sha``, "" when unknown: never a relaunch) against the commit
+    that now serves, over the loaded modules' repository paths plus ``launcher.py``.
+    A packaged launcher loaded its modules from ``bundle_dir`` (PyInstaller names
+    them ``<pkg>/<module>.pyc`` there); they count under their repository paths.
+    """
+    import sys
+
+    loaded_sha = _LOADED_CHECKOUT_SHA if loaded_sha is None else loaded_sha
+    head = checkout_sha(repo_dir)
+    if not loaded_sha or not head or head == loaded_sha:
+        return False
+    roots = [pathlib.Path(root).resolve() for root in (repo_dir, bundle_dir) if root]
+    loaded = {"launcher.py"}
+    for module in list(sys.modules.values()):
+        source = getattr(module, "__file__", None)
+        if not source:
+            continue
+        try:
+            path = pathlib.Path(source).resolve()
+        except OSError:
+            continue
+        for root in roots:
+            if path.is_relative_to(root):
+                relative = path.relative_to(root)
+                loaded.add((relative.with_suffix(".py") if relative.suffix == ".pyc" else relative).as_posix())
+                break
+    probe = subprocess.run(["git", "diff", "--quiet", loaded_sha, head, "--", *sorted(loaded)],
+                           cwd=str(repo_dir), capture_output=True, check=False)
+    return probe.returncode == 1
+
+
 def embedded_python_env(data_dir: pathlib.Path, base: dict[str, str] | None = None) -> dict[str, str]:
     """Env for running the EMBEDDED interpreter without writing into the bundle.
 
@@ -375,7 +435,12 @@ def _install_managed_repo(context: BootstrapContext, manifest: dict[str, Any], *
 
 
 def ensure_managed_repo(context: BootstrapContext) -> str:
-    """Ensure REPO_DIR is a managed git clone backed by the embedded bundle."""
+    """Ensure REPO_DIR is a managed git clone backed by the embedded bundle.
+
+    An existing directory without ``.git`` is archived under
+    ``data/archive/managed_repo`` before the first clone. A manifest mismatch on
+    a git checkout only refreshes the managed remote metadata; the checkout stays.
+    """
     manifest = load_bundle_manifest(context)
     if not context.repo_dir.exists():
         return _install_managed_repo(context, manifest, reason="missing")
@@ -524,7 +589,11 @@ def _per_skill_version_resync(
     *,
     drive_root: pathlib.Path | None = None,
 ) -> int:
-    """Re-seed only marker-owned native skills whose seed version changed."""
+    """Re-seed only marker-owned native skills whose seed version changed.
+
+    Payload drift at an equal manifest version is logged as a warning and the
+    installed files are kept; it never blocks.
+    """
     if not seed_dir.is_dir() or not native_root.is_dir():
         return 0
     upgraded = 0
@@ -601,7 +670,7 @@ def _stamp_native_seed_trust(
 ) -> None:
     """Hash-pin a native-trust review verdict for a launcher-seeded skill.
 
-    The payload bytes shipped through the repo commit gate (triad+scope), so a
+    The payload bytes shipped through the repo commit gate (its review wave), so a
     launcher-written native skill gets ``status=clean`` bound to the payload
     hash computed AFTER seeding (control files excluded from the hash). Any
     later edit flips the verdict stale exactly like an ordinary review.
@@ -1134,12 +1203,12 @@ def parse_launch_options(argv):
                         help="Automatic boot entry preserves an explicit Panic stop.")
     parser.add_argument("--host-update", type=pathlib.Path,
                         help="External host Python installer; also supports read-only --check.")
-    parser.add_argument("--seed-bundle", type=pathlib.Path, help="Keep immutable seed provenance while running an external host from source.")
+    parser.add_argument("--seed-bundle", type=pathlib.Path, help="Keep immutable seed provenance when relaunching from source; presentation is unchanged.")
     # Desktop launchers may supply platform arguments (for example Finder's
     # process serial number). Retain their previously ignored behavior.
     options, _ = parser.parse_known_args(argv)
-    if (options.host_update is not None or options.seed_bundle is not None) and not options.no_ui:
-        parser.error("--host-update and --seed-bundle require --no-ui")
+    if options.host_update is not None and not options.no_ui:
+        parser.error("--host-update requires --no-ui")
     return options
 
 

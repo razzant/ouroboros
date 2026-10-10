@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import math
 import pathlib
@@ -176,6 +178,45 @@ def drain_all_pending(*, persist: bool = True) -> list:
     return drained
 
 
+# A root's billing a caller resolved before taking ``_queue_lock``: (task id, binding).
+_PREPARED_ROOT_BILLING: contextvars.ContextVar = contextvars.ContextVar("prepared_root_billing", default=None)
+
+
+def prepare_root_billing(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The whole-work binding of a ROOT about to be admitted, resolved OFF the queue lock.
+
+    The lookup may read the money ledger (its own cross-process lock; in a cold
+    process a full parse), so a caller that holds ``_queue_lock`` for its own
+    admission transaction resolves this first, inside ``prepared_root_billing``.
+    ``None`` for a child: nothing to resolve.
+    """
+    root_id = str(task.get("id") or "").strip()
+    if not root_id or str(task.get("root_task_id") or root_id) != root_id:
+        return None
+    from ouroboros.config import runtime_setting
+    from ouroboros.usage_admission import task_billing_fields
+
+    limit = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
+    return task_billing_fields(task, root_id, limit if limit > 0 else None,
+                               task.get("budget_drive_root") or DRIVE_ROOT, pin_initial=True,
+                               persist_initial=False)
+
+
+@contextlib.contextmanager
+def prepared_root_billing(task: Dict[str, Any]):
+    """Resolve a root's billing BEFORE the caller takes ``_queue_lock``.
+
+    ``enqueue_task`` called inside the block for the same task uses the result
+    instead of reading the ledger under the lock. Written as a context manager
+    so the call shape ``enqueue_task(task, ...)`` stays the same everywhere.
+    """
+    token = _PREPARED_ROOT_BILLING.set((str(task.get("id") or "").strip(), prepare_root_billing(task)))
+    try:
+        yield
+    finally:
+        _PREPARED_ROOT_BILLING.reset(token)
+
+
 def enqueue_task(
     task: Dict[str, Any], front: bool = False, *, restoring_snapshot: bool = False,
     consciousness_window: Optional[Dict[str, Any]] = None, continuation: bool = False,
@@ -183,6 +224,10 @@ def enqueue_task(
 ) -> Dict[str, Any]:
     """Add task to PENDING (thread-safe: HTTP handlers enqueue concurrently
     with the supervisor main loop, so the mutation must hold the queue lock).
+
+    A root's whole-work binding is resolved OFF the queue lock: here before the
+    lock is taken, or earlier by a caller that holds the lock for its own
+    admission transaction (``prepared_root_billing``).
 
     ``consciousness_window``: an allowance the caller already read OFF the queue lock
     (the scheduler). ``continuation``: host-derived only (a follow-up row's own
@@ -201,6 +246,15 @@ def enqueue_task(
     # starts — a window stale by milliseconds changes nothing).
     if consciousness_window is None and not restoring_snapshot:
         consciousness_window = consciousness_admission_window(t)
+    # The whole-work binding of a root may read the money ledger too (its own
+    # cross-process lock; in a cold process a full parse): resolve it here, off
+    # the queue lock, and only attach it inside. A caller whose admission
+    # transaction already holds the lock resolved it earlier (``prepared_root_billing``).
+    prepared = _PREPARED_ROOT_BILLING.get()
+    if prepared is not None and prepared[0] == str(t.get("id") or "").strip():
+        billing = prepared[1]
+    else:
+        billing = None if restoring_snapshot else prepare_root_billing(t)
     project_id = str(t.get("project_id") or "").strip()
     # The host preparation basis survives queue snapshots and retries. Legacy
     # tasks lacking one are checked against current authority without claiming
@@ -286,18 +340,13 @@ def enqueue_task(
             if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
                 ADMISSION_RESERVATIONS.pop(task_id, None)
             return t
-        if not restoring_snapshot and task_id and str(t.get("root_task_id") or task_id) == task_id:
-            from ouroboros.config import runtime_setting
-            from ouroboros.usage_admission import task_billing_fields, UNAVAILABLE_GROUP_PREFIX
+        if billing is not None:
+            from ouroboros.usage_admission import UNAVAILABLE_GROUP_PREFIX
 
-            limit = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
-            binding = task_billing_fields(t, task_id, limit if limit > 0 else None,
-                                          t.get("budget_drive_root") or DRIVE_ROOT, pin_initial=True,
-                                          persist_initial=False)
-            if str(binding["billing_group_id"]).startswith(UNAVAILABLE_GROUP_PREFIX):
+            if str(billing["billing_group_id"]).startswith(UNAVAILABLE_GROUP_PREFIX):
                 t["_admission_blocked"] = "billing_authority_unavailable"
                 return t
-            t.setdefault("metadata", {})["billing_group"] = {k: v for k, v in binding.items()
+            t.setdefault("metadata", {})["billing_group"] = {k: v for k, v in billing.items()
                                                              if k.startswith("billing_group_")}
         QUEUE_SEQ_COUNTER_REF["value"] += 1
         seq = QUEUE_SEQ_COUNTER_REF["value"]
@@ -410,6 +459,7 @@ def ensure_control_task_result(task_id: str) -> Dict[str, Any]:
             "origin_message_text", "origin_message_ref", "objective", "title", "suggested_name",
             "original_task_id", "timeout_retry_from", "deadline_at", "root_cost_ceiling_usd",
             "billing_group", "task_constraint", "objective_author", "owner_corpus", "task_group_id", "task_group",
+            "reasoning_effort",
         ) if key in task}
         fields["root_task_id"] = resolve_task_lineage(task_id, **{
             key: task.get(key) for key in ("metadata", "root_task_id", "parent_task_id", "delegation_role",
@@ -491,10 +541,14 @@ def _consciousness_admission_block(task: Dict[str, Any], window: Optional[Dict[s
         if not window["limit_usd"]:
             return ("consciousness_allowance_exhausted",
                     "OUROBOROS_CONSCIOUSNESS_DAILY_USD=0: consciousness may not spend")
-        at_least = " (at least)" if window["unknown_unmetered"] else ""
+        at_least = " (at least)" if window.get("unknown_unmetered") else ""
+        known = window.get("settled_usd")
+        open_holds = 0.0 if known is None else max(0.0, float(window.get("accounted_usd") or 0.0) - float(known))
+        holds = f" (plus ${open_holds:.2f} of open holds, not counted)" if open_holds > 0 else ""
+        spent = "unknown" if known is None else f"${float(known):.2f}{at_least}"
         return ("consciousness_allowance_exhausted", (
-            f"${window['accounted_usd']:.2f}{at_least} of ${window['limit_usd']:.2f} "
-            f"spent in the last 24 h; resets at {window['resets_at'] or 'unknown'}"
+            f"{spent} of ${window['limit_usd']:.2f} "
+            f"known spend in the last 24 h{holds}; resets at {window['resets_at'] or 'unknown'}"
         ))
     return None
 
@@ -602,7 +656,7 @@ def _cancel_task_by_id_single(task_id: str) -> bool:
 
 
 def queue_deep_self_review_task(reason: str, model: str = "", force: bool = False, chat_id: Optional[int] = None,
-                                origin: Optional[Dict[str, Any]] = None) -> Optional[str]:
+                                origin: Optional[Dict[str, Any]] = None, reviewer: str = "") -> Optional[str]:
     """Queue a deep self-review task.
 
     ``chat_id`` targets a specific chat (e.g. the external transport chat that ran
@@ -610,12 +664,25 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
     instead of always defaulting to the web owner's ``owner_chat_id``. ``origin`` is
     the requester's consciousness origin (a wake-up or its tree), stamped on the
     root so the admission door and the ledger see it; empty for the owner.
+    ``reviewer`` is the one enabled catalog row the requester named (id or handle,
+    pool member or not); empty runs the Main model (decision 3A). A name that is not
+    an enabled row is refused in the requester's chat before any worker is held.
     """
     # Membership, not truthiness: a review asked for from the hidden partition
     # is answered there, not silently re-routed to the owner's main chat.
     target_chat_id = notification_chat_route(chat_id, load_state().get("owner_chat_id"))
     if target_chat_id is None:
         return None
+    reviewer = str(reviewer or "").strip()
+    if reviewer:
+        from ouroboros.tools.review_change import ReviewChangeArgumentError, system_review_row
+
+        try:
+            system_review_row(reviewer)
+        except ReviewChangeArgumentError as exc:
+            send_with_budget(int(target_chat_id), f"Deep self-review could not be queued: {exc}.",
+                             role="system", system_type="deep_self_review_unavailable")
+            return None
     if (not force) and queue_has_task_type("deep_self_review"):
         return None
     tid = uuid.uuid4().hex[:8]
@@ -625,6 +692,7 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
         "chat_id": int(target_chat_id),
         "text": reason or "Deep self-review",
         "model": model,
+        "reviewer": reviewer,
         "_require_worker_pool": True,
         **({"metadata": dict(origin)} if origin else {}),
     })
@@ -641,7 +709,7 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
     persist_queue_snapshot(reason="deep_self_review_enqueued")
     # Typed SYSTEM row: an acknowledgement is never a task's answer, and the bench
     # trajectory reader takes the last UNTYPED outbound row as one.
-    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})", role="system", system_type="deep_self_review_queued")
+    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason}; reviewer: {reviewer or 'Main'})", role="system", system_type="deep_self_review_queued")
     return tid
 
 
@@ -695,7 +763,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         detail = "Evolution control is unknown: runtime state is unavailable or recovering from a backup."
     elif restart_blocked:
         status = "waiting_for_restart_verify"
-        detail = "Waiting for restart verification before the next absorbed evolution cycle."
+        detail = str(active_tx.get("restart_guidance") or "Waiting for restart verification before the next absorbed evolution cycle.")
     elif isinstance(running_task, dict):
         status = "running"
         detail = "Evolution task is running now."

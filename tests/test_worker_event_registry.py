@@ -183,8 +183,6 @@ def test_previously_dropped_types_are_registered():
     for event_type in (
         "review_wave_budget_partial_unknown",
         "task_message_injected",
-        "advisory_suspect_result",
-        "advisory_contract_warning",
         "plan_task_deadline_skip",
     ):
         assert event_type in registered, event_type

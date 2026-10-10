@@ -11,7 +11,7 @@ from ouroboros.anthropic_native_custody import public_custody_projection
 from ouroboros.utils import sanitize_tool_result_for_log
 
 
-def retain_cancelled_response(request, response, capture) -> dict:
+def retain_cancelled_response(request, response, capture, *, control_reason: str = "caller_cancelled") -> dict:
     """Keep a received physical response before cancellation unwinds its caller.
 
     Reuse private CAS and the ordinary call reader. This records the provider
@@ -27,7 +27,7 @@ def retain_cancelled_response(request, response, capture) -> dict:
         payload={"response": body, "physical_attempt_capture": asdict(capture)}, keep_raw=True,
         manifest={"attempt_id": capture.attempt_id, "model": capture.model,
                   "provider": capture.provider, "state": capture.state,
-                  "status": "received", "control_reason": "caller_cancelled"},
+                  "status": "received", "control_reason": control_reason},
     )
 
 

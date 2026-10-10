@@ -21,7 +21,11 @@ SYSTEM + BIBLE are tier-0 and always full.
 import os
 import pathlib
 import tempfile
+import pytest
 from tests._governance_docs_shared import governance_doc_text
+from tests.test_swarm_host_admission import host as _promotion_host
+
+promotion_host = _promotion_host
 
 # Unique sentinel placed inside the ARCHITECTURE body so we can prove the full
 # body is inlined (max) vs replaced by a structure-only nav map (low).
@@ -51,7 +55,7 @@ def _make_env_and_memory(tmpdir: pathlib.Path):
     )
     (repo_dir / "docs" / "DEVELOPMENT.md").write_text("# DEVELOPMENT.md — Dev Guide", encoding="utf-8")
     (repo_dir / "README.md").write_text('[![Version 5.5.0](https://img.shields.io/badge/version-5.5.0-green.svg)](VERSION)', encoding="utf-8")
-    (repo_dir / "docs" / "CHECKLISTS.md").write_text("## Repo Commit Checklist\n| # | item |", encoding="utf-8")
+    (repo_dir / "docs" / "CHECKLISTS.md").write_text("## Change Review Checklist\n| # | item |", encoding="utf-8")
     (drive_root / "state" / "state.json").write_text('{"spent_usd": 0}', encoding="utf-8")
     (drive_root / "memory" / "scratchpad.md").write_text("test scratchpad", encoding="utf-8")
     (drive_root / "memory" / "identity.md").write_text("I am Ouroboros.", encoding="utf-8")
@@ -94,7 +98,6 @@ def test_plan_review_docs_pin_fail_closed_exact_artifact_custody():
     for relative in ("docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md"):
         text = governance_doc_text(relative, repo)
         assert "plan_review_exact_artifact_unavailable" in text, relative
-        assert "only when no exact artifact reference exists" in text, relative
 
 
 def test_forked_task_captures_canonical_memory_and_exact_api_context():
@@ -417,6 +420,97 @@ def test_low_mode_external_workspace_gets_both_book_navigation_views():
     assert "navigation map" in external
     assert _ARCH_BODY_SENTINEL not in external
     assert "## DEVELOPMENT.md (navigation map)" in external
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("mode", ["max", "low", "nano"])
+def test_promoted_self_body_requirement_reaches_the_contract_and_context_without_becoming_project_state(
+    promotion_host, tmp_path, monkeypatch, mode,
+):
+    """Schema → tool → event handler → real queue/contract → root and child context."""
+    import copy
+    from types import SimpleNamespace
+    from ouroboros.agent import Env
+    from ouroboros.context import build_llm_messages
+    from ouroboros.memory import Memory
+    from ouroboros.projects_registry import create_project, get_project
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.control import _build_child_subagent_contract, get_tools
+    from supervisor.events import _handle_promote_chat_to_task
+
+    host = promotion_host
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", mode)
+    monkeypatch.setattr("ouroboros.context.resolve_context_fit_route", lambda *_a, **_kw: (
+        {"model": "fixture", "provider": "fixture"},
+        SimpleNamespace(route_fp="fixture", status="asserted", stale=False, window_tokens=1_000_000),
+    ))
+    books_env, _memory = _make_env_and_memory(tmp_path / "books")
+    env = Env(repo_dir=books_env.repo_dir, drive_root=host.root, budget_drive_root=host.root)
+    development_body = "# DEVELOPMENT.md — Dev Guide\n\n## Review\n\nRead every source before committing.\n"
+    (env.repo_dir / "docs" / "DEVELOPMENT.md").write_text(development_body, encoding="utf-8", newline="\n")
+    memory = Memory(host.root, repo_dir=env.repo_dir)
+    workspace = tmp_path / "working-copy"
+    workspace.mkdir()
+    project = create_project(host.root, "code-copy", name="Code Copy")
+    entry = next(tool for tool in get_tools() if tool.name == "promote_chat_to_task")
+    field = "context_requires_self_body_docs"
+    parameters = entry.schema["parameters"]
+    assert parameters["properties"][field]["type"] == "boolean"
+    assert field not in parameters["required"]
+    description = parameters["properties"][field]["description"]
+    assert "Ouroboros code" in description and "copies elsewhere" in description
+    assert "context_requires_development" not in parameters["properties"]
+    events = []
+
+    def emit(event):
+        events.append(copy.deepcopy(event))
+        _handle_promote_chat_to_task(event, host.ctx)
+
+    tool_ctx = SimpleNamespace(
+        repo_dir=env.repo_dir, system_repo_dir=env.repo_dir, drive_root=host.root, task_id="promoter",
+        current_chat_id=1, task_metadata={}, pending_events=[], event_queue=SimpleNamespace(put_nowait=emit),
+    )
+    first = None
+    # A later task in the SAME project must not inherit the first task's choice.
+    for flag in (True, None, False):
+        kwargs = {} if flag is None else {field: flag}
+        result = entry.handler(tool_ctx, "Inspect this working copy", predecessor_task_id="",
+                               project_id=project["id"], workspace_root=str(workspace), **kwargs)
+        assert result.startswith("OK: task"), result
+        task = copy.deepcopy(host.pending[-1])
+        assert events[-1][field] is bool(flag)
+        assert task["task_contract"][field] is bool(flag)
+        assert task[field] is bool(flag)
+        assert pathlib.Path(task["workspace_root"]).resolve() == workspace.resolve()
+        assert load_task_result(host.root, task["id"])["task_contract"][field] is bool(flag)
+        assert field not in get_project(host.root, project["id"])
+        # Exercise the existing contract-only consumer, as on restored tasks.
+        task.pop(field)
+        messages, _cap = build_llm_messages(env=env, memory=memory, task=task)
+        content = messages[0]["content"]
+        first = first or content[0]
+        assert content[0] == first and "docs/DEVELOPMENT.md" in content[0]["text"]
+        handbook = [block for block in content if block["text"].startswith("## DEVELOPMENT.md\n")]
+        assert len(handbook) == int(bool(flag) and mode == "max")
+        if handbook:
+            assert content[1] == handbook[0] and "cache_control" in handbook[0]
+            assert development_body in handbook[0]["text"]
+        if mode != "max":
+            assert "## DEVELOPMENT.md (navigation map)" in content[0]["text"]
+        child = {"id": "child-" + task["id"], "type": "task", "text": "Read the assignment", "chat_id": task["chat_id"],
+                 "delegation_role": "subagent", "parent_task_id": task["id"], "root_task_id": task["id"],
+                 "configured_subagent": {"id": "helper", "route": {"kind": "api_model"}}}
+        child["task_contract"] = _build_child_subagent_contract({
+            "tid": child["id"], "objective": child["text"], "parent_contract": task["task_contract"],
+            "parent_task_id": task["id"], "root_task_id": task["id"], "workspace_root": str(workspace),
+            "workspace_mode": "external", "parent_project_id": project["id"],
+        })
+        assert child["task_contract"][field] is bool(flag)
+        child_messages, _cap = build_llm_messages(env=env, memory=memory, task=child)
+        child_content = child_messages[0]["content"]
+        assert "## DEVELOPMENT.md (navigation map)" in child_content[0]["text"]
+        assert not any(block["text"].startswith("## DEVELOPMENT.md\n") for block in child_content)
+    assert len(events) == len(host.pending) == 3 and not host.attempts
 
 
 def test_max_mode_evolution_task_keeps_arch_and_development_full():

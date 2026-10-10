@@ -271,3 +271,30 @@ def test_physical_ledger_unifies_subtree_tokens_cost_and_run_summary(tmp_path: P
         "cost_final": True,
         "accounting_authority": "physical_attempt_ledger",
     }
+
+
+def test_the_usage_store_is_the_physical_ledger_of_a_store_era_trial(tmp_path: Path) -> None:
+    """A trial written by the usage-store product reads its subtree from ``state/usage.sqlite``."""
+    from ouroboros import usage_accounting as ua
+    from ouroboros import usage_store
+
+    agent = _make_agent_dir(tmp_path)
+    data = agent / "ouroboros-data"
+    (data / "state").mkdir(parents=True, exist_ok=True)
+    (agent / "ouroboros-run-summary.json").write_text(json.dumps({"task_id": "root-1"}), encoding="utf-8")
+    for task_id, root_task_id, tokens, cost in (
+            ("root-1", "root-1", (10, 5, 3), 0.2), ("child-1", "root-1", (20, 7, 10), 0.3),
+            ("root-1", "root-1", (4, 2, 0), 0.1), ("root-2", "root-2", (999, 999, 999), 9.0)):
+        held = ua.reserve_attempt(ua.AttemptRequest(
+            model="m", provider="test", drive_root=data, task_id=task_id, root_task_id=root_task_id,
+            reservation_usd=cost, global_limit_usd=100.0))
+        ua.mark_dispatched(held)
+        ua.settle_attempt(held, dict(zip(("prompt_tokens", "completion_tokens", "cached_tokens"), tokens)),
+                          cost_usd=cost, cost_final=True)
+    usage_store.forget(data)
+    assert not (data / "state" / "usage_attempts.jsonl").exists()
+
+    metrics = build_trajectory(agent)["final_metrics"]
+    assert (metrics["total_prompt_tokens"], metrics["total_completion_tokens"], metrics["total_cached_tokens"]) == (
+        34, 14, 13)
+    assert metrics["total_cost_usd"] == 0.6

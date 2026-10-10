@@ -14,7 +14,7 @@ from ouroboros.task_results import load_task_result, write_task_result
 from supervisor import queue, workers
 from tests.test_hurry_initial_lifecycle import pool  # noqa: F401
 from tests.test_main_project_consistency import owner_turn
-from tests.test_project_hold_recovery import accepted, restore_unreadable, worker
+from tests.test_project_hold_recovery import accepted, restore_unreadable, resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 
 pytestmark = pytest.mark.serial
@@ -101,6 +101,9 @@ def test_first_restore_keeps_accepted_project_row_waiting_through_unreadable_res
     assert census["held"]["project_admission_hold"]["label"] == "Waiting for Project verification"
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
+    assert not sent
+    resume_after_app_stop(host, "sibling")
+    workers.assign_tasks()
     assert [row["id"] for row in sent] == ["sibling"]  # a healthy neighbor is not blocked
     queue.RUNNING.clear()
     workers.WORKERS[0].busy_task_id = None
@@ -111,6 +114,9 @@ def test_first_restore_keeps_accepted_project_row_waiting_through_unreadable_res
         write_task_result(host.root, "held", "scheduled", admitted_dispatch="possible")
     elif veto == "started":
         write_task_result(host.root, "held", "scheduled", started_at="2026-01-01T00:00:00Z")
+    # Selecting the app-stop hold does not discharge Project dispatch evidence:
+    # the original admission checks below must still prevent either replay.
+    resume_after_app_stop(host, "held")
     workers.assign_tasks()
     workers.assign_tasks()
     assert [row["id"] for row in sent] == (["sibling"] if veto else ["sibling", "held"])
@@ -224,6 +230,15 @@ def _drain(slot):
     return sent
 
 
+def _acknowledged_resolver_restart(root, pending):
+    """These update consumers return through the planned-restart door, not a crash."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    prepare_restart_returns(root, {}, pending, transaction_id="resolver-restart")
+    _ack(root, "resolver-restart")
+
+
 @pytest.mark.parametrize("prior", [None, "possible"])
 def test_assisted_resolver_recovers_same_id_after_restore_scope_hold(pool, prior):  # noqa: F811
     """Unreadable bindings hold the restored resolver; once scope is verifiable it runs once,
@@ -236,6 +251,7 @@ def test_assisted_resolver_recovers_same_id_after_restore_scope_hold(pool, prior
     receipt = load_task_result(pool.root, RESOLVER, strict=True)
     assert receipt["status"] == "scheduled" and receipt["host_admission"]["status"] == "accepted"
     assert queue.persist_queue_snapshot()
+    _acknowledged_resolver_restart(pool.root, queue.PENDING)
     if prior == "possible":  # the resolver may already have reached a worker
         write_task_result(pool.root, RESOLVER, "scheduled", admitted_dispatch="possible")
     bindings = registry._bindings_path(pool.root)
@@ -350,6 +366,7 @@ def test_resolver_whose_dispatch_evidence_is_lost_is_never_replayed(pool, loss, 
     queue.PENDING.clear()
     if queued:  # boot restores the row from the snapshot persisted before the handoff
         queue.QUEUE_SNAPSHOT_PATH.write_bytes(older)
+        _acknowledged_resolver_restart(pool.root, [entry["task"] for entry in json.loads(older)["pending"]])
         assert queue.restore_pending_from_snapshot() == 1
     assert update_merge.enqueue_assisted_resolution_task(tx) == ("" if loss else RESOLVER)
     workers.assign_tasks()
@@ -496,8 +513,7 @@ def test_assisted_apply_reports_started_only_for_an_admitted_resolver(pool, monk
         return (0, base, "") if cmd[:3] == ["git", "rev-parse", "--verify"] else (0, "", "")
 
     txs, rollbacks = [], []
-    monkeypatch.setattr(reviewer_slot_config, "commit_triad_rows", lambda: [])
-    monkeypatch.setattr(reviewer_slot_config, "commit_scope_rows", lambda: [])
+    monkeypatch.setattr(reviewer_slot_config, "review_pool_slots", lambda **_kw: [])
     monkeypatch.setattr(git_ops, "BRANCH_DEV", "ouroboros")
     monkeypatch.setattr(git_ops, "git_capture", capture)
     monkeypatch.setattr(git_ops, "_create_rescue_snapshot", lambda *_a, **_k: None)
@@ -567,6 +583,8 @@ def test_held_project_child_never_starts_behind_an_interrupted_parent(host, tmp_
     assert held["_project_admission_restore_hold"] and not held.get("_terminalization_retry")
     sent = worker(host, monkeypatch)
     result.write_bytes(original)
+    if parent == "completed":
+        resume_after_app_stop(host, "child")
     workers.assign_tasks()
     workers.assign_tasks()
     assert [row["id"] for row in sent] == (["child"] if parent == "completed" else [])
@@ -576,6 +594,7 @@ def test_held_project_child_never_starts_behind_an_interrupted_parent(host, tmp_
         assert host.pending[0]["_project_admission_restore_hold"]
         assert not host.pending[0].get("_terminalization_retry")
         parent_path.write_bytes(parent_bytes)
+        resume_after_app_stop(host, "child")
         workers.assign_tasks()
         workers.assign_tasks()
         assert [row["id"] for row in sent] == ["child"]
@@ -597,6 +616,7 @@ def test_readable_project_child_waits_for_its_unreadable_parent(host, tmp_path, 
     assert not sent and load_task_result(host.root, "child")["status"] == "scheduled"
     if parent == "completed":
         parent_path.write_bytes(parent_bytes)
+        resume_after_app_stop(host, "child")
     elif parent == "shutdown":  # an earlier boot handed the parent to shutdown custody
         parent_path.unlink()
         write_task_result(host.root, "parent", "cancelled", chat_id=1,
@@ -685,8 +705,9 @@ def test_healthy_child_waits_for_an_unknown_parent_inside_or_outside_the_snapsho
             assert host.pending[-1]["_project_admission_restore_hold"] and not host.attempts
             return
         parent_path.write_bytes(parent_bytes)  # the parent's evidence returns
-    else:  # a readable parent is permission: the child is never held for it
+    else:  # a readable parent satisfies lineage; explicit Resume still releases the app-stop hold
         assert not rows["child"].get("_project_admission_restore_hold")
+    resume_after_app_stop(host, *("parent", "child") if where == "queued" else ("child",))
     _passes()
     assert [row["id"] for row in sent] == (["parent", "child"] if where == "queued" else ["child"])
     assert not host.pending and not host.attempts
@@ -763,6 +784,7 @@ def test_consciousness_host_producer_reads_its_allowance_off_the_queue_lock(host
     notices = []
     monkeypatch.setattr(queue, "send_with_budget", lambda _chat, text, **_k: notices.append(text))
     window = {"status": STATUS_AVAILABLE if status == "available" else "exhausted", "limit_usd": 5.0,
+              "settled_usd": 0.0 if status == "available" else 5.0,
               "accounted_usd": 0.0 if status == "available" else 5.0, "remaining_usd": 5.0,
               "resets_at": "", "unknown_unmetered": 0}
     tid, free, reads = _consciousness_review(monkeypatch, window)

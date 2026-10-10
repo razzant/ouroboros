@@ -165,9 +165,10 @@ automatically disabling, deleting, or moving either payload.
 model's point of view: `what_model_sees` (what the skill adds to the model's
 context — tools, sections, attachments) and `token_effect` (roughly what that
 costs and when it is loaded). A bare string is shorthand for
-`what_model_sees`. The prose travels verbatim (bounded) to the model-visible
-surfaces — the `list_skills` JSON and the "Installed Skills" context section —
-so write it for the model, not for the human reviewer. Unknown keys or
+`what_model_sees`. The prose travels to the model-visible surfaces — bounded in
+the `list_skills` index and the "Installed Skills" context section, whole in
+`list_skills(name=...)`, which also returns the `read_file` call for this
+manifest — so write it for the model, not for the human reviewer. Unknown keys or
 non-string values are refused at parse time.
 
 Manifest refusals teach: every `SkillManifestError` carries the problem plus,
@@ -180,7 +181,7 @@ manifest instead of only what was wrong.
 ```mermaid
 flowchart LR
     install[install] --> review[skill_review]
-    review --> triad[reviewer-slot skill review]
+    review --> triad[skill review by the review panel]
     triad -- PASS --> deps
     deps --> enable[owner toggles enabled=true]
     enable --> execute[skill_exec / dispatch]
@@ -593,7 +594,7 @@ calls and runtime behaviours:
 | `supervised_task` | The skill may register an in-process host-supervised async task. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. Chat topics require owner permission grants; `skill.lifecycle` does not. |
-| `inject_chat` | The skill may request Host Service chat injection after an explicit owner permission grant: `POST /chat/inject` carries text, an inline image, or `attachments` (`[{path, name?, mime?}]` — regular files under the skill's own state root, at most 25 per message, which the host copies without the former 50 MiB upload cap into the shared `data/uploads` chat-upload store and stages for the task; a file-only message needs no text). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
+| `inject_chat` | The skill may request Host Service chat injection after an explicit owner permission grant: `POST /chat/inject` carries text, an inline image, or `attachments` (`[{path, name?, mime?}]` — regular files under the skill's own state root, at most 25 per message, which the host copies without the former 50 MiB upload cap into the shared `data/uploads` chat-upload store and stages for the task; a file-only message needs no text). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
 | `notify_owner` | The skill may tell the owner one thing through `POST /notify` after an explicit owner permission grant (see "Telling the owner something" below): one bounded plain sentence the host shows in the owner's chat as a System row signed with the skill's name. It wakes no model; narrower than `inject_chat`. |
 
@@ -709,11 +710,13 @@ A transport extension declares `permissions: [presence]`, obtains its ordinary
 content-hash-bound skill token, and sends:
 
 - `POST /presence/turn` with exactly `binding_id`, `event`, and optional
-  `staged_files` and negotiated `delivery_reporting_version`. The event carries the provider/account/conversation/thread,
+  `staged_files` and negotiated `delivery_reporting_version` and `continuation_version`. The event carries the provider/account/conversation/thread,
   stable source-event and conversation ids, structured actor/conversation/message
   facts, and text. Files must already be under that transport skill's state root.
 - `GET /presence/work/{work_ref}?binding_id=...` to poll only late work created
   by the same owner binding.
+- `POST /presence/work/{continuation_ref}` with `binding_id` and `transport_queue`
+  to refresh the same continuing turn's observed transport inbox facts, under the same token and binding.
 
 The nested fact maps may include optional provider evidence such as the agent's
 own account identity, explicit mention occurrences and the thread-root author.
@@ -758,6 +761,78 @@ refusal after a terminal task does not itself prove safe regeneration on the
 same ID; if prior effects remain unproven the conversation may need explicit
 owner recovery. Never treat these refusals as `completed/silent` or resend a
 confirmed provider effect merely because a Host receipt failed.
+
+#### Presence continuation
+
+`GET /identity` advertises `presence_continuation_version: 1` on supporting hosts. Request
+`continuation_version: 1` beside `binding_id` and `event` on `/presence/turn` (negotiation is not
+event identity). An author whose result waits for acceptance review then yields the conversation
+and answers early: `status: "continuing"` with `continuation_ref` (equal to `turn_ref`) and an
+initial `outcome`/`text`/`output_ref`. `deferred` with empty text means a result may follow; an
+author-selected early output (Advisory `pending_review=finish`) is speech to send once under its
+`output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; poll
+both independently. `status: "completed"` (with `continuation_ref: ""`) means the author ended
+within the request. A retry of the same event returns the identical stored envelope, never a rerun;
+`continuing` releases text to you and is not proof of provider delivery.
+
+Poll `GET /presence/work/{continuation_ref}?binding_id=...` like other late work. Every continuation
+poll carries `work_ref` and `continuation_ref` naming the author, and `child_work_ref` naming its
+current promoted independent work (empty if none). Discover and retain that child before handling
+the author's status, and poll it independently. A child promoted after the first yield is retained
+at the next park even though the original event's immutable envelope still has an empty `work_ref`.
+While the author lives it answers HTTP 202 `pending` with `outputs`: the ordered
+`{output_ref, outcome, text}` the author released so far. Its terminal answers 200 with
+`outcome`/`text`/`output_ref` holding only a new terminal output (a re-finalized released selection
+yields `silent` and empty text), the child reference, and the same `outputs`.
+A lost author answers 200 `status: "interrupted"` with the retained child reference when its retained
+process identity proves it dead; a missing or unobservable identity alone does not prove a crash.
+It is never restarted automatically and its original event is not regenerated. An explicit new
+event can request manual continuation after checking prior effects; it creates a new turn and
+retains the interrupted reference, rather than resuming the dead stack. Send each `output_ref` at most once:
+deduplicate by `output_ref`, never by text, since an identical correction is new speech. Without
+`continuation_version` the legacy shape is unchanged and the request waits for the author's terminal.
+
+Before speaking again, the same author reacquires the conversation and active slot and receives
+observed conversation and delivery facts since its yield. Reentry retains the exact observed text,
+explicit read gaps and frozen history descriptor in the existing task artifact store. Through the
+turn's already granted reader, `get_task_result(task_id, presence_reentry_sha256)` returns the
+checkpoint's character count/hash and `history_start`/`history_end`. Character ranges
+(`source_start_char`, `source_end_char`) read the retained checkpoint. To read the full frozen
+canonical interval, start `presence_reentry_offset` at `history_start` and follow `next_offset`
+until `interval_exhausted`; pages contain complete rows from this conversation and explicit gaps.
+For an oversized page, keep its `presence_reentry_offset` and use the character-range arguments
+to read its serialized text. Later appends are outside this interval. Missing, replaced or truncated
+history is unavailable, never empty-complete; concurrent in-place edits plus append remain outside
+the shared reader's non-atomic capture guarantee. Canonical history follows ordinary archive
+retention, while the checkpoint retains its originally observed facts.
+
+An inline note can omit whole rows only with an accessible source. Frozen ceilings lacking the
+reader walk the interval and keep all available text inline; this can increase context and memory,
+without widening permissions. Complete observed text does not erase history gaps. The initial
+yield anchors the previous-turn pointer across repeated parks and final completion, so the
+returning author cannot replace a newer turn's pointer. Unsubmitted transport facts remain unknown.
+
+Supply an initial inbox observation in `event.conversation.transport_queue`. To refresh it while
+an author waits, post `{binding_id, transport_queue}` to its continuation work URL; `GET` remains
+a read-only poll. The snapshot has `schema_version: 1`, `source`, timezone-qualified ISO
+`observed_at`, the exact derived `conversation_key`, `after_source_event_id` matching the turn's
+original source event, `complete: true`, `pending_count` equal to `len(events)`, and
+`omitted_count: 0`. `source` is a nonempty attribution string. Each event has a unique nonempty
+`source_event_id` and string `text`; optional `text_chars` equals the text's character count,
+and `text_truncated` is absent or false. Other provider facts are retained. These are transport
+observations of queued events, not admissions, owner instructions, or provider-delivery receipts.
+Keep the snapshot's identity and content unchanged when retrying its report.
+
+The original event retains the initial snapshot; refresh snapshots use the existing task artifact
+store, with `presence_transport_queue` pointing at the latest one. A successful refresh returns
+`{ok: true, status: "recorded" | "duplicate" | "stale", observed_at: ...}`. Older observations cannot
+replace a newer timestamp; `stale` returns the retained observation's time. Malformed snapshots or
+different content at the same timestamp return HTTP 400 `presence_observation_invalid` with
+`disposition: "rejected"`. Reentry carries the full latest received
+snapshot in its exact source and dates the observation: it is not proof that the transport inbox
+still has those contents. No received snapshot means unknown, never an empty inbox. Posting facts
+neither dequeues nor executes the events; the transport retains its ordinary admission and outbox
+custody. A later arrival can still race the author's decision and delivery.
 
 #### Reporting actual Presence delivery
 
@@ -806,6 +881,9 @@ exact `text`, `format`, provider facts in `message`, and
 sets kind explicitly. A tool handler may use its supported first `ctx` argument
 to retain compact task provenance; never serialize the full context or secrets.
 The Host establishes source identity, and a task reference grants no authority.
+A reflection written for that task's root after the report arrives shows it labelled
+`skill_claimed` unless the Host itself bound the row to a Presence turn of the same
+transport (`host_bound`); a report arriving later stays in chat history only.
 
 Report physical parts separately. Preserve resolved DM IDs, actual chunk or
 fallback text, captions and provider message IDs in the receipt snapshot.

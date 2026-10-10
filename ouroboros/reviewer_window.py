@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +175,7 @@ def resolve_reviewer_window(
     model_role: str = "",
     credential_profile_id: Optional[str] = None,
     model_route: Optional[dict] = None,
+    allow_fetch: bool = True,
 ) -> ReviewerWindow:
     """The reviewer's :class:`ReviewerWindow` from Capability Evidence.
 
@@ -185,7 +186,9 @@ def resolve_reviewer_window(
     otherwise never reach, and it stays re-confirmable for as long as the process
     lives: remote probes serve the cache inside its TTL and reach the network once
     it expires; local probes read the current serving instance (see the
-    module-level note on ``_LAZY_ROUTE_LOCKS``).
+    module-level note on ``_LAZY_ROUTE_LOCKS``). ``allow_fetch=False`` is the
+    hot-path reading (:func:`capability_evidence.probe`): the evidence already
+    held, stale or absent, and never a wait on the network.
 
     ``use_local=None`` (the default) derives the EFFECTIVE route from
     ``provider_models.review_model_uses_local`` — the same predicate every review
@@ -234,7 +237,7 @@ def resolve_reviewer_window(
                 model=model,
                 base_url=base_url,
                 use_local=use_local,
-                allow_fetch=True,
+                allow_fetch=allow_fetch,
                 api_key=_probe_api_key,
                 options=options,
             )
@@ -258,6 +261,27 @@ def resolve_reviewer_window(
     return ReviewerWindow(model=model)
 
 
+class SizedWindow(int):
+    """A sizing window that also carries the subscription account it was observed on.
+
+    The reserve math beside it then reads THAT account's maximum response from the
+    same observation instead of a cache-only lookup under the unbound route; a plain
+    int (an older or substituted caller) carries none."""
+
+    def __new__(cls, value: int, model_route: Optional[dict] = None):
+        sized = super().__new__(cls, value)
+        sized.model_route = dict(model_route or {})
+        return sized
+
+
+def observed_binding(window: Any, binding: Optional[dict]) -> dict:
+    """``binding`` plus the account route ``window`` was observed on, unless one is already carried."""
+    binding = dict(binding or {})
+    if not binding.get("model_route") and getattr(window, "model_route", None):
+        binding["model_route"] = window.model_route
+    return binding
+
+
 def reviewer_context_window(
     model_id: str,
     *,
@@ -266,6 +290,7 @@ def reviewer_context_window(
     model_role: str = "",
     credential_profile_id: Optional[str] = None,
     model_route: Optional[dict] = None,
+    allow_fetch: bool = True,
 ) -> int:
     """Reviewer window from Capability Evidence, or ``unknown_window`` when absent.
 
@@ -273,13 +298,17 @@ def reviewer_context_window(
     docstring: sizing a review pack DOWN on a guess declines the review outright,
     which is why the main lane's unknown-route policy is the same). A caller that
     must fail closed passes its own sub-floor explicitly. ``use_local=None``
-    derives the effective route exactly as :func:`resolve_reviewer_window` does.
-    The NUMBER only — a caller that also discloses its provenance takes
+    derives the effective route exactly as :func:`resolve_reviewer_window` does;
+    so does ``allow_fetch`` (a hot-path reader passes ``False``).
+    The NUMBER only (a :class:`SizedWindow` carrying the account it was observed
+    on) — a caller that also discloses its provenance takes
     :func:`resolve_reviewer_window` whole."""
-    return resolve_reviewer_window(
+    resolved = resolve_reviewer_window(
         model_id, use_local=use_local, model_role=model_role,
         credential_profile_id=credential_profile_id, model_route=model_route,
-    ).sizing_window(unknown_window)
+        allow_fetch=allow_fetch,
+    )
+    return SizedWindow(resolved.sizing_window(unknown_window), resolved.model_route)
 
 
 def window_scaled_reserves(
@@ -288,13 +317,19 @@ def window_scaled_reserves(
     output_reserve: int,
     tokenizer_margin: int,
     min_output_reserve: int = 8_192,
+    model_id: str = "", binding: Optional[dict] = None,
 ) -> tuple:
     """``(output_reserve, tokenizer_margin)`` scaled to a sub-1M reviewer window.
 
     The absolute 1M-calibrated reserves would swallow a small window whole
     (a 131K route => input limit 0, bricking the slot — Provider Independence),
     so sub-floor windows reserve a quarter for output and an eighth for the
-    tokenizer margin instead. >=1M windows keep the absolute reserves."""
+    tokenizer margin instead. >=1M windows keep the absolute reserves. With
+    ``model_id`` the output reserve stays within that route's known maximum
+    response, read on the account ``window`` was observed on (:class:`SizedWindow`)."""
+    if model_id:
+        from ouroboros.response_limits import response_allowance
+        output_reserve = response_allowance(model_id, output_reserve, **observed_binding(window, binding))
     if int(window) <= 0 or int(window) >= REVIEWER_FULL_WINDOW:
         return int(output_reserve), int(tokenizer_margin)
     return (

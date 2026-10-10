@@ -8,6 +8,7 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_owner_continue import _interrupted, NONCE
+from tests._usage_store_testing import ledger_rows
 
 
 def test_publication_failure_cannot_dispatch_and_replay_repairs_same_action(tmp_path, monkeypatch):
@@ -41,18 +42,22 @@ def test_publication_failure_cannot_dispatch_and_replay_repairs_same_action(tmp_
     assert load_task_result(tmp_path, tid)["continuation_admission"]["binding"]["action_nonce"] == NONCE
 
 
-def test_no_initial_cap_is_not_replaced_with_current_configuration(tmp_path, monkeypatch):
+def test_no_initial_cap_continues_under_the_configured_cap_disclosed(tmp_path, monkeypatch):
+    """A legacy predecessor that recorded no cap stays its own group under today's cap, named as such."""
     from ouroboros.task_results import task_result_path
     from supervisor.continuation_admission import admit_continuation
 
-    _install_queue(tmp_path, monkeypatch)
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
     _interrupted(tmp_path)
     path = task_result_path(tmp_path, "pred-1")
     row = json.loads(path.read_text())
     row.pop("billing_group")
     path.write_text(json.dumps(row))
     monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", "999")
-    assert admit_continuation("pred-1", action_nonce=NONCE)["error"] == "billing_authority_unavailable"
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    binding = workers.PENDING[0]["metadata"]["continuation"]
+    assert (binding["billing_group_id"], binding["billing_group_limit_usd"],
+            binding["billing_group_limit_source"]) == ("pred-1", 999.0, "legacy_default")
 
 
 @pytest.mark.parametrize("payload", ['[]\n', '{torn\n', '\udcff'])
@@ -141,7 +146,7 @@ def test_physical_claim_linearizes_with_pause_without_network_lock(tmp_path, mon
         else:
             assert future.result(timeout=4) == "response" and sent
     with ua._locked(tmp_path):
-        rows = list(ua._final_rows(ua._read_records_locked(tmp_path)).values())
+        rows = list({row['attempt_id']: row for row in ledger_rows(tmp_path)}.values())
     assert rows[-1]["state"] == ("released" if pause_before_claim else "settled")
 
 

@@ -145,7 +145,7 @@
                 },
                 {
                   "role": "user",
-                  "content": "look\n\n[image omitted: model has no vision]"
+                  "content": "look\n\n[image omitted: our local llama.cpp transport lane cannot carry images]"
                 }
               ],
               "max_tokens": 2048,
@@ -181,7 +181,7 @@
               ],
               "tool_choice": "auto"
             },
-            "payload_sha256": "99947884ed392199768931171855459c863d127fbc5ee9cca45d2b29572cbe38"
+            "payload_sha256": "a3db147cb36ca7f195a5167ed3b4d6dc57615f4b9537c785b271f2aa4e8b9de5"
           }
         ],
         "physical_attempts": [
@@ -189,14 +189,11 @@
             "source": "llm.local",
             "model": "local-model",
             "provider": "local",
-            "candidate_raw_sha256": "99947884ed392199768931171855459c863d127fbc5ee9cca45d2b29572cbe38",
-            "candidate_raw_size_bytes": 455,
+            "candidate_raw_sha256": "a3db147cb36ca7f195a5167ed3b4d6dc57615f4b9537c785b271f2aa4e8b9de5",
+            "candidate_raw_size_bytes": 490,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 3,
             "prompt_cache_ttl": "",
             "cost_final": true
           }
@@ -277,11 +274,8 @@
             "candidate_raw_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427",
             "candidate_raw_size_bytes": 139,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "unresolved"
-            ]
+            "state": "unresolved",
+            "transitions": 4
           }
         ],
         "unused_script_steps": 0
@@ -368,11 +362,8 @@
             "candidate_raw_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427",
             "candidate_raw_size_bytes": 139,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "unresolved"
-            ]
+            "state": "unresolved",
+            "transitions": 4
           }
         ],
         "unused_script_steps": 2
@@ -453,11 +444,8 @@
             "candidate_raw_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427",
             "candidate_raw_size_bytes": 139,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "unresolved"
-            ]
+            "state": "unresolved",
+            "transitions": 4
           }
         ],
         "unused_script_steps": 0

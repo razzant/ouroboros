@@ -15,6 +15,11 @@ from ouroboros.tools.git import _acquire_git_lock, _release_git_lock, _sanitize_
 log = logging.getLogger(__name__)
 
 _PR_BRANCH_PREFIX = "integrate/pr-"
+# The verbs that check out, commit or stage in the body's own worktree: an ordinary
+# author runs them in its body candidate (``body_candidate.authoring_seam``).
+BODY_WORKTREE_TOOLS = frozenset({
+    "create_integration_branch", "cherry_pick_pr_commits", "stage_adaptations", "stage_pr_merge",
+})
 
 
 def _g(args: List[str], cwd: pathlib.Path,
@@ -144,10 +149,12 @@ def _fetch_pr_ref(ctx: ToolContext, pr_number: int, remote: str = "origin") -> s
 def _create_integration_branch(
     ctx: ToolContext,
     pr_number: int,
-    base_branch: str = "ouroboros",
+    base_branch: str = "",
 ) -> str:
     if pr_number <= 0:
         return "⚠️ PR_BRANCH_ERROR: pr_number must be a positive integer."
+    # The body's working branch: ouroboros, or the bound candidate's branch.
+    base_branch = str(base_branch or getattr(ctx, "branch_dev", "") or "ouroboros").strip()
     err = _validate_git_ref_arg(base_branch, "base_branch")
     if err:
         return f"⚠️ PR_BRANCH_ERROR: {err}"
@@ -200,7 +207,7 @@ def _create_integration_branch(
         f"                                              original author attribution\n"
         f"  2. stage_adaptations()                   ← optional: stage Ouroboros\n"
         f"                                              adaptation changes (no commit)\n"
-        f"  3. stage_pr_merge(branch='{branch_name}') → preflight_review → commit_reviewed\n"
+        f"  3. stage_pr_merge(branch='{branch_name}') → commit_reviewed\n"
         f"     (staged adaptations from step 2 land in the final merge commit)"
     )
 
@@ -413,7 +420,7 @@ def _cherry_pick_pr_commits(
         + f"\n\nNext:\n"
           f"  stage_adaptations()                      ← optional: stage Ouroboros\n"
           f"                                              adaptation changes (no commit)\n"
-          f"  stage_pr_merge(branch='{current_branch}') → preflight_review → commit_reviewed\n"
+          f"  stage_pr_merge(branch='{current_branch}') → commit_reviewed\n"
           f"  (staged adaptations land in the merge commit — no intermediate commit needed)"
         + override_note
         + author_hint
@@ -447,7 +454,7 @@ def _stage_adaptations(ctx: ToolContext) -> str:
         + "\n".join(f"  {f}" for f in files[:20])
         + (f"\n  ... and {len(files)-20} more" if len(files) > 20 else "")
         + f"\n\nNext: stage_pr_merge(branch='{current_branch}') — do NOT commit here;\n"
-          f"  adaptation changes land in the merge commit on ouroboros."
+          f"  adaptation changes land in the merge commit on {ctx.branch_dev}."
     )
 
 
@@ -598,7 +605,6 @@ def _stage_pr_merge(
         f"  with both parents, preserving integration branch history.\n"
         f"  Branch '{branch}' left intact.\n\n"
         f"Next:\n"
-        f"  preflight_review(commit_message='...')\n"
         f"  commit_reviewed(commit_message='...')"
         + author_hint
     )
@@ -624,14 +630,14 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("create_integration_branch", {
             "name": "create_integration_branch",
             "description": (
-                "Create a fresh integration branch (integrate/pr-N) from ouroboros. "
+                "Create a fresh integration branch (integrate/pr-N) from the body's working branch. "
                 "External cherry-picked commits and Ouroboros adaptation changes are "
                 "kept separate here before merging."
             ),
             "parameters": {"type": "object", "properties": {
                 "pr_number": {"type": "integer", "description": "GitHub PR number"},
-                "base_branch": {"type": "string", "default": "ouroboros",
-                                "description": "Branch to create from"},
+                "base_branch": {"type": "string", "description": (
+                    "Branch to create from (default: ouroboros, or this task's candidate branch)")},
             }, "required": ["pr_number"]},
         }, _create_integration_branch, is_code_tool=True, mutates_worktree=True),
 
@@ -684,8 +690,8 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 "Stage all current working-tree changes on the integration branch WITHOUT "
                 "committing (git add -A only). Use after cherry_pick_pr_commits to prepare "
-                "Ouroboros adaptation/fixup changes. Finalize via preflight_review + "
-                "commit_reviewed to comply with BIBLE.md P3 (all commits must pass review). "
+                "Ouroboros adaptation/fixup changes. Finalize via commit_reviewed "
+                "to comply with BIBLE.md P3 (all commits must pass review). "
                 "Must be on an integrate/pr-N branch."
             ),
             "parameters": {"type": "object", "properties": {}},
@@ -694,13 +700,13 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("stage_pr_merge", {
             "name": "stage_pr_merge",
             "description": (
-                "Stage a no-fast-forward merge of an integration branch into ouroboros "
+                "Stage a no-fast-forward merge of an integration branch into the body's working branch "
                 "WITHOUT committing (git merge --no-ff --no-commit). Sets MERGE_HEAD so "
                 "commit_reviewed creates a proper merge commit with both parents. Target is "
-                "always ouroboros (commit_reviewed always checks out branch_dev before "
+                "branch_dev (the bound candidate branch during self-development; commit_reviewed checks it out before "
                 "committing — any other target would lose MERGE_HEAD). The "
                 "integration-branch history (with original author commits) is permanently "
-                "linked. Finalize via preflight_review + commit_reviewed."
+                "linked. Finalize via commit_reviewed."
             ),
             "parameters": {"type": "object", "properties": {
                 "branch": {"type": "string",

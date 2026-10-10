@@ -606,6 +606,9 @@ def _run_script(
     executor_active = _executor_can_run_cwd(ctx, resolved_workdir)
     active_workspace_script = binding.root == "active_workspace"
     if active_workspace_script:
+        # Workspace scripts stage in an owned per-run dir under <cwd>/.ouroboros/tmp_scripts: the run's
+        # own .gitignore keeps it out of raw Git status, and workspace_patch_rules._TOP_LEVEL_EXCLUDE_DIRS
+        # keeps ".ouroboros" out of patches. Task-drive runs stage under <task_drive>/tmp_scripts.
         root = resolved_workdir / ".ouroboros" / "tmp_scripts"
     else:
         try:

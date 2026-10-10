@@ -144,3 +144,16 @@ def test_surface_sheets_carry_no_near_white_ink():
         if near_white.search(line)
     ]
     assert not leftovers, "near-white literals outside the token sheet:\n" + "\n".join(leftovers)
+
+
+def test_an_old_desktop_app_is_named_where_its_choices_are_lost():
+    """In-app updates replace the core, never the frozen launcher that decides WebView storage, so
+    the Appearance panel carries the line ``desktop_shell.js`` fills for an app that erases it."""
+    panel = re.search(
+        r'data-settings-panel="appearance"(.*?)</section>', _read("web/modules/settings_ui.js"), re.S).group(1)
+    assert "data-shell-storage-status" in panel
+    settings = _read("web/modules/settings.js")
+    assert "mountDesktopShell(page" in settings and "disposeShell()" in settings
+    shell = _read("web/modules/desktop_shell.js")
+    assert "PERSISTENT_STORAGE_SINCE = Object.freeze([7, 2, 0])" in shell, (
+        "7.2.0 is the first release whose launcher passes private_mode=False (git tag --contains e30957143)")

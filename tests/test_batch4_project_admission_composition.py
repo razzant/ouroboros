@@ -16,7 +16,7 @@ import pytest
 from ouroboros import projects_registry as registry
 from ouroboros.task_results import STATUS_CANCELLED, STATUS_RUNNING, load_task_result, write_task_result
 from supervisor import queue, workers
-from tests.test_project_hold_recovery import accepted, restore_unreadable, worker
+from tests.test_project_hold_recovery import accepted, restore_unreadable, resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 
 pytestmark = pytest.mark.serial
@@ -54,13 +54,18 @@ def test_fresh_project_continue_recovers_once_after_temporary_authority_outage(h
     assert not basis.get("legacy_basis"), "a fresh Continue is prepared, never a legacy basis"
     assert admitted["workspace_root"] == str(folder) and admitted["admitted_dispatch"] == "none"
 
-    # Restart during a registry outage: the accepted successor waits under its own id.
+    # An unacknowledged app restart during the outage holds the same accepted id.
     path, original = restore_unreadable(host)
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
     assert not sent and host.pending[0]["_project_admission_restore_hold"], "missing authority keeps the hold"
 
     path.write_bytes(original)  # the authority returns
+    workers.assign_tasks()
+    workers.assign_tasks()
+    assert not sent, "authority recovery cannot grant Resume after an app stop"
+    assert not host.pending[0].get("_project_admission_restore_hold")
+    resume_after_app_stop(host, successor)
     workers.assign_tasks()
     workers.assign_tasks()
     assert [row["id"] for row in sent] == [successor], "same successor, dispatched exactly once"
@@ -116,7 +121,8 @@ def test_project_recovery_keeps_owner_pause_and_restart_holds(host, tmp_path, mo
     workers.assign_tasks()
     assert not sent, "Project recovery never releases the owner's own control"
     assert not host.pending[0].get("_project_admission_restore_hold")
-    assert resume_budget_paused_task("held")["ok"]  # the owner's explicit Resume
+    resumed = resume_budget_paused_task("held")  # the owner's explicit Resume
+    assert resumed["ok"], resumed
     workers.assign_tasks()
     workers.assign_tasks()
     assert [row["id"] for row in sent] == ["held"]

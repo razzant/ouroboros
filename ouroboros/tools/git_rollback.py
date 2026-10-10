@@ -18,7 +18,7 @@ def _rollback_to_target(ctx: ToolContext, target: str, confirm: bool = False) ->
 
     if not confirm:
         import subprocess, pathlib
-        repo_dir = pathlib.Path(ctx.repo_dir)
+        repo_dir = pathlib.Path(getattr(ctx, "serving_repo_dir", None) or ctx.repo_dir)  # rollback is of the RUNNING body
         try:
             full_sha = subprocess.run(
                 ["git", "rev-parse", "--verify", target],

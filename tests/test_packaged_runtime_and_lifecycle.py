@@ -985,7 +985,7 @@ def test_start_agent_never_overwrites_an_operator_env_host(monkeypatch, tmp_path
 
 
 def test_an_owner_restart_re_execs_without_the_inherited_runtime_mode_pin(monkeypatch, tmp_path):
-    """The re-exec env is the whole mechanism, so assert on the real env it hands execvpe.
+    """Assert on the environment passed to either platform's transfer primitive.
 
     ``OUROBOROS_BOOT_RUNTIME_MODE`` exists so a CHILD inherits the parent's ratchet
     baseline. Carried across the OWNER's own restart it also pinned the mode the
@@ -1006,6 +1006,8 @@ def test_an_owner_restart_re_execs_without_the_inherited_runtime_mode_pin(monkey
         captured["env"] = dict(env)
 
     monkeypatch.setattr(os, "execvpe", _capture_exec)
+    monkeypatch.setattr("ouroboros.process_custody.spawn_supervised",
+                        lambda argv, **kw: _capture_exec(argv[0], argv, kw["env"]))
     monkeypatch.setenv(BOOT_RUNTIME_MODE_ENV_KEY, "light")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
 

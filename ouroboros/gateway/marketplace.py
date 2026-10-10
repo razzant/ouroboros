@@ -188,8 +188,7 @@ async def api_marketplace_preview(request: Request) -> JSONResponse:
     except ClawHubClientError as exc:
         return _client_error_response(exc)
     except Exception as exc:
-        log.exception("marketplace preview failed")
-        return json_exception(exc)
+        return json_exception(exc, context="marketplace preview failed")
     return JSONResponse(payload)
 
 def _serialize_install_result(result: Any) -> Dict[str, Any]:
@@ -285,7 +284,10 @@ async def _apply_hub_review_and_deps(
 def _resync_skill_schedules_quiet(drive_root: pathlib.Path) -> None:
     """Mirror skill manifest schedules after a marketplace lifecycle change so a
     removed/renamed/updated scheduled skill does not fire stale before the
-    periodic scheduler tick."""
+    periodic scheduler tick. Handlers call it through ``asyncio.to_thread``:
+    the mirror waits for the supervisor queue lock, and that wait must stay off
+    the HTTP event loop (the scheduler tick already runs the same idempotent
+    resync beside lifecycle operations, so nothing new interleaves)."""
     try:
         from supervisor.queue import resync_skill_schedules
 
@@ -487,11 +489,10 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
             ),
         )
     except Exception as exc:
-        log.exception("marketplace install failed")
-        return json_exception(exc)
+        return json_exception(exc, context="marketplace install failed")
     # Resync regardless of ok: a deps-failure can set ok=false after the payload
     # was already installed on disk, changing scheduled-task readiness.
-    _resync_skill_schedules_quiet(drive_root)
+    await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     payload = _serialize_install_result(result)
     _maybe_enqueue_repair_for_payload(drive_root, payload, source="clawhub")
     status = 200 if result.ok else (getattr(result, "error_status", 0) or 400)
@@ -536,11 +537,10 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
             ),
         )
     except Exception as exc:
-        log.exception("marketplace update failed")
-        return json_exception(exc)
+        return json_exception(exc, context="marketplace update failed")
     # Resync regardless of ok: an update can mutate the payload on disk even when
     # a follow-up deps step reports ok=false, changing scheduled-task readiness.
-    _resync_skill_schedules_quiet(drive_root)
+    await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     payload = _serialize_install_result(result)
     _maybe_enqueue_repair_for_payload(drive_root, payload, source="clawhub")
     status = 200 if result.ok else (getattr(result, "error_status", 0) or 400)
@@ -629,12 +629,11 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
             options=_lifecycle_options("Uninstalled", "uninstall failed", object_result=True),
         )
     except Exception as exc:
-        log.exception("marketplace uninstall failed")
-        return json_exception(exc)
+        return json_exception(exc, context="marketplace uninstall failed")
     if result.ok:
         # The skill is gone; drop its scheduled tasks now so the scheduler does
         # not fire a deleted skill before the next periodic resync.
-        _resync_skill_schedules_quiet(drive_root)
+        await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     return JSONResponse(
         {
             "ok": result.ok,
@@ -749,7 +748,7 @@ async def _api_ouroboroshub_adopt(request: Request, body: Dict[str, Any], slug: 
     )
     # Resync regardless of ok: a rolled-back adopt still restored payloads on
     # disk and a successful one changed the scheduled-task inventory.
-    _resync_skill_schedules_quiet(drive_root)
+    await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     _maybe_enqueue_repair_for_payload(drive_root, payload, source="ouroboroshub")
     return JSONResponse(payload, status_code=_hub_payload_status(payload))
 
@@ -824,7 +823,7 @@ async def api_ouroboroshub_install(request: Request) -> JSONResponse:
     )
     # Resync regardless of ok: install + deps can leave the payload on disk with
     # ok=false, changing scheduled-task readiness.
-    _resync_skill_schedules_quiet(drive_root)
+    await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     _maybe_enqueue_repair_for_payload(drive_root, payload, source="ouroboroshub")
     return JSONResponse(payload, status_code=_hub_payload_status(payload))
 
@@ -879,7 +878,7 @@ async def api_ouroboroshub_update(request: Request) -> JSONResponse:
     )
     # Resync regardless of ok: an update can mutate the payload on disk even when
     # a follow-up deps step reports ok=false, changing scheduled-task readiness.
-    _resync_skill_schedules_quiet(drive_root)
+    await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     _maybe_enqueue_repair_for_payload(drive_root, payload, source="ouroboroshub")
     return JSONResponse(payload, status_code=_hub_payload_status(payload))
 
@@ -913,7 +912,7 @@ async def api_ouroboroshub_uninstall(request: Request) -> JSONResponse:
         options=_lifecycle_options("Uninstalled", "uninstall failed"),
     )
     if payload.get("ok"):
-        _resync_skill_schedules_quiet(drive_root)
+        await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     return JSONResponse(payload, status_code=200 if payload.get("ok") else 400)
 
 
@@ -935,8 +934,7 @@ async def api_ouroboroshub_clear_publication(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"ok": False, "code": "publication_invalid", "error": str(exc)}, status_code=400)
     except Exception as exc:
-        log.warning("Clearing local publication failed", exc_info=True)
-        return json_exception(exc)
+        return json_exception(exc, context="Clearing local publication failed")
     return JSONResponse({"ok": True, "sanitized_name": name, "publication_cleared": cleared})
 
 

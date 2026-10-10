@@ -276,7 +276,7 @@ def fallback_chain_allowed(
         return False
     if last_error_kind == "provider_outcome_unknown":
         return new_generation_after_unknown(ctx, accumulated_usage)
-    return last_error_kind not in ("context_overflow", "deadline_exhausted")
+    return last_error_kind not in ("context_overflow", "deadline_exhausted", "llm_output_exhausted")
 
 
 def reconcile_transport_wait(
@@ -906,6 +906,7 @@ _FAILURE_KIND_WORDS = {
     "provider_transient": "a temporary provider failure",
     "provider_incomplete_response": "an incomplete response",
     "llm_empty_response": "an empty response",
+    "llm_output_exhausted": "a reply that reached its length limit before any visible output",
     "provider_body_error": "an error in the provider's response",
     "provider_error": "a provider error",
     "model_substituted": "an answer from a model other than the requested one",

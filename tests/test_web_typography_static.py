@@ -137,7 +137,6 @@ def _migrated_sources() -> dict[str, str]:
         "web/onboarding.css": _decommented(_read("web/onboarding.css")),
         "web/model_roles.css": _decommented(_read("web/model_roles.css")),
         "web/model_wait.css": _decommented(_read("web/model_wait.css")),
-        "web/reviewer_slots.css": _decommented(_read("web/reviewer_slots.css")),
         "web/style.css (migrated regions)": _migrated_style_region(),
     }
 
@@ -166,8 +165,10 @@ def test_chat_reading_ladder_is_relative_and_read_only_by_chat_headings() -> Non
     """The one exception to the closed scale (docs/DESIGN.md §1): Markdown
     headings in a full rich chat answer step up from the bubble's own reading
     text. The steps are relative, so they cannot become a fifth UI size, and
-    only the rich answer's heading rules may read them: compact Markdown in a
-    bubble (a Skill Review report) keeps its --type-body labels."""
+    only the rich answer's heading rules may read them — shared, in the same
+    rules, with a delivered document in the reader (DESIGN "Document reading"):
+    compact Markdown in a bubble (a Skill Review report) keeps its --type-body
+    labels."""
     root = _root_declarations("web/ui.css")
     ladder = {"--md-heading-major": "1.25em", "--md-heading-minor": "1.125em"}
     assert {name: root.get(name) for name in ladder} == ladder
@@ -178,8 +179,8 @@ def test_chat_reading_ladder_is_relative_and_read_only_by_chat_headings() -> Non
         if any(f"var({name})" in body for name in ladder)
     ]
     assert readers == [
-        ".chat-bubble .message:where(.ui-rich-content) :is(.md-h1, .md-h2)",
-        ".chat-bubble .message:where(.ui-rich-content) .md-h3",
+        ".chat-bubble .message:where(.ui-rich-content) :is(.md-h1, .md-h2), .document-reader-markdown :is(.md-h1, .md-h2)",
+        ".chat-bubble .message:where(.ui-rich-content) .md-h3, .document-reader-markdown .md-h3",
     ], readers
 
 
@@ -296,12 +297,12 @@ def test_muted_is_a_global_colour_only_utility() -> None:
 def test_chips_and_meta_lines_declare_their_own_foreground() -> None:
     """Root cause #2. A rule that declares a size and no colour inherits
     near-white --text-primary — invisible in the CSS, loudest on screen."""
-    region = _migrated_style_region() + _decommented(_read("web/reviewer_slots.css"))
-    for selector in (".harness-chip", ".reviewer-slot-meta", ".harness-account-main strong"):
+    region = _migrated_style_region() + _decommented(_read("web/settings.css"))
+    for selector in (".harness-chip", ".available-subagent-facts dd", ".harness-account-main strong"):
         bodies = [
             body for sel, body in RULE.findall(region) if sel.strip() == selector
         ]
-        assert bodies, f"{selector} missing from the migrated region of web/style.css"
+        assert bodies, f"{selector} missing from the migrated region of web/style.css or web/settings.css"
         assert any("color:" in body for body in bodies), (
             f"{selector} declares no colour, so it inherits --text-primary "
             "(docs/DESIGN.md 'Status and chips')"
@@ -330,7 +331,6 @@ def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
     strictly alternating) is asserted by ``_style_marker_spans`` on every call
     that reads a region."""
     region = _migrated_style_region(raw=True)
-    assert ".reviewer-slots-heading" in _read("web/reviewer_slots.css")
     assert ".harness-account-row" in region
     # The Dashboard -> Updates tab migrated on 2026-08-31; its rules must stay
     # inside the guarded region so a later edit cannot drift them out of it.

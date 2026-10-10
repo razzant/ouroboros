@@ -211,7 +211,7 @@ def test_a_pending_invocation_of_this_task_is_unknown_custody_never_absence(tmp_
     assert observed["coverage_basis"] == "pending_invocations_unbound"
     assert observed["runs"] == [{
         "run_id": "", "invocation_id": "inv-mine", "route": "claudexor",
-        "cost_coverage": "unproven_preterminal", "stop_policy": "reconcile_first",
+        "cost_coverage": "unproven_preterminal", "stop_policy": "reconcile_first", "review_owned": False,
         "state": budget_pause.EXTERNAL_STOP_UNKNOWN, "stop_outcome": "pending_invocation_unbound",
         "detail": "",
     }]

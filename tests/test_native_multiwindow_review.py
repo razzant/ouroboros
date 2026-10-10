@@ -185,22 +185,22 @@ def test_read_not_carried_by_another_physical_send_does_not_count_as_delivered(t
     assert usage["native_read_coverage"]["status"] == "incomplete"
 
 
-def test_scope_brief_states_the_read_provenance_each_delivery_produces(tmp_path):
-    """The brief's pre-run manifest states WHICH provenance this row's receipts
+def test_two_part_brief_states_the_read_provenance_each_delivery_produces(tmp_path):
+    """The brief's pre-run manifest states WHICH provenance this seat's receipts
     will carry — host-executed for a native episode, parsed from the harness
     journal for a delegated session — instead of the blanket `unobserved` that
     described neither. It is never a claim that a source WAS read: that is the
     post-run coverage fact. (Window size still never rewrites a finding; that
-    invariant is pinned in tests/test_review_session_scope_wiring.py.)"""
-    from ouroboros.tools import scope_review_session as session
+    invariant is pinned in tests/test_review_brief_coupling.py.)"""
+    from ouroboros.tools import review_brief_coupling as brief_mod
     from ouroboros.tools.scope_required_sources import required_sources_ref
     path = tmp_path / "source.py"
     path.write_text("def actual_behavior(): return 1\n", encoding="utf-8")
     required = [_source(path)]
     ref = required_sources_ref(required)
-    task, manifest = session.build_scope_session_task(tmp_path, session.ScopeBriefInputs(
+    task, manifest = brief_mod.build_retrieving_brief(tmp_path, brief_mod.BriefInputs(
         commit_message="Review the change",
-        intent=session.ScopeIntentContext(goal="Check the actual behavior"),
+        intent=brief_mod.BriefIntent(goal="Check the actual behavior"),
         required_sources=required, required_sources_ref=ref))
     assert manifest["native_required_sources"] == required
     assert manifest["native_required_sources_ref"] == ref
@@ -208,7 +208,7 @@ def test_scope_brief_states_the_read_provenance_each_delivery_produces(tmp_path)
     assert "host_file_read_attestation" not in manifest
     assert ref["sha256"] in task and "independent from your working window" in task
 
-    _task, delegated = session.build_scope_session_task(tmp_path, session.ScopeBriefInputs(
+    _task, delegated = brief_mod.build_retrieving_brief(tmp_path, brief_mod.BriefInputs(
         commit_message="Review the change", delegated=True,
         required_sources=required, required_sources_ref=ref))
     assert delegated["read_provenance_expected"] == "harness_observed"

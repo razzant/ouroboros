@@ -381,6 +381,22 @@ def test_bootstrap_freshness_is_explicit_display_provenance():
     assert '"freshInstall": true' in build_onboarding_html({}, fresh_install=True)
 
 
+def test_reopened_wizard_shows_the_saved_vision_choice_and_defaults_only_a_missing_slot():
+    """PR #1560 owner decision: an existing install's Vision choice, empty included,
+    survives a reopened wizard. A loaded document carries every slot, so its blank is
+    saved "inherit Main"; only a slot the document lacks takes the profile default."""
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+
+    saved, _changed, _keys = apply_runtime_provider_defaults({**SETTINGS_DEFAULTS, "ZAI_API_KEY": "sk-zai-test-value"})
+    initial = build_setup_bootstrap(saved, "web")["initialState"]
+    assert (initial["providerProfile"], initial["mainModel"], initial["visionModel"]) == ("zai", "zai::glm-5.3", "")
+    custom = build_setup_bootstrap({**saved, "OUROBOROS_MODEL_VISION": "zai::glm-ocr"}, "web")["initialState"]
+    assert custom["visionModel"] == "zai::glm-ocr"
+    missing = build_setup_bootstrap({"ZAI_API_KEY": "sk-zai-test-value"}, "web", fresh_install=True)["initialState"]
+    assert missing["visionModel"] == "zai::glm-5.3-flash"
+
+
 def test_onboarding_wizard_module_keeps_its_multistep_contract():
     source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
     draft_source = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
@@ -460,7 +476,7 @@ def test_agents_step_ladder_states_the_startup_gate_honestly():
     assert "a plan cannot run it" not in source
     assert "not free" in source
     assert "Task acceptance stays on the API" not in source
-    assert "commit, plan, skill review and task acceptance each follow their configured" in source
+    assert "commit, plan, skill review and task acceptance all run on the review pool" in source
     assert "acceptance panel on the subscription" in source
     assert "about 12 s" in source and "$0.07 per model row per task" in source  # R12 numbers, not adjectives
     assert "all reviewers" not in source.lower()

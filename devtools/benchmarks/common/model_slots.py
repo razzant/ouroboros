@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Shared single-model benchmark helper.
 
-A single-model benchmark run pins every model slot to one model and lightens the
-review triad to ``review_slots`` copies of that model (default 1). Three identical
-reviewers add latency/cost but no diversity, and a single-model run cannot achieve
-reviewer-model diversity anyway; the loud ``single_reviewer_no_diversity`` signal
-stays on. This is a BENCHMARK convenience, NOT a claim that review got more reliable.
+A single-model benchmark run pins every model slot to one model and gives the
+review pool ``review_slots`` identical packet-delivery seats on that model
+(default 1). The pool is the marked rows of ``OUROBOROS_SUBAGENTS`` — the host
+never multiplies a seat, so N seats are N identical catalog rows written here.
+Three identical reviewers add latency/cost but no diversity, and a single-model
+run cannot achieve reviewer-model diversity anyway; the loud
+``single_reviewer_no_diversity`` signal stays on. This is a BENCHMARK
+convenience, NOT a claim that review got more reliable.
 
 Delegation has the same purity boundary: the run gets one explicit ``api_model``
 Available-subagent row on the measured model. It never inherits install defaults,
@@ -22,12 +25,15 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-from typing import Any, Mapping, MutableMapping, Optional
+from typing import Any, Mapping, MutableMapping, Optional, Sequence
 
 from ouroboros.configured_subagents import (
+    MINTED_FROM_FACTORY_DEFAULT,
     PRIMARY_RECOMMENDATION,
+    REVIEW_DELIVERY_PACKET,
     SUBAGENTS_SETTING,
     ConfiguredSubagent,
+    ConfiguredSubagents,
     configured_subagents_dict,
     make_configured_subagents,
     normalize_configured_subagents,
@@ -35,11 +41,7 @@ from ouroboros.configured_subagents import (
     serialize_configured_subagents,
 )
 from ouroboros.provider_models import provider_for_model
-from ouroboros.reviewer_slot_config import (
-    REVIEWER_SLOTS_ENV,
-    ROUTE_KIND_API as REVIEWER_ROUTE_KIND_API,
-    parse_reviewer_slots,
-)
+from ouroboros.reviewer_slot_config import ROUTE_KIND_API as REVIEWER_ROUTE_KIND_API
 from ouroboros.route_spec import (
     ROUTE_KIND_AGENT_SESSION,
     ROUTE_KIND_API_MODEL,
@@ -47,7 +49,7 @@ from ouroboros.route_spec import (
     route_spec_dict,
 )
 
-from devtools.benchmarks.common.manifests import ACTIVE_MODEL_SLOT_KEYS, MODEL_ROUTE_OPTION_KEYS
+from devtools.benchmarks.common.manifests import ACTIVE_MODEL_SLOT_KEYS, MODEL_ROUTE_OPTION_KEYS, MODEL_SLOT_KEYS
 
 # Every model slot a single-model run pins. Superset that is correct for both the
 # settings.json-profile path (SWE-bench Pro) and the forwarded-env path
@@ -56,20 +58,20 @@ SINGLE_MODEL_SLOT_KEYS = (
     "OUROBOROS_MODEL",
     "OUROBOROS_MODEL_LIGHT",
     "OUROBOROS_MODEL_FALLBACKS",
-    "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
     "OUROBOROS_MODEL_CONSCIOUSNESS",
     "OUROBOROS_MODEL_VISION",
     "OUROBOROS_WEBSEARCH_MODEL",
-    "OUROBOROS_SCOPE_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODEL",
 )
 
 BENCHMARK_SUBAGENT_ID = "benchmark-model"
+BENCHMARK_REVIEW_ID_PREFIX = "benchmark-review-"
+BENCHMARK_REVIEW_RECOMMENDATION = (
+    "Fixed-model benchmark reviewer: packet delivery on the measured model"
+)
 # Preserve the active manifest ordering, but compare only actual model-ID slots.
 # Role account/window maps and effort metadata never enter model-list parsing.
 _ACTIVE_FIXED_MODEL_KEYS = tuple(
-    key for key in ACTIVE_MODEL_SLOT_KEYS
-    if key in (*SINGLE_MODEL_SLOT_KEYS, "OUROBOROS_REVIEW_MODELS")
+    key for key in ACTIVE_MODEL_SLOT_KEYS if key in SINGLE_MODEL_SLOT_KEYS
 )
 _ACTIVE_LOCAL_ROUTE_KEYS = (
     "USE_LOCAL_MAIN",
@@ -77,15 +79,6 @@ _ACTIVE_LOCAL_ROUTE_KEYS = (
     "USE_LOCAL_FALLBACK",
     "USE_LOCAL_CONSCIOUSNESS",
 )
-_STRUCTURED_REVIEW_SHADOWS = frozenset({
-    "OUROBOROS_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODEL",
-    # Retired setting (the Claude-SDK advisory transport is gone): stale bytes
-    # on old settings snapshots are not an execution authority and must not be
-    # flagged as a fixed-model mismatch.
-    "CLAUDE_CODE_MODEL",
-})
 
 
 def _benchmark_actor(model: str) -> ConfiguredSubagent:
@@ -100,77 +93,144 @@ def _benchmark_actor(model: str) -> ConfiguredSubagent:
     )
 
 
-def single_model_subagents_setting(model: str) -> str:
-    """Canonical one-row Available-subagents value for a fixed-model run."""
-    config = make_configured_subagents((_benchmark_actor(model),))
-    return serialize_configured_subagents(config)
+def _benchmark_review_rows(
+    model: str, review_slots: int, review_effort: str, review_models: Sequence[str] = (),
+) -> tuple[ConfiguredSubagent, ...]:
+    """``review_slots`` identical review-pool seats on the measured model — or
+    one seat per model of an explicit ``review_models`` panel (a benchmark whose
+    methodology declares a different-model panel, e.g. GAIA ``--review-models``).
 
-
-def _reviewer_api_route(model: str) -> dict[str, str]:
-    """One reviewer API route serialized through the shared RouteSpec wire helper."""
-    return route_spec_dict(
-        RouteSpec(ROUTE_KIND_API_MODEL, model),
-        api_kind=REVIEWER_ROUTE_KIND_API,
-        pin_key="profile_id",
-    )
-
-
-def single_model_reviewer_slots_setting(
-    model: str,
-    *,
-    review_slots: int = 1,
-    scope_slots: int = 1,
-    review_effort: str = "",
-    scope_effort: str = "",
-) -> str:
-    """Canonical fixed-model reviewer panel: API-only, advisory explicitly off.
-
-    Triad/scope counts remain methodology inputs, but every executable row has the
-    exact measured routed-model identity.  Advisory CAN honestly run on a routed
-    model now (it shares the api_chat/agent_session row vocabulary), but benchmark
-    panels keep it ``{"enabled": false}`` for cross-run COMPARABILITY: every
-    published number was produced without the advisory pre-review, and silently
-    adding a fourth reviewer episode would change cost/latency/behavior between
-    runs.  A disabled row needs no target.  The runtime's strict parser validates
-    the generated bytes; this helper does not maintain a second reviewer schema.
+    Every seat is an ``api_model`` row marked review-eligible with PACKET delivery:
+    a retrieving seat (a session, or native tool rounds) is a different delivery
+    class even on the measured model — it reads the subject itself, pays for its
+    own episode and evidences coverage differently — so it is not the packet
+    panel every published number was produced with. The rows are minted by the
+    benchmark compiler (``minted_from``), never authored by an owner, which is
+    also what lets them share the actor row's engine under the save rule.
     """
     target = str(model or "").strip()
     if not target:
         raise ValueError("single-model benchmark reviewers require a model")
-
-    def rows(group: str, count: int, effort: str) -> list[dict[str, Any]]:
-        return [
-            {
-                "slot_id": f"benchmark-{group}-{index}",
-                "route": _reviewer_api_route(target),
-                "effort": str(effort or "").strip().lower(),
-            }
-            for index in range(1, max(1, int(count)) + 1)
-        ]
-
-    payload = {
-        "triad": rows("triad", review_slots, review_effort),
-        "scope": rows("scope", scope_slots, scope_effort),
-        "advisory": {
-            "enabled": False,
-            "route": _reviewer_api_route(""),
-            "effort": "low",
-        },
-    }
-    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
-    parse_reviewer_slots(raw)
-    return raw
+    effort = str(review_effort or "").strip().lower()
+    targets = [str(m or "").strip() for m in review_models if str(m or "").strip()]
+    if not targets:
+        targets = [target] * max(1, int(review_slots))
+    return tuple(
+        ConfiguredSubagent(
+            subagent_id=f"{BENCHMARK_REVIEW_ID_PREFIX}{index}",
+            recommended_use=BENCHMARK_REVIEW_RECOMMENDATION,
+            route=RouteSpec(ROUTE_KIND_API_MODEL, seat_model),
+            effort=effort,
+            review_eligible=True,
+            delivery=REVIEW_DELIVERY_PACKET,
+            minted_from=MINTED_FROM_FACTORY_DEFAULT,
+        )
+        for index, seat_model in enumerate(targets, start=1)
+    )
 
 
-def disabled_subagents_setting(model: str = "") -> str:
+def single_model_subagents_setting(
+    model: str, *, review_slots: int = 1, review_effort: str = "",
+    review_models: Sequence[str] = (),
+) -> str:
+    """Canonical Available-subagents value for a fixed-model run: the one
+    measured API actor plus ``review_slots`` identical packet review seats (or
+    the explicit ``review_models`` panel, one packet seat per model)."""
+    rows = (_benchmark_actor(model),
+            *_benchmark_review_rows(model, review_slots, review_effort, review_models))
+    return serialize_configured_subagents(make_configured_subagents(rows))
+
+
+def disabled_subagents_setting(
+    model: str = "", *, review_slots: int = 1, review_effort: str = "",
+) -> str:
     """Canonical explicit-off value, optionally retaining the measured actor row.
 
-    A disabled list still records which API actor the benchmark measured; ``enabled=false``
-    remains the execution authority.  The empty form stays available for callers that truly
-    have no measured model rather than inventing one.
+    A disabled list still records which API actor the benchmark measured;
+    ``enabled=false`` remains the DELEGATION authority. The review pool ignores
+    that switch (a marked row reviews whether or not delegation is on), so the
+    measured model's review seats ride the disabled document too. The empty
+    form stays available for callers that truly have no measured model rather
+    than inventing one.
     """
-    rows = (_benchmark_actor(model),) if str(model or "").strip() else ()
+    rows: tuple[ConfiguredSubagent, ...] = ()
+    if str(model or "").strip():
+        rows = (_benchmark_actor(model), *_benchmark_review_rows(model, review_slots, review_effort))
     return serialize_configured_subagents(make_configured_subagents(rows, enabled=False))
+
+
+def fixed_model_roster_mismatches(config: ConfiguredSubagents, model: str) -> list[str]:
+    """Why a parsed roster is NOT the exact fixed-model contract for ``model``.
+
+    The actor row must be the canonical one-model API actor; every marked row
+    (the review pool) must be an ``api_model`` packet seat on the measured model.
+    Empty list means the roster is the contract (any seat count).
+    """
+    target = str(model or "").strip()
+    actor = tuple(row for row in config.items if not row.review_eligible)
+    expected = make_configured_subagents((_benchmark_actor(target),))
+    mismatches: list[str] = []
+    if not config.enabled or configured_subagents_dict(make_configured_subagents(actor)) != configured_subagents_dict(expected):
+        mismatches.append(
+            f"{SUBAGENTS_SETTING}: runtime does not expose the exact one-model "
+            f"API actor for {target!r}"
+        )
+    pool = [row for row in config.items if row.review_eligible]
+    if not pool:
+        mismatches.append(f"{SUBAGENTS_SETTING}: runtime lacks the fixed-model review pool (no marked row)")
+    for row in pool:
+        if row.route.kind != ROUTE_KIND_API_MODEL or row.delivery == "native" or row.route.target_id != target:
+            route_kind = (
+                "agent_session" if row.route.kind == ROUTE_KIND_AGENT_SESSION
+                else "native_tool_rounds" if row.delivery != REVIEW_DELIVERY_PACKET
+                else REVIEWER_ROUTE_KIND_API
+            )
+            mismatches.append(
+                f"{SUBAGENTS_SETTING}: review seat {row.subagent_id!r} routes via {route_kind} "
+                f"to {row.route.target_id!r}; expected {REVIEWER_ROUTE_KIND_API} packet delivery on {target!r}"
+            )
+    return mismatches
+
+
+def container_subagents_setting(model: str, host_raw: Any) -> str:
+    """The roster a one-model benchmark CONTAINER runs, derived from the host's.
+
+    A host roster that already IS the fixed-model contract for ``model`` (the
+    ``--all-model`` launcher wrote it) is forwarded verbatim, seat count and
+    effort included. Otherwise the container gets the canonical actor plus the
+    host pool's API seats (an agent-session seat structurally cannot run in a
+    task container: no harness CLI/daemon, no harness credentials in the
+    forwarded env — see ``host_pool_session_targets``), and one packet seat on
+    the measured model when the host configured no API seat at all.
+    """
+    target = str(model or "").strip()
+    raw = str(host_raw or "").strip()
+    if raw:
+        config = parse_configured_subagents(raw)
+        if not fixed_model_roster_mismatches(config, target):
+            return serialize_configured_subagents(config)
+        api_seats = tuple(
+            row for row in config.items
+            if row.review_eligible and row.route.kind == ROUTE_KIND_API_MODEL
+        )
+        if api_seats:
+            return serialize_configured_subagents(
+                make_configured_subagents((_benchmark_actor(target), *api_seats))
+            )
+    return single_model_subagents_setting(target)
+
+
+def host_pool_session_targets(host_raw: Any) -> list[str]:
+    """The host review pool's agent-session seats, as their ``harness[=model]``
+    targets in row order — the seats a task container cannot run."""
+    raw = str(host_raw or "").strip()
+    if not raw:
+        return []
+    config = parse_configured_subagents(raw)
+    return [
+        row.route.target_id.strip() for row in config.items
+        if row.review_eligible and row.route.kind == ROUTE_KIND_AGENT_SESSION
+    ]
 
 
 def single_model_slot_snapshot(
@@ -187,10 +247,7 @@ def single_model_slot_snapshot(
         review_effort=review_effort,
         target=pinned,
     )
-    keys = (*SINGLE_MODEL_SLOT_KEYS, "OUROBOROS_REVIEW_MODELS")
-    if review_effort:
-        keys += ("OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW")
-    return {key: pinned[key] for key in keys if pinned.get(key)}
+    return {key: pinned[key] for key in SINGLE_MODEL_SLOT_KEYS if pinned.get(key)}
 
 
 def runtime_actor_snapshot(
@@ -228,14 +285,8 @@ def runtime_actor_snapshot(
     # helper override, while fallback, reviewer, vision and every other live role stay on Main.
     # ACTIVE_MODEL_SLOT_KEYS deliberately excludes legacy Heavy, so historical settings remain
     # readable without resurrecting it as an execution authority.
-    structured_review_raw = str(settings.get(REVIEWER_SLOTS_ENV) or "").strip()
     for key, raw in active_model_slots.items():
         if key == "OUROBOROS_MODEL":
-            continue
-        # A present structured panel is the runtime SSOT. Its API/session rows are
-        # checked semantically below; legacy reviewer strings are merely a derived
-        # projection and may be stale on disk without being executable.
-        if structured_review_raw and key in _STRUCTURED_REVIEW_SHADOWS:
             continue
         expected = light_model if key == "OUROBOROS_MODEL_LIGHT" else model
         configured = [item.strip() for item in raw.split(",") if item.strip()]
@@ -264,109 +315,45 @@ def runtime_actor_snapshot(
                 f"for routed model {routed_model!r}"
             )
 
-    reviewer_projection: dict[str, Any] = {}
-    reviewer_parse_error = ""
-    if not structured_review_raw:
-        mismatches.append(
-            f"{REVIEWER_SLOTS_ENV}: runtime lacks the authoritative fixed-model reviewer panel"
-        )
-    else:
-        try:
-            reviewer_config = parse_reviewer_slots(structured_review_raw)
-        except ValueError as exc:
-            reviewer_parse_error = str(exc)
-            mismatches.append(f"{REVIEWER_SLOTS_ENV}: runtime value invalid: {exc}")
-        else:
-            def reviewer_row(row: Any) -> dict[str, Any]:
-                route = route_spec_dict(
-                    RouteSpec(
-                        ROUTE_KIND_AGENT_SESSION if row.is_session else ROUTE_KIND_API_MODEL,
-                        row.target_id,
-                        row.profile_id,
-                    ),
-                    api_kind=REVIEWER_ROUTE_KIND_API,
-                    pin_key="profile_id",
-                )
-                return {
-                    "slot_id": row.slot_id,
-                    "route": route,
-                    "effort": row.effort,
-                }
-
-            reviewer_projection = {
-                "triad": [reviewer_row(row) for row in reviewer_config.triad],
-                "scope": [reviewer_row(row) for row in reviewer_config.scope],
-                "advisory": {
-                    "enabled": reviewer_config.advisory.enabled,
-                    "route": route_spec_dict(
-                        RouteSpec(
-                            (ROUTE_KIND_AGENT_SESSION
-                             if reviewer_config.advisory.kind == "agent_session"
-                             else ROUTE_KIND_API_MODEL),
-                            reviewer_config.advisory.target_id,
-                            reviewer_config.advisory.profile_id,
-                        ),
-                        api_kind=REVIEWER_ROUTE_KIND_API,
-                        pin_key="profile_id",
-                    ),
-                    "effort": reviewer_config.advisory.effort,
-                },
-            }
-            for group_name, rows in (
-                ("triad", reviewer_config.triad),
-                ("scope", reviewer_config.scope),
-            ):
-                for row in rows:
-                    # A RETRIEVING row (hosted session OR a configured-subagent
-                    # api row's native tool rounds) is a different delivery
-                    # class even on the measured model: it reads the subject
-                    # itself, pays for its own episode and evidences coverage
-                    # differently, so it is not the packet-delivery panel
-                    # every published number was produced with.
-                    if row.retrieves or row.target_id != model:
-                        route_kind = (
-                            "agent_session" if row.is_session
-                            else "native_tool_rounds" if row.native_retrieval
-                            else REVIEWER_ROUTE_KIND_API
-                        )
-                        mismatches.append(
-                            f"{REVIEWER_SLOTS_ENV}: {group_name} slot {row.slot_id!r} "
-                            f"routes via {route_kind} to {row.target_id!r}; expected "
-                            f"{REVIEWER_ROUTE_KIND_API} packet delivery on {model!r}"
-                        )
-            if reviewer_config.advisory.enabled:
-                mismatches.append(
-                    f"{REVIEWER_SLOTS_ENV}: advisory is enabled; fixed-model benchmarks "
-                    "keep the advisory disabled for cross-run comparability (it could "
-                    "honestly run on the routed model, but would add a reviewer episode "
-                    "other runs did not pay for)"
-                )
-
+    # The roster is the one SSOT for both the delegation actor and the review
+    # pool (its marked rows). Retired comma keys and the lane-era panel are not
+    # execution authorities and are not compared.
     projection: dict[str, Any] = {}
+    review_pool: list[dict[str, Any]] = []
     parse_error = ""
     try:
-        config, normalized = normalize_configured_subagents(settings.get(SUBAGENTS_SETTING))
+        config, _normalized = normalize_configured_subagents(settings.get(SUBAGENTS_SETTING))
     except ValueError as exc:
         parse_error = str(exc)
         mismatches.append(f"{SUBAGENTS_SETTING}: runtime value invalid: {exc}")
     else:
         projection = configured_subagents_dict(config)
-        if normalized != single_model_subagents_setting(model):
-            mismatches.append(
-                f"{SUBAGENTS_SETTING}: runtime does not expose the exact one-model "
-                f"API actor for {model!r}"
-            )
+        mismatches.extend(fixed_model_roster_mismatches(config, model))
+        review_pool = [
+            {
+                "subagent_id": row.subagent_id,
+                "route": route_spec_dict(
+                    RouteSpec(row.route.kind, row.route.target_id, row.route.credential_profile_id),
+                    api_kind=REVIEWER_ROUTE_KIND_API,
+                    pin_key="profile_id",
+                ),
+                "effort": row.effort,
+                "delivery": (
+                    "session" if row.route.kind == ROUTE_KIND_AGENT_SESSION
+                    else row.delivery or "native"
+                ),
+            }
+            for row in config.items if row.review_eligible
+        ]
     return {
         "model": actual_model,
         "model_slots": active_model_slots,
         "model_route_options": {key: settings[key] for key in MODEL_ROUTE_OPTION_KEYS if key in settings},
         "local_routes": local_routes,
-        "reviewer_slots": reviewer_projection,
+        "review_pool": review_pool,
         "available_subagents": projection,
         "mismatches": mismatches,
         **({"parse_error": parse_error} if parse_error else {}),
-        **({"reviewer_slots_parse_error": reviewer_parse_error}
-           if reviewer_parse_error else {}),
     }
 
 
@@ -415,8 +402,9 @@ def pin_single_model(
 
     ``target=None`` mutates ``os.environ`` (host-subprocess path, e.g. Terminal-Bench);
     pass a settings dict to update it instead (e.g. SWE-bench Pro ``derive_run_settings``).
-    ``review_effort`` (when non-empty) pins review + scope-review effort. Returns the
-    mutated mapping. A single configured reviewer is intentionally loud
+    ``review_slots`` identical packet review seats ride the roster; ``review_effort``
+    (when non-empty) is written only on each seat. Returns
+    the mutated mapping. A single configured reviewer is intentionally loud
     (``single_reviewer_no_diversity``); this helper does not suppress that.
     """
     sink: MutableMapping[str, str] = os.environ if target is None else target
@@ -432,18 +420,14 @@ def pin_single_model(
     sink["USE_LOCAL_LIGHT"] = (
         "true" if provider_for_model(effective_light) == "local" else "false"
     )
-    sink[SUBAGENTS_SETTING] = single_model_subagents_setting(model)
-    sink["OUROBOROS_REVIEW_MODELS"] = ",".join([model] * max(1, int(review_slots)))
-    sink[REVIEWER_SLOTS_ENV] = single_model_reviewer_slots_setting(
-        model,
-        review_slots=review_slots,
-        scope_slots=1,
-        review_effort=review_effort,
-        scope_effort=review_effort,
+    sink[SUBAGENTS_SETTING] = single_model_subagents_setting(
+        model, review_slots=review_slots, review_effort=review_effort,
     )
-    if review_effort:
-        sink["OUROBOROS_EFFORT_REVIEW"] = review_effort
-        sink["OUROBOROS_EFFORT_SCOPE_REVIEW"] = review_effort
+    # Lane-era carriers a previous pin may have left behind are not execution
+    # authorities any more; drop them so the forwarded contract is the roster alone.
+    for key in set(MODEL_SLOT_KEYS) - set(ACTIVE_MODEL_SLOT_KEYS):
+        if key.startswith("OUROBOROS_"):
+            sink.pop(key, None)
     return sink
 
 

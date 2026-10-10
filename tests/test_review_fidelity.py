@@ -262,161 +262,8 @@ class TestFormatStatusSection:
 
 
 # ---------------------------------------------------------------------------
-# Tests: commit_gate obligation formatting — verify no [:5] truncation
-# in _check_advisory_freshness for fresh+obs, parse_failure+obs, stale+obs.
-# We call _check_advisory_freshness via a minimal ToolContext-like stub.
-# Also test the shared JSON helper for completeness.
+# Tests: the shared blocking-findings JSON helper keeps every obligation.
 # ---------------------------------------------------------------------------
-
-import subprocess
-import tempfile
-import pathlib as _pl
-
-
-def _make_tool_context(drive_root: str, repo_dir: str):
-    """Minimal stub compatible with the first four lines of _check_advisory_freshness."""
-    class _Ctx:
-        pass
-    ctx = _Ctx()
-    ctx.drive_root = drive_root
-    ctx.repo_dir = repo_dir
-    ctx.task_id = ""
-    # drive_logs() is called for bypass audit logging only; not needed here.
-    return ctx
-
-
-def _make_git_repo(path: _pl.Path):
-    subprocess.run(["git", "init"], cwd=str(path), capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"],
-                   cwd=str(path), capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(path), capture_output=True)
-
-
-class TestCommitGateFreshnessMessages:
-    """_check_advisory_freshness must include ALL obligations in warning text."""
-
-    def _setup(self):
-        """Return (tmp_dir, ctx, repo_dir, drive_root, save_state, load_state, rs_mod)."""
-        from ouroboros.review_state import save_state, load_state
-        import importlib
-        rs_mod = importlib.import_module("ouroboros.review_state")
-
-        tmp_dir = tempfile.mkdtemp()
-        repo_dir = _pl.Path(tmp_dir) / "repo"
-        repo_dir.mkdir()
-        drive_root = _pl.Path(tmp_dir) / "drive"
-        (drive_root / "state").mkdir(parents=True)
-        _make_git_repo(repo_dir)
-
-        ctx = _make_tool_context(str(drive_root), str(repo_dir))
-        return tmp_dir, ctx, repo_dir, drive_root, save_state, load_state, rs_mod
-
-    def _add_obligations(self, drive_root, n, rs_mod):
-        """Write N open obligations into saved state."""
-        from ouroboros.review_state import load_state, save_state
-        state = load_state(drive_root)
-        state.open_obligations = [
-            _make_obligation(f"ob{i}", reason=f"obligation reason {i}")
-            for i in range(n)
-        ]
-        save_state(drive_root, state)
-
-    def test_fresh_with_open_obligations_shows_all(self, monkeypatch):
-        """fresh advisory + >5 obligations: all obligations appear in warning text."""
-        from ouroboros.review_state import (
-            AdvisoryRunRecord, compute_snapshot_hash,
-        )
-        from ouroboros.tools.commit_gate import _check_advisory_freshness
-
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-        _, ctx, repo_dir, drive_root, save_state_fn, _, rs_mod = self._setup()
-
-        commit_message = "test commit"
-        snapshot_hash = compute_snapshot_hash(repo_dir, commit_message)
-
-        # Write a fresh run for this snapshot + 8 open obligations
-        state = rs_mod.AdvisoryReviewState()
-        state.open_obligations = [
-            _make_obligation(f"ob{i}", reason=f"fresh reason {i}")
-            for i in range(8)
-        ]
-        state.add_run(AdvisoryRunRecord(
-            snapshot_hash=snapshot_hash,
-            commit_message=commit_message,
-            status="fresh",
-            ts="2026-04-08T00:00:00",
-            repo_key="",
-        ))
-        save_state_fn(drive_root, state)
-
-        result = _check_advisory_freshness(ctx, commit_message)
-        assert result is not None, "Expected non-None (obligations remain even with fresh run)"
-        for i in range(8):
-            assert f"ob{i}" in result, f"Missing obligation ob{i} in fresh+obs message"
-        assert "... and" not in result
-
-    def test_parse_failure_with_open_obligations_shows_all(self):
-        """parse_failure advisory + >5 obligations: all obligations appear in warning text."""
-        from ouroboros.review_state import (
-            AdvisoryRunRecord, compute_snapshot_hash,
-        )
-        from ouroboros.tools.commit_gate import _check_advisory_freshness
-
-        _, ctx, repo_dir, drive_root, save_state_fn, _, rs_mod = self._setup()
-
-        commit_message = "test commit"
-        snapshot_hash = compute_snapshot_hash(repo_dir, commit_message)
-
-        state = rs_mod.AdvisoryReviewState()
-        state.open_obligations = [
-            _make_obligation(f"ob{i}", reason=f"pf reason {i}")
-            for i in range(7)
-        ]
-        state.add_run(AdvisoryRunRecord(
-            snapshot_hash=snapshot_hash,
-            commit_message=commit_message,
-            status="parse_failure",
-            ts="2026-04-08T00:00:00",
-            repo_key="",
-        ))
-        save_state_fn(drive_root, state)
-
-        result = _check_advisory_freshness(ctx, commit_message)
-        assert result is not None
-        for i in range(7):
-            assert f"ob{i}" in result, f"Missing obligation ob{i} in parse_failure+obs message"
-        assert "... and" not in result
-
-    def test_stale_with_open_obligations_shows_all(self):
-        """No fresh advisory (stale/no-run) + >5 obligations: all obligations listed."""
-        from ouroboros.review_state import (
-            AdvisoryRunRecord,
-        )
-        from ouroboros.tools.commit_gate import _check_advisory_freshness
-
-        _, ctx, repo_dir, drive_root, save_state_fn, _, rs_mod = self._setup()
-
-        commit_message = "test commit"
-        # Different hash → stale (snapshot changed)
-        state = rs_mod.AdvisoryReviewState()
-        state.open_obligations = [
-            _make_obligation(f"ob{i}", reason=f"stale reason {i}")
-            for i in range(6)
-        ]
-        state.add_run(AdvisoryRunRecord(
-            snapshot_hash="aabbccddeeff0011",  # won't match current snapshot
-            commit_message=commit_message,
-            status="stale",
-            ts="2026-04-08T00:00:00",
-            repo_key="",
-        ))
-        save_state_fn(drive_root, state)
-
-        result = _check_advisory_freshness(ctx, commit_message)
-        assert result is not None
-        for i in range(6):
-            assert f"ob{i}" in result, f"Missing obligation ob{i} in stale+obs message"
-        assert "... and" not in result
 
 
 class TestCommitGateJsonHelperNotTruncated:
@@ -623,7 +470,7 @@ class TestHandleReviewStatusNotTruncated:
         from ouroboros.review_state import (
             AdvisoryReviewState, AdvisoryRunRecord, save_state,
         )
-        from ouroboros.tools.claude_advisory_review import _handle_review_status
+        from ouroboros.tools.preflight_review import _handle_review_status
 
         # Create 7 runs — previously only last 5 were returned
         runs = []
@@ -659,7 +506,7 @@ class TestHandleReviewStatusNotTruncated:
         import json, tempfile, pathlib
         from unittest.mock import MagicMock
         from ouroboros.review_state import AdvisoryReviewState, save_state
-        from ouroboros.tools.claude_advisory_review import _handle_review_status
+        from ouroboros.tools.preflight_review import _handle_review_status
 
         # Create 10 attempts — previously only last 8 were returned
         state = AdvisoryReviewState()

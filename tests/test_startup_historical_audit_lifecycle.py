@@ -4,7 +4,8 @@ The audit exists to take an O(history) diagnostic OFF the readiness path.  What
 must therefore hold is: a real separate interpreter does the work, the parent's
 record is a closed bounded schema, stop wins from either side of handle
 publication, an unreadable history stays UNKNOWN instead of becoming an
-accusation, and the monetary ledger the pass reads is not touched by it.
+accusation, and the money the pass reads (the usage store and the retained
+journal evidence) is not touched by it.
 """
 from __future__ import annotations
 
@@ -16,15 +17,14 @@ import time
 
 import pytest
 
-from ouroboros import usage_accounting as ua
-from ouroboros import usage_compaction as uc
+from ouroboros import usage_store
 from ouroboros.startup_historical_audit import HistoricalAudit, _report_fields
-from tests.fixtures_usage_compaction import (  # noqa: F401  (pytest fixtures)
-    _compact,
+from tests._usage_store_testing import ledger_rows
+from tests.fixtures_usage_store import (  # noqa: F401  (pytest fixtures)
+    ARCHIVE_SEGMENT_REL,
     _seed_mixed_ledger,
-    age_fixture_clock,
     data_root as data_root,              # re-exported for pytest, not called here
-    data_root_any_tier as data_root_any_tier,
+    fold_into_archive,
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -69,27 +69,31 @@ def _seal_manifest(root: pathlib.Path, attempt_id: str, task_id: str = "t") -> N
 
 @pytest.fixture()
 def archived_root(data_root, monkeypatch):
-    """A REAL archived chain written by the shipped compactor, plus seals over
-    an archived identity, a live identity and an absent one."""
+    """An install upgraded from a compacted journal: folded attempts live only
+    in a retained archive segment, the store holds their aggregate, plus seals
+    over an archived identity, a live identity and an absent one."""
     (data_root / "logs").mkdir(parents=True, exist_ok=True)
     _seed_mixed_ledger(data_root)
-    rows_before = [json.loads(line) for line in
-                   (data_root / ua.LEDGER_REL).read_text(encoding="utf-8").splitlines() if line.strip()]
-    archived_ids = [str(row.get("attempt_id")) for row in rows_before
-                    if str(row.get("state")) == "settled" and str(row.get("kind") or "attempt") == "attempt"]
-    assert _compact(data_root) is not None, "the fixture must really compact"
+    rows_before = ledger_rows(data_root)
+    archived_ids = [str(row["attempt_id"]) for row in rows_before
+                    if row.get("state") == "settled" and str(row.get("kind") or "attempt") == "attempt"
+                    and not row.get("review_skill")]
     assert archived_ids
-    live_rows = [json.loads(line) for line in
-                 (data_root / ua.LEDGER_REL).read_text(encoding="utf-8").splitlines() if line.strip()]
-    live_ids = [str(row.get("attempt_id")) for row in live_rows
+    fold_into_archive(data_root, archived_ids)
+    live_ids = [str(row["attempt_id"]) for row in ledger_rows(data_root)  # the import runs here, as at boot
                 if str(row.get("kind") or "attempt") == "attempt"]
-    assert live_ids, "an in-flight chain must survive the fold"
+    assert live_ids, "open attempts are never folded"
     folded = set(archived_ids) - set(live_ids)
     assert folded, "at least one identity must live only in the archive"
     _seal_manifest(data_root, sorted(folded)[0])
     _seal_manifest(data_root, live_ids[0])
     _seal_manifest(data_root, "absent-attempt-id")
     return data_root
+
+
+def _money_bytes(root: pathlib.Path) -> list:
+    paths = [root / usage_store.STORE_REL, root / usage_store.LEDGER_REL, root / ARCHIVE_SEGMENT_REL]
+    return [(path.name, path.read_bytes()) for path in paths]
 
 
 # --------------------------------------------------------------------------
@@ -99,11 +103,7 @@ def archived_root(data_root, monkeypatch):
 def test_real_child_runs_the_history_pass_in_its_own_interpreter(archived_root, monkeypatch):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(archived_root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(archived_root / "settings.json"))
-    ledger_before = (archived_root / ua.LEDGER_REL).read_bytes()
-    archive_before = sorted(
-        (path.name, path.read_bytes())
-        for path in (archived_root / uc.ARCHIVE_SEGMENT_DIR_REL).glob("*.jsonl")
-    )
+    money_before = _money_bytes(archived_root)
 
     audit = HistoricalAudit()
     audit.start(archived_root, REPO)
@@ -114,15 +114,13 @@ def test_real_child_runs_the_history_pass_in_its_own_interpreter(archived_root, 
     assert terminal["phase"] == "completed", terminal
     assert terminal["exit_code"] == 0
     assert terminal["manifests_checked"] == 3
-    # Exactly one seal names an identity that is in neither the live replay nor
-    # the archive; the archived one must NOT be accused.
+    # Exactly one seal names an identity that is in neither the store nor the
+    # retained evidence; the archived one must NOT be accused.
     assert terminal["facts_written"] == 1, terminal
     assert terminal["cpu_seconds"] >= 0 and terminal["wall_seconds"] >= 0
 
-    # The monetary authority the pass reads is untouched by it.
-    assert (archived_root / ua.LEDGER_REL).read_bytes() == ledger_before
-    assert sorted((path.name, path.read_bytes())
-                  for path in (archived_root / uc.ARCHIVE_SEGMENT_DIR_REL).glob("*.jsonl")) == archive_before
+    # The money the pass reads is untouched by it.
+    assert _money_bytes(archived_root) == money_before
 
 
 def test_recorded_facts_carry_no_paths_identities_or_messages(archived_root, monkeypatch):
@@ -143,8 +141,7 @@ def test_recorded_facts_carry_no_paths_identities_or_messages(archived_root, mon
 
 def test_unreadable_history_stays_unknown_and_accuses_nobody(data_root, monkeypatch):
     (data_root / "logs").mkdir(parents=True, exist_ok=True)
-    (data_root / ua.LEDGER_REL).parent.mkdir(parents=True, exist_ok=True)
-    (data_root / ua.LEDGER_REL).write_text("not-json\n{}\n", encoding="utf-8")
+    (data_root / usage_store.STORE_REL).write_bytes(b"not a database\n" * 512)  # a damaged store
     _seal_manifest(data_root, "absent-attempt-id")
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data_root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(data_root / "settings.json"))

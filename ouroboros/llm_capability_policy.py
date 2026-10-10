@@ -6,7 +6,8 @@ optional parameters a route refuses, and the reasoning-effort band it will
 actually run. This module owns that knowledge (process caches over a durable
 capability-evidence store), the classifier that decides whether a failure was a
 parameter rejection at all, and the one-shot payload repair that follows from
-it.
+it. Claudexor metadata discovery and requested-model admission use the engine's
+negotiated declaration, without inventing a model row or a capability claim.
 """
 
 
@@ -18,6 +19,8 @@ import logging
 import time
 from typing import Any, Dict, Optional, Set
 
+from ouroboros.claudexor_daemon import read_owned_gateway
+from ouroboros.gateways.claudexor import operation_query_supported
 from ouroboros.llm_attempt import (
     _is_provider_policy_refusal,
     _is_structured_context_overflow_exception,
@@ -44,6 +47,44 @@ _OPTIONAL_DROPPABLE_PARAMS = _OPTIONAL_SAMPLING_PARAMS + (
 
 # Shared by the classifier and floor predicate; bare "required" is too broad.
 _MANDATORY_VALUE_MARKERS = ("mandatory", "cannot be disabled", "must be enabled")
+
+
+def model_catalog(source: str, credential_profile_id: str | None = None, *,
+                  requested_model: str | None = None, timeout_sec: float | None = None) -> dict:
+    """Metadata-only transport under one connect, negotiation and read budget; the capability
+    evidence owner interprets the envelope. An elapsed budget reads nothing more."""
+    started = time.monotonic()
+    gateway = read_owned_gateway(**({} if timeout_sec is None else {"timeout_sec": timeout_sec}))
+
+    def budget() -> dict:
+        if timeout_sec is None:
+            return {}
+        remaining = timeout_sec - (time.monotonic() - started)
+        if remaining <= 0:
+            raise TimeoutError("Model metadata observation deadline elapsed")
+        return {"timeout_sec": remaining}
+
+    try:
+        hint = {"requested_model": requested_model} if requested_model is not None else {}
+        if requested_model is not None and operation_query_supported(
+                gateway.operations(**budget()),
+                method="GET", path="/v2/model-sources/:id/models", name="includeAdmission", value="true"):
+            hint["include_admission"] = True
+        return gateway.list_source_models(source, credential_profile_id, **hint, **budget())
+    finally:
+        gateway.close()
+
+
+def catalog_admits_model(catalog: dict, model: str) -> bool:
+    """An exact engine admission permits an attempt, without inventing a model row.
+
+    Older engines retain membership semantics. Source/account/freshness binding
+    belongs to the caller; this is neither entitlement nor generation evidence.
+    """
+    admission = catalog.get("admission")
+    return (any(isinstance(row, dict) and row.get("id") == model for row in catalog.get("models", []))
+            or (isinstance(admission, dict) and admission.get("requestedModel") == model
+                and admission.get("inventoryAbsence") == "advisory"))
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
@@ -99,9 +140,14 @@ class _CapabilityPolicyMixin:
                     resp.status_code,
                 )
                 return
-            from ouroboros.provider_models import update_vision_overlay
-
-            for m in resp.json().get("data", []) or []:
+            rows = resp.json().get("data", []) or []
+            from ouroboros.response_limits import record_catalog_limits
+            from ouroboros.capability_evidence import canonical_evidence_root
+            record_catalog_limits(canonical_evidence_root(),
+                [(m.get("id"), (m.get("top_provider") or {}).get("max_completion_tokens")) for m in rows],
+                provider="openrouter", base_url="https://openrouter.ai/api/v1",
+                field="top_provider.max_completion_tokens", source="OpenRouter")
+            for m in rows:
                 mid = m.get("id") or ""
                 sp = m.get("supported_parameters")
                 if mid and isinstance(sp, list) and sp:
@@ -110,13 +156,13 @@ class _CapabilityPolicyMixin:
                 cl = m.get("context_length")
                 if mid and isinstance(cl, (int, float)) and cl > 0:
                     cls._CONTEXT_LENGTH_CACHE[mid] = int(cl)
-                # Vision overlay for supports_vision(): authoritative
-                # input_modalities from the same /models payload.
-                arch = m.get("architecture")
-                if mid and isinstance(arch, dict):
-                    modalities = arch.get("input_modalities")
-                    if isinstance(modalities, list) and modalities:
-                        update_vision_overlay(mid, "image" in modalities)
+            # Image input is a fact about this exact route: one parser, stored
+            # under the OpenRouter route scope with this response's time, so any
+            # process (a worker, a cold VLM child) reads it without a fetch.
+            from ouroboros.vision_routing import record_catalog_image_input
+
+            record_catalog_image_input("openrouter", "https://openrouter.ai/api/v1", rows,
+                                       source="OpenRouter /models")
             cls._CAPABILITIES_FETCH_OK = True  # reached the provider and parsed it
         except Exception:
             log.debug("Failed to fetch OpenRouter model capabilities", exc_info=True)

@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._usage_store_testing import ledger_rows
 from tests.test_owner_continue import NONCE, _interrupted
 
 pytestmark = pytest.mark.serial
@@ -42,9 +43,8 @@ def test_retired_local_answer_owner_releases_same_continue_without_settling_mone
             asyncio.run(ua.execute_physical_attempt_async(request, failed_async_send))
         else:
             ua.execute_physical_attempt(request, failed_send)
-    ledger = tmp_path / ua.LEDGER_REL
-    before = ledger.read_bytes()
-    final = json.loads(before.splitlines()[-1])
+    before = ledger_rows(tmp_path)
+    final = before[-1]
     assert final["state"] == "unresolved"
     assert final["local_answer_owner_pid"] == os.getpid()
     held = admit_continuation("pred-1", action_nonce=NONCE)
@@ -60,16 +60,13 @@ def test_retired_local_answer_owner_releases_same_continue_without_settling_mone
     replay = admit_continuation("pred-1", action_nonce=NONCE)
     assert replay["successor_task_id"] == successor
     assert len(workers.PENDING) == 1
-    assert ledger.read_bytes() == before, "writer classification must not mutate money"
+    assert ledger_rows(tmp_path) == before, "writer classification must not mutate money"
     projection = ua.usage_projection(tmp_path, billing_group_id="pred-1")
+    # Releasing a local-writer hold neither settles nor forgets its liability: the
+    # bound stays disclosed exposure, and (#1487) it is never counted as spending.
     assert projection["unresolved_upper_bound_usd"] == 0.5
-    # Releasing a local-writer hold does not restore its monetary room.
-    sent = []
-    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id=successor, root_task_id=successor)):
-        with pytest.raises(ua.BudgetExceeded):
-            ua.execute_physical_attempt(ua.AttemptRequest(
-                model="m", provider="test", reservation_usd=20.0), lambda: sent.append(True))
-    assert sent == [] and ledger.read_bytes() == before
+    assert projection["settled_usd"] == 0.0 and projection["accounted_usd"] == 0.5
+    assert ledger_rows(tmp_path) == before
     # An actual late receipt still settles the same liability.
     reservation = ua.AttemptReservation(final["attempt_id"], tmp_path, "m", "test", 0.5)
     ua.settle_attempt(reservation, {}, cost_usd=0.7, cost_final=True)
@@ -117,7 +114,7 @@ def test_unreadable_pause_preserves_cause_and_prevents_physical_send(tmp_path, m
             root_task_id="root", reservation_usd=0.5), lambda: sent.append(True))
     assert exc.value.control_reason == "owner_pause_authority_unreadable"
     assert sent == []
-    assert json.loads((tmp_path / ua.LEDGER_REL).read_text().splitlines()[-1])["state"] == "released"
+    assert ledger_rows(tmp_path)[-1]["state"] == "released"
 
 
 def test_restart_retains_legacy_unknown_and_saved_zero_dispatch_without_inference(tmp_path, monkeypatch):
@@ -182,7 +179,7 @@ def test_owner_pause_cause_survives_root_selection_but_not_new_budget_pause(tmp_
 
 
 def test_indexed_census_preserves_legacy_members_and_reloads_only_changed_foreign_rows(tmp_path, monkeypatch):
-    from ouroboros.gateway import task_list_scan as scan
+    from ouroboros import task_result_facts as scan
     from ouroboros.model_sleep import cold_blockers
     from ouroboros.task_results import stamp_task_result_schema, task_result_path, write_task_result
     from supervisor.continuation_admission import conflicting_writers
@@ -280,24 +277,30 @@ def test_settled_continue_observes_off_lock_and_revalidates_owner_authority(tmp_
     assert bool(budget_hold_fact(workers.PENDING[0])) is (race != "none")
 
 
-def test_compaction_keeps_local_consumer_binding_and_late_receipt(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting as ua
-    from tests.fixtures_usage_compaction import _compact, _ledger_rows, _seed_mixed_ledger, age_fixture_clock
+def test_export_and_import_keep_local_consumer_binding_and_late_receipt(tmp_path, monkeypatch):
+    from ouroboros import usage_accounting as ua, usage_store
 
     monkeypatch.setenv("TOTAL_BUDGET", "100")
-    age_fixture_clock(monkeypatch)
-    _seed_mixed_ledger(tmp_path)
+    for index in range(3):
+        settled = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", drive_root=tmp_path,
+            task_id=f"done-{index}", root_task_id=f"done-{index}", reservation_usd=0.1))
+        ua.mark_dispatched(settled)
+        ua.settle_attempt(settled, {}, cost_usd=0.1, cost_final=True)
     reservation = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", drive_root=tmp_path,
         task_id="local", root_task_id="local", reservation_usd=0.5))
     ua.mark_dispatched(reservation, local_answer_owner_pid=os.getpid())
     ua.mark_unresolved(reservation, "unknown response")
-    chain = [r for r in _ledger_rows(tmp_path) if r["attempt_id"] == reservation.attempt_id]
-    assert _compact(tmp_path) is not None
-    retained = [r for r in _ledger_rows(tmp_path) if r["attempt_id"] == reservation.attempt_id]
-    assert [{k: v for k, v in r.items() if k not in {"seq", "pre_compaction_seq"}} for r in retained] == [
-        {k: v for k, v in r.items() if k not in {"seq", "pre_compaction_seq"}} for r in chain]
+
+    def current():
+        row = {r["attempt_id"]: r for r in ledger_rows(tmp_path)}[reservation.attempt_id]
+        return {key: value for key, value in row.items() if key != "seq"}
+
+    before = current()
+    # The downgrade export, then the next access's one-time import of it.
+    usage_store.export_journal(tmp_path)
+    assert current() == before
     ua.settle_attempt(reservation, {}, cost_usd=0.7, cost_final=True)
-    row = _ledger_rows(tmp_path)[-1]
+    row = current()
     assert row["local_answer_owner_pid"] == os.getpid() and row["cost_usd"] == 0.7
 
 
@@ -395,7 +398,7 @@ root = Path({str(tmp_path)!r})
 ua._reservation_cost = lambda request: 0.25
 scope = ua.UsageScope(drive_root=root, task_id="successor", root_task_id="successor",
     root_limit_usd=10, global_limit_usd=100, billing_group_id="original",
-    billing_group_limit_usd=0.1, billing_group_limit_source="initial_task_admission")
+    billing_group_limit_usd=0.0, billing_group_limit_source="initial_task_admission")
 with ua.usage_scope(scope):
     verdict = review_wave_budget_gate(SimpleNamespace(task_id="successor", pending_events=[]),
         surface="test", models=["test/model"], prompt_chars=100)

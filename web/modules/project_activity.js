@@ -5,12 +5,7 @@
 // caller supplies the previous projection when reconciling a partial census.
 
 import { activeModelWaits, mergeModelWaits } from './model_wait.js';
-import { waitFacts } from './question_presentation.js';
-
-const WORKING_PHASES = new Set(['thinking', 'working', 'finalizing']);
-// budget_pausing: the task is still RUNNING but writing its exact pause record
-// (#1196) — a stationary transition, never motion and never a queue.
-const QUEUED_PHASES = new Set(['queued', 'budget_paused', 'budget_pausing']);
+import { censusTaskPhase } from './task_phase_chip.js';
 
 function activityId(row) {
     return String(row?.activity_id || '').trim();
@@ -28,13 +23,6 @@ function isChildActivity(row) {
     return !root || root !== activityId(row);
 }
 
-function waitingQuestion(row) {
-    const question = row?.required_question;
-    if (!question || typeof question !== 'object') return false;
-    const state = question.quiz_state || question.state;
-    return (!state || state === 'open') && waitFacts(question).waiting;
-}
-
 function waitingModel(row) {
     const waits = row?.model_waits;
     if (!waits || typeof waits !== 'object') return false;
@@ -43,24 +31,6 @@ function waitingModel(row) {
     // the card would never show.
     const admitted = mergeModelWaits({}, waits);
     return activeModelWaits(admitted, false, Number(row?.task_attempt) || 0).length > 0;
-}
-
-function waitLabels(row) {
-    const labels = [];
-    if (row.project_admission_hold?.label) labels.push(row.project_admission_hold.label);
-    if (waitingModel(row)) labels.push('Waiting for access');
-    if (waitingQuestion(row)) labels.push('Waiting for your answer');
-    return labels;
-}
-
-function phaseLabel(phase) {
-    if (phase === 'thinking') return 'Thinking';
-    if (phase === 'working') return 'Working';
-    if (phase === 'finalizing') return 'Finalizing';
-    if (phase === 'queued') return 'Queued';
-    if (phase === 'budget_paused') return 'Paused';
-    if (phase === 'budget_pausing') return 'Pausing';
-    return '';
 }
 
 /**
@@ -74,37 +44,23 @@ function phaseLabel(phase) {
 export function summarizeProjectActivities(rows = []) {
     const phases = new Set();
     const waits = new Set();
+    const unknown = new Set();
     let motion = false;
-    let unknown = false;
-    for (const row of Array.isArray(rows) ? rows : []) {
-        if (!row || typeof row !== 'object') continue;
-        // A row whose owner-question detail the census could not read may be
-        // blocked on an answer: it stays static unknown rather than moving.
-        if (row._activityUnconfirmed || (row.required_question_unavailable === true && !row.project_admission_hold)) { unknown = true; continue; }
-        const phase = String(row.phase || '').trim().toLowerCase();
-        const rowWaits = waitLabels(row);
-        if (row.project_admission_hold && /^budget_paus(ed|ing)$/.test(phase)) phases.add(phase);
-        // A same-row wait supersedes its coarse queue/execution phase.
-        if (!rowWaits.length) {
-            if (WORKING_PHASES.has(phase) || QUEUED_PHASES.has(phase)) phases.add(phase);
-            else unknown = true;
-            motion ||= WORKING_PHASES.has(phase);
-        }
-        for (const label of rowWaits) waits.add(label);
+    let queued = false;
+    const order = ['working', 'thinking', 'finalizing', 'queued', 'budget_pausing', 'budget_paused', 'unknown'];
+    const ordered = (Array.isArray(rows) ? rows : []).filter(row => row && typeof row === 'object')
+        .sort((a, b) => order.indexOf(a.phase) - order.indexOf(b.phase));
+    for (const row of ordered) {
+        const view = censusTaskPhase(row, null, !row._activityUnconfirmed, waitingModel(row));
+        const label = [view.text, view.secondary].filter(Boolean).join(' · ');
+        (view.waiting ? waits : view.phase === 'unknown' ? unknown : phases).add(label);
+        motion ||= view.motion || Boolean(view.secondaryMotion);
+        queued ||= view.phase === 'queued';
     }
-
-    const phaseParts = [];
-    // Keep the strongest/most useful phase first while preserving a mixed
-    // direct+managed fact when a project has both kinds of active turn.
-    for (const phase of ['working', 'thinking', 'finalizing', 'queued', 'budget_pausing', 'budget_paused']) {
-        if (phases.has(phase)) phaseParts.push(phaseLabel(phase));
-    }
-    if (unknown) phaseParts.push('Activity status unavailable');
-    const parts = [...phaseParts, ...waits];
-    const waiting = waits.size > 0 || phases.has('budget_paused') || phases.has('budget_pausing');
+    const parts = [...phases, ...unknown, ...waits];
+    const waiting = waits.size > 0;
     const state = motion ? 'working' : waiting ? 'waiting'
-        : phaseParts.some((part) => part === 'Queued' || part === 'Paused' || part === 'Pausing') ? 'queued'
-            : phaseParts.length ? 'unknown' : 'idle';
+        : queued ? 'queued' : parts.length ? 'unknown' : 'idle';
     return {
         state,
         motion,

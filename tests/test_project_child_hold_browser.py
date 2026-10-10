@@ -102,7 +102,10 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
             page.locator('.chat-live-card[data-task-id="parent"] > [data-live-summary-button]').click()
             child_card = page.locator(CHILD)
             child_card.wait_for(state="visible")
-            assert child_card.locator('[data-live-phase]').inner_text() == "Working"
+            # The scheduled receipt precedes the authoritative pending queue read.
+            page.wait_for_function("() => document.querySelector('.chat-live-card[data-task-id=held] [data-live-phase]')?.textContent === 'Queued'")
+            assert child_card.locator('[data-live-phase]').get_attribute('data-motion') == '0'
+            assert not child_card.locator('[data-live-typing]').is_visible()
             page.evaluate("() => window.__heldCard = document.querySelector('.chat-live-card[data-task-id=held]')")
             shot(page, "scheduled")
             result_path.write_text("{torn", encoding="utf-8")
@@ -203,7 +206,14 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
     sent = worker(host, monkeypatch)
     assert queue.persist_queue_snapshot()
     snapshots, request_count, errors = [], [], []
+    # Preserve an earlier RUNNING child reply while later producer state holds it.
+    # A pending row means Queued and cannot justify this test's Working header.
+    host.pending.remove(child)
+    queue.RUNNING["held"] = {"task": child, "started_at": time.time(), "attempt": 1}
+    assert queue.persist_queue_snapshot()
     delayed_queue = _tasks_list_payload(root, None, 10, True)
+    host.pending.append(queue.RUNNING.pop("held")["task"])
+    assert queue.persist_queue_snapshot()
     show_child_hold = freeze_next_child_reply = block_state = False
     completed_states, deferred_states = [], []
     state_count_at_child_reply = None
@@ -275,7 +285,7 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
             result_path.write_text("{torn", encoding="utf-8")
             workers.assign_tasks()
             assert not sent
-            # Both real producer rows now hold, but the child's earlier queued
+            # Both real producer rows now hold, but the child's earlier running
             # snapshot remains in transit until the parent census has painted.
             parent = page.locator('.chat-live-card[data-task-id="parent"]')
             parent_row = queue.RUNNING.pop("parent")["task"]

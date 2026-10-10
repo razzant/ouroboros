@@ -1,25 +1,26 @@
 """Process-local memo of the delegated-run custody rows (razzant/ouroboros#804).
 
-Every custody question — ownership, timing, pending invocations, open runs,
-evidence — is answered from the rows ``delegate_custody.emit`` appended to the
+The boot and maintenance custody reads use the addressed open set instead
+(``delegate_custody_current``, ARCHITECTURE invariant 10). A custody question
+asked outside that binding — ownership, timing, pending invocations, open runs,
+evidence on ``delegate_wait``, ``delegate_start``, task start and completion —
+is still answered from the rows ``delegate_custody.emit`` appended to the
 rotated ``logs/events.jsonl`` chain. That chain is durable history and grows
 without bound (hundreds of MB on a long-lived install), so re-reading it on
-every ``delegate_wait``, ``delegate_start``, task start and completion is the
-"full-history scan filtered down to the answer" DEVELOPMENT §03 forbids on an
-interactive path.
+every such call is the "full-history scan filtered down to the answer"
+DEVELOPMENT §03 forbids on an interactive path.
 
-This module is the warm-cache half of the fix, the shape of
-``ouroboros/_usage_rows_memo.py``: an in-process copy of the custody rows plus
+This module is the warm-cache half of the fix: an in-process copy of the custody rows plus
 a fingerprint of the chain prefix they were read from, advanced by folding only
 the bytes appended since the previous read and REFOLDED FROM SCRATCH on any
-doubt. The durable rows stay the one authority (ARCHITECTURE §10, invariants 10
-and 26): nothing here is written to disk, a refold costs exactly what one
+doubt. The durable rows stay the one authority (ARCHITECTURE §10, invariant 10):
+nothing here is written to disk, a refold costs exactly what one
 ``_iter_rows`` replay costs today, and an unreadable chain bypasses the memo
 for that call instead of caching an "empty because unreadable" answer. It is
 deliberately NOT the durable compact projection §03 also names
 (``containment_faults.jsonl`` is that shape): each process pays one cold fold.
 
-Fingerprint rule (the ledger's ``_read_new_records_locked``): the memo's
+Fingerprint rule: the memo's
 segments must be the chain's first ``k`` segments by ``(st_dev, st_ino)`` in
 order — a rotated live file keeps its inode under its archive name, so the
 prefix it consumed stays consumed; every consumed segment has

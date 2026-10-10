@@ -8,6 +8,7 @@ import logging
 import os
 import pathlib
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Any, Mapping, Optional
 
@@ -25,7 +26,6 @@ NO_RESUME_CAUSES = (
     "deadline", "timeout", "explicit_cancellation", "abrupt_whole_app_loss",
 )
 PLANNED_RESTART_TRANSACTION_ENV = "OUROBOROS_PLANNED_RESTART_TRANSACTION_ID"
-WINDOWS_RESTART_PARENT_HANDLE_ENV = "OUROBOROS_RESTART_PARENT_HANDLE"
 
 
 def _canonical_hash(value: Any) -> str:
@@ -104,7 +104,7 @@ def _active_restart_transaction_path(drive_root: Any) -> pathlib.Path:
 
 
 def arm_active_planned_restart_transaction(drive_root: Any) -> str:
-    """Pass a prepared restart transaction to a direct re-exec successor.
+    """Pass a prepared restart transaction to a direct exec/spawn successor.
 
     Launcher-managed exits acknowledge the same durable transaction by waiting
     for exit code 42.  A direct server re-exec has no launcher, so it carries
@@ -146,146 +146,6 @@ def _write_restart_transaction(drive_root: Any, row: dict[str, Any]) -> None:
     atomic_write_json(path, row)
 
 
-def _windows_restart_kernel32():
-    """Full-width Win32 process-handle ABI for the direct-spawn exit observer."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-    for name, result, args in (
-        ("OpenProcess", wintypes.HANDLE, (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)),
-        ("GetProcessId", wintypes.DWORD, (wintypes.HANDLE,)),
-        ("GetProcessTimes", wintypes.BOOL, (wintypes.HANDLE,) +
-         (ctypes.POINTER(wintypes.FILETIME),) * 4),
-        ("WaitForSingleObject", wintypes.DWORD, (wintypes.HANDLE, wintypes.DWORD)),
-        ("GetExitCodeProcess", wintypes.BOOL, (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))),
-        ("CloseHandle", wintypes.BOOL, (wintypes.HANDLE,)),
-    ):
-        api = getattr(kernel, name)
-        api.restype, api.argtypes = result, args
-    return kernel
-
-
-def _windows_handle_identity(kernel: Any, handle: int) -> tuple[int, str]:
-    import ctypes
-    from ctypes import wintypes
-
-    pid = int(kernel.GetProcessId(handle))
-    created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
-    if not pid or not kernel.GetProcessTimes(
-        handle, ctypes.byref(created), ctypes.byref(exited),
-        ctypes.byref(kernel_time), ctypes.byref(user_time),
-    ):
-        raise OSError("Windows restart process handle identity is unreadable")
-    birth = (created.dwHighDateTime << 32) | created.dwLowDateTime
-    if not birth:
-        raise OSError("Windows restart process creation time is empty")
-    return pid, f"win-filetime:{birth}"
-
-
-def open_windows_restart_parent(drive_root: Any, transaction_id: str) -> tuple[Any, int]:
-    """Pin the prepared old process by an inheritable, queryable kernel handle."""
-    kernel = _windows_restart_kernel32()
-    active = _read_restart_transaction(drive_root, "active")
-    row = _read_restart_transaction(drive_root, transaction_id)
-    if (not transaction_id or active.get("transaction_id") != transaction_id
-            or row.get("status") != "prepared"
-            or int(row.get("supervisor_pid") or 0) != os.getpid()):
-        raise ValueError("Windows direct restart has no matching prepared transaction")
-    # Only this explicit handle enters the successor's STARTUPINFO handle list.
-    handle = kernel.OpenProcess(0x101000, True, os.getpid())  # SYNCHRONIZE | QUERY_LIMITED
-    if not handle:
-        raise OSError("Cannot open inheritable Windows restart parent handle")
-    try:
-        pid, birth = _windows_handle_identity(kernel, handle)
-        if pid != os.getpid():
-            raise ValueError("Windows restart parent handle names another process")
-        row.pop("direct_spawn_successor_pid", None)
-        row.pop("direct_spawn_successor_birth", None)
-        row.update({"direct_spawn_parent_birth": birth})
-        _write_restart_transaction(drive_root, row)
-        return kernel, int(handle)
-    except BaseException:
-        kernel.CloseHandle(handle)
-        raise
-
-
-def bind_windows_restart_successor(drive_root: Any, transaction_id: str, pid: int) -> None:
-    """Bind the one spawned child before the old process is allowed to exit 42."""
-    from ouroboros.platform_layer import process_start_time
-
-    row = _read_restart_transaction(drive_root, transaction_id)
-    birth = process_start_time(int(pid))
-    if (row.get("status") != "prepared"
-            or int(row.get("supervisor_pid") or 0) != os.getpid()
-            or not row.get("direct_spawn_parent_birth") or not birth):
-        raise ValueError("Windows restart successor identity is unprovable")
-    row.update({"direct_spawn_successor_pid": int(pid), "direct_spawn_successor_birth": birth})
-    _write_restart_transaction(drive_root, row)
-
-
-def _ack_windows_spawn_successor(drive_root: Any, transaction_id: str, handle_text: str) -> None:
-    """A child acknowledges only the inherited old process's observed exit 42."""
-    import ctypes
-    from ctypes import wintypes
-    from ouroboros.platform_layer import process_start_time
-
-    try:
-        handle = int(handle_text)
-    except (TypeError, ValueError):
-        return
-    if handle <= 0:
-        return
-    kernel = _windows_restart_kernel32()
-    try:
-        row = _read_restart_transaction(drive_root, transaction_id)
-        active = _read_restart_transaction(drive_root, "active")
-        if (row.get("status") != "prepared"
-                or active.get("transaction_id") != transaction_id
-                or not row.get("direct_spawn_parent_birth")):
-            return
-        try:
-            old_pid, old_birth = _windows_handle_identity(kernel, handle)
-        except OSError:
-            return
-        if (old_pid != int(row.get("supervisor_pid") or 0)
-                or old_birth != row.get("direct_spawn_parent_birth")
-                or old_pid == os.getpid()):
-            return
-        # WAIT_OBJECT_0 is required. A closed pipe or missing PID is no exit-code proof.
-        if kernel.WaitForSingleObject(handle, 0xFFFFFFFF) != 0:  # INFINITE
-            return
-        code = wintypes.DWORD()
-        if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 42:
-            return
-        # The parent binds the child AFTER Popen returns and BEFORE it exits 42.
-        # Read that binding after the wait: a fast child can reach this reader
-        # while its parent is still writing the custody row.
-        row = _read_restart_transaction(drive_root, transaction_id)
-        active = _read_restart_transaction(drive_root, "active")
-        if (row.get("status") != "prepared"
-                or active.get("transaction_id") != transaction_id
-                or int(row.get("supervisor_pid") or 0) != old_pid
-                or row.get("direct_spawn_parent_birth") != old_birth
-                or int(row.get("direct_spawn_successor_pid") or 0) != os.getpid()
-                or not row.get("direct_spawn_successor_birth")
-                or row["direct_spawn_successor_birth"] != process_start_time(os.getpid())):
-            return
-        row.update({
-            "status": "normal_exit_acknowledged", "exit_code": 42,
-            "exit_acknowledged_at": utc_now_iso(), "ack_source": "windows_direct_parent_handle",
-        })
-        _write_restart_transaction(drive_root, row)
-        custody.emit(drive_root, "delegate_restart_transaction_acknowledged", {
-            "restart_transaction_id": transaction_id,
-            "supervisor_pid": old_pid, "exit_code": 42,
-            "task_ids": list(row.get("task_ids") or []),
-            "ack_source": "windows_direct_parent_handle",
-        })
-    finally:
-        kernel.CloseHandle(handle)
-
-
 def acknowledge_observed_restart_exit(
     drive_root: Any, *, supervisor_pid: int, exit_code: int,
 ) -> bool:
@@ -320,34 +180,65 @@ def acknowledge_observed_restart_exit(
     return True
 
 
+@contextmanager
+def direct_restart_transaction(drive_root: Any, transaction_id: str):
+    """Serialize spawn publication with the child's first read of this exact handoff."""
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    if not transaction_id:
+        yield {}
+        return
+    path = _restart_transaction_path(drive_root, transaction_id).with_suffix(".lock")
+    fd = acquire_exclusive_file_lock(path, timeout_sec=5.0, owner_aware_stale=True)
+    try:
+        active = _read_restart_transaction(drive_root, "active")
+        row = _read_restart_transaction(drive_root, transaction_id)
+        valid = (fd is not None and row.get("status") == "prepared" and not row.get("returns_restored_at")
+                 and row.get("expected_exit_code") == 42
+                 and all(active.get(key) == row.get(key) for key in
+                         ("transaction_id", "supervisor_pid", "prepared_at"))
+                 and row.get("transaction_id") == transaction_id)
+        yield row if valid else {}
+    finally:
+        release_exclusive_file_lock(path, fd)
+
+
+def direct_spawn_successor_matches(row: Mapping[str, Any]) -> bool:
+    """Only the measured child of this successful supervised spawn may acknowledge it."""
+    from ouroboros.process_custody import _fingerprint_matches
+
+    entry = row.get("direct_spawn_successor")
+    return bool(isinstance(entry, dict) and entry.get("pid") == os.getpid()
+                and entry.get("purpose") == "server_restart_fallback" and entry.get("scope") == "daemon"
+                and _fingerprint_matches(entry, require_measured=True))
+
+
 def _ack_direct_exec_successor(drive_root: Any) -> None:
-    """A same-PID successor carrying the one-shot token proves exec succeeded."""
+    """A one-shot token plus same-PID exec or the exact custodied spawn proves transfer."""
 
     transaction_id = str(os.environ.pop(PLANNED_RESTART_TRANSACTION_ENV, "") or "")
-    parent_handle = os.environ.pop(WINDOWS_RESTART_PARENT_HANDLE_ENV, "")
     if not transaction_id:
         return
-    from ouroboros import platform_layer
-
-    if platform_layer.IS_WINDOWS:
-        if parent_handle:
-            _ack_windows_spawn_successor(drive_root, transaction_id, parent_handle)
-        return
-    row = _read_restart_transaction(drive_root, transaction_id)
-    if (
-        row.get("status") != "prepared"
-        or int(row.get("supervisor_pid") or 0) != os.getpid()
-    ):
-        return
-    row.update({
-        "status": "normal_exit_acknowledged", "exit_code": 42,
-        "exit_acknowledged_at": utc_now_iso(), "ack_source": "direct_exec_successor",
-    })
-    _write_restart_transaction(drive_root, row)
+    with direct_restart_transaction(drive_root, transaction_id) as row:
+        if not row:
+            return
+        if "direct_spawn_successor" in row:
+            if not direct_spawn_successor_matches(row):
+                return
+            ack_source = "direct_spawn_successor"
+        elif int(row.get("supervisor_pid") or 0) == os.getpid():
+            ack_source = "direct_exec_successor"
+        else:
+            return
+        row.update({
+            "status": "normal_exit_acknowledged", "exit_code": 42,
+            "exit_acknowledged_at": utc_now_iso(), "ack_source": ack_source,
+        })
+        _write_restart_transaction(drive_root, row)
     custody.emit(drive_root, "delegate_restart_transaction_acknowledged", {
         "restart_transaction_id": transaction_id,
-        "supervisor_pid": os.getpid(), "exit_code": 42,
-        "task_ids": list(row.get("task_ids") or []), "ack_source": "direct_exec_successor",
+        "supervisor_pid": row["supervisor_pid"], "exit_code": 42,
+        "task_ids": list(row.get("task_ids") or []), "ack_source": ack_source,
     })
 
 
@@ -358,12 +249,14 @@ def _selected_session(task: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def unsettled_start_ids(
-    drive_root: Any, task_id: str, *, rows: Optional[list[dict[str, Any]]] = None,
+    drive_root: Any, task_id: str, *, rows: Optional[list[dict[str, Any]]] = None, continuing: str = "",
 ) -> dict[str, list[str]]:
     """Durable run/start blockers from one consistent custody-log snapshot.
 
     A review run is the review substrate's obligation, not the actor's
-    delegation slot, so it never blocks the actor's own start.
+    delegation slot, so it never blocks the actor's own start; nor does the
+    undisposed patch of the run a start is ``continuing``. A readonly continuation
+    leaves that patch waiting for its own disposition; it is not a fresh replacement.
     """
 
     mine = str(task_id or "")
@@ -383,7 +276,7 @@ def unsettled_start_ids(
         "undisposed_patch_run_ids": [
             row.run_id for row in runs.values()
             if row.task_id == mine and row.snapshot_id and row.settled
-            and not row.patch_disposed and not row.review_owned
+            and not row.patch_disposed and not row.review_owned and row.run_id != continuing
         ],
     }
 

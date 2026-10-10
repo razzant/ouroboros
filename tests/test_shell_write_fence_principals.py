@@ -6,7 +6,7 @@ that refused ``rm -rf /tmp/x`` while ``mkdir -p /tmp/x`` and ``git clone … /tm
 passed is gone for top-level tasks and stays for subordinate subagents, whose
 write confinement is their contract.
 
-Both directions, through the surviving guards (CHECKLISTS item 21):
+Both directions, through the surviving guards (CHECKLISTS item 7):
 top-level word-guessed writes outside every root → allowed; the same argv from an
 acting or read-only subagent → refused, naming the reason and the writable roots;
 protected repo paths and light mode → refused for everyone; explicit shell syntax

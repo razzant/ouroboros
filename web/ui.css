@@ -170,11 +170,26 @@
     /* Bounded scroll region for the Updates restore list (DESIGN section 5:
        a new visual dimension becomes a variable before a page-local literal). */
     --updates-list-max-height: 320px;
+    /* The delivered-document reader (DESIGN "Document reading"): the dialog's
+       largest side on a wide screen, and its one reading measure. */
+    --document-reader-size: 920px;
+    --document-reader-measure: 76ch;
     /* Bounded scroll window for the sidebar project list (v6.32.0 geometry): a
        share of the visual viewport height below, so the navigation column keeps
        its height whatever the project count. Distinct from the fixed Updates
        window above: one is a page-local list, this one follows the viewport. */
     --nav-projects-list-max-height: calc(var(--vvh) * 0.38);
+    /* Chat media (DESIGN "Chat attachments"): a whole single photo keeps its own
+       ratio up to this height, a bubble carrying several media stops at this
+       width, and a staged composer file shows a thumbnail of this size. */
+    --chat-photo-max-height: min(340px, calc(var(--vvh) * 0.5));
+    /* A single photo's smallest box: its `•••` (a touch target at the actions'
+       7px inset on each side) stays whole inside however small the photo is. */
+    --chat-photo-min-box: calc(var(--touch-target-min) + 14px);
+    --chat-media-bubble-max: 520px;
+    --chat-attach-thumb-size: 28px;
+    /* The smallest comfortable touch target for a coarse pointer (a phone). */
+    --touch-target-min: 36px;
     --vvh: 100dvh;
 }
 

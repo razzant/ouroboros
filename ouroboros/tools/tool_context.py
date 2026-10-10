@@ -54,6 +54,9 @@ class ToolContext:
     drive_root: pathlib.Path
     branch_dev: str = "ouroboros"
     system_repo_dir: Optional[pathlib.Path] = None
+    # Set only while a body candidate is bound (``body_candidate.bind``): the checkout
+    # the server actually runs, when ``repo_dir``/``system_repo_dir`` name the candidate.
+    serving_repo_dir: Optional[pathlib.Path] = None
     workspace_root: Optional[pathlib.Path] = None
     workspace_mode: str = ""
     memory_mode: str = ""

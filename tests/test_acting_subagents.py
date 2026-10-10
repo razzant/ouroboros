@@ -777,29 +777,30 @@ def test_integrate_external_workspace_rejects_existing_but_mismatched_files(tmp_
     assert verdict["applied"] is False
 
 
-def test_integrate_external_workspace_requires_parent_active_workspace(tmp_path):
+def test_integrate_external_workspace_verifies_without_parent_active_workspace(tmp_path, monkeypatch):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     system_repo = tmp_path / "system"
     _init_repo(system_repo, {"README.md": "system\n"})
     workspace = tmp_path / "project"
     _init_repo(workspace, {"a.txt": "hi\n"})
-    drive = tmp_path / "data"; drive.mkdir()
+    drive = tmp_path / "state"; drive.mkdir()
     _make_child_patch(workspace, drive, "ext-project", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
     _record_child_workspace_root(drive, "ext-project", workspace)
     ctx = ToolContext(repo_dir=system_repo, drive_root=drive, task_id="parent-ext")
 
+    monkeypatch.setattr("ouroboros.tool_access._user_files_root", lambda: tmp_path)
     out = _integrate_subagent_patch(ctx, task_id="ext-project")
 
-    assert "INTEGRATE_EXTERNAL_WORKSPACE_PARENT_MISSING" in out
+    assert "Verified external_workspace child" in out, out
     verdict = json.loads((drive / "task_results" / "artifacts" / "parent-ext" / "subagent_patch_verdict_ext-project.json").read_text(encoding="utf-8"))
-    assert verdict["outcome"] == "shared_workspace_parent_missing"
-    assert verdict["target_root"] == str(system_repo.resolve(strict=False))
+    assert verdict["outcome"] == "verified_shared_workspace"
+    assert verdict["target_root"] == str(workspace.resolve(strict=False))
     assert (workspace / "a.txt").read_text(encoding="utf-8") == "hi\nexternal\n"
 
 
-def test_integrate_external_workspace_rejects_child_root_outside_parent_workspace(tmp_path):
+def test_integrate_external_workspace_verifies_assigned_child_root_outside_parent_workspace(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     system_repo = tmp_path / "system"
@@ -822,11 +823,11 @@ def test_integrate_external_workspace_rejects_child_root_outside_parent_workspac
 
     out = _integrate_subagent_patch(ctx, task_id="ext-other")
 
-    assert "INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISMATCH" in out
+    assert "Verified external_workspace child" in out, out
     assert (parent_workspace / "a.txt").read_text(encoding="utf-8") == "parent\n"
     verdict = json.loads((drive / "task_results" / "artifacts" / "parent-ext" / "subagent_patch_verdict_ext-other.json").read_text(encoding="utf-8"))
-    assert verdict["outcome"] == "shared_workspace_target_mismatch"
-    assert verdict["target_root"] == str(parent_workspace.resolve(strict=False))
+    assert verdict["outcome"] == "verified_shared_workspace"
+    assert verdict["target_root"] == str(child_workspace.resolve(strict=False))
 
 
 def test_integrate_external_workspace_verifies_deletions(tmp_path):
@@ -1527,8 +1528,8 @@ def test_schedule_subagent_publishes_the_depth_request_and_the_handler_accepts_i
     assert row["default"] == 0
     # Absolute from the root, and telemetry rather than a cap: both semantics
     # have to be readable by the model that fills the field in.
-    assert "ABSOLUTELY FROM THE ROOT" in row["description"]
-    assert "never widens or narrows" in row["description"]
+    assert "absolute nesting depth from root=0" in row["description"]
+    assert "never changes configured caps" in row["description"]
     # The handler's closed keyword set DERIVES from the same schema.
     assert "requested_depth" in control.schedule_subagent_param_names()
     assert "requested_depth" not in control.HIDDEN_LEGACY_SCHEDULE_PARAMS

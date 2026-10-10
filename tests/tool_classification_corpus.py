@@ -289,6 +289,9 @@ _STRUCTURED_TOOLS = ("read_file", "ext_1_demo_screenshot", "mcp_demo__ping", "ru
 # fails if a producer publishes a code no shape below (and no harvested pair)
 # exercises, which is the assertion that closes that blind spot.
 _PRODUCER_SHAPES = (
+    # Shared-result refusal text is dynamic; its native sidecar keeps the existing
+    # INTEGRATE_* classification, including under route/Safety decoration.
+    ("shared_result_refused", "integrate_subagent_patch", "⚠️ INTEGRATE_TARGET_FORBIDDEN: current read authority refuses B. Verdict: /art/verdict.json. Captured result retained; nothing was transferred or marked integrated.", "INTEGRATION_BLOCKED", (("identifier", "INTEGRATE_TARGET_FORBIDDEN"),)),
     ("safety_violation", "run_command", "⚠️ SAFETY_VIOLATION: independent assessment refused", "SAFETY_VIOLATION", ()),
     ("shell_ok", "run_command", "exit_code=0\nSTDOUT:\nfine", "OK", (("exit_code", 0),)),
     ("shell_autocorrected", "run_command", "⚠️ SHELL_REGEX_AUTO_CORRECTED: corrected\nexit_code=0\nSTDOUT:\nfine", "SHELL_REGEX_AUTO_CORRECTED", (("exit_code", 0), ("shell_regex_auto_corrected", True))),
@@ -453,6 +456,17 @@ _PRODUCER_SHAPES = (
      "follow-ups for this task: 1/2. The record is durable in state/scheduled_tasks.json and "
      "fires exactly once; the owner can disable or delete it from the Schedules surface.",
      "OK", ()),
+    # tools/vision.py `_vlm_failure` / `_no_image_route` — a VLM refusal publishes VLM_ERROR with
+    # the provider's own facts in meta; "no candidate at all" is VLM_NO_MODEL (a current contract).
+    ("vlm_query_failed", "vlm_query", "⚠️ VLM_QUERY_FAILED: RuntimeError: HTTP 400 image input is not supported", "VLM_ERROR",
+     (("model", "acme/vision"), ("provider_status_code", 400), ("provider_code", "invalid_image"),
+      ("provider_error", "image input is not supported"))),
+    ("vlm_no_vision_model", "vlm_query", "⚠️ VLM_NO_VISION_MODEL: every configured route is confirmed unable to take "
+     "image input: acme/text (this route's model metadata lists no image input for this model). Inspect the page as "
+     "TEXT/DOM (browse_page output='html' or 'text'), name a model that accepts images with vlm_query(model=...), "
+     "or ask the owner to configure a vision model.", "VLM_ERROR", ()),
+    ("vlm_no_model", "vlm_query", "⚠️ VLM_NO_MODEL: no model is configured that could analyze the image. Name one "
+     "with vlm_query(model=...), or ask the owner to configure a vision, light or main model.", "VLM_ERROR", ()),
 )
 
 

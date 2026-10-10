@@ -69,7 +69,9 @@ test('the empty-Main greeting and the reconnect notice are chrome: a read over t
     const doc = { byId: new Map(), createElement: (tag) => new ElementStub(tag, doc) };
     const messages = new ElementStub('div', doc);
     messages.isConnected = true;
-    const controls = createHistoryControls(messages);
+    const chrome = new ElementStub('div', doc);
+    chrome.isConnected = true;
+    const controls = createHistoryControls(messages, chrome);
     const node = (className) => { const element = doc.createElement('div'); element.className = className; return element; };
     messages.appendChild(node('chat-bubble assistant typing-bubble'));
     messages.appendChild(node('chat-empty-welcome'));
@@ -78,9 +80,10 @@ test('the empty-Main greeting and the reconnect notice are chrome: a read over t
     messages.appendChild(notice);
     assert.equal(feedIsEmpty(messages), true);
     assert.equal(controls.beginRecent(), true);
-    controls.render({ initialized: true });
-    assert.equal(messages.querySelector('.chat-load-older').querySelector('.chat-load-older-note').textContent,
-        'Loading saved history…');
+    controls.render({ initialized: false }, { gaps: true });
+    assert.equal(chrome.children.length, 0, 'unanswered first read is loading, not a known gap');
+    assert.equal(controls.olderButton.textContent, 'Loading saved history…');
+    assert.equal(messages.querySelector('.chat-load-older').querySelector('.chat-load-older-note').hidden, true);
     controls.endRecent(new Error('offline'));
     assert.equal(controls.recentFailed(), true);
     controls.endRecent();
@@ -289,8 +292,7 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // Both finished-transition paths share settleLiveCard; the task-bound
     // review lifecycle keeps its own trigger. The replay decision stays ONLY
     // behind the scheduler's gate, so sharing cleanup cannot mute either path.
-    assert.match(chatSource, /settleLiveCard\(record, summary\.phase \|\| 'done', wasFinished\);/);
-    assert.match(chatSource, /settleLiveCard\(record, activePhase, wasFinished\);/);
+    assert.equal((chatSource.match(/settleLiveCard\(record, wasFinished\);/g) || []).length, 2);
     assert.match(chatSource, /if \(!wasFinished && blockVisible\(record\)\) scheduleHistorySync\(\);/);
     // The third occurrence is the scheduler re-arming when a run settles with the bound
     // still armed, which is how a run that only JOINED an older in-flight fetch (and

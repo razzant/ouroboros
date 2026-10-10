@@ -93,9 +93,12 @@ def test_authored_stop_money_check_uses_real_cap_not_planning_margin(monkeypatch
     monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 10)
     ctx = SimpleNamespace(active_use_local=False, accumulated_usage={'cost': 1.0})
     cap = SimpleNamespace(root_cap_usd=10.0, ceiling_usd=7.0)
-    monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'accounted_usd': 8.0})
+    monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 8.0, 'accounted_usd': 8.0})
     assert authored_completion_budget_exhausted(ctx, 10, cap) is False
-    monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'accounted_usd': 10.0})
+    # Open holds are not spending (#1487): $8 known with $5 in flight is not exhaustion.
+    monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 8.0, 'accounted_usd': 13.0})
+    assert authored_completion_budget_exhausted(ctx, 10, cap) is False
+    monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 10.0, 'accounted_usd': 10.0})
     assert authored_completion_budget_exhausted(ctx, 10, cap) is True
     monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 0)
     assert authored_completion_budget_exhausted(ctx, 10, None) is True

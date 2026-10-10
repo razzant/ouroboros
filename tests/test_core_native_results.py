@@ -363,8 +363,8 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
         (
             "search_code",
             {"query": "x", "path": "nope"},
-            "LEGACY_TOOL_ERROR",
-            "⚠️ SEARCH_ERROR: path not found: active_workspace:nope",
+            "LEGACY_WARNING",
+            "⚠️ SEARCH_NOT_FOUND: path not found: active_workspace:nope",
         ),
         (
             "search_code",

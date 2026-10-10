@@ -298,7 +298,7 @@ def test_child_reads_its_own_drive_beside_working_sources(tmp_path):
         task={"id": "child", "type": "task", "text": "work", "delegation_role": "subagent",
               "parent_task_id": "parent", "root_task_id": "parent", "budget_drive_root": str(canonical)},
     )
-    dynamic = messages[0]["content"][2]["text"]
+    dynamic = messages[0]["content"][-1]["text"]
     assert "## Working sources" in dynamic and "your own recent process" in dynamic
     tools = dynamic[dynamic.index("## Recent tools"):].split("\n## ", 1)[0]
     assert "own_tool" in tools and "parent_tool" not in tools and "mirrored" not in tools
@@ -327,7 +327,7 @@ def test_child_without_its_own_drive_reads_the_canonical_filtered_windows(tmp_pa
         task={"id": "child", "type": "task", "text": "work", "delegation_role": "subagent",
               "parent_task_id": "parent", "root_task_id": "parent"},
     )
-    dynamic = messages[0]["content"][2]["text"]
+    dynamic = messages[0]["content"][-1]["text"]
     tools = dynamic[dynamic.index("## Recent tools"):].split("\n## ", 1)[0]
     assert "shared_drive_tool" in tools and "parent_tool" not in tools
     assert "of logs/tools.jsonl" in tools.splitlines()[0] and "task drive" not in tools.splitlines()[0]

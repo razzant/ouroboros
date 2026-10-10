@@ -80,6 +80,9 @@ SETTLED_UNREAD = "delegate_run_settled_unread"
 # releases the snapshot for GC — until then conflict material persists on disk.
 PATCH_CAPTURED = "delegate_run_patch_captured"
 PATCH_DISPOSED = "delegate_run_patch_disposed"
+# Not a row: the replayed disposition of a run whose snapshot a successor's STARTED
+# row took over (``_supersede``); its work rides the successor's cumulative capture.
+SUPERSEDED = "superseded"
 # CR1-3 (owed-before-sent, one row earlier than the disposition): APPLY-INTENT lands
 # BEFORE the target tree is mutated; RESOLVED lands only when the attempt is KNOWN to
 # have left the tree unmutated. An intent with neither resolution nor disposition
@@ -153,7 +156,14 @@ class RunCustody:
     settled: bool = False
     terminal_state: str = ""  # SETTLED row's state, replayed (empty pre-existing/CLOSED_ABSENT)
     terminal_reason: str = ""  # #1196: engine ``outcomeFacts.reason`` replayed from SETTLED ("" = none)
-    continuation_of: str = ""  # #1196: the settled run this one explicitly continued (``continue_from``)
+    continuation_of: str = ""  # the settled run this one explicitly continued (``continue_from``)
+    # Same-tree continuation (``delegate_continuation``): a run that continues IN its
+    # predecessor's undisposed snapshot records its own capture identity (``capture_id``,
+    # its invocation id) and the task whose artifact directory keeps that snapshot's
+    # baseline and ONE disposition lock (``snapshot_task_id``); "" = the run's own.
+    capture_id: str = ""
+    snapshot_task_id: str = ""
+    superseded_by: str = ""  # replayed: the run that continued in this run's snapshot
     containment_disclosed: bool = False  # written once; a re-poll must not re-find
     unread_disclosed: bool = False  # settled-never-read omission named durably
     # Staged-output half of the terminal story (D7). ``output_artifact``:
@@ -194,7 +204,8 @@ class RunCustody:
     resource_ref: Dict[str, Any] = field(default_factory=dict)
     # Capture/disposition lifecycle (replayed): capture happens once at terminal;
     # ``patch_disposed`` is "" until the nanny explicitly applies ("applied") or
-    # rejects ("rejected") the captured patch — only then may the snapshot be removed.
+    # rejects ("rejected") the captured patch — only then may the snapshot be removed —
+    # or a successor continues in the snapshot (``SUPERSEDED``: its capture is the one).
     patch_captured: bool = False
     patch_disposed: str = ""
     # CR1-3: an apply-intent row exists with no resolution and no disposition —
@@ -239,7 +250,9 @@ def emit(drive_root: Any, kind: str, payload: Dict[str, Any]) -> bool:
     """
     try:
         event = {"ts": utc_now_iso(), "type": kind, **payload}
-        written = bool(append_jsonl(event_log_path(drive_root), event))
+        from ouroboros.delegate_custody_current import publication
+        with publication(drive_root, event) as landed:
+            written = landed[0] = bool(append_jsonl(event_log_path(drive_root), event))
     except Exception:
         log.warning("delegate custody row could not be written (%s)", kind, exc_info=True)
         return False
@@ -293,6 +306,14 @@ def custody_log_unreadable(drive_root: Any) -> bool:
     enumeration reports as "never rotated" — hides custody exactly like an
     unreadable live file.
     """
+    from ouroboros.delegate_custody_current import active
+    if active(drive_root):
+        from ouroboros.obligations import members, ObligationsUnavailable
+        try:
+            members(drive_root, "custody_open")
+            return False
+        except ObligationsUnavailable:
+            return True
     from ouroboros.utils import JsonlChainUnreadable, jsonl_archive_segments
 
     path = event_log_path(drive_root)
@@ -399,9 +420,9 @@ from ouroboros.delegate_registration_policy import (
 
 from ouroboros.delegate_source_coverage import (
     apply_source_delivery_confirmation,
+    apply_source_range_receipt,
     _merge_verified_source_range,
     merge_source_delivery_confirmations,
-    _source_range_receipt_valid,
     record_source_range_verified,
     work_order_source_verification,
 )
@@ -440,6 +461,18 @@ def _merge_started_into(entry: RunCustody, previous: RunCustody) -> None:
         entry.resource_ref = previous.resource_ref
 
 
+def _supersede(state: Dict[str, RunCustody], entry: RunCustody) -> None:
+    """A run that continues IN its predecessor's undisposed snapshot takes that
+    snapshot's custody over: the predecessor replays ``SUPERSEDED`` (its work rides
+    the successor's cumulative capture, so it is never applied or rejected alone).
+    Derived from the successor's STARTED row, the one durable fact of the hand-over,
+    so a start that never bound a run leaves the predecessor's obligation intact."""
+    prior = state.get(entry.continuation_of) if entry.capture_id and entry.continuation_of else None
+    if (prior is not None and prior is not entry and prior.snapshot_id
+            and prior.snapshot_id == entry.snapshot_id and prior.patch_disposed in ("", SUPERSEDED)):
+        prior.patch_disposed, prior.superseded_by = SUPERSEDED, entry.run_id
+
+
 def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
     run_id = str(row.get("run_id") or "")
     if not run_id:
@@ -467,6 +500,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         if previous is not None:
             _merge_started_into(entry, previous)
         state[run_id] = entry
+        _supersede(state, entry)
         return
     custody = state.get(run_id)
     if custody is None:
@@ -517,16 +551,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
     elif kind == PATCH_APPLY_RESOLVED:
         custody.patch_apply_pending = False
     elif kind == SOURCE_RANGE_VERIFIED:
-        if _source_range_receipt_valid(
-            custody,
-            start_char=row.get("start_char"),
-            end_char=row.get("end_char"),
-            complete_sha256=row.get("complete_sha256"),
-            source=row.get("source"),
-            text_sha256=row.get("text_sha256"),
-            text_chars=row.get("text_chars"),
-        ):
-            _merge_verified_source_range(custody, row.get("start_char"), row.get("end_char"))
+        apply_source_range_receipt(custody, row)
     elif kind == SOURCE_RANGE_DELIVERY_CONFIRMED:
         apply_source_delivery_confirmation(custody, row)
     elif kind == PATCH_DISPOSED:
@@ -577,6 +602,9 @@ def replay(drive_root: Any,
     consistent traversal (the atomic payload busy claim, gate fix 5a). Without
     ``rows`` the fold runs over the memo's rows and is cached per memo
     generation; the returned objects are always this caller's own copies."""
+    from ouroboros.delegate_custody_current import active, state
+    if rows is None and active(drive_root):
+        return state(drive_root)
     if rows is not None:
         return _fold_rows(rows)
     from ouroboros.delegate_custody_memo import clone_custody_state, folded_state
@@ -619,6 +647,20 @@ def delegated_capture_dir(drive_root: Any, task_id: str, run_id: str) -> pathlib
 
     safe_run = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(run_id or ""))[:64]
     return task_artifact_dir_path(drive_root, str(task_id or "")) / DELEGATED_CAPTURE_PREFIX / (safe_run or "run")
+
+
+def capture_key(custody: RunCustody) -> str:
+    """The capture directory name of ONE run: its snapshot (the provisioning
+    invocation), or — for a run continuing in a predecessor's snapshot — its own
+    ``capture_id``, so each capture keeps its own identity and none overwrites another."""
+    return custody.capture_id or custody.snapshot_id or custody.run_id
+
+
+def disposition_lock_path(drive_root: Any, custody: RunCustody) -> pathlib.Path:
+    """The ONE disposition lock of an execution snapshot, shared by every run that
+    continues in it and every task that may dispose it (and the hand-over claim)."""
+    return delegated_capture_dir(drive_root, custody.snapshot_task_id or custody.task_id,
+                                 custody.snapshot_id or custody.run_id) / "disposition.lock"
 
 
 def record_patch_captured(drive_root: Any, custody: RunCustody, **payload: Any) -> bool:
@@ -813,6 +855,8 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
                 "baseline_sha": str(row.get("baseline_sha") or ""),
                 "target_root": str(row.get("target_root") or ""),
                 "authority_source": str(row.get("authority_source") or ""),
+                # Continuation lineage and the same-tree capture identity replay too.
+                **{key: str(row.get(key) or "") for key in ("continuation_of", "capture_id", "snapshot_task_id")},
                 # A copy: the source rows may be the shared, read-only custody memo.
                 "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
                 "selected_subagent_id": str(row.get("selected_subagent_id") or ""),
@@ -892,7 +936,7 @@ def record_started(drive_root: Any, custody: RunCustody,
     _CUSTODY[custody.run_id] = custody
     # The C1 binding and the resource reference ride the SAME row (a binding
     # recorded separately can lose half of itself to a crash); shape spreads LAST.
-    return emit(drive_root, STARTED, {
+    landed = emit(drive_root, STARTED, {
         "run_id": custody.run_id,
         "project_owned": custody.project_owned, "project_persistent": custody.project_persistent,
         "resource_ref": custody.resource_ref or {},
@@ -901,6 +945,18 @@ def record_started(drive_root: Any, custody: RunCustody,
         **(shape or {}),
         **{key: getattr(custody, key) for key in _STARTED_OPTION_FIELDS if getattr(custody, key) is not None},
     })
+    if landed and custody.capture_id and custody.continuation_of:
+        # The same hand-over the replay derives, and the disposition writer's
+        # follow-up: the predecessor's owner stops disclosing its patch as debt.
+        _supersede(_CUSTODY, custody)
+        try:
+            from ouroboros.delegate_terminal import refresh_disposed_reconciliation
+
+            refresh_disposed_reconciliation(drive_root, custody.continuation_of, reader_task_id=custody.task_id)
+        except Exception:
+            log.warning("Superseded custody disclosure refresh failed for run %s", custody.continuation_of,
+                        exc_info=True)
+    return landed
 
 
 def record_output_consumed(drive_root: Any, custody: RunCustody, *,
@@ -926,10 +982,10 @@ def is_terminal(detail: Dict[str, Any]) -> bool:
     return _is_terminal(detail, TERMINAL_STATES)
 
 
-def retire_project(drive_root: Any, gateway: Any, custody: RunCustody) -> None:
+def retire_project(drive_root: Any, gateway: Any, custody: RunCustody, *, live_task_ids=None) -> None:
     """Serialize the replay-to-retirement decision for one shared project."""
     with project_retirement_lock(drive_root, custody.project_id):
-        _retire_project_locked(drive_root, gateway, custody)
+        _retire_project_locked(drive_root, gateway, custody, live_task_ids=live_task_ids)
 
 
 def _project_runs(drive_root: Any, custody: RunCustody) -> Optional[List[RunCustody]]:
@@ -959,7 +1015,7 @@ def _release_registration(drive_root: Any, custody: RunCustody, **facts: Any) ->
                                        "project_id": custody.project_id, **facts})
 
 
-def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody) -> None:
+def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody, *, live_task_ids=None) -> None:
     if custody.project_persistent:
         custody.project_owned = False
         emit(drive_root, PROJECT_RETIRED, {"run_id": custody.run_id, "task_id": custody.task_id,
@@ -980,6 +1036,12 @@ def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody) -
             return
         if any(not run.settled and run.run_id != custody.run_id for run in rows):
             return
+        from ouroboros.delegate_continuation import still_continuable
+        keeper = next((run for run in rows if still_continuable(drive_root, run, live_task_ids)), None)
+        if keeper is not None:
+            _CONTINUABLE_KEEPERS[(str(drive_root), custody.project_id)] = keeper
+            return
+        _CONTINUABLE_KEEPERS.pop((str(drive_root), custody.project_id), None)
     except Exception:
         log.warning("Retirement deferred: replay failed for %s",
                     custody.run_id, exc_info=True)
@@ -1064,7 +1126,7 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
     failure_facts = {} if str(summary.get("state") or "") in SUCCEEDED_STATES else {
         "requested_model": custody.model, "failure_code": str(failure.get("code") or ""),
         "reported_cause": run_failure_cause(failure),
-        # Engine TYPED reason (``wall_clock_exceeded`` = maxSeconds expiry): the continuation gate's one fact.
+        # Engine TYPED reason (e.g. ``wall_clock_exceeded`` = maxSeconds expiry): a continuation's cause fact.
         "outcome_reason": str(outcome_facts.get("reason") or "")}
     # Claudexor reports CASH in `spendUsd`, EXACTNESS in `spendEstimated`. A run
     # is only free when the amount is really zero AND really settled: expired
@@ -1117,7 +1179,8 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
                                                "root_task_id": custody.root_task_id, "parent_task_id": custody.parent_task_id,
                                                "route": custody.route_id})
     if not custody.ledger_recorded:
-        retire_project(drive_root, gateway, custody)
+        if custody.review_owned or custody.project_persistent:
+            retire_project(drive_root, gateway, custody)
     else:
         with project_retirement_lock(drive_root, custody.project_id):
             custody.settled = emit(drive_root, SETTLED, {
@@ -1148,7 +1211,7 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
                 "credential_profile_id": applied_profile,
                 "access_profile": applied_access,
             })
-            if custody.settled:
+            if custody.settled and (custody.review_owned or custody.project_persistent):
                 _retire_project_locked(drive_root, gateway, custody)
     if custody.settled:
         from ouroboros.subagent_history import record_session_execution
@@ -1419,7 +1482,11 @@ def owned_project_registrations(drive_root: Any, state: Optional[Dict[str, RunCu
             if custody.project_owned and custody.project_id]
 
 
-def retire_settled_registrations(drive_root: Any, gateway: Any) -> None:
+# (drive root, project id) -> the run whose continuability deferred the last full-chain retirement read.
+_CONTINUABLE_KEEPERS: Dict[Tuple[str, str], RunCustody] = {}
+
+
+def retire_settled_registrations(drive_root: Any, gateway: Any, *, live_task_ids=None) -> None:
     """Retire projects every sharer has settled; a LIVE sharer (owned or not
     - only the creator carries the registration, but any live sibling makes
     the daemon refuse) defers the attempt. Idempotent, fail-soft."""
@@ -1431,8 +1498,16 @@ def retire_settled_registrations(drive_root: Any, gateway: Any) -> None:
         owned = [row for row in rows if row.project_owned]
         if not owned or any(not row.settled for row in rows):
             continue  # nothing registered here, or a live sharer defers
+        from ouroboros.delegate_continuation import still_continuable
+        # The current projection drops a settled sharer that is not the owner;
+        # the last full read's keeper stands in for it until it stops keeping.
+        keeper = _CONTINUABLE_KEEPERS.get((str(drive_root), rows[0].project_id))
+        if (not any(row.project_persistent for row in rows)
+                and any(still_continuable(drive_root, row, live_task_ids)
+                        for row in rows + ([keeper] if keeper is not None else []))):
+            continue  # still continuable: skip the locked full-chain re-read until it is not
         try:
-            retire_project(drive_root, gateway, min(owned, key=lambda row: row.run_id))
+            retire_project(drive_root, gateway, min(owned, key=lambda row: row.run_id), live_task_ids=live_task_ids)
         except Exception:
             log.warning("Registration sweep failed for project %s",
                         rows[0].project_id, exc_info=True)
@@ -1447,16 +1522,19 @@ __all__ = [
     "OWNED",
     "RunCustody",
     "SOURCE_RANGE_DELIVERY_CONFIRMED",
+    "SUPERSEDED",
     "TERMINAL_STATES",
     "UNKNOWN",
     "actor_decision_lock",
     "cancel_and_verify",
+    "capture_key",
     "close_absent_run",
     "custody_log_unreadable",
     "custody_root",
     "daemon_says_absent",
     "delegated_capture_dir",
     "disclosed_spend",
+    "disposition_lock_path",
     "emit",
     "idempotency_key",
     "is_terminal",

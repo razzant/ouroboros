@@ -325,7 +325,12 @@ def _write_fd_fully(fd: int, data: bytes, target: pathlib.Path) -> None:
 
 
 def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = False) -> None:
-    """Atomically overwrite ``path`` with exact bytes."""
+    """Atomically overwrite ``path`` with exact bytes.
+
+    A crash leaves the complete old or new file; ``fsync`` is opt-in, so power-loss
+    durability is not promised, and appends are a separate non-atomic contract.
+    Byte-exact: no newline translation on any platform.
+    """
 
     def _write(tmp: pathlib.Path) -> None:
         if not fsync:
@@ -352,11 +357,6 @@ def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) 
     agent's own file writes/edits, which round-trip source text that Python
     reads back with universal newlines.
 
-    It used to be "platform newline semantics": both lanes translated ``\\n``
-    to ``\\r\\n`` on Windows (``Path.write_text`` in text mode, and ``os.open``
-    without ``O_BINARY``). Nothing asked for that translation, while a
-    byte-compared manifest, a hashed receipt and an LF source file the agent
-    merely re-saved were all silently rewritten by it.
     """
     write_bytes_atomic(pathlib.Path(path), content.encode("utf-8"), fsync=fsync)
 
@@ -427,7 +427,11 @@ def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0,
 
 
 def read_json_dict(path: pathlib.Path) -> Optional[Dict[str, Any]]:
-    """Return a JSON object from ``path`` or ``None`` when absent/invalid."""
+    """Return a JSON object from ``path`` or ``None`` when absent/invalid.
+
+    ``None`` covers absent, unreadable, invalid and non-object alike; callers
+    wanting a fresh store collapse it to ``{}`` themselves.
+    """
     path = pathlib.Path(path)
     if not path.is_file():
         return None
@@ -447,6 +451,7 @@ def update_json_locked(
     stale_sec: float = 90.0,
     strict_existing_dict: bool = False,
     reject_existing_empty_dict: bool = False,
+    after_write: Any = None,
 ) -> Dict[str, Any]:
     """Locked read-modify-write of a durable JSON dict file.
 
@@ -496,6 +501,8 @@ def update_json_locked(
         if updated is None:
             return current
         atomic_write_json(path, updated)
+        if after_write is not None:
+            after_write(updated)  # still under the writer lock; a crash leaves extra debt
         return updated
     finally:
         release_exclusive_file_lock(lock_path, lock_fd)
@@ -551,6 +558,9 @@ def append_jsonl(
     whole-file reconciliation: unlike high-volume observational logs, they may
     not fall back to an unlocked append after lock timeout. Both lanes take the
     shared owner-aware lock primitive, so a live holder is never displaced.
+    Runtime ``logs/*.jsonl`` rows are streamed to the ``set_log_sink`` sink, minus
+    types with a dedicated live owner (``WORKER_LOG_SINK_SUPPRESSED_TYPES``, server
+    superset ``SERVER_LOG_SINK_SUPPRESSED_TYPES``): one event, one live frame.
     Returns ``True`` on successful write, ``False`` when all retries
     failed (which is also logged at WARNING). Important events
     (``task_done``, ``llm_round``, escalation messages) need that signal
@@ -577,13 +587,9 @@ def append_jsonl(
     _written = False
 
     try:
-        # ONE lock primitive for both lanes. The unlocked lane used to hand-roll
-        # its own O_CREAT|O_EXCL + age-reclaim loop — the duplicate this module's
-        # own contract tells feature code not to write — and the copy was NOT
-        # owner-aware, so a high-volume appender could delete the lock of a LIVE
-        # holder (the memory-journal compactor rewrites a journal under exactly
-        # this lock). Owner-aware everywhere: a live holder is waited out and the
-        # non-required lane then appends unlocked, exactly as before.
+        # One owner-aware lock primitive for both lanes: a live holder (e.g. the
+        # memory-journal compactor) is waited out, never displaced; the
+        # non-required lane then appends unlocked.
         lock_fd = acquire_exclusive_file_lock(
             lock_path,
             timeout_sec=2.0,
@@ -660,11 +666,8 @@ def append_jsonl(
         log.warning("append_jsonl: all write attempts failed for %s", path, exc_info=True)
     finally:
         release_exclusive_file_lock(lock_path, lock_fd)
-        # Live-stream only runtime LOG files. chat.jsonl has its own live
-        # channel (the chat frame family), and state/memory/receipt jsonl
-        # stores are durable data, not a log feed — streaming them made every
-        # ledger append a raw WS "log" frame (noise the Logs panel's backfill
-        # never mirrors: it requests events/tools/progress/supervisor only).
+        # Live-stream only runtime LOG files: chat.jsonl has its own live channel,
+        # and state/memory/receipt stores are durable data, not a log feed.
         if (
             _written
             and _log_sink is not None

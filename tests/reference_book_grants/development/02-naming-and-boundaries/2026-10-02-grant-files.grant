@@ -1,6 +1,0 @@
-260
-The byte-budget sentence now states the grant-file rule: a base number plus
-grant files, one file per change holding its net growth, folded back into the
-base by a compression pass, with the file layout checked in every default lane.
-It replaces the one-clause "raised only in the diff that needs it" rule, which
-was 260 bytes shorter.

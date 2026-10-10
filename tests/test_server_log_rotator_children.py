@@ -1,7 +1,10 @@
-"""``server.py`` imported by a spawn/forkserver worker (``__mp_main__``) attaches a stream
-handler only: two processes must never rotate ``logs/server.log`` against each other. A
-module-level ``multiprocessing.parent_process()`` check would be None in such a child, so the
-proof is a REAL child re-running the module under that name."""
+"""Only the server process writes ``logs/server.log``. Importing ``server.py`` — as a
+spawn/forkserver worker does, under ``__mp_main__`` — configures no logging at all; a pool
+worker configures a stream handler only, in ``worker_main``
+(``ouroboros/process_logging.py``, pinned in ``tests/test_process_logging.py``), so two
+processes never rotate ``server.log`` against each other. A module-level
+``multiprocessing.parent_process()`` check would be None in such a child, so the proof is a
+REAL child re-running the module under that name."""
 
 from __future__ import annotations
 
@@ -16,7 +19,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.serial
-def test_a_spawn_child_importing_server_gets_a_stream_handler_only(tmp_path):
+def test_a_spawn_child_importing_server_configures_no_logging(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
     code = (
@@ -30,5 +33,5 @@ def test_a_spawn_child_importing_server_gets_a_stream_handler_only(tmp_path):
                                text=True, timeout=180)
     assert completed.returncode == 0, completed.stderr[-2000:]
     handlers = next(line for line in completed.stdout.splitlines() if line.startswith("HANDLERS"))
-    assert "RotatingFileHandler" not in handlers and "StreamHandler" in handlers, handlers
+    assert handlers == "HANDLERS []", handlers
     assert not (data / "logs" / "server.log").exists()

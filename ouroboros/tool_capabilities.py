@@ -14,12 +14,18 @@ OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
 # carries it — the main chat, a project room, and an admitted presence
 # conversation, whose ceiling compiles this set in
 # ouroboros/presence_authority.py::build_presence_capability_ceiling.
+# Reading the chronicle and marking what matters belong here; sealing chronicle
+# pages (chronicle_write) is the integrating mind's and stays in the core set,
+# so a presence writes knowledge about people and marks, not pages (a delegated
+# child's sets below carry it for the child's own drafts only).
 COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
     "update_scratchpad", "update_identity", "chat_history",
+    "memory_read", "memory_mark",
 })
 
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
+    "inspect_harness", "maintain_harness",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -57,6 +63,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "list_projects", "route_to_project", "promote_chat_to_task", "steer_task",
     "ensure_project_scope",
     *COGNITIVE_MEMORY_TOOL_NAMES,
+    "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
@@ -64,8 +71,9 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     *OWNER_DELIVERY_TOOL_NAMES,
     "escalate",
     "switch_model",
-    "request_restart", "promote_to_stable",
-    "preflight_review", "advisory_review", "review_status", "task_acceptance_review", "verify_and_record",
+    "request_restart", "promote_to_stable", "prepare_self_change",
+    "preflight_review", "advisory_review", "review_change", "review_status", "task_acceptance_review",
+    "verify_and_record",
     # Skill discovery and review are core authoring capabilities.
     "list_skills", "skill_review", "skill_preflight",
     "submit_skill_to_hub",
@@ -78,10 +86,11 @@ META_TOOL_NAMES: frozenset[str] = frozenset({
 
 LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
 
-# V1 subagents are read-only against local Ouroboros state. Browser interaction
-# remains available by explicit product decision, so this mode is not a remote
-# website sandbox.
+# V1 subagents are read-only against local Ouroboros state, except the signed
+# knowledge notes, memory marks and chronicle drafts below. Browser interaction remains available
+# by explicit product decision, so this mode is not a remote website sandbox.
 LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
+    "inspect_harness",
     "finish_task",
     # switch_model changes COGNITIVE POWER, not authority: a child that started on
     # the cheap lane and finds the work harder raises itself instead of failing or
@@ -89,7 +98,12 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "switch_model",
     "read_file", "list_files", "search_code", "query_code",
     "vcs_status", "vcs_diff",
-    "knowledge_read", "knowledge_list",
+    # Memory: a child reads, writes knowledge notes and marks in its own name (the
+    # host signs both with its focus) and publishes chronicle pages and parts only as
+    # drafts signed with its focus (it is not the integrating mind, so tools/chronicle.py
+    # refuses its note, correction and decision); the integrating mind accepts or rejects the drafts,
+    # keeps identity and scratchpad, and receives the child's result as a report.
+    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "await_messages",
     "escalate",
@@ -129,11 +143,15 @@ ACTING_SUBAGENT_MODE: str = "acting_subagent"
 # (isolated self_worktree / shared external_workspace) and run shell/services there.
 # They explicitly CANNOT commit the live body (commit_reviewed /
 # vcs_commit_reviewed), run runtime control, touch the skills lifecycle, enable
-# tools, or write cognitive memory (update_identity/update_scratchpad/
-# knowledge_write). The parent integrates and is the sole committer. Extension /
-# MCP tools are denied unless explicitly granted per-child via
-# TaskConstraint.external_tool_grants.
+# tools, or write identity or scratchpad (update_identity / update_scratchpad).
+# Knowledge notes and memory marks they may write in their own name: the host
+# signs both with the child's focus. chronicle_write publishes only their drafts of
+# pages and parts, which the integrating mind accepts or rejects; a note, correction
+# or decision is the mind's (tools/chronicle.py refuses them). The parent
+# integrates and is the sole committer. Extension / MCP tools are denied unless
+# explicitly granted per-child via TaskConstraint.external_tool_grants.
 ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
+    "inspect_harness",
     "finish_task",
     # switch_model changes COGNITIVE POWER, not authority: a child that started on
     # the cheap lane and finds the work harder raises itself instead of failing or
@@ -152,7 +170,8 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "forward_to_worker", "peek_task", "cancel_task", "discard_child_result",
     "resume_child_task",
     "verify_and_record",
-    "knowledge_read", "knowledge_list",
+    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
+    "chat_history",
     "tree_note", "tree_read", "override_delegation_constraint",
     # Same nanny verbs, same host-derived profile — an acting child hosts a
     # workspace_write session confined to a private snapshot of its own write
@@ -184,11 +203,12 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
 
 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
+    "inspect_harness",
     "read_file", "list_files",
     "search_code", "query_code", "recent_tasks",
     "web_search", "chat_history",
     "vcs_status", "vcs_diff", "service_status", "service_logs",
-    "get_task_result", "list_projects",
+    "get_task_result", "list_projects", "memory_read",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -212,6 +232,7 @@ UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "task_acceptance_review",
     "preflight_review",
     "advisory_review",
+    "review_change",
     "skill_review",
     "skill_owner_action",
     "review_status",
@@ -219,6 +240,8 @@ UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "wait_task",
     "wait_tasks",
     "await_messages",
+    # A short receipt (id, operation, room); it never echoes the mark's text.
+    "memory_mark",
 })
 
 # Cognitive artifacts must not be truncated.
@@ -244,6 +267,8 @@ UNTRUNCATED_REPO_READ_PREFIXES: tuple[str, ...] = (
 
 # Per-tool char caps; omitted tools use DEFAULT_TOOL_RESULT_LIMIT.
 TOOL_RESULT_LIMITS: dict[str, int] = {
+    "inspect_harness": 80_000,
+    "maintain_harness": 80_000,
     "read_file": 80_000,
     "recent_tasks": 80_000,
     "knowledge_read": 80_000,
@@ -272,6 +297,10 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     "apply_patch": 80_000,
     "edit_batch": 80_000,
     "write_file": 80_000,
+    # memory_read pages itself at the source under this cap and names its
+    # continuation; it is never in UNTRUNCATED_TOOL_RESULTS (a whole room is
+    # millions of characters).
+    "memory_read": 80_000,
 }
 
 DEFAULT_TOOL_RESULT_LIMIT: int = 15_000
@@ -339,6 +368,7 @@ def routing_action_for_tool(name: object) -> str:
 # named below, so the table cannot drift away from the catalog. Publication
 # (``FOREGROUND_MUTATIVE_TOOLS``) joins the set at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
+    "maintain_harness",
     # starting or steering work (steer_task stays: the nanny of a running campaign)
     "promote_chat_to_task", "schedule_subagent", "schedule_followup", "plan_task",
     "route_to_project", "ensure_project_scope", "delegate_start", "initiate_presence",

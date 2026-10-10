@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-import time
 import json
 
 import pytest
@@ -65,14 +64,13 @@ def test_budget_projection_reads_ledger_before_state_lock(tmp_path, monkeypatch)
         lambda _st: (operations.append("save"), assert_not_holding(holding_state_lock)),
     )
     monkeypatch.setattr(state, "_openrouter_ledger_settled", lambda *_a, **_k: 1.0)
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", read_ledger)
     monkeypatch.setattr(accounting, "usage_writer_snapshot", lambda *_a, **_k: (read_ledger() or _breakdown(1.0, 1)))
     monkeypatch.setattr(accounting, "usage_projection", lambda *_a, **_k: (read_ledger() or {"accounted_usd": 1.0}))
 
     state.update_budget_from_usage({})
 
-    assert operations[:3] == ["ledger", "ledger", "ledger"]
-    assert operations[3:] == ["acquire", "load", "save", "release"]
+    assert operations[:2] == ["ledger", "ledger"]
+    assert operations[2:] == ["acquire", "load", "save", "release"]
     assert not holding_state_lock
 
 
@@ -101,11 +99,10 @@ def test_older_budget_snapshot_cannot_regress_state(tmp_path, monkeypatch):
             value = 2.0
         snapshot = _breakdown(value, int(value))
         snapshot["_usage_projection"] = {
-            "accounted_usd": value, "integrity_degraded": False, "cost_final": True,
+            "settled_usd": value, "accounted_usd": value, "integrity_degraded": False, "cost_final": True,
         }
         return snapshot
 
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
     monkeypatch.setattr(accounting, "usage_writer_snapshot", breakdown)
     older = threading.Thread(target=state.update_budget_from_usage, args=({},))
     newer = threading.Thread(target=state.update_budget_from_usage, args=({},))
@@ -129,9 +126,8 @@ def test_limited_projection_uses_breakdown_snapshot(tmp_path, monkeypatch):
     state.save_state({})  # an initialized install: only explicit init creates state (#1307)
     snapshot = _breakdown(1.0, 1)
     snapshot["_usage_projection"] = {
-        "accounted_usd": 1.0, "integrity_degraded": False, "cost_final": True,
+        "settled_usd": 1.0, "accounted_usd": 1.0, "integrity_degraded": False, "cost_final": True,
     }
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
     monkeypatch.setattr(accounting, "usage_writer_snapshot", lambda *_a, **_k: dict(snapshot))
     monkeypatch.setattr(
         accounting, "usage_projection",
@@ -145,45 +141,47 @@ def test_limited_projection_uses_breakdown_snapshot(tmp_path, monkeypatch):
 
 
 @pytest.mark.serial
-def test_compaction_provenance_keeps_high_water_marker(tmp_path, monkeypatch):
+def test_migration_continues_the_high_water_marker(tmp_path, monkeypatch):
+    """The store's marker continues the retired journal's ``[epoch, seq]``: the
+    first projection after the upgrade is accepted, never published lower."""
     from supervisor import state
     import ouroboros.usage_accounting as accounting
+    from ouroboros.usage_journal import IMPORT_REL
+    from tests._usage_store_testing import write_journal
 
     state.init(tmp_path, total_budget_limit=0.0)
-    state.save_state({})  # an initialized install: only explicit init creates state (#1307)
-    from ouroboros import usage_compaction as compaction
-    request = accounting.AttemptRequest(
+    # An upgraded install: its pre-ledger telemetry import completed long ago.
+    (tmp_path / IMPORT_REL).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / IMPORT_REL).write_text('{"completed": true}', encoding="utf-8")
+    base = dict(attempt_id="old", kind="attempt", task_id="task", root_task_id="root", provider="test",
+                model="test/model", reservation_upper_bound_usd=1.0, pricing_known=True)
+    write_journal(tmp_path, [{**base, "state": "reserved"}, {**base, "state": "dispatched"},
+                             {**base, "state": "settled", "cost_usd": 1.0, "cost_final": True}])
+    # What the journal-era writer published for that journal.
+    state.save_state({"spent_usd": 1.0, "usage_ledger_high_water_seq": [0, 3]})
+    imported = accounting.usage_breakdown(tmp_path)["_ledger_high_water_seq"]
+    assert tuple(imported) == (0, 3)
+    assert state.update_budget_from_usage({}) is True
+    assert state.load_state()["usage_ledger_high_water_seq"] == [0, 3]
+    hold = accounting.reserve_attempt(accounting.AttemptRequest(
         model="test/model", provider="test", drive_root=tmp_path,
         task_id="task", root_task_id="root", reservation_usd=1.0,
-    )
-    hold = accounting.reserve_attempt(request)
+    ))
     accounting.mark_dispatched(hold)
     accounting.settle_attempt(hold, {"prompt_tokens": 1}, cost_usd=1.0, cost_final=True)
-    before_rows = [line for line in (tmp_path / accounting.LEDGER_REL).read_text().splitlines() if line]
-    before = accounting.usage_breakdown(tmp_path)["_ledger_high_water_seq"]
-    state.update_budget_from_usage({})
-    monkeypatch.setattr(compaction, "_fold_clock", lambda: time.time() + 2 * compaction.USAGE_LEDGER_FOLD_MIN_AGE_SEC)
-    with accounting._locked(tmp_path) as heartbeat:
-        assert compaction.compact_usage_ledger_locked(tmp_path, heartbeat=heartbeat)
-    after_rows = [line for line in (tmp_path / accounting.LEDGER_REL).read_text().splitlines() if line]
     after = accounting.usage_breakdown(tmp_path)["_ledger_high_water_seq"]
-    state.update_budget_from_usage({})
+    assert tuple(after) > tuple(imported)
+    assert state.update_budget_from_usage({}) is True
 
     stored = state.load_state()
-    assert len(after_rows) < len(before_rows)
-    assert max(row["seq"] for row in map(json.loads, after_rows)) < max(
-        row["seq"] for row in map(json.loads, before_rows)
-    )
-    assert tuple(after) > tuple(before)
-    assert stored["spent_usd"] == 1.0
+    assert stored["spent_usd"] == 2.0
     assert stored["usage_ledger_high_water_seq"] == after
 
 
 @pytest.mark.serial
-def test_reordered_writers_across_real_compaction_reject_lower_epoch(tmp_path, monkeypatch):
+def test_reordered_real_writers_never_regress_the_projection(tmp_path, monkeypatch):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
-    from ouroboros import usage_compaction as compaction
 
     state.init(tmp_path, total_budget_limit=0.0)
     state.save_state({})  # an initialized install: only explicit init creates state (#1307)
@@ -216,13 +214,6 @@ def test_reordered_writers_across_real_compaction_reject_lower_epoch(tmp_path, m
     older = threading.Thread(target=state.update_budget_from_usage, args=({},))
     older.start()
     assert started.wait(2.0)
-
-    monkeypatch.setattr(
-        compaction, "_fold_clock",
-        lambda: time.time() + 2 * compaction.USAGE_LEDGER_FOLD_MIN_AGE_SEC,
-    )
-    with accounting._locked(tmp_path) as heartbeat:
-        assert compaction.compact_usage_ledger_locked(tmp_path, heartbeat=heartbeat)
     settle("after")
     newer = threading.Thread(target=state.update_budget_from_usage, args=({},))
     newer.start()
@@ -246,7 +237,6 @@ def test_stale_snapshot_is_rejected_without_state_lock(tmp_path, monkeypatch, ca
     state.save_state({"spent_usd": 2.0, "usage_ledger_high_water_seq": [0, 2]})
     monkeypatch.setattr(state, "acquire_file_lock", lambda *_a, **_k: None)
     monkeypatch.setattr(state, "release_file_lock", lambda *_a, **_k: None)
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
     monkeypatch.setattr(accounting, "usage_writer_snapshot", lambda *_a, **_k: _breakdown(1.0, 1))
 
     assert state.update_budget_from_usage({}) is False
@@ -265,7 +255,6 @@ def test_equal_marker_writes_newer_projection_even_when_spend_decreases(tmp_path
 
     state.init(tmp_path, total_budget_limit=0.0)
     state.save_state({"spent_usd": 9.0, "usage_ledger_high_water_seq": [2, 4]})
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
     monkeypatch.setattr(
         accounting,
         "usage_writer_snapshot",
@@ -285,7 +274,6 @@ def test_lower_epoch_is_rejected_and_preserves_money(tmp_path, monkeypatch, capl
 
     state.init(tmp_path, total_budget_limit=0.0)
     state.save_state({"spent_usd": 9.0, "usage_ledger_high_water_seq": [3, 4]})
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
     monkeypatch.setattr(
         accounting,
         "usage_writer_snapshot",
@@ -306,7 +294,6 @@ def test_missing_marker_fails_safe_without_fabricating_zero(tmp_path, monkeypatc
 
     state.init(tmp_path, total_budget_limit=0.0)
     state.save_state({})  # an initialized install: only explicit init creates state (#1307)
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
     monkeypatch.setattr(accounting, "usage_writer_snapshot", lambda *_a, **_k: {"accounted_usd": 9.0})
 
     state.update_budget_from_usage({})
@@ -328,7 +315,6 @@ def test_malformed_current_marker_is_unknown(tmp_path, monkeypatch):
 
     state.init(tmp_path, total_budget_limit=0.0)
     state.save_state({"spent_usd": 7.0, "usage_ledger_high_water_seq": [1, 3]})
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
     monkeypatch.setattr(
         accounting,
         "usage_writer_snapshot",
@@ -408,7 +394,7 @@ def test_per_root_money_is_still_served_from_the_ledger_after_the_slim_write(tmp
     assert state.update_budget_from_usage({}) is True
     assert "by_root" not in state.load_state()["usage_accounting"]
 
-    by_root = accounting.usage_projection(tmp_path, global_limit_usd=1000.0)["by_root"]
+    by_root = accounting.usage_projection(tmp_path, global_limit_usd=1000.0, include_roots=True)["by_root"]
     assert sorted(by_root) == roots
     for root in (roots[0], roots[77], roots[-1]):
         expected = accounting.usage_breakdown(tmp_path, root_task_id=root)["accounted_usd"]
@@ -483,9 +469,11 @@ def test_writer_snapshot_matches_the_full_breakdown_on_every_key_the_writer_read
         assert slim[key] == full[key], key
     assert slim["by_provider"]["openrouter"] == full["by_provider"]["openrouter"]
     assert slim["by_provider"]["openrouter"]["settled_usd"] == 0.625
-    full_projection = dict(full["_usage_projection"])
-    full_projection.pop("by_root")
-    assert slim["_usage_projection"] == full_projection
+    # The totals-only projection is the projection reader's own render, before
+    # the writer decorates it with the configured limit.
+    reader = accounting.usage_projection(tmp_path, global_limit_usd=None)
+    assert slim["_usage_projection"] == {key: value for key, value in reader.items()
+                                         if key not in {"limit_usd", "remaining_known_usd"}}
     assert "by_root" not in slim["_usage_projection"]
     for axis in ("by_model", "by_category", "by_task", "by_root", "delegated", "unattributed"):
         assert axis not in slim
@@ -515,7 +503,9 @@ def test_state_json_is_byte_identical_whether_written_from_the_full_or_the_slim_
     assert state.update_budget_from_usage({}) is True  # equal marker: the write is accepted
     from_full = state.STATE_PATH.read_bytes()
 
-    assert from_full == from_slim
+    # The full breakdown carries no projection snapshot, so that write renders
+    # the projection itself: the same keys and values (dict order may differ).
+    assert json.loads(from_full.decode("utf-8")) == json.loads(from_slim.decode("utf-8"))
     stored = json.loads(from_slim.decode("utf-8"))
     assert stored["spent_usd"] == 2.125 and stored["usage_accounting"]["accounted_usd"] == 2.125
     assert stored["usage_accounting"]["limit_usd"] == 100.0 and "by_root" not in stored["usage_accounting"]
@@ -530,18 +520,29 @@ def test_openrouter_drift_check_fires_on_crossing_a_multiple_of_fifty(tmp_path, 
     state.init(tmp_path, total_budget_limit=0.0)
     state.save_state({})  # an initialized install: only explicit init creates state (#1307)
     checks = []
-    monkeypatch.setattr(state, "check_openrouter_ground_truth", lambda: checks.append(True) or None)
-    monkeypatch.setattr(accounting, "ensure_legacy_imported", lambda *_a, **_k: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(state, "check_openrouter_ground_truth", lambda _key: checks.append(True) or None)
     calls = {"physical_calls": 49}
     monkeypatch.setattr(accounting, "usage_writer_snapshot",
                         lambda *_a, **_k: _breakdown(1.0, 1) | {"physical_calls": calls["physical_calls"]})
 
-    assert state.update_budget_from_usage({}) is True and checks == []
+    def write_projection():
+        assert state.update_budget_from_usage({}) is True
+        diagnostic = state._OPENROUTER_DIAGNOSTIC
+        assert diagnostic.latch.acquire(timeout=5), "diagnostic did not finish"
+        diagnostic.latch.release()
+
+    write_projection()
+    assert checks == []
     calls["physical_calls"] = 51
-    assert state.update_budget_from_usage({}) is True and len(checks) == 1
+    write_projection()
+    assert len(checks) == 1
     assert state.load_state()["openrouter_last_check_call"] == 51
-    assert state.update_budget_from_usage({}) is True and len(checks) == 1  # deduped at the same count
+    write_projection()
+    assert len(checks) == 1  # deduped at the same count
     calls["physical_calls"] = 99
-    assert state.update_budget_from_usage({}) is True and len(checks) == 1
+    write_projection()
+    assert len(checks) == 1
     calls["physical_calls"] = 100
-    assert state.update_budget_from_usage({}) is True and len(checks) == 2
+    write_projection()
+    assert len(checks) == 2

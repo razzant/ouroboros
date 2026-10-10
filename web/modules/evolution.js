@@ -2,6 +2,7 @@ import { allowanceLabel, escapeHtmlText, formatUsd2 } from './utils.js';
 import { apiFetch } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { applyChartTheme, chartChrome, onThemeChange } from './theme_palette.js';
+import { tr } from './i18n.js';
 
 /**
  * Ask for the evolution-campaign objective (pure decision helper, node-tested
@@ -117,12 +118,14 @@ export function initEvolution({ ws, state, mount }) {
 
     function pillTone(status) {
         if (['running', 'queued', 'idle_ready', 'thinking', 'sleeping'].includes(status)) return 'online';
-        if (['waiting_for_idle', 'waiting_for_owner_chat', 'waiting_for_first_conversation', 'waiting_for_restart_verify', 'paused', 'starting', 'state_unknown', 'unknown'].includes(status)) return 'starting';
+        if (['waiting_for_idle', 'waiting_for_owner_chat', 'waiting_for_first_conversation', 'waiting_for_restart_verify', 'paused', 'starting', 'state_unknown', 'unknown', 'wake_paused', 'wake_outcome_unknown'].includes(status)) return 'starting';
         if (['budget_blocked', 'budget_stopped', 'paused_failures', 'error_backoff', 'allowance_exhausted', 'allowance_unknown', 'wake_failed', 'wake_rejected'].includes(status)) return 'error';
         return 'offline';
     }
 
     function shortStatusLabel(status, fallback = 'off') {
+        if (status === 'wake_paused') return tr('consciousness.wake_paused', 'paused');
+        if (status === 'wake_outcome_unknown') return tr('consciousness.wake_outcome_unknown', 'unknown');
         if (status === 'state_unknown' || status === 'unknown') return 'unknown';  // a null control is never "off"
         if (status === 'thinking') return 'thinking';
         if (status === 'sleeping') return 'sleeping';

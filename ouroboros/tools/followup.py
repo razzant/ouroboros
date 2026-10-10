@@ -43,6 +43,7 @@ from typing import Any, Dict, List
 from ouroboros.consciousness_authority import consciousness_origin_metadata
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.dialogue_provenance import presence_caller_binding, presence_root_carrier
+from ouroboros.settings_scales import EFFORT_SCALE, requested_effort
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
@@ -215,6 +216,11 @@ def get_tools() -> List[ToolEntry]:
                                 "Optional context the future task should start from (facts, ids, paths; "
                                 f"max {_MAX_CONTEXT_CHARS} chars; longer is a typed refusal, never truncated)."
                             ),
+                        },
+                        "reasoning_effort": {
+                            "type": "string", "enum": list(EFFORT_SCALE),
+                            "description": "Optional: the reasoning effort each future task starts on, chosen for "
+                                           "that work. Omit for its configured default. A request the route may adapt.",
                         },
                     },
                     "required": ["objective", "relation"],
@@ -392,6 +398,16 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
             publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"ERROR: FOLLOWUP_TEXT_TOO_LONG: context is {len(context)} chars; the limit is "
             f"{_MAX_CONTEXT_CHARS}. Shorten it — nothing was truncated and nothing was scheduled.")))
         )
+    effort = ""
+    if params.get("reasoning_effort") is not None and notify:
+        timezone_note += " " + ignored_argument_note(
+            "reasoning_effort", params["reasoning_effort"], "a note wakes no model") + "."
+    elif params.get("reasoning_effort") is not None:
+        try:
+            effort = requested_effort(params["reasoning_effort"])
+        except ValueError as exc:
+            return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+                f"ERROR: FOLLOWUP_EFFORT_INVALID: {exc}. Nothing was scheduled.")))
     from ouroboros.tool_access import canonical_data_root
     from supervisor.queue import schedule_transaction
 
@@ -422,7 +438,8 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
                 return _register_note(ctx, task_id, drive_root, objective, trigger, cron, timezone,
                                       timezone_note, origin, relation)
             return _register_followup(ctx, task_id, drive_root, objective, context,
-                                      trigger, cron, timezone, timezone_note, origin, relation)
+                                      trigger, cron, timezone, timezone_note, origin, relation,
+                                      reasoning_effort=effort)
     except ScheduleStoreUnreadable as exc:
         # A missed table lock (ScheduleLockTimeout) or an unparseable table: the
         # follow-up was NOT registered, and the refusal says so in the text ABI
@@ -519,7 +536,8 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
 
 def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
                        objective: str, context: str, trigger: Dict[str, Any], cron: str,
-                       timezone: str, timezone_note: str, origin: dict, relation: dict) -> str:
+                       timezone: str, timezone_note: str, origin: dict, relation: dict,
+                       *, reasoning_effort: str = "") -> str:
     """The cap read, the record build and the write — all under the schedule lock."""
     from supervisor.queue import upsert_scheduled_task
 
@@ -549,6 +567,7 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
             "text": objective,
             "description": objective,
             **({"context": context} if context else {}),
+            **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
             **({"project_id": project_id} if project_id else {}),
             "metadata": {
                 "source": FOLLOWUP_SOURCE,

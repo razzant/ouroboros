@@ -236,7 +236,10 @@ def test_readonly_child_can_review_auth_sources_and_scoped_knowledge(environment
     assert 'KNOWLEDGE_READ' in reg.execute('knowledge_read', {'topic': 'topic'})
     assert 'OTHER_PROJECT_FACT' not in reg.execute('knowledge_read', {'topic': 'hidden'})
     assert sorted(str(p) for p in data.rglob('*')) == before
-    assert reg.get_schema_by_name('knowledge_write') is None
+    # A child writes knowledge and chronicle drafts in its own name; identity stays the parent's.
+    assert reg.get_schema_by_name('knowledge_write') is not None
+    assert reg.get_schema_by_name('update_identity') is None
+    assert reg.get_schema_by_name('chronicle_write') is not None
     assert 'LOCAL_READONLY_SUBAGENT_BLOCKED' in reg.execute('write_file', {'path': 'x', 'content': 'x'})
 
 
@@ -541,18 +544,27 @@ def test_parent_runtime_read_rules_follow_physical_files_across_root_labels(tmp_
     cached.parent.mkdir(parents=True, exist_ok=True)
     cached.write_text('{"synthetic": "unchanged cache"}', encoding='utf-8')
     cache_before = cached.read_bytes()
-    original_read = pathlib.Path.read_bytes
+    # Source readers use bounded Path.open('rb'); read_bytes/read_text also open.
+    original_open = pathlib.Path.open
+    hidden = project.resolve()
 
-    def permitted_read(path):
-        if path == project:
+    def permitted_open(path, *args, **kwargs):
+        if path.resolve() == hidden:
             pytest.fail('project-store source was read before admission')
-        return original_read(path)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(pathlib.Path, 'read_bytes', permitted_read)
-    for op, options in [('symbols', {}), ('digest', {}), ('structural', {'query': 'FunctionDef'})]:
+    # A bare-symbol owner_of reads the inventory through that same admission.
+    (repo / 'ouroboros').mkdir()
+    (repo / 'ouroboros' / 'domains.toml').write_text(
+        '[domains]\nD01 = "Synthetic"\n\n[modules]\n"ouroboros/owned.py" = "D01"\n', encoding='utf-8')
+    (repo / 'ouroboros' / 'owned.py').write_text('def owned_fact():\n    pass\n', encoding='utf-8')
+    monkeypatch.setattr(pathlib.Path, 'open', permitted_open)
+    for op, options in [('symbols', {}), ('digest', {}), ('structural', {'query': 'FunctionDef'}),
+                        ('architecture', {'query': 'owner_of owned_fact'})]:
         result = registry.execute('query_code', {'op': op, **options})
         assert 'hidden_project_fact' not in result
         assert 'projects/other/hidden.py' not in result
+        assert op != 'architecture' or 'ouroboros/owned.py -> D01 (Synthetic) [symbol_definition]' in result, result
     assert cached.read_bytes() == cache_before
 
 

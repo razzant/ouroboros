@@ -347,8 +347,8 @@ def test_chat_scrolls_to_bottom_after_first_history_load():
     assert "const parent = liveCardRecords.get(record.parentGroupId);" in source
     assert "seen.has(record.groupId)" in source, \
         "Nested subagent timestamps must propagate to the top-level ancestor safely"
-    assert "stick: initial ? initial.stick !== false : true" in position, \
-        "Only a fresh feed defaults to following latest; an archived bookmark must not be overwritten"
+    assert "stick: true," in position and "initial" not in position, \
+        "Every room opens following its newest message (owner decision 2026-10-05)"
     # The shared photo/video builder and the separate document builder must
     # each stamp sortable data-ts from the raw source timestamp.
     bubble_frame = media_source.split("function bubbleFrame", 1)[1].split(
@@ -436,10 +436,9 @@ def test_owner_restart_cleanup_disables_second_custody_reconcile(monkeypatch):
     owner, restart = threading.Event(), threading.Event()
     monkeypatch.setattr(server, "_owner_restart_requested", owner)
     monkeypatch.setattr(server, "_restart_requested", restart)
-    monkeypatch.setattr(server._historical_audit, "stop", lambda: None)
     monkeypatch.setattr(server, "_managed_update_pending_kwargs", lambda: {})
     monkeypatch.setattr(server, "_stop_owned_daemon_for_new_pin", lambda: None)
-    monkeypatch.setattr(server, "_stop_owned_local_processes", lambda *a, **k: None)
+    monkeypatch.setattr(server, "stop_owned_work", lambda *a, **k: None)
     monkeypatch.setattr("multiprocessing.active_children", lambda: [])
     monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
     calls = []
@@ -450,7 +449,7 @@ def test_owner_restart_cleanup_disables_second_custody_reconcile(monkeypatch):
             restart.set() if restarting else restart.clear()
             calls.clear()
             server._emergency_process_cleanup(port_sweep=False)
-            expected = {"force": True, "archive_service_logs": False}
+            expected = {"force": True, "archive_service_logs": False, "retain_saved_work": True}  # #1563
             if owner_requested:
                 expected["reconcile_delegate_custody"] = False
             if restarting:

@@ -270,15 +270,6 @@ def test_unknown_subscription_scope_stays_unknown_without_authority(tmp_path, mo
     assert window_provenance_phrase(window.window_tokens, scope_window_provenance(window)) == "unknown window"
 
 
-def test_unknown_subscription_advisory_does_not_claim_zero_capacity(tmp_path, monkeypatch, catalog):
-    from ouroboros import config
-    from ouroboros.tools.claude_advisory_review import _api_window_skip_warning
-
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    catalog["value"]["models"] = []
-    assert _api_window_skip_warning(MODEL, "instructions " * 10_000, False) == ""
-
-
 def test_model_only_ack_and_cache_cannot_certify_subscription_account(tmp_path, catalog):
     fp = ce.route_fingerprint(provider="claudexor", model=MODEL)
     with pytest.raises(ValueError, match="exact account binding"):

@@ -94,6 +94,8 @@ def direct_exec_environment(monkeypatch, root):
         captured.update(env)
         raise ReachedExec()
     monkeypatch.setattr(control.os, "execvpe", execvpe)
+    monkeypatch.setattr("ouroboros.process_custody.spawn_supervised",
+                        lambda argv, **kw: execvpe(argv[0], argv, kw["env"]))
     with pytest.raises(ReachedExec):
         server._restart_current_process("127.0.0.1", 8765)
     return captured

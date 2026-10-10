@@ -2,6 +2,16 @@
 
 Execution, accounting, recovery and publication remain with the existing review
 owners. This adapter never resumes an author or rebuilds historical evidence.
+
+Authority: a late review needs an owner chat, quiz or mailbox ``owner_source``
+newer than the frozen answer; the target may sit in any Project. ``amend_cap``
+only records an absolute original-root cap (no panel, no claim); ``review`` runs
+the full triad over the frozen terminal root even with review mode off.
+Bindings: Stop, Panic, review prohibitions, Pauses/budget fences, calendar
+deadlines, original-root and live global caps with in-flight holds. Hurry and
+finalize-now block only unstarted automatic work, not a later explicit request;
+an automatic panel also needs calendar headroom above the acceptance floor. An
+already paid or unknown panel is collected, never replayed.
 """
 from __future__ import annotations
 

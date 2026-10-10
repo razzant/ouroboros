@@ -87,7 +87,7 @@ def test_consciousness_status_snapshot_exposes_the_alarm_facts(monkeypatch, tmp_
 
     monkeypatch.setattr(state, "load_state", lambda: {"bg_consciousness_enabled": True, "owner_chat_id": 1})
     monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: {
-        "status": "available", "limit_usd": 20.0, "accounted_usd": 3.0, "remaining_usd": 17.0, "resets_at": ""})
+        "status": "available", "limit_usd": 20.0, "settled_usd": 3.0, "accounted_usd": 3.0, "remaining_usd": 17.0, "resets_at": ""})
     monkeypatch.setattr(BackgroundConsciousness, "_running_roots", staticmethod(lambda: 0))
     clock = BackgroundConsciousness(tmp_path, tmp_path / "repo", lambda: 1, now=1_800_000_000.0)
     clock.notify("task_finished:t1:completed")
@@ -149,22 +149,18 @@ def test_budget_remaining_uses_valid_projection_and_self_computes_on_limit_misma
     from supervisor import state
 
     monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 10.0)
-    calls = {"projection": 0, "import": 0}
+    calls = {"projection": 0}
 
     def _projection(_root, **_kwargs):
         calls["projection"] += 1
         return {"limit_usd": 10.0, "remaining_known_usd": 3.75}
 
     monkeypatch.setattr(ua, "usage_projection", _projection)
-    monkeypatch.setattr(
-        ua, "ensure_legacy_imported",
-        lambda _root: calls.__setitem__("import", calls["import"] + 1),
-    )
 
     valid = {"limit_usd": 10.0, "remaining_known_usd": 4.25}
     assert state.budget_remaining({}, projection=valid) == 4.25
-    assert calls == {"projection": 0, "import": 0}
+    assert calls == {"projection": 0}
 
     stale = {"limit_usd": 5.0, "remaining_known_usd": 4.25}
     assert state.budget_remaining({}, projection=stale) == 3.75
-    assert calls == {"projection": 1, "import": 1}
+    assert calls == {"projection": 1}

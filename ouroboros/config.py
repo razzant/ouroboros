@@ -37,7 +37,7 @@ from ouroboros.settings_defaults import (
     PACING_INTERVAL_DEFAULT_SEC,  # noqa: F401
     RETIRED_COMMA_LIST_SETTING_KEYS,  # noqa: F401
     RETIRED_SETTING_KEYS,  # noqa: F401
-    RETIRED_SETTING_SUCCESSORS,  # noqa: F401
+    RETIRED_SETTING_SUCCESSORS, REVIEW_POOL_MIGRATED_SETTING_KEYS, REVIEW_POOL_MIGRATION_CLASS_LINE,  # noqa: F401
     retired_setting_keys_notice,  # noqa: F401
     SETTINGS_DEFAULTS,  # noqa: F401
     SETTINGS_KEYS_NOT_EXPORTED_TO_ENV,  # noqa: F401
@@ -48,6 +48,7 @@ from ouroboros.settings_defaults import (
 from ouroboros.settings_scales import (
     EFFORT_SCALE, OPTIONAL_BOUND_LEGACY, UNLIMITED,  # noqa: F401
     PROMPT_CACHE_TTL_SCALE, defaults_for_settings_document, optional_bound_value,  # noqa: F401
+    REVIEW_POOL_DEFAULT_EFFORT,  # noqa: F401
     VALID_RUNTIME_MODES,  # noqa: F401
     VALID_SAFETY_MODES,  # noqa: F401
     _RUNTIME_MODE_RANK,  # noqa: F401
@@ -70,7 +71,6 @@ from ouroboros.model_slots import (
     _main_model,  # noqa: F401
     _parse_model_list,  # noqa: F401
     get_consciousness_model,  # noqa: F401
-    get_deep_self_review_model,  # noqa: F401
     get_fallback_models,  # noqa: F401
     get_heavy_model,  # noqa: F401
     get_image_input_mode,  # noqa: F401
@@ -83,12 +83,7 @@ from ouroboros.review_model_routes import (
     _DIRECT_PROVIDER_REVIEW_RUNS,  # noqa: F401
     _exclusive_direct_remote_provider_env,  # noqa: F401
     adaptive_quorum,  # noqa: F401
-    direct_provider_review_models_fallback,  # noqa: F401
     get_review_enforcement,  # noqa: F401
-    get_review_models,  # noqa: F401
-    get_review_targets,  # noqa: F401
-    get_scope_review_models,  # noqa: F401
-    get_scope_review_targets,  # noqa: F401
     resolved_review_model_target,  # noqa: F401
 )
 from ouroboros.runtime_limits import (
@@ -114,7 +109,7 @@ from ouroboros.runtime_limits import (
     DELEGATE_WAIT_CEILING_SEC,  # noqa: F401
     DELEGATE_WAIT_WINDOW_MAX_SEC, OPERATION_WINDOW_FALLBACK_SEC,  # noqa: F401
     MAX_ACTIVE_SUBAGENTS_HARD_CAP, MAX_SUBAGENT_DEPTH_HARD_CAP,  # noqa: F401
-    WAKE_DEFAULT_SEC, USAGE_LEDGER_FOLD_MIN_AGE_SEC,  # noqa: F401
+    WAKE_DEFAULT_SEC,  # noqa: F401
     _bounded_positive_int_setting,  # noqa: F401
     _clamped_number_setting,  # noqa: F401
     get_acceptance_reserve_pct,  # noqa: F401
@@ -196,15 +191,6 @@ from ouroboros.settings_integrity import (  # noqa: E402, F401 — public config
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
 AGENT_SERVER_PORT = 8765
-# --- Usage-ledger compaction policy -----------------------------------------
-# docs/USAGE_COMPACTION.md. Constants, not env knobs. Compact the
-# monetary ledger once its byte size reaches ~0.2s-per-cold-replay scale, well
-# under the measured 20MB degradation point (USAGE_LEDGER_WARN_BYTES in
-# context_budget.py), which stays as the broken-compaction regression tripwire.
-USAGE_LEDGER_COMPACT_BYTES = 8_000_000
-# After an unprofitable/aborted pass, retry only once the file has grown this
-# much (or was replaced) — bounds the cost of a structurally unfoldable ledger.
-USAGE_LEDGER_COMPACT_RETRY_GROWTH_BYTES = 1_000_000
 
 
 def _guard_live_settings_write() -> None:
@@ -469,15 +455,12 @@ def _settings_file_value(key: str, default: str) -> str:
     """Read ONE persisted setting off disk, without normalizing the whole file. DISK ONLY, for EVERY caller: env
     is inherited and freely rewritten by any subprocess, so it can never be a ratchet's PREVIOUS value — reading it
     there turns ``max -> low`` into ``low -> low`` and the gate opens. Absent/corrupt = the fail-closed default."""
-    if SETTINGS_PATH.exists():
-        try:
-            disk_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-            if isinstance(disk_settings, dict):
-                value = disk_settings.get(key, default)
-                return str(default if value is None or value == "" else value)
-        except (OSError, json.JSONDecodeError):
-            pass
-    return default
+    try:
+        disk_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    value = disk_settings.get(key, default) if isinstance(disk_settings, dict) else default
+    return str(default if value is None or value == "" else value)
 
 
 def _guard_context_mode_lowering(settings: dict, *, allow_context_lowering: bool = False) -> None:
@@ -508,7 +491,10 @@ def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str]
         allow_context_lowering: bool = False, allow_safety_lowering: bool = False) -> dict:
     """Normalize settings writes under existing ratchets. Only the actual writer
     names authored_keys; a defaults merge preserves absent disk-owned intent,
-    forwarded environment choices and install-time provenance."""
+    forwarded environment choices and install-time provenance. The review-pool receipts THIS
+    write owes land before it replaces the pre-image (``review_pool_receipts.persist_write_receipts``)."""
+    from ouroboros.review_pool_receipts import persist_write_receipts
+    persist_write_receipts(DATA_DIR, settings, SETTINGS_PATH)
     authored = set(authored_keys or ())
     prepared = {k: v for k, v in settings.items() if not (
         k in _DISK_AUTHORED_SETTINGS and k not in authored and not _settings_file_value(k, "")
@@ -638,7 +624,11 @@ def _settings_lock_path() -> pathlib.Path:
 def _acquire_settings_lock(timeout: float = 2.0) -> Optional[int]:
     # None means the lock was NOT taken: every WRITER must abort on it (`save_settings` raises
     # TimeoutError, `gateway.owner_settings` SettingsLockUnavailable) — writing anyway makes
-    # "atomic" a claim the code does not keep. Only READS may proceed unlocked.
+    # "atomic" a claim the code does not keep. Only READS may proceed unlocked. Under the
+    # integrity pin every read is verified and every writer refuses, so nothing is taken
+    # (or created) beside a pinned file this process does not own.
+    if _settings_integrity.expected_settings_sha256():
+        return None
     start = time.time()
     lock_path = _settings_lock_path()
     while time.time() - start < timeout:
@@ -707,6 +697,11 @@ def _coerce_setting_value(key: str, value):
     return str(value or "")
 
 
+def coerce_settings_raw(raw: Any) -> dict:
+    """The read seam's first step: every known key typed as its default declares, unknown keys untouched."""
+    return {key: _coerce_setting_value(key, value) if key in SETTINGS_DEFAULTS else value for key, value in dict(raw or {}).items()}
+
+
 def verify_settings_integrity() -> str | None:
     """Verify the strict child pin, returning the observed digest when present."""
     return _settings_integrity.verify_settings_integrity(SETTINGS_PATH)
@@ -727,6 +722,12 @@ def retired_key_sets_seen() -> tuple[tuple[str, ...], ...]:
     return tuple(sorted(_RETIREMENT_NOTICE_SEEN))
 
 
+def review_pool_migrations_seen() -> tuple:
+    """Review-lane -> review-pool ``MigrationOutcome`` records this process computed, oldest first."""
+    from ouroboros.review_pool_migration import migrations_seen
+    return migrations_seen()
+
+
 def normalize_settings_raw(raw: dict) -> dict:
     """THE raw-stage normalization every settings READER applies BEFORE defaults.
 
@@ -734,12 +735,13 @@ def normalize_settings_raw(raw: dict) -> dict:
     reader's first job is to translate it into today's vocabulary: coerce every known key to
     the type its default declares, fold the deprecated per-subsystem retention keys into the
     unified one, seed the shared review-cycle cap from the retired acceptance-pass count,
-    drop the keys a release retired, promote the renamed model slots, and repair secret
-    placeholders. Every step exists to PRESERVE an owner customization written under a
-    former key, which is why the order matters: the pass count is consumed BEFORE the retired
-    purge would drop it, and the purge runs BEFORE the slot rename so a retired spelling is
-    never promoted into a live key. Unknown keys pass through untouched — ``settings.json``
-    is the owner's document.
+    turn the former review lanes into reviewer rows of the subagent catalog (``review_pool_migration``:
+    pure, once per document digest; one that cannot finish keeps its keys for the owner's next save),
+    drop the keys a release retired, promote the renamed model slots, and repair secret placeholders.
+    Every step exists to PRESERVE an owner customization written under a former key, which is why
+    the order matters: the pass count and the lanes are consumed BEFORE the retired purge would drop
+    them, and the purge runs BEFORE the slot rename so a retired spelling is never promoted into a
+    live key. Unknown keys pass through untouched — ``settings.json`` is the owner's document.
 
     Pure — it reads no file, persists no document, and consults no environment, so a reader
     can apply it and a read stays a read. It is the seam BECAUSE it was previously inline in
@@ -754,10 +756,7 @@ def normalize_settings_raw(raw: dict) -> dict:
     (``retired_key_sets_seen`` -> ``server_maintenance._startup_retired_settings_notice``)."""
     from ouroboros.retention import LEGACY_RETENTION_KEYS, pick_legacy_retention_seed
 
-    loaded = {
-        key: _coerce_setting_value(key, value) if key in SETTINGS_DEFAULTS else value
-        for key, value in dict(raw or {}).items()
-    }
+    loaded = coerce_settings_raw(raw)
     # Prefer a CUSTOMIZED legacy retention value so a rename never orphans it; an
     # all-defaults file collapses to the unified default.
     if "OUROBOROS_GC_RETENTION_DAYS" not in loaded:
@@ -777,16 +776,14 @@ def normalize_settings_raw(raw: dict) -> dict:
         _passes = 1  # 1 = shipped legacy default: nothing to seed
     if _passes != 1 and "OUROBOROS_REVIEW_MAX_CYCLES" not in loaded:
         loaded["OUROBOROS_REVIEW_MAX_CYCLES"] = str(max(0, _passes) + 1)
-    dropped = tuple(key for key in RETIRED_SETTING_KEYS if key in loaded)
-    for _retired in RETIRED_SETTING_KEYS:
+    from ouroboros.review_pool_migration import apply_at_read_seam
+    _retained = apply_at_read_seam(loaded)  # the lanes become reviewer rows BEFORE the purge
+    dropped = tuple(key for key in RETIRED_SETTING_KEYS if key in loaded and key not in _retained)
+    for _retired in dropped:
         loaded.pop(_retired, None)
     if dropped and dropped not in _RETIREMENT_NOTICE_SEEN:
         _RETIREMENT_NOTICE_SEEN.add(dropped)
-        from ouroboros.reviewer_slot_config import authored_reviewer_slots_state
-
-        log.warning("settings: %s", retired_setting_keys_notice(
-            dropped, reviewer_slots=authored_reviewer_slots_state(
-                str(loaded.get("OUROBOROS_REVIEWER_SLOTS") or ""))))
+        log.warning("settings: %s", retired_setting_keys_notice(dropped))
     migrate_legacy_slot_keys(loaded)
     return strip_masked_secrets(loaded, known_setting_keys=SETTINGS_DEFAULTS)
 
@@ -827,6 +824,7 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
     callers are lock-owning write preconditions, so the default remains true. A raw context
     compatibility migration is persisted only while that lock is held; the write contains
     the raw mapping plus the normalized pair, never a defaults-merged settings document."""
+    from ouroboros.review_pool_migration import apply_at_read_seam, environment_overridable_keys
     loaded: dict = {}
     try:
         raw = _settings_integrity.read_settings_json_verified(SETTINGS_PATH)
@@ -845,6 +843,7 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
     # An existing (even unreadable) document keeps the optional bounds it ran under.
     settings = defaults_for_settings_document(raw is not None or SETTINGS_PATH.exists())
     settings.update(loaded)
+    env_wins = environment_overridable_keys(raw)  # a seam default for an ABSENT key is not the owner's value
     for key in SETTINGS_DEFAULTS:
         raw_env = os.environ.get(key)
         if raw_env is None or key in _DISK_AUTHORED_SETTINGS or key in ENDPOINT_AUTHORED_SETTINGS:  # DISK-authored
@@ -854,9 +853,12 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
             continue
         if raw_env == "" and key not in OPTIONAL_BOUND_LEGACY:
             continue
-        if key in loaded and settings.get(key) not in {None, ""}:
+        if key in loaded and key not in env_wins and settings.get(key) not in {None, ""}:
             continue
         settings[key] = _coerce_setting_value(key, raw_env)
+    if not isinstance(raw, dict):
+        # No document went through the read seam: the never-configured install (§1.5) takes its factory rows here.
+        apply_at_read_seam(settings)
     return settings
 
 
@@ -980,9 +982,6 @@ def apply_settings_to_env(settings: dict, *, environ=None) -> None:
                 elif isinstance(val, (dict, list)):
                     val = json.dumps(val, ensure_ascii=False, separators=(",", ":"))
                 environ[k] = str(val)
-        # Reviewer-model floors moved into the structured-slot projection (6.1):
-        from ouroboros.reviewer_slot_config import project_reviewer_slots_into_env
-        project_reviewer_slots_into_env(environ=environ)
         if not environ.get("OUROBOROS_REVIEW_ENFORCEMENT"):
             environ["OUROBOROS_REVIEW_ENFORCEMENT"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"])
         if not environ.get("OUROBOROS_TASK_REVIEW_MODE"):

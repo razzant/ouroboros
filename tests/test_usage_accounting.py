@@ -12,6 +12,8 @@ import pytest
 import httpx
 
 from ouroboros import usage_accounting as ua
+from ouroboros import usage_journal, usage_store
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
@@ -42,10 +44,9 @@ def _request(data_root, **overrides):
 
 
 def _ledger(data_root):
-    path = data_root / ua.LEDGER_REL
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    """Every attempt's CURRENT row in write order (the store keeps no superseded
+    transition rows, so an attempt reads as its latest state)."""
+    return ledger_rows(data_root)
 
 
 def test_attempt_lifecycle_and_root_projection(data_root):
@@ -58,15 +59,16 @@ def test_attempt_lifecycle_and_root_projection(data_root):
         cost_final=True,
     )
 
-    projection = ua.usage_projection(data_root)
+    projection = ua.usage_projection(data_root, include_roots=True)
     assert projection["settled_usd"] == 0.25
     assert projection["confirmed_usd"] == 0.25
     assert projection["cost_final"] is True
     assert projection["by_root"]["root"]["settled_usd"] == 0.25
     assert projection["by_root"]["root"]["limit_usd"] == 2.0
+    assert "by_root" not in ua.usage_projection(data_root)  # the per-root map is an explicit request
     rows = _ledger(data_root)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "settled"]
-    assert [row["seq"] for row in rows] == [1, 2, 3]
+    assert [row["state"] for row in rows] == ["settled"]  # one row per attempt, updated in place
+    assert [(row["seq"], row["revision"]) for row in rows] == [(3, 3)]
 
 
 def test_unresolved_reason_is_redacted_before_truncation_and_fails_closed(
@@ -260,10 +262,9 @@ def test_abandoned_attempt_settles_with_the_usage_the_dead_child_reported(data_r
     projection = ua.usage_projection(data_root)
     assert projection["unresolved_upper_bound_usd"] == 0.0
     assert projection["accounted_usd"] < 5.0
-    # Idempotent: a terminal attempt is never transitioned again (a post-terminal
-    # row would make the whole ledger unreadable for every later reader).
+    # Idempotent: a terminal attempt is never transitioned again.
     assert ua.terminalize_abandoned_attempt(reservation, reason="again") == "settled"
-    assert [row["state"] for row in _ledger(data_root)] == ["reserved", "dispatched", "settled"]
+    assert [(row["state"], row["revision"]) for row in _ledger(data_root)] == [("settled", 3)]
 
 
 def test_abandoned_attempt_closes_with_its_price_honestly_unknown(data_root):
@@ -357,12 +358,25 @@ def test_provider_reported_zero_cost_is_final_not_missing(data_root):
     assert _ledger(data_root)[-1]["cost_usd"] == 0
 
 
-def test_torn_final_row_is_quarantined_but_midstream_corruption_fails(data_root):
-    reservation = ua.reserve_attempt(_request(data_root))
-    ua.release_attempt(reservation)
-    ledger = data_root / ua.LEDGER_REL
-    with ledger.open("ab") as handle:
-        handle.write(b'{"seq":')
+def _released_journal_rows():
+    return [
+        {"seq": 1, "kind": "attempt", "attempt_id": "a1", "state": "reserved", "root_task_id": "root",
+         "reservation_upper_bound_usd": 1.0, "ts": "2026-01-01T00:00:00Z"},
+        {"seq": 2, "kind": "attempt", "attempt_id": "a1", "state": "released", "root_task_id": "root",
+         "reservation_upper_bound_usd": 1.0, "reason": "not_dispatched", "ts": "2026-01-01T00:00:01Z"},
+    ]
+
+
+def _journal_text(rows):
+    return "".join(json.dumps(row) + "\n" for row in rows)
+
+
+def test_torn_final_journal_row_is_quarantined_at_import_but_midstream_corruption_fails(data_root):
+    """The retired journal is read ONCE, by the store's import, with the
+    validated reader: a torn final row is quarantined (integrity disclosed
+    from then on), corruption before it refuses the import."""
+    ledger = data_root / "state" / "usage_attempts.jsonl"
+    ledger.write_text(_journal_text(_released_journal_rows()) + '{"seq":')
 
     projection = ua.usage_projection(data_root)
     assert projection["attempt_counts"]["released"] == 1
@@ -372,29 +386,18 @@ def test_torn_final_row_is_quarantined_but_midstream_corruption_fails(data_root)
     assert breakdown["integrity_degraded"] is True
     assert breakdown["cost_final"] is False
     assert (data_root / ua.QUARANTINE_REL).is_file()
-    repaired = ledger.read_bytes()
-    assert b'{"seq":' not in repaired
+    imported = (data_root / "state" / "usage_attempts.jsonl").read_text()  # kept in place, truncated
+    assert imported == _journal_text(_released_journal_rows())  # the torn tail left for quarantine
 
 
 @pytest.mark.parametrize(
     "field,value",
     (("seq", "not-a-number"), ("prompt_tokens", "not-a-number")),
 )
-def test_structurally_invalid_numeric_tail_is_quarantined(data_root, field, value):
-    reservation = ua.reserve_attempt(_request(data_root))
-    ua.release_attempt(reservation)
-    ledger = data_root / ua.LEDGER_REL
-    row = {
-        "seq": 3,
-        "ts": "2026-01-01T00:00:00Z",
-        "attempt_id": "tail-attempt",
-        "kind": "attempt",
-        "state": "reserved",
-        "reservation_upper_bound_usd": 1.0,
-        field: value,
-    }
-    with ledger.open("a") as handle:
-        handle.write(json.dumps(row) + "\n")
+def test_structurally_invalid_numeric_journal_tail_is_quarantined(data_root, field, value):
+    row = {"seq": 3, "ts": "2026-01-01T00:00:00Z", "attempt_id": "tail-attempt", "kind": "attempt",
+           "state": "reserved", "reservation_upper_bound_usd": 1.0, field: value}
+    (data_root / "state" / "usage_attempts.jsonl").write_text(_journal_text([*_released_journal_rows(), row]))
 
     projection = ua.usage_projection(data_root)
     assert projection["integrity_degraded"] is True
@@ -402,51 +405,41 @@ def test_structurally_invalid_numeric_tail_is_quarantined(data_root, field, valu
     assert projection["attempt_counts"]["released"] == 1
 
 
-def test_quarantined_dispatch_tail_makes_replay_evidence_degraded(data_root):
-    reservation = ua.reserve_attempt(_request(data_root, task_id="replay-risk"))
-    ledger = data_root / ua.LEDGER_REL
-    corrupt_dispatch = {
-        **_ledger(data_root)[-1],
-        "seq": 2,
-        "state": "dispatched",
-        "prompt_tokens": "torn",
-    }
-    with ledger.open("a") as handle:
-        handle.write(json.dumps(corrupt_dispatch) + "\n")
+def test_quarantined_dispatch_journal_tail_makes_replay_evidence_degraded(data_root):
+    reserved = {"seq": 1, "kind": "attempt", "attempt_id": "r1", "state": "reserved", "task_id": "replay-risk",
+                "root_task_id": "replay-risk", "reservation_upper_bound_usd": 1.0, "ts": "2026-01-01T00:00:00Z"}
+    corrupt_dispatch = {**reserved, "seq": 2, "state": "dispatched", "prompt_tokens": "torn"}
+    (data_root / "state" / "usage_attempts.jsonl").write_text(_journal_text([reserved, corrupt_dispatch]))
 
     evidence = ua.usage_breakdown(data_root, task_id="replay-risk")
     assert evidence["physical_calls"] == 0
     assert evidence["integrity_degraded"] is True
-    ua.release_attempt(reservation)
 
-    lines = ledger.read_text().splitlines()
-    ledger.write_text(lines[0] + "\nnot-json\n" + lines[1] + "\n")
+
+def test_journal_corruption_before_the_final_row_refuses_the_import(data_root):
+    rows = _released_journal_rows()
+    (data_root / "state" / "usage_attempts.jsonl").write_text(
+        json.dumps(rows[0]) + "\nnot-json\n" + json.dumps(rows[1]) + "\n")
     with pytest.raises(ua.UsageLedgerCorrupt):
         ua.usage_projection(data_root)
+    assert not (data_root / usage_store.STORE_REL).exists()  # nothing half-imported
 
 
-def test_structurally_invalid_final_row_is_quarantined_but_midstream_is_fatal(data_root):
-    reservation = ua.reserve_attempt(_request(data_root))
-    ua.release_attempt(reservation)
-    ledger = data_root / ua.LEDGER_REL
-    bad = {
-        "seq": 999,
-        "kind": "attempt",
-        "attempt_id": "bad-tail",
-        "state": "dispatched",
-    }
-    with ledger.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(bad) + "\n")
+def test_structurally_invalid_final_journal_row_is_quarantined_but_midstream_is_fatal(data_root):
+    bad = {"seq": 999, "kind": "attempt", "attempt_id": "bad-tail", "state": "dispatched"}
+    (data_root / "state" / "usage_attempts.jsonl").write_text(_journal_text([*_released_journal_rows(), bad]))
 
     assert ua.usage_projection(data_root)["attempt_counts"] == {"released": 1}
     assert all(row.get("attempt_id") != "bad-tail" for row in _ledger(data_root))
     assert (data_root / ua.QUARANTINE_REL).is_file()
 
-    lines = ledger.read_text().splitlines()
-    bad["seq"] = 2
-    ledger.write_text(lines[0] + "\n" + json.dumps(bad) + "\n" + lines[1] + "\n")
+    other = data_root / "other"
+    (other / "state").mkdir(parents=True)
+    rows = _released_journal_rows()
+    (other / "state" / "usage_attempts.jsonl").write_text(_journal_text([rows[0], {**bad, "seq": 2},
+                                                                         {**rows[1], "seq": 3}]))
     with pytest.raises(ua.UsageLedgerCorrupt):
-        ua.usage_projection(data_root)
+        ua.usage_projection(other)
 
 
 def test_concurrent_writers_keep_monotonic_sequence(data_root):
@@ -458,16 +451,25 @@ def test_concurrent_writers_keep_monotonic_sequence(data_root):
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(one, range(16)))
     rows = _ledger(data_root)
-    assert [row["seq"] for row in rows] == list(range(1, len(rows) + 1))
+    # One row per attempt; every transition took the next store write sequence.
+    assert len(rows) == 16 and all(row["revision"] == 3 for row in rows)
+    assert sorted(row["seq"] for row in rows) == [row["seq"] for row in rows]
+    assert len({row["seq"] for row in rows}) == 16 and max(row["seq"] for row in rows) == 48
     assert ua.usage_projection(data_root)["settled_usd"] == 0.16
 
 
-def test_known_reservation_is_checked_before_dispatch(data_root):
+def test_known_spend_not_open_holds_is_checked_before_dispatch(data_root):
+    """#1487: a $0.60 hold is exposure, so a second $0.50 call is admitted under $1;
+    once a price is KNOWN at the limit, the next reservation is refused before dispatch."""
     first = ua.reserve_attempt(_request(data_root, reservation_usd=0.6, global_limit_usd=1.0))
-    with pytest.raises(ua.BudgetExceeded):
-        ua.reserve_attempt(_request(data_root, reservation_usd=0.5, global_limit_usd=1.0))
-    assert [row["state"] for row in _ledger(data_root)] == ["reserved"]
-    ua.release_attempt(first)
+    second = ua.reserve_attempt(_request(data_root, reservation_usd=0.5, global_limit_usd=1.0))
+    assert [row["state"] for row in _ledger(data_root)] == ["reserved", "reserved"]
+    ua.release_attempt(second)
+    ua.mark_dispatched(first)
+    ua.settle_attempt(first, {}, cost_usd=1.0, cost_final=False)  # a disclosed estimate is known
+    with pytest.raises(ua.BudgetExceeded, match=r"known=\$1\.000000"):
+        ua.reserve_attempt(_request(data_root, reservation_usd=0.01, global_limit_usd=1.0))
+    assert sorted(row["state"] for row in _ledger(data_root)) == ["released", "settled"]
 
 
 def test_live_openrouter_catalog_produces_known_reservation(data_root, monkeypatch):
@@ -600,9 +602,10 @@ def test_request_carried_applied_ttl_wins_over_the_global_setting(data_root, mon
 
 
 def test_admission_honors_the_cheaper_owner_tier(data_root, monkeypatch):
-    """G3-5 end-to-end: under a finite root limit sized between the 5m and 1h
-    reservation bounds, the owner's 5m selection must ADMIT the call that the
-    old hardcoded-1h pricing rejected — and 1h must still reject it."""
+    """G3-5 end-to-end: the owner's cache tier prices the recorded reservation bound.
+    Under a finite root limit sized between the 5m and 1h bounds both are ADMITTED
+    (#1487: a call's own bound is exposure, known spend decides), each recording its
+    own tier's worst case."""
     _isolated_anthropic_catalog(monkeypatch)
 
     def _admit(root_id):
@@ -619,8 +622,9 @@ def test_admission_honors_the_cheaper_owner_tier(data_root, monkeypatch):
         ))
 
     monkeypatch.setenv("OUROBOROS_PROMPT_CACHE_TTL", "1h")
-    with pytest.raises(ua.BudgetExceeded):
-        _admit("ttl-root-1h")
+    hour = _admit("ttl-root-1h")
+    assert _ledger(data_root)[-1]["reservation_upper_bound_usd"] > 0.02
+    ua.release_attempt(hour)
     monkeypatch.setenv("OUROBOROS_PROMPT_CACHE_TTL", "5m")
     reservation = _admit("ttl-root-5m")
     assert _ledger(data_root)[-1]["reservation_upper_bound_usd"] == 0.01875
@@ -654,8 +658,12 @@ def test_scope_runtime_limit_is_enforced_without_provider_retry(data_root):
         sends += 1
 
     scope = ua.UsageScope(drive_root=data_root, global_limit_usd=0.5)
-    with ua.usage_scope(scope), pytest.raises(ua.BudgetExceeded):
-        ua.execute_physical_attempt(_request(data_root, reservation_usd=0.6), send)
+    with ua.usage_scope(scope):
+        spent = ua.reserve_attempt(_request(data_root, reservation_usd=0.1))
+        ua.mark_dispatched(spent)
+        ua.settle_attempt(spent, {}, cost_usd=0.5, cost_final=True)  # known spend reaches the limit
+        with pytest.raises(ua.BudgetExceeded):
+            ua.execute_physical_attempt(_request(data_root, reservation_usd=0.01), send)
     assert sends == 0
 
 
@@ -806,10 +814,10 @@ def test_live_pricing_lookup_finishes_before_ledger_lock(data_root, monkeypatch)
     @contextlib.contextmanager
     def tracked_lock(root):
         nonlocal lock_active
-        with original_locked(root):
+        with original_locked(root) as txn:  # the money hold yields its store transaction
             lock_active = True
             try:
-                yield
+                yield txn
             finally:
                 lock_active = False
 
@@ -967,7 +975,6 @@ def test_legacy_state_projection_cannot_regress_under_reordered_writers(
             "_ledger_high_water_seq": [0, int(value)],
         }
 
-    monkeypatch.setattr(ua, "ensure_legacy_imported", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(ua, "usage_writer_snapshot", breakdown)
     older = threading.Thread(target=state.update_budget_from_usage, args=({},))
     newer = threading.Thread(target=state.update_budget_from_usage, args=({},))
@@ -1048,15 +1055,17 @@ def test_legacy_import_is_resumable_and_preserves_delta(data_root):
     settings.write_text('{"secret":"unchanged"}\n')
     before = settings.read_bytes()
 
-    first = ua.ensure_legacy_imported(data_root)
+    report = usage_store.migrate_from_journal(data_root)
+    first = json.loads((data_root / usage_journal.IMPORT_REL).read_text())
     row_count = len(_ledger(data_root))
-    second = ua.ensure_legacy_imported(data_root)
+    again = usage_store.migrate_from_journal(data_root)
 
+    assert report["status"] == "completed" and again["status"] == "already_completed"
     assert first["legacy_usage_count"] == 1
     assert first["legacy_metadata_count"] == 2
     assert first["legacy_delta_usd"] == 0.3
     assert first["legacy_baseline_source"] == "state.json"
-    assert second == first
+    assert json.loads((data_root / usage_journal.IMPORT_REL).read_text()) == first
     assert len(_ledger(data_root)) == row_count
     projection = ua.usage_projection(data_root)
     assert projection["settled_usd"] == 0.4
@@ -1097,16 +1106,19 @@ def test_completed_import_is_immutable_without_a_second_repair_api(data_root):
     )
     (data_root / "settings.json").write_text('{"secret":"unchanged"}\n')
 
-    incomplete = ua.ensure_legacy_imported(data_root)
-    original_ledger = (data_root / ua.LEDGER_REL).read_bytes()
-    original_watermark = (data_root / ua.IMPORT_REL).read_bytes()
+    usage_store.migrate_from_journal(data_root)
+    incomplete = json.loads((data_root / usage_journal.IMPORT_REL).read_text())
+    original_rows = _ledger(data_root)
+    original_watermark = (data_root / usage_journal.IMPORT_REL).read_bytes()
     assert incomplete["legacy_baseline_source"] == "state.json"
     assert incomplete["legacy_usage_count"] == 2
     assert incomplete["legacy_metadata_count"] == 0
 
-    assert ua.ensure_legacy_imported(data_root) == incomplete
-    assert (data_root / ua.LEDGER_REL).read_bytes() == original_ledger
-    assert (data_root / ua.IMPORT_REL).read_bytes() == original_watermark
+    # A completed import is never re-imported, whatever the sources say later.
+    (data_root / "state" / "state.json").write_text(json.dumps({"spent_usd": 9, "spent_calls": 9}))
+    assert usage_store.migrate_from_journal(data_root)["status"] == "already_completed"
+    assert _ledger(data_root) == original_rows
+    assert (data_root / usage_journal.IMPORT_REL).read_bytes() == original_watermark
 
 
 def test_concurrent_legacy_importers_share_one_exact_snapshot(data_root, monkeypatch):
@@ -1129,7 +1141,7 @@ def test_concurrent_legacy_importers_share_one_exact_snapshot(data_root, monkeyp
     (data_root / "state" / "state.json").write_text(json.dumps({"spent_usd": 0.1, "spent_calls": 1}))
     (data_root / "settings.json").write_text('{"secret":"unchanged"}\n')
 
-    original = ua._legacy_snapshot
+    original = usage_journal.legacy_snapshot
     calls = 0
     calls_lock = threading.Lock()
     barrier = threading.Barrier(4)
@@ -1144,15 +1156,15 @@ def test_concurrent_legacy_importers_share_one_exact_snapshot(data_root, monkeyp
 
     def import_once(_index):
         barrier.wait()
-        return ua.ensure_legacy_imported(data_root)
+        return usage_store.migrate_from_journal(data_root)["status"]
 
-    monkeypatch.setattr(ua, "_legacy_snapshot", snapshot)
+    monkeypatch.setattr(usage_journal, "legacy_snapshot", snapshot)
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(import_once, range(4)))
 
     assert calls == 1
-    assert all(result == results[0] for result in results)
-    assert results[0]["legacy_usage_count"] == 1
+    assert sorted(results) == ["already_completed"] * 3 + ["completed"]
+    assert json.loads((data_root / usage_journal.IMPORT_REL).read_text())["legacy_usage_count"] == 1
     assert len(_ledger(data_root)) == 1
 
 
@@ -1247,7 +1259,8 @@ def test_body_error_zero_usage_settles_confirmed_zero():
     # of an HTTP-200) that billed zero tokens is a request rejected before
     # generation — settle a confirmed $0, not an unknown cost that holds the bound.
     normalized, cost, final = ua.usage_from_response(
-        {"error": {"code": 429, "message": "rate limited"}, "choices": None, "usage": None}
+        {"error": {"code": 429, "message": "rate limited"}, "choices": None,
+         "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
     )
     assert cost == 0.0
     assert final is True
@@ -1272,7 +1285,8 @@ def test_body_error_storm_does_not_phantom_exhaust_budget(data_root):
     # accumulating a phantom unresolved sum that exhausts the finite budget.
     class _BodyErrResp:
         def model_dump(self):
-            return {"error": {"code": 429, "message": "rate limited"}, "usage": None}
+            return {"error": {"code": 429, "message": "rate limited"},
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
 
     for i in range(7):
         ua.execute_physical_attempt(
@@ -1443,8 +1457,9 @@ def test_a_non_final_projection_names_its_cause(data_root):
 
 def test_review_wave_admission_override_compares_against_the_given_remaining(monkeypatch):
     """The managed-update admission gate runs OUTSIDE any task usage scope: the
-    override branch must estimate with the normal reservation math and compare
-    against the caller's remaining USD, never a task projection."""
+    override branch estimates with the normal reservation math and decides on the
+    caller's known remaining USD, never a task projection. The estimate larger than
+    the remainder is disclosed, not a refusal (#1487); no known room refuses."""
     import ouroboros.usage_accounting as ua
 
     monkeypatch.setattr(ua, "_reservation_cost", lambda _request: 1.25)
@@ -1459,10 +1474,15 @@ def test_review_wave_admission_override_compares_against_the_given_remaining(mon
         prompt_chars=400_000,
         remaining_usd_override=2.0,
     )
-    assert tight["fits"] is False
+    assert tight["fits"] is True
     assert tight["estimated_wave_usd"] == 2.5
     assert tight["remaining_usd"] == 2.0
     assert tight["limit_usd"] is None
+    spent = ua.review_wave_admission(
+        root_task_id="managed-update-admission", models=["prov/a"], prompt_chars=400_000,
+        remaining_usd_override=0.0,
+    )
+    assert spent["fits"] is False and spent["estimated_wave_usd"] == 1.25
 
     roomy = ua.review_wave_admission(
         root_task_id="managed-update-admission",

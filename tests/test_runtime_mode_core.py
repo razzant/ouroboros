@@ -47,10 +47,9 @@ def test_settings_defaults_include_phase2_keys():
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"] == "openai/gpt-5.6-luna"
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-5.6-luna"
-    assert (
-        SETTINGS_DEFAULTS["OUROBOROS_MODEL_DEEP_SELF_REVIEW"]
-        == ""  # unauthored; the getter resolves the route's default
-    )
+    # Retired (review pool): the deep-review model is a reviewer row of the subagent
+    # catalog; the read seam migrates the key, so it is no shipped default any more.
+    assert "OUROBOROS_MODEL_DEEP_SELF_REVIEW" not in SETTINGS_DEFAULTS
     assert SETTINGS_DEFAULTS["TOTAL_BUDGET"] == 200.0
     assert SETTINGS_DEFAULTS["OUROBOROS_PER_TASK_COST_USD"] == 50.0
 
@@ -365,8 +364,27 @@ def test_phase4_ui_copy_matches_shipped_runtime():
     assert "land in Phase 3" not in settings_ui
     assert "data/skills/" in settings_ui
     assert "Pick both review enforcement and the initial runtime mode" in onboarding_html
-    assert "normal triad + scope review" in onboarding_html
+    assert "normal review gate" in onboarding_html
+    assert "triad + scope" not in onboarding_html
     assert "Phase 6+:" not in onboarding_html
+
+
+def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(monkeypatch):
+    """V-D4-07, the owner's approval of 2026-10-08 for exactly three phrases of the protected
+    ``runtime_mode_policy``: the module docstring, the advanced-mode refusal and the pro-mode
+    notice say «the normal review gate» / «the normal review panel» (the words
+    ``settings_setup_contract`` already uses) — the lanes they used to name no longer exist."""
+    from ouroboros import runtime_mode_policy as policy
+
+    assert "commits still flow through the normal\nreview gate." in (policy.__doc__ or "")
+    refusal = policy.protected_write_block_message(path="BIBLE.md", runtime_mode="advanced", action="run tool 'write_file' against")
+    assert refusal.endswith("Switch to runtime_mode='pro' and let the normal review panel "
+                            "cover the protected core/contract/release change before commit.")
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    notice = policy.core_patch_notice(["BIBLE.md"])
+    assert notice.endswith("These changes can be committed only through the normal review gate.")
+    for text in (policy.__doc__ or "", refusal, notice):
+        assert "triad" not in text and "scope review" not in text
 
 
 def test_skills_ui_reads_live_extension_state_fields():
@@ -532,7 +550,7 @@ class _CommitCtx:
         self._last_scope_raw_result = {}
         self._review_degraded_reasons = []
         self._current_review_tool_name = "commit_reviewed"
-        self._scope_review_history = {}
+        self._coupling_review_history = {}
         self._review_history = []
 
     def emit_progress_fn(self, *_args, **_kwargs):

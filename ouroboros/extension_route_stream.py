@@ -2,6 +2,17 @@
 
 The runner owns process staging/custody; this module owns response delivery and
 backpressure. No response lifetime timer or durable stream registry is involved.
+
+Frame bounds come from `runtime_limits.py`: `EXTENSION_STREAM_CHUNK_BYTES` (body
+frame), `EXTENSION_STREAM_METADATA_BYTES` (metadata frame) and
+`EXTENSION_CHILD_CLEANUP_GRACE_SEC` (post-response child exit); none is a response
+deadline, and a slow consumer's backpressure is never an idle failure. Headers keep
+their order; HEAD and bodiless statuses finish on the headers, and a child's
+background work survives a client that closes once the wire body is complete.
+Cancellation during startup keeps the worker future and process context until the
+child exits. A failed final send is a delivery failure; a child error after the
+final body is only a diagnostic and leaves the delivered body intact. An abnormal
+child exit logs its exit code and bounded, sanitized stderr.
 """
 from __future__ import annotations
 

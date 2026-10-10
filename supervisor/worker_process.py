@@ -16,6 +16,7 @@ import logging
 import json
 import pathlib
 from typing import Any
+from ouroboros.observability import stamp_finalization_enqueue
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -135,6 +136,10 @@ def request_worker_stop(proc):
     This Process still owns its native Popen. It is NOT an attached PID/watch:
     Process.kill retains multiprocessing's native exited-child checks, including
     on Darwin, and works before the child installs or can service its lifeline.
+
+    Panic budget: local child owners get 250 ms (``request_worker_owned_stops``),
+    the lifeline bounds its callback at 500 ms, and this backstop requests the
+    native kill at 750 ms whatever the lifeline did.
     """
     import threading
 
@@ -245,6 +250,18 @@ def request_worker_owned_stops(drive_root):
     return results
 
 
+def _configure_worker_logging() -> None:
+    """Give a real pool child its own process logging (stream handler, redaction,
+    crash hooks) whatever module the parent ran as ``__main__``; ``worker_main``
+    run inside another process leaves logging to that host process."""
+    import multiprocessing
+
+    if multiprocessing.parent_process() is not None:
+        from ouroboros.process_logging import configure_process_logging
+
+        configure_process_logging(drive_logs=None)
+
+
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                 custody_session_id: str = "", stop_socket=None) -> None:
     import os as _os
@@ -257,6 +274,12 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     # Before ANY import that resolves the update-tx marker through git_ops (see
     # _bind_worker_repo_root): a spawned child would otherwise gate on the hardcoded default repo.
     _bind_worker_repo_root(repo_dir, drive_root)
+    try:
+        _configure_worker_logging()
+    except Exception:
+        import traceback as _tb_boot  # logging itself failed: stderr is all that is left
+
+        _tb_boot.print_exc()
     # Entry progress precedes extension loading and agent construction. If logging
     # fails, the parent retains the ordinary readiness window rather than losing the child.
     try:
@@ -324,10 +347,10 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     try:
         from ouroboros.config import initialize_runtime_mode_baseline
         initialize_runtime_mode_baseline()
-    except Exception:
+    except Exception as _e:
         # Non-fatal: save_settings still has env-var fallback gating.
         try:
-            _log_worker_crash(wid, _drive, "init_baseline", None, _tb.format_exc())
+            _log_worker_crash(wid, _drive, "init_baseline", _e, _tb.format_exc())
         except Exception:
             pass
     # Guards BOTH extension entry points below: the spawn-time load and the
@@ -356,9 +379,9 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
         else:
             _repo_path = get_skills_repo_path()
             _reload_extensions(_drive, _load_settings, repo_path=_repo_path or None)
-    except Exception:
+    except Exception as _e:
         try:
-            _log_worker_crash(wid, _drive, "extension_reload", None, _tb.format_exc())
+            _log_worker_crash(wid, _drive, "extension_reload", _e, _tb.format_exc())
         except Exception:
             pass
     try:
@@ -422,28 +445,45 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                         # File publication must not enter the model's crash-retry rail.
                         log.exception("Terminal file preparation failed for %s", task.get("id"))
                     e2["_files_prepared_attempt"] = int(task.get("_attempt") or 1)
-                out_q.put(e2)
+                out_q.put(stamp_finalization_enqueue(e2))
         except Exception as _e:
             _log_worker_crash(wid, _drive, "handle_task", _e, _tb.format_exc())
             return
 
 
 def _log_worker_crash(wid: int, drive_root: pathlib.Path, phase: str, exc: Exception, tb: str) -> None:
-    """Best-effort worker-side crash logging."""
+    """Record a worker-side crash in this process's log and in ``supervisor.jsonl``.
+
+    The row goes through the shared appender (lock, live sink, test-data guard);
+    when that write fails while the process dies, one stderr line is the last
+    trace left.
+    """
     import os as _os
+    import sys as _sys
+    entry = {
+        "ts": utc_now_iso(),
+        "type": "worker_crash",
+        "worker_id": wid,
+        "pid": _os.getpid(),
+        "phase": phase,
+        "error": repr(exc),
+        "traceback": str(tb)[:3000],
+    }
     try:
-        path = drive_root / "logs" / "supervisor.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        entry = json.dumps({
-            "ts": utc_now_iso(),
-            "type": "worker_crash",
-            "worker_id": wid,
-            "pid": _os.getpid(),
-            "phase": phase,
-            "error": repr(exc),
-            "traceback": str(tb)[:3000],
-        }, ensure_ascii=False)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(entry + "\n")
+        if exc is not None:
+            log.error("Worker %s crashed during %s", wid, phase, exc_info=exc)
+        else:
+            log.error("Worker %s crashed during %s:\n%s", wid, phase, tb)
     except Exception:
-        log.debug("Suppressed exception", exc_info=True)
+        pass
+    try:
+        from ouroboros.utils import append_jsonl
+
+        if append_jsonl(drive_root / "logs" / "supervisor.jsonl", entry):
+            return
+    except Exception:
+        pass
+    try:
+        print(json.dumps(entry, ensure_ascii=False), file=_sys.stderr, flush=True)
+    except Exception:
+        pass

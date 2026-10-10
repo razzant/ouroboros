@@ -78,19 +78,60 @@ def test_caption_mode_rewrites_send_copy_without_mutating_transcript(monkeypatch
     assert out[0]["content"][1] == {"type": "text", "text": "[image caption: old caption]"}
 
 
-def test_inline_mode_blind_model_fails_closed_without_caption(monkeypatch):
+def test_inline_mode_sends_pixels_even_when_metadata_says_no(monkeypatch):
+    """Owner decision: Inline sends the image even against a "no"; the provider's own
+    refusal is what the agent sees, never a pre-emptive placeholder."""
+    from ouroboros import vision_routing
     from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
 
     monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "inline")
-    messages = _image_message()
-    out = prepare_messages_for_send(
-        messages,
-        routing=VisionRoutingContext("not/vision", object(), {}),
-    )
+    for verdict in (None, False):
+        monkeypatch.setattr(vision_routing, "supports_vision", lambda *_a, verdict=verdict, **_k: verdict)
+        messages = _image_message()
+        assert prepare_messages_for_send(
+            messages, routing=VisionRoutingContext("not/vision", object(), {}),
+        ) is messages
+    # The same "no" does withhold pixels in Auto (here: the block's own caption).
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
+    monkeypatch.setattr(vision_routing, "supports_vision", lambda *_a, **_k: False)
+    out = prepare_messages_for_send(_image_message(), routing=VisionRoutingContext("not/vision", object(), {}))
+    assert out[0]["content"][1] == {"type": "text", "text": "[image caption: old caption]"}
 
-    assert out is not messages
-    assert out[0]["content"][1]["text"].startswith("[image omitted:")
-    assert "old caption" not in out[0]["content"][1]["text"]
+
+def test_an_unreadable_route_fact_is_unknown_not_no(monkeypatch):
+    """Auto withholds pixels only on a fact; a failure to read one sends as unknown,
+    while a model wait still belongs to its owner."""
+    import pytest
+
+    from ouroboros import vision_routing
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
+
+    def unreadable(*_a, **_k):
+        raise RuntimeError("catalog read failed")
+
+    monkeypatch.setattr(vision_routing, "supports_vision", unreadable)
+    messages = _image_message()
+    assert prepare_messages_for_send(messages, routing=VisionRoutingContext("acme/x", object(), {})) is messages
+
+    def interrupted(*_a, **_k):
+        raise ModelWaitInterrupted("owner stop", role="main")
+
+    monkeypatch.setattr(vision_routing, "supports_vision", interrupted)
+    with pytest.raises(ModelWaitInterrupted):
+        prepare_messages_for_send(_image_message(), routing=VisionRoutingContext("acme/x", object(), {}))
+
+
+def test_inline_mode_on_our_local_lane_names_the_lane(monkeypatch):
+    from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "inline")
+    out = prepare_messages_for_send(
+        _image_message(), routing=VisionRoutingContext("some-model (local)", object(), {}, use_local=True),
+    )
+    assert out[0]["content"][1]["text"].startswith("[image omitted: our local llama.cpp transport lane")
 
 
 def test_off_mode_ignores_existing_caption(monkeypatch):

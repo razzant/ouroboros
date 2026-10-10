@@ -242,16 +242,18 @@ def _wait_until(predicate, timeout=20.0):
 
 
 def test_default_native_plan_reads_workspace_and_collects_exact_paid_wave(harness, monkeypatch):
-    """Real default slots, native executor, inspection registry and collector."""
+    """Real pool slots (three natively retrieving api seats), native executor,
+    inspection registry and collector."""
     from collections import Counter
     from ouroboros.tools.plan_review_runtime import plan_review_slots
     from ouroboros.usage_accounting import current_usage_scope
+    from tests.review_pool_rosters import set_review_pool
     from tests.test_native_tool_round_executor import _tool_call
 
-    monkeypatch.setenv('OUROBOROS_REVIEWER_SLOTS', '')
+    set_review_pool(monkeypatch, delivery="native")
     harness.state['slots'] = plan_review_slots()
     assert len(harness.state['slots']) == 3
-    assert all(slot.native_retrieval and not slot.subagent_id for slot in harness.state['slots'])
+    assert all(slot.native_retrieval and slot.subagent_id == slot.slot_id for slot in harness.state['slots'])
     calls, release = [], threading.Event()
 
     def transport(_self, **kwargs):

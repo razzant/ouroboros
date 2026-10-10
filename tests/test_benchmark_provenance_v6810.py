@@ -407,16 +407,16 @@ def test_model_id_classifiers_preserve_the_prior_ordered_vocabulary():
     from devtools.benchmarks.common.model_slots import _ACTIVE_FIXED_MODEL_KEYS
     from devtools.benchmarks.programbench.run_programbench_e2e import _MODEL_ID_SLOT_KEYS
 
-    # Exact pre-subscription vocabulary: adding role metadata must not drop a
-    # fallback/reviewer list, resurrect Heavy, or widen model-ID admission.
+    # Exact pre-subscription vocabulary minus the reviewer carriers (the review
+    # pool lives in the roster, OUROBOROS_SUBAGENTS): adding role metadata must not
+    # drop a fallback list, resurrect Heavy, or widen model-ID admission.
     prior = (
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_VISION",
         "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACKS",
-        "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "OUROBOROS_WEBSEARCH_MODEL",
-        "OUROBOROS_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_WEBSEARCH_MODEL",
     )
     assert _ACTIVE_FIXED_MODEL_KEYS == prior
-    assert _MODEL_ID_SLOT_KEYS == (*prior[:7], "OUROBOROS_REVIEWER_SLOTS", *prior[7:])
+    assert _MODEL_ID_SLOT_KEYS == prior
 
 
 @pytest.mark.parametrize("model", ["openai::model-x", "claudexor::codex=model-x"])
@@ -440,7 +440,7 @@ def test_fixed_actor_records_account_window_options_without_changing_model_check
     assert actual["model_slots"] == baseline["model_slots"]
     assert actual["model_route_options"] == options
     assert actual["available_subagents"] == baseline["available_subagents"]
-    assert actual["reviewer_slots"] == baseline["reviewer_slots"]
+    assert actual["review_pool"] == baseline["review_pool"]
     assert all(settings[key] == value for key, value in options.items())
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
@@ -451,9 +451,11 @@ def test_fixed_actor_records_account_window_options_without_changing_model_check
     settings["OUROBOROS_MODEL_FALLBACKS"] = f"{model},foreign/model"
     refused = runtime_actor_snapshot(settings, expected_model=model)
     assert any("OUROBOROS_MODEL_FALLBACKS" in error for error in refused["mismatches"])
-    panel = json.loads(settings["OUROBOROS_REVIEWER_SLOTS"])
-    panel["triad"][0]["route"] = {"kind": "agent_session", "target_id": "codex=model-x"}
-    settings["OUROBOROS_REVIEWER_SLOTS"] = json.dumps(panel)
+    roster = json.loads(settings["OUROBOROS_SUBAGENTS"])
+    seat = next(row for row in roster["items"] if row.get("review_eligible"))
+    seat["route"] = {"kind": "agent_session", "target_id": "codex=model-x"}
+    seat.pop("delivery", None)
+    settings["OUROBOROS_SUBAGENTS"] = json.dumps(roster)
     refused = runtime_actor_snapshot(settings, expected_model=model)
     assert any("agent_session" in error for error in refused["mismatches"])
     # The direct-provider legacy model-ID refusal still runs with role metadata present.
@@ -554,9 +556,12 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "stop_action_conflict": (False, "task_cancel refuses conflicting action replay; no task transition"),
     "artifact_unavailable": (False, "gateway/task_archive.py: confined single-file read unavailable; HTTP refusal, not a task terminal"),
     "artifact_unverified": (False, "gateway/task_archive.py: single-file drift or capture verification failure; HTTP refusal, not a task terminal"),
+    "upload_unavailable": (False, "gateway/files.py: a chat attachment is missing or not a regular file; HTTP 404, not a task terminal"),
+    "upload_unreadable": (False, "gateway/files.py: a chat attachment's confined read failed; HTTP 503, not a task terminal"),
     "history_source_unavailable": (False, "gateway/history_paging.py: readable recent projection with explicit source gap; no task attempt was truncated"),
     "late_answer_not_delivered": (False, "gateway/task_decision.py: a late quiz answer was recorded but its chat delivery failed (503, retry); no task attempt was truncated"),
     "budget_pausing_no_extraction": (False, "review_verdict_extraction.py: Light verdict extraction refused while the task's exact budget pause is closing dispatch (#1196); the review row stays undispatched and the attempt is paused, not truncated"),
+    "owner_pause": (False, "tools/skill_publish.py: publication tool returns its completed stages after owner Pause interrupts the formatter; the task is retained for Resume, not terminalized or scored"),
     # -- truncating: the rail stopped the attempt, so reward 0 is not a capability fact ----
     "budget_exhausted": (True, "loop.py:287 per-task USD reservation rail"),
     "round_limit": (True, "loop.py:3128 _handle_round_limit, the round cap"),

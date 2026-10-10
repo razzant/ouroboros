@@ -7,6 +7,13 @@ seams, so the durable file keeps one writer discipline while the module that
 owns dispatch stays readable in one window (DEVELOPMENT "Paying down a size
 cap"). Callers reach these through ``supervisor.queue``; nothing here is a
 second scheduler or a second store.
+
+Restore of a suppressed skill row rechecks skill presence, manifest declaration,
+``supervised_task`` permission and readiness. A blocked row comes back disabled
+as ``restored_not_ready`` (marker lifted, change recorded); an absent or
+unknowable skill or schedule is ``manifest_absent`` with ``changed=false`` and
+the suppression kept. A consumed one-shot is ``consumed_not_rearmed`` until a
+fresh ``trigger.run_at`` is authored.
 """
 
 from __future__ import annotations
@@ -157,6 +164,24 @@ def _merge_onto_current(existing: Dict[str, Any], incoming: Dict[str, Any]) -> D
     return merged
 
 
+def _require_template_effort(template: Dict[str, Any]) -> None:
+    """A template's explicit starting effort for each fired root: top-level, and a tier.
+
+    Absent keeps the fired task's configured default. Every schedule writer (the
+    owner's gateway and CLI, ``schedule_followup``) reaches this one check, so an
+    invalid value is refused instead of silently starting at the default.
+    """
+    if "reasoning_effort" in (template.get("metadata") or {}):
+        raise ScheduleRefused("invalid_template", "reasoning_effort is a top-level task template field, not metadata")
+    if "reasoning_effort" in template:
+        from ouroboros.settings_scales import requested_effort
+
+        try:
+            template["reasoning_effort"] = requested_effort(template["reasoning_effort"])
+        except ValueError as exc:
+            raise ScheduleRefused("invalid_template", str(exc)) from exc
+
+
 def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | None = None,
                           actor: str = "", task_id: str = "", reason: str = "",
                           host_followup: dict | None = None,
@@ -201,6 +226,7 @@ def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | 
             # Normalization below drops template lineage; keep its provenance.
             incoming["followup_origin"] = origin_of(incoming)
         incoming["task"] = normalize_template(incoming)
+        _require_template_effort(incoming["task"])  # refused before the audit intent: nothing changed
         if incoming.get("followup_origin"):
             incoming["task"]["metadata"]["objective_author"] = {
                 "kind": "task", "task_id": incoming["followup_origin"]["task_id"]}

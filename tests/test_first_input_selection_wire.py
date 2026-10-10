@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.system_e2e.harness import ScriptedStubModel, MOCK_SLUG, keyless_settings
+from tests._usage_store_testing import ledger_rows
 
 FIRST = ("FIRST_POSITION: specimen A supports explanation alpha.\n\n"
          "Sources: DECLARED_QUESTION, DECLARED_FACTS, TOOL_DECLARED_OBSERVATION; "
@@ -201,12 +202,11 @@ def _run(episode):
 
 
 def _seals(episode, model):
-    from ouroboros import model_send_seal, usage_accounting as ua
+    from ouroboros import model_send_seal
     from ouroboros.request_wire_contract import physical_candidate_bytes
 
     rows = {}
-    for line in (episode.drive / ua.LEDGER_REL).read_text(encoding="utf-8").splitlines():
-        row = json.loads(line)
+    for row in ledger_rows(episode.drive):
         if row.get("candidate_manifest_ref"):
             rows[row["attempt_id"]] = row
     assert len(rows) == len(model.received)
@@ -287,7 +287,10 @@ def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, 
                 # The SAME exclusion predicate is RED for the ordinary baseline.
                 with pytest.raises(AssertionError):
                     assert all(marker not in text for marker in FORBIDDEN)
-                assert all(marker in text for marker in FORBIDDEN if marker != "OTHER_TASK_PROCESS"), n
+                # A helper's view keeps knowledge out of the request: it reads it on demand.
+                knowledge = ("INHERITED_GLOBAL_KNOWLEDGE", "INHERITED_PROJECT_KNOWLEDGE", "INHERITED_WORKPAD")
+                assert all(marker in text for marker in FORBIDDEN if marker not in ("OTHER_TASK_PROCESS", *knowledge)), n
+                assert not any(marker in text for marker in knowledge), n
             assert (PEER in text) == (n >= 7), n
             if n >= 3:
                 assert "TOOL_DECLARED_OBSERVATION" in text

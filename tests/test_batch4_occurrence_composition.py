@@ -150,7 +150,7 @@ def test_saved_schedule_pause_retains_cap_and_unrelated_hold_across_stale_restar
     stale.pop('_owner_hold', None)
     (root / 'state/owner_restart_no_resume.flag').write_text('owner_restart')
     record_restart(root)
-    retained, _parked, consumed = _retain_snapshot_pending([stale], [], stale=True)
+    retained, _unseen, consumed, _prior_roots = _retain_snapshot_pending([stale], [], stale=True)
     assert not consumed and len(retained) == 1 and retained[0]['id'] == tid
     assert retained[0]['_consciousness_continuation'] is True
     workers.PENDING[:] = retained
@@ -187,7 +187,7 @@ def test_dispatched_schedule_exact_pause_is_not_ordinary_replay(world, monkeypat
     write_task_result(root, tid, 'budget_paused', **fields)
     assert occurrence.restore_allowed(copy.deepcopy(original)) is False
     assert occurrence.restore_allowed({'id': tid, 'metadata': {'schedule_id': 'legacy-without-receipt'}}) is False
-    restored, _, consumed = _retain_snapshot_pending([copy.deepcopy(saved)], [], stale=True)
+    restored, _unseen, consumed, _prior_roots = _retain_snapshot_pending([copy.deepcopy(saved)], [], stale=True)
     assert not consumed and len(restored) == 1 and restored[0]['_budget_pause']['exact_continuation']
     workers.PENDING[:] = restored
     resumed = queue.resume_budget_paused_task(tid)

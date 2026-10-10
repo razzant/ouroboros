@@ -11,6 +11,7 @@ import pytest
 import ouroboros.config as config
 import ouroboros.post_task_evolution as pte
 import supervisor.state as state
+from tests._usage_store_testing import ledger_rows
 
 
 # --- Budget refusal guard (red-team R2.1 / BIBLE P8) --------------------------
@@ -79,11 +80,10 @@ def test_budget_reset_never_rewrites_physical_attempt_ledger(tmp_path, monkeypat
         ),
         lambda: {"usage": {"prompt_tokens": 1, "completion_tokens": 1}},
     )
-    ledger = tmp_path / "state" / "usage_attempts.jsonl"
-    before = ledger.read_bytes()
+    before = ledger_rows(tmp_path)
 
     assert state.reset_per_task_budget(tmp_path, confirm_isolated=True) is True
-    assert ledger.read_bytes() == before
+    assert ledger_rows(tmp_path) == before
 
 
 # --- V4 config envelope -------------------------------------------------------

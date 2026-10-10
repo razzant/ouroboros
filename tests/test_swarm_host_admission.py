@@ -26,6 +26,7 @@ from supervisor.events import _handle_promote_chat_to_task
 
 pytestmark = pytest.mark.serial
 EXACT_OWNER = "  Исследуй варианты A и B.\nСначала уточни ограничения.  \n"
+WORDLESS = "(image attached)"
 SURFACE = {"channel": "web", "viewport": {"width": 1280, "height": 800}}
 CONSTRAINT = {"mode": "normal"}
 REFUSALS = {
@@ -150,22 +151,26 @@ def host(tmp_path, monkeypatch, request):
                            run_async=event_loop.run_until_complete)
 
 
-def incoming_case(host, room, *, caption_only=False):
+def incoming_case(host, room, *, caption_only=False, wordless=False):
     project_id, chat_id = "", 1
     if room == "project":
         project_id = "room-project"
         project = create_project(host.root, project_id, name="Room Project")
         chat_id = int(project["chat_id"])
-    client_message_id = f"swarm-probe-{room}-{'caption' if caption_only else 'text'}"
+    kind = "wordless" if wordless else "caption" if caption_only else "text"
+    client_message_id = f"swarm-probe-{room}-{kind}"
+    # A wordless send's canonical row holds the host placeholder, not owner words.
+    logged = WORDLESS if wordless else EXACT_OWNER
     ref = build_owner_message_ref(chat_id=chat_id, client_message_id=client_message_id,
-                                  ts="2026-09-12T12:00:00Z", text=EXACT_OWNER)
+                                  ts="2026-09-12T12:00:00Z", text=logged)
     append_jsonl(host.root / "logs/chat.jsonl", {"ts": ref["ts"], "role": "user", "chat_id": chat_id,
-                 "client_message_id": client_message_id, "text": EXACT_OWNER})
+                 "client_message_id": client_message_id, "text": logged,
+                 **({"text_placeholder": True} if wordless else {})})
     source = host.root / "input.txt"
     source.write_bytes(b"exact-owner-attachment\n")
     incoming = {
-        "chat_id": chat_id, "text": "" if caption_only else EXACT_OWNER,
-        "image_caption": EXACT_OWNER if caption_only else "", "log_text": EXACT_OWNER,
+        "chat_id": chat_id, "text": "" if caption_only or wordless else EXACT_OWNER,
+        "image_caption": EXACT_OWNER if caption_only else "", "log_text": logged,
         "client_message_id": client_message_id, "origin_message_ref": ref,
         "source": "web", "task_constraint": CONSTRAINT,
         "task_metadata": {"force_plan": True, "force_plan_source": "swarm",
@@ -225,6 +230,26 @@ def test_swarm_press_admits_root_without_any_model_call(host, room, caption_only
     assert fact["scheduled_result"]["status"] == "scheduled"
     assert not host.notices
     assert not (host.root / "memory/owner_mailbox/existing-project-root.jsonl").exists()
+
+
+@pytest.mark.parametrize("room", ["main", "project"])
+def test_swarm_press_admits_a_wordless_attachment_message(host, room):
+    # The web gateway no longer invents a caption for an uploaded photo: a send with
+    # attachments and no words reaches routing with neither, under the row's placeholder.
+    case = incoming_case(host, room, wordless=True)
+    server._route_owner_message(host.bridge, host.ctx, case.incoming)
+    fact = capture(host, case)
+    assert host.attempts == [] and not host.notices
+    assert len(host.pending) == 1
+    task = host.pending[0]
+    assert task["id"] == case.task_id and str(task.get("project_id") or "") == case.project_id
+    assert task["objective"] == task["origin_message_text"] == WORDLESS
+    assert task["origin_message_ref"] == case.ref
+    assert task["metadata"]["force_plan"] is True and task["metadata"]["force_plan_source"] == "swarm"
+    assert len(task["attachment_manifest"]) == 1
+    assert Path(task["attachment_manifest"][0]["abs_path"]).read_bytes() == case.source.read_bytes()
+    assert [row["status"] for row in fact["annotations"]] == ["scheduled"]
+    assert fact["scheduled_result"]["status"] == "scheduled"
 
 
 @pytest.mark.parametrize("room", ["main", "project"])

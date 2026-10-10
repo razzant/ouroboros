@@ -160,6 +160,7 @@ def _base_roots(
         getattr(ctx, "workspace_root", None),
         getattr(ctx, "repo_dir", None),
         getattr(ctx, "system_repo_dir", None),
+        getattr(ctx, "serving_repo_dir", None),
         getattr(ctx, "drive_root", None),
     )
     for value in values:

@@ -66,6 +66,7 @@ from tests.system_e2e.interfaces import (
 # The wave-3b delegated-transport glue, reused rather than re-derived: one author
 # for the run-id regex the scripts read and for the custody-row reader, so a change
 # to either cannot drift between the two delegation waves.
+from tests.system_e2e.test_system_scenarios_w3a import _completion_step
 from tests.system_e2e.test_system_scenarios_w3b import (
     _RUN_ID_RE,
     _custody_rows,
@@ -228,6 +229,9 @@ def test_s24_mutating_delegated_run_is_isolated_until_an_explicit_clean_apply(
             "subagent_id": "cx-builder", "prompt": _MUTATE_PROMPT}},
         _wait_step,
         _integrate_step,
+        # The verification reminder holds this answer for explicit selection.
+        {"final": f"{S24_MARKER}: patch integrated."},
+        _completion_step(f"{S24_MARKER}: patch integrated.", answer_form="answer"),
     ]
     with FakeClaudexorDaemon() as daemon, \
             ScriptedStubModel(script, final_answer=f"{S24_MARKER}: patch integrated.") as stub:
@@ -244,6 +248,7 @@ def test_s24_mutating_delegated_run_is_isolated_until_an_explicit_clean_apply(
             oracle = ArtifactOracle(server.data_root)
             stored = wait_durable_result(oracle, task_id)
             assert S24_MARKER in str(stored.get("result") or ""), stored
+            assert stored.get("reason_code") != "round_limit", stored
             assert stub.script_consumed(), "S24 script was not fully consumed"
 
             # -- the run was admitted as MUTATING, into its own snapshot ------

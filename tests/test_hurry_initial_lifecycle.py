@@ -18,6 +18,7 @@ from ouroboros.gateway.task_hurry import _admit_hurry_locked, api_task_hurry
 from ouroboros.owner_mailbox import KIND_HURRY, _mailbox_path, drain_owner_entries
 from ouroboros.utils import atomic_write_json
 from supervisor import queue, state, task_reaper, worker_health, workers
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
@@ -77,8 +78,15 @@ def _enqueue_origin(pool, monkeypatch, origin):
     if origin in {"review", "restore"}:
         task_id = queue.queue_deep_self_review_task("owner:/review", force=True, chat_id=1)
         if origin == "restore":
+            from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+
             queue.PENDING.clear()
             assert queue.restore_pending_from_snapshot() == 1
+            # This is an application-crash restore, with no acknowledged Restart
+            # transaction. The accepted task waits for the owner's Resume (#1563).
+            assert budget_hold_fact(queue.PENDING[0])["reason"] == HOLD_SAVED_WORK
+            assert queue.resume_budget_paused_task(task_id)["ok"]
+            assert budget_hold_fact(queue.PENDING[0]) is None
     elif origin == "evolution":
         from supervisor import git_ops
 
@@ -156,7 +164,7 @@ def test_real_admission_hurry_and_pre_running_death_recover(pool, monkeypatch, o
     assert row["owner_hurry"]["attempt_key"] == 1
     assert [entry["kind"] for entry in drain_owner_entries(pool.root, task_id)] == [KIND_HURRY]
     assert not (pool.root / "logs/chat.jsonl").exists()
-    assert not (pool.root / "state/usage_attempts.jsonl").exists()
+    assert not ledger_rows(pool.root)
     if phase == "pending":
         workers.assign_tasks()
     assert pool.slot.in_q.get_nowait()["id"] == task_id
@@ -209,6 +217,29 @@ def test_initializer_holds_queue_lock_and_does_not_rewrite_existing_wait(pool, m
     assert _hurry(pool.root, task_id).status_code == 200
     row = results.load_task_result(pool.root, task_id, strict=True)
     assert {key: value for key, value in row.items() if key != "owner_hurry"} == json.loads(before)
+
+
+def test_hurry_does_not_release_restored_work_before_owner_resume(pool):
+    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+
+    task_id = queue.queue_deep_self_review_task("owner:/review", force=True, chat_id=1)
+    queue.PENDING.clear()
+    assert queue.restore_pending_from_snapshot() == 1
+    [restored] = queue.PENDING
+    hold = dict(budget_hold_fact(restored))
+    assert hold["reason"] == HOLD_SAVED_WORK
+    workers.assign_tasks()
+    assert not queue.RUNNING and pool.slot.in_q.empty()
+    response = _hurry(pool.root, task_id)
+    assert response.status_code == 200, response.text
+    assert budget_hold_fact(restored) == hold
+    workers.assign_tasks()
+    assert not queue.RUNNING and pool.slot.in_q.empty()
+    assert results.load_task_result(pool.root, task_id)["owner_hurry"]["request_id"] == "request-1"
+    assert queue.resume_budget_paused_task(task_id)["ok"]
+    workers.assign_tasks()
+    assert pool.slot.in_q.get_nowait()["id"] == task_id
+    assert pool.slot.in_q.empty() and set(queue.RUNNING) == {task_id}
 
 
 @pytest.mark.parametrize("status", ["scheduled", "running", "interrupted", "completed", "cancelled", "future_status"])

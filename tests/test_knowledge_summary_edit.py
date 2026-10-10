@@ -297,7 +297,7 @@ def test_schema_adds_summary_without_breaking_older_calls(tmp_path):
     assert schema["parameters"]["required"] == ["topic"]
     assert props["summary"]["type"] == "string" and "mode=edit only" in props["summary"]["description"]
     assert {"topic", "scope", "content", "mode", "old_str", "expected_revision"} < set(props)
-    assert props["mode"]["enum"] == ["overwrite", "append", "edit"]
+    assert props["mode"]["enum"] == ["overwrite", "append", "edit", "archive", "restore"]
     assert set(props) == set(inspect.signature(tools._knowledge_write).parameters) - {"ctx"}
     assert "body text never replaces it" in schema["description"]
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)

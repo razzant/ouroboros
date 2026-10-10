@@ -252,13 +252,13 @@ def _spy_effective_reads(monkeypatch) -> list:
     from ouroboros import task_status
 
     flags: list = []
-    real = task_status.load_effective_task_result
+    real = task_status.effective_task_result
 
     def _spy(drive_root, tid, materialize_artifacts=True):
         flags.append(bool(materialize_artifacts))
         return real(drive_root, tid, materialize_artifacts=materialize_artifacts)
 
-    monkeypatch.setattr(task_status, "load_effective_task_result", _spy)
+    monkeypatch.setattr(task_status, "effective_task_result", _spy)
     return flags
 
 

@@ -8,9 +8,10 @@ import json
 import logging
 import os
 import pathlib
+import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.config import DATA_DIR
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
@@ -38,8 +39,10 @@ STATE_LOCK_PATH: pathlib.Path = DRIVE_ROOT / "locks" / "state.lock"
 ISOLATED_BENCHMARK_SENTINEL = ".ouroboros_isolated_benchmark"
 
 
-def init(drive_root: pathlib.Path, total_budget_limit: float = 0.0) -> None:
-    global DRIVE_ROOT, STATE_PATH, STATE_LAST_GOOD_PATH, STATE_LOCK_PATH
+def init(drive_root: pathlib.Path, total_budget_limit: float = 0.0, *,
+         stop_requested: Optional[Callable[[], bool]] = None) -> None:
+    global DRIVE_ROOT, STATE_PATH, STATE_LAST_GOOD_PATH, STATE_LOCK_PATH, _OPENROUTER_DIAGNOSTIC
+    _OPENROUTER_DIAGNOSTIC = _OpenRouterDiagnostic(stop_requested)
     DRIVE_ROOT = drive_root
     STATE_PATH = drive_root / "state" / "state.json"
     STATE_LAST_GOOD_PATH = drive_root / "state" / "state.last_good.json"
@@ -533,12 +536,14 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
     witness completed. Both copies absent create a first state ONLY on positive
     evidence (``state_initialization``); otherwise the answer is ``unavailable``
     and nothing is minted — the supervisor keeps serving independent work.
-    Money/network facts for drift detection are read before taking the lock."""
+    The diagnostic ledger observation precedes the lock; its network check runs
+    off-thread after initialization. Until it succeeds the baseline is unknown."""
     from supervisor import state_initialization as witness
 
+    global _OPENROUTER_DIAGNOSTIC
+    _OPENROUTER_DIAGNOSTIC = _OpenRouterDiagnostic(_OPENROUTER_DIAGNOSTIC.stop_requested)
+    diagnostic = _OPENROUTER_DIAGNOSTIC
     or_settled = _openrouter_ledger_settled()
-    key_fp = _openrouter_key_fingerprint()
-    ground_truth = check_openrouter_ground_truth()
     try:
         with _state_lock("init"):
             created = ""
@@ -566,14 +571,8 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
             st["session_spent_snapshot"] = float(st.get("spent_usd") or 0.0)
             st["session_openrouter_settled_snapshot"] = or_settled
             st["openrouter_ledger_settled_usd"] = or_settled
-            st["session_openrouter_key_fp"] = key_fp
-            if ground_truth is not None:
-                st["session_total_snapshot"] = ground_truth["total_usd"]
-                st["openrouter_total_usd"] = ground_truth["total_usd"]
-                st["openrouter_daily_usd"] = ground_truth["daily_usd"]
-                st["openrouter_last_check_at"] = utc_now_iso()
-            else:
-                st["session_total_snapshot"] = 0.0
+            st["session_openrouter_key_fp"] = ""
+            st["session_total_snapshot"] = None
             st["budget_drift_pct"] = None
             st["budget_drift_alert"] = False
             _save_state_unlocked(st)
@@ -590,6 +589,7 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
         read = read_state()
         return StateRead("unavailable" if read.quality in CURRENT_QUALITIES else read.quality,
                          read.source, read.values, CONTROL_KEYS, str(exc))
+    diagnostic.start(st)
     return read_state()
 
 
@@ -598,7 +598,7 @@ EVOLUTION_BUDGET_RESERVE: float = 2.0  # Stop evolution when remaining < this
 
 
 def set_budget_limit(limit: float) -> None:
-    """Set total budget limit for budget_pct."""
+    """Set the total budget limit the budget readers use."""
     global TOTAL_BUDGET_LIMIT
     TOTAL_BUDGET_LIMIT = limit
 
@@ -644,10 +644,9 @@ def budget_remaining(
         projection = None
     try:
         if projection is None:
-            from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
+            from ouroboros.usage_accounting import usage_projection
             from ouroboros.usage_ledger import UsageLockUnavailable
 
-            ensure_legacy_imported(DRIVE_ROOT)
             with contextlib.suppress(*((UsageLockUnavailable,) if allow_stale else ())):
                 projection = usage_projection(DRIVE_ROOT, global_limit_usd=total, allow_stale=allow_stale)
             if projection is None or (
@@ -745,7 +744,7 @@ def reset_per_task_budget(data_root: Any, *, confirm_isolated: bool = False) -> 
     return True
 
 
-def _openrouter_key_fingerprint() -> str:
+def _openrouter_key_fingerprint(api_key: Optional[str] = None) -> str:
     """Non-secret identity of the currently configured OpenRouter key.
 
     Drift comparison is only meaningful while the ledger baseline and the
@@ -753,7 +752,8 @@ def _openrouter_key_fingerprint() -> str:
     swap the key mid-session. Returns a short sha256 prefix (never the key)."""
     import hashlib
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if api_key is None:
+        api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         return ""
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
@@ -766,10 +766,9 @@ def _openrouter_ledger_settled(breakdown: Optional[Dict[str, Any]] = None) -> Op
     the tracked side of the drift comparison."""
     try:
         if breakdown is None:
-            from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+            from ouroboros.usage_accounting import usage_writer_snapshot
 
-            ensure_legacy_imported(DRIVE_ROOT)
-            breakdown = usage_breakdown(DRIVE_ROOT)
+            breakdown = usage_writer_snapshot(DRIVE_ROOT)
         bucket = dict(breakdown.get("by_provider") or {}).get("openrouter") or {}
         return float(bucket.get("settled_usd") or 0.0)
     except Exception:
@@ -777,11 +776,15 @@ def _openrouter_ledger_settled(breakdown: Optional[Dict[str, Any]] = None) -> Op
         return None
 
 
-def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
-    """Return OpenRouter total/daily usage, or None on error."""
+def check_openrouter_ground_truth(api_key: Optional[str] = None) -> Optional[Dict[str, float]]:
+    """Return OpenRouter usage for the captured key, or None on error.
+
+    A standalone caller may omit the key; asynchronous diagnostics always pass
+    the exact captured request key rather than rereading hot-reloaded settings."""
     try:
         import urllib.request
-        api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if api_key is None:
+            api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if not api_key:
             return None
         from ouroboros.net_transport import trust_ssl_context
@@ -805,20 +808,150 @@ def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
         return None
 
 
-def budget_pct(st: Dict[str, Any]) -> float:
-    """Return ledger-derived budget percent used."""
-    total = float(TOTAL_BUDGET_LIMIT or 0.0)
-    if total <= 0:
-        return 0.0
-    try:
-        from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
+# Only diagnostic baseline/publication identity: ordinary spend may advance
+# while HTTP is pending. Its captured OpenRouter-only comparison stays paired.
+_OPENROUTER_DIAGNOSTIC_BASIS = (
+    "initialization_id", "session_id", "session_total_snapshot", "session_spent_snapshot",
+    "session_openrouter_settled_snapshot", "session_openrouter_key_fp", "openrouter_last_check_at",
+)
 
-        ensure_legacy_imported(DRIVE_ROOT)
-        projection = usage_projection(DRIVE_ROOT, global_limit_usd=total)
-        return (float(projection.get("accounted_usd") or 0.0) / total) * 100.0
-    except Exception:
-        log.exception("Budget ledger unavailable while calculating percent")
-        return 100.0
+
+class _OpenRouterDiagnostic:
+    """One non-queued HTTP observation per process generation, never a money owner.
+
+    As with supervisor maintenance, busy crossings are consumed, not queued.
+    Start/fetch failure leaves the previous observation unchanged; publication
+    failures are logged. The next ordinary crossing may sample again. Stop never
+    joins HTTP: a closed/replaced generation discards its delayed response.
+    """
+
+    def __init__(self, stop_requested: Optional[Callable[[], bool]] = None):
+        self.stop_requested = stop_requested
+        self.latch = threading.Lock()
+
+    def current(self) -> bool:
+        return (self is _OPENROUTER_DIAGNOSTIC
+                and not (self.stop_requested and self.stop_requested()))
+
+    def start(self, st: Dict[str, Any]) -> None:
+        api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if not api_key or not self.current() or not self.latch.acquire(blocking=False):
+            return
+        try:
+            snapshot = {key: st.get(key) for key in _OPENROUTER_DIAGNOSTIC_BASIS + (
+                "openrouter_ledger_settled_usd", "spent_usd", "spent_calls",
+            )}
+            snapshot["integrity_degraded"] = bool((st.get("usage_accounting") or {}).get("integrity_degraded"))
+            threading.Thread(target=self.run, args=(api_key, snapshot),
+                             name="openrouter-diagnostic", daemon=True).start()
+        except Exception:
+            self.latch.release()
+            log.warning("OpenRouter diagnostic could not start", exc_info=True)
+
+    def run(self, api_key: str, snapshot: Dict[str, Any]) -> None:
+        try:
+            if not self.current():
+                return
+            key_fp = _openrouter_key_fingerprint(api_key)
+            ground_truth = check_openrouter_ground_truth(api_key)
+            if ground_truth is None or not self.current():
+                return
+            with _state_lock("OpenRouter diagnostic"):
+                if not self.current():
+                    return
+                st = _load_state_unlocked()
+                if (not self.current() or key_fp != _openrouter_key_fingerprint()
+                        or any(st.get(key) != snapshot.get(key) for key in _OPENROUTER_DIAGNOSTIC_BASIS)):
+                    return
+                _apply_openrouter_ground_truth(st, snapshot, key_fp, ground_truth)
+                if self.current():
+                    _save_state_unlocked(st)
+        except Exception:
+            log.warning("OpenRouter diagnostic publication failed", exc_info=True)
+        finally:
+            self.latch.release()
+
+
+_OPENROUTER_DIAGNOSTIC = _OpenRouterDiagnostic()
+
+
+def _apply_openrouter_ground_truth(st: Dict[str, Any], snapshot: Dict[str, Any],
+                                  key_fp: str, ground_truth: Dict[str, float]) -> None:
+    """Publish one applicable observation under STATE_LOCK; money stays ledger-owned."""
+    st["openrouter_total_usd"] = ground_truth["total_usd"]
+    st["openrouter_checked_ledger_settled_usd"] = snapshot.get("openrouter_ledger_settled_usd")
+    st["openrouter_daily_usd"] = ground_truth["daily_usd"]
+    st["openrouter_last_check_at"] = utc_now_iso()
+
+    # Drift compares the OpenRouter-only settled ledger delta with
+    # the queried key's usage delta — the only like-for-like pair.
+    # Direct-provider spend is invisible to /auth/key by
+    # construction and must not count as "drift".
+    session_total_snap = st.get("session_total_snapshot")
+    session_or_settled_snap = st.get("session_openrouter_settled_snapshot")
+    or_ledger_settled = snapshot.get("openrouter_ledger_settled_usd")
+    baseline_fp = str(st.get("session_openrouter_key_fp") or "")
+    integrity_degraded = bool(snapshot.get("integrity_degraded"))
+    key_changed = bool(key_fp) and bool(baseline_fp) and key_fp != baseline_fp
+
+    if integrity_degraded:
+        # A quarantined ledger tail makes the tracked side
+        # non-final; a confident percentage would be dishonest.
+        # Comparison is suppressed, not zeroed.
+        st["budget_drift_pct"] = None
+        st["budget_drift_alert"] = False
+    elif (
+        key_changed
+        or session_total_snap is None
+        or session_or_settled_snap is None
+        or or_ledger_settled is None
+    ):
+        # Rebaseline (key swapped mid-session, or pre-upgrade state
+        # lacks the OpenRouter-only snapshot) and skip this cycle:
+        # the old baseline describes a different key/metric.
+        st["session_total_snapshot"] = ground_truth["total_usd"]
+        st["session_openrouter_settled_snapshot"] = or_ledger_settled
+        st["session_openrouter_key_fp"] = key_fp
+        st["budget_drift_pct"] = None
+        st["budget_drift_alert"] = False
+    else:
+        or_delta = ground_truth["total_usd"] - float(session_total_snap)
+        our_delta = float(or_ledger_settled) - float(session_or_settled_snap)
+
+        if or_delta > 0.001:
+            drift_pct = abs(or_delta - our_delta) / max(abs(or_delta), 0.01) * 100.0
+            st["budget_drift_pct"] = drift_pct
+            abs_diff = abs(or_delta - our_delta)
+            if drift_pct > 50.0 and abs_diff > 5.0:
+                st["budget_drift_alert"] = True
+                all_provider_delta = float(snapshot.get("spent_usd") or 0.0) - float(
+                    st.get("session_spent_snapshot") or 0.0
+                )
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        # "type" is the events.jsonl schema key every
+                        # other event uses; type-keyed aggregations
+                        # lost this row when it was written as "event".
+                        "type": "budget_drift_warning",
+                        "drift_pct": round(drift_pct, 2),
+                        "our_delta": round(our_delta, 4),
+                        "or_delta": round(or_delta, 4),
+                        "abs_diff": round(abs_diff, 4),
+                        "all_provider_delta": round(all_provider_delta, 4),
+                        "spent_calls": snapshot["spent_calls"],
+                        "note": (
+                            "OpenRouter-only ledger delta vs /auth/key usage delta. "
+                            "High drift usually means a shared OR key or missing ledger rows."
+                        ),
+                    }
+                )
+            else:
+                st["budget_drift_alert"] = False
+        else:
+            st["budget_drift_pct"] = 0.0
+            st["budget_drift_alert"] = False
 
 
 def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
@@ -831,6 +964,11 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
     The persisted projection carries totals only; the per-root map is never written.
     The ledger read is the writer's slim snapshot (``usage_writer_snapshot``): only what this
     function persists is rendered; the loop's llm_usage path writes once per turn, direct callers on call.
+
+    Writes are ordered by the ledger's ``(compaction_epoch, seq)`` marker, compared under STATE_LOCK:
+    a lower epoch, or a same-epoch lower seq, is stale and skipped; an equal or higher marker writes.
+    The projection stays untouched, returning False, on a quarantined ledger (``integrity_degraded``),
+    an unparseable fresh or saved marker, a lock timeout, or an unavailable ``state.json``.
     """
     def _to_float(v: Any, default: float = 0.0) -> float:
         try:
@@ -865,25 +1003,23 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
 
     from ouroboros.usage_accounting import (
         UsageLedgerCorrupt,
-        ensure_legacy_imported,
+        UsageLockUnavailable,
         usage_projection,
         usage_writer_snapshot,
     )
 
+    diagnostic = _OPENROUTER_DIAGNOSTIC
     # Ledger I/O is deliberately OUTSIDE STATE_LOCK: the lock stays
     # short-lived, and the validated-snapshot marker below preserves the old
     # serialization invariant without holding STATE_LOCK across a long read.
     # A DISPLAY read (``allow_stale``: this runs on the supervisor loop once per turn with
     # ``llm_usage`` events): a lagging snapshot carries its own lower marker, so it never regresses money.
     try:
-        ensure_legacy_imported(DRIVE_ROOT)
         breakdown = usage_writer_snapshot(DRIVE_ROOT, allow_stale=True)
         total_limit = float(TOTAL_BUDGET_LIMIT or 0.0)
         projection_snapshot = breakdown.pop("_usage_projection", None)
         if total_limit > 0 and isinstance(projection_snapshot, dict):
             from ouroboros._usage_rows import _with_limit
-            # Totals only (issue #1002): per-root money is a ledger render nothing reads back from here.
-            projection_snapshot.pop("by_root", None)
             projection = _with_limit(projection_snapshot, total_limit)
         else:
             projection = (
@@ -900,6 +1036,11 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
         # in place, report the refusal to the caller, and let the next event
         # retry: paid usage itself is already persisted in the ledger.
         log.warning("Skipping legacy budget projection: usage ledger is corrupt", exc_info=True)
+        return False
+    except UsageLockUnavailable:
+        # Contention, or a journal still awaiting the lifecycle import: unknown, never
+        # zero; the prior projection stays and the next event retries.
+        log.info("Skipping budget projection: the usage store is unavailable for a display read")
         return False
     ledger_high_water_marker = (
         None if breakdown.get("integrity_degraded") else _ledger_high_water_marker(breakdown)
@@ -967,94 +1108,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
     if should_check_ground_truth:
-        ground_truth = check_openrouter_ground_truth()
-        if ground_truth is not None:
-            lock_fd = acquire_file_lock(STATE_LOCK_PATH)
-            if lock_fd is None:
-                return True
-            try:
-                try:
-                    st = _load_state_unlocked()
-                except StateUnavailable:
-                    return True
-                st["openrouter_total_usd"] = ground_truth["total_usd"]
-                st["openrouter_daily_usd"] = ground_truth["daily_usd"]
-                st["openrouter_last_check_at"] = utc_now_iso()
-
-                # Drift compares the OpenRouter-only settled ledger delta with
-                # the queried key's usage delta — the only like-for-like pair.
-                # Direct-provider spend is invisible to /auth/key by
-                # construction and must not count as "drift".
-                session_total_snap = st.get("session_total_snapshot")
-                session_or_settled_snap = st.get("session_openrouter_settled_snapshot")
-                or_ledger_settled = st.get("openrouter_ledger_settled_usd")
-                current_fp = _openrouter_key_fingerprint()
-                baseline_fp = str(st.get("session_openrouter_key_fp") or "")
-                integrity_degraded = bool(breakdown.get("integrity_degraded"))
-                key_changed = bool(current_fp) and bool(baseline_fp) and current_fp != baseline_fp
-
-                if integrity_degraded:
-                    # A quarantined ledger tail makes the tracked side
-                    # non-final; a confident percentage would be dishonest.
-                    # Comparison is suppressed, not zeroed.
-                    st["budget_drift_pct"] = None
-                    st["budget_drift_alert"] = False
-                elif (
-                    key_changed
-                    or session_total_snap is None
-                    or session_or_settled_snap is None
-                    or or_ledger_settled is None
-                ):
-                    # Rebaseline (key swapped mid-session, or pre-upgrade state
-                    # lacks the OpenRouter-only snapshot) and skip this cycle:
-                    # the old baseline describes a different key/metric.
-                    st["session_total_snapshot"] = ground_truth["total_usd"]
-                    st["session_openrouter_settled_snapshot"] = or_ledger_settled
-                    st["session_openrouter_key_fp"] = current_fp
-                    st["budget_drift_pct"] = None
-                    st["budget_drift_alert"] = False
-                else:
-                    or_delta = ground_truth["total_usd"] - _to_float(session_total_snap)
-                    our_delta = _to_float(or_ledger_settled) - _to_float(session_or_settled_snap)
-
-                    if or_delta > 0.001:
-                        drift_pct = abs(or_delta - our_delta) / max(abs(or_delta), 0.01) * 100.0
-                        st["budget_drift_pct"] = drift_pct
-                        abs_diff = abs(or_delta - our_delta)
-                        if drift_pct > 50.0 and abs_diff > 5.0:
-                            st["budget_drift_alert"] = True
-                            all_provider_delta = _to_float(st.get("spent_usd") or 0.0) - _to_float(
-                                st.get("session_spent_snapshot") or 0.0
-                            )
-                            append_jsonl(
-                                DRIVE_ROOT / "logs" / "events.jsonl",
-                                {
-                                    "ts": utc_now_iso(),
-                                    # "type" is the events.jsonl schema key every
-                                    # other event uses; type-keyed aggregations
-                                    # lost this row when it was written as "event".
-                                    "type": "budget_drift_warning",
-                                    "drift_pct": round(drift_pct, 2),
-                                    "our_delta": round(our_delta, 4),
-                                    "or_delta": round(or_delta, 4),
-                                    "abs_diff": round(abs_diff, 4),
-                                    "all_provider_delta": round(all_provider_delta, 4),
-                                    "spent_calls": st["spent_calls"],
-                                    "note": (
-                                        "OpenRouter-only ledger delta vs /auth/key usage delta. "
-                                        "High drift usually means a shared OR key or missing ledger rows."
-                                    ),
-                                }
-                            )
-                        else:
-                            st["budget_drift_alert"] = False
-                    else:
-                        st["budget_drift_pct"] = 0.0
-                        st["budget_drift_alert"] = False
-
-                _save_state_unlocked(st)
-            finally:
-                release_file_lock(STATE_LOCK_PATH, lock_fd)
+        diagnostic.start(st)
 
     return True
 
@@ -1063,9 +1117,8 @@ def budget_breakdown(st: Dict[str, Any]) -> Dict[str, float]:
     """Aggregate accounted physical-attempt cost by category."""
     breakdown: Dict[str, float] = {}
     try:
-        from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+        from ouroboros.usage_accounting import usage_breakdown
 
-        ensure_legacy_imported(DRIVE_ROOT)
         ledger = usage_breakdown(DRIVE_ROOT, allow_stale=True)
         for category, bucket in dict(ledger.get("by_category") or {}).items():
             breakdown[str(category)] = float(bucket.get("accounted_usd") or 0.0)
@@ -1082,9 +1135,8 @@ def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
     """Aggregate physical calls/tokens/accounted cost by model."""
     breakdown: Dict[str, Dict[str, float]] = {}
     try:
-        from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+        from ouroboros.usage_accounting import usage_breakdown
 
-        ensure_legacy_imported(DRIVE_ROOT)
         ledger = usage_breakdown(DRIVE_ROOT, allow_stale=True)
         buckets = dict(ledger.get("by_model") or {})
         unattributed = dict(ledger.get("unattributed") or {}).get("model") or {}
@@ -1105,27 +1157,21 @@ def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
 
 
 def per_task_cost_summary(max_tasks: int = 10, tail_bytes: int = 512_000) -> List[Dict[str, Any]]:
-    """Return task cost summary from ledger-attributed physical attempts."""
-    del tail_bytes  # compatibility-only; the append-only ledger is replayed in full
-    tasks: Dict[str, Dict[str, Any]] = {}
+    """The costliest tasks by accounted spend: the indexed task summaries, never
+    a scan of attempts (``accounted_num`` orders; amounts come from the exact
+    decimal text)."""
+    del tail_bytes  # compatibility-only
     try:
-        from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+        from ouroboros import usage_store
 
-        ensure_legacy_imported(DRIVE_ROOT)
-        ledger = usage_breakdown(DRIVE_ROOT)
-        for task_id, bucket in dict(ledger.get("by_task") or {}).items():
-            tasks[str(task_id)] = {
-                "task_id": str(task_id),
-                "cost": float(bucket.get("accounted_usd") or 0.0),
-                "rounds": int(bucket.get("physical_calls") or 0),
-                "model": "",
-            }
+        with usage_store.read(DRIVE_ROOT) as txn:
+            buckets = [(key, txn.bucket("task", key)) for key in txn.top_keys("task", max_tasks)]
     except Exception:
         log.error("Failed to calculate ledger per-task cost summary", exc_info=True)
         raise
-
-    sorted_tasks = sorted(tasks.values(), key=lambda x: x["cost"], reverse=True)
-    return sorted_tasks[:max_tasks]
+    tasks = [{"task_id": key, "cost": float(bucket.render_summary()["accounted_usd"]),
+              "rounds": int(bucket.physical), "model": ""} for key, bucket in buckets]
+    return sorted(tasks, key=lambda x: x["cost"], reverse=True)
 
 
 def reconstruct_task_cost(
@@ -1150,11 +1196,10 @@ def reconstruct_task_cost(
             from ouroboros.cost_projection import (
                 COST_SCOPE_OWN, build_cost_presentation, honest_accounted_amount,
             )
-            from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+            from ouroboros.usage_accounting import usage_breakdown
 
             authority_root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
             if breakdown is None:
-                ensure_legacy_imported(authority_root)
                 bucket = usage_breakdown(authority_root, task_id=want)
             else:
                 from ouroboros._usage_rows import _breakdown_bucket, _with_integrity
@@ -1257,16 +1302,17 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
         lines.append("queue_warning: running>0 while busy=0")
     accounting_available = True
     try:
-        from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown, usage_projection
+        from ouroboros.usage_accounting import usage_breakdown, usage_projection
 
-        ensure_legacy_imported(DRIVE_ROOT)
         ledger_breakdown = usage_breakdown(DRIVE_ROOT, allow_stale=True)  # /status renders on the loop
         ledger_projection = (
             usage_projection(DRIVE_ROOT, global_limit_usd=TOTAL_BUDGET_LIMIT, allow_stale=True)
             if TOTAL_BUDGET_LIMIT > 0
             else ledger_breakdown
         )
-        spent = float(ledger_projection.get("accounted_usd") or 0.0)
+        spent = float(ledger_projection.get("settled_usd") or 0.0)  # known: what the limit decides on
+        open_holds = float(ledger_projection.get("reserved_usd") or 0.0) + float(
+            ledger_projection.get("unresolved_upper_bound_usd") or 0.0)
         pct = (spent / TOTAL_BUDGET_LIMIT * 100.0) if TOTAL_BUDGET_LIMIT > 0 else 0.0
         budget_remaining_usd = (
             float(ledger_projection.get("remaining_known_usd") or 0.0)
@@ -1280,7 +1326,7 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
     except Exception:
         log.exception("Budget ledger unavailable while building status")
         accounting_available = False
-        spent = pct = budget_remaining_usd = None
+        spent = pct = budget_remaining_usd = open_holds = None
         spent_calls = prompt_tokens = completion_tokens = cached_tokens = None
     lines.append(f"budget_total: ${TOTAL_BUDGET_LIMIT:.0f}")
     if not accounting_available:
@@ -1297,6 +1343,9 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
             lines.append(f"spent_usd: ${spent:.2f} ({pct:.1f}% of budget)")
         else:
             lines.append(f"spent_usd: ${spent:.2f}")
+        if open_holds > 0:
+            lines.append(f"open_holds_usd: ${open_holds:.2f} (reservations and unresolved upper bounds; "
+                         "not counted as spending)")
         lines.append(f"spent_calls: {spent_calls}")
         lines.append(
             f"prompt_tokens: {prompt_tokens}, completion_tokens: {completion_tokens}, "
@@ -1312,12 +1361,11 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
 
     drift_pct = st.get("budget_drift_pct")
     if accounting_available and drift_pct is not None:
-        # Same fields as the update_budget computation: OpenRouter-only settled
-        # ledger delta vs the key's usage delta. Rendering the all-provider
-        # spent delta here used to contradict the percentage next to it.
+        # The ledger side captured with this diagnostic, not newer spend that
+        # arrived while HTTP was pending. Older snapshots predate this field.
         session_total_snap = st.get("session_total_snapshot")
         session_or_settled_snap = st.get("session_openrouter_settled_snapshot")
-        or_ledger_settled = st.get("openrouter_ledger_settled_usd")
+        or_ledger_settled = st.get("openrouter_checked_ledger_settled_usd", st.get("openrouter_ledger_settled_usd"))
         or_total = st.get("openrouter_total_usd")
 
         if (

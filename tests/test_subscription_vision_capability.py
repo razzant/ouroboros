@@ -75,12 +75,14 @@ def test_preset_images_reach_real_main_transport(subscription_transport, catalog
     assert calls == [("codex", "explicit-main", "exact-model")]
     assert messages == original
     assert len(gateway.creates) == 1 and len(gateway.accepted_operations) == 1
-    assert [row["state"] for row in ledger(root)] == ["reserved", "dispatched", "settled"]
+    assert [(row["state"], row["revision"]) for row in ledger(root)] == [("settled", 3)]
 
 
-def test_image_capability_is_exact_role_account_and_not_a_global_overlay(catalog):
+def test_image_capability_is_exact_role_account_and_not_a_global_record(catalog, monkeypatch, tmp_path):
+    from ouroboros import capability_evidence
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     state, calls = catalog
-    before = dict(provider_models._VISION_OVERLAY)
     assert provider_models.supports_vision(MODEL, model_role="main") is True
     state["modalities"] = ["text"]
     assert provider_models.supports_vision(MODEL, model_role="vision") is False
@@ -88,7 +90,9 @@ def test_image_capability_is_exact_role_account_and_not_a_global_overlay(catalog
     assert provider_models.supports_vision(MODEL, model_role="vision", model_account_override="") is True
     assert calls == [("codex", "main-a", "exact-model"), ("codex", "vision-b", "exact-model"),
                      ("codex", None, "exact-model")]
-    assert provider_models._VISION_OVERLAY == before
+    # An account's catalog answer is read per call; it never becomes a stored route record.
+    store = capability_evidence._load(capability_evidence.canonical_evidence_root())
+    assert store["image_input"] == {}
 
 
 @pytest.mark.parametrize("modalities", [None, []])
@@ -120,14 +124,36 @@ def test_text_only_and_image_off_do_not_query_catalog(catalog, monkeypatch):
     assert calls == []
 
 
-def test_confirmed_nonvision_keeps_existing_capability_gap(catalog, monkeypatch):
-    state, _ = catalog
+def test_confirmed_nonvision_is_still_called_when_named_and_sent_inline(catalog, monkeypatch):
+    """Owner decision (Inline = always send): a model named explicitly, and an Inline
+    send, carry the image even though this account's catalog says text only; the
+    route's own refusal is what the agent then sees. Auto withholds on that "no"."""
+    state, calls = catalog
     state["modalities"] = ["text"]
     monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "inline")
-    assert vision._resolve_vlm_model(LLMClient(), MODEL) == ""
+    assert vision._resolve_vlm_model(LLMClient(), MODEL) == MODEL
+    messages = image_messages()
+    assert prepare_messages_for_send(messages, routing=VisionRoutingContext(MODEL, object(), {})) is messages
+    assert calls == [], "neither an explicit model nor Inline asks the catalog for permission"
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
+    for key, value in (("OUROBOROS_MODEL", MODEL), ("OUROBOROS_MODEL_VISION", ""),
+                       ("OUROBOROS_MODEL_LIGHT", ""), ("OUROBOROS_MODEL_FALLBACKS", "")):
+        monkeypatch.setenv(key, value)  # every caption candidate is this text-only route
     prepared = prepare_messages_for_send(image_messages(), routing=VisionRoutingContext(MODEL, object(), {}))
     assert "image omitted" in prepared[1]["content"][1]["text"]
-    assert provider_models.supports_vision(MODEL + " (local)") is False
+    assert "Claudexor model catalog" in prepared[1]["content"][1]["text"]
+
+
+def test_our_local_lane_is_a_transport_fact_decided_by_lane(catalog, monkeypatch):
+    """The " (local)" lane cannot carry image bytes because of OUR transport; the
+    policy names that lane, and the capability reader returns no model verdict for it."""
+    _, calls = catalog
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "inline")
+    prepared = prepare_messages_for_send(image_messages(), routing=VisionRoutingContext(
+        MODEL + " (local)", object(), {}))
+    assert "our local llama.cpp transport lane cannot carry images" in prepared[1]["content"][1]["text"]
+    assert provider_models.supports_vision(MODEL + " (local)") is None
+    assert calls == []
 
 
 def test_caption_calls_use_vision_role_and_preserve_canonical_image(subscription_transport, catalog, monkeypatch):
@@ -141,7 +167,9 @@ def test_caption_calls_use_vision_role_and_preserve_canonical_image(subscription
         MODEL, client, {}, drive_root=root, task_id="task-one"))
     assert "Ответ 🐍" in prepared[1]["content"][1]["text"]
     assert messages == original
-    assert calls == [("codex", "vision-b", "exact-model")]
+    # The explicit vision slot is used without asking its catalog (owner decision);
+    # the caption call itself still binds the vision role's account.
+    assert calls == []
     assert gateway.uploads[0][0]["account"] == {"mode": "pin", "profileId": "vision-b"}
     assert gateway.uploads[0][0]["messages"][-1]["content"][1]["type"] == "image_url"
     assert len(gateway.creates) == 1
@@ -156,7 +184,9 @@ def test_temporary_vision_role_uses_new_model_account_only(catalog, tmp_path):
         assert vision._resolve_vlm_model(LLMClient(), MODEL) == changed
         from ouroboros.vision_routing import resolve_vision_caption_model
         assert resolve_vision_caption_model(SimpleNamespace(model=MODEL), LLMClient()) == changed
-    assert calls == [("another", "changed-profile", "new-image-model")] * 2
+    # The owner's switch is an explicit choice of the vision route: it is used
+    # without a catalog veto, so no other account's catalog is consulted either.
+    assert calls == []
 
 
 def test_browser_screenshot_keeps_subscription_image(catalog, tmp_path, monkeypatch):
@@ -180,9 +210,10 @@ def test_registered_vision_tool_reaches_real_child_from_preset(child_fixture, ca
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=root)
     registry._ctx.task_id = "image-task"
     registry._ctx.task_attempt = 1
-    # URL avoids image decoder fixtures; invalid base64 exercises the existing
-    # permissive screenshot fixture path. The controlled child does not inspect pixels.
-    registry._ctx.browser_state.last_screenshot_b64 = "fixture-not-base64"
+    # A URL stays remote; a valid 1x1 PNG passes the shared byte check unchanged
+    # (invalid base64 is refused before any route). The child does not inspect pixels.
+    registry._ctx.browser_state.last_screenshot_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
     args = {"prompt": "Describe only this image"}
     if name == "vlm_query":
         args["image_url"] = "https://example.invalid/fixture.png"

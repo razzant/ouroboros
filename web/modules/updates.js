@@ -82,6 +82,24 @@ function progressVerdict(data, base) {
     return null; // Assisted work and boot recovery have their existing durable owner.
 }
 
+export function applyFailureText(err) {
+    const body = err?.body || {};
+    const parts = [String(err.message || err)];
+    if (body.reason) parts.push(`reason: ${body.reason}`);
+    if (Array.isArray(body.blockers) && body.blockers.length) {
+        parts.push(`blocked by: ${body.blockers.slice(0, 5).join(', ')}`);
+    }
+    if (body.rolled_back) parts.push('the checkout was rolled back');
+    if (body.smoke) parts.push('the post-update smoke check failed');
+    if (typeof body.estimated_wave_usd === 'number') {
+        parts.push(`assisted review needs ~$${body.estimated_wave_usd}` + (
+            typeof body.remaining_usd === 'number' ? ` of $${body.remaining_usd} remaining` : ''
+        ));
+    }
+    if (body.stash_note) parts.push(body.stash_note);
+    return parts.join(' · ');
+}
+
 // Verdict function: durable server state × transient client phase → one
 // presentation descriptor (deterministic given status, phase, and the clock —
 // humanizeCheckedAt reads Date.now for the "checked N ago" age). The button is always a real next action; facts
@@ -102,6 +120,13 @@ export function updateVerdict(data = {}, phase = '') {
 
     const warnings = extraWarnings(data);
     const base = { chips, warnings, checkedAgo };
+    if (data.update_tx?.active && data.update_tx.local_work_recovery) {
+        return { ...base, state: 'resolving', tone: 'warn',
+            headline: 'Local changes still need recovery confirmation.',
+            hint: 'Quit and reopen the desktop app, or restart the server process for a web deployment. '
+                + 'In-app Restart is deferred to preserve the current files. The saved update stash is retained.',
+            action: { id: 'check', label: 'Check again' } };
+    }
     const recovery = data.update_tx?.active && (
         ['corrupt', 'gate_blocked', 'marker_cleanup_retry'].includes(data.update_tx.phase)
         || (!data.update_progress?.active && data.update_progress?.result === 'failed')
@@ -853,24 +878,6 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         } catch (err) {
             showToast('Rollback failed: ' + (err.message || err), 'error');
         }
-    }
-
-    function applyFailureText(err) {
-        const body = err?.body || {};
-        const parts = [String(err.message || err)];
-        if (body.reason) parts.push(`reason: ${body.reason}`);
-        if (Array.isArray(body.blockers) && body.blockers.length) {
-            parts.push(`blocked by: ${body.blockers.slice(0, 5).join(', ')}`);
-        }
-        if (body.rolled_back) parts.push('the checkout was rolled back');
-        if (body.smoke) parts.push('the post-update smoke check failed');
-        if (typeof body.estimated_wave_usd === 'number') {
-            parts.push(`assisted review needs ~$${body.estimated_wave_usd}` + (
-                typeof body.remaining_usd === 'number' ? ` of $${body.remaining_usd} remaining` : ''
-            ));
-        }
-        if (body.stash_note) parts.push(body.stash_note);
-        return parts.join(' · ');
     }
 
     async function applyUpdate() {

@@ -195,14 +195,9 @@ def _time_fact(ctx: Any) -> dict[str, Any]:
 
 
 def _settled_spend_fact(ctx: Any, root_task_id: str) -> dict[str, Any]:
-    """The tree's ledger-accounted spend, read through the canonical locked reader
-    (``usage_accounting.usage_breakdown``) in every state — an absent ledger is the reader's own
-    known-zero. The fact writes nothing of its own; it inherits the reader's bounded maintenance —
-    today: the torn-tail quarantine after a SINGLE crash mid-append (a crash inside that repair, a
-    torn quarantine sink, is a known residual, issue #586), the empty
-    ``state/`` lock directory on a never-initialized root, and owner-aware
-    ``usage_attempts.lock`` recovery (ARCHITECTURE §1 Platform substrate) —
-    each pinned by a regression."""
+    """The tree's accounted spend: the usage store's root summary read through
+    ``usage_accounting.usage_breakdown`` in every state (a root with no recorded
+    attempt is the reader's own known-zero). The fact writes nothing of its own."""
     try:
         from ouroboros.usage_accounting import usage_breakdown
 
@@ -316,13 +311,8 @@ def _active_descendants_fact(ctx: Any) -> dict[str, Any]:
 def coordination_live_context(ctx: Any) -> dict[str, Any]:
     """One LLM-first planning snapshot for startup and meaningful nanny wakes.
 
-    Polling writes nothing of its own; it inherits the canonical usage-ledger reader's bounded
-    maintenance — today: the torn-tail quarantine after a SINGLE crash mid-append
-    (``usage_ledger._read_records_locked``, identical for every reader; a crash inside that repair
-    is a known residual, issue #586), the empty ``state/`` lock directory
-    on a never-initialized root, and owner-aware ``usage_attempts.lock`` recovery
-    (ARCHITECTURE §1 Platform substrate) — each pinned by a regression;
-    the settled-spend fact reads the ledger through that reader.
+    Polling writes nothing of its own; the settled-spend fact is one read of the
+    usage store's root summary (``usage_accounting.usage_breakdown``).
     """
 
     root_task_id = _coordination_root_id(ctx)
@@ -998,7 +988,17 @@ def supervised_wait(
     checkpoint_reason: str = "",
     wait_once: Optional[Callable[..., str]] = None,
 ) -> ToolResult:
-    """Renew quiet windows internally and return only a meaningful wake batch."""
+    """Renew quiet windows internally and return only a meaningful wake batch.
+
+    The journal cursor is durable, so it survives worker restarts. ``cache_horizon_note``
+    is attached once per wake, only when the time since the last model response exceeds
+    the applied cache horizon. ``checkpoint_after_sec`` is a one-shot wake: an earlier
+    real event consumes it, and it never repeats. Renewal runs on a fixed three-second
+    tick with no backoff and no durable outage latch. A read that delivered no daemon
+    answer is a quiet renewal: ``observation_read_timeout`` is our own read bound
+    expiring, ``daemon_unreachable`` is a socket that carried nothing; only the latter
+    opens an outage episode (one owner line, plus one line when a read is answered again).
+    """
 
     reason_text = str(checkpoint_reason or "").strip()
     ignored_note = ""

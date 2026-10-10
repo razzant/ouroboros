@@ -1,4 +1,17 @@
-"""Post-task result emission, memory work, reflections, and review context."""
+"""Post-task result emission, memory work, reflections, and review context.
+
+``emit_task_results`` derives the loop outcome once, emits the lifecycle and
+usage events, registers the final answer in the durable outbox, stores the
+result (``_store_task_result`` via ``write_task_result``, which stamps
+``task_result_schema``) and dispatches the root-only post-task synthesis
+(checkpointed by ``post_task_checkpoint``).
+
+``total_rounds``/``prompt_tokens``/``completion_tokens`` on the stored result
+come from the usage ledger (``reconstruct_task_cost``); the loop's own tally
+rides ``loop_outcome.usage``. A capture the ledger could not read is ``None``
+(unknown), never zero. A task exception is ``failure.kind = "runtime"``, not a
+provider failure (``derive_loop_outcome``).
+"""
 
 from __future__ import annotations
 
@@ -13,6 +26,7 @@ import time
 from dataclasses import replace
 from typing import Any, Callable, Dict, List
 
+from ouroboros.observability import timed_phase
 from ouroboros.settings_integrity import copy_task_settings_context
 from ouroboros.cost_projection import cost_projection, resolve_cost_pair
 from ouroboros.task_results import (
@@ -236,11 +250,11 @@ def _run_post_task_processing_async(
                 return failure
 
             # All late model work belongs to this one scoped worker.  This keeps
-            # the root checkpoint non-final until consolidation, reflection,
-            # and promotion have all stopped billing.
+            # the root checkpoint non-final until the fallback memory draft,
+            # consolidation, reflection and promotion have all stopped billing.
             stages: List[tuple[str, Callable[[], Any]]] = [
-                ("chat_consolidation", lambda: _run_chat_consolidation(
-                    env, task_memory, llm_client, task_snapshot, drive_logs)),
+                ("memory_fallback_draft", lambda: _run_memory_fallback_draft(
+                    env, task_snapshot, llm_client, drive_logs, trace_snapshot)),
                 ("scratchpad_consolidation", lambda: _run_scratchpad_consolidation(
                     env, task_memory, llm_client)),
                 ("reflection", (lambda: finish_published_reflection(env, task_snapshot, result["reflection_entry"]))
@@ -399,14 +413,14 @@ def recover_pending_root_post_task_synthesis(
     """
     from types import SimpleNamespace
     from ouroboros.post_task_synthesis import resume_paused_late_phase, revoke_late_phase_grant
-    from ouroboros.task_results import list_task_results
+    from ouroboros.obligations import result_rows
     from ouroboros.terminal_projection import terminal_projection_owed
 
     root = pathlib.Path(drive_root).resolve(strict=False)
     if resume_task_id:
         return int(resume_paused_late_phase(root, repo_dir or root.parent, str(resume_task_id)))
     try:
-        rows = list_task_results(root)
+        rows = list(result_rows(root, "synthesis", exclude=exclude_task_ids))
     except Exception:
         return 0
     recovered = 0
@@ -785,17 +799,16 @@ def emit_task_results(
     review_evidence["task_inputs"] = capture_task_inputs(
         ctx, task, task.get("budget_drive_root") or receipt_root, verification_receipts,
     )
+    from ouroboros.context_input_selection import historical_inputs_exhibit
+    review_evidence["historical_author_inputs"] = historical_inputs_exhibit(
+        ctx, task.get("budget_drive_root") or receipt_root, str(task.get("id") or ""),
+    )
 
-    # GR2-5 (§8-A2, ONE outbox for EVERY root) + GR3-5 (ordering closes the
-    # persist→register crash window): the final answer enters the durable
-    # outbox — the owed row embeds the full payload — immediately BEFORE
-    # the durable result write, regardless of the blocking/nonblocking
-    # post-task split below. Registered-then-crashed leaves an owed row
-    # boot replay delivers (projection-over-replay: no boot scan of
-    # task_results is ever needed); the old stored-then-crashed order left
-    # a terminal result nobody would ever deliver. The nonblocking lane
-    # used to buffer the send with no delivery_id and no owed registration
-    # at all. Seam + dedup: ouroboros/task_finalization.py.
+    # Every root registers its full answer payload in the durable outbox BEFORE
+    # the result write, including the nonblocking post-task lane. After a crash,
+    # boot replays the owed row without scanning task_results; reversing these
+    # writes could strand a terminal result with no delivery. Registration and
+    # deduplication share ouroboros/task_finalization.py.
     if _root_outbox and not _presence:
         send_event.setdefault("progress_meta", {}).update(outcome_axes=outcome_axes, reason_code=reason_code)
         stamp_root_final_phase(  # the stamp names the SAME word the durable row below settles to
@@ -803,10 +816,10 @@ def emit_task_results(
             post_task_open=not task.get("_skip_post_task_synthesis") and not _root_post_task_already_completed(env, task),
         )
         register_final_answer_owed(task, send_event, env_drive_root=env.drive_root)
-    _store_task_result(
-        env, task, text, usage, llm_trace, review_evidence=review_evidence,
-        loop_outcome=loop_outcome, cost_fields=task_cost_fields, final_delivery=send_event,
-    )
+    with timed_phase("result_store", timing=usage.get("_finalization_timing") or {}):
+        _store_task_result(env, task, text, usage, llm_trace, review_evidence=review_evidence,
+                           loop_outcome=loop_outcome, cost_fields=task_cost_fields,
+                           final_delivery=send_event)
     stored_result = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
     if _root_outbox and task.get("_skip_post_task_synthesis"):
         # Stop before post-task dispatch forbids paid synthesis, not the free
@@ -1175,7 +1188,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                     "pass_index": 0,
                 }
             root_phase_checkpoint.setdefault("post_task_synthesis", "pending_once")
-        review_projection = _compact_review_projection(llm_trace)
+        review_projection = _compact_review_projection(llm_trace, task, env.drive_root)
         model_execution = model_execution_projection(usage)
         from ouroboros.acceptance_history import retain_acceptance_history
         history_fields = retain_acceptance_history(
@@ -1269,8 +1282,6 @@ def build_review_context(env: Any) -> str:
     try:
         from ouroboros.review_state import (
             _LEGACY_CURRENT_REPO_KEY,
-            advisory_commit_ready,
-            compute_snapshot_hash,
             format_status_section,
             load_state,
             make_repo_key,
@@ -1287,7 +1298,6 @@ def build_review_context(env: Any) -> str:
         continuations, corrupt = list_review_continuations(env.drive_root)
         repo_dir = pathlib.Path(env.repo_dir)
         repo_key = make_repo_key(repo_dir)
-        snapshot_hash = compute_snapshot_hash(repo_dir)
         open_obs = state.get_open_obligations(repo_key=repo_key)
         open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
         if (
@@ -1300,34 +1310,10 @@ def build_review_context(env: Any) -> str:
         ):
             return ""
 
-        current_run = None
-        for run in reversed(state.advisory_runs):
-            if run.snapshot_hash != snapshot_hash:
-                continue
-            if run.repo_key not in ("", repo_key, _LEGACY_CURRENT_REPO_KEY):
-                continue
-            current_run = run
-            break
-
-        # H5 (capinv-447): honestly named — this is the ADVISORY readiness
-        # projection, not the full commit gate (triad/scope/custody independent).
-        lines: List[str] = ["## Review Continuity", "### Advisory readiness (not the full commit gate)"]
-        live_status = str(getattr(current_run, "status", "") or "missing")
-        repo_commit_ready = advisory_commit_ready(
-            current_run is not None and current_run.status in ("fresh", "bypassed", "skipped"),
-            open_obs, open_debts,
-            matching_run=current_run if getattr(current_run, "repo_key", None) == repo_key else None,
-        )
-        lines.append(f"- repo_key={repo_key}")
-        lines.append(f"- snapshot_hash={snapshot_hash[:12] or '(empty)'}")
-        lines.append(f"- advisory_status={live_status}")
-        lines.append(f"- repo_commit_ready={'yes' if repo_commit_ready else 'no'}")
-        if current_run is not None:
-            lines.append(f"- current_review_ts={str(current_run.ts or '')[:19]}")
-            if current_run.bypass_reason:
-                lines.append(f"- bypass_reason={_truncate_with_notice(current_run.bypass_reason, 220)}")
-        else:
-            lines.append("- no advisory run matches the current worktree snapshot")
+        # Owed work and the checkout's stale marker only: the retired advisory
+        # gate projected no readiness here (decision 3A), and the commit gate is
+        # the panel, tests, custody and binding, none of which this section decides.
+        lines: List[str] = ["## Review Continuity", f"- repo_key={repo_key}"]
 
         stale_matches_repo = not state.last_stale_repo_key or state.last_stale_repo_key == repo_key
         if state.last_stale_from_edit_ts and stale_matches_repo:
@@ -1464,7 +1450,7 @@ from ouroboros.post_task_synthesis import (  # noqa: E402, F401 -- intentional p
     _compact_review_projection,
     _record_task_facts,
     _post_task_paid_interruption,
-    _run_chat_consolidation,
+    _run_memory_fallback_draft,
     _run_scratchpad_consolidation,
     _run_reflection,
     finish_published_reflection,

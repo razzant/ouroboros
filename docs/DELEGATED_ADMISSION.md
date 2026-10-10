@@ -37,6 +37,14 @@ captures the result and applies it through its existing integration path.
 Ordinary folders use the separate supported direct/copy work-product shape in
 `delegate_directory.py`.
 
+One start provisions nothing: a continuation (`continue_from` on `delegate_start`,
+`delegate_continuation.py`) of a run whose private snapshot is still undisposed
+runs in THAT snapshot, with the same execution root, baseline and binding, and
+takes its custody over, so the earlier work is captured once in the successor's
+cumulative patch. A predecessor whose patch was already applied or rejected is
+continued from a fresh snapshot of the target. The admission floors are unchanged:
+the continuation's access is the caller's own, never wider than the run it continues.
+
 The harness can execute model-generated commands under the operator's OS
 identity. It is not assumed hostile, but the host cannot review each command
 before it runs.

@@ -1,4 +1,11 @@
-"""Task-scoped long-running service manager."""
+"""Task-scoped long-running service manager.
+
+``service_execution_facts`` is the only source of the sleep ``services`` selector:
+the real Popen return code for host and local-executor services; a Docker service
+reports no return code (its ``kill -0`` probe status is not the service's) and an
+inconclusive probe reads ``unknown``. The park loop polls it about every second as
+host work, never a model round.
+"""
 
 from __future__ import annotations
 
@@ -46,6 +53,7 @@ from ouroboros.workspace_executor import executor_ref_from_ctx
 from ouroboros.workspace_executor import overlay_env, resolve_process_env, service_env, validate_process_env
 from ouroboros.workspace_executor import kill_all_services as executor_kill_all_services
 from ouroboros.workspace_executor import _read_local_service_marker
+from ouroboros.workspace_executor import service_execution_facts as executor_service_execution_facts
 from ouroboros.workspace_executor import service_logs as executor_service_logs
 from ouroboros.workspace_executor import service_status as executor_service_status
 from ouroboros.workspace_executor import start_service as executor_start_service
@@ -190,6 +198,15 @@ def _stop_record(record: ServiceRecord, *, wait: bool = True) -> None:
 def _finalize_service_log_for_drive(
     drive_root: pathlib.Path, record: ServiceRecord, *, log_path: pathlib.Path | None = None,
 ) -> Dict[str, Any]:
+    """Capture a service log's tail and full blob, then delete the live log.
+
+    Secrets known to ``record`` are masked in both. The live log is deleted only
+    once its blob is stored (or it is already gone); an oversized log
+    (``full_log_omitted``) or a failed capture (``errors``) leaves it in place and
+    reports ``retained_live_log_path``. The executor stop path calls this before it
+    forgets the record's secret values, and only after termination is confirmed; an
+    unconfirmed stop keeps the record for a later cleanup.
+    """
     result: Dict[str, Any] = {"deleted_live_log": False, "full_log_ref": {}, "tail": "", "errors": []}
     log_path = log_path if log_path is not None else record.log_path
     try:
@@ -455,6 +472,8 @@ def _start_service(
         # Retire the exited host record before a new process can append to its
         # log with a different environment (or switch to an executor backend).
         _stop_service(ctx, name=service_name)
+    from ouroboros import body_candidate
+
     if _executor_can_run_cwd(ctx, workdir):
         try:
             payload = executor_start_service(
@@ -477,6 +496,8 @@ def _start_service(
             return json.dumps(payload, ensure_ascii=False, indent=2)
         except OwnerPauseRefused as exc:
             return _publish_tool_result(ctx, launch_refusal_result(str(exc), completed_no_effect=True))
+        except body_candidate.CandidateRefused:
+            raise
         except Exception as exc:
             text = redact_known_values(f"⚠️ SERVICE_START_ERROR: executor backend failed: {type(exc).__name__}: {exc}", secret_values)
             if getattr(exc, "process_not_started", False) is True:
@@ -513,6 +534,11 @@ def _start_service(
         if _panic_requested:
             raise RuntimeError(f"Emergency Stop during service spawn: {request_process_tree_kill(proc)}")
 
+    # Inside the bound candidate a failure to isolate refuses the start on either backend
+    # (the registry types CandidateRefused); it never falls back to the serving environment.
+    candidate_env = body_candidate.process_environment(ctx, workdir)
+    service_base_env = candidate_env if candidate_env is not None else _service_env()
+
     log_fh = log_path.open("ab")
     try:
         bootstrap_process_path()
@@ -537,7 +563,7 @@ def _start_service(
             # The attested emergency bundled-node PATH prepend (post-gates
             # node resolver) applies on top of the allowlisted service env;
             # a healthy resolution leaves the env byte-identical.
-            env=overlay_env(apply_env_path_prepend(_service_env(), active_node_resolution(ctx)), env),
+            env=overlay_env(apply_env_path_prepend(service_base_env, active_node_resolution(ctx)), env),
         )
         log_fh.close()
     except OwnerPauseRefused as exc:
@@ -607,6 +633,24 @@ def _status_payload(record: ServiceRecord) -> Dict[str, Any]:
         "log_path": str(record.log_path),
         "ts": utc_now_iso(),
     }
+
+
+def service_execution_facts(service_id: str) -> Dict[str, Any] | None:
+    """One task service's start identity and execution state, for a sleep selector.
+
+    Execution facts only: no readiness refresh, no log read. ``service_id`` is the
+    ``task_id:name`` lookup key a stop/start reuses, so ``started_at`` with the
+    process identity pins ONE start. ``returncode`` is the real exit status where
+    this process holds the child, else ``None``. ``None`` = no record in this
+    process: never started, stopped, or a registry a restart did not carry.
+    """
+    with _LOCK:
+        record = _SERVICES.get(service_id)
+    if record is None:
+        return executor_service_execution_facts(service_id)
+    rc = record.proc.poll()
+    return {"service_id": service_id, "started_at": record.started_at, "pid": record.proc.pid,
+            "pgid": record.pgid, "state": "running" if rc is None else "exited", "returncode": rc}
 
 
 def _service_status(ctx: ToolContext, name: str = "service") -> str:
@@ -861,13 +905,16 @@ def kill_all_services(
     wait: bool = True,
     include_keep_alive: bool = True,
     request_only: bool = False,
+    durable: bool = True,
 ) -> List[Dict[str, Any]]:
     """Stop every tracked service process group for panic/shutdown paths.
 
     ``include_keep_alive=False`` (graceful shutdown/restart) leaves keep_alive
     services running: they are session-scoped in the process custody ledger,
     so the next server generation's reaper still collects them. Panic and
-    emergency cleanup keep the default and kill everything.
+    emergency cleanup keep the default and kill everything. ``durable=False``
+    stops only this process's in-memory services: the exit stop
+    (``owned_shutdown.stop_owned_work``) settles the durable records itself.
     """
 
     global _panic_requested
@@ -898,7 +945,7 @@ def kill_all_services(
             payload["log_finalization"] = _finalize_service_log_for_drive(pathlib.Path(drive_root), record)
         stopped.append(payload)
     try:
-        stopped.extend(executor_kill_all_services(drive_root, wait=wait))
+        stopped.extend(executor_kill_all_services(drive_root, wait=wait, durable=durable))
     except Exception:
         pass
     if wait and drive_root is not None and stopped:

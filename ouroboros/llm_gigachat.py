@@ -18,6 +18,7 @@ from ouroboros.llm_attempt import (
     _execute_candidate,
     _physical_candidate,
     attach_processing_receipt,
+    bound_reply_allowance,
 )
 
 
@@ -113,11 +114,12 @@ class _GigaChatLaneMixin:
             for block in content:
                 if isinstance(block, dict):
                     if str(block.get("type") or "") in ("image_url", "image"):
-                        # Explicit placeholder instead of a silent drop: the
-                        # model (and the transcript reader) must know an image
-                        # was present but not deliverable on this lane.
-                        caption = str(block.get("_caption") or "").strip()
-                        parts.append(f"[image omitted: model has no vision{f' — {caption}' if caption else ''}]")
+                        # Explicit marker instead of a silent drop: the model
+                        # (and the transcript reader) must know an image was
+                        # present but our lane, not the model, could not carry it.
+                        from ouroboros.llm_messages import own_lane_image_marker
+
+                        parts.append(own_lane_image_marker("GigaChat", str(block.get("_caption") or "").strip()))
                         continue
                     parts.append(str(block.get("text", "")))
                 else:
@@ -263,7 +265,7 @@ class _GigaChatLaneMixin:
         # before measurement and sealing. The library's transport retries are off
         # (``_get_gigachat_client``); its one re-send after a 401 repeats these
         # sealed bytes inside the same attempt and claims no fresher clock.
-        candidate = _physical_candidate(stamp_clock_note(payload))
+        candidate = bound_reply_allowance(target, _physical_candidate(stamp_clock_note(payload)))
         request = _attempt_request(target, candidate, source="llm.gigachat")
         completion = _execute_candidate(
             request,

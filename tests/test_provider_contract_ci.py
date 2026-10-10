@@ -13,6 +13,7 @@ from ouroboros.provider_models import (
     OPENAI_DIRECT_DEFAULTS,
     normalize_deepseek_reasoning_effort,
     normalize_model_identity,
+    tool_schema_limit,
 )
 from ouroboros.request_wire_contract import canonical_sha256
 from ouroboros.request_wire_receipts import (
@@ -982,7 +983,12 @@ def test_public_chat_builds_full_registry_request_for_every_matrix_row():
         assert first["no_proxy"] is True
         assert first["bypass_response_cache"] is False
         assert first["timeout"] == CANARY_TIMEOUT_SEC
-        assert [tool["function"]["name"] for tool in first["tools"]] == names
+        # The whole registry, fitted to the route's schema ceiling as Main does
+        # (direct OpenAI: 128; tests/test_route_tool_schema_limit.py pins both sides).
+        limit = tool_schema_limit(canary.model)
+        sent = [tool["function"]["name"] for tool in first["tools"]]
+        assert sent == [name for name in names if name in sent] and CANARY_TOOL_NAME in sent
+        assert len(sent) == (min(len(names), limit) if limit else len(names))
         # Every row asks for the same exact object beside the same synthetic roster.
         assert [message["role"] for message in first["messages"]] == ["user"]
         assert first["messages"][0]["content"].startswith(context)

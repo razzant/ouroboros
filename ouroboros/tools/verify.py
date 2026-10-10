@@ -172,7 +172,9 @@ def _check_has_exit_masking(argv: List[str]) -> tuple[bool, list[str]]:
 
 
 # Public name for the SECOND consumer: run_command/run_script read the same
-# sensor to disclose a masked green in their result envelope.
+# sensor to disclose a masked green in their result envelope: on an exit-0 result
+# they append one EXIT_MASKING_NOTE and publish `exit_masking_reasons` in the
+# result meta; status and exit code are unchanged and no receipt is written.
 check_exit_masking = _check_has_exit_masking
 
 
@@ -845,6 +847,7 @@ def _verify_and_record(
     if kind == "artifact_observation":
         paths = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
         obs_status, detail = _observe_artifacts(ctx, paths)
+        # 20 paths stored; _outcome_receipts' identity carries the omitted count and full-set hash.
         receipt.update({"status": obs_status, "paths": paths[:20], "summary": detail})
         if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
             return _receipt_custody_failure(kind, f"{obs_status}: {detail}")
@@ -879,32 +882,29 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("verify_and_record", {
             "name": "verify_and_record",
             "description": (
-                "Verify your deliverable BEFORE claiming it is done, and record a durable host-attested "
-                "receipt. The host RUNS your declared check and attests the result — one call replaces the "
-                "verification run you would do anyway. Pick contract_kind: visible_verifier / explicit_command "
-                "(run `check`, pass on exit 0 and, if given, `expected` substring present) · explicit_metric "
-                "(run `check`, pass when the `expected` metric string appears) · artifact_observation (the host "
-                "confirms the declared artifact_paths exist) · no_visible_machine_contract (honest escape hatch: "
-                "no machine check exists; your best proxy + risk is recorded for review) · delegation_zero_run "
-                "(configured session actors only: record a typed incomplete/unknown decision when no "
-                "physical leaf was started, with zero_run_decision and zero_run_basis). Recording a receipt "
-                "suppresses the receipt_absent transparency flag on a clean turn. ANTI-CHEAT: verify ONLY against "
-                "PUBLIC task info — the instruction text, examples embedded in it, installed oracles, and your own "
-                "independent checks. NEVER read a hidden /tests/ dir, solution.sh, copied verifier code, or look up "
-                "the answer online."
+                "Verify BEFORE claiming completion; the host runs your check and records a durable attested "
+                "receipt, replacing a separate verification run. contract_kind: visible_verifier/explicit_command "
+                "run check and pass on exit 0 plus any expected substring; explicit_metric runs check and "
+                "requires the expected metric string; artifact_observation confirms artifact_paths exist; "
+                "no_visible_machine_contract records your best proxy and risk for review when no machine "
+                "check exists; delegation_zero_run records an incomplete/unknown decision for configured "
+                "session actors whose physical leaf never started (zero_run_decision + zero_run_basis). "
+                "A receipt suppresses receipt_absent on a clean turn. Verify ONLY against PUBLIC task "
+                "instructions, embedded examples, installed oracles and your independent checks. NEVER "
+                "read hidden /tests/, solution.sh or copied verifier code, or look up the answer online."
             ),
             "parameters": {"type": "object", "properties": {
-                "contract_kind": {"type": "string", "enum": list(_CONTRACT_KINDS), "description": "How the deliverable is verifiable — you declare it (the host never guesses)."},
-                "criterion_id": {"type": "string", "default": "", "description": "Optional id of the task_contract acceptance claim this receipt supports. Use ids from task_contract.acceptance_claims when present."},
-                "criterion_source": {"type": "string", "enum": ["task_stated", "agent_defined"], "default": "agent_defined", "description": "Where this success criterion came from: task_stated (the task/instructions state it) or agent_defined (you synthesized it). Flag-only honesty — an agent_defined criterion asks you to double-check it is equivalent to what the task actually requires."},
-                "criterion_basis": {"type": "string", "default": "", "description": "Optional one-line basis for an agent_defined criterion: why this check is sufficient evidence for the task's real requirement."},
-                "zero_run_decision": {"type": "string", "enum": list(_ZERO_RUN_DECISIONS), "description": "For delegation_zero_run only: the actor's typed decision when no selected physical leaf was started."},
-                "zero_run_basis": {"type": "string", "description": "For delegation_zero_run only: concise host-visible evidence or blocker; required and never inferred from final prose."},
-                "check": {"description": "The verification command: an argv list (['pytest','-q']) or a shell one-liner string. Required for visible_verifier/explicit_command/explicit_metric.", "type": ["array", "string"], "items": {"type": "string"}},
-                "expected": {"type": "string", "default": "", "description": "Optional expected substring/metric in the check output (explicit_command/explicit_metric)."},
-                "expected_match": {"type": "string", "enum": list(_EXPECTED_MATCH_KINDS), "default": "substring", "description": "How `expected` is matched: substring (default) · exact (whole stripped output equals expected) · exact_line (expected equals one stripped output line) · json_equals (output and expected parse to equal JSON, key-order tolerant) · bytes_equal (after the check runs, artifact_paths=[a, b] are compared BYTE-FOR-BYTE — golden files, migration parity; the receipt records a bounded hexdump of the first divergence). Use a stricter mode when the task gives a worked example / exact output."},
-                "artifact_paths": {"type": "array", "items": {"type": "string"}, "description": "Deliverable paths. For artifact_observation the host confirms they exist (existence/size only, never content) — observable roots are the active workspace plus every resource root the ACTIVE profile can already read (for orchestrating parents that includes subagent_projects and deliverables, so a parent CAN confirm a child's deliverable in the projects tree; child/readonly profiles lack those roots); a path outside these is a non-fatal refused_out_of_scope, not a failure. For run-kind checks (visible_verifier/explicit_command/explicit_metric) the host ALSO probes (after the check) whether each declared path that is RELATIVE to the check's working directory (cwd) still exists and records an advisory artifact_lifecycle flag — catching a check that built then deleted its own deliverable."},
-                "env_from_settings": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Run-kind only: explicit environment variable → saved setting key mapping, with existing Settings-selection authority and secret masking."},
+                "contract_kind": {"type": "string", "enum": list(_CONTRACT_KINDS), "description": "Declare how the deliverable is verifiable; the host never guesses."},
+                "criterion_id": {"type": "string", "default": "", "description": "Supported claim id from task_contract.acceptance_claims, when present."},
+                "criterion_source": {"type": "string", "enum": ["task_stated", "agent_defined"], "default": "agent_defined", "description": "task_stated: stated in task/instructions; agent_defined: synthesized by you. Flag only: double-check an agent_defined criterion matches the actual requirement."},
+                "criterion_basis": {"type": "string", "default": "", "description": "Optional line explaining why an agent_defined check sufficiently proves the task's requirement."},
+                "zero_run_decision": {"type": "string", "enum": list(_ZERO_RUN_DECISIONS), "description": "delegation_zero_run only: actor's typed decision when no selected physical leaf started."},
+                "zero_run_basis": {"type": "string", "description": "Required for delegation_zero_run: concise host-visible evidence/blocker, never inferred from final prose."},
+                "check": {"description": "Command as argv (['pytest','-q']) or shell one-liner. Required for visible_verifier/explicit_command/explicit_metric.", "type": ["array", "string"], "items": {"type": "string"}},
+                "expected": {"type": "string", "default": "", "description": "Expected output substring/metric for explicit_command/explicit_metric."},
+                "expected_match": {"type": "string", "enum": list(_EXPECTED_MATCH_KINDS), "default": "substring", "description": "Match expected as substring (default), exact (whole stripped output), exact_line (one stripped output line), or json_equals (parsed JSON equality, ignoring key order). bytes_equal compares artifact_paths=[a, b] byte-for-byte after check, recording a bounded hexdump of the first divergence (golden files/migration parity). Prefer stricter matching for worked examples/exact output."},
+                "artifact_paths": {"type": "array", "items": {"type": "string"}, "description": "Deliverable paths. artifact_observation checks existence/size, never content, in the active workspace and the ACTIVE profile's readable resource roots. Orchestrating parents include subagent_projects/deliverables and can confirm child deliverables; child/readonly profiles lack those roots. Outside paths return non-fatal refused_out_of_scope. Run kinds (visible_verifier/explicit_command/explicit_metric) also check after execution that paths RELATIVE to cwd still exist; advisory artifact_lifecycle flags expose checks that delete their deliverables."},
+                "env_from_settings": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Run kinds: environment variable → saved setting key mapping; existing Settings-selection authority and secret masking apply."},
                 "cwd": {
                     "type": "string",
                     "default": "",

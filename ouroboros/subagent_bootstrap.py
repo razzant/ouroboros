@@ -496,7 +496,9 @@ def configured_actor_finalization_message(
 
     ``None`` = not a configured actor (the legacy nanny message applies);
     ``""`` = clean (succeeded leaf, adoption, or a typed zero-run receipt);
-    otherwise the one structural reminder. Host children and coordination
+    otherwise the one structural reminder, prefixed ``CONFIGURED_ACTOR_INCOMPLETE``
+    for an incomplete fact and ``CONFIGURED_ACTOR_UNKNOWN`` for anything else:
+    a disclosure, not a gate. Host children and coordination
     activity are auxiliary evidence and never silence it (owner 2026-08-28).
     """
     if not isinstance(getattr(ctx, "_configured_actor_bootstrap", None), dict):

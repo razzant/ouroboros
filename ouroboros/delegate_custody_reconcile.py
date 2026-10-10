@@ -13,6 +13,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
+from ouroboros.observability import timed_phase
 from ouroboros.delegate_registration_policy import record_persistent as _record_persistent
 from ouroboros.subagent_history import session_request_facts
 
@@ -63,6 +64,7 @@ def pending_invocations(drive_root: Any,
     return replay_pending(drive_root, rows)
 
 
+@timed_phase("release_task_runs")
 def release_task_runs(drive_root: Any, task_id: str, *,
                       gateway_factory: Optional[Callable[[], Any]] = None) -> List[Dict[str, Any]]:
     """Run the one non-panic terminal custody boundary for a normal loop exit."""
@@ -78,6 +80,7 @@ def release_task_runs(drive_root: Any, task_id: str, *,
     return list(result.get("outcomes") or [])
 
 
+@timed_phase("custody_reconcile", within="release_task_runs")
 def reconcile_task_runs(drive_root: Any, task_id: str, *,
                         gateway_factory: Optional[Callable[[], Any]] = None,
                         deliberate_terminal: str = "") -> List[Dict[str, Any]]:
@@ -154,13 +157,13 @@ def reconcile_orphaned_runs(
     orphans = [c for c in candidates if c.task_id and c.task_id not in live_or_reserved]
     stray = [record for record in unbound
              if record["task_id"] and record["task_id"] not in live_or_reserved]
-    return _reconcile_each(drive_root, orphans, gateway_factory, pending=stray)
+    return _reconcile_each(drive_root, orphans, gateway_factory, pending=stray, live_task_ids=live_or_reserved)
 
 
 def _reconcile_each(drive_root: Any, runs: List[RunCustody],
                     gateway_factory: Optional[Callable[[], Any]],
                     pending: Optional[List[Dict[str, Any]]] = None,
-                    deliberate_terminal: str = "") -> List[Dict[str, Any]]:
+                    deliberate_terminal: str = "", live_task_ids=None) -> List[Dict[str, Any]]:
     """One transport, one settle-or-cancel pass. Shared by both release surfaces.
 
     ``pending`` is the durable sweep's extra duty: START_REQUESTED-only invocations
@@ -173,9 +176,17 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     """
     # Registration duty is real work only for a retire-ELIGIBLE project:
     # a deferred one must not spin the daemon up.
-    snapshot = _custody().replay(drive_root).values()
-    unsettled_projects = {row.project_id for row in snapshot
-                          if row.project_id and row.run_id and not row.settled}
+    from ouroboros.delegate_continuation import still_continuable
+
+    snapshot = list(_custody().replay(drive_root).values())
+    # Only a still-owned registration can be retired, so only its rows are asked
+    # (each ask reads task results); one continuable row keeps the whole project.
+    owned = {row.project_id for row in snapshot if row.project_owned and row.project_id}
+    unsettled_projects: set = set()
+    for row in snapshot:
+        if (row.project_id in owned and row.project_id not in unsettled_projects and row.run_id
+                and (not row.settled or still_continuable(drive_root, row, live_task_ids))):
+            unsettled_projects.add(row.project_id)
     registrations = [row for row in snapshot
                      if row.project_owned and row.project_id
                      and row.project_id not in unsettled_projects]
@@ -211,7 +222,7 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
         # Recomputed inside: a run settled this very pass may have made its
         # project eligible - the pre-pass gate is not the last word.
         if registrations or runs:
-            _custody().retire_settled_registrations(drive_root, gateway)
+            _custody().retire_settled_registrations(drive_root, gateway, live_task_ids=live_task_ids)
     finally:
         try:
             gateway.close()
@@ -220,6 +231,7 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     return outcomes
 
 
+@timed_phase("custody_pending", within="release_task_runs")
 def _recover_pending_invocation(drive_root: Any, gateway: Any,
                                 record: Dict[str, Any], *,
                                 deliberate_terminal: str = "") -> Dict[str, Any]:
@@ -310,6 +322,9 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         # belongs there like every other (P34R.1).
         ledger_root=str(drive_root),
         idempotency_key=str(record["idempotency_key"]), invocation_id=invocation_id,
+        continuation_of=str(record.get("continuation_of") or ""),
+        capture_id=str(record.get("capture_id") or ""),
+        snapshot_task_id=str(record.get("snapshot_task_id") or ""),
         selected_subagent_id=str(record.get("selected_subagent_id") or ""),
         config_fingerprint=str(record.get("config_fingerprint") or ""),
         work_order_fingerprint=str(record.get("work_order_fingerprint") or ""),
@@ -405,6 +420,7 @@ def _owner_terminal_is_deliberate(drive_root: Any, task_id: str, *,
                          EXECUTION_FAILED, EXECUTION_CANCELLED}
 
 
+@timed_phase("custody_run", within="release_task_runs")
 def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
                    deliberate_terminal: str = "") -> Dict[str, Any]:
     from ouroboros.gateways.claudexor import ClaudexorUnavailable

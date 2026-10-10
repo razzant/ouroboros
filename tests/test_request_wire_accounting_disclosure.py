@@ -49,6 +49,7 @@ from ouroboros.usage_accounting import (
     usage_projection,
     usage_scope,
 )
+from tests._usage_store_testing import ledger_rows
 
 
 class _Rejected(RuntimeError):
@@ -135,8 +136,7 @@ def _learned_actions(evidence):
 
 
 def _rows(root):
-    path = root / ua.LEDGER_REL
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return ledger_rows(root)
 
 
 def _capture(candidate, *, state="settled", attempt="attempt-wire", digest=None,

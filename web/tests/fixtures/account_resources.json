@@ -1,0 +1,210 @@
+{
+  "operations": [
+    {
+      "id": "get:quota",
+      "method": "GET",
+      "path": "/v2/quota",
+      "parameters": [
+        {
+          "name": "view",
+          "location": "query",
+          "enum": [
+            "resources"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "post:quota",
+      "method": "POST",
+      "path": "/v2/quota",
+      "parameters": [
+        {
+          "name": "view",
+          "location": "query",
+          "enum": [
+            "resources"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "post:account-resets",
+      "method": "POST",
+      "path": "/v2/account-resets"
+    },
+    {
+      "id": "get:account-resets.id",
+      "method": "GET",
+      "path": "/v2/account-resets/:id"
+    }
+  ],
+  "quota": {
+    "snapshots": [
+      {
+        "subject": {
+          "harness": "claude",
+          "subject_id": "claude-default",
+          "credential_route": "vendor_native",
+          "plan_label": "Max"
+        },
+        "constraints": [
+          {
+            "id": "session",
+            "label": "5-hour",
+            "used_ratio": 1,
+            "window_seconds": 18000,
+            "resets_at": "2099-10-09T14:00:00Z",
+            "cooldown_until": null
+          },
+          {
+            "id": "weekly",
+            "label": "Weekly",
+            "used_ratio": 0.42,
+            "window_seconds": 604800,
+            "resets_at": "2099-10-09T14:00:00Z",
+            "cooldown_until": null
+          }
+        ],
+        "source": "claude_oauth_usage",
+        "observed_at": "2026-10-09T12:00:00Z",
+        "freshness": "fresh"
+      }
+    ],
+    "absences": [],
+    "refreshed_at": "2026-10-09T12:00:00Z",
+    "resources": [
+      {
+        "target": {
+          "harness": "claude",
+          "profile_id": "claude-default"
+        },
+        "balances": {
+          "value": [
+            {
+              "id": "prepaid",
+              "label": "Credit balance",
+              "amount": "2460",
+              "unit": "minor",
+              "currency": "USD",
+              "has_balance": true,
+              "unlimited": false,
+              "decimal_places": 2
+            }
+          ],
+          "source": "provider_fixture",
+          "observed_at": "2026-10-09T10:00:00Z",
+          "freshness": "stale",
+          "last_attempt_at": "2026-10-09T12:00:00Z",
+          "last_error": "balance_read_failed"
+        },
+        "spending": {
+          "value": [
+            {
+              "id": "extra",
+              "label": "Extra usage",
+              "enabled": true,
+              "used": "0",
+              "limit": null,
+              "unit": "minor",
+              "currency": "USD",
+              "resets_at": "2099-10-09T14:00:00Z",
+              "reason": null,
+              "decimal_places": 2
+            }
+          ],
+          "source": "provider_fixture",
+          "observed_at": "2026-10-09T12:00:00Z",
+          "freshness": "fresh",
+          "last_attempt_at": "2026-10-09T12:00:00Z",
+          "last_error": null
+        },
+        "resets": {
+          "value": [
+            {
+              "id": "opaque-grant",
+              "kind": "granted_reset",
+              "label": "Granted reset",
+              "available_count": 1,
+              "eligible": true,
+              "usable_now": true,
+              "reason": null,
+              "resets_at": null,
+              "weekly_limit_applies": false,
+              "grants": [
+                {
+                  "id": "grant-one",
+                  "label": "Included usage reset",
+                  "available_count": 1,
+                  "total_count": 1,
+                  "usable_now": true,
+                  "starts_at": "2026-10-09T12:00:00Z",
+                  "expires_at": "2099-10-09T14:00:00Z",
+                  "clears": [
+                    "5-hour",
+                    "weekly"
+                  ],
+                  "description": "Restores the five-hour and weekly included limits."
+                }
+              ],
+              "description": "Restores eligible included usage limits."
+            },
+            {
+              "id": "opaque-refill",
+              "kind": "session_refill",
+              "label": "5-hour session refill",
+              "available_count": null,
+              "eligible": true,
+              "usable_now": true,
+              "reason": null,
+              "resets_at": null,
+              "weekly_limit_applies": true,
+              "grants": null,
+              "description": "Restores the session window only."
+            }
+          ],
+          "source": "provider_fixture",
+          "observed_at": "2026-10-09T12:00:00Z",
+          "freshness": "fresh",
+          "last_attempt_at": "2026-10-09T12:00:00Z",
+          "last_error": null
+        },
+        "diagnostics": {
+          "value": [
+            {
+              "code": "subscription_exhausted",
+              "detail": "Included usage exhausted; balance is a separate resource."
+            }
+          ],
+          "source": "provider_fixture",
+          "observed_at": "2026-10-09T12:00:00Z",
+          "freshness": "fresh",
+          "last_attempt_at": "2026-10-09T12:00:00Z",
+          "last_error": null
+        }
+      }
+    ]
+  },
+  "receipt": {
+    "id": "reset-fixture",
+    "request": {
+      "target": {
+        "harness": "claude",
+        "profile_id": "claude-default"
+      },
+      "offer_id": "opaque-grant",
+      "grant_id": "grant-one"
+    },
+    "state": "completed",
+    "created_at": "2026-10-09T12:00:00Z",
+    "completed_at": "2026-10-09T12:00:00Z",
+    "outcome": "reset",
+    "detail": null,
+    "readback": {
+      "state": "failed",
+      "attempted_at": "2026-10-09T12:00:00Z",
+      "detail": "usage_read_failed"
+    },
+    "resources": null
+  }
+}

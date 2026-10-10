@@ -4,7 +4,7 @@ import test from 'node:test';
 import { accountScopedModelCatalog, catalogModelOptions, harnessModelsKnown, modelsGapNote,
     routeModelSuggestions, routeModelInputHtml, sessionModelOptions } from '../modules/route_editor_primitives.js';
 import { mergeModelCatalog, mergeHarnessModelCatalog } from '../modules/settings_catalog.js';
-import { sessionRouteVerdict } from '../modules/subagent_status_primitives.js';
+import { rowMeta, sessionRouteVerdict } from '../modules/subagent_status_primitives.js';
 
 const entries = [
     { value: 'claudexor::codex=only-a', id: 'only-a', source_id: 'codex', credential_profile_id: 'personal',
@@ -146,4 +146,42 @@ test('older catalogs preserve their usable suggestions without inventing per-acc
     assert.equal(accountScopedModelCatalog(legacy, 'personal'), legacy);
     assert.deepEqual(routeModelSuggestions({ kind: 'api_model', target_id: 'claudexor::codex=legacy', credential_profile_id: 'personal' },
         [{ value: 'claudexor::codex=legacy' }]), ['legacy']);
+});
+
+test('Claude [1m] availability keeps account evidence and selected bytes across consumers', () => {
+    const snapshot = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url))).status;
+    snapshot.harnesses = [{ id: 'claude', enabled: true, status: 'ok', models: [
+        { id: 'claude-future[1m]', credential_profile_id: 'failed' },
+        { id: 'claude-future', credential_profile_id: 'personal' },
+        { id: 'alias', resolved_model: 'claude-resolved[1m]', credential_profile_id: 'personal' },
+    ] }];
+    snapshot.profiles.profiles.forEach((row) => { row.profile.harness_id = 'claude'; });
+    snapshot.quota = [{ subject: { harness: 'claude', subject_id: 'personal' }, freshness: 'fresh', constraints: [] }];
+    const state = { snapshot, catalogKnown: true, accountsKnown: true, quotaKnown: true };
+    const row = { route: { kind: 'agent_session', target_id: 'claude=claude-future[1M]', credential_profile_id: '' } };
+    const verdict = sessionRouteVerdict(row, state);
+    assert.equal(verdict.label, 'Available');
+    assert.match(verdict.text, /Base model listed/);
+    assert.equal(row.route.target_id, 'claude=claude-future[1M]');
+    // The qualifier's meta line is flagged to wrap (readable without hover); other lines are not.
+    const metaState = { ...state, setting: { items: [row] } };
+    assert.equal(rowMeta(row, metaState, []).qualifier, true);
+    assert.match(rowMeta(row, metaState, []).text, /checked by the engine at session start/);
+    const exact = { route: { ...row.route, target_id: 'claude=claude-future' } };  // listed exactly: no qualifier
+    assert.equal(rowMeta(exact, { ...state, setting: { items: [exact] } }, []).qualifier, undefined);
+    const options = sessionModelOptions(snapshot.harnesses[0], 'claude-future[1m]', { snapshot });
+    assert.match(options.find((option) => option.value === 'claude-future[1m]').label, /base model listed/);
+    assert.match(sessionRouteVerdict({ route: { ...row.route, credential_profile_id: 'personal' } }, state).text, /Base model listed/);
+    assert.equal(sessionRouteVerdict({ route: { ...row.route, credential_profile_id: 'work' } }, state).label, 'Unavailable');
+    const onlyFailed = { ...state, snapshot: { ...snapshot, harnesses: [{ ...snapshot.harnesses[0], models: [snapshot.harnesses[0].models[0]] }] } };
+    assert.equal(sessionRouteVerdict(row, onlyFailed).label, 'No account');
+    const baseOnly = { ...snapshot.harnesses[0], models: snapshot.harnesses[0].models.slice(1) };
+    assert.match(sessionModelOptions(baseOnly, 'claude-future[1M]').at(-1).label, /base model listed/);
+    assert.doesNotMatch(sessionModelOptions(baseOnly, 'claude-resolved[1m]').at(-1).label, /not in discovery/);
+    for (const selected of ['claude-future[other]', 'claude-absent']) {
+        assert.equal(sessionRouteVerdict({ route: { ...row.route, target_id: `claude=${selected}` } }, state).label, 'Unavailable');
+    }
+    const unread = { ...state, snapshot: { ...snapshot, harnesses: [{ ...baseOnly, models_error: 'unread' }] } };
+    assert.equal(sessionRouteVerdict(row, unread).label, 'Not checked');
+    assert.match(sessionModelOptions({ id: 'codex', models: [{ id: 'future' }] }, 'future[1m]').at(-1).label, /not in discovery/);
 });

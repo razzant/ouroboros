@@ -76,7 +76,7 @@ def test_accounts_partial_quota_cards(direct_server_with_data):
             page.click('[data-settings-tab="agents"]')
             page.locator("#available-subagents-editor").scroll_into_view_if_needed()
             page.wait_for_function("""() => [...document.querySelectorAll('[data-subagent-status]')]
-                .map(el => el.textContent).join('|') === 'Saved · Not checked|Saved · Limit reached|Saved · Limit reached'""")
+                .map(el => el.textContent).join('|') === 'Not checked|Limit reached|Limit reached'""")
             page.locator("#available-subagents-editor").screenshot(path=str(evidence / "subagent-quota.png"))
             assert requests and set(requests) == {"GET"}
         finally:

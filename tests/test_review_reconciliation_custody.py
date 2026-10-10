@@ -44,24 +44,17 @@ def test_parallel_commit_roster_is_atomic_and_token_updates_are_exact(tmp_path):
         time.time(),
         {"fingerprint": "binding-1"},
     )
-    triad_plan = {
-        "models": ["model-a"],
-        "routes": [ReviewRouteKind.AGENT_SESSION],
-        "efforts": ["high"],
-        "slot_ids": ["slot-a"],
+    # One wave: the packet seat and the coupling-only seat are rows of the SAME
+    # roster surface, each with its own reserved operation.
+    plan = {
+        "models": ["model-a", "model-b"],
+        "routes": [ReviewRouteKind.AGENT_SESSION, ReviewRouteKind.AGENT_SESSION],
+        "efforts": ["high", "xhigh"],
+        "slot_ids": ["slot-a", "scope-a"],
+        "parts": [("change",), ("coupling",)],
     }
-    scope_slot = ReviewSlot(
-        slot_id="scope-a",
-        model="model-b",
-        effort="xhigh",
-        route=ReviewRouteKind.AGENT_SESSION,
-    )
 
-    _reserve_parallel_review_roster(
-        ctx,
-        {"row_plan": triad_plan},
-        [{"slot": scope_slot, "prepared": object(), "final": None}],
-    )
+    _reserve_parallel_review_roster(ctx, {"row_plan": plan})
 
     state = load_state(drive)
     attempt = state.attempts[-1]
@@ -71,13 +64,12 @@ def test_parallel_commit_roster_is_atomic_and_token_updates_are_exact(tmp_path):
 
     assert attempt.review_owner_session_id == current_custody_session_id()
     assert attempt.review_owner_pid == os.getpid()
-    triad = attempt.triad_raw_results[0]
-    scope = attempt.scope_raw_result["raw_results"][0]
+    triad, scope = attempt.triad_raw_results
     assert triad["operation_id"] == ctx._review_reserved_operations[
         "multi_model_review"
     ]["slot-a"]
     assert scope["operation_id"] == ctx._review_reserved_operations[
-        "scope_review"
+        "multi_model_review"
     ]["scope-a"]
 
     from ouroboros.review_custody import run_custodied_review_slots
@@ -124,7 +116,7 @@ def test_parallel_commit_roster_is_atomic_and_token_updates_are_exact(tmp_path):
             ),
             pool.submit(
                 checkpoint,
-                surface="scope_review",
+                surface="multi_model_review",
                 slot_id="scope-a",
                 operation_id=scope["operation_id"],
                 invocation_id="inv-scope",
@@ -135,10 +127,7 @@ def test_parallel_commit_roster_is_atomic_and_token_updates_are_exact(tmp_path):
 
     updated = load_state(drive).attempts[-1]
     assert updated.triad_raw_results[0]["pending_invocation_id"] == "inv-triad"
-    assert (
-        updated.scope_raw_result["raw_results"][0]["pending_invocation_id"]
-        == "inv-scope"
-    )
+    assert updated.triad_raw_results[1]["pending_invocation_id"] == "inv-scope"
 
 
 def test_first_paid_wave_keeps_empty_and_partial_reserved_rosters_in_custody():

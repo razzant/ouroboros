@@ -40,6 +40,21 @@ def restore_unreadable(host):  # noqa: F811
     return path, original
 
 
+def resume_after_app_stop(host, *task_ids):  # noqa: F811
+    """Owner-approved Quit/crash policy: verification healing alone cannot dispatch.
+
+    Tests of subsequent admission explicitly Resume the named accepted tasks;
+    the real selection still checks all independent no-dispatch/money guards.
+    """
+    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+
+    for task_id in task_ids:
+        row = next(task for task in host.pending if task["id"] == task_id)
+        assert budget_hold_fact(row)["reason"] == HOLD_SAVED_WORK
+        answer = queue.resume_budget_paused_task(task_id)
+        assert answer["ok"], answer
+
+
 def worker(host, monkeypatch):  # noqa: F811
     sent = []
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=lambda _event: None))
@@ -73,6 +88,9 @@ def test_same_id_recovers_once_with_original_resources_and_visible_wait(host, tm
         assert queue.restore_pending_from_snapshot() == 1
         assert host.pending[0]["_project_admission"] == prepared["_project_admission"]
     path.write_bytes(original)
+    workers.assign_tasks()
+    assert not sent
+    resume_after_app_stop(host, "held")
     workers.assign_tasks()
     workers.assign_tasks()
     assert [row["id"] for row in sent] == ["held"]
@@ -166,6 +184,7 @@ def test_snapshot_clear_failure_retains_hold_then_revalidates(host, tmp_path, mo
     path, original = restore_unreadable(host)
     path.write_bytes(original)
     sent = worker(host, monkeypatch)
+    resume_after_app_stop(host, "held")
     hold = copy.deepcopy(host.pending[0]["_project_admission_restore_hold"])
     with monkeypatch.context() as patch:
         patch.setattr(queue, "persist_queue_snapshot", lambda **_k: False)
@@ -193,6 +212,7 @@ def test_batch_revalidation_reads_registry_once_and_healthy_sibling_progresses(h
     assert reads == [True] and [row["id"] for row in sent] == ["main"]
     path.write_bytes(original)
     workers.WORKERS[0].busy_task_id = None
+    resume_after_app_stop(host, "held", "second")
     workers.assign_tasks()
     assert reads == [True, True] and [row["id"] for row in sent] == ["main", "held"]
 
@@ -206,6 +226,7 @@ def test_held_row_recovers_beside_a_room_with_malformed_routing(host, tmp_path, 
     next(row for row in data["projects"] if row["id"] == "other")["routing_generation"] = "0"
     path.write_text(json.dumps(data), encoding="utf-8")
     sent = worker(host, monkeypatch)
+    resume_after_app_stop(host, "held")
     workers.assign_tasks()
     workers.assign_tasks()
     assert [row["id"] for row in sent] == ["held"] and not host.pending
@@ -237,6 +258,9 @@ def test_first_restore_of_old_project_row_keeps_original_custody(host, tmp_path,
     assert host.pending[0]["_project_admission_restore_hold"]
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
+    assert not sent
+    resume_after_app_stop(host, "held")
+    workers.assign_tasks()
     assert [task["id"] for task in sent] == ["held"]
 
 
@@ -251,6 +275,8 @@ def test_schedule_requires_its_positive_original_no_dispatch_receipt(host, tmp_p
     path, original = restore_unreadable(host)
     sent = worker(host, monkeypatch)
     path.write_bytes(original)
+    if dispatch == "none":
+        resume_after_app_stop(host, "held")
     workers.assign_tasks()
     if dispatch == "none":
         assert [row["id"] for row in sent] == ["held"]
@@ -286,6 +312,8 @@ def test_room_rebind_and_back_cannot_redirect_original_preparation(host, tmp_pat
     if back:
         registry.update_project(host.root, "target", working_dir=str(tmp_path / "prepared"))
     sent = worker(host, monkeypatch)
+    if frozen:
+        resume_after_app_stop(host, "held")
     workers.assign_tasks()
     workers.assign_tasks()
     if frozen:

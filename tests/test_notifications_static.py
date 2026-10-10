@@ -111,8 +111,9 @@ def test_policy_has_one_canonical_home():
     assert "## 9. Notifications" in design
     assert "ONE canonical statement" in design
     development = _read("docs/development/03-module-size-and-complexity.md")
-    assert "notifications ring for live events only" in development
-    assert "`docs/DESIGN.md` §9" in development, "DEVELOPMENT points at the policy, never restates it"
+    assert "docs/DESIGN.md" in development and "§9" in development, (
+        "DEVELOPMENT points at the policy, never restates it"
+    )
     architecture = _read("docs/architecture/03-web-ui-pages-and-buttons.md")
     assert "web/modules/notifications.js" in architecture
 

@@ -1,13 +1,9 @@
-"""Task pacing SSOT (v6.54.4): ONE urgency system for a task's time budget.
+"""Task pacing SSOT: time milestones, intrinsic pacing and review-budget inputs.
 
-Absorbs the milestone CONTENT logic that lived inline in ``loop.py`` (deadline
-50/25/10% TIME BUDGET notes and the v6.53.0 intrinsic no-deadline pacing) and
-adds the acceptance-review budget layer: the finalization reserve, a budget
-snapshot, and the improvement-pass gates driven by ``task_contract.budget_profile``
-(``improvement_policy`` fixed | adaptive; the legacy ``until_deadline`` /
-``stall_rounds_threshold`` aliases were removed in the 7.0 ABI window, Q10=A).
+Owns milestone notes, the finalization reserve, budget snapshots and improvement-pass
+gates driven by ``task_contract.budget_profile`` (``improvement_policy`` fixed | adaptive).
 
-Design contract (owner-decided, sprint v6.55):
+Design contract:
 - Pacing notes fire only on milestone triggers, never per round (prompt-cache
   friendly), their wording is TASK-NEUTRAL, and note identification is by the
   checkpoint metadata — never a regex strip of transcript text.
@@ -16,6 +12,10 @@ Design contract (owner-decided, sprint v6.55):
   obligation gate unconditionally — a deadline never hangs on review passes.
 - ``loop.py`` keeps only transport (message append + checkpoint emit); every
   threshold, text, and time computation lives here.
+- Time, cost and intrinsic notes carry ``resource_facts`` (``with_resource_facts``):
+  per-tool call/error counts, producer-reported durations, own/tree/delegated ledger
+  buckets and the unreserved global remainder. Only tool name, error flag and reported
+  duration are read; no argv, stdout or sleep/poll classification selects behaviour.
 """
 
 from __future__ import annotations
@@ -312,8 +312,11 @@ _TIME_BUDGET_THRESHOLDS = ((0.50, "50%"), (0.25, "25%"), (0.10, "10%"))
 # contract's budget_profile.cost_hard_stop_pct, not a global).
 _COST_BUDGET_THRESHOLDS = ((0.50, "50%"), (0.25, "25%"), (0.10, "10%"))
 _COST_WRAPUP_SPENT_FRACTION = 0.80
-# The historical in-task hard stop: half the budget remaining at task start.
-_DEFAULT_COST_HARD_STOP_PCT = 50
+# Disclosed bases: no default in-task stop (owner 2026-10-07, #1128: no share of the
+# wallet, no margin before a cap); and an inherited pre-upgrade number whose author is
+# unreadable now, kept provisionally and never widened (a compatibility gap, named).
+COST_BASIS_NO_DEFAULT_STOP = "no_default_cost_stop"
+COST_BASIS_POLICY_UNVERIFIED = "legacy_policy_unverified"
 
 # Typed cost-ceiling states (v6.91): ``None`` is deliberately NOT overloaded to
 # mean both "unlimited" and "exhausted" — a $0.50 bench root cap under a $3
@@ -323,23 +326,24 @@ COST_CEILING_ACTIVE = "active"
 COST_CEILING_EXHAUSTED_SOFT_LAND = "exhausted_soft_land"
 COST_CEILING_UNKNOWN = "unknown"
 
-# Planning margin subtracted from the root cap before the graceful in-task stop:
-# an ABSOLUTE emit-window's worth of money (~2 forced-wrap-up call reservation
-# bounds), NEVER a percentage of the cap (a pct reserve amputated ~54 min from a
-# 6h task — v6.54.4 adversarial r1, see effective_finalization_reserve_sec) and
-# NOT ledger-held — the ledger fence still binds at the full cap; the margin
-# only pulls the graceful stop earlier so the wrap-up call fits under the fence.
+# Planning margin an EXPLICIT ``cost_hard_stop_pct`` profile subtracts from the
+# root cap before its graceful in-task stop (authored experiment math, verbatim;
+# ordinary tasks have none, owner 2026-10-07): an ABSOLUTE emit-window's worth of
+# money (~2 forced-wrap-up call reservation bounds), NEVER a percentage of the cap
+# (a pct reserve amputated ~54 min from a 6h task — v6.54.4 adversarial r1, see
+# effective_finalization_reserve_sec) and NOT ledger-held: the fence binds at the full cap.
 _WRAPUP_CALL_RESERVATION_BOUND_USD = 1.50
 COST_PLANNING_MARGIN_USD = max(1.0, 2.0 * _WRAPUP_CALL_RESERVATION_BOUND_USD)
 
 
-# Deciding-spend basis vocabulary (v6.91). The tree-accounted number is the
-# authority for every rooted task (with a root cap the ledger fence counts the
-# TREE; without one the in-task ceiling still decides on the subtree); when it
+# Deciding-spend basis vocabulary (v6.91). The tree's KNOWN (settled) spend is
+# the authority for every rooted task (#1487: with a root cap the ledger fence
+# counts the TREE's known spend; without one the in-task ceiling still decides
+# on the subtree); open holds are disclosed beside it, never counted. When it
 # is momentarily unavailable the own-cost number still decides — but the
 # substitution is DISCLOSED as a lower bound, never silent (BIBLE P1). Only a
 # task with no root at all has no tree to read, so its own cost is complete.
-SPEND_BASIS_TREE = "tree_accounted"
+SPEND_BASIS_TREE = "tree_known"
 SPEND_BASIS_OWN_TREE_UNKNOWN = "own_fallback_tree_unknown"
 SPEND_BASIS_OWN_NO_TREE_CAP = "own_only_no_tree_cap"
 
@@ -371,23 +375,33 @@ class CostCeiling:
     """Typed in-task cost-stop state, resolved ONCE at loop start.
 
     ``state``:
-    - ``disabled``: no in-task stop — explicit ``cost_hard_stop_pct=0`` (bench
-      contract, e.g. SWE-Pro) or no finite budget on either axis (e.g. GAIA);
-      the whole cost axis stays silent.
-    - ``active``: ``ceiling_usd`` is the root's strictly-positive original
-      graceful-stop point, or a disclosed legacy local resolution when the
-      original carrier is unavailable.
-    - ``exhausted_soft_land``: the root cap leaves no room above the planning
-      margin — the loop must enter its graceful best-effort wrap-up
-      immediately; it must NEVER run uncapped.
-    - ``unknown``: resolution inputs errored; the axis stays silent but the
-      gap is represented, never filled in (BIBLE P1)."""
+    - ``disabled``: no in-task stop — an ordinary task (no explicit
+      ``cost_hard_stop_pct``, no producer allowance: owner 2026-10-07), an
+      explicit ``cost_hard_stop_pct=0`` (bench contract, e.g. SWE-Pro), or no
+      finite budget on either axis (e.g. GAIA); the ledger fences still bind.
+    - ``active``: ``ceiling_usd`` is a real early stop: an explicit profile's
+      authored point or a producer's allowance (a wake's daily remainder), also
+      as a member's inherited number, or one whose root authority is unreadable
+      now (``legacy_policy_unverified``).
+    - ``exhausted_soft_land``: an explicit profile whose root cap leaves no room
+      above its planning margin — the loop must enter its graceful best-effort
+      wrap-up immediately; it must NEVER run uncapped.
+    - ``unknown``: resolution inputs errored; the axis stays silent and only
+      the hard money limits bind, the gap represented, never filled in (P1)."""
 
     state: str
     ceiling_usd: Optional[float] = None
     root_cap_usd: Optional[float] = None
     planning_margin_usd: Optional[float] = None
     basis: str = ""
+
+
+def _positive(value: Any) -> Optional[float]:
+    try:
+        number = None if value is None or isinstance(value, bool) else float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number is not None and math.isfinite(number) and number > 0 else None
 
 
 def resolve_cost_ceiling(
@@ -400,39 +414,44 @@ def resolve_cost_ceiling(
 ) -> CostCeiling:
     """The in-task cost stop, computed ONCE at loop start (typed; v6.91).
 
-    The GLOBAL component keeps the historical semantics: ``cost_hard_stop_pct``
-    None -> 50% of the global remaining at task start; 0 -> the whole in-task
-    stop is disabled (bench contract). The ROOT component is the per-task tree
-    cap (``OUROBOROS_PER_TASK_COST_USD`` -> ``UsageScope.root_limit_usd``, the
-    SAME value the ledger fence enforces) minus the ABSOLUTE planning margin —
-    deliberately NOT pct-scaled (pct applies to the global axis only; scaling
-    the owner's chosen cap would silently halve it). The ceiling is
-    min(available components); NEVER a computed $0 — a root cap at or below the
-    margin resolves to ``exhausted_soft_land`` instead.
+    Without an explicit ``cost_hard_stop_pct`` the host has no stop of its own
+    (owner 2026-10-07, #1128): only a producer allowance stops early, at its
+    actual value — a ROOT's ``root_ceiling_usd`` (a wake's daily remainder,
+    ``producer_allowance``) or a member's inherited number (``root_resolved_ceiling``;
+    the caller decides which carry that authority); otherwise ``disabled``. The
+    ledger fences still bind every send at the full limits, on known spend.
 
-    An enabled non-root member keeps the propagated original root ceiling;
-    a later global balance never re-mints that early threshold. A ROOT may
-    carry a producer's own ``root_cost_ceiling_usd`` below its hard cap (a
-    consciousness wake-up: what is left of its allowance); it lands the same
-    planning margin early, and at or below the margin it is an immediate soft
-    landing, exactly like a cap. Actual global
-    and root dispatch fences still bind independently. Legacy missing carriers
-    retain a disclosed local resolution, never a guessed original root fact.
+    An EXPLICIT percentage keeps the authored math verbatim. The GLOBAL
+    component is that share of the global remaining at task start; 0 disables
+    the whole in-task stop (bench contract). The ROOT component is the per-task
+    tree cap (``OUROBOROS_PER_TASK_COST_USD`` -> ``UsageScope.root_limit_usd``,
+    the SAME value the ledger fence enforces) minus the ABSOLUTE planning margin
+    — deliberately NOT pct-scaled. The ceiling is min(available components);
+    NEVER a computed $0 — a root cap at or below the margin resolves to
+    ``exhausted_soft_land`` instead. An enabled non-root member keeps the
+    propagated original root ceiling; a later global balance never re-mints
+    that early threshold. A ROOT's producer ceiling lands the same planning
+    margin early under an explicit profile. Legacy missing carriers retain a
+    disclosed local resolution, never a guessed original root fact.
 
-    Stated plainly rather than implied: the ``room <= 0`` bail is the owner's
-    "$0 ceiling" rule EXACTLY, no wider. A cap just ABOVE the margin therefore
-    yields a real but tiny ceiling — ``root_cap_usd = COST_PLANNING_MARGIN_USD
-    + 0.01`` gives ``ceiling_usd == 0.01``, which the first round's spend
-    crosses — so a positive ``ceiling_usd`` is not by itself a promise of
-    working room. Both numbers are disclosed on the carrier (``ceiling_usd``,
-    ``root_cap_usd``, ``planning_margin_usd``) and printed in the stop text, so
-    a reader sees the tiny ceiling instead of inferring a healthy one. Widening
-    the bail into a minimum-room FLOOR would move caps the owner deliberately
-    allows into immediate soft-land; that is an owner call, not a code one."""
+    Stated plainly rather than implied: under an explicit profile the
+    ``room <= 0`` bail is the owner's "$0 ceiling" rule EXACTLY, no wider. A cap
+    just ABOVE the margin therefore yields a real but tiny ceiling —
+    ``root_cap_usd = COST_PLANNING_MARGIN_USD + 0.01`` gives
+    ``ceiling_usd == 0.01``, which the first round's spend crosses — so a
+    positive ``ceiling_usd`` is not by itself a promise of working room. Both
+    numbers are disclosed on the carrier (``ceiling_usd``, ``root_cap_usd``,
+    ``planning_margin_usd``) and printed in the stop text."""
     try:
         pct = profile.get("cost_hard_stop_pct")
         if pct is None:
-            pct = _DEFAULT_COST_HARD_STOP_PCT
+            cap = _positive(root_cap_usd)
+            allowance = _positive(root_ceiling_usd)
+            if allowance is None:
+                return CostCeiling(state=COST_CEILING_DISABLED, root_cap_usd=cap,
+                                   basis=COST_BASIS_NO_DEFAULT_STOP)
+            return CostCeiling(state=COST_CEILING_ACTIVE, ceiling_usd=allowance, root_cap_usd=cap,
+                               basis="root_resolved_ceiling" if non_root_member else "producer_allowance")
         pct = max(0, min(100, int(pct)))
         if pct == 0:
             return CostCeiling(
@@ -504,22 +523,61 @@ def resolve_cost_ceiling(
         return CostCeiling(state=COST_CEILING_UNKNOWN, basis="resolve_error")
 
 
-def resolve_task_cost_ceiling(ctx: Any, budget_remaining_usd: Optional[float]) -> CostCeiling:
-    """The typed in-task cost stop of ONE task, resolved once per task.
+# Who authored a task's early cost stop: an explicit percentage profile, a
+# producer allowance, nobody (the removed default), or unreadable.
+COST_STOP_EXPLICIT, COST_STOP_PRODUCER, COST_STOP_NONE, COST_STOP_UNKNOWN = (
+    "explicit", "producer", "none", "unknown")
 
-    The root cap comes from the bound usage scope -- the SAME
-    ``OUROBOROS_PER_TASK_COST_USD``-derived value the ledger fence enforces
-    (``agent.py`` wires it as ``UsageScope.root_limit_usd``), so the graceful
-    stop and the fence can never disagree about the cap. The same scope says
-    whether this task is the root of its tree or one of its members."""
+
+def _root_cost_stop_authority(scope: Any) -> Tuple[str, Optional[float]]:
+    """Who authored the number a member inherited, from the root's canonical row.
+
+    ONE strict read, only for the ambiguous member (an inherited number, no
+    explicit percentage of its own): the number cannot say whether the root took
+    it from an explicit profile (returned: that percentage), a producer allowance
+    (returned: its actual value) or the removed default (a child scheduled before
+    the upgrade; a readable root with neither). A root row that cannot be read,
+    or lacks its contract, is ``unknown``: the caller keeps the number, never
+    guessing either way."""
+    from ouroboros.contracts.task_contract import normalize_budget_profile
+    from ouroboros.task_results import load_task_result
+
+    try:
+        row = load_task_result(pathlib.Path(scope.drive_root), scope.root_task_id, strict=True)
+    except Exception:
+        log.warning("Root %s cost-stop authority unreadable", getattr(scope, "root_task_id", ""), exc_info=True)
+        return COST_STOP_UNKNOWN, None
+    contract = row.get("task_contract") if isinstance(row, dict) else None
+    if not isinstance(contract, dict):
+        return COST_STOP_UNKNOWN, None
+    pct = normalize_budget_profile(contract.get("budget_profile")).get("cost_hard_stop_pct")
+    if pct is not None:
+        return COST_STOP_EXPLICIT, float(pct)
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    producer = _positive(row.get("root_cost_ceiling_usd")) or _positive(metadata.get("root_cost_ceiling_usd"))
+    return (COST_STOP_PRODUCER, producer) if producer is not None else (COST_STOP_NONE, None)
+
+
+def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:
+    """The policy authority and resolver inputs of ONE task: the one reading a start
+    (``resolve_task_cost_ceiling``), a cold restore (``restore_cost_ceiling``) and
+    the Resume refresh share. Authority is never inferred from a number, a saved
+    basis label, or a child's local ``None``."""
     root_cap = None
     root_ceiling = None
     non_root_member = False
+    scope = None
     try:
         from ouroboros.usage_accounting import current_usage_scope
 
         scope = current_usage_scope()
         if scope is not None:
+            # Who authored the stop is copied first: the group projection below can fail (a
+            # store timeout), and that must leave the scope's carried cap, never erase the stop.
+            root_ceiling = getattr(scope, "root_cost_ceiling_usd", None)
+            non_root_member = bool(
+                scope.root_task_id and scope.task_id and scope.root_task_id != scope.task_id
+            )
             root_cap = getattr(scope, "root_limit_usd", None)
             if root_cap is None:  # a Continue's successor: the original root's carried group cap
                 root_cap = getattr(scope, "billing_group_limit_usd", None)
@@ -529,19 +587,105 @@ def resolve_task_cost_ceiling(ctx: Any, budget_remaining_usd: Optional[float]) -
                                                root_limit=scope.root_limit_usd)
                 if snapshot is not None:
                     root_cap = snapshot["root_limit_usd"]
-            root_ceiling = getattr(scope, "root_cost_ceiling_usd", None)
-            non_root_member = bool(
-                scope.root_task_id and scope.task_id and scope.root_task_id != scope.task_id
-            )
     except Exception:
-        log.debug("Usage scope unavailable for cost ceiling resolution", exc_info=True)
+        log.debug("Usage scope or group cap projection unavailable for cost ceiling resolution", exc_info=True)
+    profile = resolve_budget_profile(ctx)
+    if profile.get("cost_hard_stop_pct") is not None:
+        authority = COST_STOP_EXPLICIT
+    elif _positive(root_ceiling) is None:
+        authority, root_ceiling = COST_STOP_NONE, None
+    elif not non_root_member:
+        authority = COST_STOP_PRODUCER
+    else:
+        authority, value = _root_cost_stop_authority(scope)
+        if authority == COST_STOP_EXPLICIT:
+            # The root's authored percentage governs the member it handed its number to.
+            profile = {**profile, "cost_hard_stop_pct": int(value)}
+        elif authority != COST_STOP_UNKNOWN:
+            root_ceiling = value
+    return {"authority": authority, "profile": profile, "root_cap_usd": root_cap,
+            "non_root_member": non_root_member, "root_ceiling_usd": root_ceiling}
+
+
+def _resolve_from_inputs(inputs: Dict[str, Any], budget_remaining_usd: Optional[float]) -> CostCeiling:
+    if inputs["authority"] == COST_STOP_UNKNOWN:
+        # Neither removed as a default nor confirmed as authored: the number the
+        # member already carries keeps binding, labelled, until its root is readable.
+        return CostCeiling(state=COST_CEILING_ACTIVE, ceiling_usd=_positive(inputs["root_ceiling_usd"]),
+                           root_cap_usd=_positive(inputs["root_cap_usd"]), basis=COST_BASIS_POLICY_UNVERIFIED)
     return resolve_cost_ceiling(
         budget_remaining_usd,
-        resolve_budget_profile(ctx),
-        root_cap_usd=root_cap,
-        non_root_member=non_root_member,
-        root_ceiling_usd=root_ceiling,
+        inputs["profile"],
+        root_cap_usd=inputs["root_cap_usd"],
+        non_root_member=inputs["non_root_member"],
+        root_ceiling_usd=inputs["root_ceiling_usd"],
     )
+
+
+def resolve_task_cost_ceiling(ctx: Any, budget_remaining_usd: Optional[float]) -> CostCeiling:
+    """The typed in-task cost stop of ONE task, resolved once per task.
+
+    The root cap comes from the bound usage scope -- the SAME
+    ``OUROBOROS_PER_TASK_COST_USD``-derived value the ledger fence enforces
+    (``agent.py`` wires it as ``UsageScope.root_limit_usd``), so the graceful
+    stop and the fence can never disagree about the cap. The same scope says
+    whether this task is the root of its tree or one of its members, and which
+    authority (``_cost_stop_inputs``) stands behind any early stop."""
+    inputs = _cost_stop_inputs(ctx)
+    _remember_cost_stop_policy(ctx, inputs)
+    return _resolve_from_inputs(inputs, budget_remaining_usd)
+
+
+def _remember_cost_stop_policy(ctx: Any, inputs: Dict[str, Any]) -> None:
+    try:
+        setattr(ctx, "_cost_stop_policy", dict(inputs))
+    except Exception:
+        log.debug("Cost-stop policy could not be stashed on the tool context", exc_info=True)
+
+
+def cost_stop_policy(ctx: Any) -> Dict[str, Any]:
+    """The authority and resolver inputs behind this task's ceiling: the read its
+    latest start or restore made (read now only when neither did in this process)."""
+    policy = getattr(ctx, "_cost_stop_policy", None)
+    if not isinstance(policy, dict):
+        policy = _cost_stop_inputs(ctx)
+        _remember_cost_stop_policy(ctx, policy)
+    return policy
+
+
+def cost_stop_authority(ctx: Any) -> str:
+    """The authority behind this task's ceiling (``cost_stop_policy``)."""
+    return str(cost_stop_policy(ctx)["authority"])
+
+
+def restore_cost_ceiling(ctx: Any, saved: Any) -> Optional[CostCeiling]:
+    """The ceiling a cold continuation (budget pause, owner-wait restart) resumes under.
+
+    Every restore re-reads the start's authority, never the saved number alone:
+    an explicit percentage keeps its saved threshold (Q10 Resume moves it later);
+    a producer allowance is re-read at its actual value (no old margin kept); a
+    stop saved under the removed default is dropped, disclosed in the basis; an
+    unreadable authority keeps the bound it had (``legacy_policy_unverified``),
+    never re-armed or widened, until a later restore can read it. ``None`` only
+    for an explicit policy with nothing saved: the loop resolves it as at any
+    start. Callers assign the result."""
+    previous = CostCeiling(**saved) if isinstance(saved, dict) else None
+    inputs = _cost_stop_inputs(ctx)
+    _remember_cost_stop_policy(ctx, inputs)
+    if inputs["authority"] == COST_STOP_EXPLICIT:
+        return previous
+    if inputs["authority"] == COST_STOP_UNKNOWN and previous is not None:
+        if previous.state not in {COST_CEILING_ACTIVE, COST_CEILING_EXHAUSTED_SOFT_LAND}:
+            return previous
+        basis = previous.basis if previous.basis.startswith(COST_BASIS_POLICY_UNVERIFIED) else (
+            f"{COST_BASIS_POLICY_UNVERIFIED}({previous.basis})")
+        return replace(previous, basis=basis)
+    restored = _resolve_from_inputs(inputs, None)
+    if (restored.state == COST_CEILING_DISABLED and previous is not None
+            and previous.state in {COST_CEILING_ACTIVE, COST_CEILING_EXHAUSTED_SOFT_LAND}):
+        removed = "soft_land" if previous.ceiling_usd is None else f"${float(previous.ceiling_usd):.2f}"
+        restored = replace(restored, basis=f"{restored.basis}(saved default stop {removed} removed)")
+    return restored
 
 
 def cost_ceiling_disclosure(ceiling: CostCeiling) -> Dict[str, Any]:
@@ -554,14 +698,18 @@ def cost_ceiling_disclosure(ceiling: CostCeiling) -> Dict[str, Any]:
         "basis": ceiling.basis,
         "allocation": "unreserved_shared_pool",
         "rule": (
-            "The graceful in-task cost stop of THIS task's whole tree, resolved once at task "
-            "start: the root resolves min(configured share of global remaining, hard tree cap "
-            "minus a planning margin); enabled descendants retain that original number. "
-            "Legacy members without it disclose their local resolution. Crossing it asks for a "
-            "best-effort final answer; the ledger fence at the full cap still binds "
-            "independently. This threshold reserves no money: concurrent tasks share the "
-            "global pool and may consume it before this task reaches its ceiling. "
-            "Budget checkpoints report observed spend and unreserved shared headroom."
+            "The early in-task cost stop of THIS task's whole tree, if any. Ordinary tasks have none: new paid calls "
+            "are refused only when known spend (confirmed and estimated, subagents included) reaches the hard tree "
+            "cap, the whole-work group cap or the shared Total budget. An active stop is an explicit "
+            "cost_hard_stop_pct profile's point (resolved once at task start, retained by descendants; spend over it "
+            "stops) or a producer's allowance such as a wake's daily remainder (known spend reaching it stops). At "
+            "any of these a task with an exact continuation pauses with its work saved; an actor without one ends "
+            "budget_exhausted instead (only an explicit profile's stop may still buy it one final answer, fenced by "
+            "the hard limits; at any other stop the host's notice ends it with no paid recap). "
+            "Basis legacy_policy_unverified: a number inherited before this version whose author is unreadable now, "
+            "kept provisionally, never widened, re-read at the next start or restore. Nothing here reserves money: "
+            "concurrent tasks share the global pool, and calls in flight or charged late can take spend past any "
+            "limit. Checkpoints report known spend, open holds beside it, and unreserved shared headroom."
         ),
     }
 
@@ -584,11 +732,12 @@ def in_task_cost_ceiling_disclosure(ctx: Any, budget_remaining_usd: Optional[flo
 def tree_spend_line(tree_info: Any, ceiling: Optional[CostCeiling] = None) -> str:
     """The one live tree-spend line the checkpoint and the pacing note share.
 
+    Known (settled) spend decides; open holds ride beside it, never added in.
     Names the BINDING bound: the in-task ceiling when one is active (that is
     what stops the task first), with the hard tree cap the ledger fence
     enforces beside it. Empty string when tree accounting is unavailable --
     unknown is never rendered as $0."""
-    if not isinstance(tree_info, dict) or tree_info.get("accounted_usd") is None:
+    if not isinstance(tree_info, dict) or tree_info.get("settled_usd") is None:
         return ""
     raw_cap = tree_info.get("root_limit_usd")
     cap = float(raw_cap) if raw_cap is not None else None
@@ -603,9 +752,11 @@ def tree_spend_line(tree_info: Any, ceiling: Optional[CostCeiling] = None) -> st
             bound += f" (${cap:.2f} hard tree cap)"
     else:
         bound = f" of ${cap:.2f} hard tree cap" if cap is not None else ""
+    known = float(tree_info["settled_usd"])
+    holds = max(0.0, float(tree_info.get("accounted_usd") or known) - known)
     return (
-        f"Task tree spend: ~${float(tree_info['accounted_usd']):.2f}{bound} "
-        "(ledger-accounted incl. in-flight holds, subagents included; ceiling is unreserved)"
+        f"Task tree spend: ~${known:.2f}{bound} "
+        f"(known, subagents included; +${holds:.2f} open holds not counted; ceiling is unreserved)"
     )
 
 
@@ -767,6 +918,7 @@ def prepared_wrapup_candidate(
         context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
         overrides=waiter.overrides if waiter else None)
 
+    # Named residual: reads the task's refused-image memory, never recovers a first refusal (vision_routing).
     send_messages = _prepare_main_messages(
         messages, model=ctx.active_model, llm=ctx.llm,
         accumulated_usage=ctx.accumulated_usage,
@@ -778,9 +930,18 @@ def prepared_wrapup_candidate(
         model_role=role,
         model_account_override=account,
     )
+    from ouroboros.loop_forced_finalization import _forced_physical_context
+    from ouroboros.usage_accounting import bind_physical_attempt_context
+
+    # ONE Main measurement of the final input sizes the priced copy here and the admitted send
+    # (``loop_forced_finalization._call_forced_model_once`` reads it back): same bound context, same allowance.
+    physical = _forced_physical_context(ctx, send_messages)
+    if owner_ctx is not None:
+        owner_ctx._forced_physical_context = physical
     # The forced send seals Main's clock line; its priced copy carries one too.
     with MainSendClock(main_clock_policy(getattr(owner_ctx, "task_metadata", {}),
-                                         task_type=str(getattr(ctx, "task_type", "") or ""))).bound():
+                                         task_type=str(getattr(ctx, "task_type", "") or ""))).bound(), \
+            bind_physical_attempt_context(physical):
         request = prospective_wrapup_attempt_request(
             llm=ctx.llm, messages=send_messages, model=ctx.active_model,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
@@ -921,10 +1082,10 @@ def build_cost_budget_note(
     budget) keeps the axis silent. ADVISORY only — the hard stop itself lives
     in the loop's budget gate, not here (P5).
 
-    ``tree_cost_usd`` (v6.91) is the root subtree's ledger-accounted spend
-    (settled + reserved + unresolved holds, subagents included) — when known it
-    is the DECIDING spend, because the ledger fence counts the tree, not this
-    task's own calls (waves died at tree $84-94 while own showed $41-49).
+    ``tree_cost_usd`` (v6.91) is the root subtree's KNOWN (settled) spend,
+    subagents included — when known it is the DECIDING spend, because the
+    ledger fence counts the tree, not this task's own calls (waves died at tree
+    $84-94 while own showed $41-49); open holds are not spending (#1487).
     ``task_cost`` (own accumulated cost) stays the diagnostic line. Unknown tree
     spend falls back to own cost — never coerced to $0, and never SILENTLY
     substituted: under a ``root_cap_usd`` the fallback is a lower bound and the
@@ -950,11 +1111,11 @@ def build_cost_budget_note(
         own_text = f"; own calls ~${task_cost:.2f}" if task_cost is not None else ""
         spent_line = (
             f"Spent this task tree: ~${deciding:.2f} "
-            f"(ledger-accounted incl. in-flight holds, subagents included{own_text})"
+            f"(known spend, subagents included; open holds not counted{own_text})"
         )
     elif spend_basis == SPEND_BASIS_OWN_TREE_UNKNOWN:
         spent_line = (
-            f"Spent this task: ~${deciding:.2f} (OWN calls only — the tree-accounted "
+            f"Spent this task: ~${deciding:.2f} (OWN calls only — the tree's known "
             "total is unavailable right now, so subagent spend is NOT included; treat "
             "this as a lower bound against the tree cap)"
         )
@@ -1000,11 +1161,11 @@ def build_cost_budget_note(
         )
         _tree_tail = _TREE_FLUSH_SENTENCE if _workspace_delivery(ctx) else ""
         if tree_basis:
-            _tree_amount = f"tree-accounted ~${deciding:.2f} of ~${base:.2f}"
+            _tree_amount = f"tree known spend ~${deciding:.2f} of ~${base:.2f}"
         elif spend_basis == SPEND_BASIS_OWN_TREE_UNKNOWN:
             _tree_amount = (
                 f"~${deciding:.2f} of ~${base:.2f}, counting OWN calls only — the "
-                "tree-accounted total is unavailable right now, so this is a lower bound"
+                "tree's known total is unavailable right now, so this is a lower bound"
             )
         else:
             _tree_amount = f"~${deciding:.2f} of ~${base:.2f}"
@@ -1122,9 +1283,9 @@ def _acceptance_rails_line_inner(
                 projection = usage_projection(
                     scope.drive_root, global_limit_usd=scope.global_limit_usd,
                 )
-                root = (projection.get("by_root") or {}).get(scope.root_task_id) or {}
+                root = usage_projection(scope.drive_root, root_task_id=scope.root_task_id)
                 remaining = projection.get("remaining_known_usd")
-                money_bits.append(_headroom_phrase(remaining, rails.get("cost_ceiling_usd"), root.get("accounted_usd")))
+                money_bits.append(_headroom_phrase(remaining, rails.get("cost_ceiling_usd"), root.get("settled_usd")))
         except Exception:
             log.debug("rails: budget projection unavailable", exc_info=True)
         if money_bits:
@@ -1286,8 +1447,8 @@ def build_intrinsic_pacing_note(
     no deterministic time/round/cost stop (finalization stays P5 judgment).
 
     ``tree_cost_provider`` (v6.91): a zero-arg callable returning the root
-    subtree's accounting snapshot (``{"accounted_usd", "root_limit_usd"}`` or
-    None). Called ONLY when the note actually fires (a rare, already
+    subtree's accounting snapshot (``{"settled_usd", "accounted_usd",
+    "root_limit_usd"}`` or None). Called ONLY when the note actually fires (a rare, already
     cache-breaking surface — never per round), so a fresh ledger read at most
     once per pacing interval keeps the number honest after long child waits.
     Unknown stays "unknown", never $0."""
@@ -1306,6 +1467,7 @@ def build_intrinsic_pacing_note(
     cost = float(raw_cost) if raw_cost is not None else None
     cost_text = f"~${cost:.2f}" if cost is not None else "unknown"
     tree_line = ""
+    tree_known: Optional[float] = None
     tree_accounted: Optional[float] = None
     tree_cap: Optional[float] = None
     if callable(tree_cost_provider):
@@ -1315,7 +1477,8 @@ def build_intrinsic_pacing_note(
             tree_info = None
         rendered = tree_spend_line(tree_info, getattr(ctx, "_cost_ceiling", None))
         if rendered:
-            tree_accounted = float(tree_info["accounted_usd"])
+            tree_known = float(tree_info["settled_usd"])
+            tree_accounted = float(tree_info.get("accounted_usd") or tree_known)
             raw_cap = tree_info.get("root_limit_usd")
             tree_cap = float(raw_cap) if raw_cap is not None else None
             tree_line = f" | {rendered}"
@@ -1338,7 +1501,8 @@ def build_intrinsic_pacing_note(
         "rounds": int(round_idx),
         "cost": round(cost, 4) if cost is not None else None,
     }
-    if tree_accounted is not None:
+    if tree_known is not None:
+        checkpoint["tree_known_usd"] = round(tree_known, 4)
         checkpoint["tree_accounted_usd"] = round(tree_accounted, 4)
         checkpoint["tree_cap_usd"] = round(tree_cap, 4) if tree_cap is not None else None
     ceiling = getattr(ctx, "_cost_ceiling", None)
@@ -1429,7 +1593,7 @@ def with_resource_facts(note: PacingNote, ctx: Any, usage: Optional[Dict[str, An
             log.debug("Pacing spend facts unavailable", exc_info=True)
     facts = {"tools": tools, "spend": spend}
     return PacingNote(
-        text=note.text + "\nObserved resource facts (accounted money includes open holds):\n"
+        text=note.text + "\nObserved resource facts (known spend is settled_usd; accounted money adds open holds):\n"
              + json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         checkpoint={**note.checkpoint, "resource_facts": facts},
     )

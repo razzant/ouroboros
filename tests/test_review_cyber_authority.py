@@ -8,9 +8,9 @@ import pytest
 from ouroboros import config
 from ouroboros.tools import git, plan_review
 from ouroboros.tools.parallel_review import aggregate_review_verdict
-from ouroboros.tools.review_helpers import build_scope_actor_record, review_enforcement_blocks
-from ouroboros.tools.scope_review import ScopeReviewResult
-from tests.test_advisory_inline_freshness import candidate  # noqa: F401
+from ouroboros.tools.review_helpers import review_enforcement_blocks
+from ouroboros.review_ledger import CouplingOutcome
+from tests.test_git_review_preflight_gate import candidate  # noqa: F401
 from tests.test_plan_review_engine import harness, _call, _state  # noqa: F401
 
 
@@ -29,59 +29,66 @@ def test_effective_authority_keeps_configured_enforcement(access):
     assert not review_enforcement_blocks("advisory")
 
 
-@pytest.mark.parametrize("status,phase", [
-    ("responded", ""), ("error", "context"), ("error", "delivery"),
-    ("parse_failure", "format"), ("sub_floor", "window_authority"),
-    ("not_dispatched", "admission"), ("pending", "delivery"),
+@pytest.mark.parametrize("status", [
+    "responded", "unanswered", "error", "not_performed", "not_dispatched", "pending",
 ])
-def test_scope_review_facts_survive_action_authority(candidate, access, status, phase):  # noqa: F811
+def test_coupling_facts_survive_action_authority(candidate, access, status):  # noqa: F811
+    """The gate's one verdict (``review_err``) is projected under the owner's
+    action authority; the coupling question's facts — its status and its
+    findings — are carried through unchanged whichever way the authority goes."""
     finding = {"item": "contract", "severity": "critical", "verdict": "FAIL", "reason": "Original criticism"}
-    result = ScopeReviewResult(
-        blocked=True, status=status, failure_phase=phase, raw_text="Exact original review",
-        block_message="Original failure", critical_findings=[finding],
-        operation_state="in_flight" if status == "pending" else "settled",
-    )
-    candidate._last_scope_raw_results = [build_scope_actor_record(result)]
+    result = CouplingOutcome(verdict="FAIL", blocked=True, status=status, critical_findings=[finding])
     before = copy.deepcopy(result.__dict__)
-    blocked, _, _, findings, _ = aggregate_review_verdict(
-        None, result, "", [], candidate, "candidate", 0, candidate.repo_dir,
+    blocked, _, reason, _findings, coupling_items = aggregate_review_verdict(
+        "⚠️ REVIEW_BLOCKED: critical findings", result, "critical_findings", [],
+        candidate, "candidate", 0, candidate.repo_dir,
     )
-    assert blocked == (access == "pro")
+    assert blocked == (access == "pro") and reason == "critical_findings"
     assert result.__dict__ == before
-    assert findings[0]["verdict"] == "FAIL"
+    assert coupling_items[0]["verdict"] == "FAIL" and coupling_items[0]["tag"] == "coupling"
     if access == "cyber_pro":
-        event = json.loads((candidate.drive_logs() / "events.jsonl").read_text().splitlines()[-1])
+        event = json.loads((candidate.drive_logs() / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         assert event["review_enforcement"] == "blocking"
         assert event["decision_authority"] == "cyber_pro"
 
 
-def test_missing_preflight_does_not_become_a_review(candidate, access):  # noqa: F811
+def test_missing_preflight_is_a_stated_fact_never_a_review_or_a_block(candidate, access, monkeypatch):  # noqa: F811
     from ouroboros.review_state import load_state
+    from ouroboros.tools import commit_gate
 
-    outcome = git._check_advisory_freshness(candidate, "candidate", paths=["change.py"])
-    assert (outcome is None) == (access == "cyber_pro")
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *a, **kw: None)
+    monkeypatch.setattr(commit_gate, "run_commit_preflight", lambda *a, **kw: pytest.fail("no row was named"))
+    outcome = git._preflight_and_tests_gate(candidate, "candidate", 0, classification_paths=["change.py"])
+    assert outcome is None, "a commit without a named preflight row blocks under neither authority"
+    assert commit_gate._review_preflight_facts(candidate) == {"status": "not_performed", "record_id": ""}
     assert load_state(candidate.drive_root).advisory_runs == []
 
 
-def test_review_status_readiness_matches_actual_cyber_gate(candidate, access):  # noqa: F811
-    from ouroboros.tools.claude_advisory_review import _handle_review_status
+def test_review_status_readiness_matches_the_actual_gate(candidate, access):  # noqa: F811
+    from ouroboros.tools.preflight_review import _handle_review_status
     from ouroboros.review_state import load_state
 
     projection = json.loads(_handle_review_status(candidate))
-    assert projection["repo_commit_ready"] == (access == "cyber_pro")
+    assert "repo_commit_ready" not in projection, "no readiness axis is projected under either authority"
+    assert not projection["open_obligations"] and not projection["commit_readiness_debts"]
     assert not projection["advisory_runs"]
-    assert projection["latest_advisory_status"] != "fresh"
     assert not load_state(candidate.drive_root).advisory_runs
 
 
 def test_actual_staged_candidate_can_continue_after_failed_review(candidate, access, monkeypatch):  # noqa: F811
     from ouroboros.tools import git_review_cycle
 
-    result = ScopeReviewResult(blocked=True, status="error", failure_phase="context", block_message="Missing required source")
-    monkeypatch.setattr(git, "_advisory_and_tests_gate", lambda *a, **k: None)
+    # The wave's one verdict: nobody answered the coupling question (the seat
+    # asked it errored) — NOT_PERFORMED, carried as ``review_err`` with the
+    # coupling outcome's facts beside it.
+    result = CouplingOutcome(blocked=True, status="error")
+    not_performed = ("⚠️ REVIEW_BLOCKED: review NOT_PERFORMED — the coupling question (Part 2) "
+                     "was answered by no seat — asked of: slot_2.")
+    monkeypatch.setattr(git, "_preflight_and_tests_gate", lambda *a, **k: None)
     monkeypatch.setattr(git, "_install_paid_dispatch_stamp", lambda *a, **k: None)
     monkeypatch.setattr(git, "_reconcile_and_clear_review_roster", lambda *a, **k: None)
-    monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **k: (None, result, "", []))
+    monkeypatch.setattr(git, "_run_parallel_review",
+                        lambda *a, **k: (not_performed, result, "coupling_not_performed", []))
     git._reset_commit_review_state(candidate)
     outcome = git_review_cycle._run_reviewed_stage_cycle(
         candidate, "candidate", 0, paths=["change.py"], require_release_tag=False,
@@ -128,7 +135,7 @@ def test_pending_cyber_commit_uses_no_second_dispatch(candidate, access, monkeyp
             pre_fingerprint={"fingerprint": "new"}, review_rebuttal="")
         assert free["replay_reason"] == "review_pending"
         assert load_state(candidate.drive_root).attempts[-1].triad_raw_results == before
-        monkeypatch.setattr(git, "_advisory_and_tests_gate", lambda *a, **k: None)
+        monkeypatch.setattr(git, "_preflight_and_tests_gate", lambda *a, **k: None)
         monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **k: pytest.fail("duplicate paid panel"))
         cycle = git._run_reviewed_stage_cycle(candidate, "new candidate", 0,
             paths=["change.py"], require_release_tag=False)

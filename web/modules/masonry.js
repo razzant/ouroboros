@@ -9,6 +9,8 @@
    "Widgets board") override the author's span class; a board without them is
    planned exactly as before. `applyMasonry` returns an idempotent disposer. */
 
+// Nothing moves in the DOM, so tab order follows the DOM, not the visual order.
+
 const bound = new WeakMap();
 // An owner span this large or larger means every track the board has.
 const FULL_SPAN = 12;

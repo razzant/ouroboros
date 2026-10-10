@@ -10,6 +10,7 @@ import { projectReference } from './project_reference.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
 import { joinMarkdownHeadings, MARKDOWN_FENCED_CODE } from './utils.js';
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
+import { activityWaitPhase, pausePhaseLabel } from './task_phase_chip.js';
 import { apiFetch } from './api_client.js';
 import { currentLanguage, fmt, isEnglish, tr, tx } from './i18n.js';
 import {
@@ -94,11 +95,11 @@ export function evidenceLinkHtml(evidenceRef) {
         : '';
 }
 
-// A host-placed card row (timeline or Reviews) as its timeline summary: the first line
-// heads, `card_row_id` is the row's stable identity, and a late-review row carries its
-// record link (`cardRowEvidenceRef`).
+// A placed row's first line heads; card_row_id keeps identity, and late reviews
+// retain their record link. Only typed host pause copy enters the translator.
 export function cardRowSummary(msg, phase, rawTs = '') {
-    const lines = String(msg.text ?? msg.content ?? '').split('\n');
+    const text = String(msg.text ?? msg.content ?? '');
+    const lines = (msg.role === 'system' && msg.system_type === 'task_pause_notice' ? tx(text) : text).split('\n');
     const rowId = String(msg.card_row_id || '').trim() || `${String(msg.system_type || '').trim()}|${rawTs}`;
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
@@ -261,12 +262,13 @@ const perToolLine = (entries) => entries
     .filter(([name, n]) => name && n > 0)
     .map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(' · ');
 
-/**
- * The block's one tool row, built from the live map and the host's totals
- * together: the host answers what it stated, the live map answers the rest.
- * The closed row carries the counts only (summary outranks details); the
- * per-tool names live behind Expand, so the row stays one line either way.
- */
+export function toolEvidenceIncomplete(coverage) {
+    return Boolean(coverage && (coverage.gaps?.length || coverage.matched > coverage.shown
+        || coverage.source && !Number.isFinite(coverage.live_size)));
+}
+
+// One tool row combines host counts with invocation facts; names and read scope
+// live behind Expand. A bounded read is not an unknown invocation outcome.
 export function toolEvidenceView(fold = null) {
     const live = fold?.calls instanceof Map ? [...fold.calls.values()] : [];
     const host = fold?.host || null;
@@ -274,7 +276,9 @@ export function toolEvidenceView(fold = null) {
     const calls = Math.max(Number.isInteger(host?.calls) ? host.calls : 0, observed);
     // Frozen totals count model wait errors. Canonical evidence reports operation
     // outcomes; a bounded partial read discloses its gap instead of reviving waits.
-    const partial = Boolean(fold?.coverage) && observed > 0 && observed < calls;
+    const partial = toolEvidenceIncomplete(fold?.coverage) || Boolean(fold?.coverage) && observed < calls;
+    const bounded = fold?.coverage && (fold.coverage.archives_bounded || fold.coverage.archives_available > fold.coverage.archives
+        || fold.coverage.live_size > fold.coverage.live_window);
     // Only settled, individually identified calls can supersede an aggregate
     // host error. Partial replay and legacy start-only rows have no such proof.
     const outcomesKnown = calls > 0 && live.length === calls && !(fold?.legacy?.calls)
@@ -284,21 +288,26 @@ export function toolEvidenceView(fold = null) {
         : Math.max(Number.isInteger(host?.errors) ? host.errors : 0, observedErrors);
     const liveCounts = new Map();
     for (const call of live) liveCounts.set(call.tool, (liveCounts.get(call.tool) || 0) + 1);
-    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const headline = !calls && partial ? tr('task.tools.history_incomplete', 'Tool history incomplete')
+        : fmt(calls === 1 ? '{n} tool call' : '{n} tool calls', { n: calls });
     return {
         phase: errors > 0 ? 'warn'
             : ((!host && live.some((call) => call.status === 'calling')) ? 'calling' : 'result'),
-        headline: `${plural(calls, 'tool call')}${errors > 0 ? ` · ${plural(errors, 'error')}` : ''}`
-            + (live.some(call => call.waitEnded) || fold?.legacy?.wait_ended ? ' · wait ended' : '')
-            + (live.some(call => call.status === 'unknown') || fold?.legacy?.unknown || partial ? ' · outcome unknown' : ''),
+        headline: headline + (errors > 0 ? ` · ${fmt(errors === 1 ? '{n} error' : '{n} errors', { n: errors })}` : '')
+            + (live.some(call => call.waitEnded) || fold?.legacy?.wait_ended ? ` · ${tr('task.tools.wait_ended', 'wait ended')}` : '')
+            + (calls && (live.some(call => ['unknown', 'wait_ended'].includes(call.status)) || fold?.legacy?.unknown || fold?.coverage && observed < calls)
+                ? ` · ${tr('task.tools.outcome_unknown', 'outcome unknown')}` : ''),
         body: '',
-        fullBody: (partial ? 'Invocation evidence is incomplete. ' : '') + perToolLine(host?.counts && typeof host.counts === 'object'
+        fullBody: (partial || bounded ? (partial ? tr('task.tools.incomplete', 'Invocation evidence is incomplete.')
+            : tr('task.tools.bounded_window', 'Only recent tool history was read.'))
+            + (fold?.coverage?.source ? ` ${fmt('Source: {source}.', { source: fold.coverage.source })}` : '') + ' ' : '')
+            + perToolLine(host?.counts && typeof host.counts === 'object'
             ? Object.entries(host.counts) : [...liveCounts]),
         visible: true,
         // Host-stamped routing/completion acts are receipts, never work. Missing
         // aggregate fields do not erase complete per-invocation receipt evidence.
-        receipt: errors <= 0 && (Number(host?.routing || 0) + Number(host?.completion || 0) >= calls
-            || live.length >= calls && live.length > 0 && live.every((call) => call.receipt)),
+        receipt: calls > 0 && errors <= 0 && (Number(host?.routing || 0) + Number(host?.completion || 0) >= calls
+            || !partial && live.length >= calls && live.every((call) => call.receipt)),
         calls,
         errors,
     };
@@ -364,7 +373,7 @@ export function isNonTerminalMediaHistoryRow(msg) {
  * distinction for the replay passes and the pager's page-row count.
  */
 export function isReplayEvidenceRow(row) {
-    return row?.system_type === 'quiz_answer' || Boolean(row?.summary_kind && row?.historical_terminal);
+    return ['quiz_answer', 'task_evidence'].includes(row?.system_type) || Boolean(row?.summary_kind && row?.historical_terminal);
 }
 
 export function isForegroundLiveCard(record) {
@@ -407,8 +416,8 @@ const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
  */
 export function restartConfirmBody(activities) {
     const lines = [
-        'Running tasks stop. Tasks already paused stay paused.',
-        'Queued tasks that have not started are kept on hold under the same task, and wait for your Resume.',
+        'Running tasks stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.',
+        'Runnable queued tasks return to the queue. Existing holds and limits still apply.',
         'Saved settings apply after the restart.',
     ];
     if (!Array.isArray(activities) || activities.some((row) => row?.phase === 'unknown')) {
@@ -811,8 +820,7 @@ export function clearStickyCardState(record) {
     // A recycled slot must not inherit the previous cycle's finalizing hold —
     // nor the outcome observed under it (#1110), which would otherwise paint the
     // new cycle's chip with the old cycle's Failed.
-    record.finalizingHold = false;
-    record.observedOutcome = '';
+    Object.assign(record, { finalizingHold: false, censusPhase: '', observedOutcome: '' });
     // The activity clock is cycle state too: a recycled slot ('active') would
     // otherwise open showing the previous cycle's "updated" time.
     record.latestActivityTs = '';
@@ -896,9 +904,7 @@ export function isTerminalTaskPhase(phase = '', terminal = false) {
     return Boolean(terminal) || ['done', 'lifecycle_error', 'cancelled'].includes(phase);
 }
 
-// ---------------------------------------------------------------------------
 // In-flight chat activity status (owner decisions 1A-5A; managed continuity).
-// ---------------------------------------------------------------------------
 
 /**
  * One request/apply clock for every /api/state consumer on a page. Responses
@@ -1067,16 +1073,12 @@ export function unkeyedFrameEndsTurn(row) {
 }
 
 /**
- * Single status reducer for the chat header (owner decisions 2A/5A; managed
- * activities added by the project-continuity contract). Priority: disconnected
- * > background live card (Working...) > admitted managed work (Working...) >
- * a root settling its Pause (Pausing…) > server-confirmed direct/ephemeral
- * turns (Thinking...) > local pending submissions (Sending...) >
- * queue-admitted but unstarted managed work (Queued...) > model access wait >
- * paused work (Paused) > idle. A queued task ranks below
- * Sending... because an unacknowledged local submission is the more actionable
- * state. Idle is Starting… until the host proves `supervisor_ready` (В9),
- * then Online. Pure over its inputs for dependency-free node tests.
+ * One header reducer: offline > active managed work > pausing > direct turns
+ * > pending submissions > queued work > access/answer wait > unknown > paused
+ * > Project hold > idle. A queued task ranks below an unacknowledged submission;
+ * neither admission nor a connected socket proves execution or readiness.
+ * Idle says Starting until the supervisor confirms readiness. Multiple tasks
+ * are counted independently, so one paused task never hides another working.
  */
 export function computeDerivedChatStatus({
     isConnected = true,
@@ -1086,41 +1088,30 @@ export function computeDerivedChatStatus({
     queuedManagedCount = 0,
     pausingManagedCount = 0,
     pausedManagedCount = 0,
+    pausedCause = '',
+    waitingOwnerCount = 0,
     unknownActivityCount = 0,
     waitingModelCount = 0,
     projectWaitLabel = '',
     pendingSubmissionsCount = 0,
     supervisorStarting = false,
 } = {}) {
-    if (!isConnected) {
-        return { kind: 'offline', text: 'Reconnecting...', showDots: false };
-    }
-    if (hasActiveLiveCard) {
-        return { kind: 'thinking', text: 'Working...', showDots: false };
-    }
-    if (activeManagedCount > 0) {
-        return { kind: 'thinking', text: 'Working...', showDots: true };
-    }
+    if (!isConnected) return { kind: 'offline', text: 'Reconnecting...', showDots: false };
+    if (hasActiveLiveCard) return { kind: 'thinking', text: 'Working...', showDots: false };
+    if (activeManagedCount > 0) return { kind: 'thinking', text: 'Working...', showDots: true };
     // Sent work still finishing under the owner's Pause: settling, not working.
     if (pausingManagedCount > 0) return { kind: 'thinking', text: 'Pausing…', showDots: true };
-    if (activeDirectCount > 0) {
-        return { kind: 'thinking', text: 'Thinking...', showDots: true };
-    }
-    if (pendingSubmissionsCount > 0) {
-        return { kind: 'thinking', text: 'Sending...', showDots: true };
-    }
+    if (activeDirectCount > 0) return { kind: 'thinking', text: 'Thinking...', showDots: true };
+    if (pendingSubmissionsCount > 0) return { kind: 'thinking', text: 'Sending...', showDots: true };
     if (queuedManagedCount > 0) {
         if (waitingModelCount > 0) return { kind: 'online', text: 'Waiting for access', showDots: false };
         return { kind: 'thinking', text: 'Queued...', showDots: true };
     }
     if (waitingModelCount > 0) return { kind: 'online', text: 'Waiting for access', showDots: false };
+    if (waitingOwnerCount > 0) return { kind: 'online', text: tr('task.chip.waiting_for_answer', 'Waiting for your answer'), showDots: false };
     if (unknownActivityCount > 0) return { kind: 'online', text: 'Activity unconfirmed', showDots: false };
-    if (pausedManagedCount > 0) {
-        // Paused work is NOT running and will not start by itself: never dress
-        // it up as Working or Queued. The census phase is shared by a budget
-        // pause, the owner's Pause and a Restart hold, so no cause is claimed.
-        return { kind: 'online', text: 'Paused', showDots: false };
-    }
+    // Mixed or unknown causes stay generic; paused work never claims Running.
+    if (pausedManagedCount > 0) return { kind: 'online', text: pausePhaseLabel('budget_paused', pausedCause), showDots: false };
     if (projectWaitLabel) return { kind: 'online', text: projectWaitLabel, showDots: false };
     if (supervisorStarting) return { kind: 'starting', text: 'Starting…', showDots: false };
     return { kind: 'online', text: 'Online', showDots: false };
@@ -1132,21 +1123,26 @@ export function computeDerivedChatStatus({
 export function chatStatusCounts(activities, records, isWaiting = () => false) {
     const counts = { activeDirectCount: 0, activeManagedCount: 0, queuedManagedCount: 0, pausingManagedCount: 0,
         pausedManagedCount: 0, unknownActivityCount: 0, hasActiveLiveCard: false, waitingModelCount: 0,
-        projectWaitLabel: '' };
+        projectWaitLabel: '', waitingOwnerCount: 0, pausedCause: '' };
+    const pauseCauses = new Set();
     for (const [id, entry] of activities) {
         // A Project verification hold is a static wait: never queued or working,
         // while its pause/pausing/unknown census phase still counts as itself.
         const projectHold = entry?.project_admission_hold?.label;
         if (projectHold) counts.projectWaitLabel = projectHold;
         else if (isWaiting(id)) continue;
-        if (entry?.phase === 'unknown') counts.unknownActivityCount += 1;
+        const waitPhase = activityWaitPhase(entry);
+        if (entry?._activityUnconfirmed || entry?.phase === 'unknown') counts.unknownActivityCount += 1;
         else if (entry?.phase === 'budget_pausing') counts.pausingManagedCount += 1;
-        else if (entry?.phase === 'budget_paused') counts.pausedManagedCount += 1;
+        else if (entry?.phase === 'budget_paused') { counts.pausedManagedCount += 1; pauseCauses.add(entry.pause_cause || ''); }
+        else if (waitPhase === 'unknown') counts.unknownActivityCount += 1;
+        else if (waitPhase === 'owner_wait') counts.waitingOwnerCount += 1;
         else if (projectHold) continue;
         else if (String(entry?.kind || '') !== 'managed_task') counts.activeDirectCount += 1;
         else if (String(entry?.phase || '') === 'queued') counts.queuedManagedCount += 1;
         else counts.activeManagedCount += 1;
     }
+    if (pauseCauses.size === 1) counts.pausedCause = [...pauseCauses][0];
     for (const record of records) {
         if (!isForegroundLiveCard(record)) continue;
         if (record.projectHold) {
@@ -1313,8 +1309,8 @@ export function routingAnnotationText(annotation) {
  * authority follows from that — on a
  * `complete` snapshot every id the census does not list is gone, whatever its
  * kind, with no wall-clock barrier and no generation marker. An incomplete
- * snapshot (supervisor not ready, or a source failed) is a partial listing and
- * deletes nothing.
+ * snapshot retains omitted rows as unconfirmed; only its positive rows can
+ * affirm current activity.
  *
  * `concludedIds` (Set/Map with .has) is the client-side conclusion ledger: a
  * turn already concluded by its keyed final must never be re-inserted by a
@@ -1322,7 +1318,8 @@ export function routingAnnotationText(annotation) {
  * never restart, so conclusion is final).
  */
 export function computeHydratedDirectActivities(existingMap, turnsList, chatId, concludedIds = null, complete = true) {
-    const nextMap = new Map(existingMap || []);
+    const nextMap = new Map(Array.from(existingMap || [], ([id, row]) => [id,
+        complete ? row : { ...row, _activityUnconfirmed: true }]));
     if (!Array.isArray(turnsList)) return nextMap;
     const listed = new Set();
     for (const turn of turnsList) {
@@ -1331,10 +1328,10 @@ export function computeHydratedDirectActivities(existingMap, turnsList, chatId, 
         if (!aid || (concludedIds && concludedIds.has(aid))) continue;
         listed.add(aid);
         nextMap.set(aid, {
+            ...turn, _activityUnconfirmed: false,
             activityId: aid,
             kind: turn.kind || 'direct_chat',
             phase: turn.phase || 'thinking',
-            ...(turn.project_admission_hold ? { project_admission_hold: turn.project_admission_hold } : {}),
             clientMessageId: turn.client_message_id || nextMap.get(aid)?.clientMessageId || '',
         });
     }
@@ -1451,17 +1448,18 @@ export function clearTransientRoutingAnnotations(messagesDiv = globalThis.docume
     return changed;
 }
 
-// В9: the host stamps a typed `ingress_accepted: true` on an owner echo only after the durable
-// chat write, so that client_message_id's bubble says `Input saved` — never that work began.
-// No flag is unknown and adds nothing. The note wears the delivery note's quiet style.
+// В9: the host stamps a typed `ingress_accepted: true` on an owner echo only after the durable chat write, so that
+// client_message_id's bubble says `Input saved` — never that work began; `ingress_undispatched` (proven never dispatched) says
+// `Saved, not delivered.` and `ingress_pending` (the running host has not said yet) `Input saved`, each until the next fact.
 export function markIngressSaved(root, row) {
-    const cmid = String(row?.client_message_id || '');
+    const cmid = String(row?.client_message_id || ''), state = row?.ingress_undispatched === true ? 'undispatched' : row?.ingress_pending === true ? 'pending' : '';
     if (row?.role !== 'user' || row.ingress_accepted !== true || !cmid) return false;
     const bubble = [...root.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
-        .find((node) => node.dataset.clientMessageId === cmid);
-    if (!bubble || bubble.querySelector('[data-ingress-saved]')) return false;
-    const note = Object.assign(document.createElement('div'), { className: 'msg-pending', textContent: 'Input saved' });
-    note.dataset.ingressSaved = '';
+        .find((node) => node.dataset.clientMessageId === cmid), prior = bubble?.querySelector('[data-ingress-saved]');
+    if (!bubble || (prior && (!['undispatched', 'pending'].includes(prior.dataset.ingressSaved) || prior.dataset.ingressSaved === state))) return false;  // `Input saved` and a kept send's delivery doubt are final
+    const note = Object.assign(document.createElement('div'), { className: 'msg-pending', textContent: state === 'undispatched' ? tr('chat.saved_undispatched', 'Saved, not delivered.') : 'Input saved' });
+    note.dataset.ingressSaved = state;
+    for (const doubt of [prior, bubble.querySelector('[data-ingress-unconfirmed]')]) doubt?.remove();  // the saved row settles a "Send again" doubt
     bubble.insertBefore(note, bubble.querySelector('.msg-time'));
     return true;
 }

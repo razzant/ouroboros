@@ -10,7 +10,8 @@ isolated real servers. `run_live_lanes.py` owns admission, seed/settings, the
 lane pool, budget and reports; `scenarios.py::SCENARIOS` owns scenario prompts,
 settings overrides and callable acceptance checks; `stub_lane.py` reuses the
 loopback model and review answers in `tests/system_e2e/harness.py` for the
-`--stub` $0 rehearsal; `ui_probe.py` owns the real-browser client.
+`--stub` $0 rehearsal; `ui_probe.py` owns the real-browser client;
+`traces.py` owns each lane's key-redacted trace bundle.
 Keep this opt-in stand outside runtime imports and default local evolution.
 
 ## Scenario acceptance
@@ -23,7 +24,7 @@ and requires K passes for EACH selected scenario.
 
 | Scenario | Work and required evidence | Rationale / limits |
 |---|---|---|
-| SM1 | Change the shared brand accent consistently with DESIGN.md §3 in `web/ui.css`, exercise the app and setup wizard, then land a reviewed release through `preflight_review` → `commit_reviewed`. The full profile uses advanced runtime and blocking enforcement, with no landing skip flags. Acceptance retains the S2 checks: the commit exists and includes the changed shared palette with nonempty accent/focus roles, VERSION strictly increases, the landed carriers pass `commit_admission.release_metadata_preflight`, the worktree is clean, a real advisory ledger row and `scope_review_complete` exist, usage is positive, and the browser reads the new accent and matching accent/focus roles on both `/` and `/onboarding` after restart. | One shared file does not prove both documents loaded it: the browser oracle detects a missing wizard link or divergent page override. The named accent roles and alpha ladder remain part of the palette. SM1's lane-local release/review/restart contract is separate from a version-neutral contributor PR; changing its source oracle must not remove those obligations. `vision_evidence_present` records browser/vision tool rows for reviewers to judge, not a host assertion that the image was inspected. `committed_companions` records paths beyond the palette, release carriers, DESIGN and comment-only CSS as facts, not an automatic scope failure: reviewers may identify another legitimate accent consumer. The clean-tree check discloses and tolerates only transient `.ouroboros/` scratch. |
+| SM1 | Change the shared brand accent consistently with DESIGN.md §3 in `web/ui.css`, exercise the app and setup wizard, then land a reviewed release through `preflight_review` → `commit_reviewed`. The full profile uses advanced runtime and blocking enforcement, with no landing skip flags. Acceptance retains the S2 checks: the commit exists and includes the changed shared palette with nonempty accent/focus roles, VERSION strictly increases, the landed carriers pass `commit_admission.release_metadata_preflight`, the worktree is clean, a real advisory ledger row and the commit gate's review-ledger record of the wave (seats dispatched, both questions answered) exist, usage is positive, and the browser reads the new accent and matching accent/focus roles on both `/` and `/onboarding` after restart. | One shared file does not prove both documents loaded it: the browser oracle detects a missing wizard link or divergent page override. The named accent roles and alpha ladder remain part of the palette. SM1's lane-local release/review/restart contract is separate from a version-neutral contributor PR; changing its source oracle must not remove those obligations. `vision_evidence_present` records browser/vision tool rows for reviewers to judge, not a host assertion that the image was inspected. `committed_companions` records paths beyond the palette, release carriers, DESIGN and comment-only CSS as facts, not an automatic scope failure: reviewers may identify another legitimate accent consumer. The clean-tree check discloses and tolerates only transient `.ouroboros/` scratch. |
 | SW1 | The Swarm button arms `force_plan` on the ordinary chat send. Require the managed root and plan review, at least two completed children with causal parent/root/depth lineage, a `swarm_fanout` receipt covering them, absorbed-child finalization, the with-children cost rollup without retired aliases, positive usage and the `/proc` environment-based orphan check. | UI admission, child execution and root accounting are separate proofs. An API fallback can continue diagnostics when the browser is unavailable, but cannot pass `ui_swarm_path_exercised`. Children spend under their root's fence. |
 | SK1 | The model authors `SKILL.md` + `plugin.py` and calls `skill_preflight`; the runner reviews, grants exactly the manifest's one privileged permission (`inject_chat`), enables, dispatches, disables and deletes. Require persisted findings plus HTTP 200 with `executable_review` in BOTH the review response and `/api/extensions`; retain separate `author_*` / `dispatch_*` terminals. Dispatch needs the generation-bearing durable row, typed `status=ok`, exact echo and one host-attributed owner-chat relay per successful call. | The product's executable-review gate decides eligibility under the applied enforcement; SK1 sets no enforcement override. Clean state, non-PASS items, status and blocking reason remain facts, because requiring all-PASS would measure author quality instead of the lifecycle. A generation digest alone also appears on failed dispatches. The fixture exercises its declared permission rather than requesting an unused grant. |
 
@@ -55,10 +56,19 @@ the manifest comes from the applied settings file, not argv. Credit admission
 uses the minimum of key-limit remaining and account credits, refusing below
 `--min-credit-usd` (default the run cap).
 
-Paid runs use `scenarios.STAND_PANEL_SETTINGS`: Gemini 3.8 Flash / GPT-5.6
-Luna / DeepSeek v4 Pro triad, DeepSeek v4 Pro scope, Claude Sonnet 5 advisory;
-reviewers at low effort, task/evolution at medium. `--production-panel` selects
-the tree's defaults instead; neither choice changes installed product defaults.
+Paid runs use `scenarios.STAND_PANEL_SETTINGS`: the review pool as catalog rows
+marked Reviewer (`scenarios.STAND_REVIEW_PANEL`) — Gemini 3.8 Flash, GPT-5.6 Luna
+and DeepSeek v4 Pro packing the brief, DeepSeek v4 Pro reading the work itself —
+beside an unmarked Claude Sonnet 5 row an author may name for a preflight; every
+row at low effort, task/evolution at medium. The retired lane and review-effort
+keys are never written: the isolated settings builder drops them, so a panel
+under them would vanish and the lane would run the factory rows. `--production-panel`
+selects the tree's defaults instead (no catalog: the factory reviewer rows);
+neither choice changes installed product defaults.
+A scenario's overrides are applied over that template, and the lane reviews with
+the document they produce: SW1 composes its catalog as the scout beside the
+template's reviewers (the stand panel's marked rows, the factory rows under
+`--production-panel`, the stub lane's keyless rows), so every lane has a pool.
 The default `full` profile retains each scenario's enforcement; `wiring` sets
 advisory enforcement and must be reported as such.
 
@@ -88,7 +98,8 @@ global remaining) and the per-task cap minus its planning margin. A lane's
 global remaining is its own budget; root reservations do not disable this
 earlier stop. SW1's UI root and the evolution root also follow this path.
 
-Read settled spend and unknown-cost counts from `state/usage_attempts.jsonl`;
+Read settled spend and unknown-cost counts through `run_live_lanes.lane_spend`
+from `state/usage.sqlite`, with journal fallback for an older seed;
 `llm_usage` omits review/synthesis spend and cannot be the stand's money source.
 Admit only while `spent + reserved(in flight) + reservation ≤ cap`. If only
 in-flight reservations prevent admission, wait for settlement and recheck;
@@ -159,6 +170,27 @@ result surfaces. Post-stop `/proc` survivors fail a passing lane and name up
 to twenty PIDs/command heads with an omitted count; without `/proc` the scan
 is explicitly unavailable, never passed.
 
+After the lane server stops, on every outcome, `traces.py` copies its
+journals into `lanes/<id>_a<n>/traces/` with the data-root layout kept:
+`logs/*.jsonl`, `logs/*.log` with the rotated `server.log.<n>` backups, `task_results/*.json`,
+`state/{advisory_review.json,usage.sqlite,usage_attempts.jsonl,queue_snapshot.json,evolution_campaign.json}`
+and the observability call manifests `observability/calls/*/*.json`, for
+the lane root and every `state/headless_tasks/<id>/data` fork. Never
+`settings.json`, `memory/`, the gzip payload blobs or credential stores.
+Every credential value the lane could have seen (the `--key-env` value and
+each secret-shaped key of the lane settings file: `*_API_KEY`, `*_TOKEN`,
+`*_CREDENTIALS`, `*_PASSWORD`, `*_SECRET`) is replaced by
+`<redacted:NAME sha256:…>`, the same fingerprint the manifest discloses.
+If a value still occurs in any bundle file afterwards, the bundle is
+deleted and `result.json` records `traces: {published: false, reason:
+"secret_residue"}`; otherwise `traces: {published: true, files, bytes,
+redacted, limit_bytes, truncated}`. A bundle above 200 MiB
+(`BUNDLE_LIMIT_BYTES`) keeps the newest tail of each journal, opened by a
+`trace_truncated` line and listed in `truncated`; JSON files are never cut.
+A lane that never started records `reason: "lane_not_started"`, one
+without a data root `"no_data_root"`, and a failed copy `"collect_error"`
+with its key-redacted error.
+
 The watcher reports lane state, spend/cap and free disk on `/` and `/mnt/data`.
 Key headroom is an informational probe on its own thread, with an eight-second
 HTTP bound, at most once a minute and failure backoff. A failed probe is not
@@ -166,7 +198,7 @@ an alert or a delay of the watcher tick.
 
 Focused contracts live in `tests/test_e2e_live_runner.py` (including exact FIFO
 feasibility fixtures), `tests/test_e2e_live_sm1_checks.py`,
-`tests/test_e2e_live_sk1_plugin.py`, `tests/test_e2e_live_panel.py`,
+`tests/test_e2e_live_sk1_plugin.py`, `tests/test_e2e_live_panel.py`, `tests/test_e2e_live_traces.py`,
 `tests/test_server_runner_absorb_wait.py` and `tests/test_e2e_live_ci_lane.py`;
 `tests/test_web_typography_static.py` owns shared-source loading and variable
 resolution; `tests/test_e2e_live_sm1_palette_browser.py` exercises the two-document
@@ -180,10 +212,21 @@ The `.github/workflows/ci.yml` `e2e-live` job runs only on an explicit
 tag, and checks out the dispatched SHA (`gh workflow run CI --ref ouroboros
 -f e2e_live=true` tests the development tip). It runs one SM1 attempt with
 `--self-mod --total-budget 30 --per-task-usd 15`, reserving $30 for its two
-roots. The owner supplies `OUROBOROS_E2E_LIVE_OPENROUTER_KEY`; its absence
+roots, and `--task-timeout 4500` (75 minutes: at 2400 all four runs hit the
+deadline, and the traced one spent ~21 minutes on edits and ~17 on the review
+path before a review wave was cut off, #1501). The job's `timeout-minutes`
+outlasts the stand's own worst-case waits, so the stand's verdict and traces,
+not a job kill, end the run. The owner supplies
+`OUROBOROS_E2E_LIVE_OPENROUTER_KEY`; its absence
 produces the honest green summary `skipped: secret
 OUROBOROS_E2E_LIVE_OPENROUTER_KEY not configured`, not a claimed run.
-Upload the manifest, index, lane results and screenshots even on failure.
-The summary renders verdicts or the typed refusal/error without changing
-the stand's exit verdict. Browser PR proof and the keyless system-E2E
-schedule retain their separate existing CI owners.
+Upload the manifest, index, lane results, screenshots and each lane's
+`traces/` bundle even on failure, never a lane's `data/` tree; read a run
+with `gh run download <run-id> -n e2e-live-run`. The summary renders
+verdicts or the typed refusal/error without changing the stand's exit
+verdict. Browser PR proof and the keyless system-E2E lane (manual dispatch and
+release tags) retain their
+separate existing CI owners; the latter uploads its scenario servers'
+`data/logs/`, `data/task_results/` and the journal segments rotated into
+`data/archive/*.jsonl` as `system-e2e-traces`. Both uploads are
+diagnostics: a failed upload never reddens its job.

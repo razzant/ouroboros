@@ -145,12 +145,26 @@ def _unavailable_basis(parent, child, task_id, result):
     parent, child = pathlib.Path(parent), pathlib.Path(child)
     promotion = result.get("child_ref_promotion") or {}
     unavailable, pending = promotion.get("unavailable_refs") or [], promotion.get("pending_refs") or []
-    if not unavailable or not pending or any(
-            not isinstance(row, dict) or row.get("kind") != "history_retention_deferred"
-            or row.get("reason") != "call_inventory_unavailable" for row in pending):
+    if not pending:
         return None
     watched = {parent / "task_results" / f"{task_id}.json", child / "task_results" / f"{task_id}.json",
                child / "observability" / "calls" / task_id}
+    for row in pending:
+        if not isinstance(row, dict):
+            return None
+        if row.get("kind") == "history_retention_deferred" and row.get("reason") == "call_inventory_unavailable":
+            if not unavailable:
+                return None
+        elif row.get("kind") == "task_artifact" and row.get("failure_kind") == "immutable_identity_mismatch":
+            for key in ("source_path", "destination_path", "canonical_path"):
+                if not row.get(key) or not pathlib.Path(row[key]).is_absolute():
+                    return None
+                watched.add(pathlib.Path(row[key]))
+            if (not row.get("failed_path") or not row.get("failed_stamp")
+                    or _path_fact(pathlib.Path(row["failed_path"]))[:5] != tuple(row["failed_stamp"])):
+                return None  # Repair between the failed read and this observation must retry.
+        else:
+            return None  # Transient read/write failures must remain retryable.
     for ref in unavailable:
         if not isinstance(ref, dict) or not ref.get("path"):
             return None  # An unaddressed failure cannot supply repair evidence.
@@ -177,7 +191,20 @@ def _unavailable_basis(parent, child, task_id, result):
         original = pathlib.Path(str(ref["path"]))
         if original.is_absolute() and any(original.is_relative_to(root) for root in (parent, child)):
             watched.add(original)  # Never probe an arbitrary outside locator.
-    return tuple((str(path), _path_fact(path)) for path in sorted(watched))
+    # A repair can rewrite an existing call's refs without changing its directory.
+    # Reuse file observations, never the directory timestamp as proof of its contents.
+    try:
+        for root in (parent, child):
+            directory = root / "observability" / "calls" / task_id
+            watched.add(directory)
+            watched.update(directory.glob("*.json"))
+        facts = tuple((str(path), _path_fact(path)) for path in sorted(watched))
+    except OSError:
+        return None
+    if any(isinstance(fact[0], str) and fact[0] not in {"FileNotFoundError", "NotADirectoryError"}
+           for _path, fact in facts):
+        return None
+    return (json.dumps((pending, unavailable), sort_keys=True, default=str), facts)
 
 
 def unchanged_unavailable_retry(parent, child, task_id, result, *, generation):

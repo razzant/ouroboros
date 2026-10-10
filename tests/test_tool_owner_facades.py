@@ -59,6 +59,7 @@ def test_tool_descriptor_owner_facades_preserve_identity():
         ("drive_root", "required"),
         ("branch_dev", "ouroboros"),
         ("system_repo_dir", None),
+        ("serving_repo_dir", None),
         ("workspace_root", None),
         ("workspace_mode", ""),
         ("memory_mode", ""),

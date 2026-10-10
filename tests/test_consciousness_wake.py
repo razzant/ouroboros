@@ -532,7 +532,7 @@ def test_render_substitutes_every_placeholder_and_keeps_every_event(tmp_path, mo
     assert text.startswith("You are Ouroboros. No one has asked for a task")
     assert "1 h 30 min ago" in text and "autonomy: act — everything your runtime mode allows except" in text
     assert "toggle_evolution, request_restart" in text
-    assert "allowance accounting (last 24 h): 4.00 / 20.00 USD" in text and "tasks running: 1/2" in text
+    assert "allowance known spend (last 24 h): 4.00 / 20.00 USD" in text and "tasks running: 1/2" in text
     assert "next interval: 3300 s" in text
     assert "- wake cause: task t14 finished (completed)" in text
     assert text.count("- task t") == 15 and "more; see" not in text  # the trigger's own terminal stays an event
@@ -541,7 +541,7 @@ def test_render_substitutes_every_placeholder_and_keeps_every_event(tmp_path, mo
         disabled_tools=[], spent_usd=None, daily_usd=0, running=0, max_tasks=0, interval=900,
         events=_observe(tmp_path / "empty", since=T0 + 1).full_text())
     assert "no wake since this process started" in quiet and "wake cause: scheduled heartbeat" in quiet
-    assert "unavailable tools: none" in quiet and "allowance accounting (last 24 h): unknown / 0.00 USD" in quiet
+    assert "unavailable tools: none" in quiet and "allowance known spend (last 24 h): unknown / 0.00 USD" in quiet
     assert "including evolution" in quiet
 
 
@@ -708,3 +708,15 @@ def test_first_wake_uses_late_publication_when_old_readiness_debt_remains(tmp_pa
     assert len(first.events) == 1 and first.events[0][0] == "task_terminal"
     assert "task late failed" in first.events[0][2]
     assert _wake(tmp_path, first.boundary, T0 + 600).events == ()
+
+
+def test_projection_discloses_parked_wake_and_unknown_outcome(describe):
+    for outcome in ("paused", "pausing"):
+        value = describe({**BASE, "last_wake_outcome": outcome, "tasks_running": 1})
+        assert value["status"] == "wake_paused"
+        assert outcome in value["detail"] and "returned while" in value["detail"]
+        assert value["tasks_running"] == 1
+    completed_since = describe({**BASE, "last_wake_outcome": "paused", "tasks_running": 0})
+    assert "still occupies" not in completed_since["detail"] and completed_since["tasks_running"] == 0
+    unknown = describe({**BASE, "last_wake_outcome": "unknown"})
+    assert unknown["status"] == "wake_outcome_unknown" and "unconfirmed" in unknown["detail"]

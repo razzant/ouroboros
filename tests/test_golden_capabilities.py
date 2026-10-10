@@ -3,7 +3,7 @@
 Every case here is a POSITIVE pin drawn from a documented capinv-447 incident:
 it asserts that a legitimate capability SURVIVES the immune system, not that
 something is blocked. A guard change that turns any of these red is a
-capability regression by definition (CHECKLISTS item 21: "name the surviving
+capability regression by definition (CHECKLISTS item 7: "name the surviving
 positive path"). Deliberately NOT a framework — plain parametrized tests over
 the existing entry points; the exhaustive per-branch pins live next to their
 fixes (test_declared_params_honored, test_capability_effect_predicates,

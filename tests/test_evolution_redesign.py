@@ -32,7 +32,8 @@ def test_evolution_campaign_text_includes_objective(tmp_path, monkeypatch):
 
     assert "EVOLUTION CAMPAIGN" in text
     assert "Improve scheduler observability" in text
-    assert "normal advisory + triad + scope review flow" in text
+    assert "the normal commit review by the review panel (`commit_reviewed`)" in text
+    assert "triad + scope" not in text
 
 
 def test_evolution_campaign_pause_resume_preserves_history(tmp_path):

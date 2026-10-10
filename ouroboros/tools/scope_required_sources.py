@@ -155,6 +155,7 @@ def scope_required_sources(
     *,
     staged_tree_sha: str = "",
     subject: Any = None,
+    layer: str = "body",
 ) -> List[Dict[str, Any]]:
     """The required-source rows for one staged change, sorted by path.
 
@@ -165,7 +166,17 @@ def scope_required_sources(
     required source names its exact baseline preimage; the brief materializes
     that source for its reader. An unavailable source stays in the manifest as
     a diagnostic gap, never disappears into a declared-empty result.
+
+    ``layer`` is the checklist layer (`review_body_fact.layer_for`). The
+    protected-path inventory, the ``prompts/`` rule, the derived families and
+    the declared twins all name files of the Ouroboros body; for the ``core``
+    layer (``repo_dir`` is another repository) none of them applies, so no
+    source is owed categorically and the manifest is empty — the reviewer reads
+    what its own judgment needs. The policy version is unchanged: the body
+    manifest is byte-identical to before.
     """
+    if layer != "body":
+        return []
     root = pathlib.Path(repo_dir)
     if touched_paths is None:
         touched_paths = staged_touched_paths(repo_dir, subject)
@@ -236,8 +247,18 @@ def required_sources_ref(rows: Sequence[Dict[str, Any]], *, staged_tree_sha: str
     }
 
 
-def render_required_sources(rows: Sequence[Dict[str, Any]]) -> str:
-    """The reviewer's own view of the manifest: path, disposition and size."""
+def render_required_sources(rows: Sequence[Dict[str, Any]], *, layer: str = "body") -> str:
+    """The reviewer's own view of the manifest: path, disposition and size.
+    The empty manifest is worded by layer: the body owes nothing for THIS
+    change; the core layer owes nothing categorically (no body inventory)."""
+    if not rows and layer != "body":
+        return (
+            "REQUIRED SOURCES: none is owed categorically. This subject is not the "
+            "Ouroboros body, so no protected-path inventory, frozen-contract twin or "
+            "prompt rule applies to it; the staged diff is the complete change "
+            "evidence. Read any file of the subject your judgment needs with your "
+            "own tools."
+        )
     if not rows:
         return (
             "REQUIRED SOURCES: none. This change touches no protected runtime path, "

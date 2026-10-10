@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from ouroboros.skill_loader import compute_content_hash
 from ouroboros.tools.registry import ToolContext
+from tests.review_pool_rosters import set_review_pool
 
 
 def test_skill_review_history_section_renders_concrete_fail_reasons():
@@ -300,10 +301,7 @@ def test_pending_quorum_note_keeps_partial_fails_and_leaves_retry_to_the_gate(
 
     skills_root = _build_skill(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setattr(
-        "ouroboros.config.get_review_models",
-        lambda: ["openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-opus-4.6"],
-    )
+    set_review_pool(monkeypatch, ["openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-opus-4.6"])
     ctx = _make_ctx(tmp_path)
     partial = [
         {**row, "verdict": "FAIL", "reason": "fetch.py writes outside the skill directory"}

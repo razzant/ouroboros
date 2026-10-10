@@ -70,7 +70,7 @@ def test_backend_receipt_owns_custody_after_local_handler_unwinds(tmp_path, monk
     assert result.code != 'TOOL_ERROR', result
     assert not load_task_result(tmp_path, 'root').get('launch_handoffs')
     _assert_consumers(tmp_path, registry, queue, workers, backend != 'completed')
-    records = executor._iter_process_records(tmp_path)
+    records = executor._owned_process_records(tmp_path, 'foreground')
     assert bool(records) == (backend != 'completed')
     if records:
         assert records[0][1]['task_id'] == records[0][1]['root_task_id'] == 'root'

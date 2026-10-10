@@ -21,6 +21,7 @@ from ouroboros.loop_transport import (
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
 
 from tests.test_llm_claudexor import Gateway, MODEL, ROUTE, result
+from tests._usage_store_testing import ledger_rows
 
 OTHER_ACCOUNT = {**ROUTE, "credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"}
 
@@ -83,8 +84,8 @@ def test_substituted_round_is_discarded_and_asked_again(setup, asynchronous):
     assert row["discarded_usage"] == {"input_tokens": 20, "output_tokens": 7, "cached_input_tokens": 12}
     assert row["task_id"] == "task-one" and row["physical_attempt_id"]
     # Two settled physical attempts: the discarded generation was paid for too.
-    rows = [entry for entry in (root / ua.LEDGER_REL).read_text().splitlines() if entry]
-    assert len(rows) >= 2
+    rows = ledger_rows(root)
+    assert len(rows) >= 2 and all(row["state"] == "settled" for row in rows)
 
 
 def test_second_request_drops_the_substituting_account_preference(setup):

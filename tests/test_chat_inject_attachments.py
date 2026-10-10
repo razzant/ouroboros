@@ -83,7 +83,7 @@ def test_cancelled_inject_retains_copy_and_inflight_until_worker_settles(tmp_pat
     client = _client(tmp_path, bridge)
     ctx = client.app.state.host_service_context
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
-    original_copy, original_leave = host_service.store_chat_upload, ctx._leave_inflight
+    original_copy, original_leave = host_service.store_upload, ctx._leave_inflight
     left = []
 
     def copy(*args, **kwargs):
@@ -103,7 +103,7 @@ def test_cancelled_inject_retains_copy_and_inflight_until_worker_settles(tmp_pat
     async def payload():
         return {"chat_id": 42, "text": "file", "attachments": [{"path": str(source)}]}
 
-    monkeypatch.setattr(host_service, "store_chat_upload", copy)
+    monkeypatch.setattr(host_service, "store_upload", copy)
     monkeypatch.setattr(ctx, "_leave_inflight", leave)
     request = SimpleNamespace(app=client.app, headers={"x-skill-token": "token"}, json=payload)
     scopes = []
@@ -307,12 +307,12 @@ def test_unaccepted_inject_removes_only_its_new_copies(tmp_path, monkeypatch, fa
     elif failure == "bad_shape_second":
         body["attachments"].append("not an object")
     elif failure == "copy_second":
-        original = host_service.store_chat_upload
+        original = host_service.store_upload
         def fail_second(path, *args, **kwargs):
             if path == second:
                 raise OSError("controlled second-copy failure")
             return original(path, *args, **kwargs)
-        monkeypatch.setattr(host_service, "store_chat_upload", fail_second)
+        monkeypatch.setattr(host_service, "store_upload", fail_second)
         body["attachments"].append({"path": str(second)})
     elif failure == "invalid_wait":
         body["wait_for_response"] = True

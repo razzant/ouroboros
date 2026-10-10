@@ -34,20 +34,121 @@ def _summary(root, task_id: str, text: str) -> None:
     })
 
 
-def test_authored_summary_is_persisted_and_wins_without_chat_access(tmp_path):
-    from ouroboros.project_dialogue import append_authored_task_summary
+@pytest.mark.parametrize("result", ["Use the existing tower", "r" * 20_000, "\x00" * 6_000])
+def test_helper_brief_keeps_the_answer_source_and_conditions_across_rebuilds(result):
+    from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.main_context_authority import project_helper_predecessor_authority
+
+    authority = {
+        "task_id": "prior", "source": _source("prior"), "status": "completed", "result": result,
+        "origin_message_text": "  Owner: keep the tower.\nUse three levels.  ",
+        "verification_receipts": [{"evidence": "old receipt " * 300}],
+        "task_contract": {"objective": "Build the tower", "context": "never use native/API fallback",
+                          "delegation_budget": {"intent_note": "L1 asks L2 to spawn L3"},
+                          "predecessor_authority": {"task_id": "earlier", "result": "earlier body"}},
+    }
+    envelope = build_task_contract({"predecessor_authority": authority})["predecessor_authority"]
+    before = copy.deepcopy(envelope)
+    if isinstance(envelope["result"], dict):
+        assert len(json.dumps(envelope["result"], ensure_ascii=False)) > 15_000  # wrapper included
+    brief = project_helper_predecessor_authority(envelope)
+    for key in ("task_id", "source", "status", "result", "task_contract", "origin_message_text",
+                "authority_sha256", "authority_chars", "digest_semantics"):
+        assert brief[key] == before[key]
+    assert "predecessor_authority" not in brief["task_contract"]
+    assert "verification_receipts" not in brief
+    assert brief["omitted_fields"]["verification_receipts"] == len(json.dumps(
+        envelope["verification_receipts"], ensure_ascii=False, sort_keys=True))
+    wire = json.dumps(brief, ensure_ascii=False, sort_keys=True)
+    assert json.dumps(project_helper_predecessor_authority(brief), ensure_ascii=False, sort_keys=True) == wire
+    rebuilt = build_task_contract({"predecessor_authority": brief})["predecessor_authority"]
+    assert json.dumps(rebuilt, ensure_ascii=False, sort_keys=True) == wire
+    assert project_helper_predecessor_authority(authority) == brief  # legacy normalization is shared
+    assert envelope == before
+    brief["task_contract"]["delegation_budget"]["intent_note"] = "changed only in the copy"
+    assert envelope == before
+
+
+@pytest.mark.parametrize("selection", ["shared", "declared"])
+def test_child_grandchild_and_external_session_keep_the_same_predecessor_brief(selection):
+    from types import SimpleNamespace
+
+    from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.subagent_work_order import assignment_instructions, compile_external_work_order
+    from ouroboros.tools.control_scheduling import _build_child_subagent_contract
+
+    root = build_task_contract({"task_contract": {
+        "objective": "Continue the tower", "input_sources": selection,
+        "predecessor_authority": {
+            "task_id": "prior", "source": _source("prior"), "authority_sha256": "a" * 64,
+            "result": "The tower stands", "origin_message_text": "Keep the old tower",
+            "task_contract": {"context": "never use native/API fallback",
+                              "constraints": "L1 asks L2 to spawn L3"},
+            "verification_receipts": [{"evidence": "RECEIPT_BODY"}],
+        },
+    }})
+    before = copy.deepcopy(root)
+    child = _build_child_subagent_contract({"tid": "child", "parent_contract": root})
+    grandchild = _build_child_subagent_contract({"tid": "grandchild", "parent_contract": child})
+    brief = child["predecessor_authority"]
+    assert grandchild["predecessor_authority"] == brief
+    assert brief["source"] == before["predecessor_authority"]["source"]
+    assert brief["authority_sha256"] == "a" * 64
+    assert "verification_receipts" not in brief and brief["omitted_fields"]["verification_receipts"] > 0
+    for contract in (root, child, grandchild):
+        instructions = assignment_instructions(SimpleNamespace(task_contract=contract))
+        session, _ = json.JSONDecoder().raw_decode(instructions.split("\n", 1)[1])
+        assert session["predecessor_authority"] == brief
+        assert "RECEIPT_BODY" not in instructions
+    for contract in (child, grandchild):
+        leaf = compile_external_work_order({"task_contract": contract})
+        assert "get_task_result" in leaf and "RECEIPT_BODY" not in leaf
+        for words in ("The tower stands", "Keep the old tower", "never use native/API fallback",
+                      "L1 asks L2 to spawn L3"):
+            assert (words in leaf) == (selection == "shared")
+    assert build_task_contract({"task_contract": grandchild}) == grandchild
+    assert root == before
+
+
+@pytest.mark.parametrize("selection", ["shared", "declared"])
+def test_a_task_without_a_predecessor_never_acquires_an_empty_brief(selection):
+    from types import SimpleNamespace
+
+    from ouroboros.subagent_work_order import assignment_instructions
+    from ouroboros.tools.control_scheduling import _build_child_subagent_contract
+
+    child = _build_child_subagent_contract({"tid": "fresh", "parent_contract": {"input_sources": selection}})
+    assert "predecessor_authority" not in child
+    instructions = assignment_instructions(SimpleNamespace(task_contract=child))
+    session, _ = json.JSONDecoder().raw_decode(instructions.split("\n", 1)[1])
+    assert "predecessor_authority" not in session and "full report" not in instructions
+
+
+def test_legacy_declared_reference_keeps_unknown_omission_sizes_and_cannot_regain_bodies():
+    from ouroboros.main_context_authority import project_helper_predecessor_authority
+
+    reference = {"source": _source("prior"), "omitted_fields": ["result", "task_contract"]}
+    brief = project_helper_predecessor_authority(reference, declared=True)
+    assert brief == {"source": reference["source"], "omitted_fields": {"result": None, "task_contract": None}}
+    assert project_helper_predecessor_authority(brief) == brief
+    assert project_helper_predecessor_authority(brief, declared=True) == brief
+
+
+def test_a_stored_authored_narrative_wins_without_chat_access(tmp_path):
+    # Nothing writes an authored narrative any more; the readers keep serving the
+    # ones earlier versions stored beside a task result and in the chat log.
     from ouroboros.task_results import load_task_result, write_task_result
 
     task_id = "narrative-root"
-    write_task_result(tmp_path, task_id, "completed", result="raw")
     ref = _ref(task_id)
     row = {
-        "type": "task_summary", "summary_kind": "authored_root_summary",
+        "summary_kind": "authored_root_summary",
         "summary_id": f"task-narrative:{task_id}", "task_id": task_id,
         "result_ref": ref, "source_coverage": {"task_result": ref},
         "text": "The authored account of what actually happened.",
     }
-    assert append_authored_task_summary(tmp_path, tmp_path, row)
+    _summary(tmp_path, task_id, row["text"])
+    write_task_result(tmp_path, task_id, "completed", result="raw", continuation_narrative=row)
     stored = load_task_result(tmp_path, task_id)
     assert stored["status"] == "completed"
     assert stored["continuation_narrative"]["text"] == row["text"]

@@ -287,8 +287,9 @@ def test_managed_continuation_keeps_old_money_and_mints_one_new_attempt(tmp_path
         text, usage, _ = run_llm_loop(**ledger_kwargs(tmp_path, llm, []))
     assert text == "done" and llm.calls == 2 and observations == [1]
     rows = _ledger(tmp_path)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "unresolved", "reserved", "dispatched", "settled"]
-    old, new = rows[0]["attempt_id"], rows[3]["attempt_id"]
+    assert [(row["state"], row["revision"]) for row in rows] == [("unresolved", 4), ("settled", 3)]
+    assert rows[0]["physical_failure"]
+    old, new = rows[0]["attempt_id"], rows[1]["attempt_id"]
     assert old != new
     assert usage["transport_recovery"]["previous_attempt"]["physical_attempt_id"] == old
     assert ua.usage_projection(tmp_path)["unresolved_upper_bound_usd"] == 1.0
@@ -296,18 +297,23 @@ def test_managed_continuation_keeps_old_money_and_mints_one_new_attempt(tmp_path
 
 @pytest.mark.parametrize("reported_model", ["absent", None, "test"])
 @pytest.mark.parametrize("axis", ["matching", "empty", "before_wait", "source", "profile", "fingerprint", "model", "local"])
-def test_catalog_reachability_binds_effective_account_and_wait_start(monkeypatch, axis, reported_model):
+@pytest.mark.parametrize("advisory", [False, True])
+def test_catalog_reachability_binds_effective_account_and_wait_start(monkeypatch, axis, reported_model, advisory):
     import time
     from ouroboros import llm_claudexor
     started = time.time() - 10
     catalog = dict(source="codex", credentialProfileId="effective-profile", accountFingerprint="account-a",
                    observedAt=datetime.fromtimestamp(started + 1, timezone.utc).isoformat(),
                    provenance="provider_http", models=[{"id": "test"}])
+    if advisory:
+        catalog.update(models=[], admission={"requestedModel": "test", "inventoryAbsence": "advisory"})
     if axis == "before_wait": catalog["observedAt"] = datetime.fromtimestamp(started - 1, timezone.utc).isoformat()
     if axis == "source": catalog["source"] = "foreign"
     if axis == "profile": catalog["credentialProfileId"] = "foreign"
     if axis == "fingerprint": catalog["accountFingerprint"] = "foreign"
-    if axis == "model": catalog["models"] = [{"id": "foreign"}]
+    if axis == "model":
+        catalog["models"] = [{"id": "foreign"}]
+        if advisory: catalog["admission"]["requestedModel"] = "foreign"
     if axis == "local": catalog["provenance"] = "local_cache"
     if axis == "empty": catalog = {}
     route = {"source": "codex", "credentialProfileId": "effective-profile", "accountFingerprint": "account-a"}

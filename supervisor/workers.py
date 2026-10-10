@@ -240,6 +240,23 @@ def open_repo_writer_admission(expected_reason: str = "") -> bool:
     return True
 
 
+def open_repo_writer_admission_after_update_abort(expected_reason: str = "") -> bool:
+    """Publish stopped saved work before any writer can use a released update gate."""
+    from supervisor.restart_retention import recover_aborted_update
+    from supervisor.update_merge import active_update_tx
+
+    with _queue_lock:
+        if active_update_tx():
+            return False
+        with _repo_writer_gate_lock:
+            if expected_reason and _repo_writer_gate_reason != expected_reason:
+                return False
+        if not recover_aborted_update(DRIVE_ROOT, RUNNING, PENDING):
+            log.warning("Update abort retains writer admission: saved-work handoff is unconfirmed")
+            return False
+        return open_repo_writer_admission(expected_reason=expected_reason)
+
+
 def repo_writer_admission_closed() -> str:
     with _repo_writer_gate_lock:
         reason = _repo_writer_gate_reason
@@ -1188,6 +1205,7 @@ def kill_workers(
     reconcile_review_custody: bool = True,
     hold_never_started: bool = False,
     stop_source: str = "",  # a stop door's typed cause (``_write_failure_result``)
+    retain_saved_work: bool = False,  # an application stop: saved work survives it (#1563)
 ) -> bool:
     global _WORKER_POOL_DISABLED_REASON
     from supervisor import queue, restart_retention as retention  # every door retains saved pauses
@@ -1209,36 +1227,46 @@ def kill_workers(
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
         cleared_running = len(RUNNING)
-        for w in WORKERS.values():
-            if w.proc.pid:
-                kill_worker_tree(w.proc.pid)
-            elif w.proc.is_alive():
-                w.proc.terminate()
-        for w in WORKERS.values():
-            w.proc.join(timeout=3)
-        _kill_survivors()
+        doomed = list(WORKERS.values())
+        for w in doomed:
+            # The timeout reaper's ownership mark: assignment, the health check
+            # and the crash detector skip the slot while it is torn down below.
+            w.reaping = True
+    # Kill and join OUTSIDE the queue lock: the lifecycle serializer still
+    # excludes pool starts and kills, and ingress/stop doors are not held.
+    for w in doomed:
+        if w.proc.pid:
+            kill_worker_tree(w.proc.pid)
+        elif w.proc.is_alive():
+            w.proc.terminate()
+    for w in doomed:
+        w.proc.join(timeout=3)
+    _kill_survivors()
+    from supervisor.worker_process import close_worker_stop_channel
+    for w in doomed:
+        close_worker_stop_channel(w.proc)
+    with _queue_lock:
         dead_pids: set[int] = set()
-        for w in WORKERS.values():
+        unconfirmed_pids: list[int] = []
+        for w in doomed:
             try:
                 if w.proc.pid and not w.proc.is_alive():
                     dead_pids.add(int(w.proc.pid))
                     from supervisor.worker_health import retire_confirmed_worker_consumers
                     retire_confirmed_worker_consumers(w, RUNNING.get(w.busy_task_id))
+                else:
+                    unconfirmed_pids.append(int(w.proc.pid or 0))
             except Exception:
+                unconfirmed_pids.append(int(getattr(w.proc, "pid", 0) or 0))
                 log.debug("Cannot confirm worker %s dead", w.wid, exc_info=True)
-        from supervisor.worker_process import close_worker_stop_channel
-        for w in WORKERS.values():
-            close_worker_stop_channel(w.proc)
         WORKERS.clear()
-        orphaned_ids = []
-        drained_ids = []
-        terminalization_retry_ids = []
+        orphaned_ids, drained_ids, terminalization_retry_ids = [], [], []
         # #1196: an exact mid-run budget pause survives the physical epoch. Its
         # PENDING carrier and its durable ``paused`` row are left exactly as they
         # are — never cancelled here, never ``pending_parent_interrupted`` — so the
         # next boot's ``restore_pending_from_snapshot`` re-validates the durable
         # authority and parks the same task id again (or holds it, typed).
-        retained_paused_ids = []
+        retained_paused_ids: list = []
         cleanup_ok = True
         try:
             done_status = terminal_status or "failed"
@@ -1247,25 +1275,16 @@ def kill_workers(
                 DRIVE_ROOT, owner_restart=hold_never_started or stop_source == "owner_restart")
             retention.park_saved_running_rows(RUNNING, PENDING, preserve_running, DRIVE_ROOT,
                                              sleep_hold_reason=sleep_hold_reason)
-            running_task_ids = set(RUNNING) - preserve_running
+            # An application stop keeps rows whose attempt saved work in RUNNING for the next boot.
+            retained_running_ids = retention.retain_saved_running(RUNNING, preserve_running, DRIVE_ROOT) \
+                if retain_saved_work else []
+            kept_running = preserve_running | set(retained_running_ids)  # neither is interrupted here
+            running_task_ids = set(RUNNING) - kept_running
             interrupted_roots = {
                 str((meta.get("task") or {}).get("root_task_id") or task_id)
                 for task_id, meta in RUNNING.items()
-                if isinstance(meta, dict) and task_id not in preserve_running
+                if isinstance(meta, dict) and task_id not in kept_running
             }
-
-            def _settle_killed_pending(
-                task: Dict[str, Any], *, reason: str, status: str, trigger: str,
-            ) -> bool:
-                """Return true only after pending custody is durably terminal."""
-                return _settle_terminalization_task(
-                    task,
-                    reason=reason,
-                    status=status,
-                    trigger=trigger,
-                    reconcile_delegate_custody=reconcile_delegate_custody,
-                    stop_source=stop_source,
-                )
 
             def _retain_killed_pending(
                 task: Dict[str, Any], *, reason: str, status: str, trigger: str,
@@ -1314,6 +1333,8 @@ def kill_workers(
                         PENDING.remove(existing_retry)
                         orphaned_ids.append(str(task_id))
                     RUNNING.pop(str(task_id), None)
+                    continue
+                if task_id in retained_running_ids:
                     continue
                 if task_id in preserve_running:
                     successor = dict(task)
@@ -1392,8 +1413,12 @@ def kill_workers(
                 if preserve_pending and tid in preserve_running:
                     PENDING.append(task)
                     continue
-                if retention.retained_pending(task, sleep_hold_reason=sleep_hold_reason):
-                    retained_paused_ids.append(tid)
+                paused = retention.retained_pending(task, sleep_hold_reason=sleep_hold_reason)
+                # Accepted work never ends with the application (boot decides), except a child
+                # whose parent this stop interrupted: invariant 19 settles it as before.
+                if paused or retain_saved_work and not retention.child_of_interrupted(
+                        task, running_task_ids, interrupted_roots):
+                    retained_paused_ids.extend([tid] if paused else [])
                     PENDING.append(task)
                     continue
                 if not preserve_pending and hold_never_started and retention.hold_never_started(
@@ -1409,13 +1434,17 @@ def kill_workers(
                         "cancelled", "pending_parent_interrupted")
                 else:
                     reason, status, trigger = result_reason, done_status, "pending_pool_kill"
-                if _settle_killed_pending(task, reason=reason, status=status, trigger=trigger):
+                # True only after pending custody is durably terminal.
+                if _settle_terminalization_task(task, reason=reason, status=status, trigger=trigger,
+                                                reconcile_delegate_custody=reconcile_delegate_custody,
+                                                stop_source=stop_source):
                     drained_ids.append(tid)
                 else:
                     # Failed durable settlement keeps non-dispatchable retry
                     # custody, never a lost row or permission to run it again.
                     PENDING.append(_retain_killed_pending(task, reason=reason, status=status, trigger=trigger))
-            if orphaned_ids or drained_ids or terminalization_retry_ids or retained_paused_ids or retention.held_ids(PENDING):
+            if (orphaned_ids or drained_ids or terminalization_retry_ids or retained_paused_ids
+                    or retained_running_ids or retention.held_ids(PENDING)):
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
@@ -1425,6 +1454,7 @@ def kill_workers(
                         "drained_pending": drained_ids,
                         "terminalization_retry": terminalization_retry_ids,
                         **({"retained_budget_paused": retained_paused_ids} if retained_paused_ids else {}),
+                        **({"retained_saved_work": retained_running_ids} if retained_running_ids else {}),
                         **({"held_for_owner_restart": held} if (held := retention.held_ids(PENDING)) else {}),
                     },
                 )
@@ -1442,6 +1472,15 @@ def kill_workers(
         log.warning("Failed to persist queue snapshot after worker shutdown", exc_info=True)
     if not snapshot_ok:
         log.error("Worker shutdown completed without a durable final queue snapshot")
+    global _LAST_WORKER_EXIT_CENSUS
+    _LAST_WORKER_EXIT_CENSUS = {
+        "ts": utc_now_iso(),
+        "doomed": sorted(int(w.proc.pid or 0) for w in doomed),
+        "dead": sorted(dead_pids),
+        "unconfirmed": sorted(unconfirmed_pids),
+        "cleanup_ok": bool(cleanup_ok),
+        "snapshot_ok": bool(snapshot_ok),
+    }
     if cleared_running:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -1452,6 +1491,22 @@ def kill_workers(
             },
         )
     return bool(cleanup_ok and snapshot_ok)
+
+
+_LAST_WORKER_EXIT_CENSUS: Optional[dict] = None
+
+
+def last_worker_exit_census() -> Optional[dict]:
+    """The PID census of the latest ``kill_workers`` in this process, or None before any.
+
+    ``doomed`` are the worker PIDs that round tore down, ``dead`` those whose
+    exit the join confirmed, ``unconfirmed`` the rest (still alive after the
+    survivor sweep, or unknown). A body adoption arms only on a census whose
+    ``unconfirmed`` list is empty: the ``bool`` return of ``kill_workers`` is
+    about cleanup and the final snapshot, not about which readers of the
+    checkout are gone, and a census is never inferred from that boolean.
+    """
+    return dict(_LAST_WORKER_EXIT_CENSUS) if _LAST_WORKER_EXIT_CENSUS else None
 
 
 def _persist_pending_terminalization_retries(task_ids: List[str]) -> None:

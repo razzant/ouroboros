@@ -191,6 +191,8 @@ def test_poller_still_terminates_when_no_expiry_lands_inside_the_slot(
 class _OutcomeCustodyStub:
     """cancel_and_verify scripted to one typed outcome (or an exception)."""
 
+    CANCEL_CONTAINMENT_FAULT = "containment_fault_run_may_still_be_live"
+
     def __init__(self, outcome, state="running", raises=False):
         self.outcome, self.state, self.raises = outcome, state, raises
         self.cancels = []
@@ -525,8 +527,8 @@ def test_clock_crossing_between_timeout_checks_still_cancels_the_running_session
     )
     monkeypatch.setattr(
         rx,
-        "_poll_detail",
-        lambda *_args, **_kwargs: {"lastSeq": 1, "summary": {"state": "running"}},
+        "_observe_session",
+        lambda *_args, **_kwargs: ({"lastSeq": 1, "summary": {"state": "running"}}, None),
     )
     stub = _OutcomeCustodyStub("confirmed")
     with pytest.raises(TimeoutError, match="exceeded the slot budget"):
@@ -535,3 +537,110 @@ def test_clock_crossing_between_timeout_checks_still_cancels_the_running_session
             SimpleNamespace(run_id="run-cross"), "run-cross", 1.0,
         )
     assert stub.cancels == ["review_slot_timeout"]
+
+
+# ---------------------------------------------------------------------------
+# #1547 link 2: a transient OBSERVATION failure is not the run's failure
+# ---------------------------------------------------------------------------
+
+
+class _BlindGateway:
+    """A live run whose reads fail ``blind`` times (or forever) before answering."""
+
+    def __init__(self, failure, *, blind=None, terminal="succeeded"):
+        self.failure, self.blind, self.terminal, self.reads = failure, blind, terminal, 0
+
+    def get_run(self, run_id, *, timeout_sec=None):
+        self.reads += 1
+        if self.blind is None or self.reads <= self.blind:
+            raise self.failure
+        return {"lastSeq": 9, "summary": {"state": self.terminal}, "primaryOutput": {"text": "[]"}}
+
+
+def _transient(code="daemon_unreachable", status_code=0):
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    return ClaudexorUnavailable(code, f"{code} while reading the run", status_code=status_code)
+
+
+@pytest.mark.parametrize("failure", [
+    _transient(), _transient("poll_wall_timeout"), _transient("malformed_response"),
+    _transient("http_503", status_code=503),
+])
+def test_a_transient_observation_failure_keeps_polling_until_the_terminal(tmp_path, monkeypatch, failure):
+    """Transport, read timeout, unreadable body, 5xx: the run is live and the
+    poller keeps observing it on the slot clock; the terminal it then reads is
+    the slot's ordinary result and nothing was cancelled."""
+    from ouroboros import review_execution as rx
+
+    monkeypatch.setattr(rx, "_SESSION_POLL_SEC", 0.01)
+    gateway, stub = _BlindGateway(failure, blind=2), _OutcomeCustodyStub("confirmed")
+    detail = rx._poll_session_terminal(gateway, stub, tmp_path, SimpleNamespace(run_id="run-b"), "run-b", 600.0)
+    assert detail["summary"]["state"] == "succeeded" and gateway.reads == 3
+    assert stub.cancels == []
+
+
+def test_a_received_refusal_about_the_run_itself_still_propagates(tmp_path):
+    """A 4xx is the daemon's answer about THIS run (unknown, reclaimed), not a
+    blind spot: it propagates exactly as before."""
+    from ouroboros import review_execution as rx
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    gateway = _BlindGateway(_transient("http_410", status_code=410))
+    with pytest.raises(ClaudexorUnavailable) as raised:
+        rx._poll_session_terminal(gateway, _OutcomeCustodyStub("confirmed"), tmp_path,
+                                  SimpleNamespace(run_id="run-g"), "run-g", 600.0)
+    assert raised.value.status_code == 410 and gateway.reads == 1
+
+
+@pytest.mark.parametrize("stub", [
+    _OutcomeCustodyStub("confirmed", raises=True),  # cancel_and_verify itself raised
+    # The real seam's shape for an unreachable daemon: a containment fault whose
+    # verify read reached no state either (delegate_custody.cancel_and_verify).
+    _OutcomeCustodyStub("containment_fault_run_may_still_be_live", state=""),
+], ids=["cancel_raised", "containment_fault_without_state"])
+def test_a_run_unobservable_to_its_deadline_with_an_unreachable_cancel_stays_in_flight(tmp_path, monkeypatch, stub):
+    """Blind on every read AND the deadline cancel/verify unreachable: nothing
+    terminal is known, so the attempt is NOT settled — the typed
+    ``ReviewPollUnavailable`` names the started run for a later observation."""
+    from ouroboros import review_execution as rx
+
+    monkeypatch.setattr(rx, "_SESSION_POLL_SEC", 0.01)
+    failure = _transient()
+    with pytest.raises(rx.ReviewPollUnavailable) as raised:
+        rx._poll_session_terminal(_BlindGateway(failure), stub, tmp_path,
+                                  SimpleNamespace(run_id="run-u"), "run-u", 0.05)
+    error = raised.value
+    assert error.code == "review_poll_unavailable" and error.__cause__ is failure
+    assert error.delegated_run_started is True and error.delegated_run_id == "run-u"
+    assert isinstance(error, rx.ReviewRouteUnavailable) and stub.cancels == ["review_slot_timeout"]
+
+
+@pytest.mark.parametrize("outcome, state", [
+    ("confirmed", "running"), ("requested", "running"),
+    # A refused cancel whose verify read still SAW the run live is an observed run.
+    ("containment_fault_run_may_still_be_live", "running"),
+])
+def test_an_unobservable_run_whose_deadline_cancel_answered_times_out_as_before(tmp_path, monkeypatch, outcome, state):
+    """When the deadline cancel/verify DID reach the daemon the slot ends as the
+    ordinary honest timeout; the typed in-flight refusal is only for the doubly
+    blind case."""
+    from ouroboros import review_execution as rx
+
+    monkeypatch.setattr(rx, "_SESSION_POLL_SEC", 0.01)
+    stub = _OutcomeCustodyStub(outcome, state=state)
+    with pytest.raises(TimeoutError, match="exceeded the slot budget"):
+        rx._poll_session_terminal(_BlindGateway(_transient()), stub, tmp_path,
+                                  SimpleNamespace(run_id="run-t"), "run-t", 0.05)
+
+
+def test_a_gateway_terminal_failure_read_after_a_blip_is_the_runs_own_failure(tmp_path, monkeypatch):
+    """The blip is forgiven, the ``failed`` terminal is not: it returns as the
+    detail the caller settles as the run's own failure, exactly as today."""
+    from ouroboros import review_execution as rx
+
+    monkeypatch.setattr(rx, "_SESSION_POLL_SEC", 0.01)
+    gateway = _BlindGateway(_transient(), blind=1, terminal="failed")
+    detail = rx._poll_session_terminal(gateway, _OutcomeCustodyStub("confirmed"), tmp_path,
+                                       SimpleNamespace(run_id="run-f"), "run-f", 600.0)
+    assert detail["summary"]["state"] == "failed" and gateway.reads == 2

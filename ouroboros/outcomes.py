@@ -4,7 +4,9 @@ Lifecycle, execution health, artifacts, review, and objective evaluation are
 separate axes. Tool errors remain evidence without degrading a delivered answer.
 Task acceptance or qualified Advisory author completion establishes objective
 success; neither final text nor absent tool errors can. Typed runtime evidence may conservatively
-degrade an otherwise ``not_evaluated`` objective.
+degrade an otherwise ``not_evaluated`` objective. An oversized ledger rides as
+a stub whose ``summary`` is re-projected from the artifact file; the stub is
+never a source for entries or axes.
 """
 
 from __future__ import annotations
@@ -1385,9 +1387,7 @@ def refresh_verification_ledger_artifacts(
     """Return ``ledger`` with artifact status synchronized after finalization."""
     if not isinstance(ledger, dict):
         return ledger
-    # An omitted-to-artifact stub is a PROJECTION of the artifact file, not a
-    # source: it carries no entries, so rebuilding from it would mint "0
-    # entries / no failures / execution ok" over the real ledger's summary.
+    # A stub has no entries: rebuilding from it would mint a clean "0 failures" summary.
     if ledger.get("omitted_to_artifact"):
         return ledger
     entries = [

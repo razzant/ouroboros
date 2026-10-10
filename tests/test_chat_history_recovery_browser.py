@@ -156,8 +156,9 @@ def _is_seen_ack(project):
 
 
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("theme", ["light", "dark"])
 def test_project_panel_shows_a_slow_first_read_as_loading_and_a_failed_one_as_retry(
-    direct_server_with_data, browser_engine, tmp_path,
+    direct_server_with_data, browser_engine, theme, tmp_path,
 ):
     from playwright.sync_api import sync_playwright
     from ouroboros.projects_registry import create_project
@@ -176,24 +177,30 @@ def test_project_panel_shows_a_slow_first_read_as_loading_and_a_failed_one_as_re
             acked = []
             page.on("request", lambda request: acked.extend(
                 project["id"] for project in (slow, failing) if _is_seen_ack(project)(request)))
+            page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
             page.add_init_script(f"({_FAULT_RECENT_READ})()")
             _open(page, url)
 
             # Slow: the response is withheld, and the panel must already say so.
             page.evaluate("id => { window.__recentFault = {chatId: id, mode: 'hold'}; }", slow["chat_id"])
             feed = _click_project(page, slow)
-            loading = _wait_recent_state(page, feed, "s.busy && s.button === 'Loading…'")
+            loading = _wait_recent_state(page, feed, "s.busy && s.button === 'Loading saved history…'")
             assert loading["disabled"] and loading["messages"] == 0, loading
+            assert loading["note"] == '', 'one read has one loading indicator'
+            assert page.locator('#project-panel .chat-history-status').count() == 0
             assert [read for read in _reads(page, slow["chat_id"]) if not read["done"]], \
                 "the loading state is asserted while the read is provably unanswered"
             assert slow["id"] not in acked, "an unpainted revision is never acknowledged"
-            _screenshot(page, tmp_path, f"project-first-read-loading-{browser_engine}")
+            for width in (1343, 390):
+                page.set_viewport_size({'width': width, 'height': 876})
+                _screenshot(page, tmp_path, f'project-loading-{theme}-{width}-{browser_engine}')
+            page.set_viewport_size({'width': 1280, 'height': 850})
 
             with page.expect_request(_is_seen_ack(slow), timeout=30_000):
                 page.evaluate("() => { window.__recentFault = null; window.__releaseRecent(); }")
             _idle(page, feed)
             loaded = page.evaluate(_RECENT_STATE, feed)
-            assert not loaded["busy"] and loaded["button"] != "Loading…", loaded
+            assert not loaded["busy"] and loaded["button"] != "Loading saved history…", loaded
             assert page.locator(f"{feed} .message").filter(has_text="history-human-0005").count() == 1
             _screenshot(page, tmp_path, f"project-first-read-loaded-{browser_engine}")
 
@@ -203,6 +210,16 @@ def test_project_panel_shows_a_slow_first_read_as_loading_and_a_failed_one_as_re
             failed = _wait_recent_state(page, feed, "!s.busy && s.button === 'Retry loading messages'")
             assert not failed["disabled"] and failed["messages"] == 0, failed
             assert failed["note"] == "Some saved history could not be loaded.", failed
+            note = page.locator('#project-panel .chat-history-status')
+            assert note.evaluate('e => getComputedStyle(e).backgroundColor') == 'rgba(0, 0, 0, 0)'
+            for width in (1343, 390):
+                page.set_viewport_size({'width': width, 'height': 876})
+                page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+                box = note.bounding_box()
+                assert box['x'] >= 0 and box['x'] + box['width'] <= width + 1
+                assert note.evaluate('e => e.scrollWidth <= e.clientWidth')
+                _screenshot(page, tmp_path, f'project-error-{theme}-{width}-{browser_engine}')
+            page.set_viewport_size({'width': 1280, 'height': 850})
             assert failing["id"] not in acked, "a failed read is never acknowledged"
             _screenshot(page, tmp_path, f"project-first-read-failed-{browser_engine}")
 

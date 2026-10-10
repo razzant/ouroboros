@@ -87,7 +87,10 @@ def _replay(q: Any, predecessor: str, nonce: str, successor: str) -> Optional[Di
                 write_task_result(q.DRIVE_ROOT, successor, stored.get("status") or "scheduled",
                                   continuation_admission=admission, metadata=(row or stored).get("metadata"),
                                   root_task_id=successor, chat_id=binding.get("chat_id"),
-                                  project_id=binding.get("project_id") or "")
+                                  project_id=binding.get("project_id") or "",
+                                  **{k: v for k, v in (row or {}).items()
+                                     if k in {"deadline_at", "reasoning_effort", "workspace_root", "workspace_mode"}
+                                     and v})
             if row is not None and row.get("_continuation_prepared"):
                 prepared = row.pop("_continuation_prepared")
                 if q.persist_queue_snapshot(reason="owner_continue_binding_recovered") is not True:
@@ -126,17 +129,22 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None,
     blockers: List[Dict[str, Any]] = []
     members = {predecessor}
     member_results = {}
+    from supervisor.owner_pause_control import warm_paused_member
+
     with q._queue_lock:
-        running = [(str(tid), dict(meta.get("task") or {})) for tid, meta in q.RUNNING.items()
-                   if isinstance(meta, dict)]
+        running = [(str(tid), dict(meta.get("task") or {}),
+                    warm_paused_member(meta) if owner_pause_fence_id else False)
+                   for tid, meta in q.RUNNING.items() if isinstance(meta, dict)]
         pending = [dict(task) for task in q.PENDING if isinstance(task, dict)]
         latch = dict(q.BUDGET_ROOT_FENCES.get(predecessor) or {})
     owner_latched = bool(owner_pause_fence_id and latch.get("cause") == "owner_pause"
                          and str(latch.get("status") or "") in {"active", "paused"}
                          and str(latch.get("fence_id") or "") == str(owner_pause_fence_id))
-    for task_id, task in running:
+    for task_id, task, warm in running:
         if str(task.get("root_task_id") or task_id) == predecessor:
             members.add(task_id)
+            if warm:
+                continue  # saved warm under the owner's Pause: its stack waits, it writes nothing
             blockers.append({"kind": "running_member", "task_id": task_id})
     from ouroboros.post_task_checkpoint import late_phase_state
 
@@ -175,7 +183,9 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None,
         else:
             blockers.extend({"kind": "delegated_run", "task_id": member,
                              "run_id": str(run.get("run_id") or ""),
-                             "invocation_id": str(run.get("invocation_id") or "")}
+                             "invocation_id": str(run.get("invocation_id") or ""),
+                             # The owner Pause's consumers read it; Continue's hold does not.
+                             "review_owned": bool(run.get("review_owned"))}
                             for run in observed.get("runs") or [] if isinstance(run, dict))
     try:
         from ouroboros import process_custody as pc
@@ -193,13 +203,12 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None,
     except Exception as exc:
         blockers.append({"kind": "process_custody_unreadable", "detail": str(exc)[:200]})
     try:
-        from ouroboros import usage_accounting as ua
-        attempts, integrity, _memo, _generation = ua._memoized_final_rows(custody_root)
-        if not integrity:
-            raise OSError("attempt_custody_unreadable")
+        from ouroboros import usage_store
+        # The root's open attempts only (the store's open-set index).
+        with usage_store.read(custody_root) as txn:
+            attempts = txn.open_attempts(root_task_id=predecessor)
         for attempt in attempts:
-            if (str(attempt.get("root_task_id") or "") == predecessor
-                    and attempt.get("state") in {"dispatched", "unresolved"}):
+            if attempt.get("state") in {"dispatched", "unresolved"}:
                 consumer = attempt.get("local_answer_consumer_id")
                 retired = (member_results.get(str(attempt.get("task_id") or ""), {})
                            .get("retired_model_consumers") or {}).get(consumer) if consumer else None
@@ -207,10 +216,37 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None,
                         and type(attempt.get("local_answer_task_attempt")) is int
                         and retired.get("task_attempt") == attempt["local_answer_task_attempt"]):
                     continue
-                blockers.append({"kind": "model_handoff", "attempt_id": attempt.get("attempt_id")})
+                # A reviewer's own send (its slot/skill attribution) is review
+                # custody: the owner Pause's readers list it as still finishing.
+                blockers.append({"kind": "model_handoff", "attempt_id": attempt.get("attempt_id"),
+                                 "review_owned": bool(attempt.get("review_slot_id") or attempt.get("review_skill"))})
     except Exception as exc:
         blockers.append({"kind": "attempt_custody_unreadable", "detail": str(exc)[:200]})
     return blockers
+
+
+def action_writers(q: Any, predecessor: str, *, drive_root: Any = None,
+                   owner_pause_fence_id: str = "") -> List[Dict[str, Any]]:
+    """An ADDRESSED action's census (Continue, Resume, held selection) of ``predecessor``.
+
+    It first retires the positively ended local owners of this tree only
+    (``local_custody_repair``: a retained witness or platform-qualified
+    absence), then observes exactly as ``conflicting_writers`` — which stays
+    the passive, write-free reader every census and GET uses (#1554).
+    """
+    from ouroboros.local_custody_repair import repair_ended_local_custody
+    from ouroboros.owner_pause import tree_member_results
+
+    root = pathlib.Path(drive_root or q.DRIVE_ROOT)
+    try:
+        members = set(tree_member_results(root, predecessor)) | {predecessor}
+        repaired = repair_ended_local_custody(root, members, root_task_id=predecessor)
+        if repaired:
+            q.append_jsonl(pathlib.Path(q.DRIVE_ROOT) / "logs" / "events.jsonl",
+                           {"type": "local_custody_retired", "root_task_id": predecessor, "retired": repaired})
+    except Exception:
+        log.warning("Ended local custody of %s was not repaired; it stays held", predecessor, exc_info=True)
+    return conflicting_writers(q, predecessor, drive_root=drive_root, owner_pause_fence_id=owner_pause_fence_id)
 
 
 def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: Dict[str, Any],
@@ -222,7 +258,14 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     title = str(result.get("title") or result.get("suggested_name") or result.get("objective") or predecessor)[:80]
     original = sources.get("original") or {}
     origin_ref = original.get("origin_message_ref")
+    from ouroboros.settings_scales import EFFORT_SCALE
+
+    # The same work keeps the effort it was explicitly started on. A root's stored value is
+    # only that explicit choice (dispatch stamps children alone; a switch_model is not
+    # stored), read from the result row its admission wrote even if no worker ever ran.
+    effort = str(result.get("reasoning_effort") or "")
     task: Dict[str, Any] = {
+        **({"reasoning_effort": effort} if effort in EFFORT_SCALE else {}),
         "id": binding["successor_task_id"], "type": "task", "chat_id": binding.get("chat_id"),
         "project_id": str(binding.get("project_id") or ""), "text": text, "objective": text,
         "title": f"Continue: {title}", "suggested_name": f"Continue: {title}",
@@ -268,23 +311,52 @@ def _billing_group(q: Any, predecessor: str, result: Dict[str, Any]) -> Dict[str
     """The whole-work group the successor spends from, and the cap it started under.
 
     A chain keeps the FIRST root's group and cap; otherwise the predecessor's
-    own earliest ledger row names the cap it started under (the configured
-    initial cap included). With neither a durable initial binding nor a ledger
-    cap, the authority is unavailable; changed configuration cannot reprice it.
+    own earliest live ledger row names the group it spent in and the cap it
+    started under (an older block's own literal included, ``legacy_live``).
+    With neither a durable initial binding nor a ledger cap, the predecessor
+    stays its own group, its spend preserved, under the configured cap — the
+    choice is pinned on the predecessor's result (``legacy_default``) so its
+    own later work and every successor share one ceiling.
     """
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     carried = result.get("billing_group") or metadata.get("billing_group") or metadata.get("continuation") or {}
     if carried.get("billing_group_id") and "billing_group_limit_usd" in carried:
         return {key: carried.get(key) for key in (
             "billing_group_id", "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")}
-    from ouroboros.usage_admission import original_group_limit
+    from ouroboros.usage_admission import ledger_billing_binding, original_group_limit
 
     group = str(result.get("root_task_id") or predecessor)
+    recorded = ledger_billing_binding(q.DRIVE_ROOT, group)  # the root's own first row: its group, not only itself
+    if recorded:
+        return {key: recorded.get(key) for key in ("billing_group_id", "billing_group_limit_usd", "billing_group_limit_source")}
     found = original_group_limit(q.DRIVE_ROOT, group)
-    if found["source"] != "ledger_first_row":
-        raise ValueError("billing_authority_unavailable")
-    return {"billing_group_id": group, "billing_group_limit_usd": found["limit_usd"],
-            "billing_group_limit_source": "ledger_first_row"}
+    if found["source"] != "no_attempt_recorded":
+        return {"billing_group_id": group, "billing_group_limit_usd": found["limit_usd"],
+                "billing_group_limit_source": found["source"]}
+    from ouroboros.config import runtime_setting
+    from ouroboros.task_results import stamp_task_result_schema, task_result_path
+    from ouroboros.utils import update_json_locked
+
+    limit = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
+    binding = {"billing_group_id": group, "billing_group_limit_usd": limit if limit > 0 else None,
+               "billing_group_limit_source": "legacy_default", "billing_group_limit_revision": utc_now_iso()}
+
+    def pin(current):
+        nonlocal binding
+        if current.get("billing_group"):  # already chosen (by an earlier Continue or admission): share it
+            binding = current["billing_group"]
+            return None
+        return stamp_task_result_schema({**current, "billing_group": binding})
+
+    if result.get("status"):  # a recorded predecessor: the choice becomes its durable binding, or nothing is admitted
+        try:
+            update_json_locked(task_result_path(q.DRIVE_ROOT, group), pin, strict_existing_dict=True)
+        except (OSError, ValueError, TimeoutError) as exc:
+            # An unpinned choice would let the predecessor's own later work follow a changed
+            # setting instead of the successor's ceiling: refuse now; the same nonce retries.
+            log.warning("Could not pin the default billing group on %s", group, exc_info=True)
+            raise ValueError("billing_authority_unavailable") from exc
+    return {key: binding.get(key) for key in ("billing_group_id", "billing_group_limit_usd", "billing_group_limit_source")}
 
 
 def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -379,7 +451,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
         except Exception as exc:
             return {"ok": False, "error": "continuation_claim_unwritable", "detail": str(exc)[:200]}
         binding = dict(claim["binding"])
-    blockers = conflicting_writers(q, predecessor)
+    blockers = action_writers(q, predecessor)
     admission = {"binding": binding, "binding_sha256": binding_sha(binding), "admitted_at": utc_now_iso(),
                  "held": bool(blockers)}
     task = _successor_task(q, predecessor, result, binding, verdict, sources, admission)
@@ -407,7 +479,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
                 "successor_task_id": successor, "unconfirmed": True}
     task["_admission_token"] = token
     task["_continuation_prepared"] = admission["binding_sha256"]
-    with q._queue_lock:
+    with q.prepared_root_billing(task), q._queue_lock:  # the ledger read happens before the lock
         admitted = q.enqueue_task(task, project_admission=project_basis)
         if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
             q.release_task_admission(successor, token)
@@ -423,7 +495,9 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
                 q.DRIVE_ROOT, successor, STATUS_SCHEDULED, continuation_admission=admission,
             chat_id=task.get("chat_id"), project_id=task.get("project_id") or "", title=task["title"],
             suggested_name=task["suggested_name"], root_task_id=successor, metadata=task["metadata"],
-            **({"deadline_at": task["deadline_at"]} if task.get("deadline_at") else {}),
+            # The binding a successor that never starts must still hand on to its own Continue.
+            **{key: task[key] for key in ("deadline_at", "reasoning_effort", "workspace_root", "workspace_mode")
+               if task.get(key)},
             **({"reason_code": HOLD_CONTINUATION_WRITER,
                 "resource_limit": {"status": "budget_hold", "auto_resume": False, "exact_continuation": False,
                                    **task["_budget_pause_hold"]}} if blockers else {}),

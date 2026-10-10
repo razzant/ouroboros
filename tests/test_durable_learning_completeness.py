@@ -425,36 +425,60 @@ def _write_schedules(tmp_path, count):
     )
 
 
-def test_wake_context_discloses_a_malformed_recent_chat_gap(tmp_path):
+def test_wake_context_reads_main_beside_a_malformed_chat_line_and_the_reader_discloses_it(tmp_path):
+    """A torn chat line takes no position and breaks nothing: the wake reads Main as its own room, the
+    one complete row verbatim and counted in its facts; the deliberate reader discloses the malformed line."""
+    from ouroboros.memory import Memory
+
     context = _wake_context(tmp_path, chat_rows=[
         json.dumps({"chat_id": 1, "direction": "in", "text": "complete recent chat"}),
         '{"direction":"in","text":"broken"',
     ])
-    assert "jsonl_malformed" in context
+    room = context.split("\n## This room (Main) — head ", 1)[1].split("\n## ", 1)[0]  # the heading, not the books' mention
+    assert "people 1, mine 0" in room and "complete recent chat" in room.split("### Open conversation", 1)[1]
+    assert "\n## Live rooms" not in context and '"text":"broken"' not in context  # Main is the room, not a live line
+    assert "jsonl_malformed" in Memory(drive_root=tmp_path).chat_history(count=20)
+
+
+def _legacy_memory(tmp_path, block):
+    """One legacy block covering the one chat row, with the old cursor after it: no cursor gap."""
+    from ouroboros.utils import jsonl_generation_signature
+
+    for name in ("memory", "logs"):
+        (tmp_path / name).mkdir(parents=True, exist_ok=True)
+    chat = tmp_path / "logs" / "chat.jsonl"
+    chat.write_text(json.dumps({"chat_id": 1, "direction": "in", "text": "complete recent chat"}) + "\n",
+                    encoding="utf-8")  # the same bytes _wake_context writes
+    (tmp_path / "memory" / "dialogue_blocks.json").write_text(json.dumps([{
+        "ts": "2026-08-21T00:00:00Z", "source": "consolidator", "message_count": 1, **block,
+    }]), encoding="utf-8")
+    (tmp_path / "memory" / "dialogue_meta.json").write_text(json.dumps({
+        "last_consolidated_offset": 1, "chat_log_signature": jsonl_generation_signature(chat)}), encoding="utf-8")
+
+
+def _story(context):
+    return context.split("## My story", 1)[1].split("\n## ", 1)[0]
 
 
 def test_wake_context_carries_a_complete_dialogue_block_without_a_gap(tmp_path):
-    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "memory" / "dialogue_blocks.json").write_text(json.dumps([{
-        "ts": "2026-08-21T00:00:00Z", "source": "consolidator",
-        "content": "Complete consolidated biography block.",
-    }]), encoding="utf-8")
+    _legacy_memory(tmp_path, {"content": "Complete consolidated biography block."})
     _write_schedules(tmp_path, 8)
-    context = _wake_context(tmp_path)
-    assert "Complete consolidated biography block." in context
-    dialogue = context.split("## Dialogue History", 1)[1].split("\n## ", 1)[0]
-    assert "[MEMORY GAP]" not in dialogue
+    story = _story(_wake_context(tmp_path))
+    # The wake integrates my life (its room is Main): the retold first block (no rooms: an
+    # old mixed record) is whole in my story, headed by its id and provenance, never a gap.
+    assert "#### legacy-b00-rlegacy — " in story and " — Unknown provenance [legacy mixed record] — " in story
+    assert "\n  Complete consolidated biography block." in story
+    assert "memory gap" not in story and "[MEMORY GAP]" not in story
+    assert "memory_read(node_id='legacy-b00-rlegacy')" not in story  # whole, so no pointer line repeats it
 
 
 def test_wake_context_discloses_a_durable_dialogue_gap(tmp_path):
-    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "memory" / "dialogue_blocks.json").write_text(json.dumps([{
-        "ts": "2026-08-21T00:00:00Z", "source": "consolidator",
-        "gap_id": "dialogue-gap-123",
-        "content": "[MEMORY GAP] A durable biography interval is unavailable.",
-    }]), encoding="utf-8")
+    _legacy_memory(tmp_path, {"gap_id": "dialogue-gap-123",
+                              "content": "[MEMORY GAP] A durable biography interval is unavailable."})
     context = _wake_context(tmp_path)
-    assert "## Dialogue History" in context and "[MEMORY GAP]" in context
+    assert "## Dialogue History" not in context
+    assert "- memory gap: Unknown provenance [legacy mixed record]; " in _story(context)
+    assert "memory_read(node_id='legacy-b00-rlegacy')" in _story(context)
 
 
 def test_wake_context_discloses_an_omitted_schedule_count(tmp_path):

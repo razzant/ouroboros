@@ -87,9 +87,10 @@ def test_saved_external_work_does_not_gate_supervising_cognition(tmp_path, monke
     assert any("NEW physical model attempt" in str(row.get("content")) for row in messages_seen[-1])
     if external in {"inline", "consumed", "unread", "patch"}:
         assert [row["content"] for row in messages_seen[-1] if row.get("tool_call_id") == "completed-wait"] == [output]
-    ledger = _ledger(tmp_path)
-    assert [row["state"] for row in ledger] == ["reserved", "dispatched", "unresolved", "reserved", "dispatched", "settled"]
-    assert ledger[0]["attempt_id"] != ledger[3]["attempt_id"]
+    ledger = _ledger(tmp_path)  # one current row per attempt: the lost send, then its retry
+    assert [(row["state"], row["revision"]) for row in ledger] == [("unresolved", 4), ("settled", 3)]
+    assert ledger[0]["physical_failure"]["stage"] == "raised_exception"
+    assert ledger[0]["attempt_id"] != ledger[1]["attempt_id"]
     assert usage["transport_recovery"]["previous_attempt"]["physical_attempt_id"] == ledger[0]["attempt_id"]
     assert ua.usage_projection(tmp_path)["unresolved_upper_bound_usd"] == 1.0
     custody_after = custody.event_log_path(tmp_path).read_bytes() if custody.event_log_path(tmp_path).exists() else b""

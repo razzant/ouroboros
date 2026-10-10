@@ -138,9 +138,11 @@ def test_every_launch_family_refuses_after_the_fence_as_not_started(tmp_path, mo
 
 
 def test_the_boundary_saves_an_exact_owner_pause_buying_no_round_and_observing_runs(tmp_path, monkeypatch):
-    """No model call is made (the limit context has no LLM); the delegated run
-    the member sent is OBSERVED, never stop-requested, and the saved pause is
-    marked unsettled rather than claimed as a clean Paused."""
+    """No model call is made (the limit context has no LLM); the member's own
+    delegated run is stop-requested under the owner Pause's policy (owner
+    2026-10-07 fork 1 = A; its reviewers' runs are spared by source), and while
+    that stop is unconfirmed the saved pause is marked unsettled rather than
+    claimed as a clean Paused."""
     from ouroboros import budget_pause, owner_pause
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
 
@@ -167,7 +169,7 @@ def test_the_boundary_saves_an_exact_owner_pause_buying_no_round_and_observing_r
     assert row["reason"] == "owner" and row["rail"] == owner_pause.RAIL_OWNER_PAUSE
     assert row["settlement"] == owner_pause.SETTLEMENT_EXTERNAL_RUNNING
     assert row["owner_fence_id"] == owner_pause.read_fence(tmp_path, "solo")["fence_id"]
-    assert seen and all(kw.get("request_stop") is False for kw in seen)
+    assert seen and all(kw.get("stop_policy") == budget_pause.STOP_POLICY_TASK_OWNED for kw in seen)
     assert limit_ctx.accumulated_usage["reason_code"] == "owner_paused"
     marker = budget_pause.exact_pause_marker(row)
     assert marker["reason"] == "owner" and marker["settlement"] == owner_pause.SETTLEMENT_EXTERNAL_RUNNING
@@ -215,8 +217,8 @@ def test_the_tree_turns_paused_only_when_no_member_runs_and_sent_work_settled(tm
     # Nothing runs any more, but the child's sent run still does: not a clean Paused.
     assert owner_pause.read_fence(tmp_path, "root-1")["state"] == owner_pause.FENCE_REQUESTED
 
-    # With every member parked, only the assignment tick's observe-only re-check
-    # can notice the sent run ending; it never asks the run to stop.
+    # With every member parked, only the assignment tick's re-check can notice the
+    # member's stopped run ending; it re-reads the stop the park issued, never a new one.
     from supervisor import owner_pause_control
     from supervisor.owner_pause_control import settle_requested_owner_pauses
 
@@ -224,13 +226,13 @@ def test_the_tree_turns_paused_only_when_no_member_runs_and_sent_work_settled(tm
     observed: list = []
 
     def custody(_root, task_id, *, runs, **kwargs):
-        observed.append((task_id, kwargs.get("request_stop")))
+        observed.append((task_id, kwargs.get("stop_policy"), "prior" in kwargs))
         return {"custody_read": "ok", "runs": runs}
 
     monkeypatch.setattr(budget_pause, "observe_task_runs",
                         lambda root, task_id, **kw: custody(root, task_id, runs=[{"run_id": "run-1"}], **kw))
     assert settle_requested_owner_pauses(queue, now=100.0) == []
-    assert observed == [("child-run", False)]
+    assert observed == [("child-run", budget_pause.STOP_POLICY_TASK_OWNED, True)]
     monkeypatch.setattr(budget_pause, "observe_task_runs",
                         lambda root, task_id, **kw: custody(root, task_id, runs=[], **kw))
     assert settle_requested_owner_pauses(queue, now=101.0) == [], "throttled per root"
@@ -378,3 +380,94 @@ def test_the_pause_endpoint_is_text_free_and_typed(tmp_path, monkeypatch):
     child = client.post("/api/tasks/child-run/pause", json={"request_id": "r"})
     assert child.status_code == 409 and child.json()["reason_code"] == "not_a_root_task"
     assert client.post("/api/tasks/ghost/pause", json={"request_id": "r"}).status_code == 404
+
+
+def test_a_direct_roots_warm_park_settles_when_its_requested_stop_ends_and_resume_proceeds(tmp_path, monkeypatch):
+    """R1: a direct actor parks WARM outside ``RUNNING``. Its own run's stop answered
+    ``requested``; when that run ends later, the settle tick reaches the park through
+    the direct registry and re-reads (never re-issues) the stop it issued, so the tree
+    turns Paused and the owner's Resume is no longer refused."""
+    import threading
+    import time
+
+    from ouroboros import delegate_custody as dc
+    from ouroboros import owner_pause, owner_wait
+    from ouroboros.external_runs import EXTERNAL_STOP_CONFIRMED, EXTERNAL_STOP_REQUESTED
+    from ouroboros.gateways import claudexor as gw
+    from ouroboros.model_wait import TaskModelWait
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
+    from supervisor import owner_pause_control
+    from supervisor.budget_resume import resume_warm_owner_pause_root
+    from supervisor.owner_pause_control import (
+        refresh_owner_pause_tree,
+        request_owner_pause,
+        settle_requested_owner_pauses,
+    )
+    from tests.test_direct_chat_turn_owner_control import _live_chat_agent
+
+    queue, state, _workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    write_task_result(tmp_path, "author", STATUS_RUNNING, chat_id=0)
+    _live_chat_agent(monkeypatch, task_id="author")
+    dc.record_started(tmp_path, dc.RunCustody(
+        run_id="run-own", task_id="author", route_id="r", model="m", project_id="p",
+        project_owned=False, root_task_id="author", ledger_root=str(tmp_path)))
+    remote = {"state": "running", "cancels": []}
+
+    class Daemon:
+        def handshake(self, **_kw):
+            return {"compatible": True}
+
+        def cancel_run(self, run_id, reason=""):
+            remote["cancels"].append(run_id)
+            return {"accepted": True, "status": "accepted"}
+
+        def get_run(self, run_id, **_kw):
+            return {"lastSeq": 3, "summary": {"state": remote["state"], "spendUsd": 0.0}}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: Daemon())
+    ack = request_owner_pause("author", request_id="press")
+    assert ack["ok"] and ack["state"] == "requested", ack
+
+    ctx, limit = _loop_ctx(tmp_path, "author", direct=True)
+    ctx.pending_events, ctx.current_chat_id = [], 0
+    waiter = TaskModelWait(task={"id": "author", "budget_drive_root": str(tmp_path)},
+                           drive_root=tmp_path, event_queue=None, worker_slot_held=False)
+    waiter.tool_context, ctx.model_wait_context = ctx, waiter
+    ctx.owner_wait_callback = owner_wait.direct_owner_wait
+    real_sleep = time.sleep
+    monkeypatch.setattr(owner_wait.time, "sleep", lambda seconds: real_sleep(min(seconds, 0.02)))
+    woke: dict = {}
+    parked = threading.Thread(target=lambda: woke.update(cause=owner_wait.park_owner_pause_warm(
+        limit, ctx, fence=owner_pause.read_fence(tmp_path, "author"), detached=["review-op"])), daemon=True)
+    parked.start()
+    try:
+        deadline = time.monotonic() + 10
+        while (load_task_result(tmp_path, "author").get("owner_wait") or {}).get("state") != "waiting":
+            assert time.monotonic() < deadline and parked.is_alive(), woke
+            real_sleep(0.02)
+        wait = load_task_result(tmp_path, "author")["owner_wait"]
+        assert [run["state"] for run in wait["owner_pause"]["external_runs"]["runs"]] == [EXTERNAL_STOP_REQUESTED]
+        assert remote["cancels"] == ["run-own"]
+        # The stopped run has not ended yet: still Pausing, and Resume waits for it.
+        assert refresh_owner_pause_tree("author") == owner_pause.FENCE_REQUESTED
+        assert resume_warm_owner_pause_root("author")["error"] == "owner_pause_effects_unsettled"
+
+        remote["state"] = "cancelled"  # the run obeys the requested stop later
+        monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
+        assert settle_requested_owner_pauses(queue, now=100.0) == ["author"]
+        assert remote["cancels"] == ["run-own"], "the issued stop is re-read, never repeated"
+        wait = load_task_result(tmp_path, "author")["owner_wait"]
+        assert [run["state"] for run in wait["owner_pause"]["external_runs"]["runs"]] == [EXTERNAL_STOP_CONFIRMED]
+        assert owner_pause.read_fence(tmp_path, "author")["warm_members"] == ["author"]
+
+        resumed = resume_warm_owner_pause_root("author")
+        assert resumed["ok"] and resumed["warm"], resumed
+        parked.join(10)
+        assert woke.get("cause") == "control:owner_resume"
+    finally:
+        owner_pause.release_fence(tmp_path, "author", reason="test_cleanup")
+        parked.join(10)

@@ -222,7 +222,7 @@ def test_registry_arg_aliases_and_public_tool_arg_errors(tmp_path):
 
     result = reg.execute("list_skills", {"foo": "bar"})
     assert "TOOL_ARG_ERROR (list_skills)" in result
-    assert "Accepted parameters: none" in result
+    assert "Accepted parameters: name, offset, snapshot" in result
     assert "_kwargs" not in result
 
 

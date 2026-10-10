@@ -171,7 +171,6 @@ def _run_emit(tmp_path, task, monkeypatch):
     drive_root = tmp_path / "data"
     for sub in ("logs", "memory", "task_results"):
         (drive_root / sub).mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(atp, "_run_chat_consolidation", lambda *a, **k: None)
     monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **k: None)
     monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **k: None)
     # Hermetic: isolate the live project-journal/state side effects (append + mirror both

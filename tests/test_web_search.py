@@ -16,6 +16,7 @@ import pytest
 
 import ouroboros.tools.search as search_module
 from ouroboros.tools.search import _web_search
+from tests._usage_store_testing import ledger_rows
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +130,7 @@ def test_responses_flex_refusal_reprices_standard_and_keeps_original_intent(ctx,
     assert [request.processing_preference for request in prepared] == ["economy", "economy"]
     assert prepared[0].candidate_raw_sha256 != prepared[1].candidate_raw_sha256
     with ua._locked(holds[0].drive_root):
-        records = ua._read_records_locked_cached(holds[0].drive_root)
+        records = ledger_rows(holds[0].drive_root)
     matching = [row for row in records if row.get("candidate_raw_sha256") == prepared[0].candidate_raw_sha256]
     assert matching[-1]["state"] == "released"
     for request in prepared:
@@ -186,7 +187,8 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
         search_module._web_search(request_ctx, "latest news", model="gpt-5.2")
     )
 
-    assert result == {"answer": "fresh answer", "answer_type": "summary", "sources": [], "backend": "openai_responses"}
+    assert {key: result[key] for key in ("answer", "answer_type", "sources", "backend")} == {"answer": "fresh answer", "answer_type": "summary", "sources": [], "backend": "openai_responses"}
+    assert result["legs_tried"][0]["model"] == "gpt-5.2"
     assert calls["api_key"] == "openai-key"
     assert calls["base_url"] is None
     assert calls["kwargs"]["model"] == "gpt-5.2"
@@ -649,11 +651,7 @@ def test_fallback_read_timeout_keeps_its_dispatched_attempt_unresolved(
     result = json.loads(_web_search(ctx, "fallback timeout"))
 
     assert result["reason_code"] == "provider_outcome_unknown"
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / ua.LEDGER_REL).read_text().splitlines()
-        if line.strip()
-    ]
+    rows = ledger_rows(tmp_path)
     final_states = {}
     for row in rows:
         final_states[row["attempt_id"]] = row["state"]
@@ -808,7 +806,8 @@ def test_terminal_openrouter_status_allows_next_backend(ctx, monkeypatch):
 
     result = json.loads(_web_search(ctx, "terminal OpenRouter query"))
 
-    assert result == {"answer": "recovered", "backend": "anthropic_server_tool"}
+    assert result["answer"] == "recovered" and result["backend"] == "anthropic_server_tool"
+    assert [leg["outcome"] for leg in result["legs_tried"]] == ["failed", "succeeded"]
 
 
 def test_explicit_web_503_allows_one_safe_retry(ctx, patch_env, monkeypatch):
@@ -937,9 +936,9 @@ def test_direct_search_dispatch_failure_releases_same_unsent_reservation(ctx, pa
     mock_openai.responses.create.assert_not_called()
     assert len(reservations) == 1
     with ua._locked(reservations[0].drive_root):
-        records = ua._read_records_locked_cached(reservations[0].drive_root)
+        records = ledger_rows(reservations[0].drive_root)
     chain = [row for row in records if row["attempt_id"] == reservations[0].attempt_id]
-    assert [row["state"] for row in chain] == ["reserved", "released"]
+    assert [row["state"] for row in chain] == ["released"]
 
 
 def test_direct_search_failed_cleanup_retains_reservation_and_refuses_fallback(ctx, patch_env, mock_openai, monkeypatch):

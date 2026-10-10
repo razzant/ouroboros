@@ -39,9 +39,21 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # --------------------------------------------------------------------------
 
 
+class _FakeHook:
+    def __init__(self) -> None:
+        self.handlers: list = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+
 class _FakeWindow:
+    """pywebview 5.4's window surface the setup host touches (the caption tint hooks included)."""
+
     def __init__(self) -> None:
         self.destroyed = False
+        self.events = types.SimpleNamespace(before_show=_FakeHook(), closed=_FakeHook())
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -288,7 +300,8 @@ def test_the_desktop_setup_window_cannot_write_settings_at_all(monkeypatch, tmp_
         {}, 8765, open_external_url=lambda url: {"ok": False},
     )
 
-    assert seen["methods"] == ["onboarding_finished", "open_external_url"]
+    # Completion, the external opener and the caption tint: none of them writes settings.
+    assert seen["methods"] == ["onboarding_finished", "open_external_url", "set_native_appearance"]
     assert outcome == {"saved": True, "restart_required": True}
     # The window reported completion, and the LAUNCHER still wrote nothing: the
     # bytes on disk (if any) came from the endpoint the page posted to.
@@ -408,11 +421,11 @@ def test_server_boot_never_writes_the_settings_file():
 
 def test_server_boot_leaves_the_settings_bytes_alone(tmp_path, monkeypatch):
     """The behavioural half of the pin above. A REAL lifespan boot over a document
-    whose provider normalization reports a change (a retired model default the
-    normalization replaces — the exact case the retired boot write persisted) leaves
-    the file's bytes and mtime untouched. The syntactic pin is the fast tripwire; this
-    one also catches a boot write that reaches the disk through some helper other
-    than the named saver.
+    whose provider normalization reports a change (a product-authored Heavy default
+    the normalization clears — the kind of change the retired boot write persisted)
+    leaves the file's bytes and mtime untouched. The syntactic pin is the fast
+    tripwire; this one also catches a boot write that reaches the disk through some
+    helper other than the named saver.
 
     The boot managed-update thread is the one lifespan job stubbed for a reason of its
     own rather than for scope: it is a daemon whose work races this assertion anyway,
@@ -420,12 +433,9 @@ def test_server_boot_leaves_the_settings_bytes_alone(tmp_path, monkeypatch):
     whatever ``REPO_DIR`` resolves to in the process that happens to run pytest."""
     import server as srv
     from ouroboros import config as cfg
-    from ouroboros.server_runtime import (
-        _RETIRED_MODEL_DEFAULT_REPLACEMENTS,
-        apply_runtime_provider_defaults,
-    )
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
 
-    document = {"OUROBOROS_MODEL": next(iter(_RETIRED_MODEL_DEFAULT_REPLACEMENTS))}
+    document = {"OUROBOROS_MODEL_HEAVY": "anthropic/claude-opus-" + "4.7"}
     assert apply_runtime_provider_defaults(dict(document))[1] is True, (
         "the fixture must give boot something it could persist")
     settings_path = tmp_path / "settings.json"

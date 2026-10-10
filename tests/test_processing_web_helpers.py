@@ -2,7 +2,6 @@
 
 import copy
 import hashlib
-import json
 import sys
 from types import SimpleNamespace
 
@@ -11,6 +10,7 @@ import pytest
 from ouroboros import llm, pricing, usage_accounting as ua
 from ouroboros.llm_attempt import _canonical_candidate_bytes
 from tests.test_usage_accounting import data_root as _usage_data_root
+from tests._usage_store_testing import ledger_rows
 
 data_root = _usage_data_root
 
@@ -34,7 +34,7 @@ class Response:
 
 
 def ledger(root):
-    return [json.loads(line) for line in (root / ua.LEDGER_REL).read_text().splitlines()]
+    return ledger_rows(root)
 
 
 @pytest.fixture
@@ -92,7 +92,8 @@ def test_anthropic_search_refusal_reprices_same_native_body_as_standard(helpers,
     rows = ledger(root)
     finals = list({row["attempt_id"]: row for row in rows}.values())
     assert [row["state"] for row in finals] == ["released", "settled"]
-    assert [row["reservation_upper_bound_usd"] for row in rows if row["state"] == "reserved"] == [0.01, 0.04]
+    # each attempt's current row keeps the reservation bound it was admitted with
+    assert [row["reservation_upper_bound_usd"] for row in finals] == [0.01, 0.04]
     assert [mode for mode, _hash in priced] == ["fast", "standard"]
     for candidate, row in zip(state.sent, finals):
         assert row["candidate_raw_sha256"] == hashlib.sha256(_canonical_candidate_bytes(candidate)).hexdigest()
@@ -104,15 +105,30 @@ def test_anthropic_search_refusal_reprices_same_native_body_as_standard(helpers,
 
 
 def test_standard_search_gets_its_own_budget_admission(helpers, monkeypatch):
+    """The standard retry's own reservation is admitted again on KNOWN spend (#1487):
+    a sibling's final $0.02 that landed after the fast attempt refuses it."""
     root, state = helpers
     state.error = FastCapacityRefusal("Fast capacity exhausted")
-    monkeypatch.setattr(ua, "_reservation_cost", lambda request:
-                        0.01 if request.submitted_processing_mode == "fast" else 0.04)
+    landed = []
+
+    def price(request):
+        if request.submitted_processing_mode == "fast":
+            return 0.01
+        if not landed:
+            landed.append(True)
+            with ua.usage_scope(ua.UsageScope(drive_root=root, task_id="sibling", root_task_id="helper")):
+                held = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="p", reservation_usd=0.02))
+                ua.mark_dispatched(held)
+                ua.settle_attempt(held, {}, cost_usd=0.02, cost_final=True)
+        return 0.04
+
+    monkeypatch.setattr(ua, "_reservation_cost", price)
     with ua.usage_scope(ua.UsageScope(drive_root=root, task_id="helper", root_task_id="helper", root_limit_usd=0.02)):
         with pytest.raises(ua.BudgetExceeded):
             llm.anthropic_web_search_server_tool(api_key="test", model="model", query="query")
     assert len(state.sent) == 1
-    assert ledger(root)[-1]["state"] == "released"
+    finals = {row["attempt_id"]: row for row in ledger(root)}.values()
+    assert [(row["task_id"], row["state"]) for row in finals] == [("helper", "released"), ("sibling", "settled")]
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "openrouter"])

@@ -292,3 +292,17 @@ def test_fetching_payload_writes_the_letter_through_the_one_seam(monkeypatch):
 
     assert calls and calls[0]["fetched"] is True
     assert payload["letter"] is None and payload["latest_version"] == "6.87.5"
+
+
+def test_pending_local_work_is_projected_without_exposing_raw_transaction(monkeypatch):
+    import supervisor.update_merge as update_merge
+    _wire(monkeypatch)
+    tx = {"phase": "pending_boot_smoke", "stash_restore": {"status": "applying", "stash_sha": "s" * 40}}
+    monkeypatch.setattr(update_merge, "active_update_tx", lambda: tx)
+    payload = control._managed_update_payload(fetch=False, include_tags=False)
+    assert payload["update_tx"]["local_work_recovery"] is True
+    assert "stash_restore" not in payload["update_tx"]
+    tx.pop("stash_restore")
+    assert "local_work_recovery" not in control._managed_update_payload(fetch=False, include_tags=False)["update_tx"]
+    tx.update(phase="marker_cleanup_retry", gate_blocked_reason="rollback_restart_pending")
+    assert control._managed_update_payload(fetch=False, include_tags=False)["update_tx"]["local_work_recovery"] is True

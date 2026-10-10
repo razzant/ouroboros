@@ -98,7 +98,7 @@ SCENARIOS = {
     # integration: the parallel wave-3b lane claimed S11-S13 first.
     "S14": ("plan review: scripted REVISE->ACCEPT cycle, honest durable chronicle, cycle-cap refusal", LANE_MOCK),
     "S15": ("commit triad+scope, ADVISORY class: red verdicts recorded + waved through with durable override, commit lands", LANE_MOCK),
-    "S16": ("commit triad+scope, BLOCKING class: red blocks (HEAD unmoved), identical resubmit refused free, green lands; stale advisory refresh and post-verdict revalidation", LANE_MOCK),
+    "S16": ("commit triad+scope, BLOCKING class: red blocks (HEAD unmoved), identical resubmit refused free, green lands; post-verdict revalidation", LANE_MOCK),
     "S17": ("acceptance loop (required+blocking): reject -> rework -> accept; paid-identity / free-replay invariants", LANE_MOCK),
     # Ф4 wave 4 (plan §8 remainder: update variations, chat-lineage cancel,
     # absorb kill-recovery, delegated interactive answer).
@@ -140,6 +140,10 @@ SCENARIOS = {
     # (the stub answers per seat by the wire model id).
     "S34": ("plan review addressed answer, BLOCKING at the shipped cap: t1 objects below quorum -> $0 reject -> the identical envelope with the answer re-asks t1 ALONE (t2/t3 kept at $0 as replayed rows) over the barrier route -> t1 retires -> GREEN closed, two paid cycles, the task completes under blocking", LANE_MOCK),
     "S35": ("plan review no-need path, BLOCKING: t1 asks the author (need_evidence), t2 leaves a note; a $0 accept closes the wave GREEN with no second panel (three reviewer calls, one paid cycle) and the task completes under blocking", LANE_MOCK),
+    # #1539 own-body candidates: the smallest real consumer of the authoring seam.
+    "S36": ("own-body candidate on a real server: the root's first body write in the installation's spelling binds a candidate, later repo/… and absolute serving spellings reach the same candidate files, the serving clone is byte-identical, a refused resume is the typed CANDIDATE_MISSING in the tool log, and a process in the candidate sees its isolated data root", LANE_MOCK),
+    "S37": ("restart-bound adoption on one real server: a reviewed candidate commit, request_restart(adopt_commit) arms on the stop evidence, the in-place re-exec switches the clean serving checkout before its imports, generation B settles it adopted and verifies the restart on the serving SHA", LANE_MOCK),
+    "S38": ("evolution crash between the candidate commit and its receipts: the supervisor's cycle commits in its candidate under blocking review, the tree is SIGKILLed and the post-commit receipts removed; a fresh boot recovers the exact commit and its reviewed provenance at worker boot and does not absorb it (the serving checkout never held it)", LANE_MOCK),
 }
 
 MOCK_SLUG = "openai-compatible::mock-model"
@@ -155,7 +159,8 @@ DISTINCT_MOCK_MODEL_IDS = tuple(f"mock-model-t{i}" for i in (1, 2, 3))
 #   REVIEWER_SLOT_MARKER   — ouroboros/review_execution.py::_render_prompt_parts
 #   ACCEPTANCE_KEYS_MARKER — same function, the task_acceptance criteria_used key list
 #   TRIAD_USER_MARKER      — ouroboros/tools/review.py::_dispatch_unified_review
-#   SCOPE_USER_MARKER      — ouroboros/tools/scope_review.py::_call_scope_llm
+#   TWO_PART_SURFACE       — ouroboros/triad_review.py::REVIEW_OUTPUT_SHAPES (the commit gate's
+#                            native inspection episode names it on its "Surface:" line)
 #   PLAN_REVIEW_MARKER     — ouroboros/tools/plan_packet.py::build_plan_review_system_prompt
 #   NATIVE_EPISODE_MARKER  — ouroboros/review_native_episode.py::episode_prompt
 # The default-lane marker-pin test greps them out of the source files so drift is a
@@ -164,7 +169,9 @@ DISTINCT_MOCK_MODEL_IDS = tuple(f"mock-model-t{i}" for i in (1, 2, 3))
 REVIEWER_SLOT_MARKER = "You are an independent Ouroboros reviewer slot."
 ACCEPTANCE_KEYS_MARKER = "criteria_used (the acceptance criteria you re-derived"
 TRIAD_USER_MARKER = "Review the staged diff and context provided in the instructions above."
-SCOPE_USER_MARKER = "Review the staged change and context above. Output ONLY a JSON array."
+# The one wave's native inspection episode (one brief, two parts — contract B):
+# classified by the surface NAME on its prompt line, never by a packet marker.
+TWO_PART_SURFACE = "multi_model_review"
 SKILL_REVIEW_MARKER = "You are performing a SKILL review, not a repo-commit review."
 PLAN_REVIEW_MARKER = (
     "You are one independent reviewer of an INTENTION — a plan spec — "
@@ -183,11 +190,26 @@ FINALIZATION_MARKERS = ("[OWNER_STOP]", "[FINALIZE_NOW]")
 # pre-review episode and any future native surface classify by NAME.
 _SURFACE_LINE_RE = re.compile(r"^Surface: ([A-Za-z_]+)$", re.MULTILINE)
 
+# A pool row delivers as a packet or as a native episode (catalog ``delivery``),
+# and both forms of ONE surface answer that surface's output contract — so the
+# stub names the native episode by the SAME kind as the surface's packet: a
+# scripted verdict or a call count reaches a native seat and a packet seat alike.
+# The native skill-review episode carries only the dynamic tail of the skill
+# pack (skill_review_passes: the stable prefix with SKILL_REVIEW_MARKER stays
+# behind), and the native acceptance episode carries no packet marker at all;
+# their surface line is the only name they have. An unknown surface stays a
+# typed ``native_episode``.
+_NATIVE_SURFACE_KINDS = {
+    TWO_PART_SURFACE: "two_part_review",   # the commit gate's one brief of two parts (contract B)
+    "task_acceptance": "acceptance",
+    "skill_review": "skill_review",
+    "advisory_review": "advisory_review",
+}
+
 MARKER_SOURCES = {
     REVIEWER_SLOT_MARKER: "ouroboros/review_execution.py",
     ACCEPTANCE_KEYS_MARKER: "ouroboros/review_execution.py",
     TRIAD_USER_MARKER: "ouroboros/tools/review_multi_model.py",   # TRIAD_USER_TURN: the one literal the send and the admission share
-    SCOPE_USER_MARKER: "ouroboros/tools/scope_review.py",
     SKILL_REVIEW_MARKER: "ouroboros/skill_review_prompt.py",
     PLAN_REVIEW_MARKER: "ouroboros/tools/plan_packet.py",
     NATIVE_EPISODE_MARKER: "ouroboros/review_native_episode.py",
@@ -236,7 +258,7 @@ def body_text(body: dict) -> str:
 def classify_call(body: dict) -> str:
     """Name the branch a chat-completion body belongs to.
 
-    Returns one of: ``safety``, ``skill_review``, ``scope_review``, ``triad_review``,
+    Returns one of: ``safety``, ``skill_review``, ``two_part_review``, ``triad_review``,
     ``acceptance``, ``reviewer_slot``, ``plan_review``, ``advisory_review``,
     ``native_episode``, ``finalization``, ``agent``. ORDER MATTERS (roast F22):
     every review-organ branch is checked BEFORE the finalization-turn check,
@@ -260,17 +282,13 @@ def classify_call(body: dict) -> str:
     # another branch's marker; its own opening sentence is the most specific.
     if SKILL_REVIEW_MARKER in full:
         return "skill_review"
-    # Scope before triad: both user messages start with "Review the staged".
-    if SCOPE_USER_MARKER in user_tail:
-        return "scope_review"
     if TRIAD_USER_MARKER in user_tail:
         return "triad_review"
     if PLAN_REVIEW_MARKER in full:
         return "plan_review"
     if NATIVE_EPISODE_MARKER in full:
         match = _SURFACE_LINE_RE.search(full)
-        surface = match.group(1) if match else ""
-        return surface if surface in {"advisory_review", "scope_review"} else "native_episode"
+        return _NATIVE_SURFACE_KINDS.get(match.group(1) if match else "", "native_episode")
     if REVIEWER_SLOT_MARKER in full:
         return "acceptance" if ACCEPTANCE_KEYS_MARKER in full else "reviewer_slot"
     if any(marker in full for marker in FINALIZATION_MARKERS):
@@ -282,7 +300,7 @@ def classify_call(body: dict) -> str:
 # consume an agent script step or a ReplayModel fixture row, and a scenario's
 # ReviewScript may override their canned answers.
 REVIEW_KINDS = frozenset({
-    "safety", "scope_review", "triad_review", "acceptance", "reviewer_slot",
+    "safety", "two_part_review", "triad_review", "acceptance", "reviewer_slot",
     "plan_review", "advisory_review", "native_episode",
 })
 
@@ -290,8 +308,10 @@ REVIEW_KINDS = frozenset({
 # ---------------------------------------------------------------------------
 # Canned review-organ verdicts (all-clean). Shapes come from the tree's own parsers:
 # triad — triad_review.REVIEW_JSON_ARRAY_CONTRACT ([] + NO_FINDINGS sentinel);
-# scope — scope_review_contract.normalize_scope_items (required matrix, PASS reasons
-# must be non-terse); reviewer slot — review_execution's "Return JSON with keys" list.
+# two-part — triad_review.REVIEW_TWO_PART_OBJECT_CONTRACT: one object {change, change_clean,
+# coupling}, the coupling matrix per scope_review_contract.normalize_scope_items (required
+# matrix, PASS reasons must be non-terse); reviewer slot — review_execution's "Return JSON
+# with keys" list.
 # ---------------------------------------------------------------------------
 
 TRIAD_CLEAN_TEXT = "[]\nNO_FINDINGS"
@@ -309,8 +329,8 @@ def canned_review_answer(kind: str) -> dict | None:
                 "content": json.dumps({"status": "SAFE", "reason": "stub"})}
     if kind == "skill_review":
         return {"role": "assistant", "content": skill_review_clean_text()}
-    if kind == "scope_review":
-        return {"role": "assistant", "content": scope_clean_text()}
+    if kind == "two_part_review":
+        return {"role": "assistant", "content": two_part_clean_text()}
     if kind == "triad_review":
         return {"role": "assistant", "content": TRIAD_CLEAN_TEXT}
     if kind in ("acceptance", "reviewer_slot"):
@@ -346,16 +366,20 @@ def skill_review_clean_text() -> str:
     ])
 
 
-def scope_clean_text() -> str:
-    return json.dumps([
-        {
-            "item": item,
-            "verdict": "PASS",
-            "severity": "advisory",
-            "reason": "Stub scope reviewer: checked and clean for this scripted smoke diff.",
-        }
-        for item in sorted(SCOPE_REQUIRED_ITEMS)
-    ])
+def two_part_clean_text() -> str:
+    """Contract B, all clean: no change findings and a full PASS coupling matrix."""
+    return json.dumps({
+        "change": [], "change_clean": True,
+        "coupling": [
+            {
+                "item": item,
+                "verdict": "PASS",
+                "severity": "advisory",
+                "reason": "Stub coupling reviewer: checked and clean for this scripted smoke diff.",
+            }
+            for item in sorted(SCOPE_REQUIRED_ITEMS)
+        ],
+    })
 
 
 def reviewer_slot_clean_text(kind: str) -> str:
@@ -1104,35 +1128,59 @@ class KeylessIsolatedServer(IsolatedServer):
         self.candidate.release()
 
 
-def keyless_reviewer_slots(*, advisory: bool = False, distinct_models: bool = False) -> str:
-    """The structured ``OUROBOROS_REVIEWER_SLOTS`` value pinning every reviewer row
-    to the loopback stub.
+# The pool rows of ``keyless_review_catalog``: seat ``t<i>`` is catalog row
+# ``review-t<i>`` — a reviewer's seat id IS its catalog row id, so the durable wave
+# artifacts (plan-review actors, finding ids ``<row>:<id>``) name seats by these.
+KEYLESS_REVIEW_ROWS = ("review-t1", "review-t2", "review-t3")
+# The rows that deliver as PACKETS (contract A: the JSON array + NO_FINDINGS); the
+# remaining row keeps the catalog default, a native inspection episode (contract B).
+KEYLESS_PACKET_ROWS = KEYLESS_REVIEW_ROWS[:2]
 
-    ABI 7.0 (ABI-10): the comma-list reviewer settings keys are RETIRED —
-    ``load_settings`` drops them from the file, so pinning them there is a silent
-    no-op and the review organ falls back to the shipped OpenRouter default panel
-    (observed live on this tree: S2's triad dispatched gemini/terra/opus with no
-    credential and deterministically blocked at pack assembly). The structured key
-    is the ONE configuration surface, so the keyless lane pins THAT.
 
-    ``advisory=True`` additionally pins the ONE optional advisory reviewer row to
-    the stub (wave 3a): the advisory pre-review then runs the bounded NATIVE
-    inspection episode against the loopback model instead of being unavailable
-    keyless (which the commit gate compensates with an audited bypass).
+def keyless_review_catalog(*, distinct_models: bool = False) -> str:
+    """The ``OUROBOROS_SUBAGENTS`` catalog whose rows marked Reviewer are the whole
+    review pool, every one an API route onto the loopback stub.
 
-    ``distinct_models=True`` pins seat ``t<i>`` to its own slug
+    The review pool is the enabled catalog rows marked Reviewer (``review_eligible``),
+    and a never-configured catalog reads the factory reviewers instead: live
+    OpenRouter routes that dispatch with no credential and deterministically block
+    at pack assembly keyless. So the keyless lane pins THIS catalog. Three rows keep
+    the shipped panel's width. The catalog itself is switched off: review stays on
+    for rows marked Reviewer, while delegation stays as unconfigured as on a bare
+    keyless install.
+
+    The panel is MIXED on purpose: ``KEYLESS_PACKET_ROWS`` deliver as packets
+    (``delivery: packet`` — the triad/skill/acceptance packet the stub classifies
+    by its marker) and the last row keeps the catalog default, a native inspection
+    episode (the stub classifies it by its ``Surface:`` line). One wave therefore
+    exercises both delivery classes end to end and their aggregate: a scripted red
+    packet verdict blocks beside a clean native seat, and a hooked native seat
+    (the post-verdict freshness probe) runs beside clean packets.
+
+    ``distinct_models=True`` pins row ``review-t<i>`` to its own slug
     (``DISTINCT_MOCK_MODEL_IDS``) so a per-seat ReviewScript can tell the seats
-    apart on the wire; the stub must advertise those ids (``model_ids``).
+    apart on the wire; the stub must advertise those ids (``model_ids``). A
+    scenario that passes its own catalog owns its pool: it marks its own reviewers
+    or reviews nothing — ``keyless_review_rows()`` are the rows to add to such a
+    roster when the scenario still reviews.
     """
-    row = {"kind": "api_chat", "target_id": MOCK_SLUG}
-    payload = {
-        "triad": [{"slot_id": f"t{i}", "route": {**row, **({"target_id": f"{MOCK_SLUG}-t{i}"} if distinct_models else {})}}
-                  for i in (1, 2, 3)],
-        "scope": [{"slot_id": "s1", "route": dict(row)}],
-    }
-    if advisory:
-        payload["advisory"] = {"enabled": True, "route": dict(row)}
-    return json.dumps(payload)
+    return json.dumps({"enabled": False, "items": keyless_review_rows(distinct_models=distinct_models)})
+
+
+def keyless_review_rows(*, distinct_models: bool = False) -> list:
+    """The reviewer rows of ``keyless_review_catalog`` (see there), as catalog items."""
+    items = []
+    for i, row_id in enumerate(KEYLESS_REVIEW_ROWS, 1):
+        row = {
+            "subagent_id": row_id,
+            "recommended_use": "Keyless reviewer on the loopback stub.",
+            "route": {"kind": "api_model", "target_id": f"{MOCK_SLUG}-t{i}" if distinct_models else MOCK_SLUG},
+            "review_eligible": True,
+        }
+        if row_id in KEYLESS_PACKET_ROWS:
+            row["delivery"] = "packet"
+        items.append(row)
+    return items
 
 
 def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
@@ -1140,9 +1188,9 @@ def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
 
     Every model-slot key the TREE declares is pinned — un-listed keys default to the
     empty string (slot disabled / no fallback), the live loop slots to the stub slug,
-    and the review organ through the structured ``OUROBOROS_REVIEWER_SLOTS`` (the one
-    ABI-10 configuration surface; the retired comma keys in the ACTIVE list are pinned
-    empty for hygiene but are dropped by ``load_settings`` either way). Deriving the
+    and the review pool through catalog rows marked Reviewer (``keyless_review_catalog``;
+    the retired comma keys in the ACTIVE list are pinned empty for hygiene but are
+    dropped by ``load_settings`` either way). Deriving the
     slot list from ``provider_models`` (instead of an enumerated literal, as the
     cancellation-harness precedent did) means an upstream slot added tomorrow is
     pinned by construction rather than silently defaulting to a live OpenRouter
@@ -1169,7 +1217,7 @@ def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
         "OUROBOROS_PER_TASK_COST_USD": 10.0,
         "OPENAI_COMPATIBLE_BASE_URL": stub.base_url,
         "OPENAI_COMPATIBLE_API_KEY": "stub-key-not-a-credential",
-        "OUROBOROS_REVIEWER_SLOTS": keyless_reviewer_slots(),
+        "OUROBOROS_SUBAGENTS": keyless_review_catalog(),
     })
     for slot in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT"):
         cfg[slot] = MOCK_SLUG
@@ -1227,6 +1275,8 @@ def write_settings_file(settings_path: pathlib.Path, settings: dict) -> None:
 
 def start_server(clone, root, settings: dict, *, ready_timeout: float = 300) -> KeylessIsolatedServer:
     assert_settings_keyless(settings)
+    # A body write prepares a candidate checkout under this root (#1539): keep it in the scenario.
+    settings = {"OUROBOROS_SUBAGENT_WORKTREE_ROOT": str(pathlib.Path(root) / "worktrees"), **settings}
     data_root = pathlib.Path(root) / "data"
     data_root.mkdir(parents=True, exist_ok=True)
     settings_path = data_root / "settings.json"
@@ -1252,7 +1302,7 @@ class ArtifactOracle:
         On this tree a headless task's ToolContext drive root is
         ``state/headless_tasks/<task_id>/data`` under the server's data root, so the
         durable review evidence (state/advisory_review.json, the
-        advisory_review_bypassed / scope_review_complete events) lands THERE, not in
+        advisory_review_bypassed event, the review ledger record) lands THERE, not in
         the server-level files. Falls back to the server root when the task has no
         forked drive (e.g. a direct-chat turn)."""
         forked = self.data_root / "state" / "headless_tasks" / str(task_id) / "data"
@@ -1275,6 +1325,11 @@ class ArtifactOracle:
 
     def advisory_review(self) -> dict:
         return self._json("state/advisory_review.json")
+
+    def review_ledger_records(self) -> list:
+        """Every review ledger record under this root (state/review_ledger/*.json)."""
+        ledger = self.data_root / "state" / "review_ledger"
+        return [self._json(f"state/review_ledger/{path.name}") for path in sorted(ledger.glob("*.json"))]
 
     def cancel_intents(self) -> dict:
         blob = self._json("state/cancel_intents.json")

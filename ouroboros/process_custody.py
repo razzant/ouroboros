@@ -74,10 +74,11 @@ def adopt_session_id(value: str) -> None:
     next reap tick. The worker entrypoint calls this with the server's id.
 
     The id is passed as a spawn ARGUMENT, never via ambient env: an env var
-    would survive ``server_control.restart_current_process`` (which re-execs
-    with ``os.environ.copy()``), making a freshly restarted server adopt the
-    dead generation's id and treat leftover processes as same-session
-    survivors — the inverse leak. A spawn arg cannot survive an exec.
+    would survive ``server_control.restart_current_process`` (which hands the
+    server over with ``os.environ.copy()``: exec on POSIX, spawn on Windows),
+    making a freshly restarted server adopt the dead generation's id and treat
+    leftover processes as same-session survivors — the inverse leak. A spawn
+    arg survives neither transfer.
     """
     global _SESSION_ID
     v = str(value or "").strip()
@@ -153,6 +154,11 @@ def record_process(
     }
     if not append_jsonl(ledger_path(drive_root), entry):
         raise OSError("process custody record could not be written")
+    from ouroboros.owned_shutdown import record_ledgered_process
+
+    # The ledger stays the reaper's custody; the installation's ownership set names the row too.
+    if not record_ledgered_process(drive_root, entry):
+        log.warning("process %s (%s) is ledgered but not in the ownership set", pid, purpose)
     return entry
 
 
@@ -175,6 +181,7 @@ def spawn_supervised(
     residual — such a child is unledgered and the reaper cannot see it.
     ``on_spawn`` publishes the Popen into its existing owner before custody I/O;
     it must not wait or persist. Callback failure follows normal spawn cleanup.
+    The returned Popen retains its exact durable row as ``_ouroboros_custody``.
     """
     if new_process_group:
         merged = dict(subprocess_new_group_kwargs())
@@ -187,7 +194,7 @@ def spawn_supervised(
     try:
         if on_spawn is not None:
             on_spawn(proc)
-        record_process(
+        proc._ouroboros_custody = record_process(
             drive_root,
             pid=proc.pid,
             cmd=cmd,
@@ -382,10 +389,12 @@ def _rewrite_ledger(
     Lifecycle callers pass their raw read snapshot, not the deduplicated view.
     If another rewrite changed that prefix, defer to a fresh sweep. Signals and
     waits stay outside this short transaction so new spawns can enter custody.
+    PIDs whose rows it drops leave the ownership set once the lock is released.
     """
     import json
 
     path = ledger_path(drive_root)
+    dropped: set = set()
     try:
         from ouroboros.utils import jsonl_append_lock_path, replace_atomic
         from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
@@ -396,6 +405,7 @@ def _rewrite_ledger(
             log.warning("process ledger rewrite skipped: append lock unavailable")
             return
         try:
+            seen, named = set(), set()
             if previous is None:
                 payload = "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries).encode("utf-8")
             else:
@@ -410,18 +420,30 @@ def _rewrite_ledger(
                         pid = int(row.get("pid") or 0) if isinstance(row, dict) else 0
                     except (TypeError, ValueError, UnicodeError):
                         pid = 0
+                    seen.add(pid)
                     # Only the last observed row can survive for this PID.
                     # Unparseable rows remain literal bytes, never deletion authority.
                     if not pid or survivors.pop(pid, None) == row:
                         kept.append(line)
+                        named.add(pid)
+                for line in current[len(previous):].splitlines():
+                    try:
+                        named.add(int(json.loads(line).get("pid") or 0))
+                    except Exception:
+                        continue
                 payload = b"".join(reversed(kept)) + current[len(previous):]
             tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
             tmp.write_bytes(payload)
             replace_atomic(tmp, path)
+            dropped = seen - named - {0}
         finally:
             release_exclusive_file_lock(lock_path, lock_fd)
     except Exception:
         log.debug("process ledger rewrite failed", exc_info=True)
+    if dropped:
+        from ouroboros.owned_shutdown import forget_ledgered_pids
+
+        forget_ledgered_pids(drive_root, dropped)  # the ledger's close path is the set's too
 
 
 def _multiprocessing_parent_sentinel() -> Optional[int]:

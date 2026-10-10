@@ -16,7 +16,7 @@ import os
 from hashlib import sha256
 
 from ouroboros.config import apply_settings_to_env, load_settings, save_settings
-from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import append_jsonl, run_cmd, utc_now_iso, write_text
 
 log = logging.getLogger(__name__)
@@ -59,16 +59,66 @@ def _evolution_restart_block_reason(ctx: ToolContext) -> str:
     return "commit_reviewed must create a local reviewed commit before evolution restart"
 
 
-def _request_restart(ctx: ToolContext, reason: str) -> str:
+def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = False) -> str:
+    """Prepare (or deliberately resume) this task's body candidate before authoring or testing."""
+    from ouroboros import body_candidate
+
+    if in_place:
+        from ouroboros.config import get_runtime_mode
+        from ouroboros.consciousness_authority import effective_runtime_mode
+
+        if effective_runtime_mode(get_runtime_mode(), getattr(ctx, "task_metadata", None)) != "cyber_pro":
+            return _publish_tool_result(ctx, ToolResult(
+                status="blocked", code="ACCESS_BLOCKED",
+                text="⚠️ IN_PLACE_REQUIRES_CYBER_PRO: outside Cyber Pro, self-authoring uses a candidate."))
+        if body_candidate.is_bound(ctx):
+            return _publish_tool_result(ctx, ToolResult(
+                status="blocked", code="ACCESS_BLOCKED",
+                text="⚠️ CANDIDATE_ALREADY_BOUND: this task already authors a candidate; in_place applies before it."))
+        body_candidate.choose_in_place(ctx)
+        return ("OK: by your explicit Cyber Pro decision this task writes the serving checkout directly. "
+                "Unfinished edits are live for every reader of that tree.")
+    try:
+        bound = body_candidate.prepare(ctx, resume=str(resume or "").strip())
+    except body_candidate.CandidateRefused as exc:
+        return _publish_tool_result(ctx, ToolResult(
+            status="blocked", code=exc.code, text=f"⚠️ {exc.code}: {exc.text}"))
+    return (
+        f"OK: body candidate {bound['candidate_id']} is {bound['state']} — path {bound['path']}, branch "
+        f"{bound['branch']}, base {str(bound['base_sha'])[:12]}. Body writes, default process cwd, child copies, "
+        "review and commit_reviewed now use it; processes started inside it get an isolated HOME/data/settings "
+        f"environment. The running body at {bound['repo_dir']} is unchanged until an exact reviewed commit is "
+        "adopted with request_restart(adopt_commit=...), or published through the Git/PR tools."
+        + (f" The earlier checkout of this task was gone; its commits remain on branch {bound['previous_branch']}."
+           if bound.get("previous_branch") else "")
+    )
+
+
+def _request_restart(ctx: ToolContext, reason: str, adopt_commit: str = "") -> str:
     block_reason = _evolution_restart_block_reason(ctx)
     if block_reason:
         return f"⚠️ RESTART_BLOCKED: in evolution mode, {block_reason}."
     is_evolution = str(ctx.current_task_type or "") == "evolution"
     restart_reason = str(reason or "").strip() or "agent_requested_restart"
+    from ouroboros import body_adoption, body_candidate
+
+    serving_dir = body_candidate.serving_repo_dir_for(ctx)
+    adoption_note, handoff = "", None
+    try:  # the restart marker names the SERVING checkout's expected state, never the candidate's
+        if is_evolution and body_candidate.is_bound(ctx) and not str(adopt_commit or "").strip():
+            adopt_commit = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip()
+        if str(adopt_commit or "").strip():
+            handoff = body_adoption.authorize(ctx, adopt_commit, reason=restart_reason)
+            adoption_note = (f" It adopts candidate commit {handoff['cand'][:12]} onto {handoff['branch']} "
+                             "once this generation's readers have stopped.")
+    except body_adoption.AdoptionRefused as exc:
+        return f"⚠️ RESTART_BLOCKED: {exc.code}: {exc.text}"
+    if not adoption_note and body_candidate.is_bound(ctx):
+        adoption_note = " The candidate is NOT adopted by this restart; it stays retained."
     # Persist expected ref for post-restart verification.
     try:
-        sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
-        branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir)
+        sha = handoff["cand"] if handoff else run_cmd(["git", "rev-parse", "HEAD"], cwd=serving_dir)
+        branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=serving_dir)
         evolution_claim = {}
         if is_evolution:
             metadata = getattr(ctx, "task_metadata", {})
@@ -84,8 +134,10 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
         # One marker schema with the supervisor's evolution restart (W4-F3).
         from supervisor.evolution_lifecycle import write_pending_restart_marker
 
+        from ouroboros.tool_access_paths import canonical_data_root
+
         write_pending_restart_marker(
-            ctx.drive_root, expected_sha=sha, expected_branch=branch,
+            canonical_data_root(ctx), expected_sha=sha, expected_branch=branch,
             reason=restart_reason, evolution_claim=evolution_claim,
         )
         if evolution_claim:
@@ -112,7 +164,40 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
     ctx.pending_restart_reason = restart_reason
     ctx.last_push_succeeded = False
     ctx.last_reviewed_commit_sha = ""
-    return f"Restart requested: {restart_reason}"
+    return f"Restart requested: {restart_reason}.{adoption_note}"
+
+
+def self_change_tool_entries() -> list:
+    """The two verbs of own-body self-change, in catalog order: prepare the candidate, restart (and adopt)."""
+    return [
+        ToolEntry("prepare_self_change", {
+            "name": "prepare_self_change",
+            "description": (
+                "Prepare this task's own-body candidate BEFORE running tests, scripts or commands that author or "
+                "exercise Ouroboros's code: a separate checkout at the running body's commit, so unfinished work "
+                "never reaches the files the live server imports. Body file writes and acting self_worktree "
+                "children prepare it automatically; processes do not, so call this first for process-first work. "
+                "Idempotent. resume deliberately continues ONE exact retained candidate (its id, owner task or "
+                "branch) whose previous owner has ended. in_place is Cyber Pro's explicit decision to edit the "
+                "serving checkout directly instead."),
+            "parameters": {"type": "object", "properties": {
+                "resume": {"type": "string", "description": "Exact retained candidate to continue; omit for this task's own."},
+                "in_place": {"type": "boolean", "description": "Cyber Pro only: author the serving checkout directly."},
+            }, "required": []},
+        }, _prepare_self_change),
+        ToolEntry("request_restart", {
+            "name": "request_restart",
+            "description": (
+                "Ask supervisor to restart runtime after a reviewed local commit or a non-evolution clean no-op; "
+                "evolution requires its exact active commit receipt. A restart alone adopts nothing: pass "
+                "adopt_commit (the exact reviewed commit of your body candidate) to adopt it locally at this "
+                "restart, after the running generation's readers have stopped."),
+            "parameters": {"type": "object", "properties": {
+                "reason": {"type": "string"},
+                "adopt_commit": {"type": "string", "description": "Exact reviewed candidate commit SHA to adopt at this restart."},
+            }, "required": ["reason"]},
+        }, _request_restart),
+    ]
 
 
 def _set_tool_timeout(ctx: ToolContext, seconds: int) -> str:
@@ -151,19 +236,33 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
     return f"Promote to stable requested: {reason}"
 
 
-def _request_deep_self_review(ctx: ToolContext, reason: str) -> str:
-    # Availability follows the configured deep-review ROW (a native inspection
-    # episode or a delegated session), not the model key alone.
+def _request_deep_self_review(ctx: ToolContext, reason: str, reviewer: str = "") -> str:
+    # The executor is the one enabled catalog row the caller names (decision 3A),
+    # else the Main model; availability follows that row (a native inspection
+    # episode or a delegated session), not a model key alone.
     from ouroboros.deep_self_review import deep_review_route, deep_review_unavailable_text
     from ouroboros.consciousness_authority import consciousness_origin_metadata
-    unavailable, identity = deep_review_route()
+    reviewer = str(reviewer or "").strip()
+    if reviewer:
+        from ouroboros.tools.arg_feedback import argument_refusal
+        from ouroboros.tools.review_change import ReviewChangeArgumentError, system_review_row
+
+        try:
+            unavailable, identity = deep_review_route(system_review_row(reviewer))
+        except ReviewChangeArgumentError as exc:
+            return argument_refusal(ctx, "TOOL_ARG_ERROR (request_deep_self_review)", [str(exc)],
+                                    effect="No review was queued.")
+    else:
+        unavailable, identity = deep_review_route()
     if unavailable:
         return deep_review_unavailable_text(unavailable)
     # A consciousness turn names itself: the review root then goes through the ONE
     # admission door and its spend stays inside the consciousness allowance.
-    ctx.pending_events.append({"type": "deep_self_review_request", "reason": reason, "model": identity, "ts": utc_now_iso(),
+    ctx.pending_events.append({"type": "deep_self_review_request", "reason": reason, "reviewer": reviewer,
+                               "model": identity, "ts": utc_now_iso(),
                                **consciousness_origin_metadata(getattr(ctx, "task_metadata", None))})
-    return f"Deep self-review requested (reviewer: {identity}). It will be queued and executed asynchronously."
+    return (f"Deep self-review requested (reviewer: {reviewer or 'Main'}, runs on {identity}). "
+            "It will be queued and executed asynchronously.")
 
 
 @completed_local_read

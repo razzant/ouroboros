@@ -146,8 +146,11 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
         kind = str(row.get("type") or "")
         if kind == custody.STARTED:
             started.add(run_id)
+            source_request = row.get("work_order_source_request")
             partial_work_order_seen = partial_work_order_seen or (
                 str(row.get("work_order_coverage") or "") == "partial"
+                # a continuation that adopted a snapshot carries its predecessor's sources
+                or bool(isinstance(source_request, dict) and source_request.get("inherited_sources"))
             )
         elif kind == custody.CLOSED_ABSENT and run_id not in settled:
             # Closed-without-settlement is still TERMINAL: leaving it in the
@@ -341,6 +344,10 @@ def acceptance_patch_dispositions(drive_root: Any, task_id: str) -> Dict[str, An
     disposition recorded", never "reviewed clean"; an unreadable log is the
     typed ``evidence_read_failed`` marker, never an empty-therefore-clean
     section (the ``task_execution_evidence`` rule, GR6-4).
+
+    Rows keep the newest ``_ACCEPT_PATCH_DISPOSITION_CAP`` (20) entries and
+    ``omitted`` counts the rest. ``unreviewed_delegated_apply`` is set when any
+    applied row of the ``delegated`` pipeline exists, judged before the cap.
     """
     from ouroboros import delegate_custody as custody
     from ouroboros.utils import truncate_review_artifact
@@ -369,6 +376,7 @@ def acceptance_patch_dispositions(drive_root: Any, task_id: str) -> Dict[str, An
             "applied": bool(row.get("applied")),
             "reason": truncate_review_artifact(str(row.get("reason") or ""), limit=600),
             "patch_sha256": str(row.get("patch_sha256") or ""),
+            **({"target_root": str(row["target_root"])} if row.get("target_root") else {}),
             **({"verdict_artifact_write_failed": True}
                if row.get("verdict_artifact_write_failed") else {}),
         })

@@ -2,23 +2,20 @@
  * a frame deadline. Frames only settle geometry after those owners are ready.
  * No fetch, pager, message cache or timer lives here.
  */
-export function createChatReadingPosition({ initial, visible, alive, ready, feed, anchors, fallback, changed, afterWrite, activity, updateButton }) {
+export function createChatReadingPosition({ visible, alive, ready, feed, anchors, changed, afterWrite, activity, updateButton }) {
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
     let viewportAnchor = null, width = feed.clientWidth;
-    let intent = initial && initial.stick === false ? { ...initial } : null;
-    const saved = intent;
+    // Every room opens following its newest message (owner decision 2026-10-05).
+    let intent = null;
     // dragging: 'held'/'released' feed scrollbar, or 'owed' to a downward gesture's animation.
     let approximate = false, dragging = '', claimed = null, scrolls = 0;
     const state = {
-        top: Math.max(0, Number(initial?.scrollTop) || 0),
-        stick: initial ? initial.stick !== false : true,
+        top: 0,
+        stick: true,
         get generation() { return generation; },
         get pending() { return Boolean(intent); },
         get target() { return intent; },
-        /** The cross-instance saved place is still pending; a reshow of this
-         * live room is not one: its target was taken from the mounted rows. */
-        get restoring() { return Boolean(intent) && intent === saved; },
         get approximate() { return approximate; },
         remember(force = false) {
             if (intent || !visible() || (!force && width !== feed.clientWidth)) return;
@@ -81,7 +78,6 @@ export function createChatReadingPosition({ initial, visible, alive, ready, feed
             approximate = false; state.remember(true);
             if (notify) changed();
         },
-        export() { return intent ? { ...intent } : null; },
         /** An explicit navigation (↓) that awaits history before it moves: the
          * reader's own later gesture supersedes it, even one a bounded box absorbs. */
         claim() {
@@ -139,7 +135,7 @@ export function createChatReadingPosition({ initial, visible, alive, ready, feed
                 if (event.type === 'wheel') wheelAt = event.timeStamp;
                 const nested = continuing ? latched : nestedMoves(origin, direction);
                 latched = event.type === 'keydown' ? null : nested;
-                // The reader's own box scrolling supersedes a saved place or a ↓
+                // The reader's own box scrolling supersedes a pending place or a ↓
                 // still awaiting history, which must not override it later; other
                 // layout stays. The feed pages nothing, and following can only
                 // end: turning back or reading away from the live edge.
@@ -226,7 +222,7 @@ export function createChatReadingPosition({ initial, visible, alive, ready, feed
                     const exact = anchors.restore(target.historyAnchor, { exact: true });
                     approximate = !exact && Boolean(target.historyAnchor);
                     if (!exact) {
-                        if (!anchors.restore(target.historyAnchor, { cardOnly: true }) && !fallback(target)) {
+                        if (!anchors.restore(target.historyAnchor, { cardOnly: true })) {
                             feed.scrollTop = Math.max(0, Math.min(target.scrollTop || 0,
                                 feed.scrollHeight - feed.clientHeight));
                         }

@@ -17,9 +17,11 @@ TARGET = "b" * 40
 
 
 @pytest.fixture(autouse=True)
-def _reset_writer_admission():
+def _reset_writer_admission(monkeypatch):
+    import supervisor.restart_retention as retention
     import supervisor.workers as workers
 
+    monkeypatch.setattr(retention, "_update_returns", {})
     workers.open_repo_writer_admission()
     yield
     workers.open_repo_writer_admission()
@@ -371,48 +373,55 @@ def test_assisted_update_refuses_before_mutation_when_budget_is_exhausted(monkey
     assert "needs model budget" in _body(response)["error"]
 
 
-def test_assisted_update_refuses_when_one_review_wave_is_unaffordable(monkeypatch):
-    """Affordability floor: remaining budget above zero but below one estimated
-    triad+scope wave refuses BEFORE any repo mutation (rescue included)."""
+@pytest.mark.parametrize("remaining", [0.4, 0.0])
+def test_assisted_update_money_preflight_decides_on_known_room_only(monkeypatch, tmp_path, remaining):
+    """#1487: the assisted update's money preflight is the reservation's own rule.
+    Known room above zero admits the update even when one estimated review wave
+    is larger (that estimate is disclosed, never an earlier refusal); no known room
+    refuses BEFORE any repo mutation (rescue included). Readiness, stash and rollback
+    stay with their own owners."""
     import ouroboros.reviewer_slot_config as reviewer_slot_config
     import ouroboros.usage_admission as usage_admission
     import supervisor.git_ops as git_ops
     import supervisor.state as state
 
+    class ReachedRescue(Exception):
+        pass
+
     monkeypatch.setattr(state, "load_state", lambda: {})
-    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 0.4)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: remaining)
     monkeypatch.setattr(control, "_respawn_workers_after_failed_update", lambda: None)
-    api_row = SimpleNamespace(target_id="openai/gpt-test", is_session=False)
-    monkeypatch.setattr(reviewer_slot_config, "commit_triad_rows", lambda: [api_row])
-    monkeypatch.setattr(reviewer_slot_config, "commit_scope_rows", lambda: [api_row])
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
+    (tmp_path / "logs").mkdir()
+    api_row = SimpleNamespace(model="openai/gpt-test", is_session=False)
+    monkeypatch.setattr(reviewer_slot_config, "review_pool_slots", lambda **_kw: [api_row, api_row])
     monkeypatch.setattr(
         usage_admission,
         "review_wave_admission",
         lambda **kwargs: {
-            "fits": False,
+            "fits": kwargs.get("remaining_usd_override", 0) > 0,
             "estimated_wave_usd": 3.21,
             "remaining_usd": kwargs.get("remaining_usd_override"),
         },
     )
-    monkeypatch.setattr(
-        git_ops,
-        "_create_rescue_snapshot",
-        lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("floor refusal must happen before rescue/materialization")
-        ),
-    )
+    monkeypatch.setattr(git_ops, "_create_rescue_snapshot",
+                        lambda *_a, **_k: (_ for _ in ()).throw(ReachedRescue()))
+    plan = _plan(kind="conflicting", local_dirty_count=0, local_snapshot=BASE, code_conflict_paths=["local.py"])
+    tx = {"phase": "stashing_local_work", "stash_sha": "", "local_work_carrier": "none"}
 
-    response = control._start_assisted_merge_fenced(_plan(
-        kind="conflicting",
-        local_dirty_count=0,
-        local_snapshot=BASE,
-        code_conflict_paths=["local.py"],
-    ), {"phase": "stashing_local_work", "stash_sha": "", "local_work_carrier": "none"})
-
-    assert response.status_code == 409
-    body = _body(response)
-    assert "review wave" in body["error"]
-    assert body["estimated_wave_usd"] == 6.42  # triad + scope surfaces summed
+    if remaining <= 0:
+        response = control._start_assisted_merge_fenced(plan, tx)
+        assert response.status_code == 409
+        assert "needs model budget" in _body(response)["error"]
+        return
+    with pytest.raises(ReachedRescue):
+        control._start_assisted_merge_fenced(plan, tx)
+    events = [json.loads(line) for line in (tmp_path / "logs" / "supervisor.jsonl").read_text().splitlines()]
+    estimate = [e for e in events if e["type"] == "managed_update_wave_estimate"]
+    # ONE wave over the pool's paid seats, priced once: both parts of the brief ride each seat.
+    assert len(estimate) == 1 and estimate[0]["estimated_wave_usd"] == 3.21
+    assert estimate[0]["exceeds_known_remaining"] is True and estimate[0]["remaining_usd"] == 0.4
+    assert not [e for e in events if e["type"] == "managed_update_wave_floor_refused"]
 
 
 @pytest.mark.parametrize(("ready", "expected_status"), [(True, 200), (False, 409)])
@@ -425,10 +434,9 @@ def test_assisted_resolver_boots_before_conflicts_reach_live_tree(
     import supervisor.update_merge as update_merge
     import supervisor.workers as workers
 
-    # No API reviewer rows -> the wave-floor estimator is skipped entirely
+    # No API reviewer rows -> the wave estimate prices nothing
     # (agent-session rows ride subscriptions, not USD budget).
-    monkeypatch.setattr(reviewer_slot_config, "commit_triad_rows", lambda: [])
-    monkeypatch.setattr(reviewer_slot_config, "commit_scope_rows", lambda: [])
+    monkeypatch.setattr(reviewer_slot_config, "review_pool_slots", lambda **_kw: [])
     calls = []
     monkeypatch.setattr(git_ops, "BRANCH_DEV", "ouroboros")
     monkeypatch.setattr(git_ops, "_create_rescue_snapshot", lambda *_a, **_k: None)
@@ -556,8 +564,7 @@ def test_resolver_fence_blockers_still_unwind_the_stash(monkeypatch):
     import supervisor.update_merge as update_merge
     import supervisor.workers as workers
 
-    monkeypatch.setattr(reviewer_slot_config, "commit_triad_rows", lambda: [])
-    monkeypatch.setattr(reviewer_slot_config, "commit_scope_rows", lambda: [])
+    monkeypatch.setattr(reviewer_slot_config, "review_pool_slots", lambda **_kw: [])
     monkeypatch.setattr(git_ops, "BRANCH_DEV", "ouroboros")
     monkeypatch.setattr(git_ops, "_create_rescue_snapshot", lambda *_a, **_k: None)
     monkeypatch.setattr(

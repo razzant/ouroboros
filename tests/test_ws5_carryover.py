@@ -116,7 +116,7 @@ def test_capability_evidence_is_route_aware_not_model_aware(monkeypatch, tmp_pat
 
     import ouroboros.config as cfg
     from ouroboros import capability_evidence as ce
-    from ouroboros.tools import scope_review as sr
+    from ouroboros.tools import scope_window as sr
 
     model = "openai::gpt-5.5-pinned"
     base_urls = {"OPENAI_BASE_URL": "https://route-a.example/v1"}
@@ -134,13 +134,13 @@ def test_capability_evidence_is_route_aware_not_model_aware(monkeypatch, tmp_pat
 
     monkeypatch.setattr(ce, "_provider_metadata_window", fake_metadata)
 
-    sr._scope_window(model)
-    sr._scope_window(model)
+    sr.scope_window(model)
+    sr.scope_window(model)
     assert fetched == ["https://route-a.example/v1"], "one probe per route, not per call"
 
     # Same model, DIFFERENT base URL: a new route, so the lazy probe must run again.
     base_urls["OPENAI_BASE_URL"] = "https://route-b.example/v1"
-    sr._scope_window(model)
+    sr.scope_window(model)
     assert fetched == [
         "https://route-a.example/v1", "https://route-b.example/v1",
     ], "a base-URL change is a new route fingerprint and must be probed"
@@ -154,7 +154,7 @@ def test_no_scope_row_shape_is_asked_to_confirm_a_context_window(monkeypatch, tm
     Settings turned into "confirm this reviewer's context window" — the only path by
     which the row could sign a blocking verdict. Scope review now reads the
     repository itself, and authority rests on the declared required-source manifest
-    and the reads recorded against it, so no scope row of any shape is asked about a
+    and the reads recorded against it, so no reviewer row of any shape is asked about a
     window and the save performs no capability probe for one.
     """
     import json
@@ -184,25 +184,20 @@ def test_no_scope_row_shape_is_asked_to_confirm_a_context_window(monkeypatch, tm
     monkeypatch.setattr(ce, "probe", lambda *_a, **_kw: pytest.fail(
         "a settings save probed a reviewer's context window"))
 
-    roster = {"enabled": True, "items": [{
-        "subagent_id": "api-critic", "name": "API critic",
-        "recommended_use": "Bounded inspection episode.",
-        "route": {"kind": "api_model", "target_id": "openai::gpt-critic"}, "effort": "medium",
-    }]}
-    slots = {
-        "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai::gpt-triad"}}],
-        "scope": [
-            {"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai::gpt-bare"}},
-            {"slot_id": "s2", "subagent_id": "api-critic"},
-            {"slot_id": "s3", "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}},
-        ],
-    }
+    # Reviewers are catalog rows marked Reviewer; one of every shape a row can take.
+    roster = {"enabled": True, "items": [
+        {"subagent_id": "bare-critic", "recommended_use": "Reads the packet.", "review_eligible": True,
+         "route": {"kind": "api_model", "target_id": "openai::gpt-bare"}, "delivery": "packet"},
+        {"subagent_id": "api-critic", "name": "API critic", "recommended_use": "Bounded inspection episode.",
+         "review_eligible": True, "route": {"kind": "api_model", "target_id": "openai::gpt-critic"}, "effort": "medium"},
+        {"subagent_id": "session-critic", "recommended_use": "Reads the repository.", "review_eligible": True,
+         "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}},
+    ]}
     app = Starlette(routes=[Route("/api/settings", smod.api_settings_post, methods=["POST"])])
     app.state.drive_root = data_dir
     app.state.repo_dir = data_dir
     response = TestClient(app).post("/api/settings", json={
         "OUROBOROS_SUBAGENTS": json.dumps(roster),
-        "OUROBOROS_REVIEWER_SLOTS": json.dumps(slots),
         "OPENAI_BASE_URL": "https://route-b.example/v1",
     })
 
@@ -210,8 +205,8 @@ def test_no_scope_row_shape_is_asked_to_confirm_a_context_window(monkeypatch, tm
     body = response.json()
     assert "review_capability_notices" not in body, body
     assert "needs_ack" not in response.text
-    stored = json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_REVIEWER_SLOTS"]
-    assert [row.get("slot_id") for row in json.loads(stored)["scope"]] == ["s1", "s2", "s3"]
+    stored = json.loads(json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_SUBAGENTS"])
+    assert [row["subagent_id"] for row in stored["items"]] == ["bare-critic", "api-critic", "session-critic"]
     assert not hasattr(smod, "_review_capability_notices")
     # The generic ack endpoint stays: the main model's own window evidence is
     # recorded through it (tests/test_owner_settings_write_seam.py

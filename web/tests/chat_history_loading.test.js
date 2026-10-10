@@ -67,7 +67,7 @@ const assertLoading = (f, why) => {
     assert.ok(f.controls(), `${why}: the history control is mounted in the feed`);
     assert.equal(f.controls().hidden, false, why);
     assert.equal(f.controls().getAttribute('aria-busy'), 'true', why);
-    assert.equal(f.button().textContent, 'Loading…', why);
+    assert.equal(f.button().textContent, 'Loading saved history…', why);
     assert.equal(f.button().hidden, false, why);
     assert.equal(f.button().disabled, true, why);
 };
@@ -83,7 +83,7 @@ test('an empty feed shows the loading state BEFORE the history request resolves'
     f.reads[0].ok(page([row('chat:10', 'First saved answer')]));
     assert.equal((await paint).painted, true);
     assert.equal(f.controls().getAttribute('aria-busy'), '', 'the loading state is lifted on success');
-    assert.notEqual(f.button().textContent, 'Loading…');
+    assert.notEqual(f.button().textContent, 'Loading saved history…');
     assert.equal(f.bubbles().length, 1);
 });
 
@@ -101,7 +101,7 @@ test('an ordinary refresh over a painted transcript keeps every rendered message
     assert.equal(f.reads.length, 2, 'the refresh request is in flight and unanswered');
     assert.deepEqual(f.bubbles(), painted, 'the painted messages stay mounted while the refresh is in flight');
     assert.equal(f.controls().getAttribute('aria-busy'), '');
-    assert.notEqual(f.button().textContent, 'Loading…');
+    assert.notEqual(f.button().textContent, 'Loading saved history…');
 
     f.reads[1].ok(page([row('chat:10', 'Kept answer one'), row('chat:20', 'Kept answer two')]));
     assert.equal((await second).painted, true);
@@ -195,7 +195,7 @@ test('closing the panel while its first read is in flight leaves no late write a
     f.reads[0].ok(page([row('chat:10', 'Arrived after close')]));
     assert.deepEqual(await paint, { painted: false, revision: 1 });
     assert.equal(f.bubbles().length, 0, 'a closed room consumes no late response');
-    assert.equal(controls.querySelector('.chat-load-older-btn').textContent, 'Loading…',
+    assert.equal(controls.querySelector('.chat-load-older-btn').textContent, 'Loading saved history…',
         'destroy() makes late continuations no-ops instead of repainting a removed control');
 });
 
@@ -228,4 +228,34 @@ test('delayed latest cannot certify newer retained recent rows until the physica
     assert.equal(f.bubbles().some(node => node.dataset.historyId === 'chat:195'), false,
         'an ordinary read superseded by latest cannot mount unowned stale rows');
     assert.equal(f.note().textContent, 'Beginning of saved history');
+});
+
+test('a room that grew past one window while open offers its older rows, and one press reads them', async t => {
+    // Opened while empty (a new Project): the pager's chain is that one complete read.
+    // The room then grows past a window; a later recent read starts beyond the chain.
+    const f = fixture(t);
+    const covered = (from, to, upper, ids, next = null, cursor = `p:${from}`) => ({
+        ...page(ids.map(id => row(`chat:${id}`, `Row ${id}`))), page_cursor: cursor, next_cursor: next, has_more: Boolean(next),
+        window: { complete: !next, truncated_by: next ? ['quota'] : [] },
+        coverage: { v: 1, view: 'room', upper: { chat: upper, progress: 0 }, spans: {
+            chat: { from, to, chain: 'retained', gaps: [] },
+            progress: { from: 0, to: 0, chain: 'empty', gaps: [] },
+        } },
+    });
+    const first = f.instance.refreshHistory({ revision: 1 });
+    await settle(); f.reads[0].ok(covered(0, 10, 10, [])); await first;
+    assert.equal(f.button().hidden, true, 'an empty complete room has nothing older');
+    const grown = f.instance.refreshHistory({ revision: 2 });
+    await settle(); f.reads[1].ok(covered(60, 100, 100, [80, 90], 'before:60')); await grown;
+    assert.equal(f.button().hidden, false, 'rows between the old chain and the newest read are older history to offer');
+    const press = f.clickRetry();
+    await settle(); assert.equal(f.reads.length, 3, 'the press first re-anchors the chain at the newest read');
+    f.reads[2].ok(covered(60, 100, 100, [80, 90], 'before:60', 'p:latest'));
+    await settle(); await settle();
+    assert.equal(f.reads.length, 4, 'and the same press goes on into the older rows');
+    f.reads[3].ok(covered(10, 60, 100, [20, 50]));
+    await press; await settle();
+    const shown = f.bubbles().map(node => node.dataset.historyId);
+    assert.ok(shown.includes('chat:20') && shown.includes('chat:50'), shown);
+    assert.equal(f.button().hidden, true, 'the beginning is reached');
 });

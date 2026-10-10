@@ -60,3 +60,28 @@ def test_fresh_lock_of_reaped_process_is_recovered_within_caller_budget(tmp_path
         assert f"pid={os.getpid()}" in lock.read_text()
     finally:
         platform.release_exclusive_file_lock(lock, fd)
+
+
+@pytest.mark.parametrize("creation", [FileExistsError, PermissionError])
+@pytest.mark.parametrize("windows", [True, False], ids=["windows", "posix"])
+def test_a_name_that_refuses_its_probe_mid_release_is_contention_only_on_windows(
+        tmp_path, monkeypatch, creation, windows):
+    """Windows refuses to open a name while its holder deletes it (delete pending, or the
+    deleter's handle shares no access), so a pre-send accounting wait must re-contend.
+    The same refusal on POSIX stays a permission failure that fails closed."""
+    lock = tmp_path / "usage_attempts.lock"
+    opened = os.open
+
+    def releasing_holder(path, flags, *args, **kwargs):
+        if str(path) != str(lock):
+            return opened(path, flags, *args, **kwargs)
+        if flags & os.O_CREAT:
+            raise creation(17 if creation is FileExistsError else 13, "held")
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(platform, "kernel_file_locks_enforced", lambda path: True)
+    monkeypatch.setattr(platform, "IS_WINDOWS", windows)
+    monkeypatch.setattr(os, "open", releasing_holder)
+    outcome = {}
+    assert platform.acquire_exclusive_file_lock(lock, timeout_sec=0.1, outcome=outcome) is None
+    assert outcome == {"reason": "contention" if windows else "permission", "errno": 13}

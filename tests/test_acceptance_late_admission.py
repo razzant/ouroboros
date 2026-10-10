@@ -18,6 +18,7 @@ from tests.test_acceptance_history import _caller, _request, _source
 from tests.test_acceptance_late_consumers import delivered, late as late
 from tests.test_review_operation_collection import _send_ctx, fresh_sends as fresh_sends
 from tests.test_review_operation_lifetime import until
+from tests._usage_store_testing import ledger_rows
 
 
 def _unpaid(f, late):
@@ -25,7 +26,7 @@ def _unpaid(f, late):
     row = load_task_result(f.root, f.tid)
     assert not late.calls and row['acceptance_debt'] and not row.get('review_projection', {}).get('panels')
     assert not load_task_result(f.root, f.accounting).get('task_acceptance_review_accounting')
-    assert not (f.root / 'state' / 'usage_attempts.jsonl').exists()
+    assert not ledger_rows(f.root)
     return row
 
 
@@ -133,14 +134,14 @@ def test_existing_paid_or_unknown_panel_collects_after_calendar_closes(late, tmp
     _request(f, ctx, _source(ctx))
     until(lambda: not review_operation._LIVE)
     assert len(late.calls) == 3
-    before = (f.root / 'state' / 'usage_attempts.jsonl').read_bytes()
+    before = ledger_rows(f.root)
     monkeypatch.setattr('ouroboros.deadline_utils.utc_now', lambda: now + timedelta(seconds=3601))
     debt = load_task_result(f.root, f.tid)['acceptance_debt']
     automatic = run_historical_acceptance(ctx, task_id=f.tid, debt_id=debt['debt_id'], automatic=True)
     assert automatic['reason'] == 'existing_operation_collection_owned'
     explicit = _request(f, ctx, _source(ctx))
     assert explicit['reason'] == 'existing_paid_operation'
-    assert len(late.calls) == 3 and (f.root / 'state' / 'usage_attempts.jsonl').read_bytes() == before
+    assert len(late.calls) == 3 and ledger_rows(f.root) == before
 
 
 @pytest.mark.parametrize('venue,evidence,buy', [
@@ -240,7 +241,7 @@ def test_spawned_worker_public_request_waits_for_real_original_owner(late, tmp_p
             entered.set()
             assert release.wait(20)
         monkeypatch.setattr(pipeline, '_record_task_facts', hold)
-        for name in ('_run_chat_consolidation', '_run_scratchpad_consolidation', '_run_reflection', '_update_improvement_backlog'):
+        for name in ('_run_scratchpad_consolidation', '_run_reflection', '_update_improvement_backlog'):
             monkeypatch.setattr(pipeline, name, lambda *_a, **_k: None)
         monkeypatch.setattr('ouroboros.post_task_evolution.maybe_promote', lambda *_a, **_k: None)
         task = {**f.task, 'drive_root': str(f.root), '_is_direct_chat': True}

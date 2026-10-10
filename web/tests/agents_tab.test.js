@@ -40,7 +40,7 @@ import {
     setAccountEnabled,
     vendorCredentialRetainedNotice,
 } from '../modules/harness_accounts.js';
-import { pinnedAccountWarning } from '../modules/reviewer_slots.js';
+import { profileOptionsFor } from '../modules/route_editor_primitives.js';
 
 const MULTI = JSON.parse(readFileSync(
     fileURLToPath(new URL('./fixtures/credential_profiles_multi.json', import.meta.url)), 'utf-8'));
@@ -802,32 +802,16 @@ test('the Enabled toggle is the engine PATCH contract, and a refusal changes not
         /daemon_unreachable/);
 });
 
-test('a review row pinned to a removed account stays visible with ONE warning', () => {
+test('a reviewer row pinned to a removed account keeps its pin visible', () => {
     // The row must not silently reroute to automatic rotation: that would widen
     // which account the reviewer may spend without the owner deciding it.
-    const state = {
-        triad: [{ slot_id: 't1', route: { kind: 'agent_session', target_id: 'codex', profile_id: 'work' } }],
-        scope: [{ slot_id: 's1', route: { kind: 'agent_session', target_id: 'codex', profile_id: 'koshak' } }],
-        advisory: { route: { kind: 'agent_session', target_id: 'claude', profile_id: 'main' } },
-        profilesByHarness: { codex: ['koshak'], claude: ['main'] },
-        accountsKnown: true,
-    };
-    const warning = pinnedAccountWarning(state);
-    assert.match(warning, /A review row is pinned/);
-    assert.match(warning, /codex · work/);
-    assert.doesNotMatch(warning, /koshak/);   // still discovered
-    assert.doesNotMatch(warning, /main/);     // still discovered
-    assert.match(warning, /refuse rather than reroute/);
-
-    // Every pin present: nothing to say.
-    assert.equal(pinnedAccountWarning({ ...state, profilesByHarness: {
-        codex: ['work', 'koshak'], claude: ['main'] } }), '');
-    // Accounts never read: the pin only LOOKS missing, and the tab's banner is
-    // already saying nobody could be asked (BIBLE P1).
-    assert.equal(pinnedAccountWarning({ ...state, accountsKnown: false }), '');
-    // Two missing pins count as two, in one sentence.
-    assert.match(pinnedAccountWarning({ ...state, profilesByHarness: { codex: ['koshak'] } }),
-        /2 review rows are pinned/);
+    const options = profileOptionsFor([{ id: 'koshak', name: 'koshak', enabled: true }], 'work');
+    assert.deepEqual(options.map((option) => option.value), ['', 'koshak', 'work']);
+    assert.equal(options.at(-1).label, 'Account: work (not in discovery)');
+    // Accounts never read: the pin only LOOKS missing (BIBLE P1).
+    assert.equal(profileOptionsFor([], 'work', { accountsKnown: false }).at(-1).label, 'Account: work (not checked)');
+    assert.deepEqual(profileOptionsFor([{ id: 'work', name: 'work', enabled: true }], 'work').map((option) => option.value),
+        ['', 'work']);
 });
 
 test('familyLabel prefers live discovery and falls back to the product name', () => {

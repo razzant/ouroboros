@@ -751,12 +751,14 @@ def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContex
         or getattr(ctx, "drive_root", "")
         or "."
     ).resolve(strict=False)
+    # An extension is a capability of the RUNNING body, also for a task that authors a candidate.
+    repo_dir = pathlib.Path(getattr(ctx, "serving_repo_dir", None) or ctx.repo_dir)
     skill = _skill_for_dispatch(
         str(ext_tool.get("skill") or ""),
         dispatch_drive_root,
-        pathlib.Path(str(ext_tool.get("skills_repo_path") or ctx.repo_dir)),
+        pathlib.Path(str(ext_tool.get("skills_repo_path") or repo_dir)),
     )
-    env = _base_env_for_skill(skill, dispatch_drive_root, pathlib.Path(ctx.repo_dir))
+    env = _base_env_for_skill(skill, dispatch_drive_root, repo_dir)
     model_capable = _extension_has_model_credentials(skill, dispatch_drive_root)
     dispatch_id = f"extension:tool:{uuid.uuid4().hex}"
     result = _run_child(
@@ -768,12 +770,12 @@ def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContex
             "args": dict(args or {}),
             "ctx": _tool_context_payload(ctx),
             "drive_root": str(dispatch_drive_root),
-            "repo_dir": str(ctx.repo_dir),
-            "skills_repo_path": str(ext_tool.get("skills_repo_path") or ctx.repo_dir),
+            "repo_dir": str(repo_dir),
+            "skills_repo_path": str(ext_tool.get("skills_repo_path") or repo_dir),
         },
         skill_dir=skill.skill_dir,
         drive_root=dispatch_drive_root,
-        repo_dir=pathlib.Path(ctx.repo_dir),
+        repo_dir=repo_dir,
         env=env,
         timeout_sec=max(1, int(ext_tool.get("timeout_sec") or 60)),
         on_spawn=((

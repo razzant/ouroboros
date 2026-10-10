@@ -478,6 +478,19 @@ def _under(path: pathlib.Path, root: pathlib.Path) -> bool:
         return False
 
 
+def system_repo_paths(active_root, system_repo_root, locators: Iterable[str]) -> list[str]:
+    """Declared path locators that resolve under the system repository, repo-relative POSIX."""
+    from ouroboros.tools.plan_evidence import _split_selector
+    system = pathlib.Path(system_repo_root).resolve(strict=False)
+    active = pathlib.Path(active_root).resolve(strict=False)
+    found = []
+    for locator in (str(raw or "").strip() for raw in locators or []):
+        resolved = _resolve_locator_path(_split_selector(locator)[0], active)[0] if _is_path_locator(locator) else None
+        if resolved is not None and resolved != system and _under(resolved, system):
+            found.append(resolved.relative_to(system).as_posix())
+    return found
+
+
 def resolve_constitutional(
     *,
     active_root: str | pathlib.Path,

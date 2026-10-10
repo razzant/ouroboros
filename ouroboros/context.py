@@ -15,7 +15,6 @@ from ouroboros.config import get_context_mode
 from ouroboros.desktop_autostart import runtime_facts as desktop_runtime_facts
 from ouroboros.context_budget import (
     LARGE_CONTEXT_SECTION_CHARS,
-    MAX_RECENT_CHAT_TAIL,
     SCRATCHPAD_SECTION_BUDGET_CHARS,
 )
 from ouroboros.context_fit import (
@@ -77,6 +76,16 @@ log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
 
 
+def build_incoming_user_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
+    """Build only this delivery's images, never the task's historical manifest."""
+    task = {**entry, "drive_root": drive_root, "id": task_id}
+    if "attachment_manifest" in entry or "attachment_manifest_ref" in entry:
+        task["attachment_images"] = entry.get("attachment_manifest") or []
+        task["task_contract"] = {key: entry[key] for key in
+                                 ("attachment_manifest", "attachment_manifest_ref") if key in entry}
+    return build_user_content(task)
+
+
 def build_user_content(task: Dict[str, Any]) -> Any:
     from ouroboros.presence_context import frame_presence_user_content
 
@@ -122,16 +131,34 @@ def build_user_content(task: Dict[str, Any]) -> Any:
         # before staging) still folds its caption into the lead text block.
         image_caption = task.get("image_caption", "")
         combined_text = "\n".join(part for part in (image_caption, text if text != image_caption else "") if part) or "Analyze the screenshot"
-        content: List[Dict[str, Any]] = [
-            {"type": "text", "text": combined_text},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:{task.get('image_mime', 'image/jpeg')};base64,{image_b64}"},
-                # Eviction metadata (stripped before provider calls): the K-newest
-                # image policy replaces older blocks with this caption.
-                "_caption": str(image_caption or "")[:200],
-            },
-        ]
+        import base64
+        from ouroboros.image_preparation import prepare_image_bytes, retain_original
+        content: List[Dict[str, Any]] = [{"type": "text", "text": combined_text}]
+        try:
+            raw = base64.b64decode(image_b64, validate=True)
+        except ValueError:
+            raw = None
+            content.append({"type": "text", "text": "Image pixels unavailable: the inline image is not valid base64."})
+        if raw is not None:
+            source_path = ""
+            if task.get("drive_root"):
+                try:  # a failed copy loses the re-view address, not this turn's pixels
+                    source_path = str(retain_original(pathlib.Path(task["drive_root"]) / "uploads" / "views",
+                                                      raw, "inline.image"))
+                except OSError:
+                    log.warning("inline image original was not retained", exc_info=True)
+            original = f" Original: {source_path}" if source_path else ""
+            try:
+                prepared = prepare_image_bytes(raw, max_bytes=8 * 1024 * 1024)
+            except ValueError as exc:
+                content.append({"type": "text", "text": f"Image pixels unavailable: {exc}.{original}"})
+            else:
+                if prepared.note or original:
+                    content.append({"type": "text", "text": (prepared.note + original).strip()})
+                content.append({"type": "image_url", "image_url": {
+                    "url": f"data:{prepared.mime};base64,{base64.b64encode(prepared.data).decode('ascii')}"},
+                    "_caption": str(image_caption or ""),
+                    "_source_path": source_path})
     else:
         content = [{"type": "text", "text": text or "(empty message)"}]
     content.extend(attachment_image_blocks)
@@ -180,22 +207,28 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
         relpath = str(entry.get("relpath") or "").strip()
         if not relpath:
             continue
+        label = str(entry.get("label") or pathlib.Path(relpath).name).strip()
         try:
             img_path = (artifact_dir / relpath).resolve(strict=False)
-            if not img_path.is_file():
-                continue
-            # Skip NATIVE injection of an oversized image so a large attachment can't blow the
-            # context / provider request with a huge data URL (parity with ws._MAX_NATIVE_IMAGE_BYTES
-            # = 8 MB). It stays manifest-readable via read_file / view_image (which downscales).
+            if not img_path.is_relative_to(artifact_dir.resolve()) or (artifact_dir / relpath).is_symlink():
+                raise ValueError("image path escapes its staged artifact owner")
+            # Keep the existing admission budget; exceeding it is visible while
+            # the complete original remains accessible through the manifest.
             if img_path.stat().st_size > 8 * 1024 * 1024:
-                continue
-            mime = str(entry.get("mime") or "image/png").strip() or "image/png"
-            b64 = _b64.b64encode(img_path.read_bytes()).decode("ascii")
-        except Exception:
-            log.debug("attachment image blocks: skipped %s on error", relpath, exc_info=True)
+                raise ValueError("image exceeds the 8 MiB automatic attachment read budget")
+            raw = img_path.read_bytes()
+            from hashlib import sha256
+            from ouroboros.image_preparation import prepare_image_bytes
+            if entry.get("sha256") and sha256(raw).hexdigest() != entry["sha256"]:
+                raise ValueError("staged image no longer matches its captured identity")
+            prepared = prepare_image_bytes(raw, max_bytes=8 * 1024 * 1024)
+            mime = prepared.mime
+            b64 = _b64.b64encode(prepared.data).decode("ascii")
+        except (OSError, ValueError) as exc:
+            blocks.append({"type": "text", "text":
+                           f"[image: {label}] Pixels unavailable: {exc}. Original: artifact_store/{relpath}."})
             continue
-        label = str(entry.get("label") or img_path.name).strip() or img_path.name
-        caption = f"[image: {label}]"
+        caption = f"[image: {label}; original: {img_path}" + (f"; {prepared.note}]" if prepared.note else "]")
         blocks.append({"type": "text", "text": caption})
         blocks.append({
             "type": "image_url",
@@ -405,6 +438,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
             "artifact transport; do not use runtime_data/uploads as artifact transport"
         )
     try:
+        from ouroboros.search_routes import resolve_web_search_route
         from ouroboros.config import get_allow_mutative_subagents
         from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
         from ouroboros.workspace_copies import workspace_copy_source_is_system
@@ -418,6 +452,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
             ),
             "write_surfaces": sorted(VALID_WRITE_SURFACES),
             "web_search_backend": runtime_setting("OUROBOROS_WEBSEARCH_BACKEND", "auto"),
+            "web_search_route": resolve_web_search_route(),
             "main_web_search": {
                 "mode": runtime_setting("OUROBOROS_MAIN_WEB_SEARCH", "off"),
                 "engine": runtime_setting("OUROBOROS_MAIN_WEB_SEARCH_ENGINE", "auto"),
@@ -555,6 +590,11 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         log.debug("Failed to inject answer_protocol rule", exc_info=True)
     if not declared:
         runtime_data["official_update"] = official_update_projection(git_sha)
+        from ouroboros import body_candidate
+
+        # Absent when none exists, so an ordinary Runtime block stays byte-identical.
+        if candidates := body_candidate.context_fact(str(task.get("root_task_id") or task.get("id") or "")):
+            runtime_data["body_candidates"] = candidates
     out = "## Runtime context\n\n" + json.dumps(runtime_data, ensure_ascii=False, indent=2)
     if declared:
         return out
@@ -603,17 +643,16 @@ def build_knowledge_sections(
     # One mind keeps its authored common orientation across rooms. The generated
     # inventory is navigation, not a substitute for that understanding; a
     # project's shelf adds focus without hiding the common corpus.
-    from ouroboros.knowledge import (INDEX_FILE, OVERVIEW_TOPIC, inventory_knowledge,
-                                     read_knowledge_note, render_knowledge_index, resolve_knowledge_address)
+    from ouroboros.knowledge import (OVERVIEW_TOPIC, knowledge_index_view,
+                                     read_knowledge_note, resolve_knowledge_address)
 
     pid = str(project_id or "").strip()
     global_address = resolve_knowledge_address(env.drive_path("memory").parent, OVERVIEW_TOPIC, "global")
-    authored_overview = False
+    overview = None
     try:
         overview = read_knowledge_note(global_address)
         overview_text = overview.source.text_at(overview.source.body_span) if overview.source else overview.text
         if overview_text.strip():
-            authored_overview = overview.source is not None
             sections.append(f"## Shared understanding\n\nSource: knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global').\n\n" + overview_text)
         else:
             sections.append(_SHARED_UNDERSTANDING_GAP)  # present but empty is still unauthored
@@ -621,29 +660,29 @@ def build_knowledge_sections(
         sections.append(_SHARED_UNDERSTANDING_GAP)
     except (OSError, UnicodeDecodeError) as exc:
         sections.append(f"Shared understanding source unavailable: knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global'). {type(exc).__name__}.")
-    knowledge_indexes = [(global_address.shelf / INDEX_FILE,
+    knowledge_indexes = [(global_address,
                           "## Knowledge base\n\nGlobal navigation: knowledge_list(scope='global'); read linked topics with knowledge_read(topic=..., scope='global').",
                           "knowledge index")]
     if pid:
         from ouroboros.project_facts import project_knowledge_dir
 
-        knowledge_indexes.append((project_knowledge_dir(pid) / INDEX_FILE,
+        project_address = resolve_knowledge_address(project_knowledge_dir(pid).parents[2], "topic", f"project:{pid}")
+        knowledge_indexes.append((project_address,
                                   f"## Project knowledge ({pid})", "project knowledge index"))
-    if include_pattern_body:
-        knowledge_indexes.append((env.drive_path("memory/knowledge/patterns.md"), pattern_header, "patterns register"))
-    for path, header, label in knowledge_indexes:
-        # The authored summary is the resident face of a note, so the index carries it
-        # whether or not a common orientation exists; the fresh inventory render also
-        # covers the case where the index file is absent (a note landed before any
-        # rebuild); an existing stale index is still read as written.
-        is_global_index = path == global_address.shelf / INDEX_FILE
-        text = (render_knowledge_index(inventory_knowledge(global_address), include_summaries=True)
-                if is_global_index and (authored_overview or not path.exists()) else safe_read(path))
-        if not text.strip():
-            continue
+    for address, header, label in knowledge_indexes:
+        # Every shelf and overview branch projects the current source state, even
+        # when a previous writer could not publish its generated index.
+        try:
+            text = knowledge_index_view(address, overview=overview)
+        except (OSError, UnicodeDecodeError) as exc:
+            text = f"Knowledge navigation unavailable: {type(exc).__name__}; knowledge_list(scope={address.scope!r})."
         if warn_large and len(text) > _LARGE_CONTEXT_SECTION_CHARS:
             log.warning("context: %s is large (%d chars)", label, len(text))
         sections.append(f"{header}\n\n{text}")
+    if include_pattern_body:
+        text = safe_read(env.drive_path("memory/knowledge/patterns.md"))
+        if text.strip():
+            sections.append(f"{pattern_header}\n\n{text}")
     if not include_pattern_body:
         sections.append("Pattern Register details: knowledge_read(topic='patterns', scope='global').")
     if pid:
@@ -756,8 +795,8 @@ def _render_scratchpad_for_context(memory: "Memory", budget: int) -> str:
     return section
 
 
-def build_memory_sections(memory: Memory, partition: str = "all", durable_dialogue_gaps_out: Optional[List[Dict[str, Any]]] = None,
-                          *, include_scratchpad: bool = True) -> List[str]:
+def build_memory_sections(memory: Memory, partition: str = "all", *, include_scratchpad: bool = True) -> List[str]:
+    """Identity and WORLD (stable), the scratchpad (volatile); my story and rooms are ``memory_view``'s."""
     sections = []
 
     include_stable = partition in {"all", "stable"}
@@ -788,18 +827,6 @@ def build_memory_sections(memory: Memory, partition: str = "all", durable_dialog
             # Generated profile is full; oversize is a generation-discipline bug.
             _warn_if_over_budget("world", world_raw)
             sections.append("## Environment Profile (from `memory/WORLD.md` — already loaded; delete WORLD.md and restart to regenerate if the host environment changes)\n\n" + world_raw)
-
-    if include_volatile:
-        dialogue_blocks = memory.load_dialogue_blocks()
-        if dialogue_blocks:
-            blocks_md = memory.format_blocks_as_markdown(dialogue_blocks)
-            if blocks_md.strip():
-                if durable_dialogue_gaps_out is not None:
-                    durable_dialogue_gaps_out.extend(memory._durable_dialogue_gaps(dialogue_blocks)[0])
-                sections.append("## Dialogue History\n\n" + blocks_md)
-        legacy_summary = safe_read(memory.drive_root / "memory" / "dialogue_summary.md").strip()
-        if legacy_summary:
-            sections.append("## Legacy Dialogue Summary (retired flat format, read-only fallback)\n\n" + legacy_summary)
 
     if partition == "all":
         registry_path = memory.drive_root / "memory" / "registry.md"
@@ -876,90 +903,13 @@ def _format_recent_reflections(entries: List[Dict[str, Any]], limit: int = 20) -
     return "\n\n".join(blocks)
 
 
-def build_recent_sections(
-    memory: Memory, env: Any, task_id: str = "", thread_chat_id: int = 0,
-    project_id: str = "", chat_coverage_out: Optional[Dict[str, Any]] = None,
-) -> List[str]:
+def build_recent_sections(memory: Memory, env: Any, task_id: str = "", project_id: str = "") -> List[str]:
+    """My own recent process: this task's windows, the supervisor, reflections (the project's too).
+
+    Conversations are not here: the current room's open conversation, its task facts
+    and the other live rooms are the memory view's (``memory_view.render_room``).
+    """
     sections = []
-
-    # Full project awareness (v6.32.0): registry membership is the SSOT for "is
-    # this a project thread" (a numeric range cannot disambiguate large external
-    # transport ids). The one identity (main chat + background consciousness) sees
-    # its WHOLE conversation, project threads included, because Ouroboros is one
-    # awareness/biography (BIBLE P1). A project TASK gets a FOCUSED view of its own
-    # thread as working context to reduce interference — focus, not isolation.
-    try:
-        from ouroboros.dialogue_provenance import RoomLabelResolver
-
-        _room_resolver = RoomLabelResolver(memory.drive_root)
-        _project_chat_ids = _room_resolver.project_chat_ids
-    except Exception:
-        _room_resolver = None
-        _project_chat_ids = set()
-
-    _chat_tail = MAX_RECENT_CHAT_TAIL
-    retained_project_origins: List[Dict[str, Any]] = []
-
-    _focused_project = bool(thread_chat_id and thread_chat_id in _project_chat_ids)
-    if _focused_project:
-        # Post-hoc bindings and retention-proof origins belong to the existing
-        # Project dialogue read model; focus changes the working view, not memory.
-        from ouroboros.project_dialogue import project_recent_dialogue
-
-        chat_entries, chat_coverage, retained_project_origins = project_recent_dialogue(
-            memory, thread_chat_id, _chat_tail,
-        )
-    else:
-        dialogue_meta = memory.load_dialogue_meta()
-        # The Memory owner returns one bounded, truthfully-gapped raw suffix.
-        chat_entries, chat_coverage = memory.read_unconsolidated_chat(
-            dialogue_meta, _chat_tail,
-        )
-    if chat_coverage_out is not None:
-        chat_coverage_out.update(chat_coverage)
-    chat_summary = memory.summarize_chat(
-        chat_entries, limit=_chat_tail,
-        include_room_labels=not _focused_project,
-        room_resolver=_room_resolver,
-    )
-    if chat_summary:
-        sections.append("## Recent chat\n\n" + chat_summary)
-    if retained_project_origins:
-        sections.append(
-            "## Project owner origins (retention-proof bindings)\n\n"
-            + memory.summarize_chat(
-                retained_project_origins, limit=len(retained_project_origins),
-            )
-        )
-    if chat_entries or chat_coverage.get("gaps"):
-        generation_count = len(chat_coverage.get("generations") or [])
-        compact_gaps = [
-            {
-                key: gap[key]
-                for key in (
-                    "kind", "detail", "first_line_sha256", "offset", "error",
-                    "count", "omitted_bytes_at_least", "omitted_rows",
-                )
-                if key in gap
-            }
-            for gap in (chat_coverage.get("gaps") or [])
-            if isinstance(gap, dict)
-        ]
-        coverage_projection = {
-            "matched_rows": int(chat_coverage.get("matched_rows") or 0),
-            "shown_rows": int(chat_coverage.get("shown_rows") or 0),
-            "omitted_matching_rows": int(chat_coverage.get("omitted_matching_rows") or 0),
-            "omitted_matching_rows_unknown": bool(
-                chat_coverage.get("omitted_matching_rows_unknown")
-            ),
-            "generation_count": generation_count,
-            "gaps": compact_gaps,
-            "reader": str(chat_coverage.get("reader") or "chat_history(count, offset, search)"),
-        }
-        sections.append(
-            "## Recent chat coverage\n\n"
-            + json.dumps(coverage_projection, ensure_ascii=False, sort_keys=True, default=str)
-        )
 
     # Each task reads ITS OWN newest rows through a bounded window (#131): a
     # global tail filtered afterwards handed every task whatever share of the
@@ -1111,7 +1061,7 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100) -> str:
             lines.append(f"  Live ({_field(skill.get('process') or 'unknown', 20)}): no ({_field(skill.get('live_reason') or 'unknown', 60)})")
         count += 1
         if len(lines) >= max_lines:
-            lines.append("- ... (truncated; call list_skills for the full catalogue)")
+            lines.append("- ... (truncated; list_skills pages every skill; list_skills(name=...) gives one in full)")
             break
     if count == 0:
         return ""
@@ -1215,6 +1165,9 @@ def _capture_context_core(
 
     task_metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     is_child = str(task.get("delegation_role") or task_metadata.get("delegation_role") or "") == "subagent"
+    # My memory view: one spec by role, its facts read once from the canonical root
+    # (the one chronicle activation happens here); rendered per mode by the fit plan.
+    view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx)
 
     # Max keeps the full capability/WHY map even for external work: binding a
     # folder changes tools' default target, not the mind's knowledge of its body.
@@ -1243,10 +1196,17 @@ def _capture_context_core(
             )
     except Exception:
         log.debug("Failed to build Available subagents catalog", exc_info=True)
-    semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable"))
+    try:
+        from ouroboros.subagent_runtime import review_facts_block
 
-    semi_stable_parts.extend(build_knowledge_sections(context_env, project_id=resolve_project_id(task),
-                                                     include_pattern_body=not is_child))
+        semi_stable_parts.append(review_facts_block())
+    except Exception:
+        log.warning("Failed to build the Review block", exc_info=True)
+    semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable"))
+    # Knowledge leads the changing block (its edits never cost the cached story) and
+    # rides only where the view holds it: a child or nanny reads it by knowledge_read.
+    head_parts = (build_knowledge_sections(context_env, project_id=resolve_project_id(task),
+                                           include_pattern_body=not is_child) if view_spec.knowledge else [])
 
     deep_review_path = context_env.drive_path("memory/deep_review.md")
     try:
@@ -1272,6 +1232,12 @@ def _capture_context_core(
     dynamic_parts = []
     if health_section:
         dynamic_parts.append(health_section)
+    try:
+        from ouroboros.subagent_runtime import review_records_block
+
+        dynamic_parts.append(review_records_block(drive_root=canonical_root, task_id=str(task.get("id") or "")))
+    except Exception:
+        log.warning("Failed to build the Review records block", exc_info=True)
     dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile", include_scratchpad=not is_child))
 
     registry_digest = _build_registry_digest(context_env)
@@ -1333,23 +1299,16 @@ def _capture_context_core(
     except Exception:
         _reflections_pid = ""
     if is_child:
-        dynamic_parts.append(
-            "## Working sources\n\n"
-            "The shared biography is loaded above; your own recent process (progress, tools, events) "
-            "is loaded below. Your parent's selected discussion and working sources are in this "
-            "assignment's context. Other raw conversations, the global scratchpad and earlier task "
-            "reports are not preloaded: use chat_history, knowledge_read, get_task_result or ask "
-            "your parent for exact sources when useful."
-        )
+        # The role line lists exactly what this child's view loaded (the same spec).
+        from ouroboros.memory_view import working_sources_line
+
+        dynamic_parts.append(working_sources_line(view_spec, view))
         # A child keeps its own process memory too (owner decision 2026-09-22):
         # its execution drive holds exactly its worker rows, progress is canonical.
         own_drive = memory if context_memory is not memory else None
         recent = context_memory.recent_activity_sections(str(task.get("id") or ""), own_drive=own_drive)
     else:
-        recent = build_recent_sections(
-            context_memory, env, task_id=task.get("id", ""), thread_chat_id=int(task.get("chat_id") or 0),
-            project_id=_reflections_pid,
-        )
+        recent = build_recent_sections(context_memory, env, task_id=task.get("id", ""), project_id=_reflections_pid)
     dynamic_parts.extend(snapshot_labelled(section, captured_at) for section in recent)
     try:
         from ouroboros.presence_context import build_presence_context_section
@@ -1379,7 +1338,19 @@ def _capture_context_core(
         reference_books=tuple(books),
         reference_book_errors=tuple(book_errors),
         compact_reference_docs=is_child,
+        dynamic_head_text="\n\n".join(head_parts),
+        memory_view_json=view_json,
     )
+
+
+def _capture_memory_view(task: Dict[str, Any], canonical_root: pathlib.Path, ctx: Any) -> Tuple[Any, Any, str]:
+    """``(ViewSpec, MemoryViewSnapshot, its canonical JSON)``, captured once from the canonical root."""
+    from ouroboros.memory_view import capture_memory_view, snapshot_json, view_spec_for_task
+
+    view_ctx = ctx if isinstance(getattr(ctx, "task_metadata", None), dict) else None
+    spec = view_spec_for_task(task, canonical_root, ctx=view_ctx)
+    snapshot = capture_memory_view(canonical_root, task, spec)
+    return spec, snapshot, snapshot_json(snapshot)
 
 
 def _context_fit_route(
@@ -1399,6 +1370,7 @@ def build_context_fit_plan(
     *,
     preferred_mode: Optional[str] = None,
     ctx: Any = None,
+    tool_schemas: Optional[List[Dict[str, Any]]] = None,
 ) -> ContextFitPlan:
     """Compatibility wrapper over the cohesive context-fit implementation."""
     core = _capture_context_core(env, memory, task, review_context_builder, ctx)
@@ -1408,7 +1380,27 @@ def build_context_fit_plan(
         task,
         preferred_mode=str(preferred_mode or get_context_mode() or "max"),
         route_resolver=_context_fit_route,
+        tool_schemas=tool_schemas,
     )
+
+
+def _record_memory_view(env: Any, memory: Memory, task: Dict[str, Any], ctx: Any,
+                        plan: ContextFitPlan) -> Dict[str, Any]:
+    """The view fact of the first send's projection: on the task context and one event receipt."""
+    facts = dict(plan.projection(plan.initial_mode).memory_facts or {})
+    if not facts:  # a declared-input child carries no memory view
+        return {}
+    if ctx is not None:
+        from ouroboros.memory_floor import trace_facts
+
+        ctx.memory_view_facts = trace_facts(facts)
+    from ouroboros.utils import append_jsonl
+
+    root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
+    if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view",
+                                                     "task_id": str(task.get("id") or ""), **facts}):
+        log.warning("Context memory view receipt could not be written")
+    return facts
 
 
 def build_llm_messages(
@@ -1417,9 +1409,13 @@ def build_llm_messages(
     task: Dict[str, Any],
     review_context_builder: Optional[Any] = None,
     ctx: Any = None,
-    *, llm: Any = None, tool_schemas: Optional[List[Dict[str, Any]]] = None,
-    fit_candidate: Optional[Any] = None,
+    *, tool_schemas: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """The first request of a task: the plan's projection for its starting mode, and the cap info.
+
+    No model is called on this path: my memory is rendered, never prepared by a paid pass;
+    a window too small for it addresses lines and pages instead.
+    """
     # Keep the legacy public shape while publishing the immutable plan on the
     # existing ToolContext for the ordinary loop.  Commit/scope reviewers do not
     # call this builder and therefore cannot take the Low retry.
@@ -1430,46 +1426,8 @@ def build_llm_messages(
         review_context_builder,
         preferred_mode=get_context_mode(),
         ctx=ctx,
+        tool_schemas=tool_schemas,
     )
-    maintenance = None
-    if plan.preferred_mode == "nano" and llm is not None and ctx is not None and task_input_sources(task) != "declared":
-        from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS, OWNER_NANO_TARGET_TOKENS
-        from ouroboros.consolidator import maintain_memory_pressure
-        import copy
-
-        def fits() -> bool:
-            proposed = plan.messages_for("nano")
-            if fit_candidate is not None:
-                return fit_candidate(proposed, tool_schemas or []).get("accepted") is True
-            return (estimate_context_prompt_tokens(proposed, tool_schemas)
-                    + NANO_MIN_HEADROOM_TOKENS <= OWNER_NANO_TARGET_TOKENS)
-
-        if not fits():
-            canonical_root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
-            working_memory = memory if memory.drive_root.resolve() == canonical_root.resolve() else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
-            maintenance_ctx = copy.copy(ctx)
-            maintenance_ctx.drive_root = canonical_root
-            maintenance_ctx.budget_drive_root = str(canonical_root)
-            maintenance_ctx.task_id = str(task.get("id") or getattr(ctx, "task_id", "") or "context_maintenance")
-            ctx.emit_progress_fn("Shared memory is larger than this working window; consolidating complete sources before continuing.")
-
-            def rebuild_and_fit() -> bool:
-                nonlocal plan
-                plan = build_context_fit_plan(env, memory, task, review_context_builder, preferred_mode="nano", ctx=ctx)
-                return fits()
-
-            maintenance = maintain_memory_pressure(working_memory, llm, maintenance_ctx, fits=rebuild_and_fit,
-                                                   current_topic=str(task.get("text") or ""))
-            from ouroboros.utils import append_jsonl
-
-            if not append_jsonl(canonical_root / "logs/events.jsonl", {
-                "ts": utc_now_iso(), "type": "context_memory_maintenance",
-                "task_id": maintenance_ctx.task_id, **maintenance,
-            }):
-                log.warning("Context memory maintenance receipt could not be written; source journals remain authoritative")
-            ctx._context_memory_maintenance = maintenance
-            if maintenance["status"] != "fitting":
-                ctx.emit_progress_fn("Shared memory remains larger than the measured working window; original sources were preserved.")
     if ctx is not None:
         ctx.context_fit_plan = plan
     messages = plan.messages_for(plan.initial_mode)
@@ -1488,6 +1446,7 @@ def build_llm_messages(
         "nano_estimated_tokens": plan.nano_projection.estimated_tokens if plan.nano_projection else None,
         "nano_calibrated_tokens": plan.nano_projection.calibrated_tokens if plan.nano_projection else None,
     }}
-    if maintenance is not None:
-        cap_info["context_memory_maintenance"] = maintenance
+    view_facts = _record_memory_view(env, memory, task, ctx, plan)
+    if view_facts:
+        cap_info["memory_view"] = view_facts
     return messages, cap_info

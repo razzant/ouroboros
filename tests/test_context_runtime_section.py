@@ -345,13 +345,13 @@ def test_improvement_backlog_digest_is_actor_scoped(tmp_path):
         messages, _ = build_llm_messages(
             env=FakeEnv(), memory=Memory(drive_root=tmp_path), task=task,
         )
-        assert "## Improvement Backlog" not in messages[0]["content"][2]["text"]
+        assert "## Improvement Backlog" not in messages[0]["content"][-1]["text"]
 
     for task_type in ("evolution", "deep_self_review"):
         messages, _ = build_llm_messages(
             env=FakeEnv(), memory=Memory(drive_root=tmp_path),
             task={"id": task_type, "type": task_type, "text": "improve"})
-        dynamic_text = messages[0]["content"][2]["text"]
+        dynamic_text = messages[0]["content"][-1]["text"]
         assert "## Improvement Backlog" in dynamic_text
         assert "Reduce recurring task friction around REVIEW_BLOCKED" in dynamic_text
 
@@ -620,9 +620,11 @@ def test_captured_recent_and_drive_sections_carry_one_capture_label(tmp_path, mo
         encoding="utf-8")
     messages, _info = build_llm_messages(env=env, memory=memory, task={
         "id": "t-labels", "type": "task", "text": "hi", "_is_direct_chat": True, "chat_id": 1, "metadata": {}})
-    dynamic = messages[0]["content"][2]["text"]
+    dynamic = messages[0]["content"][-1]["text"]
     label = "_Snapshot captured at 2027-01-15T12:00:00+00:00 when this context was built; not refreshed during this run._"
-    assert "## Drive state\n" + label in dynamic and "## Recent chat coverage\n" + label in dynamic
+    assert "## Drive state\n" + label in dynamic
+    # The chat row is the memory view's (the open conversation): no capture-labelled chat tail.
+    assert "## Recent chat" not in dynamic and "] hello" in dynamic.split("## This room (Main)", 1)[1]
     assert '"context_captured_at": "2027-01-15T12:00:00+00:00"' in dynamic
     headings = [line for line in dynamic.splitlines() if line.startswith(("## Recent ", "## Drive state"))]
     assert headings and all(dynamic.split(heading + "\n", 1)[1].startswith(label) for heading in headings)

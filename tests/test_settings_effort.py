@@ -5,9 +5,7 @@ from ouroboros.config import (
     SETTINGS_DEFAULTS,
     apply_settings_to_env,
     resolve_effort,
-    get_review_models,
     get_review_enforcement,
-    get_scope_review_models,
     get_task_review_mode,
     get_context_mode,
     get_image_input_mode,
@@ -48,37 +46,58 @@ def test_effort_defaults_in_config():
     """All effort keys have correct defaults in SETTINGS_DEFAULTS."""
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_TASK") == "medium"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_EVOLUTION") == "high"
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_REVIEW") == "high"
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_SCOPE_REVIEW") == "high"
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_DEEP_SELF_REVIEW") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == ""  # empty = the Task / Chat effort
+    # The review surface efforts are retired settings (review pool: effort is a field of
+    # the reviewer row); the resolver keeps its own "high" default for callers.
+    for retired in ("OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_EFFORT_DEEP_SELF_REVIEW"):
+        assert retired not in SETTINGS_DEFAULTS
 
 
 def test_review_effort_default_carriers_stay_in_sync():
     """The owner-facing fallback must not drift from config/API defaults.
 
-    Since 6.3 moved the Review/Scope efforts off the Behavior tab into the
-    Review lanes section (Agents tab) as per-slot dropdowns, the owner-facing carrier is
-    reviewer_slots.js: an EMPTY slot effort inherits the surface default
-    (OUROBOROS_EFFORT_REVIEW / OUROBOROS_EFFORT_SCOPE_REVIEW), and the optional
-    advisory row defaults low (D14)."""
+    A reviewer is a catalog row marked Reviewer, and the catalog editor is the
+    owner-facing carrier: a marked row with no effort of its own (and no compound
+    session effort) states that it reviews at the pool default, the former
+    OUROBOROS_EFFORT_REVIEW default."""
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    slots_ui = (root / "web" / "modules" / "reviewer_slots.js").read_text(encoding="utf-8")
-    assert "review effort" in slots_ui and "scope review effort" in slots_ui
-    assert "effort: 'low'" in slots_ui  # the advisory default (D14)
-    assert SETTINGS_DEFAULTS["OUROBOROS_EFFORT_REVIEW"] == "high"
-    assert SETTINGS_DEFAULTS["OUROBOROS_EFFORT_SCOPE_REVIEW"] == "high"
+    editor = (root / "web" / "modules" / "subagents_settings.js").read_text(encoding="utf-8")
+    assert "export const REVIEW_POOL_DEFAULT_EFFORT = 'high';" in editor
+    assert "Default (reviews at ${REVIEW_POOL_DEFAULT_EFFORT})" in editor
+    # The surface effort keys are retired (review pool: effort lives on the reviewer
+    # row); the read seam migrates them, so they are no shipped default any more.
+    assert "OUROBOROS_EFFORT_REVIEW" not in SETTINGS_DEFAULTS
+    assert "OUROBOROS_EFFORT_SCOPE_REVIEW" not in SETTINGS_DEFAULTS
+    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
+    from ouroboros.reviewer_slot_config import ConfiguredReviewerSlot, row_effort
+
+    bare = ConfiguredReviewerSlot(slot_id="r", kind="api", target_id="openai/gpt-5.6-terra")
+    assert row_effort(bare) == REVIEW_POOL_DEFAULT_EFFORT == "high"
 
 
-def test_deep_self_review_effort_slot(monkeypatch):
-    monkeypatch.delenv("OUROBOROS_EFFORT_DEEP_SELF_REVIEW", raising=False)
-    assert resolve_effort("deep_self_review") == "high"
-    monkeypatch.setenv("OUROBOROS_EFFORT_DEEP_SELF_REVIEW", "medium")
-    assert resolve_effort("deep_self_review") == "medium"
-    monkeypatch.setenv("OUROBOROS_EFFORT_DEEP_SELF_REVIEW", "extreme")
-    assert resolve_effort("deep_self_review") == "high"
+_RETIRED_EFFORT_KEYS = ("OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_EFFORT_DEEP_SELF_REVIEW")
+
+
+def test_an_exported_retired_review_effort_key_is_inert_for_the_deep_review(monkeypatch):
+    """The deep review's Main row carries no effort of its own, so it reviews at the
+    pool default; the lane-era surface keys are retired, and one exported in the
+    process environment (a benchmark container, an operator shell) changes nothing —
+    ``resolve_effort`` no longer has a branch that reads them."""
+    import inspect
+
+    from ouroboros import settings_scales
+    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
+    from ouroboros.deep_self_review import main_review_row
+    from ouroboros.reviewer_slot_config import row_effort
+
+    for key in _RETIRED_EFFORT_KEYS:
+        monkeypatch.setenv(key, "low")
+    assert row_effort(main_review_row()) == REVIEW_POOL_DEFAULT_EFFORT
+    source = inspect.getsource(settings_scales.resolve_effort)
+    assert not any(key in source for key in _RETIRED_EFFORT_KEYS)
+    assert "deep_self_review" not in source and "scope_review" not in source
 
 
 def test_review_models_default_in_config():
@@ -140,153 +159,44 @@ def test_auto_grant_reviewed_skills_default_in_config():
 
 
 # ---------------------------------------------------------------------------
-# get_review_models() — single source of truth
+# Factory review pools
 # ---------------------------------------------------------------------------
 
-def test_get_review_models_default(monkeypatch):
-    """get_review_models() returns the config default when env is unset."""
-    monkeypatch.delenv("OUROBOROS_REVIEW_MODELS", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
-    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
-    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
-    models = get_review_models()
-    assert isinstance(models, list)
-    assert len(models) >= 2
-    assert all("/" in m for m in models)  # valid OpenRouter model IDs
+
+def _factory_pool_models(doc: dict) -> list:
+    """The review POOL a settings document gets at the factory (PR-3): the
+    exclusive-provider panel is minted into the catalog once, never multiplied
+    at read time by the pool reader."""
+    from ouroboros.subscription_install_presets import factory_review_rows
+
+    return [row["route"]["target_id"] for row in factory_review_rows(doc)]
 
 
-def test_get_review_models_custom(monkeypatch):
-    """get_review_models() returns custom models when env is set."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "a/b,c/d")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
-    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
-    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
-    models = get_review_models()
-    assert models == ["a/b", "c/d"]
-
-
-def test_get_review_models_empty_env_falls_back_to_default(monkeypatch):
-    """get_review_models() falls back to default when env is empty string."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
-    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
-    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
-    models = get_review_models()
-    # Must return the default, not an empty list
-    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
-
-    assert len(models) >= 2
-    assert models == list(OPENROUTER_REVIEW_DEFAULTS["triad"])
-
-
-def test_get_review_models_repeats_main_in_openai_only_mode(monkeypatch):
-    """The OpenAI-only profile runs its Main reviewer three independent times."""
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
-    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
-    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.6-terra")
-    monkeypatch.setenv(
-        "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.6-terra,google/gemini-3.6-flash,anthropic/claude-opus-4.6",
-    )
-
-    models = get_review_models()
-
-    assert models == [
+def test_factory_pool_repeats_main_in_openai_only_mode():
+    """The OpenAI-only profile mints three independent Main catalog rows."""
+    assert _factory_pool_models({"OPENAI_API_KEY": "configured", "OUROBOROS_MODEL": "openai::gpt-5.6-terra"}) == [
         "openai::gpt-5.6-terra",
         "openai::gpt-5.6-terra",
         "openai::gpt-5.6-terra",
     ]
 
 
-def test_get_review_models_does_not_apply_openai_only_fallback_with_compatible_base_url(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://compat.example/v1")
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
-    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
-    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
-    monkeypatch.delenv("GIGACHAT_USER", raising=False)
-    monkeypatch.delenv("GIGACHAT_PASSWORD", raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
-    monkeypatch.setenv(
-        "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6",
-    )
-
-    models = get_review_models()
-
-    assert models == ["openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-opus-4.6"]
-
-
-def test_get_review_models_preserves_explicit_official_openai_list(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
-    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
-    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "openai/gpt-5.5,openai/gpt-4.1")
-
-    models = get_review_models()
-
-    assert models == ["openai::gpt-5.5", "openai::gpt-4.1"]
-
-
-def test_get_review_models_repeats_main_in_anthropic_only_mode(monkeypatch):
+def test_factory_pool_repeats_main_in_anthropic_only_mode():
     """The Anthropic-only profile repeats even an explicit provider Main."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
-    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
-    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
-    monkeypatch.setenv("OUROBOROS_MODEL", "anthropic::claude-opus-4-6")
-    monkeypatch.setenv(
-        "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6",
-    )
-
-    models = get_review_models()
-
-    assert models == [
+    assert _factory_pool_models({"ANTHROPIC_API_KEY": "sk-ant", "OUROBOROS_MODEL": "anthropic::claude-opus-4-6"}) == [
         "anthropic::claude-opus-4-6",
         "anthropic::claude-opus-4-6",
         "anthropic::claude-opus-4-6",
     ]
 
 
-def test_get_review_models_and_scope_route_to_gigachat_in_gigachat_only_mode(monkeypatch):
-    """v6.14.0: GigaChat joins the direct-provider review fallback. A GigaChat-only
-    env (no other provider) must route the commit triad AND the scope reviewer to
-    gigachat:: models, never to an empty list or an unconfigured foreign provider —
-    the single-isolated-provider invariant (docs/DEVELOPMENT.md "Provider
-    Independence"). GIGACHAT_DIRECT_DEFAULTS uses the universally available
-    GigaChat-2-Max for every slot,
-    so the quorum-safe fallback degrades to [main, main, main]."""
+def test_factory_pool_routes_to_gigachat_in_gigachat_only_mode(monkeypatch):
+    """v6.14.0: GigaChat joins the direct-provider review panel. A GigaChat-only
+    install (no other provider) gets a gigachat:: review pool, never an empty one
+    or an unconfigured foreign provider — the single-isolated-provider invariant
+    (docs/DEVELOPMENT.md "Provider Independence"). GIGACHAT_DIRECT_DEFAULTS uses the
+    universally available GigaChat-2-Max for every slot, so the quorum-safe panel is
+    [main, main, main] — three catalog rows (PR-3)."""
     monkeypatch.setenv("GIGACHAT_CREDENTIALS", "giga-creds")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -296,21 +206,12 @@ def test_get_review_models_and_scope_route_to_gigachat_in_gigachat_only_mode(mon
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
     monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
     monkeypatch.setenv("OUROBOROS_MODEL", "gigachat::GigaChat-2-Max")
-    monkeypatch.setenv(
-        "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
-    )
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "openai/gpt-5.5")
 
-    review_models = get_review_models()
-    scope_models = get_scope_review_models()
-
-    assert review_models == [
+    assert _factory_pool_models({"GIGACHAT_CREDENTIALS": "giga-creds", "OUROBOROS_MODEL": "gigachat::GigaChat-2-Max"}) == [
         "gigachat::GigaChat-2-Max",
         "gigachat::GigaChat-2-Max",
         "gigachat::GigaChat-2-Max",
     ]
-    assert scope_models and all(m.startswith("gigachat::") for m in scope_models)
 
 
 def test_from_zero_local_only_review_slots_inherit_main_and_stay_local(monkeypatch):
@@ -329,16 +230,21 @@ def test_from_zero_local_only_review_slots_inherit_main_and_stay_local(monkeypat
         "OUROBOROS_REVIEW_MODELS",
         "openai/gpt-5.6-luna,google/gemini-3.6-flash,anthropic/claude-sonnet-5",
     )
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "openai/gpt-5.6-terra")
 
-    assert get_review_models() == ["owner/local-main"] * 3
-    assert get_scope_review_models() == ["owner/local-main"]
+    # The factory pool is the shipped panel's three seats on the local Main (three
+    # independent runs, quorum 2 of 3); every review slot built from it runs on the
+    # local lane.
+    assert _factory_pool_models({"USE_LOCAL_MAIN": "true", "LOCAL_MODEL_SOURCE": "owner/local.gguf",
+                                 "OUROBOROS_MODEL": "owner/local-main"}) == ["owner/local-main"] * 3
     assert review_model_uses_local("owner/local-main") is True
 
-    from ouroboros.review_substrate import reviewer_slots
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from ouroboros.subscription_install_presets import factory_review_rows
 
-    slots = reviewer_slots()
-    assert [slot.model for slot in slots] == ["owner/local-main"] * 3
+    rows = factory_review_rows({"USE_LOCAL_MAIN": "true", "LOCAL_MODEL_SOURCE": "owner/local.gguf",
+                                "OUROBOROS_MODEL": "owner/local-main"})
+    slots = review_pool_slots({"OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": rows})})
+    assert [slot.model for slot in slots] == ["owner/local-main"] * 3  # three runs of Main, quorum 2 of 3
     assert all(slot.use_local for slot in slots)
 
 
@@ -360,17 +266,6 @@ def test_get_review_enforcement_invalid_falls_back(monkeypatch):
     """Unknown values fall back to advisory (the default)."""
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "strictest")
     assert get_review_enforcement() == "advisory"
-
-
-def test_get_scope_review_models_preserves_duplicate_slots(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "model/a, model/a, model/b")
-    assert get_scope_review_models() == ["model/a", "model/a", "model/b"]
-
-
-def test_get_scope_review_models_falls_back_to_singular(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "")
-    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODEL", "legacy/scope")
-    assert get_scope_review_models() == ["legacy/scope"]
 
 
 def test_get_task_review_mode_clamps_invalid(monkeypatch):
@@ -446,18 +341,20 @@ def test_get_auto_grant_enabled_prefers_settings_file(monkeypatch, tmp_path):
     assert cfg.get_auto_grant_enabled() is True
 
 
-def test_apply_settings_clears_review_models_restores_default(monkeypatch):
-    """ABI-10: the retired comma key is IGNORED by apply_settings_to_env; the
-    derived-projection floor restores the shipped default in env."""
-    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
-
+def test_apply_settings_ignores_the_retired_review_models_key(monkeypatch):
+    """ABI-10: the retired comma key is IGNORED by apply_settings_to_env — a ghost
+    value neither reaches the env plane nor is replaced by a projected floor
+    (PR-3 removed the lane projection); the catalog alone selects the pool."""
     monkeypatch.delenv("OUROBOROS_REVIEW_MODELS", raising=False)
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    settings = {"OUROBOROS_REVIEW_MODELS": "ghost/value"}
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from tests.review_pool_rosters import packet_pool
+
+    settings = {"OUROBOROS_REVIEW_MODELS": "ghost/value",
+                "OUROBOROS_SUBAGENTS": packet_pool(["vendor/selected"])}
     apply_settings_to_env(settings)
-    env_val = os.environ.get("OUROBOROS_REVIEW_MODELS", "")
-    assert env_val == ",".join(OPENROUTER_REVIEW_DEFAULTS["triad"])
-    assert len(get_review_models()) >= 2
+    assert "OUROBOROS_REVIEW_MODELS" not in os.environ
+    assert [slot.model for slot in review_pool_slots()] == ["vendor/selected"]
 
 
 def test_apply_settings_clears_review_enforcement_restores_default(monkeypatch):
@@ -469,15 +366,12 @@ def test_apply_settings_clears_review_enforcement_restores_default(monkeypatch):
     assert get_review_enforcement() == "advisory"
 
 
-def test_apply_settings_clears_task_and_scope_review_restores_default(monkeypatch):
-    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
-
+def test_apply_settings_clears_task_review_restores_default_and_ignores_retired_scope_key(monkeypatch):
     monkeypatch.delenv("OUROBOROS_SCOPE_REVIEW_MODELS", raising=False)
     monkeypatch.delenv("OUROBOROS_SCOPE_REVIEW_MODEL", raising=False)
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
     settings = {"OUROBOROS_SCOPE_REVIEW_MODELS": "ghost/value", "OUROBOROS_TASK_REVIEW_MODE": ""}
     apply_settings_to_env(settings)
-    assert os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS") == ",".join(OPENROUTER_REVIEW_DEFAULTS["scope"])
+    assert "OUROBOROS_SCOPE_REVIEW_MODELS" not in os.environ
     assert os.environ.get("OUROBOROS_TASK_REVIEW_MODE") == SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"]
 
 
@@ -490,6 +384,8 @@ def test_apply_settings_to_env_includes_effort_keys(monkeypatch, tmp_path):
     settings = {
         "OUROBOROS_EFFORT_TASK": "low",
         "OUROBOROS_EFFORT_EVOLUTION": "medium",
+        # Retired review-lane efforts in a stale settings dict are ghosts too (the read
+        # seam migrates them into the reviewer rows): apply must NOT export them.
         "OUROBOROS_EFFORT_REVIEW": "high",
         "OUROBOROS_EFFORT_SCOPE_REVIEW": "low",
         "OUROBOROS_EFFORT_CONSCIOUSNESS": "none",
@@ -505,16 +401,14 @@ def test_apply_settings_to_env_includes_effort_keys(monkeypatch, tmp_path):
     apply_settings_to_env(settings)
     assert os.environ.get("OUROBOROS_EFFORT_TASK") == "low"
     assert os.environ.get("OUROBOROS_EFFORT_EVOLUTION") == "medium"
-    assert os.environ.get("OUROBOROS_EFFORT_REVIEW") == "high"
-    assert os.environ.get("OUROBOROS_EFFORT_SCOPE_REVIEW") == "low"
+    assert os.environ.get("OUROBOROS_EFFORT_REVIEW") is None
+    assert os.environ.get("OUROBOROS_EFFORT_SCOPE_REVIEW") is None
     assert os.environ.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "none"
-    # ABI-10: the retired comma-list INPUT is ignored; the env carries the projection of the
-    # configured reviewer slots (defaults here), never the retired value.
-    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS as _rd
-
-    assert os.environ.get("OUROBOROS_REVIEW_MODELS") == ",".join(_rd["triad"])
+    # ABI-10: the retired comma-list INPUT is ignored — the env carries neither the
+    # retired value nor a projected floor (the lane projection left with the lanes).
+    assert os.environ.get("OUROBOROS_REVIEW_MODELS") is None
     assert os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT") == "advisory"
-    assert os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS") == ",".join(_rd["scope"])
+    assert os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS") is None
     assert os.environ.get("OUROBOROS_TASK_REVIEW_MODE") == "required"
     assert os.environ.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "true"
     assert os.environ.get("OUROBOROS_RETURN_REASONING") == ""

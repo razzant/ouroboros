@@ -8,12 +8,13 @@ registry, no observation inbox, no pause/resume: the supervisor loop calls ``tic
 per pass and the ``DirectActivityRegistry`` (the census of live direct turns) is the only
 liveness truth. Tick order, each step a typed outcome: disabled → a live wake → a live owner
 turn → not yet due → the rolling-24h allowance (an unreadable ledger is the disclosed skip
-``allowance_unknown``, never a silent block; a remainder at or below the graceful stop's planning
-margin counts as exhausted — less than one planned turn) → an owner chat must be bound → launch.
-What is left of that allowance is the launched tree's graceful ceiling
-(``metadata.root_cost_ceiling_usd``, В26=A): the in-task stop lands the wake a planning margin
-before it, while the ledger fence stays at the owner's per-task cap, so a wake never dies before
-its first call on a nearly spent day. The next
+``allowance_unknown``, never a silent block; known spend at the daily limit is
+``allowance_exhausted``) → an owner chat must be bound → launch.
+What is left of that allowance is the launched tree's producer ceiling
+(``metadata.root_cost_ceiling_usd``, В26=A): the in-task stop pauses the wake when its known
+spend reaches it — no extra planning margin is subtracted or skipped (owner 2026-10-07) — while the
+ledger fence stays at the owner's per-task cap, so a wake never dies before its first call on a
+nearly spent day. The next
 wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup`` persists
 ``consciousness_next_interval_sec``) or ``WAKE_DEFAULT_SEC``, clamped into the owner's
 [min, max]; a runner failure — or a wake the lane could not admit — doubles it up to max until a
@@ -55,7 +56,6 @@ from ouroboros.consciousness_allowance import STATUS_EXHAUSTED, STATUS_UNKNOWN, 
 from ouroboros.consciousness_authority import is_consciousness_origin
 from ouroboros.consciousness_wake import bind_wake_observation, observe_wake, render_wake_message, wake_task_metadata
 from ouroboros.deadline_utils import parse_deadline_ts
-from ouroboros.task_pacing import COST_PLANNING_MARGIN_USD
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -248,9 +248,9 @@ class BackgroundConsciousness:
             window = self._allowance_view(now, fresh=True)
             if window.get("status") == STATUS_UNKNOWN:
                 return self._skip("allowance_unknown", now + self.floor, now=now, error=str(window.get("error") or ""))
-            # Nothing left — or less than one planned turn (the graceful stop's planning
-            # margin): a wake started there would only be told to land at once.
-            if window.get("status") == STATUS_EXHAUSTED or float(window.get("remaining_usd") or 0.0) <= COST_PLANNING_MARGIN_USD:
+            # Known spend reached the daily allowance (#1487: unresolved bounds are
+            # disclosed exposure, not spending). No extra early margin skips a wake.
+            if window.get("status") == STATUS_EXHAUSTED or float(window.get("remaining_usd") or 0.0) <= 0.0:
                 resets = parse_deadline_ts(str(window.get("resets_at") or ""))
                 return self._skip("allowance_exhausted", max(resets.timestamp() if resets else 0.0, now + self.floor), now=now)
             if not self._owner_chat_id():
@@ -274,13 +274,13 @@ class BackgroundConsciousness:
             per_task_cap = 0.0
         # В26=A: a wake's whole tree may spend at most what is left of the rolling-24h
         # allowance, and never more than the owner's per-task cap (a cap of 0 disables
-        # that half). It travels as the tree's GRACEFUL ceiling (`root_cost_ceiling_usd`,
-        # honored for the root itself by `task_pacing.resolve_cost_ceiling` and inherited
-        # by the members): the in-task stop lands a planning margin early, while the
-        # ledger fence keeps the owner's per-task cap — one Main attempt reserves several
-        # dollars up front, and a fence narrowed below that refused every wake of a
-        # nearly spent day before its first call. The tick never launches with less
-        # than the planning margin left (that window is `allowance_exhausted`).
+        # that half). It travels as the tree's producer ceiling (`root_cost_ceiling_usd`,
+        # honored for the root itself by `task_pacing.resolve_cost_ceiling` and by the
+        # members): the in-task stop pauses the tree when its known spend reaches it, with
+        # no planning margin subtracted (owner 2026-10-07), while the ledger fence keeps the
+        # owner's per-task cap — one Main attempt reserves several dollars up front, and a
+        # fence narrowed below that refused every wake of a nearly spent day before its
+        # first call.
         ceiling = min(per_task_cap, remaining) if per_task_cap > 0 else remaining
         metadata = {**self._routing_facts(chat_id),
                     **wake_task_metadata(level, reason, root_cost_ceiling_usd=ceiling)}
@@ -294,7 +294,7 @@ class BackgroundConsciousness:
         def render(events: str) -> str:
             return render_wake_message(
                 self._repo_dir, reason=reason, last_wake_at=self._last_wake_at, now=now, level=level,
-                disabled_tools=list(metadata.get("disabled_tools") or []), spent_usd=window.get("accounted_usd"),
+                disabled_tools=list(metadata.get("disabled_tools") or []), spent_usd=window.get("settled_usd"),
                 spent_is_floor=int(window.get("unknown_unmetered") or 0) > 0,
                 daily_usd=window.get("limit_usd") or 0.0, running=self._running_roots(),
                 max_tasks=get_consciousness_max_tasks(), interval=self._interval(), events=events)
@@ -339,13 +339,30 @@ class BackgroundConsciousness:
         return "launched"
 
     def _wake_finished(self, task_id: str, ok: bool) -> None:
-        """Runs on the wake's thread once its turn ended (success or runner failure)."""
+        """Runner success controls backoff; stored work facts describe its outcome."""
+        outcome = "unknown"
+        if ok:
+            try:
+                from ouroboros.task_results import load_task_result
+                row = load_task_result(self._drive_root, task_id, strict=True)
+                pause = (row or {}).get("budget_pause") or {}
+                owner_pause = (row or {}).get("owner_pause") or {}
+                if owner_pause.get("state") == "requested" or pause.get("state") == "pausing":
+                    outcome = "pausing"
+                elif (owner_pause.get("state") == "paused" or pause.get("state") == "paused"
+                      or row and row.get("status") == "scheduled"
+                      and row.get("reason_code") in {"budget_paused", "budget_exhausted", "owner_paused"}):
+                    outcome = "paused"
+                elif row:
+                    outcome = "done"  # the ordinary successful-turn contract is unchanged
+            except Exception:
+                log.debug("Wake outcome is unreadable for %s", task_id, exc_info=True)
         with self._lock:
             now = time.time()
             self._last_wake_at, self._last_wake_task_id = now, str(task_id)
             self._set_last_wake_at(now)
             if ok:
-                self._backoff, self._last_wake_outcome, self._last_error = 1, "done", ""
+                self._backoff, self._last_wake_outcome, self._last_error = 1, outcome, ""
             else:
                 self._backoff, self._last_wake_outcome = min(self._backoff * 2, 1024), "failed"
                 self._last_error = f"wake-up {task_id} failed in its runner (see the chat and events.jsonl)"
@@ -396,7 +413,7 @@ class BackgroundConsciousness:
         window = self._allowance_view(time.time())
         values = (self._enabled, get_consciousness_autonomy(), _iso(self._next_wake_at), self._pending_reason or "",
                   _iso(self._last_wake_at), self._last_wake_task_id, self._last_wake_outcome, self._last_error,
-                  window.get("accounted_usd"), window.get("limit_usd"), str(window.get("resets_at") or ""),
+                  window.get("settled_usd"), window.get("limit_usd"), str(window.get("resets_at") or ""),
                   self._running_roots(), int(get_consciousness_max_tasks()), wake,
                   int(window.get("unknown_unmetered") or 0), bool(window.get("integrity_degraded")))
         return dict(zip(SNAPSHOT_KEYS, values))

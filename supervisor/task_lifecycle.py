@@ -535,6 +535,10 @@ def cancel_task_custody(task_id: str, *, deliver: bool = True) -> str:
        watchdog to retry, and the outcome is ``failed`` — the caller must not
        report a cancellation that did not happen.
 
+    A workspace task's cancelled result carries ``artifact_attribution:
+    "shared_unproven"``: the shared tree is captured outside the normal
+    patch-capture seam, so its diff does not prove which actor authored it.
+
     ``deliver=False`` suppresses the per-task salvage chat delivery (cascade
     sweeps deliver ONE root message with a children digest instead).
     """
@@ -552,8 +556,12 @@ def cancel_task_custody(task_id: str, *, deliver: bool = True) -> str:
     # settles the old attempt and the reaper's final terminal check suppresses
     # the clone.
     try:
+        from supervisor.task_ownership import TaskOwnershipRead, prepare_retry_chain
+
+        reads = TaskOwnershipRead(q.DRIVE_ROOT)
+        prepare_retry_chain(q, task_id, reads.load)
         with q._queue_lock:
-            retry_target, settled_retry_status = _live_retry_target_locked(q, task_id)
+            retry_target, settled_retry_status = _live_retry_target_locked(q, task_id, results=reads)
     except Exception:
         log.error(
             "Cancellation retry-lineage authority is indeterminate for %s",

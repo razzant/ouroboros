@@ -292,3 +292,105 @@ def test_choices_survive_reload_and_reload_itself_never_notifies(subscription_ui
     assert len(notes) == 1
     assert notes[0]['options']['body'] == 'The report is ready.'
     capture(page, 'notifications-after-reload')
+
+
+# The desktop app's bridge as `launcher_background.DesktopApi` answers it, recording each call: the
+# real SPA decides from these answers exactly as inside the packaged window. `window.__nextNative`
+# scripts the next `show_native_notification` answers; nothing here reaches an operating system.
+DESKTOP_BRIDGE = """
+window.__native = [];
+window.__asks = 0;
+window.__nextNative = [];
+window.pywebview = { api: {
+    shell_info: async () => ({ shell_version: '7.7.0', persistent_storage: true,
+        native_notifications: { available: true, status: 'not_determined', platform: 'macos', reason: '' } }),
+    request_native_notifications: async () => {
+        window.__asks += 1;
+        return { available: true, status: 'authorized', platform: 'macos', reason: '' };
+    },
+    show_native_notification: async (...args) => {
+        window.__native.push(args);
+        return window.__nextNative.shift() || { ok: true, status: 'submitted', platform: 'macos', sound: 'os' };
+    },
+    request_attention: async () => ({ ok: true, status: 'native_sound', sound_played: true }),
+    notify_owner: async () => ({ ok: true, status: 'native_sound', sound_played: true }),
+} };
+"""
+TOASTS = "() => [...document.querySelectorAll('#toast-stack .toast')].map((node) => node.textContent)"
+
+
+def test_the_desktop_app_keeps_permission_and_the_last_hand_off_apart(subscription_ui):
+    """Through the shipped Settings: switching on is the gesture that asks; an unconfirmed hand-off shows
+    no second alert and says so; a failed one falls back and says so without withdrawing the permission."""
+    ui = subscription_ui
+    page = ui['page']
+    page.add_init_script(DESKTOP_BRIDGE)
+    boot(page, ui)
+    enable(page)
+    status = page.locator('[data-settings-panel="appearance"] [data-notify-status]')
+    page.wait_for_function("() => window.__asks === 1")
+    page.wait_for_function("() => /System notifications are on/.test("
+                           "document.querySelector('[data-settings-panel=\"appearance\"] [data-notify-status]').textContent)")
+    assert 'shows each alert' not in status.inner_text()
+    capture(page, 'notifications-desktop-on')
+
+    page.evaluate("window.__nextNative.push({ ok: null, status: 'unknown', platform: 'macos', reason: 'no_completion' })")
+    deliver(page, {'type': 'log', 'chat_id': MAIN,
+                   'data': {'type': 'task_done', 'task_id': 't-unknown', 'status': 'completed'}})
+    page.wait_for_function("() => window.__native.length === 1")
+    page.wait_for_timeout(120)
+    assert page.evaluate(TOASTS) == [], 'it may still appear: no copy in the app'
+    assert recorded(page) == [], 'and no browser banner'
+    assert 'did not confirm the last alert' in status.inner_text()
+    capture(page, 'notifications-desktop-unconfirmed')
+
+    page.evaluate("window.__nextNative.push({ ok: false, status: 'failed', platform: 'macos', reason: 'no_center' })")
+    deliver(page, {'type': 'log', 'chat_id': MAIN,
+                   'data': {'type': 'task_done', 'task_id': 't-failed', 'status': 'completed'}})
+    page.wait_for_function("() => window.__native.length === 2")
+    page.wait_for_function("() => window.__notifications.length === 1")
+    assert titles(page) == ['Task finished'], 'never reached the system: the browser banner this client allows'
+    assert page.evaluate(TOASTS) == []
+    assert 'could not be handed to the system (no_center)' in status.inner_text()
+    assert 'so it fell back to a browser banner or the app' in status.inner_text(), 'never claimed as the app'
+    assert page.evaluate("window.__asks") == 1, 'a live alert never asks for permission'
+    capture(page, 'notifications-desktop-fell-back')
+
+
+# The bridge of a desktop app before system notifications, as 7.6.0's `launcher.py` exposed it: no
+# `shell_info` or `show_native_notification`, and `notify_owner` IS `request_attention`, which, with the
+# window hidden in background mode, shows a Windows balloon with Windows' sound whatever `sound` says.
+OLD_DESKTOP_BRIDGE = """
+window.__attention = [];
+const attention = async (...args) => {
+    window.__attention.push(args);
+    return { ok: true, status: 'background', banner: true, sound_played: false };
+};
+window.pywebview = { api: { request_attention: attention, notify_owner: attention } };
+"""
+
+
+def test_sound_off_never_calls_an_older_desktop_app(subscription_ui):
+    """That app's hidden-window balloon would sound: Sound off keeps to a silent browser banner, Sound on
+    still reaches the app, and Settings never calls the banner fallback the app."""
+    ui = subscription_ui
+    page = ui['page']
+    page.add_init_script(OLD_DESKTOP_BRIDGE)
+    boot(page, ui)
+    enable(page)
+    pref(page, 'sound').uncheck()
+    page.wait_for_function("() => JSON.parse(localStorage.getItem('ouroboros.notifications') || '{}').sound === false")
+    deliver(page, {'type': 'log', 'chat_id': MAIN,
+                   'data': {'type': 'task_done', 'task_id': 't-old-silent', 'status': 'completed'}})
+    page.wait_for_function("() => window.__notifications.length === 1")
+    assert page.evaluate("window.__attention") == [], 'never asked: its balloon would play a sound'
+    assert recorded(page)[0]['options']['silent'] is True
+    status = page.locator('[data-settings-panel="appearance"] [data-notify-status]')
+    assert 'predates them, so alerts fall back to a browser banner or the app' in status.inner_text()
+
+    pref(page, 'sound').check()
+    deliver(page, {'type': 'log', 'chat_id': MAIN,
+                   'data': {'type': 'task_done', 'task_id': 't-old-loud', 'status': 'completed'}})
+    page.wait_for_function("() => window.__attention.length === 1")
+    assert page.evaluate("window.__attention[0][0]") is True, 'Sound on keeps the earlier path'
+    capture(page, 'notifications-old-app-sound-off')

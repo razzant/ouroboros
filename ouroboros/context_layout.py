@@ -3,8 +3,9 @@
 Main Max keeps the full Architecture capability/WHY map for every task class;
 its Development handbook remains tied to the active self-body binding. Low and
 Nano carry both books' authored chapter introductions and physical pointers.
-Children use that compact orientation while retaining their shared biography;
-parent-selected details arrive through ordinary source reads and working views.
+Children use that compact orientation; their memory view (``memory_view.ROLE_DEFAULTS``)
+decides what of my story and room they carry, and parent-selected details arrive
+through ordinary source reads and working views.
 
 Source bytes belong to ReferenceBook; this module only renders the selected
 view. Stable full prefixes contain no cwd, task identity or revision counters.
@@ -19,14 +20,16 @@ from typing import Any, List
 from ouroboros.reference_books import ReferenceBook, compose_book, load_reference_book, overview_book
 
 # Protected core: always rendered in full, in every context mode. Encoded as
-# data so a drift-guard test can assert no future change demotes it.
+# data so a drift-guard test can assert no future change demotes it. The marks I
+# keep in view never become addresses (``memory_floor`` has no step for them);
+# conversations are the memory view's, whose physical floor alone degrades them.
 TIER0_ALWAYS_FULL = frozenset({
     "system",
     "bible",
     "identity",
     "scratchpad",
     "knowledge_index",
-    "recent_dialogue",
+    "memory_marks",
 })
 
 
@@ -163,15 +166,15 @@ def reference_doc_sections(
     architecture_text: str | None = None,
     development_text: str | None = None,
     books: tuple[ReferenceBook, ...] = (),
-) -> List[str]:
-    """Render one captured book pair; missing bodies remain named and readable.
+) -> tuple[List[str], str]:
+    """Return common reference sections and the optional separate Max handbook.
 
-    Max's handbook inclusion follows the caller's active-repository decision.
+    Max's common sections do not depend on the caller's handbook inclusion.
     Compact modes orient the mind to both books and retain exact physical
     pointers; they never turn a composed-book line into a file address.
     """
     parts: List[str] = []
-    on_demand: List[str] = []
+    development = ""
     by_id = {book.book_id: book for book in books}
 
     arch_section = architecture_context_section(
@@ -201,19 +204,18 @@ def reference_doc_sections(
             parts.append(book_navigation(development_book) if development_book is not None
                          else generate_doc_nav_map(dev_text, title="DEVELOPMENT.md", rel_path="docs/DEVELOPMENT.md"))
         elif include_development:
-            parts.append("## DEVELOPMENT.md\n\n" + dev_text)
-        else:
-            on_demand.append("docs/DEVELOPMENT.md")
+            development = "## DEVELOPMENT.md\n\n" + dev_text
 
     # README (user-facing) and CHECKLISTS (reviewers load their own copy) are not
     # inlined in the agent context in any mode.
-    on_demand.extend(["README.md", "docs/CHECKLISTS.md"])
-
-    if on_demand:
-        listing = ", ".join(f"`{p}`" for p in on_demand)
-        parts.append(
-            "## Reference docs available on demand\n\n"
-            f"Not inlined in the working context: {listing}. "
-            "Read them in full (untruncated) with `read_file(root=\"system_repo\", path=...)` when relevant."
-        )
-    return parts
+    books_note = (
+        "Reference books: `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`. "
+        "If a book is not inlined, read it on demand. "
+        if context_mode not in {"low", "nano"} else ""
+    )
+    parts.append(
+        "## Reference docs available on demand\n\n" + books_note
+        + "Not inlined in the working context: `README.md`, `docs/CHECKLISTS.md`. "
+        "Read them in full (untruncated) with `read_file(root=\"system_repo\", path=...)` when relevant."
+    )
+    return parts, development

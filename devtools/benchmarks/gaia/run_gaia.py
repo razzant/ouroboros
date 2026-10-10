@@ -40,11 +40,10 @@ _GAIA_PINNED_MODEL_KEYS = {
     "OUROBOROS_MODEL_VISION",
     "OUROBOROS_MODEL_CONSCIOUSNESS",
     "OUROBOROS_MODEL_FALLBACKS",
-    "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
-    "OUROBOROS_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODEL",
 }
+# The task-review panel rides the roster (OUROBOROS_SUBAGENTS): three packet seats
+# on the solve model by default, or the explicit ``--review-models`` panel.
+_GAIA_DEFAULT_REVIEW_SEATS = 3
 _PROVIDER_ENV_KEYS = {
     "OPENROUTER_API_KEY",
     "OPENAI_API_KEY",
@@ -146,6 +145,15 @@ def _sanitized_host_env(*models: str, websearch_backend: str = "") -> dict[str, 
     return keep
 
 
+def _gaia_subagents_setting(solve_model: str, review_models: str = "") -> str:
+    """The run roster: the one solve-model actor plus the task-review pool —
+    three packet seats on the solve model, or one per ``--review-models`` entry."""
+    panel = [m.strip() for m in str(review_models or "").split(",") if m.strip()]
+    return single_model_subagents_setting(
+        solve_model, review_slots=_GAIA_DEFAULT_REVIEW_SEATS, review_models=panel,
+    )
+
+
 def _render_run_settings(
     base_settings_path: pathlib.Path, solve_model: str, run_dir: pathlib.Path, *,
     vision_model: str = "", review_models: str = "", review_mode: str = "required",
@@ -158,17 +166,13 @@ def _render_run_settings(
     settings.pop("OUROBOROS_MODEL_HEAVY", None)
     settings.pop("USE_LOCAL_HEAVY", None)
     for key in ACTIVE_MODEL_SLOT_KEYS:
-        if key.startswith("OUROBOROS_EFFORT_"):
+        if key.startswith("OUROBOROS_EFFORT_") or key not in _GAIA_PINNED_MODEL_KEYS:
             continue
-        if key not in _GAIA_PINNED_MODEL_KEYS:
-            continue
-        if key == "OUROBOROS_REVIEW_MODELS":
-            settings[key] = review_models or ",".join([solve_model] * 3)
-        elif key:
-            settings[key] = solve_model
+        settings[key] = solve_model
     # One exact API actor preserves fixed-model methodology even when the product's
-    # install defaults would otherwise add a Light scout or a session-backed row.
-    settings["OUROBOROS_SUBAGENTS"] = single_model_subagents_setting(solve_model)
+    # install defaults would otherwise add a Light scout or a session-backed row;
+    # the task-review pool rides the same roster as packet seats.
+    settings["OUROBOROS_SUBAGENTS"] = _gaia_subagents_setting(solve_model, review_models)
     # A fixed MAIN reasoner may route vision to a SEPARATE model (e.g. sonnet main +
     # gpt-4o vision, the HAL methodology) without breaking the fixed-model claim.
     if vision_model:
@@ -230,12 +234,14 @@ def _settings_env(settings_path: pathlib.Path, solve_model: str, run_dir: pathli
     for key in ACTIVE_MODEL_SLOT_KEYS:
         if key.startswith("OUROBOROS_EFFORT_") or key not in _GAIA_PINNED_MODEL_KEYS:
             continue
-        if key in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_MODEL_VISION") and settings.get(key):
+        if key == "OUROBOROS_MODEL_VISION" and settings.get(key):
             env[key] = str(settings[key])
-        elif key == "OUROBOROS_REVIEW_MODELS":
-            env[key] = ",".join([solve_model] * 3)
-        elif key:
+        else:
             env[key] = solve_model
+    # The roster (actor + review pool) already written into the settings file wins
+    # (it honors the per-config --review-models panel); else the default panel.
+    if not str(settings.get("OUROBOROS_SUBAGENTS") or "").strip():
+        env["OUROBOROS_SUBAGENTS"] = _gaia_subagents_setting(solve_model)
     env["OUROBOROS_SETTINGS_PATH"] = str(settings_path)
     env["OUROBOROS_DATA_DIR"] = str(run_dir / "ouroboros_data")
     # Free main port (caller passes one) so the dedicated server doesn't collide with the

@@ -111,6 +111,7 @@ def test_presence_contract_refusal_and_valid_completion_remain_distinct():
     result = _call(ctx, _finish_presence, "message", "hello")
     assert result.status == "unavailable"
     assert not hasattr(ctx, "_presence_completion")
+    assert not hasattr(ctx, "_presence_selection_seq")
     ctx.task_contract = {"capability_ceiling": {}}
     assert json.loads(_finish_presence(ctx, "message", "hello")) == {
         "status": "completion_requested", "completion_control": True, "action": "finish",
@@ -118,7 +119,9 @@ def test_presence_contract_refusal_and_valid_completion_remain_distinct():
     assert ctx._completion_request["source"] == "presence_finish"
     assert ctx._completion_request["answer"] == "hello"
     assert ctx._presence_completion_accepted is False
-    assert ctx._presence_completion == {"outcome": "message", "message": "hello"}
+    assert ctx._presence_completion == {
+        "outcome": "message", "message": "hello", "selection": "1",
+    }
 
 
 def test_real_producer_failure_survives_registry_dispatch(tmp_path, monkeypatch):

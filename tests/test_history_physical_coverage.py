@@ -64,7 +64,10 @@ def test_replacing_a_later_archive_invalidates_every_page_read_before(tmp_path):
         'the untouched first archive keeps its own prefix witness'
 
 
-def test_sparse_global_archives_empty_pages_and_retained_origin(tmp_path):
+def test_sparse_project_opens_with_its_answer_and_retained_origin_in_one_read(tmp_path):
+    """The Nova shape (owner decision 2026-10-05, 1A): other rooms wrote five archives since
+    the Project's last answer. Its first read still holds that answer beside the retained
+    origin, covers the whole chain, and leaves no empty page to walk."""
     from ouroboros.projects_registry import create_project, bind_task_to_project
     from ouroboros.project_dialogue import build_owner_message_ref
 
@@ -79,14 +82,11 @@ def test_sparse_global_archives_empty_pages_and_retained_origin(tmp_path):
         write(tmp_path / f'archive/chat_20260903T00000{index}.jsonl', [row(i, text='foreign' + 'x' * 2000) for i in range(350)])
     write(tmp_path / 'logs/chat.jsonl', [row(9)])
     loaded = list(pages(tmp_path, chat_id=str(project['chat_id'])))
-    assert loaded[0]['messages'][0]['origin_projected']
-    assert loaded[0]['coverage']['spans']['chat']['from'] > 0
-    assert any(not page['messages'] and page['has_more'] for page in loaded[1:])
-    found = [item for page in loaded[1:] for item in page['messages'] if item['text'] == 'Later answer']
-    assert len(found) == 1 and found[0]['ts'] > loaded[0]['messages'][0]['ts']
-    spans = sorted((page['coverage']['spans']['chat'] for page in loaded), key=lambda span: span['from'])
-    assert spans[0]['from'] == 0
-    assert all(a['to'] >= b['from'] for a, b in zip(spans, spans[1:]))
+    assert len(loaded) == 1
+    first, later = loaded[0]['messages']
+    assert first['origin_projected'] and first['text'] == origin
+    assert later['text'] == 'Later answer' and later['ts'] > first['ts']
+    assert loaded[0]['coverage']['spans']['chat']['from'] == 0
 
 
 def test_legacy_origin_identity_survives_source_label_and_cmid_absence(tmp_path):

@@ -457,6 +457,7 @@ def record_depth_limit_refusal(
     )
     reason_code = "subtask_depth_limit"
     detail = f"Subtask depth limit ({max_depth}) exceeded by attempted depth {new_depth}."
+    role = str(fields.get("role") or "").strip()
     try:
         from ouroboros.task_results import STATUS_FAILED, write_task_result
 
@@ -467,9 +468,9 @@ def record_depth_limit_refusal(
             parent_task_id=parent_id or None,
             root_task_id=root_id,
             session_id=session_id,
-            actor_id=f"subagent:{fields.get('role') or 'researcher'}",
+            actor_id=f"subagent:{role}",
             delegation_role="subagent",
-            role=str(fields.get("role") or "researcher"),
+            role=role,
             description=str(fields.get("objective") or ""),
             objective=str(fields.get("objective") or ""),
             expected_output=str(fields.get("expected_output") or ""),

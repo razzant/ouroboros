@@ -102,6 +102,9 @@ def test_supervisor_usage_summaries_use_shared_cost_normalizer(tmp_path, monkeyp
         encoding="utf-8",
     )
 
+    from ouroboros import usage_store
+
+    usage_store.migrate_from_journal(tmp_path)  # the lifecycle job the server runs before any display
     assert state.budget_breakdown({}) == {"task": 1.25, "review": 0.5}
     assert state.model_breakdown({})["m2"]["cost"] == 0.5
     assert [item["task_id"] for item in state.per_task_cost_summary(max_tasks=2)] == ["a", "b"]

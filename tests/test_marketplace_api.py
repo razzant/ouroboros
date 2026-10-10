@@ -894,3 +894,71 @@ def test_ouroboroshub_update_review_blockers_restore_live_payload(monkeypatch, t
     assert calls == {"unload": 1, "reconcile": 1}
     assert (target_dir / "old.txt").read_text(encoding="utf-8") == "old-live-version"
     assert not (target_dir / "new.txt").exists()
+
+
+def test_uninstall_handler_waits_for_the_queue_lock_off_the_event_loop(monkeypatch, tmp_path):
+    """While the post-uninstall schedule resync waits for a held supervisor
+    queue lock, another request (GET /api/widgets) completes on the same loop;
+    the resync still runs, after the uninstall step, on a worker thread."""
+    import threading
+
+    import supervisor.queue as supervisor_queue
+    from ouroboros.gateway.widgets import api_widgets
+
+    _stub_marketplace_roots(monkeypatch, tmp_path)
+    _run_lifecycle_inline(monkeypatch)
+    order: list[str] = []
+    resync_threads: list[int] = []
+    entered = threading.Event()
+    held = threading.Event()
+    release = threading.Event()
+    holding = {"value": False}
+
+    def uninstall_skill(_drive_root, *, sanitized_name):
+        order.append("uninstall")
+        return SimpleNamespace(ok=True, sanitized_name=sanitized_name, error="")
+
+    def resync_skill_schedules(_drive_root=None):
+        resync_threads.append(threading.get_ident())
+        entered.set()
+        with supervisor_queue._queue_lock:  # the real mirror waits here too
+            order.append("resync")
+
+    monkeypatch.setattr(marketplace_api, "uninstall_skill", uninstall_skill)
+    monkeypatch.setattr(supervisor_queue, "resync_skill_schedules", resync_skill_schedules)
+
+    def hold_lock():
+        with supervisor_queue._queue_lock:
+            holding["value"] = True
+            held.set()
+            release.wait(timeout=10)
+            holding["value"] = False
+
+    async def scenario():
+        loop_thread = threading.get_ident()
+        uninstall = asyncio.create_task(
+            marketplace_api.api_marketplace_uninstall(_BodyRequest(path_params={"name": "demo"}))
+        )
+        await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
+        assert entered.is_set(), "the handler never reached the schedule resync"
+        other = await asyncio.wait_for(api_widgets(None), 5)
+        still_held = holding["value"]
+        release.set()
+        response = await uninstall
+        return loop_thread, other, still_held, response
+
+    holder = threading.Thread(target=hold_lock, daemon=True)
+    holder.start()
+    assert held.wait(timeout=5)
+    try:
+        loop_thread, other, still_held, response = asyncio.run(scenario())
+    finally:
+        release.set()
+        holder.join(timeout=5)
+
+    assert other.status_code == 200
+    assert still_held, "the other request finished only after the lock was released: the loop was blocked"
+    assert response.status_code == 200
+    assert _json_response_payload(response)["ok"] is True
+    assert order == ["uninstall", "resync"]
+    assert resync_threads and resync_threads[0] != loop_thread

@@ -438,6 +438,19 @@ def test_previous_turn_shows_what_a_transport_tool_delivered(tmp_path):
         ["Schedule: Mon 10:00"], "Final: 10:00", "partly confirmed")
     assert 'delivery partly confirmed): "Schedule: Mon 10:00" / "Final: 10:00".' in build_presence_context_section(
         tmp_path, captured[-1]["metadata"]["presence"])
+    # A lost projection is rebuilt from the same receipt/speech rule without rerunning either author.
+    from ouroboros.presence_runner import _previous_turn_path
+
+    pointer = _previous_turn_path(tmp_path, _event().conversation_key)
+    for event_id, state, message in (("e1", "confirmed", ""), ("e5", "partly confirmed", "Final: 10:00")):
+        pointer.unlink()
+        invoked = []
+        replay = _pointer_turn(tmp_path, event_id, {"outcome": "message", "text": "Must not run"},
+                               version=1, captured=invoked)
+        restored = json.loads(pointer.read_text())
+        assert invoked == [] and restored["task_id"] == replay.task_id
+        assert (restored["transport_sends"], restored["delivery"], restored["message"]) == (
+            ["Schedule: Mon 10:00"], state, message)
 
 
 def test_deferred_handoff_keeps_internal_finish_note_out_of_prior_speech(tmp_path):

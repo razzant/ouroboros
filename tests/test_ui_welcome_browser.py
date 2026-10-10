@@ -252,7 +252,7 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
             # A held read over a feed of chrome only: its loading state, never an old greeting.
             loading = """() => window.__historyHeld.length > 0
                 && document.querySelector('#chat-messages .chat-load-older')?.getAttribute('aria-busy') === 'true'
-                && document.querySelector('#page-chat .chat-page-header .chat-history-status')
+                && document.querySelector('#chat-messages .chat-load-older-btn')
                 ?.textContent.includes('Loading saved history') === true"""
             notices = "document.querySelectorAll('.chat-bubble[data-system-type=\"reconnect\"]').length"
 

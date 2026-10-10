@@ -30,7 +30,7 @@ from ouroboros.utils import append_jsonl
 from supervisor.events_worker_reports import _handle_log_event
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui, capture
 from tests.test_usage_lock_continuity import held_lock
-from tests.test_usage_writer_view import root as root, request
+from tests._usage_store_testing import request, root as root
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 

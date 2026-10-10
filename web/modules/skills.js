@@ -6,7 +6,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { patchInstalledSkillEnrichment, renderInstalledSkillCard, renderSkillHubBadges } from './skill_card_renderer.js';
+import { patchInstalledSkillEnrichment, renderInstalledSkillCard, renderReviewFindingsList, renderSkillHubBadges } from './skill_card_renderer.js';
 import { hubFactsPending } from './hub_sync.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
@@ -358,6 +358,19 @@ async function renderSkillsList(container, emptyEl, reviewingSkills = new Set(),
 }
 
 
+/** Repaint the cards from the list already in memory: an action's spinner needs no network read. */
+function repaintSkillsList(container, reviewingSkills, repairingSkills, interactions = {}) {
+    const snapshot = skillsSnapshot;
+    if (!container.isConnected || !snapshot?.rawSkills) return;
+    const options = { githubTokenConfigured: snapshot.githubTokenConfigured, hubCatalogByName: hubCatalog.byName, hubCatalogAvailable: hubCatalog.available };
+    const byName = new Map(mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue)).map((skill) => [skill.name, skill]));
+    for (const card of container.querySelectorAll(':scope > .skills-card')) {
+        const skill = byName.get(card.dataset.skill);
+        if (skill) patchInstalledSkillEnrichment(card, skill, reviewingSkills, repairingSkills, snapshot.live, options, interactions.menuFor?.(card) || card);
+    }
+}
+
+
 async function postWithFeedback(url, body) {
     const resp = await apiFetch(url, {
         method: 'POST',
@@ -396,7 +409,7 @@ function buildHealPrompt(skill) {
 }
 
 
-function attachActionHandlers(container, renderFn, reviewingSkills, repairingSkills, ctx = {}) {
+function attachActionHandlers(container, renderFn, reviewingSkills, repairingSkills, ctx = {}, repaintFn = renderFn) {
     let activeMenu = null;
     function closeSkillMenus(options = {}) {
         activeMenu?.binding.close(options);
@@ -507,11 +520,8 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             return;
         }
 
-        const { skills } = await fetchSkills();
-        const skill = (skills || []).find((item) => item.name === name);
-        if (!skill) throw new Error('Skill not found in current catalogue.');
-
         if (action === 'review' || action === 'rereview') {
+            // No pre-read: the review endpoint re-checks that the skill exists.
             const ok = await openConfirmDialog({
                 title: action === 'rereview' ? `Re-review ${name}` : `Review ${name}`,
                 body: `Run security review for ${name}? It can take a few minutes and runs in the background.`,
@@ -521,6 +531,11 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             await reviewSkillInBackground(name);
             return;
         }
+
+        // Grant, approve and repair consume the row's keys, hash or findings.
+        const { skills } = await fetchSkills();
+        const skill = (skills || []).find((item) => item.name === name);
+        if (!skill) throw new Error('Skill not found in current catalogue.');
 
         if (action === 'grant') {
             const grants = skill.grants || {};
@@ -560,7 +575,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             });
             if (!ok) return false;
             repairingSkills.add(name);
-            renderFn();
+            repaintFn();
             try {
                 const prompt = buildHealPrompt(skill);
                 await postWithFeedback('/api/command', {
@@ -576,8 +591,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                     document.querySelector('[data-nav-page="chat"]')?.click();
                 }
             } finally {
-                repairingSkills.delete(name);
-                renderFn();
+                repairingSkills.delete(name); // the click handler's render follows
             }
             return;
         }
@@ -606,7 +620,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
     async function reviewSkillInBackground(name) {
         if (reviewingSkills.has(name)) return null;
         reviewingSkills.add(name);
-        renderFn();
+        repaintFn();
         try {
             showToast(`${name}: security review started; this can take a few minutes`, 'muted');
             const result = await postWithFeedback(
@@ -622,8 +636,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             emitSkillLifecycle('review', name, result);
             return result;
         } finally {
-            reviewingSkills.delete(name);
-            renderFn();
+            reviewingSkills.delete(name); // every caller's click handler renders afterwards
         }
     }
 
@@ -633,7 +646,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
         // thrown error caught by the click handler). Reuses the reviewingSkills lock + spinner.
         if (reviewingSkills.has(name)) return null;
         reviewingSkills.add(name);
-        renderFn();
+        repaintFn();
         try {
             showToast(`${name}: skipping LLM review (owner attestation)…`, 'warn');
             const result = await postWithFeedback(
@@ -644,8 +657,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             emitSkillLifecycle('attest_review', name, result);
             return result;
         } finally {
-            reviewingSkills.delete(name);
-            renderFn();
+            reviewingSkills.delete(name); // the click handler's render follows
         }
     }
 
@@ -922,14 +934,23 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             if (refreshNeeded) renderFn();
         }
     };
-    const handlers = [['change', onChange], ['keydown', onKeydown], ['submit', onSubmit], ['click', onClick]];
-    handlers.forEach(([type, handler]) => container.addEventListener(type, handler));
+    // A findings block is rendered collapsed with its summary only; its list
+    // is built on the first open from the row already in memory. `toggle`
+    // does not bubble, so the container listens in the capture phase.
+    const onToggle = (event) => {
+        const details = event.target;
+        if (!details?.dataset?.skillFindings || !details.open || details.childElementCount > 1) return;
+        const skill = skillsSnapshot?.rawSkills?.find((row) => row?.name === details.dataset.skillFindings);
+        details.insertAdjacentHTML('beforeend', renderReviewFindingsList(skill));
+    };
+    const handlers = [['change', onChange], ['keydown', onKeydown], ['submit', onSubmit], ['click', onClick], ['toggle', onToggle, true]];
+    handlers.forEach(([type, handler, capture]) => container.addEventListener(type, handler, capture));
     return { closeMenus: closeSkillMenus,
         menuFor: card => card.contains(activeMenu?.trigger) ? activeMenu.popover : null,
         beforeReplace(card) { if (!card || card.contains(activeMenu?.trigger)) closeSkillMenus(); },
         destroy() {
         closeSkillMenus();
-        handlers.forEach(([type, handler]) => container.removeEventListener(type, handler));
+        handlers.forEach(([type, handler, capture]) => container.removeEventListener(type, handler, capture));
     } };
 }
 
@@ -1008,6 +1029,9 @@ export function initSkills(ctx) {
         if (destroyed) return;
         return renderSkillsList(container, emptyEl, reviewingSkills, repairingSkills, actions);
     };
+    const repaintFn = () => {
+        if (!destroyed) repaintSkillsList(container, reviewingSkills, repairingSkills, actions);
+    };
     const refreshActive = async () => {
         if (destroyed) return;
         const generation = ++refreshGeneration;
@@ -1033,7 +1057,7 @@ export function initSkills(ctx) {
     };
 
     refreshBtn.addEventListener('click', refreshActive);
-    actions = attachActionHandlers(container, renderFn, reviewingSkills, repairingSkills, ctx);
+    actions = attachActionHandlers(container, renderFn, reviewingSkills, repairingSkills, ctx, repaintFn);
 
     const tabs = bindTabStrip(document.querySelector('#page-skills .skills-tabs'), {
         dataAttr: 'data-tab', activeClass: 'is-active',
@@ -1049,9 +1073,10 @@ export function initSkills(ctx) {
         actions.closeMenus();
         if (event.detail?.page === 'skills') {
             // Fresh catalog snapshot once per page open; re-renders reuse it and
-            // refresh it themselves only when hub facts came back unknown.
+            // refresh it themselves only when hub facts came back unknown. The
+            // OuroborosHub pane reads the catalog itself, so it is not read twice.
             tabs.select(activeTab);
-            loadHubCatalog(true);
+            if (activeTab !== 'ouroboroshub') loadHubCatalog(true);
             refreshActive();
         }
     };

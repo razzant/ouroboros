@@ -403,6 +403,8 @@ def test_catalog_preserves_exact_profile_provenance_and_engine_auto(gateway_fact
     assert calls[3].url.query == b"requestedModel=exact%2Fmodel%2B1"
     assert gateway.list_source_models("codex+raw", "team user+1", requested_model="exact-model") == catalog
     assert calls[4].url.query == b"credentialProfileId=team+user%2B1&requestedModel=exact-model"
+    assert gateway.list_source_models("codex+raw", requested_model="future/model", include_admission=True) == catalog
+    assert calls[5].url.query == b"requestedModel=future%2Fmodel&includeAdmission=true"
 
 
 @pytest.mark.parametrize("reason", ["", "user_cancelled"])

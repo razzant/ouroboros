@@ -3,7 +3,7 @@
 ``advanced`` is allowed to evolve the application layer, but must not casually
 rewrite the core contracts, safety files, or release/managed-repo invariants.
 ``pro`` may touch those paths, but commits still flow through the normal
-triad + scope review gate.
+review gate.
 """
 
 from __future__ import annotations
@@ -337,7 +337,7 @@ def protected_write_block_message(
     return (
         f"⚠️ CORE_PROTECTION_BLOCKED: runtime_mode={runtime_mode!r} refuses "
         f"to {action} protected {category or 'core'} path: {norm}. "
-        f"Switch to {target_modes} and let the normal triad + scope review "
+        f"Switch to {target_modes} and let the normal review panel "
         "cover the protected core/contract/release change before commit."
     )
 
@@ -355,5 +355,5 @@ def core_patch_notice(paths: Iterable[ProtectedPath | str]) -> str:
         "⚠️ CORE_PATCH_NOTICE: runtime_mode='pro' or 'cyber_pro' is editing protected "
         "Ouroboros core/contract/release surface(s): "
         f"{format_protected_paths(paths)}. These changes can be committed only "
-        "through the normal triad + scope review pipeline."
+        "through the normal review gate."
     )

@@ -854,10 +854,21 @@ def test_budget_refusal_pauses_and_settlement_frees_headroom(tmp_path):
 
     root = tmp_path / "budget-resume"
     events_path = root / "dispatch_events.jsonl"
+    entered: list[str] = []
+    entered_lock = threading.Lock()
 
     def callback(task, task_dir):
-        if task.task_id == "arvo:1":
-            # Hold the reservation until the second claim has been refused
+        # Both tasks are submitted at once and each claims on its own pool
+        # thread, so which claims first is a thread-scheduling race.  Two
+        # reservations never fit the cap, so the first task to get here is
+        # the only claimant until it settles: it holds.  Pinning the hold to
+        # arvo:1 let arvo:2 claim, run and settle before arvo:1's thread even
+        # claimed, and then no claim was ever refused.
+        with entered_lock:
+            entered.append(task.task_id)
+            first = len(entered) == 1
+        if first:
+            # Hold the reservation until the other claim has been refused
             # and the gate paused; the dispatcher writes the pause event
             # synchronously before waiting on the in-flight lane.
             deadline = time.monotonic() + 30

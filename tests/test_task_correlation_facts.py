@@ -41,7 +41,8 @@ def test_real_llm_round_and_usage_join_across_worker_and_supervisor_logs(tmp_pat
         def chat(self, **kwargs):
             return ({"content": "done", "tool_calls": [], "finish_reason": "stop"},
                     {"provider": "openai-compatible", "resolved_model": "local-model", "cost": 0.0,
-                     "prompt_tokens": 12, "completion_tokens": 3})
+                     "prompt_tokens": 12, "completion_tokens": 3, "ledger_attempt_ids": ["a1", "a2"],
+                     "claudexor": {"operation_id": "op-1"}})
     message, cost = call_llm_with_retry(LLM(), [{"role": "user", "content": "do work"}],
                                        "openai-compatible::local-model", None, "medium", 1,
                                        logs, "call-task", 7, events, {})
@@ -55,11 +56,98 @@ def test_real_llm_round_and_usage_join_across_worker_and_supervisor_logs(tmp_pat
     global_rows = [json.loads(line) for line in (canonical / "logs" / "events.jsonl").read_text().splitlines()]
     round_row = next(row for row in local if row["type"] == "llm_round")
     saved = next(row for row in global_rows if row["type"] == "llm_usage")
-    for key in ("llm_call_id", "execution_id", "round_id", "round"):
+    for key in ("llm_call_id", "execution_id", "round_id", "round", "ledger_attempt_ids", "claudexor"):
         assert saved[key] == round_row[key]
     assert saved["round"] == 7
     assert saved["cost"] == 0 and saved["cost_known"] is True
+    # #807: the round names its physical attempts; the last one carried this response.
+    assert round_row["ledger_attempt_ids"] == ["a1", "a2"] and round_row["physical_attempt_id"] == "a2"
+    assert round_row["claudexor"]["operation_id"] == "op-1"
     assert not any(row["type"] == "llm_round" for row in global_rows)
+
+
+class _Clock:
+    """The loop's own clock: ``sleep`` advances it, so a backoff is part of the round."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def time(self):
+        return 1_700_000_000.0 + self.now
+
+    def sleep(self, seconds):
+        self.now += float(seconds)
+
+
+class _TimedLLM:
+    """Each call costs ``latency`` seconds; the scripted answers say how each call ends."""
+
+    def __init__(self, clock, script, latency=2.0):
+        self.clock, self.script, self.latency = clock, list(script), latency
+
+    def chat(self, **kwargs):
+        self.clock.now += self.latency
+        step = self.script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def _round_rows(logs):
+    rows = [json.loads(line) for line in (logs / "events.jsonl").read_text().splitlines()]
+    return [row for row in rows if row["type"] == "llm_round"]
+
+
+def test_llm_round_duration_spans_the_logical_round_and_settles_it(tmp_path, monkeypatch):
+    from ouroboros import loop_llm_call as llm_call
+
+    clock, usage, events = _Clock(), {}, queue.Queue()
+    monkeypatch.setattr(llm_call, "time", clock)
+    answer = ({"content": "done", "tool_calls": []}, {"response_finish_reason": "stop"})
+    empty = ({"content": "", "tool_calls": []}, {"response_finish_reason": None})
+
+    def call(llm, round_idx, retries=1):
+        return llm_call.call_llm_with_retry(llm, [{"role": "user", "content": "hi"}], "fake/model", None, "medium",
+                                            retries, tmp_path, "duration-task", round_idx, events, usage)
+
+    # An empty reply, its backoff and the retry are one logical round.
+    assert call(_TimedLLM(clock, [empty, answer]), 1, retries=2)[0]["content"] == "done"
+    first = _round_rows(tmp_path)[-1]
+    assert first["duration_ms"] == round((clock.now - 1000.0) * 1000) and first["duration_ms"] > 4000
+    finished = [event["data"] for event in events.queue
+                if event.get("type") == "log_event" and event["data"].get("type") == "llm_round_finished"]
+    assert finished[-1]["duration_ms"] == first["duration_ms"]
+    # A later call on the settled round id (a wrap-up) measures only itself.
+    call(_TimedLLM(clock, [answer], latency=1.0), 1)
+    assert _round_rows(tmp_path)[-1]["duration_ms"] == 1000
+    # A failed call and the fallback that settles the same round: one row covering both.
+    start = clock.now
+    assert call(_TimedLLM(clock, [RuntimeError("provider down")]), 2)[0] is None
+    call(_TimedLLM(clock, [answer], latency=3.0), 2)
+    assert _round_rows(tmp_path)[-1]["duration_ms"] == round((clock.now - start) * 1000) == 5000
+    # A new round after a failed one starts fresh.
+    assert call(_TimedLLM(clock, [RuntimeError("provider down")]), 3)[0] is None
+    call(_TimedLLM(clock, [answer], latency=1.5), 4)
+    assert _round_rows(tmp_path)[-1]["duration_ms"] == 1500 and len(_round_rows(tmp_path)) == 4  # wrap-up has its own row
+
+
+def test_llm_api_error_names_its_operation_and_attempts_only_when_the_failure_carries_them(tmp_path, monkeypatch):
+    from ouroboros import loop_llm_call as llm_call
+
+    monkeypatch.setattr(llm_call, "time", _Clock())
+    tagged = RuntimeError("operation failed")
+    tagged.operation_id, tagged.ledger_attempt_ids = "op-9", ["x1"]
+    for error in (tagged, RuntimeError("plain failure")):
+        assert llm_call.call_llm_with_retry(_TimedLLM(_Clock(), [error]), [{"role": "user", "content": "hi"}],
+                                            "fake/model", None, "medium", 1, tmp_path, "error-task", 1,
+                                            None, {})[0] is None
+    rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    tagged_row, plain_row = [row for row in rows if row["type"] == "llm_api_error"]
+    assert tagged_row["operation_id"] == "op-9" and tagged_row["ledger_attempt_ids"] == ["x1"]
+    assert "operation_id" not in plain_row and plain_row["ledger_attempt_ids"] == []
 
 
 def test_intrinsic_checkpoint_discloses_the_same_binding_ceiling_as_text(monkeypatch):
@@ -70,7 +158,7 @@ def test_intrinsic_checkpoint_discloses_the_same_binding_ceiling_as_text(monkeyp
     now = datetime.now(timezone.utc)
     note = pacing.build_intrinsic_pacing_note(SimpleNamespace(_cost_ceiling=ceiling),
         created=now - timedelta(seconds=60), now=now, round_idx=4, accumulated_usage={"cost": 10},
-        tree_cost_provider=lambda: {"accounted_usd": 20, "root_limit_usd": 100})
+        tree_cost_provider=lambda: {"settled_usd": 20, "accounted_usd": 20, "root_limit_usd": 100})
     assert note.checkpoint["cost_ceiling"] == pacing.cost_ceiling_disclosure(ceiling)
     assert note.checkpoint["tree_cap_usd"] == 100
     assert "$80.00 in-task cost ceiling" in note.text

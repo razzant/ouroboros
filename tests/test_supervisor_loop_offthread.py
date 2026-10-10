@@ -503,9 +503,8 @@ def test_a_reconcile_thread_that_cannot_start_releases_its_latch_and_waits_a_cad
 
 
 def test_startup_custody_still_runs_inline_and_starts_no_maintenance_thread(tmp_path, monkeypatch):
-    """Startup custody is once-per-generation and synchronous by contract: the loop's
-    readiness follows it. The off-loop move touched only the tick; the startup sweep
-    still runs every step on the caller's thread and starts nothing."""
+    """Startup reconciles addressed custody inline; historical refresh and bulk
+    state housekeeping belong to the later maintenance pass."""
     from ouroboros import process_custody as pc
     from ouroboros import server_maintenance as sm
 
@@ -526,7 +525,7 @@ def test_startup_custody_still_runs_inline_and_starts_no_maintenance_thread(tmp_
     threads = _track_threads(monkeypatch)
 
     sm._startup_custody_sweep()
-    assert [name for name, _ in order] == ["reap", "reconcile", "backfill", "cursor", "replay", "delegate_state"]
+    assert [name for name, _ in order] == ["reap", "reconcile", "backfill", "replay"]
     assert {thread for _, thread in order[:2]} == {threading.current_thread().name}
     assert threads == [], "startup custody never hands its work to a maintenance thread"
 
@@ -538,6 +537,8 @@ def test_drive_custody_rides_the_reconcile_pass_bounded_and_never_startup(tmp_pa
     the startup sweep copies and hashes no child store (readiness waits on nothing)."""
     from ouroboros import headless, server_maintenance as sm
     from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.startup_migrations import prepare_startup_state
+    prepare_startup_state(tmp_path)
 
     monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
     monkeypatch.setattr(sm, "_DRIVE_PRUNE_CURSOR", {"headless": "", "direct": ""})

@@ -207,4 +207,4 @@ def test_startup_prune_sweeps_run_the_tombstone_sweep():
 
     import ouroboros.server_maintenance as sm
 
-    assert "sweep_uninstalled_skill_state" in inspect.getsource(sm._startup_prune_sweeps)
+    assert "sweep_uninstalled_skill_state" in inspect.getsource(sm._run_deferred_startup_prunes)

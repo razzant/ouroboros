@@ -1,8 +1,9 @@
 """Full room evidence retains conversations beyond consolidation and rotation."""
 from __future__ import annotations
 
-from ouroboros.memory import Memory
-from ouroboros.project_dialogue import build_owner_message_ref, project_recent_dialogue
+from ouroboros.chronicle_store import ChronicleStore
+from ouroboros.memory_inventory import open_room_rows
+from ouroboros.project_dialogue import build_owner_message_ref
 from ouroboros.projects_registry import bind_task_to_project, create_project
 from ouroboros.utils import append_jsonl, atomic_write_json
 
@@ -19,9 +20,9 @@ def test_full_room_includes_rotated_consolidated_dialogue_and_child_lineage(tmp_
     live = tmp_path / "logs" / "chat.jsonl"
     append_jsonl(live, {"ts": "2026-09-03T01:00:00Z", "chat_id": 1, "direction": "out", "text": "Child explanation", "task_id": "child", "root_task_id": "parent"})
     atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", {"consolidated_chat_lines": 100000})
-    # Full reader ignores the consolidation cursor's bounded recent window.
-    memory = Memory(tmp_path)
-    recent, _, _ = project_recent_dialogue(memory, project["chat_id"], 10**9)
+    # The full reader ignores what the memory view counts as retold before the update (its open rows).
+    ChronicleStore(tmp_path).ensure_activated()
+    recent = open_room_rows(tmp_path, project["chat_id"])
     source = read_room_source(tmp_path, project["chat_id"])
     assert "Original choice" in source["text"] and "I need a plan" in source["text"]
     assert "Option A saves time; option B keeps flexibility" in source["text"]
@@ -136,3 +137,42 @@ def test_incoming_attachment_names_follow_the_existing_history_annotation(tmp_pa
     assert 'BINARY_PAYLOAD_NOT_DIALOGUE' not in source['text']
     direct = _row_projection({'direction': 'in', 'attachment_manifest': manifest}, 'mailbox', 1, tmp_path)
     assert direct['attachments'][0]['label'] == 'board-forecast.pdf'
+
+
+def test_room_source_signs_old_outgoing_rows_by_the_activation_lineage_epoch(tmp_path):
+    """Before the chronicle is active every lineage-free outgoing row reads as mine, as it always
+    did. Once the activation records the lineage epoch, a row before it is mine only by its task
+    result; rows after it, and the reader's other rows, keep their signature."""
+    import json
+
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.dialogue_evidence import read_room_source
+    from ouroboros.task_result_schema import SCHEMA_VERSION_KEY, TASK_RESULT_SCHEMA_VERSION
+    from ouroboros.task_results import task_result_path
+
+    out = {"chat_id": 1, "direction": "out"}
+    for row in (
+        {"chat_id": 1, "direction": "in", "ts": "2026-08-01T00:00:01Z", "text": "Review the patch."},
+        {**out, "ts": "2026-08-01T00:00:02Z", "task_id": "kid00001", "text": "## Summary Nobody recorded who wrote this."},
+        {**out, "ts": "2026-08-01T00:00:03Z", "task_id": "kid00002", "text": "## Summary A child's report."},
+        {**out, "ts": "2026-08-01T00:00:04Z", "task_id": "root0001", "text": "My own answer."},
+        {**out, "ts": "2026-08-21T00:00:05Z", "task_id": "kid00003", "subagent_task_id": "kid00003",
+         "parent_task_id": "root0002", "text": "The first row that carries lineage."},
+        {**out, "ts": "2026-08-21T00:00:06Z", "task_id": "root0002", "text": "My answer after the epoch."},
+    ):
+        append_jsonl(tmp_path / "logs" / "chat.jsonl", row)
+    for task_id, fields in (("root0001", {}), ("kid00002", {"parent_task_id": "root0001", "root_task_id": "root0001",
+                                                             "delegation_role": "subagent"})):
+        task_result_path(tmp_path, task_id).write_text(json.dumps({
+            SCHEMA_VERSION_KEY: TASK_RESULT_SCHEMA_VERSION, "task_id": task_id, "status": "completed", **fields}),
+            encoding="utf-8")
+
+    def authors():
+        return [row["author"] for row in read_room_source(tmp_path, 1)["rows"]]
+
+    human, child = authors()[0], "child kid00003 of root0002"
+    assert authors() == [human, "Ouroboros", "Ouroboros", "Ouroboros", child, "Ouroboros"]
+    assert not (tmp_path / "memory" / "chronicle").exists()  # the reader never creates the chronicle
+    assert ChronicleStore(tmp_path).ensure_activated()["metadata"]["lineage_epoch"]["pos"] == 4
+    assert authors() == [human, "outgoing, author not recorded", "child kid00002 of root0001", "Ouroboros", child,
+                         "Ouroboros"]

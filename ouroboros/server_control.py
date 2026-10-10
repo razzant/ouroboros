@@ -8,6 +8,8 @@ import pathlib
 import sys
 from typing import Any
 
+from ouroboros.platform_layer import IS_WINDOWS
+
 
 def external_owner_binding(state: dict) -> tuple[bool, Any, tuple[int, int]]:
     """Ordinary commands use this current state observation, never Panic's cached pair."""
@@ -97,55 +99,6 @@ class PanicIngress:
         return True
 
 
-def _spawn_restart_successor(
-    argv: list[str], env: dict[str, str], repo_dir: pathlib.Path, *,
-    new_process_group: bool = True,
-) -> None:
-    from ouroboros.config import DATA_DIR
-    from ouroboros.process_custody import spawn_supervised
-    from ouroboros.delegate_recovery import (
-        PLANNED_RESTART_TRANSACTION_ENV, WINDOWS_RESTART_PARENT_HANDLE_ENV,
-        bind_windows_restart_successor, open_windows_restart_parent,
-    )
-
-    root = pathlib.Path(DATA_DIR)
-    env.pop(WINDOWS_RESTART_PARENT_HANDLE_ENV, None)
-    transaction_id = env.get(PLANNED_RESTART_TRANSACTION_ENV, "")
-    observing = os.name == "nt" and not new_process_group and bool(transaction_id)
-    kernel, parent_handle = open_windows_restart_parent(root, transaction_id) if observing else (None, 0)
-    try:
-        popen_kwargs = {}
-        if observing:
-            import subprocess
-
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.lpAttributeList = {"handle_list": [parent_handle]}
-            popen_kwargs = {"startupinfo": startupinfo, "close_fds": True}
-            env[WINDOWS_RESTART_PARENT_HANDLE_ENV] = str(parent_handle)
-        proc = spawn_supervised(
-            argv,
-            drive_root=root,
-            # The replacement is the next server generation. Session scope would
-            # make its startup reap treat it as a foreign-session process.
-            purpose="server_restart_fallback",
-            scope="daemon",
-            cwd=str(repo_dir),
-            env=env,
-            new_process_group=new_process_group,
-            **popen_kwargs,
-        )
-        if observing:
-            try:
-                bind_windows_restart_successor(root, transaction_id, proc.pid)
-            except Exception:
-                proc.terminate()
-                proc.wait(timeout=5)
-                raise
-    finally:
-        if parent_handle:
-            kernel.CloseHandle(parent_handle)
-
-
 def restart_current_process(
     host: str,
     port: int,
@@ -154,7 +107,7 @@ def restart_current_process(
     log: Any,
     owner_initiated: bool = False,
 ) -> None:
-    """Transfer direct server mode to a replacement process.
+    """Hand this server over to its successor: exec on POSIX, supervised spawn on Windows.
 
     ``owner_initiated`` marks the restart the OWNER asked for (the chat Restart
     button, and the control endpoints that restart on the owner's behalf). Only
@@ -197,38 +150,52 @@ def restart_current_process(
     except Exception:
         raw_argv = sys.argv
     argv = [sys.executable, *raw_argv]
-    from ouroboros import platform_layer
-
-    if platform_layer.IS_WINDOWS:
-        # Match CPython's multiprocessing Windows venv launch: the venv exe is
-        # a redirector, whose Popen PID is not the interpreting successor PID.
-        # Launch the base interpreter while preserving the venv selection.
-        base_executable = getattr(sys, "_base_executable", sys.executable)
-        if base_executable != sys.executable:
-            argv[0] = base_executable
-            env["__PYVENV_LAUNCHER__"] = sys.executable
-        # Windows CRT exec is spawn-plus-exit; use the custodied spawn directly.
-        # Keep its console group so Ctrl+C still reaches the replacement.
-        log.info("Starting replacement direct server mode on %s:%d", desired_host, port)
+    if IS_WINDOWS:
+        # Windows has no process-image replacement. Its C runtime emulates exec by
+        # starting an UNQUOTED command line and exiting the caller, so a spaced or
+        # empty argument (a Python under "Program Files") reaches the successor
+        # broken. The supervised spawn below quotes argv and IS the transfer here.
+        log.info("Starting the replacement direct server on %s:%d", desired_host, port)
+    else:
+        log.info("Re-executing direct server mode on %s:%d", desired_host, port)
         try:
-            _spawn_restart_successor(argv, env, repo_dir, new_process_group=False)
+            os.execvpe(sys.executable, argv, env)
+            return  # exec does not return; only a test double of it reaches this line
         except Exception:
-            log.exception("Spawned restart fallback failed; no successor was started.")
-            raise
-        log.info("Spawned replacement server process for Windows direct restart.")
-        return
-
-    log.info("Re-executing direct server mode on %s:%d", desired_host, port)
+            log.exception("Direct re-exec failed; attempting spawned restart fallback.")
     try:
-        os.execvpe(sys.executable, argv, env)
+        from ouroboros import delegate_recovery
+        from ouroboros.config import DATA_DIR
+        from ouroboros.process_custody import spawn_supervised
+
+        # Hold publication across Popen and custody: an early child must read
+        # the completed receipt, never consume its token before it is bound.
+        with delegate_recovery.direct_restart_transaction(
+            DATA_DIR, env.get(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, ""),
+        ) as transaction:
+            proc = spawn_supervised(
+                argv,
+                drive_root=pathlib.Path(DATA_DIR),
+                # daemon, NOT session: the replacement IS the next server
+                # generation. Session scope would make startup reap itself.
+                purpose="server_restart_fallback",
+                scope="daemon",
+                # Windows keeps CTRL+C; POSIX isolates custody failure cleanup
+                # and the successor from the caller's terminal hangup.
+                new_process_group=not IS_WINDOWS,
+                cwd=str(repo_dir),
+                env=env,
+            )
+            if transaction and transaction.get("supervisor_pid") == os.getpid():
+                try:
+                    transaction["direct_spawn_successor"] = proc._ouroboros_custody
+                    delegate_recovery._write_restart_transaction(DATA_DIR, transaction)
+                except Exception:
+                    log.exception("Spawned successor could not bind restart returns; saved work remains held.")
+        log.info("Spawned the replacement server process.")
     except Exception:
-        log.exception("Direct re-exec failed; attempting spawned restart fallback.")
-        try:
-            _spawn_restart_successor(argv, env, repo_dir)
-            log.info("Spawned replacement server process after exec failure.")
-        except Exception:
-            log.exception("Spawned restart fallback failed; no successor was started.")
-            raise
+        log.exception("Spawned restart fallback failed; no successor was started.")
+        raise
 
 
 def execute_panic_stop(

@@ -119,11 +119,16 @@ def _configure_credential_helper(repo_slug: str, token: str) -> None:
 
 
 def push_to_remote(branch: Optional[str] = None, push_tags: bool = True) -> Tuple[bool, str]:
-    """Push current branch (and optionally tags) to origin.
+    """Push current branch (and optionally its release tags) to origin.
 
     Network pushes ride the shared bounded git runner: a hung remote surfaces
     as the ordinary ``(False, "git push failed: ...")`` result instead of
     pinning the worker forever on an unbounded subprocess wait.
+
+    Tags are the annotated tags REACHABLE from the pushed branch
+    (``--follow-tags``), never ``--tags``: linked worktrees share one tag
+    namespace, so a release tag on an unadopted body candidate or a contained
+    orphan must not be published with the serving line. Nothing is forced.
     """
     if not _go()._has_remote("origin"):
         return False, "No remote configured"
@@ -135,7 +140,7 @@ def push_to_remote(branch: Optional[str] = None, push_tags: bool = True) -> Tupl
 
     result = f"Pushed {target} to origin"
     if push_tags:
-        rc_t, _, err_t = _go()._git_network_bounded(["push", "origin", "--tags"])
+        rc_t, _, err_t = _go()._git_network_bounded(["push", "--follow-tags", "origin", target])
         if rc_t != 0:
             result += f" (tags push failed: {err_t})"
         else:

@@ -5,9 +5,11 @@ import os
 import pytest
 
 from tests.test_history_bookmark_browser import _GAP, _bookmark_reconnect, _retained_room, _stage_file
-from tests.test_chat_history_paging_browser import _open, _open_project, _step, _idle, _screenshot, _FRAMES, _write, _result
+from tests.test_chat_history_paging_browser import (
+    _assert_at_newest, _open, _open_project, _step, _idle, _screenshot, _FRAMES, _write, _result,
+)
 from tests.test_chat_history_recovery_browser import _click_project
-from tests.test_history_continuity_browser import _OFFSET, _bookmark_place
+from tests.test_history_continuity_browser import _bookmark_place
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
@@ -104,8 +106,11 @@ def test_unavailable_recent_then_latest_keeps_a_retained_room_at_the_present(dir
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_visible_receipt_line_keeps_its_page_through_latest_rebase(direct_server_with_data, browser_engine, tmp_path):
-    """A receipt line read mid-timeline, its card header and Reviews offscreen, survives the page's rebase."""
+def test_a_visible_receipt_line_keeps_its_node_when_the_newest_window_moves_past_it(
+        direct_server_with_data, browser_engine, tmp_path):
+    """A receipt line read mid-timeline, its card header and Reviews offscreen: a reconnect's newest window
+    no longer holds the card's rows, and the reader in older history is not re-anchored, so the line keeps
+    its node, its newest revision and its place (owner decision 2026-10-05)."""
     from ouroboros.merge_receipts import card_row_text
     from ouroboros.projects_registry import create_project
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
@@ -179,13 +184,14 @@ def test_visible_receipt_line_keeps_its_page_through_latest_rebase(direct_server
                         'ts': f'2026-09-01T11:{index // 60:02d}:{index % 60:02d}Z', 'content': f'Filler activity {index:03d}'}) + '\n')
             before = page.evaluate('() => window.__historyReads.length')
             _bookmark_reconnect(page)
-            # The recent read drops the owner's rows; a latest read then rebases the window.
-            page.wait_for_function('n => window.__historyReads.slice(n[0]).filter(r => r.chatId === n[1] && !r.cursor && r.done).length >= 2',
+            # The newest read drops the owner's rows; the reader in older history keeps the chain.
+            page.wait_for_function('n => window.__historyReads.slice(n[0]).some(r => r.chatId === n[1] && !r.cursor && r.done)',
                                    arg=[before, cid])
             _idle(page, feed)
             page.evaluate(_FRAMES)
             reads = page.evaluate('n => window.__historyReads.slice(n[0]).filter(r => r.chatId === n[1])', [before, cid])
             (tmp_path / f'receipt-rebase-reads-{browser_engine}.json').write_text(json.dumps(reads, indent=2))
+            assert [read['cursor'] for read in reads] == [None], 'one newest read: no re-anchor under a reader in history'
             assert not any(row.get('task_id') == task_id for row in reads[-1]['body']['messages']), 'the source is absent elsewhere'
             assert lines.count() == 6, 'no line read under the viewport may leave with its page'
             assert line.evaluate('n => n === window.__readingReceipt'), 'the visible line keeps its node'
@@ -203,8 +209,10 @@ def test_visible_receipt_line_keeps_its_page_through_latest_rebase(direct_server
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_send_while_a_saved_place_loads_owns_the_view_unless_it_fails(direct_server_with_data, browser_engine, tmp_path):
-    """A failed Send keeps the loading saved place, draft and file; an accepted one stays at the present."""
+def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_newest(direct_server_with_data, browser_engine, tmp_path):
+    """Read pages back, a room opened again while its newest page is still loading: a failed Send keeps
+    the draft and the file, and the room lands at its newest message; an accepted Send's echo is the
+    newest row and the late read cannot pull the reader away from it (owner decision 2026-10-05)."""
     from playwright.sync_api import sync_playwright
 
     project = _retained_room(direct_server_with_data['data_dir'], 'send-place', 1200)
@@ -217,25 +225,25 @@ def test_send_while_a_saved_place_loads_owns_the_view_unless_it_fails(direct_ser
             page.add_init_script(f'({_HOLD_ROOM})()')
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
-            for _ in range(3):
-                _step(page, feed, automatic=True)
             target = page.locator(f'{feed} [data-client-message-id="send-place-650"]')
 
-            def reopen_held():
-                offset = _bookmark_place(page, target, 80)
+            def reopen_held(read_back):
+                if read_back:
+                    for _ in range(3):
+                        _step(page, feed, automatic=True)
+                    _bookmark_place(page, target, 80)
                 page.locator('#project-panel-close').click()
                 page.evaluate('id => { window.__holdRoom = {chatId: id, released: new Promise(r => { window.__releaseRoom = r; })}; }', cid)
                 _click_project(page, project)
                 page.wait_for_function(held, arg=cid)
-                return offset
 
             def release():
-                assert page.evaluate(held, cid), 'the saved place was still loading when Send was pressed'
+                assert page.evaluate(held, cid), 'the room was still loading when Send was pressed'
                 page.evaluate('() => { window.__holdRoom = null; window.__releaseRoom(); }')
                 _idle(page, feed)
                 page.evaluate(_FRAMES)
 
-            offset = reopen_held()
+            reopen_held(read_back=True)
             page.route('**/api/chat/upload', lambda route: route.fulfill(
                 status=500, content_type='application/json', body='{"ok": false, "error": "controlled upload failure"}'))
             _stage_file(page)
@@ -243,24 +251,24 @@ def test_send_while_a_saved_place_loads_owns_the_view_unless_it_fails(direct_ser
             page.locator(composer).press('Enter')
             page.locator('.toast').filter(has_text='controlled upload failure').wait_for()
             release()
-            assert abs(target.evaluate(_OFFSET) - offset) <= 8, 'a failed Send leaves the saved place to restore'
+            _assert_at_newest(page, feed, 'send-place message 1199')
             assert page.locator(composer).input_value() == 'KEPT_DRAFT'
             assert page.locator('#project-panel .attach-name').filter(has_text='kept.txt').count() == 1
-            _screenshot(page, tmp_path, f'send-failed-keeps-place-{browser_engine}')
+            _screenshot(page, tmp_path, f'send-failed-keeps-draft-{browser_engine}')
 
             page.unroute('**/api/chat/upload')
             page.locator('#project-panel .attach-remove').click()
             page.locator(composer).fill('')
-            reopen_held()
+            reopen_held(read_back=False)
             page.evaluate(_KEEP_CHAT_FRAMES)
-            page.locator(composer).fill('SENT_WHILE_THE_PLACE_LOADS')
+            page.locator(composer).fill('SENT_WHILE_THE_ROOM_LOADS')
             page.locator(composer).press('Enter')
-            page.wait_for_function("() => window.__sentChat?.content === 'SENT_WHILE_THE_PLACE_LOADS'")
+            page.wait_for_function("() => window.__sentChat?.content === 'SENT_WHILE_THE_ROOM_LOADS'")
             release()
             _screenshot(page, tmp_path, f'send-accepted-present-{browser_engine}')
-            echo = page.locator(f'{feed} .chat-bubble.user').filter(has_text='SENT_WHILE_THE_PLACE_LOADS')
+            echo = page.locator(f'{feed} .chat-bubble.user').filter(has_text='SENT_WHILE_THE_ROOM_LOADS')
             assert echo.count() == 1
-            assert page.locator(feed).evaluate(_GAP) <= 8, 'the late saved-place read cannot pull the reader back'
+            assert page.locator(feed).evaluate(_GAP) <= 8, 'the late read cannot pull the reader away from the echo'
             assert page.locator(composer).input_value() == ''
         finally:
             browser.close()

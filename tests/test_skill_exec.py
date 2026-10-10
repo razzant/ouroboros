@@ -1455,8 +1455,8 @@ def test_stale_review_job_is_marked_interrupted(tmp_path, monkeypatch):
 
 def test_reconcile_stale_review_jobs_heals_dead_running_job(tmp_path, monkeypatch):
     # The periodic supervisor reconcile (server.py) calls this to heal a worker
-    # that died mid-review and left review_job.json at status=running in a
-    # headless/no-UI run where boot/extensions-API reconciles never fire.
+    # that died mid-review and left review_job.json at status=running between
+    # boots (the Skills list GET is a passive read and heals nothing).
     from ouroboros.skill_review_runner import (
         reconcile_stale_review_jobs,
         review_job_state_path,

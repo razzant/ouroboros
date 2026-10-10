@@ -118,9 +118,16 @@ That is the one fast recipe (node lane, then every default-lane test in a single
 xdist run); a bare `pytest tests/` runs the same tests in one process and takes
 many times longer. Like CI's default lanes it leaves out the opt-in marker
 lanes (`size_ratchet`, `browser`, `ui_browser`, `portable_detail`,
-`skill_smoke`, `integration`); a change that touches repository size or a
-reference-book chapter also runs `python -m pytest tests/ -m size_ratchet`. `python scripts/run_tests.py tests/test_x.py` forwards a
-focused run. Inside Ouroboros a reviewed commit (`commit_reviewed` /
+`skill_smoke`, `integration`). A change that touches repository size or a
+reference-book chapter also runs the size lane against its contribution base:
+
+```bash
+OURO_SIZE_RATCHET_BASE_REF=upstream/ouroboros python -m pytest -o addopts="" tests/ -m size_ratchet
+```
+
+Use the exact target-base SHA when verifying a frozen range. Without a base,
+the reference-book comparison is skipped. `python scripts/run_tests.py tests/test_x.py`
+forwards a focused run. Inside Ouroboros a reviewed commit (`commit_reviewed` /
 `vcs_commit_reviewed`) runs the complete battery in its hermetic gate unless
 `skip_tests` is set, so running it by hand first is optional rather than a
 second requirement; for a pull request, CI is that gate. If the full battery could
@@ -147,8 +154,8 @@ committed diff to a **separate agent context**. Use a subagent, new task, or
 fresh agent session. Reviewing in the authoring conversation does not count.
 
 The main review path is an **agentic checklist review**: the reviewer reads
-the repository with its own tools and covers the "Intent / Scope Review
-Checklist" from [`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) — every one of its
+the repository with its own tools and covers the "Coupling questions"
+section of [`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) — every one of its
 eight items (`intent_alignment`, `forgotten_touchpoints`,
 `cross_surface_consistency`, `regression_surface`, `prompt_doc_sync`,
 `architecture_fit`, `cross_module_bugs`, `implicit_contracts`) — following
@@ -168,7 +175,7 @@ docs/ARCHITECTURE.md, docs/DEVELOPMENT.md, and docs/DESIGN.md by their
 headings and read every section relevant to this change in full.
 Inspect the complete diff, touched files, relevant callers, tests, and docs.
 
-Cover the Intent / Scope Review Checklist from docs/CHECKLISTS.md exactly:
+Cover the Coupling questions from docs/CHECKLISTS.md exactly:
 output a JSON array of objects with the keys "item", "verdict" (PASS/FAIL),
 "severity" (critical/advisory), and "reason", covering all eight checklist
 items per its output contract — PASS rows are mandatory and justified with a
@@ -201,36 +208,72 @@ self-review. Mark the review `NOT_RUN` and explain why in the PR.
 
 ### Maintainer-grade project-native review command
 
-Ouroboros can produce review evidence in a structured SHA-bound packet. Its
-contributor mode uses the reviewer slots actually configured on the machine:
-`api_chat`, `agent_session`, or a mixture.
+Ouroboros can produce review evidence in a structured SHA-bound packet.
+`scripts/run_external_review.py` is an operator wrapper over the runtime's own
+review flow: without `--contributor` it runs the commit gate's review-only
+cycle over the staged index of the checkout it runs from (in an isolated
+checkout of that staged patch, so edits during the run never reach the
+reviewers); with `--contributor` it runs the proposal's own hermetic tests and
+then the same runtime operation Ouroboros uses to review a change,
+`review_change`, over a committed `base..head` proposal, and writes the public
+packet. It uses the review pool actually configured on the machine — the
+catalog rows marked Reviewer in Settings → Agents (`review_eligible` rows of
+`OUROBOROS_SUBAGENTS`): API routes, agent sessions, or a mixture.
 
 Treat this command as **maintainer tooling**, not the default contributor
-path. What a scope reviewer is owed in full is change-relative: the touched
+path. What a retrieving reviewer is owed in full is change-relative: the touched
 protected runtime paths, prompts and frozen contracts, with their declared
 families and cross-language twins. Everything else it reaches itself with
 read-only tools, so the run does not depend on a very large reviewer window.
 Reading coverage is diagnostic: incomplete or unobserved ranges are recorded
 beside the received verdict and never remove a responding reviewer from quorum,
 block a commit or automatically buy another review. The author judges whether
-a concrete gap warrants more reading. A scope review that cannot run at
+a concrete gap warrants more reading. A coupling review that cannot run at
 all — an unreadable repository, an unavailable review subject, a reviewer that
 failed or answered outside the contract — is reported as
 `SCOPE_REVIEW_BLOCKED` with its cause, and the evidence packet is preserved
 and marked incomplete. The agentic checklist review above needs none of this.
 
-Configured API slots need their provider credentials and a positive finite
-`TOTAL_BUDGET`. Agent-session slots need their configured agent route and
-account to be available. The wrapper checks route-specific readiness where it
-has a reliable probe; the selected route reports other failures explicitly.
+The run keeps its own writes off your data root: its review drive
+(`--drive-root`: a new or empty directory, or the drive of the run it
+continues; by default a new temporary one, refused before it is created when
+the temporary directory lies inside your data root) is its whole data root — ledger,
+review state, reviewer markers, locks and logs. It reads your `settings.json`
+in place under an integrity pin (never copied, never written; an edit during
+the run is a typed refusal; the reviewer panel and efforts come from it, or the
+product default where it names none, derived from its own model and provider
+settings — never from a copy inherited in your environment — and from the
+provider keys the run has), and with
+`--attach-host-engine` that engine's ownership marker, loopback descriptor and
+token. A provider key missing from both the environment and settings may still
+come from the wrapper's keys-file fallback (`OUROBOROS_KEYS_FILE`). Every run
+needs an explicit `--run-cap-usd`: the isolated review ledger starts empty, so
+that cap (kept by a continuation on the same `--drive-root`) is its whole
+global limit, never your saved `TOTAL_BUDGET`. It does not see your other
+spend. Configured API slots need their provider credentials. Agent-session
+slots need their agent route and account, and `--attach-host-engine`: the run
+then uses the Claudexor engine already running for your data root and never
+starts, prepares, rotates or stops one; a missing, foreign, dead or too old
+engine is a typed refusal, never another engine. That engine records the runs
+it executes for this review in its own home (`<data root>/claudexor`), as it
+does for every delegated run. Without that option the run starts no engine
+either: any other Claudexor call it makes (a Claudexor Main or Light model) is a
+typed refusal. The wrapper checks route-specific readiness
+where it has a reliable probe; the selected route reports other failures
+explicitly. A paid readiness probe (one token on a configured reviewer model)
+is an attempt in the review ledger, under the cap.
 
-From a clean committed branch:
+Commit the proposal on a branch, then run the command from a clean checkout of
+the target base (a worktree shares the repository's branches and remote refs):
 
 ```bash
+git worktree add --detach ../ouroboros-review upstream/ouroboros
+cd ../ouroboros-review
 python scripts/run_external_review.py \
   --contributor \
   --base-ref upstream/ouroboros \
-  --head-ref HEAD \
+  --head-ref <your-branch> \
+  --run-cap-usd 25 \
   "<PR title>" \
   --goal "<goal>" \
   --scope "<scope>"
@@ -240,17 +283,32 @@ The command creates `review-evidence.json`, `full-output.txt`, and
 `review-packet.zip`. The packet records the configured slots, observed
 route/model/profile facts, absent telemetry, base/head/tree/diff hashes,
 verdicts, and incomplete or degraded actors. It fails closed when the declared
-slot route and observable execution receipt disagree or cannot be correlated.
+slot route and observable execution receipt disagree or cannot be correlated,
+or when the review record is missing or names another subject. It names the
+review record the operation wrote (its aggregate verdict, tests and cost), and
+`full-output.txt` carries every seat row with its retained answer. Before any
+reviewer is paid the lane runs the proposal's hermetic test suite in an
+isolated checkout of the same frozen `base..head` subject: a failure is the
+typed `tests_preflight_blocked` refusal (exit 3, nothing dispatched, no
+record), and a pass lands on the review record of that exact tree as
+`tests={policy: run, result: passed, proof: candidate_bound, tree_sha}`. The
+review operation itself runs no tests, so a record without that attachment
+says `NOT_RUN`; the verification of section 4 is still yours to run and
+report.
 
 Applied reasoning effort is not currently exposed by every route. The packet
 records configured effort as requested and leaves effective effort absent
 rather than presenting the request as observed fact.
 
-The lane always executes the target base's own review machinery: run from any
-checkout that is not the base, it re-runs itself from a detached worktree of
-the base commit. Your proposal is therefore never reviewed by its own copy of
-the review flow, whatever it touches, and no extra step is needed when a PR
-changes the review script or review substrate.
+The lane always executes the installed body's review flow and rules, those of
+the checkout the command runs from, and never the proposal's copy: the review
+operation freezes `base..head` as a subject it only reads. Your proposal is
+therefore never reviewed by its own copy of the review flow or checklists,
+whatever it touches, and no extra step is needed when a PR changes the review
+script, review substrate or `docs/CHECKLISTS.md`. A checkout that already
+contains the proposal (its own branch, or anything built on it) is refused
+before anything is spent. `READY_FOR_INTEGRATION` is evidence for the
+maintainer's own review and landing, never merge authority.
 
 ## 6. Open the Pull Request
 
@@ -263,7 +321,7 @@ Complete the PR template with:
 - reviewed base SHA and head SHA;
 - verdict, findings, and their disposition;
 - checks, coverage limitations, and full output or artifact link;
-- the scope-checklist coverage table and the reviewer's checklist JSON;
+- the coupling-questions coverage table and the reviewer's checklist JSON;
 - `NOT_RUN` plus a reason for unavailable verification or review.
 
 Review output is public evidence. Inspect attachments for credentials, private

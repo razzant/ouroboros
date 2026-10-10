@@ -36,15 +36,20 @@ def test_a_consciousness_started_review_keeps_the_tree_category():
     """The allowance discovers its roots by the consciousness categories: a review root whose only
     priced rows said `deep_self_review` was invisible to it (astra round 3)."""
     from ouroboros.deep_self_review import _review_usage_scope
+    from ouroboros.review_records import ReviewRequest
     from ouroboros.usage_accounting import UsageScope
 
-    kept = _review_usage_scope(UsageScope(category="consciousness_task", source="agent.task"))
+    def scope(current):
+        return _review_usage_scope(current, ReviewRequest(surface="deep_self_review", goal="review"))
+
+    kept = scope(UsageScope(category="consciousness_task", source="agent.task"))
     assert kept.category == "consciousness_task" and kept.source == "deep_self_review"
-    wake = _review_usage_scope(UsageScope(category="consciousness", source="agent.task"))
+    assert kept.review_wave_id.startswith("wave-")  # the review names its round (#1544)
+    wake = scope(UsageScope(category="consciousness", source="agent.task"))
     assert wake.category == "consciousness"
-    own = _review_usage_scope(UsageScope(category="task", source="agent.task"))
+    own = scope(UsageScope(category="task", source="agent.task"))
     assert own.category == "deep_self_review" and own.source == "deep_self_review"
-    assert _review_usage_scope(UsageScope()).category == "deep_self_review"
+    assert scope(UsageScope()).category == "deep_self_review"
 
 
 def test_a_started_root_reads_the_mode_it_runs_in_but_the_wake_keeps_mains(tmp_path, monkeypatch):

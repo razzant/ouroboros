@@ -1,0 +1,370 @@
+{
+  "source": "Actual Control API create and Exact Retry responses from the reviewed Claudexor producer, using a temporary CommandStore and an injected daemon facade. No provider run.",
+  "producer_source_sha256": "12631b29fce5b49c36d1e8d6567b56c538348e71723e2a673b12dcfc99f1542a",
+  "responses": [
+    {
+      "route": "create",
+      "scenario": "first_lookup",
+      "status": 503,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_before_preflight",
+          "cause": {
+            "message": "daemon RPC timeout (claudexor.findAccepted)",
+            "code": "daemon_busy",
+            "status": 503,
+            "retryable": true,
+            "requiredActions": [
+              "Inspect daemon availability."
+            ],
+            "context": {
+              "operation": "claudexor.findAccepted"
+            }
+          }
+        }
+      }
+    },
+    {
+      "route": "create",
+      "scenario": "second_lookup",
+      "status": 503,
+      "lookups": 2,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_after_preflight",
+          "cause": {
+            "message": "daemon RPC timeout (claudexor.findAccepted)",
+            "code": "daemon_busy",
+            "status": 503,
+            "retryable": true,
+            "requiredActions": [
+              "Inspect daemon availability."
+            ],
+            "context": {
+              "operation": "claudexor.findAccepted"
+            }
+          },
+          "preflight": {
+            "message": "mutable requirement unavailable",
+            "code": "requirement_unavailable",
+            "status": 403,
+            "retryable": false,
+            "requiredActions": [
+              "Restore the requirement."
+            ],
+            "context": {
+              "phase": "requirements"
+            }
+          }
+        }
+      }
+    },
+    {
+      "route": "create",
+      "scenario": "conflict",
+      "status": 409,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_conflict",
+        "message": "idempotency key was already used with a different request",
+        "retryable": false,
+        "fieldErrors": {},
+        "requiredActions": [],
+        "evidenceRefs": [],
+        "context": {}
+      }
+    },
+    {
+      "route": "create",
+      "scenario": "invalid_key",
+      "status": 400,
+      "lookups": 1,
+      "problem": {
+        "code": "invalid_idempotency_key",
+        "message": "Idempotency-Key must contain 1-256 characters",
+        "retryable": false,
+        "fieldErrors": {},
+        "requiredActions": [],
+        "evidenceRefs": [],
+        "context": {}
+      }
+    },
+    {
+      "route": "create",
+      "scenario": "untyped",
+      "status": 503,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_before_preflight",
+          "cause": {
+            "message": "index unreadable",
+            "requiredActions": [],
+            "context": {}
+          }
+        }
+      }
+    },
+    {
+      "route": "create",
+      "scenario": "read_403",
+      "status": 503,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_before_preflight",
+          "cause": {
+            "message": "index read refused",
+            "code": "index_forbidden",
+            "status": 403,
+            "retryable": false,
+            "requiredActions": [],
+            "context": {}
+          }
+        }
+      }
+    },
+    {
+      "route": "create",
+      "scenario": "read_429",
+      "status": 503,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_before_preflight",
+          "cause": {
+            "message": "index read refused",
+            "code": "index_rate_limited",
+            "status": 429,
+            "retryable": false,
+            "requiredActions": [],
+            "context": {}
+          }
+        }
+      }
+    },
+    {
+      "route": "retry",
+      "scenario": "first_lookup",
+      "status": 503,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_before_preflight",
+          "cause": {
+            "message": "daemon RPC timeout (claudexor.findAccepted)",
+            "code": "daemon_busy",
+            "status": 503,
+            "retryable": true,
+            "requiredActions": [
+              "Inspect daemon availability."
+            ],
+            "context": {
+              "operation": "claudexor.findAccepted"
+            }
+          }
+        }
+      }
+    },
+    {
+      "route": "retry",
+      "scenario": "second_lookup",
+      "status": 503,
+      "lookups": 2,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_after_preflight",
+          "cause": {
+            "message": "daemon RPC timeout (claudexor.findAccepted)",
+            "code": "daemon_busy",
+            "status": 503,
+            "retryable": true,
+            "requiredActions": [
+              "Inspect daemon availability."
+            ],
+            "context": {
+              "operation": "claudexor.findAccepted"
+            }
+          },
+          "preflight": {
+            "message": "mutable requirement unavailable",
+            "code": "requirement_unavailable",
+            "status": 403,
+            "retryable": false,
+            "requiredActions": [
+              "Restore the requirement."
+            ],
+            "context": {
+              "phase": "requirements"
+            }
+          }
+        }
+      }
+    },
+    {
+      "route": "retry",
+      "scenario": "conflict",
+      "status": 409,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_conflict",
+        "message": "idempotency key was already used with a different request",
+        "retryable": false,
+        "fieldErrors": {},
+        "requiredActions": [],
+        "evidenceRefs": [],
+        "context": {}
+      }
+    },
+    {
+      "route": "retry",
+      "scenario": "invalid_key",
+      "status": 400,
+      "lookups": 1,
+      "problem": {
+        "code": "invalid_idempotency_key",
+        "message": "Idempotency-Key must contain 1-256 characters",
+        "retryable": false,
+        "fieldErrors": {},
+        "requiredActions": [],
+        "evidenceRefs": [],
+        "context": {}
+      }
+    },
+    {
+      "route": "retry",
+      "scenario": "untyped",
+      "status": 503,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_before_preflight",
+          "cause": {
+            "message": "index unreadable",
+            "requiredActions": [],
+            "context": {}
+          }
+        }
+      }
+    },
+    {
+      "route": "retry",
+      "scenario": "read_403",
+      "status": 503,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_before_preflight",
+          "cause": {
+            "message": "index read refused",
+            "code": "index_forbidden",
+            "status": 403,
+            "retryable": false,
+            "requiredActions": [],
+            "context": {}
+          }
+        }
+      }
+    },
+    {
+      "route": "retry",
+      "scenario": "read_429",
+      "status": 503,
+      "lookups": 1,
+      "problem": {
+        "code": "idempotency_status_unavailable",
+        "message": "idempotency status is temporarily unavailable; retry the same operation with the same Idempotency-Key",
+        "retryable": true,
+        "fieldErrors": {},
+        "requiredActions": [
+          "Retry the same operation with the same Idempotency-Key."
+        ],
+        "evidenceRefs": [],
+        "context": {
+          "stage": "lookup_before_preflight",
+          "cause": {
+            "message": "index read refused",
+            "code": "index_rate_limited",
+            "status": 429,
+            "retryable": false,
+            "requiredActions": [],
+            "context": {}
+          }
+        }
+      }
+    }
+  ]
+}

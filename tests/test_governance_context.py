@@ -15,12 +15,20 @@ import pytest
 from ouroboros.runtime_limits import REVIEW_GOVERNANCE_INLINE_SHARE
 from ouroboros.tools.governance_context import (
     REVIEW_PROTOCOL_CHAPTER,
+    SHARED_CHECKLIST_SECTION,
     GovernanceContext,
     governance_context,
 )
+from ouroboros.tools.review_helpers import load_checklist_section
 from ouroboros.utils import estimate_tokens
 
-CHECKLIST_SECTION = "## Repo Commit Checklist\n\n1. item\n"
+CHECKLIST_SECTION = "## Change Review Checklist\n\n1. item\n"
+SHARED_PATH = f"docs/CHECKLISTS.md#{SHARED_CHECKLIST_SECTION}"
+# The shared section comes from the review code's own checklist, never from the
+# reviewed tree, whose copy (written by the fixture) says something else.
+SHARED_SECTION = load_checklist_section(SHARED_CHECKLIST_SECTION)
+TREE_SHARED_RULE = "The reviewed tree's own copy of the shared rule."
+SHARED_RENDERED = f"## {SHARED_PATH}\n\n{SHARED_SECTION}"
 
 # Chapter bodies are addressed by what they MENTION: the selector looks for an
 # exact touched file name, so `review_project_dialogue.py` must not satisfy a
@@ -47,6 +55,9 @@ def repo(tmp_path: pathlib.Path) -> pathlib.Path:
     (tmp_path / "BIBLE.md").write_text("# Constitution\n\nP1 Continuity.\n", encoding="utf-8", newline="\n")
     (tmp_path / "docs" / "CHECKLISTS_ARCHIVE.md").write_text(
         "# Archive\n\nA standing disclosure.\n", encoding="utf-8", newline="\n")
+    (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+        f"# Checklists\n\n{CHECKLIST_SECTION}\n## {SHARED_CHECKLIST_SECTION}\n\n{TREE_SHARED_RULE}\n",
+        encoding="utf-8", newline="\n")
     (tmp_path / "docs" / "DESIGN.md").write_text(
         "# Design\n\nThe design system for web/ work.\n", encoding="utf-8", newline="\n")
 
@@ -98,13 +109,53 @@ def test_tier_one_rules_are_always_inline(repo):
     context = _context(repo)
 
     assert _paths(context, "inline", tier=1) == [
-        "docs/CHECKLISTS.md", "BIBLE.md", "docs/CHECKLISTS_ARCHIVE.md"]
+        "docs/CHECKLISTS.md", SHARED_PATH, "BIBLE.md", "docs/CHECKLISTS_ARCHIVE.md"]
     assert "P1 Continuity." in context.stable_inline
     assert "A standing disclosure." in context.stable_inline
     # The caller's checklist section is declared, never re-rendered: the surface
-    # owns where its own section sits in the prompt.
+    # owns where its own section sits in the prompt. The shared section is the
+    # one this module loads itself, and it leads the stable text.
     assert CHECKLIST_SECTION not in context.stable_inline
-    assert [row["chars"] for row in _rows(context, tier=1)][0] == len(CHECKLIST_SECTION)
+    assert context.stable_inline.startswith(SHARED_RENDERED)
+    assert TREE_SHARED_RULE not in context.stable_inline
+    assert [row["chars"] for row in _rows(context, tier=1)][:2] == [
+        len(CHECKLIST_SECTION), len(SHARED_SECTION)]
+
+
+def test_the_body_layer_has_no_switch_that_drops_the_shared_section():
+    """The only surface that ever opted out of `Shared Contract Ownership` (the
+    skill advisory prompt) is gone with PR-3; a body-layer reviewer of this
+    repository's code always carries the section, and nothing can ask otherwise."""
+    import inspect
+
+    from ouroboros.tools import governance_context as module
+
+    assert "repository_rules" not in inspect.signature(module.governance_context).parameters
+    assert "repository_rules" not in inspect.getsource(module)
+
+
+def test_a_non_body_subject_runs_the_core_layer_without_the_shared_section(repo):
+    """Another repository is not Ouroboros's body: the core layer names the
+    shared section `not_applicable` and inlines no text of it; the supplied
+    checklist section is the only tier-1 inline row."""
+    context = _context(repo, layer="core")
+
+    assert SHARED_PATH in _paths(context, "not_applicable")
+    assert SHARED_CHECKLIST_SECTION not in context.stable_inline + context.navigation
+    assert _paths(context, "inline", tier=1) == ["docs/CHECKLISTS.md"]
+    assert context.layer == "core" and _context(repo).layer == "body"
+
+
+def test_an_unloadable_shared_section_is_named_not_claimed(repo, monkeypatch):
+    def _missing(name, checklist_path=None):
+        raise ValueError(f"Section '## {name}' not found")
+
+    monkeypatch.setattr("ouroboros.tools.review_helpers.load_checklist_section", _missing)
+    context = _context(repo)
+
+    assert f"[⚠️ OMISSION: {SHARED_PATH} could not be loaded" in context.stable_inline
+    assert "the section that applies to this review is inlined above." in context.navigation
+    assert f"`{SHARED_CHECKLIST_SECTION}` section" not in context.navigation
 
 
 def test_tier_one_is_the_same_text_whatever_the_change_touches(repo):
@@ -120,7 +171,7 @@ def test_a_document_the_surface_already_inlines_is_declared_not_duplicated(repo)
     context = _context(repo, already_inline=("BIBLE.md", "docs/CHECKLISTS_ARCHIVE.md"))
 
     assert "P1 Continuity." not in context.stable_inline
-    assert context.stable_inline == ""
+    assert context.stable_inline == SHARED_RENDERED
     carried = {row["path"]: row for row in _rows(context, "inline", tier=1)}
     assert carried["BIBLE.md"]["chars"] == len("# Constitution\n\nP1 Continuity.\n")
     assert "carried by this surface" in carried["BIBLE.md"]["reason"]
@@ -146,19 +197,24 @@ def test_a_carrying_surface_may_state_its_own_delivery_mechanism(repo):
 def test_a_surface_with_no_checklist_section_says_so_instead_of_claiming_one(repo):
     """A deep self-review supplies no section. Recording `inline` with zero
     characters, and telling the reviewer a section is inlined above, would both
-    be false (BIBLE P1)."""
+    be false (BIBLE P1); the shared section it does receive is named as such."""
     context = _context(repo, checklist_section_text="")
 
     row = next(row for row in context.manifest if row["path"] == "docs/CHECKLISTS.md")
     assert row["disposition"] == "navigation" and row["chars"] == 0
     assert row["reason"] == "this surface supplies no checklist section"
-    assert "NO section of it is inlined for this review" in context.navigation
-    assert "is inlined above" not in context.navigation
+    assert f"its `{SHARED_CHECKLIST_SECTION}` section is inlined above." in context.navigation
+    assert "the section that applies to this review" not in context.navigation
+    assert context.stable_inline.startswith(SHARED_RENDERED)
+    bare = _context(repo, checklist_section_text="", layer="core")
+    assert "NO section of `docs/CHECKLISTS.md` is inlined for this review" in bare.navigation
+    assert "is inlined above" not in bare.navigation
     # A surface that does supply one keeps the inline row and the pointer.
     supplied = _context(repo)
     assert next(r for r in supplied.manifest
                 if r["path"] == "docs/CHECKLISTS.md")["disposition"] == "inline"
-    assert "is inlined above" in supplied.navigation
+    assert (f"the section that applies to this review and its `{SHARED_CHECKLIST_SECTION}` "
+            "section are inlined above.") in supplied.navigation
 
 
 def test_an_unreadable_tier_one_document_is_named_not_silently_skipped(repo):
@@ -333,7 +389,7 @@ def test_every_document_is_dispositioned_exactly_once(repo):
 
     paths = _paths(context)
     assert len(paths) == len(set(paths))
-    for expected in ("BIBLE.md", "docs/CHECKLISTS.md", "docs/CHECKLISTS_ARCHIVE.md",
+    for expected in ("BIBLE.md", "docs/CHECKLISTS.md", SHARED_PATH, "docs/CHECKLISTS_ARCHIVE.md",
                      "docs/DESIGN.md", "docs/DEVELOPMENT.md", "docs/ARCHITECTURE.md",
                      *(f"docs/development/{name}" for name in DEV_CHAPTERS),
                      *(f"docs/architecture/{name}" for name in ARCH_CHAPTERS)):
@@ -357,7 +413,7 @@ def test_the_triad_packet_declares_bible_and_the_archive_as_already_delivered(re
         ctx, ["web/modules/chat.js"], CHECKLIST_SECTION,
         ["openai/packet"], [ReviewSlot(slot_id="triad_slot_1", model="openai/packet")])
 
-    assert context.stable_inline == ""
+    assert context.stable_inline == SHARED_RENDERED
     assert all("carried by this surface" in row["reason"]
                for row in context.manifest if row["path"] in ("BIBLE.md", "docs/CHECKLISTS_ARCHIVE.md"))
     assert "docs/DESIGN.md" in [row["path"] for row in context.manifest
@@ -377,6 +433,7 @@ def test_a_panel_with_no_api_row_asks_for_no_packet_governance(repo):
 def test_retrieving_triad_receives_shared_tiers_in_its_actual_task(repo, monkeypatch):
     from ouroboros.review_records import ReviewSlot
     from ouroboros.tools import review
+    from ouroboros.tools.review_subject import build_triad_session_task
 
     monkeypatch.setattr(review, "reviewer_context_window", lambda *_a, **_k: 200_000)
     ctx = type("_Ctx", (), {"repo_dir": str(repo)})()
@@ -385,12 +442,14 @@ def test_retrieving_triad_receives_shared_tiers_in_its_actual_task(repo, monkeyp
     context = review._triad_governance_context(
         ctx, ["web/modules/chat.js"], checklist, ["openai/native"],
         [ReviewSlot(slot_id="triad_1", model="openai/native")], delivery="retrieving")
-    task = review._triad_session_task(
-        ctx, goal_section="goal", scope_section="scope", checklist_section=checklist,
+    # The builder the two-part brief calls (review_brief_coupling.build_retrieving_brief).
+    task = build_triad_session_task(
+        governance_repo_dir=repo, goal_section="goal", scope_section="scope", checklist_section=checklist,
         rebuttal_section="", review_history_section="", governance=context)
 
     assert task.count("P1 Continuity.") == 1
     assert task.count("A standing disclosure.") == 1
+    assert task.count(SHARED_SECTION) == 1
     assert "The design system for web/ work." in task
     assert "How a commit is reviewed." in task
     assert "docs/architecture/02-web.md" in task

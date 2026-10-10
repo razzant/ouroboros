@@ -5,9 +5,29 @@ import { readFileSync } from 'node:fs';
 import { apiClient, updateStrategyForPlan } from '../modules/api_client.js';
 import { updatePillText, verifiedUpdatePlan } from '../modules/update_status.js';
 import {
+    applyFailureText,
+    updateVerdict,
     bindUpdateRefreshEvents,
     restartStatusCanSettle,
 } from '../modules/updates.js';
+
+
+test('update failure renders the rollback stash disclosure without losing diagnostics', () => {
+    const stash = 'a'.repeat(40);
+    const note = `rolled back to 123456789abc; conflicting paths: "draft\\nname.txt"; `
+        + `recover with \`git stash apply ${stash}\`\nGit diagnostics:\nCONFLICT from stdout`;
+    const rendered = applyFailureText({ message: 'smoke failed', body: {
+        rolled_back: true, rollback: note, stash_note: note,
+    } });
+    assert.ok(rendered.includes(note));
+    assert.equal(rendered.split(`git stash apply ${stash}`).length - 1, 1);
+    const pending = applyFailureText({ message: 'write failed', body: {
+        reason: 'stash_recovery_incomplete', rolled_back: false,
+        stash_note: 'Automatic recovery is unconfirmed; current files were left unchanged.',
+    } });
+    assert.ok(pending.includes('unconfirmed'));
+    assert.ok(!pending.includes('the checkout was rolled back'));
+});
 
 
 class FakeWS {
@@ -259,4 +279,18 @@ test('all successful restart paths share one lifecycle entry', () => {
     // Definition plus rollback, ordinary apply, recovery replace, and Restart now.
     assert.equal((source.match(/enterRestarting\(\)/g) || []).length, 5);
     assert.doesNotMatch(source, /restartNeeded = false;\s*enterRestarting\(\)/);
+});
+
+
+test('pending local-work recovery never offers the refused in-app Restart', () => {
+    const ordinary = { update_tx: { active: true, phase: 'pending_boot_smoke' } };
+    assert.equal(updateVerdict(ordinary).action.id, 'restart');
+    const pending = { update_tx: { ...ordinary.update_tx, local_work_recovery: true } };
+    for (const phase of ['', 'restarting', 'restart_needed', 'restart_required']) {
+        const view = updateVerdict(pending, phase);
+        assert.equal(view.action.id, 'check');
+        assert.match(view.hint, /Quit and reopen/);
+        assert.match(view.hint, /restart the server process/);
+        assert.match(view.hint, /stash is retained/);
+    }
 });

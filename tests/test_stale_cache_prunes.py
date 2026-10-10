@@ -108,6 +108,6 @@ def test_startup_prune_sweeps_run_both():
 
     import ouroboros.server_maintenance as sm
 
-    src = inspect.getsource(sm._startup_prune_sweeps)
+    src = inspect.getsource(sm._run_deferred_startup_prunes)
     assert "prune_stale_code_intel_roots" in src
     assert "prune_failed_reconcile_markers" in src

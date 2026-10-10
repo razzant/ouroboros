@@ -754,17 +754,17 @@ def test_reconciler_skips_a_row_whose_retry_went_live_after_the_decision(tmp_pat
     from ouroboros import presence_runner, task_status
 
     task_id = "presence-raced"
-    real_effective, order = task_status.load_effective_task_result, []
+    real_effective, order = task_status.effective_task_result, []
 
     def effective_then_retry_registers(root, tid, *args, **kwargs):
         effective = real_effective(root, tid, *args, **kwargs)
-        if tid == task_id and not order:  # the retry goes live right after the sweep decided
+        if tid.get("task_id") == task_id and not order:  # the retry goes live right after the sweep decided
             order.append("live")
             with presence_runner._LIVE_LOCK:
                 presence_runner._LIVE_PRESENCE_TASKS.add((str(tmp_path.resolve()), task_id))
         return effective
 
-    monkeypatch.setattr(task_status, "load_effective_task_result", effective_then_retry_registers)
+    monkeypatch.setattr(task_status, "effective_task_result", effective_then_retry_registers)
     try:
         healed, row = _sweep(tmp_path, monkeypatch, task_id)
         assert (healed, row["status"], order) == (0, STATUS_RUNNING, ["live"])  # decision dropped, row untouched
@@ -780,20 +780,20 @@ def test_reconciler_settles_nothing_when_the_row_was_requeued_after_the_decision
     from ouroboros import owner_quiz, task_status
 
     task_id = "presence-requeued"
-    real_effective, cleanups = task_status.load_effective_task_result, []
+    real_effective, cleanups = task_status.effective_task_result, []
 
     def effective_then_requeue(root, tid, *args, **kwargs):
         effective = real_effective(root, tid, *args, **kwargs)
-        if tid == task_id:
+        if tid.get("task_id") == task_id:
             write_task_result(tmp_path, task_id, "scheduled", result="New authority")
         return effective
 
-    monkeypatch.setattr(task_status, "load_effective_task_result", effective_then_requeue)
+    monkeypatch.setattr(task_status, "effective_task_result", effective_then_requeue)
     monkeypatch.setattr(owner_quiz, "reconcile_terminal", lambda root, tid: cleanups.append(tid))
     healed, row = _sweep(tmp_path, monkeypatch, task_id)
     assert (healed, row["status"], row["result"], cleanups) == (0, "scheduled", "New authority", [])
     # The same sweep over a genuine orphan still heals and still runs the terminal cleanup.
-    monkeypatch.setattr(task_status, "load_effective_task_result", real_effective)
+    monkeypatch.setattr(task_status, "effective_task_result", real_effective)
     healed, row = _sweep(tmp_path, monkeypatch, "presence-orphan")
     assert (healed, row["status"], cleanups) == (1, STATUS_FAILED, ["presence-orphan"])
 
@@ -866,6 +866,8 @@ def test_a_presence_placeholder_owes_no_terminal_projection_even_when_its_retry_
         reconcile_terminal_projections,
         settle_terminal_projection,
     )
+    from ouroboros.startup_migrations import prepare_startup_state
+    prepare_startup_state(tmp_path)
 
     task_id = _task_id(_admission(), _event())
     _reconciled(tmp_path, monkeypatch, task_id)

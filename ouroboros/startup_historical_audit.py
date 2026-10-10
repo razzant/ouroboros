@@ -1,4 +1,4 @@
-"""One session-owned historical seal audit after mandatory startup recovery.
+"""Explicit historical seal audit (owner CLI or rebuild job), never automatic at boot.
 
 The audit is diagnostic, O(history), and uses the unchanged monetary/archive
 owners in a separate interpreter. It cannot hold server readiness or the GIL.
@@ -33,7 +33,7 @@ class HistoricalAudit:
                 return
             self._launched = True
         # No filesystem, spawning or waiting under the state lock. Failure is
-        # terminal for this generation; ordinary next startup owns another pass.
+        # terminal for this invocation; a later explicit invocation may retry.
         try:
             threading.Thread(target=self._run, args=(Path(data_root), Path(repo_dir)),
                              name="startup-historical-audit", daemon=True).start()

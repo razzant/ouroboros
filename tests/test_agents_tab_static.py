@@ -35,7 +35,6 @@ MODULES = REPO_ROOT / "web" / "modules"
 PAGE_SOURCES = (
     "settings_ui.js",
     "harness_accounts.js",
-    "reviewer_slots.js",
     "subagents_settings.js",
 )
 
@@ -137,35 +136,25 @@ def test_agents_tab_sits_between_models_and_behavior() -> None:
 
 def test_accounts_own_connections_and_agents_own_role_editors() -> None:
     panel = _panel("agents")
-    for fragment in (
-        "renderReviewerSlotsSection()",
-        "renderSubagentsSection()",
-    ):
-        assert fragment in panel, f"the Agents panel does not render {fragment}"
+    assert "renderSubagentsSection()" in panel, "the Agents panel does not render the catalog"
+    # Reviewers are rows of that catalog marked Reviewer: no second review section.
+    assert "renderReviewerSlotsSection" not in _read("settings_ui.js")
     accounts = _panel("providers")  # Existing internal tab id, owner-facing Accounts.
     assert "renderAgentsServiceBanner()" in accounts
     assert "renderAgentAccountsSection()" in accounts
-    # The delegation roster precedes reviewers that reference its rows.
-    order = [panel.index(f) for f in (
-        "renderSubagentsSection()", "renderReviewerSlotsSection()",
-    )]
-    assert order == sorted(order), "the Agents panel sections are out of order"
     # Exactly ONE service banner element on the whole page.
     assert _page_markup().count('id="agents-service-banner"') == 1
 
 
 def test_the_vacated_tabs_no_longer_render_the_moved_sections() -> None:
     source = _read("settings_ui.js")
-    for renderer in ("renderAgentAccountsSection()", "renderReviewerSlotsSection()",
-                     "renderSubagentsSection()"):
+    for renderer in ("renderAgentAccountsSection()", "renderSubagentsSection()"):
         assert source.count(renderer) == 1, (
             f"{renderer} is rendered more than once — a section mounted in two "
             "panels would carry two drafts of the same settings keys"
         )
     assert "renderAgentAccountsSection()" not in _panel("agents")
-    models = _panel("models")
-    assert "renderReviewerSlotsSection()" not in models
-    assert "renderSubagentsSection()" not in models
+    assert "renderSubagentsSection()" not in _panel("models")
 
 
 # ---------------------------------------------------------------------------
@@ -268,13 +257,13 @@ def test_no_owner_facing_coding_agent_copy_remains_on_the_agents_surfaces() -> N
 # rows loses the same minutes the owner does.
 STALE_ADDRESSES = (
     (r"Reviewer Slots",
-     'the section is called "Review lanes" and lives on the Agents tab (D-10)'),
+     "reviewers are the rows marked Reviewer in Agents → Available subagents"),
     (r"Models[- ]page|Models tab \(Reviewer",
      "the reviewer rows and the subagent route left the Models page for Agents (D-10)"),
     (r"Providers\s*(?:→|->)\s*Harness Accounts",
      "accounts are Agents → Accounts now, grouped per family (D-10)"),
     (r"Models\s*(?:→|->)\s*(?:Subagents|Reviewer)",
-     "delegation is Agents → Delegation, review rows are Agents → Review lanes (D-10)"),
+     "delegation and reviewers are Agents → Available subagents (D-10)"),
 )
 
 
@@ -342,15 +331,15 @@ def test_the_reviewer_disclosure_stopped_advising_against_the_default() -> None:
     subscription connected, everything that can run on one does, and a triad is
     never half API and half subscription). Its carrier — the conditional
     all-delegated warning about a task-acceptance API fallback — is gone with the
-    fallback itself (owner R2/R12, 2026-09-01): acceptance follows the rows, and
-    the only server-side sentence left is the ONE-TIME migration disclosure with
-    the measured numbers, which states what the rows now cost and never advises
-    against the default."""
+    fallback itself (owner R2/R12, 2026-09-01): acceptance follows the rows. The
+    ONE-TIME packet→retrieving migration disclosure that was the last server-side
+    sentence left with the review lanes (PR-3): delivery is a field of the catalog
+    row the owner saves, so no sentence advises for or against a delivery."""
     config = (REPO_ROOT / "ouroboros" / "reviewer_slot_config.py").read_text(encoding="utf-8")
     assert "Keep at least one API reviewer row" not in config
     assert "never fall back" not in config and "stays API-only" not in config
-    assert "Task acceptance now follows these triad rows" in config
-    assert "Keep an api_chat row" not in config
-    lanes = _read("reviewer_slots.js")
-    assert "keep at least one API row" not in lanes
-    assert "never fall back to API spend" in lanes
+    assert "acceptance_delivery_disclosure" not in config and "Keep an api_chat row" not in config
+    # Reviewers are catalog rows now; their editor carries the standing rule.
+    editor = " ".join(_read("subagents_settings.js").split())
+    assert "keep at least one API row" not in editor.lower()
+    assert "waits for capacity rather than silently falling back to API spend" in editor

@@ -246,7 +246,7 @@ def test_restoration_reads_an_exact_checkpoint_unit_as_source_without_protocol_r
                                  keep=None, restore=(unit_ref,))
     assert receipt.status == "applied"
     source_message = next(m for m in restored if (cc._capsule_metadata(m)[1] or {}).get("retention") == "source_view")
-    assert source_message.get("tool_calls") is None and source_message["role"] == "assistant"
+    assert source_message.get("tool_calls") is None and source_message["role"] == "user"
     text = source_message["content"][0]["text"]
     assert "read-only projection" in text and "original source tail" in text
     assert "Source reference: " + cc._canonical_json(unit_ref) in text

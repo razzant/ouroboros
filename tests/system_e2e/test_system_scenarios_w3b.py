@@ -292,6 +292,9 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
             task_id = submit_running(
                 server, "Delegate the survey to your configured scout, wait it out, then finish.")
             result = server.wait_task(task_id, timeout=600)
+            # Read before anything else: the periodic custody sweep (600 s cadence)
+            # may retire the registration any time after the owner's finish.
+            deletes_at_finish = daemon.calls("DELETE", "/v2/projects/")
             assert result.get("status") == "completed", result
             oracle = ArtifactOracle(server.data_root)
             stored = wait_durable_result(oracle, task_id)
@@ -348,8 +351,10 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
             assert (body.get("scope") or {}).get("kind") == "project", body
             project_posts = daemon.calls("POST", "/v2/projects")
             assert project_posts and all(p["idempotency_key"] for p in project_posts)
-            assert daemon.calls("DELETE", "/v2/projects/"), (
-                "the settled readonly run's owned registration was never retired")
+            # Owner decision 1A: settlement keeps the engine project while the owning
+            # task line can still continue the run; generation B proves its retirement.
+            assert not deletes_at_finish, (
+                "the settled run's project was retired while its owner still ran", deletes_at_finish)
 
             # -- successful receipt, captured before the later refusals ------
             assert len(successful_receipts) == 1, successful_receipts
@@ -393,6 +398,19 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
             assert "fake_route_refused" in transcript
         finally:
             server.stop()
+
+        # Generation B, same data root: the boot custody sweep reads the owner's
+        # normal finish from its durable result and retires the registration.
+        with ScriptedStubModel([]) as stub_b:
+            server_b = start_server(e2e_clone, root, keyless_settings(
+                stub_b, OUROBOROS_SUBAGENTS=_roster(_SCOUT_ROW, _PINNED_ROW)))
+            try:
+                assert wait_until(lambda: daemon.calls("DELETE", "/v2/projects/"), 240), (
+                    "the boot custody sweep never retired the finished owner's registration")
+                assert wait_until(lambda: _custody_rows(
+                    ArtifactOracle(server_b.data_root), "delegate_run_project_retired", run_id), 60)
+            finally:
+                server_b.stop()
 
 
 # ===========================================================================

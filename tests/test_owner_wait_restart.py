@@ -11,9 +11,6 @@ import datetime as dt
 import json
 import os
 import queue as stdqueue
-import signal
-import subprocess
-import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -104,10 +101,15 @@ def first_cleanup(case):
         additional_task_ids=native,
     )
     assert selected == native == {case.task_id}
+    # As server._perform_supervisor_restart: the same transaction names the runnable queue (#1563).
+    from supervisor.restart_retention import prepare_restart_returns
+
+    prepare_restart_returns(case.root, workers.RUNNING, list(workers.PENDING),
+                            transaction_id=case.transaction_id, owner_wait_ids=selected)
     assert workers.kill_workers(
         terminal_status="cancelled", result_reason="Planned self-restart",
         preserve_pending=True, preserve_running_task_ids=selected,
-        reconcile_delegate_custody=False, archive_service_logs=False,
+        reconcile_delegate_custody=False, archive_service_logs=False, retain_saved_work=True,
     )
     assert not case.process.is_alive() and not workers.RUNNING
     assert sorted(row["id"] for row in workers.PENDING) == sorted(pending_ids + [case.task_id])
@@ -124,11 +126,7 @@ def acknowledge(case, monkeypatch, transport):
             case.root, supervisor_pid=os.getpid(), exit_code=42,
         )
     else:
-        # This branch exercises POSIX same-PID exec even on a Windows test host.
-        # The physical Windows spawn/handle path has its own unmocked test.
-        from ouroboros import platform_layer
-
-        monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)
+        # The production restore predicate consumes this one-shot exec token.
         monkeypatch.setenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, case.transaction_id)
 
 
@@ -184,108 +182,90 @@ def test_observed_restart_restores_real_native_source_past_snapshot_age(restart_
     assert transaction["ack_source"] == ("launcher_waitpid" if transport == "launcher" else "direct_exec_successor")
 
 
-@pytest.mark.parametrize("outcome", [
-    "exit42", "late_binding", "exit1", "signal", "foreign_parent_pid", "foreign_parent_birth",
-    "foreign_successor_pid", "foreign_successor_birth",
-])
-def test_windows_direct_parent_exit_observer_reaches_prepared_wait_reader(
-    restart_case, monkeypatch, outcome,
-):
-    """Portable subprocess proxy: Windows HANDLE inheritance still needs native CI."""
-    from ouroboros import platform_layer
+@pytest.mark.parametrize("control", ["restart", "unacknowledged", "panic", "stop_child", "bad_child_source"])
+def test_preserved_question_parent_keeps_its_saved_running_child(restart_case, monkeypatch, control):
+    """Separate owner-question custody counts as surviving ancestry during both kills."""
+    from ouroboros import working_checkpoint
+    from ouroboros.cancel_intents import request_cancel
+    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _working_run
 
     case = restart_case
-    successor = first_cleanup(case)
-    old = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(int(sys.argv[1]))",
-                            "42" if outcome != "exit1" else "1"])
-    try:
-        if outcome == "signal":
-            # A genuine signal death, rather than a mocked missing PID.
-            sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-            old.wait(timeout=5)
-            old = sleeper
-            old.send_signal(signal.SIGTERM)
-        tx = delegate_recovery._read_restart_transaction(case.root, case.transaction_id)
-        tx.update({
-            "supervisor_pid": old.pid, "direct_spawn_parent_birth": "win-filetime:12345",
-            "direct_spawn_successor_pid": os.getpid(),
-            "direct_spawn_successor_birth": "win-filetime:67890",
-        })
-        if outcome == "foreign_successor_pid":
-            tx["direct_spawn_successor_pid"] += 1
-        if outcome == "foreign_successor_birth":
-            tx["direct_spawn_successor_birth"] = "win-filetime:67891"
-        if outcome == "late_binding":
-            tx.pop("direct_spawn_successor_pid")
-            tx.pop("direct_spawn_successor_birth")
-        delegate_recovery._write_restart_transaction(case.root, tx)
-        active = delegate_recovery._read_restart_transaction(case.root, "active")
-        active["supervisor_pid"] = old.pid
-        atomic_write_json(delegate_recovery._active_restart_transaction_path(case.root), active)
+    case.task["root_task_id"] = case.task_id
+    _working_run(case.root, workers, "saved-child", parent=case.task_id)
+    workers.WORKERS[1] = workers.Worker(1, InertProcess(), SimpleNamespace(), busy_task_id="saved-child")
+    if control == "stop_child":
+        request_cancel(case.root, "saved-child", reason="owner stop", source="owner", requested_by="owner")
+    if control == "bad_child_source":
+        working_checkpoint.checkpoint_path(case.root, "saved-child", 1).write_bytes(b"broken source")
+    native = owner_wait.prepare_owner_wait_handoffs(case.root, workers.RUNNING, case.transaction_id)
+    selected = delegate_recovery.prepare_planned_restart_handoffs(
+        case.root, workers.RUNNING, restart_transaction_id=case.transaction_id, additional_task_ids=native)
+    assert selected == native == {case.task_id}
+    prepare_restart_returns(case.root, workers.RUNNING, workers.PENDING,
+                            transaction_id=case.transaction_id, owner_wait_ids=selected)
+    assert workers.kill_workers(
+        terminal_status="cancelled", result_reason="Planned self-restart",
+        preserve_pending=True, preserve_running_task_ids=selected,
+        reconcile_delegate_custody=False, archive_service_logs=False, retain_saved_work=True)
+    assert [row["id"] for row in workers.PENDING] == [case.task_id]
+    assert set(workers.RUNNING) == (set() if control == "stop_child" else {"saved-child"})
+    if control == "stop_child":
+        assert load_task_result(case.root, "saved-child")["status"] == "cancelled"
+    else:
+        assert load_task_result(case.root, "saved-child")["status"] == "running"
+    # The lifespan's second cleanup sees the parent already queued and the child
+    # still carried in RUNNING for recovery from its last working checkpoint.
+    assert workers.kill_workers(
+        terminal_status="cancelled", result_reason="Server shutdown.", preserve_pending=True,
+        reconcile_delegate_custody=False, archive_service_logs=False, retain_saved_work=True)
+    if control != "unacknowledged":
+        acknowledge(case, monkeypatch, "launcher")
+    if control == "panic":
+        (case.root / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
+    workers.RUNNING.clear()
+    workers.PENDING.clear()
+    queue.restore_pending_from_snapshot()
+    rows = {row["id"]: row for row in workers.PENDING}
+    child_survives = control not in {"stop_child", "bad_child_source"}
+    assert set(rows) == {case.task_id} | ({"saved-child"} if child_survives else set())
+    if child_survives:
+        child = rows["saved-child"]
+        assert child["_attempt"] == 2 and child["parent_task_id"] == case.task_id
+        source = working_checkpoint.recovery_source_for_task(case.root, child)
+        assert source["messages"][-1]["content"] == "done a"
+    if control in {"unacknowledged", "panic"}:
+        assert all(budget_hold_fact(row)["reason"] == HOLD_SAVED_WORK for row in rows.values())
+        commands = stdqueue.Queue()
+        workers.WORKERS[0] = workers.Worker(0, InertProcess(), commands)
+        monkeypatch.setattr(workers, "load_state", lambda: {})
+        workers.assign_tasks()
+        assert commands.empty() and not workers.RUNNING
+    else:
+        parent = rows[case.task_id]
+        assert parent["_owner_wait_resume"]["source_ref"] == case.wait["source_ref"]
+        assert owner_wait.load_owner_wait(case.ctx, parent["_owner_wait_resume"])["round_idx"] == 7
+        assert all(budget_hold_fact(row) is None for row in rows.values())
+        from supervisor import state
 
-        class Kernel:
-            closed = False
-            waited = False
-
-            def GetProcessId(self, handle):
-                assert handle == 12345
-                return old.pid + (outcome == "foreign_parent_pid")
-
-            def GetProcessTimes(self, handle, created, *_rest):
-                stamp = 12345 + (outcome == "foreign_parent_birth")
-                created._obj.dwLowDateTime = stamp
-                created._obj.dwHighDateTime = 0
-                return True
-
-            def WaitForSingleObject(self, handle, timeout):
-                assert handle == 12345 and timeout == 0xFFFFFFFF
-                self.waited = True
-                if outcome == "late_binding":
-                    pending = delegate_recovery._read_restart_transaction(case.root, case.transaction_id)
-                    pending.update({"direct_spawn_successor_pid": os.getpid(),
-                                    "direct_spawn_successor_birth": "win-filetime:67890"})
-                    delegate_recovery._write_restart_transaction(case.root, pending)
-                old.wait(timeout=5)
-                return 0
-
-            def GetExitCodeProcess(self, handle, code):
-                assert self.waited and old.poll() is not None
-                code._obj.value = old.returncode & 0xFFFFFFFF
-                return True
-
-            def CloseHandle(self, handle):
-                self.closed = True
-                assert handle == 12345
-                return True
-
-        kernel = Kernel()
-        monkeypatch.setattr(delegate_recovery, "_windows_restart_kernel32", lambda: kernel)
-        monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
-        monkeypatch.setattr(platform_layer, "process_start_time", lambda pid: "win-filetime:67890")
-        monkeypatch.setenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, case.transaction_id)
-        monkeypatch.setenv(delegate_recovery.WINDOWS_RESTART_PARENT_HANDLE_ENV, "12345")
-        delegate_recovery._ack_direct_exec_successor(case.root)
-        monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)  # resume portable reader on this host
-        assert kernel.closed
-        assert delegate_recovery.WINDOWS_RESTART_PARENT_HANDLE_ENV not in os.environ
-        observed = delegate_recovery._read_restart_transaction(case.root, case.transaction_id)
-        if outcome in {"exit42", "late_binding"}:
-            assert kernel.waited and observed["status"] == "normal_exit_acknowledged"
-            assert observed["ack_source"] == "windows_direct_parent_handle"
-            assert owner_wait.restore_owner_wait_allowed(case.root, successor)
-            assert restore_stale_snapshot(case) == 1
-            assert owner_wait.load_owner_wait(case.ctx, workers.PENDING[0]["_owner_wait_resume"])["round_idx"] == 7
-        else:
-            assert observed["status"] == "prepared"
-            assert not owner_wait.restore_owner_wait_allowed(case.root, successor)
-    finally:
-        if old.poll() is None:
-            old.terminate()
-        old.wait(timeout=5)
+        commands = stdqueue.Queue()
+        workers.WORKERS.update({wid: workers.Worker(wid, InertProcess(), commands) for wid in (0, 1)})
+        monkeypatch.setattr(workers, "load_state", lambda: {})
+        monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 100.0)
+        workers.assign_tasks()
+        assert {commands.get_nowait()["id"] for _ in rows} == set(rows)
+        assert commands.empty() and set(workers.RUNNING) == set(rows)
 
 
 @pytest.mark.parametrize("refusal", ["unacknowledged", "spent_wait", "panic", "owner_restart", "bad_source"])
 def test_old_snapshot_never_revives_unproven_or_spent_wait(restart_case, monkeypatch, refusal):
+    """Owner 2026-10-08 (#1563): a crash-like (unacknowledged) stop or a Panic keeps the
+    exact question-wait source HELD for an explicit Resume — never dispatched by itself;
+    the owner's acknowledged Restart returns the wait it named; a spent wait or an
+    unreadable source never revives."""
+    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+
     case = restart_case
     first_cleanup(case)
     if refusal != "unacknowledged":
@@ -299,8 +279,25 @@ def test_old_snapshot_never_revives_unproven_or_spent_wait(restart_case, monkeyp
     elif refusal == "bad_source":
         path = task_artifact_dir_path(case.root, case.task_id) / case.wait["source_ref"]["path"]
         path.write_bytes(b"broken source")
-    assert restore_stale_snapshot(case) == 0
-    assert not workers.PENDING
+    restored = restore_stale_snapshot(case)
+    if refusal in {"spent_wait", "bad_source"}:
+        assert restored == 0 and not workers.PENDING
+        return
+    [row] = workers.PENDING
+    if refusal == "owner_restart":  # the owner's acknowledged Restart returns the wait it named
+        assert row["_owner_wait_resume"]["source_ref"] == case.wait["source_ref"]
+        assert budget_hold_fact(row) is None
+        return
+    assert budget_hold_fact(row)["reason"] == HOLD_SAVED_WORK, "held for an explicit Resume"
+    assert budget_hold_fact(row)["stop_cause"] == ("panic" if refusal == "panic" else "app_stop")
+    assert not row.get("_owner_wait_resume"), "never the cold wait handoff the stop refused"
+    assert row["_working_recovery"]["source_ref"] == case.wait["source_ref"]
+    assert row["_attempt"] == case.attempt + 1
+    commands = stdqueue.Queue()
+    workers.WORKERS[0] = workers.Worker(0, InertProcess(), commands)
+    monkeypatch.setattr(workers, "load_state", lambda: {})
+    workers.assign_tasks()
+    assert commands.empty() and not workers.RUNNING, "nothing runs before the owner's Resume"
 
 
 def test_running_projection_preserves_the_native_continuation_before_cold_load(restart_case):
@@ -430,11 +427,14 @@ def restore_project_wait(case, monkeypatch, *, registry_outage=True):
 
 
 @pytest.mark.serial
-def test_project_wait_recovers_once_after_registry_hold(restart_case, monkeypatch):
+@pytest.mark.parametrize("owner_restart", [False, True])
+def test_project_wait_recovers_once_after_registry_hold(restart_case, monkeypatch, owner_restart):
     from tests.test_project_hold_recovery import worker
 
     case = restart_case
     restored = restore_project_wait(case, monkeypatch)
+    if owner_restart:  # owner 2026-10-08 (quiz d2f7532b): the owner's Restart returns the work it named
+        (case.root / "state" / "owner_restart_no_resume.flag").write_text("owner_restart", encoding="utf-8")
     handoff = dict(restored["_owner_wait_resume"])
     original = read_actor_source_bytes(case.root, case.task_id, handoff["source_ref"])
     sent = worker(SimpleNamespace(root=case.root), monkeypatch)
@@ -479,7 +479,7 @@ def test_project_wait_unreadable_authority_stays_same_id_then_recovers(restart_c
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("refusal", ["unacknowledged", "spent_wait", "panic", "owner_restart", "deadline", "ceiling",
+@pytest.mark.parametrize("refusal", ["unacknowledged", "spent_wait", "panic", "deadline", "ceiling",
                                    "ceiling_unreadable_transaction", "stop"])
 def test_project_wait_positive_refusal_uses_existing_custody(restart_case, monkeypatch, refusal):
     from ouroboros.cancel_intents import request_cancel

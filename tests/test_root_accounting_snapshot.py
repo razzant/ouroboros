@@ -173,26 +173,33 @@ def test_checkpoint_refresh_updates_snapshot_but_stale_phase_patch_does_not(root
         assert projected["root_phase_checkpoint"] == after["root_phase_checkpoint"]
 
 
-def test_weighted_compaction_preserves_checkpoint_counts(root, monkeypatch):
-    from tests.fixtures_usage_compaction import _compact, _ledger_rows, age_fixture_clock
+def test_an_imported_weighted_aggregate_keeps_checkpoint_counts(root, tmp_path):
+    from tests._usage_store_testing import write_compacted_journal
 
-    age_fixture_clock(monkeypatch)
-
-    unresolved_ids = set()
     for _ in range(6):
         reservation = _reserve(root)
-        unresolved_ids.add(reservation.attempt_id)
         ua.mark_dispatched(reservation)
         ua.mark_unresolved(reservation, "provider_outcome_unknown")
-    _settle(root, 0.5)  # Only the measured settlement may fold; late receipts keep their identities.
-    before = _checkpoint(root)["root_phase_checkpoint"]["accounting"]
-    assert before["attempt_counts"] == {"unresolved": 6}
-    assert _compact(root) is not None
-    rows = _ledger_rows(root)
-    for attempt_id in unresolved_ids:
-        assert [row["state"] for row in rows if row["attempt_id"] == attempt_id] == ["reserved", "dispatched", "unresolved"]
-    after = _checkpoint(root, "refresh")["root_phase_checkpoint"]["accounting"]
-    assert after == before
+    for _ in range(4):
+        _settle(root, 0.5)
+    live = _checkpoint(root)["root_phase_checkpoint"]["accounting"]
+    assert live["attempt_counts"]["unresolved"] == 6 and live["non_final_rows"] == 6
+
+    # The same money as the retired compaction left it: the four settled
+    # attempts folded into one aggregate (weight 4), the open ones retained.
+    imported = tmp_path / "imported"
+    imported.mkdir()
+    common = dict(model="openai/test", provider="openai", task_id="root", root_task_id="root",
+                  root_limit_usd=100.0, pricing_known=True)
+    chains = []
+    for index in range(6):
+        row = {**common, "kind": "attempt", "attempt_id": f"open-{index}", "reservation_upper_bound_usd": 0.25}
+        chains += [{**row, "state": "reserved"}, {**row, "state": "dispatched"},
+                   {**row, "state": "unresolved", "reason": "provider_outcome_unknown"}]
+    write_compacted_journal(imported, [{**common, "attempt_id": "fold-root", "folded_attempt_count": 4,
+                                        "cost_usd": 2.0, "cost_final": True,
+                                        "reservation_upper_bound_usd": 1.0}], chains)
+    assert _checkpoint(imported)["root_phase_checkpoint"]["accounting"] == live
 
 
 def test_snapshot_keeps_logical_root_scope_on_retry(root):

@@ -29,6 +29,7 @@ from tests.system_e2e.harness import (
     wait_durable_result,
     wait_until,
 )
+from tests._usage_store_testing import ledger_rows
 
 
 pytestmark = [pytest.mark.serial, pytest.mark.browser]
@@ -226,14 +227,11 @@ def test_owner_wait_preserves_form_and_lends_one_worker(wait_clone, local_form, 
             assert len(oracle.task_drive(task_a).events("task_received")) == 1
             assert wait_until(lambda: task_a not in oracle.running_ids(), 30)
             assert gate.timed_out is False
-            usage = [row for row in oracle._jsonl("state/usage_attempts.jsonl")
+            usage = [row for row in ledger_rows(server.data_root)
                      if row.get("task_id") == task_a and row.get("category") == "task"]
-            identities = []
-            for state in ("reserved", "dispatched", "settled"):
-                attempts = [row["attempt_id"] for row in usage if row.get("state") == state]
-                assert len(attempts) == len(set(attempts)) == len(steps)
-                identities.append(set(attempts))
-            assert identities[0] == identities[1] == identities[2]
+            # One current row per attempt: every step's attempt went the whole way.
+            attempts = [row["attempt_id"] for row in usage if row.get("state") == "settled"]
+            assert len(attempts) == len(set(attempts)) == len(steps) == len(usage)
             if output := os.environ.get("OUROBOROS_BROWSER_EVIDENCE_OUT"):
                 destination = Path(output) / answer_path
                 destination.mkdir(parents=True, exist_ok=True)

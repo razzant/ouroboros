@@ -1,4 +1,9 @@
-"""Selected-skill publication preflight and safe in-process scan cache."""
+"""Selected-skill publication preflight and safe in-process scan cache.
+
+Preflight returns exactly one backend-authored state (``ready``, ``warnings``,
+``needs_attention``, ``repairable``, ``hard_block``); the browser renders it, and
+only ``hard_block`` sets ``task_start_allowed`` false.
+"""
 
 from __future__ import annotations
 

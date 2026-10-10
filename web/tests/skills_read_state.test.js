@@ -820,7 +820,8 @@ test('Skills header Refresh and page revisit call the currently selected catalog
             addEventListener: (event, callback) => { listeners[event] = callback; },
             removeEventListener: event => { delete listeners[event]; },
         },
-        skillsPageTemplate: () => '', activateTab() {}, loadHubCatalog() {},
+        skillsPageTemplate: () => '', activateTab() {},
+        loadHubCatalog(force) { calls.push(`catalog:${force}`); },
         attachActionHandlers: () => ({ closeMenus() {}, destroy() {} }),
         bindTabStrip: (strip, { onChange }) => {
             tabs.forEach(tab => { tab.handlers.click = () => onChange(tab.dataset.tab, tab); });
@@ -843,7 +844,8 @@ test('Skills header Refresh and page revisit call the currently selected catalog
         calls.length = 0;
         listeners['ouro:page-shown']({ detail: { page: 'skills' } });
         await nextTurn();
-        assert.deepEqual(calls, [tab.dataset.tab]);
+        // The OuroborosHub pane reads the catalog itself: no second forced read on page show.
+        assert.deepEqual(calls, tab.dataset.tab === 'ouroboroshub' ? ['ouroboroshub'] : ['catalog:true', tab.dataset.tab]);
     }
     const older = deferred(), current = deferred();
     context.renderMarketplacePane = () => older.promise;

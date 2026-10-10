@@ -199,7 +199,6 @@ def test_attachment_label_sanitized_for_manifest(tmp_path):
 def test_oversized_attachment_image_not_native_injected(tmp_path):
     """An attachment image over the 8MB native-inject cap stays manifest-readable but is NOT
     base64-injected into the message (no context/provider byte-bomb); a small one IS injected."""
-    import json
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.context import build_user_content
 
@@ -207,8 +206,13 @@ def test_oversized_attachment_image_not_native_injected(tmp_path):
     drive.mkdir()
     attach = task_artifact_dir_path(drive, "t", create=True) / "attachments"
     attach.mkdir(parents=True, exist_ok=True)
-    (attach / "big.png").write_bytes(b"\x89PNG\r\n" + b"\0" * (9 * 1024 * 1024))
-    (attach / "small.png").write_bytes(b"\x89PNG\r\n" + b"\0" * 1024)
+    import base64
+    from tests.test_live_image_delivery import pixels
+
+    small = pixels()
+    big = small + bytes(9 * 1024 * 1024)
+    (attach / "big.png").write_bytes(big)
+    (attach / "small.png").write_bytes(small)
     task = {
         "id": "t", "drive_root": str(drive), "text": "look",
         "attachment_images": [
@@ -216,9 +220,13 @@ def test_oversized_attachment_image_not_native_injected(tmp_path):
             {"relpath": "attachments/small.png", "mime": "image/png", "is_image": True, "label": "small"},
         ],
     }
-    blob = json.dumps(build_user_content(task))
-    assert "small.png" in blob  # small image natively injected (its _source_path appears)
-    assert "big.png" not in blob  # oversized image skipped (manifest-readable only, no data URL)
+    content = build_user_content(task)
+    image, = [block for block in content if block["type"] == "image_url"]
+    assert base64.b64decode(image["image_url"]["url"].split(",", 1)[1]) == small
+    assert image["_source_path"].endswith("small.png")
+    note = next(block["text"] for block in content if block["type"] == "text" and "big.png" in block["text"])
+    assert "exceeds the 8 MiB automatic attachment read budget" in note and "Original:" in note
+    assert (attach / "big.png").read_bytes() == big
 
 
 def test_resolve_ffmpeg_chain_sibling_then_imageio_then_path(tmp_path, monkeypatch):

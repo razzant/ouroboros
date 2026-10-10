@@ -1,0 +1,117 @@
+# Ship Ouroboros record metadata with Vector (https://vector.dev). See README.md.
+# /data is Ouroboros's data root as the Compose example in docs/DEPLOYMENT.md mounts it; mount the same
+# volume read-only here or replace /data with your data root. Vector keeps its read checkpoints in data_dir.
+data_dir: /var/lib/vector
+sources:
+  ouroboros_records:
+    type: file
+    include:
+      - /data/logs/events.jsonl
+      - /data/logs/tools.jsonl
+      - /data/logs/supervisor.jsonl
+      # Generations rotated while Vector was down; one it already read keeps its inode and checkpoint.
+      - /data/archive/events_*.jsonl
+      - /data/archive/tools_*.jsonl
+      - /data/archive/supervisor_*.jsonl
+      # Worker rows of subagents and forked-memory tasks; deleted with the task drive after retention.
+      # Their tools.jsonl is not read: the canonical tools.jsonl holds the same rows.
+      - /data/state/headless_tasks/*/data/logs/events.jsonl
+    read_from: beginning
+    ignore_older_secs: 86400       # older archive generations and finished drives: a one-time backfill, not this tail
+    fingerprint:
+      strategy: device_and_inode   # rotation renames the file into archive/, keeping its inode
+    max_line_bytes: 16777216       # the 102400 default DROPS longer rows; real rows reach ~300 KB
+transforms:
+  ouroboros_metadata:
+    type: remap
+    inputs: [ouroboros_records]
+    drop_on_error: true
+    source: |
+      path = string!(.file)
+      row = object!(parse_json!(string!(.message)))
+      anchors = ["task_received", "task_done", "task_error", "task_metrics_event", "task_cost_finalized",
+                 "llm_round", "llm_usage", "llm_api_error", "tool_call_started", "tool_call", "tool_call_timeout",
+                 "worker_crash", "worker_dead_detected", "supervisor_loop_stall", "supervisor_loop_stall_end"]
+      if !includes(anchors, row.type) { abort }
+      allowed = ["ts", "type", "task_id", "root_task_id", "parent_task_id", "delegation_role", "task_depth",
+                 "task_attempt", "chat_id", "execution_id", "round_id", "llm_call_id", "invocation_id",
+                 "tool_call_id", "ledger_attempt_ids", "physical_attempt_id", "operation_id", "worker_id",
+                 "pid", "task_type", "status", "reason_code", "is_error", "tool", "elapsed_ms", "timeout_sec",
+                 "waited_ms", "exit_code", "timed_out", "round", "attempt", "model", "provider",
+                 "reasoning_effort", "prompt_tokens", "completion_tokens", "cached_tokens",
+                 "cache_write_tokens", "duration_ms", "duration_sec", "tool_calls", "tool_errors", "error_kind",
+                 "status_code", "retry_same_request", "phase", "exitcode", "busy_task_id", "signal",
+                 "stalled_sec"]
+      . = filter(row) -> |key, _value| { includes(allowed, key) }
+      if row.type == "task_received" { .task_id = row.task.id }  # the id only; the rest of `task` is content
+      .log = replace(replace(replace(path, r'^.*/', ""), r'\.jsonl$', ""), r'_.*$', "")  # archive/<log>_<stamp>
+      .child_drive = contains(path, "/state/headless_tasks/")  # a subagent's or forked-memory task's own drive
+sinks:
+  ouroboros_metadata_file:     # replace with your destination (Loki, Elasticsearch, an OTLP endpoint, ...)
+    type: file
+    inputs: [ouroboros_metadata]
+    path: /var/lib/vector/ouroboros-metadata.jsonl
+    encoding:
+      codec: json
+tests:  # one input per test: a condition passes when any output event meets it
+  - name: an archived tools row keeps only its metadata
+    inputs:
+      - insert_at: ouroboros_metadata
+        type: log
+        log_fields:
+          file: /srv/ouroboros/data/archive/tools_20261005T120000_1.jsonl
+          message: '{"ts":"2026-10-05T00:00:00+00:00","type":"tool_call","task_id":"t1","tool":"run_command","invocation_id":"i1","args":{"cmd":"echo hi"},"result_preview":"hi","status":"ok","is_error":false,"elapsed_ms":12}'
+    outputs:
+      - extract_from: ouroboros_metadata
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.type, "tool_call")
+              assert_eq!(.invocation_id, "i1")
+              assert_eq!(.elapsed_ms, 12)
+              assert!(!exists(.args) && !exists(.result_preview) && !exists(.message) && !exists(.file))
+              assert_eq!(.log, "tools")
+              assert_eq!(.child_drive, false)
+  - name: a child-drive task_done row drops its content and money
+    inputs:
+      - insert_at: ouroboros_metadata
+        type: log
+        log_fields:
+          file: /srv/ouroboros/data/state/headless_tasks/t2/data/logs/events.jsonl
+          message: '{"ts":"2026-10-05T00:00:01+00:00","type":"task_done","task_id":"t2","status":"completed","outcome_axes":{"objective":{"status":"fail","detail":"secret plan"}},"artifact_bundle":{"files":["/home/u/x"]},"cancel_origin":{"reason":"why"},"accounted_upper_bound_usd":0.5}'
+    outputs:
+      - extract_from: ouroboros_metadata
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.type, "task_done")
+              assert_eq!(.status, "completed")
+              assert!(!exists(.outcome_axes) && !exists(.artifact_bundle) && !exists(.cancel_origin))
+              assert!(!exists(.accounted_upper_bound_usd))
+              assert_eq!(.log, "events")
+              assert_eq!(.child_drive, true)
+  - name: a task start keeps only its task id
+    inputs:
+      - insert_at: ouroboros_metadata
+        type: log
+        log_fields:
+          file: /srv/ouroboros/data/logs/events.jsonl
+          message: '{"ts":"2026-10-05T00:00:03+00:00","type":"task_received","task":{"id":"t4","text":"the owner task text"}}'
+    outputs:
+      - extract_from: ouroboros_metadata
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.type, "task_received")
+              assert_eq!(.task_id, "t4")
+              assert!(!exists(.task))
+              assert_eq!(.child_drive, false)
+  - name: a row that is not an anchor never leaves
+    inputs:
+      - insert_at: ouroboros_metadata
+        type: log
+        log_fields:
+          file: /srv/ouroboros/data/logs/events.jsonl
+          message: '{"ts":"2026-10-05T00:00:02+00:00","type":"history_retention","task_id":"t3","text":"not an anchor"}'
+    no_outputs_from:
+      - ouroboros_metadata

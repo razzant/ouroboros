@@ -130,7 +130,7 @@ def test_backend_only_request_keeps_unconfirmed_custody(owners, monkeypatch):
         cwd_root="active_workspace", outputs=[], before_outputs={}, backend_pid="123",
     )
     executor._SERVICES[record.service_id] = record
-    monkeypatch.setattr(executor, "_iter_process_records", lambda *_: pytest.fail("request must not read durable records"))
+    monkeypatch.setattr(executor, "_owned_process_records", lambda *_: pytest.fail("request must not read durable records"))
     receipts = services.kill_all_services(ctx.drive_root, request_only=True)
     assert receipts == [{"service_id": record.service_id, "requested": False, "scope": "backend",
                          "error": "backend-only process requires executor settlement"}]

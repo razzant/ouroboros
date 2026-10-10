@@ -112,33 +112,43 @@ assumed in two places that used to hardcode TB2.1:
   own rules permit web access is run with the explicit `--allow-agent-web` flag, which
   prints a loud non-leaderboard-faithful warning for TB2.1 and is recorded in the manifest
   and the disclosure ledger — never a silent default.
-- **Every reviewer row the container can run is declared; the rest is disclosed (2026-09-02).**
-  Task acceptance executes every triad row on its configured delivery (owner R2), so
-  `metadata.yaml` declares the rows the container's panel actually runs — api packet rows and
-  configured-subagent native inspection rows, by model id. An agent-session row structurally
+- **Every reviewer row the container can run is declared; the rest is disclosed (2026-09-02;
+  review-pool adapter 2026-10-08).** Task acceptance executes every review-pool row on its
+  configured delivery (owner R2), so `metadata.yaml` declares the rows the container's panel
+  actually runs — api packet rows and configured-subagent native inspection rows, by model id.
+  The container roster is DERIVED from the host roster (`common/model_slots.py`,
+  `container_subagents_setting`; the host roster is read operator-environment first, else the
+  `--settings-path` file — the one precedence shared by `run_tb.py` and the container adapter's
+  `_container_env`): a host roster that already IS the fixed-model contract for the measured
+  model (the `--all-model` launcher wrote it) is forwarded verbatim, seat count and effort
+  included; otherwise the container gets the canonical one-model actor plus the host pool's
+  API seats as they are (their own model id, effort and delivery), and one packet seat on the
+  measured model when the host pool has no API seat at all. The shipped cross-model review
+  defaults are never substituted, and a malformed host roster is a typed refusal recorded on
+  the manifest, never a declared-but-never-run default. An agent-session row structurally
   cannot run inside a Terminal-Bench task container: the image has no harness CLI/daemon, the
   forwarded-env allowlist carries no harness credentials, and the container secret policy
-  forbids them. It is therefore never declared as a used model (a declared-but-never-run model
-  would misrepresent the submission) and is carried as the typed disclosure
-  `triad_rows_not_executable_in_container` (the rows' `harness[=model]` targets) in
-  `run_manifest.json`, with the same list as a comment line in `metadata.yaml`; its acceptance
-  seat degrades typed inside the container, so configure api/native rows for a TB run. Before
-  this change only the panel's non-retrieving api rows ran and were declared, with the shipped
-  defaults substituted when none existed; runs whose panel carries retrieving rows are not
-  comparable on the acceptance axis with earlier runs, and a submission must be read against
-  its own `metadata.yaml` and manifest. `metadata.yaml` cannot distinguish an api packet row
-  from a configured-subagent native inspection row: both are declared under
-  `commit_review_triad` by model id, and under the container's one-model roster a
-  subagent-bound row resolves to the measured model and dedupes onto it
-  (`agent+commit_review_triad`). The per-delivery record is the run manifest: on a fixed-model
-  run `harness.fixed_model_actor.reviewer_slots` carries the projection's `slot_id`,
-  `route{kind, target_id}` and `effort` per row — a fixed-model panel is always direct api
-  rows, so no subagent binding exists there — and `extra.triad_rows_not_executable_in_container`
-  carries the session rows. A plain `--model` run records only the latter; its api-vs-native
-  split is recoverable from the forwarded host settings (`--settings-path`) only when the panel
-  is persisted there — the container adapter resolves the environment first
-  (`harbor_installed_agent.py`, `_container_env`), so a panel supplied only through the
-  operator's environment leaves no durable per-delivery record on a plain `--model` run.
+  forbids them. It is therefore NOT forwarded and never declared as a used model (a
+  declared-but-never-run model would misrepresent the submission); it is carried as the typed
+  disclosure `extra.triad_rows_not_executable_in_container` (the rows' `harness[=model]`
+  targets, in row order) in `run_manifest.json`, as the same list in a comment line of
+  `metadata.yaml`, and admission prints ONE loud warning naming the seats (owner R40) — so
+  configure api seats for a TB run. Runs before 2026-09-02 ran and declared only the panel's
+  non-retrieving api rows, with the shipped defaults substituted when none existed; runs whose
+  pool carries retrieving rows are not comparable on the acceptance axis with those, and a
+  submission must be read against its own `metadata.yaml` and manifest. `metadata.yaml` cannot
+  distinguish an api packet row from a native inspection row: both are declared under the
+  historical label `commit_review_triad` by model id, and a seat on the measured model dedupes
+  onto it (`agent+commit_review_triad`). The per-delivery record is the run manifest: on a
+  fixed-model run `harness.fixed_model_actor.review_pool` carries each marked row's
+  `subagent_id`, `route{kind, target_id[, profile_id]}`, `effort` and `delivery`
+  (`packet`/`native`; `session` for an agent-session row) — the `--all-model` panel is packet
+  seats on the measured model — beside `available_subagents` (the whole roster) and
+  `mismatches`. A plain `--model` run records only `extra.triad_rows_not_executable_in_container`;
+  the forwarded API seats' api-vs-native split is recoverable from the host roster they were
+  derived from (operator environment, else `--settings-path`) and is durable only when that
+  roster is persisted in the settings file — a pool supplied only through the operator's
+  environment leaves no durable per-delivery record on a plain `--model` run.
 - **Harbor version:** the pinned TB2.1 bench venv is harbor **0.18.0** (`~/ouro/venv-tb`). 0.20.0
   is the current latest and is installed in a SEPARATE venv (`~/ouro/venv-fb`), reachable via
   `--harbor-bin` and leaving `venv-tb` frozen at 0.18.0 so published TB2.1 numbers keep their

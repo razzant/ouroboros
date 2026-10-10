@@ -18,7 +18,7 @@
         "inputId": "per-task-budget",
         "label": "Per-task Cost Cap (USD)",
         "min": "0.01",
-        "note": "Hard cap over one task's WHOLE tree, subagents included: further model calls are refused and the task is force-stopped once the tree's accounted spend reaches this (a graceful wrap-up fires just before). The wrap-up itself needs about $3.00 of room, so a cap at or below that finalizes the task immediately instead of running any work rounds.",
+        "note": "Hard cap over one task's WHOLE tree, subagents included: new model calls are refused once the tree's known spend (confirmed and estimated) reaches it. A resumable task then pauses with its work saved; a run that cannot be resumed ends as budget-exhausted instead. Calls already in flight settle normally and can take the total past the cap. Reservations and unresolved charges are shown separately, not counted as spending. Raising the cap does not resume a paused task.",
         "settingKey": "OUROBOROS_PER_TASK_COST_USD",
         "settingsInputId": "s-settings-per-task-cost",
         "stateKey": "perTaskCostUsd",
@@ -322,7 +322,7 @@
       },
       {
         "className": "pro",
-        "copy": "Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal triad + scope review gate.",
+        "copy": "Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal review gate.",
         "label": "Pro",
         "tone": "Power",
         "value": "pro"
@@ -513,7 +513,7 @@
       "fallback": "zai::glm-5.3-flash",
       "light": "zai::glm-5.3-flash",
       "main": "zai::glm-5.3",
-      "vision": ""
+      "vision": "zai::glm-5.3-flash"
     }
   },
   "modelSuggestions": [

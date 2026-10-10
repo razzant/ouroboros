@@ -18,7 +18,7 @@ def test_prompts_do_not_infer_current_human_from_authors():
     assert "Razzhigaev" not in system
 
 
-def test_live_task_message_marker_uses_my_human_wording():
+def test_live_task_message_marker_uses_my_human_wording(tmp_path):
     system = (REPO_ROOT / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
     # v7 L-B split: sweep the whole loop family (facade + leaves).
     loop_dir = REPO_ROOT / "ouroboros"
@@ -31,7 +31,16 @@ def test_live_task_message_marker_uses_my_human_wording():
     assert "[Message from my human]" in system
     # The drained mailbox text (plus its optional surface note) must still go
     # through the owner-marking wrapper before injection.
-    assert "_owner_marked_content(noted_owner_text(owner_ctx, entry, " in loop
+    import queue
+    from types import SimpleNamespace
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+
+    messages = []
+    assert write_owner_message(tmp_path, "look here", "wording-task", msg_id="owner-wording", client_surface={"channel": "telegram"})
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "wording-task", None, set(), SimpleNamespace(task_attempt=1))
+    assert messages[0]["content"].startswith("[Message from my human]: look here\n[note: sent from client surface:")
+    assert "telegram" in messages[0]["content"]
     # Addressed task-tree messages are peer/ancestor/peer-root communication,
     # not owner dialogue, and must never borrow the owner's priority marker.
     # Ask the render ladder itself: every provenance it can frame — including

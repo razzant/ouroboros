@@ -37,6 +37,9 @@ def registry(tmp_path, monkeypatch):
         "review_notes": "PREVIOUS_CASE_REVIEW", "disabled_tools": ["web_search"],
         "predecessor_authority": {
             "task_id": "previous", "result": "PREVIOUS_CASE_RESULT", "authority_sha256": "a" * 64,
+            "task_contract": {"context": "never use native/API fallback",
+                              "constraints": "L1 asks L2 to spawn L3"},
+            "verification_receipts": [{"evidence": "PREVIOUS_CASE_RECEIPT"}],
             "source": {"kind": "task_result", "task_id": "previous", "projection": "authority",
                        "read": {"tool": "get_task_result", "arguments": {
                            "task_id": "previous", "include_authority": True}}},
@@ -89,7 +92,9 @@ def test_declared_child_excludes_prior_carriers_keeps_authority_and_restarts(
     assert predecessor["source"] == before["predecessor_authority"]["source"]
     assert predecessor["task_id"] == "previous"
     assert predecessor["authority_sha256"] == "a" * 64
-    assert predecessor["omitted_fields"] == ["result"]
+    assert set(predecessor["omitted_fields"]) == {"result", "task_contract", "verification_receipts"}
+    assert predecessor["omitted_fields"]["result"] == len("PREVIOUS_CASE_RESULT")
+    assert predecessor["omitted_fields"]["verification_receipts"] > 0
     from ouroboros.tool_access import lineage_task_ids
 
     lineage = {"parent_task_id": "parent", "root_task_id": "root"}
@@ -136,6 +141,9 @@ def test_ordinary_child_keeps_parent_context_notes_and_attachment_route(registry
     assert contract["notes"] == "PREVIOUS_CASE_NOTES"
     assert contract["review_notes"] == "PREVIOUS_CASE_REVIEW"
     assert "PREVIOUS_CASE_RESULT" in json.dumps(contract["predecessor_authority"])
+    assert contract["predecessor_authority"]["task_contract"] == registry._ctx.task_contract[
+        "predecessor_authority"]["task_contract"]
+    assert "PREVIOUS_CASE_RECEIPT" not in json.dumps(contract)
     assert event["context"] == "CHILD_REFERENCE"
     assert ("input_sources" in contract) == bool(options)
 

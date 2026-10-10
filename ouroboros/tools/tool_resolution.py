@@ -80,7 +80,7 @@ def system_repo_dir_for(ctx: Any) -> pathlib.Path:
     return pathlib.Path(getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir"))
 
 
-_PATH_NORMALIZED_TOOLS = frozenset({"read_file", "write_file", "edit_text", "list_files", "search_code", "query_code"})
+_PATH_NORMALIZED_TOOLS = frozenset({"read_file", "write_file", "edit_text", "apply_patch", "edit_batch", "list_files", "search_code", "query_code"})
 _TOP_LEVEL_PATH_WRITE_TOOLS = frozenset({"write_file", "edit_text"})
 _ROOT_SELECTED_READ_TOOLS = frozenset({"read_file", "list_files", "search_code"})
 
@@ -198,14 +198,31 @@ def _normalize_dispatch_path_args_result(
     root_arg = root_arg or "active_workspace"
     if root_arg in ("active_workspace", "system_repo"):
         try:
+            from ouroboros.body_candidate import serving_alias_root
+
             norm_root = active_repo_dir_for(ctx) if root_arg == "active_workspace" else system_repo_dir_for(ctx)
+            # A bound candidate keeps the serving spelling of a body path (`repo/x`, the
+            # absolute serving path) naming the same file it named on the binding write.
+            serving_alias = serving_alias_root(ctx, norm_root)
+
+            def _normalize(text: str) -> str:
+                text = text.strip().replace("\\", "/")
+                relative = _registry().normalize_root_relative(norm_root, text)
+                if serving_alias is not None and relative == text:
+                    relative = _registry().normalize_root_relative(serving_alias, text)
+                return relative
+
             for _key in ("path", "dir"):
                 if isinstance(args.get(_key), str) and args[_key]:
-                    args[_key] = _registry().normalize_root_relative(norm_root, args[_key])
-            if isinstance(args.get("files"), list):
-                for _f in args["files"]:
+                    args[_key] = _normalize(args[_key])
+            for entries in (args.get("files"), args.get("edits")):
+                for _f in entries if isinstance(entries, list) else []:
                     if isinstance(_f, dict) and isinstance(_f.get("path"), str) and _f["path"]:
-                        _f["path"] = _registry().normalize_root_relative(norm_root, _f["path"])
+                        _f["path"] = _normalize(_f["path"])
+            if name == "apply_patch" and isinstance(args.get("patch"), str):
+                from ouroboros.tools.edit_ops import normalize_patch_paths
+
+                args["patch"] = normalize_patch_paths(args["patch"], _normalize)
         except Exception:
             pass
         return _DispatchPathNormalization()
@@ -277,10 +294,9 @@ _TOOL_ARG_ALIASES: dict[str, dict[str, str]] = {
 }
 
 
-_IGNORE_ROOT_ARG_TOOLS = frozenset({
-    "commit_reviewed",
-    "vcs_commit_reviewed",
-})
+# Empty: the commit tools declare ``root`` and refuse every root but the system
+# repository themselves; the name stays for ``registry.py``'s re-export.
+_IGNORE_ROOT_ARG_TOOLS: frozenset[str] = frozenset()
 
 
 _GENERIC_VCS_TARGET_TOOLS = frozenset({
@@ -289,6 +305,7 @@ _GENERIC_VCS_TARGET_TOOLS = frozenset({
     "vcs_pull_ff",
     "vcs_restore",
     "vcs_revert",
+    "review_change",
 })
 
 
@@ -521,10 +538,10 @@ def _user_files_binding_reaches_repo(ctx: Any, binding: Any) -> bool:
     """
     from ouroboros.tool_access import path_is_relative_to
 
-    repo = system_repo_dir_for(ctx)
+    repos = {system_repo_dir_for(ctx), pathlib.Path(getattr(ctx, "serving_repo_dir", None) or system_repo_dir_for(ctx))}
     return any(
         item.root == "user_files" and item.target_path is not None
-        and path_is_relative_to(pathlib.Path(item.target_path), repo)
+        and any(path_is_relative_to(pathlib.Path(item.target_path), repo) for repo in repos)
         for item in _binding_items(binding)
     )
 

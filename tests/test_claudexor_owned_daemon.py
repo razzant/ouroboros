@@ -3589,10 +3589,8 @@ def test_the_proxy_count_in_the_docs_matches_the_handlers_that_exist(tmp_path):
     places a reader looks first. A hand-counted number in prose cannot be trusted
     to be re-counted when the fifth one lands, so it is asserted instead.
 
-    ``docs/ARCHITECTURE.md`` carries the same module-local count in its gateway
-    map. Every Claudexor route must also be named by one of the dedicated gateway
-    module entries: a proxy the map never names is a proxy nobody discovers from
-    the architecture doc.
+    The module map names the gateway owners; the endpoint registry names every
+    registered route. Short module-purpose rows need not duplicate that registry.
     """
     import inspect
     import re
@@ -3612,18 +3610,14 @@ def test_the_proxy_count_in_the_docs_matches_the_handlers_that_exist(tmp_path):
     )
 
     arch = architecture_text()
-    account_line = next(ln for ln in arch.splitlines() if "claudexor_accounts.py" in ln)
-    assert f"{expected} thin proxies" in account_line.lower(), (
-        "the gateway map still counts a different number of account proxies: "
-        f"{account_line.strip()[:160]}"
-    )
-    gateway_lines = [
-        ln for ln in arch.splitlines()
-        if "claudexor_accounts.py" in ln or "claudexor_quota.py" in ln
-    ]
+    assert "claudexor_accounts.py" in arch and "claudexor_quota.py" in arch
+    from ouroboros.reference_books import load_reference_book, read_book_section
 
-    # Every REGISTERED path is named in that map entry, so a new proxy cannot
-    # land undocumented behind an updated count.
+    book = load_reference_book(pathlib.Path(__file__).resolve().parents[1], "architecture")
+    endpoints = read_book_section(book, "4. Server API Endpoints").text
+    documented = set(re.findall(r"^\|\s*(?:GET|POST|PUT|PATCH|DELETE|ANY)\s*\|\s*`([^`]+)`", endpoints, re.M))
+
+    # Every registered full path belongs in its canonical endpoint registry.
     from ouroboros.gateway.router import collect_routes
 
     paths = {
@@ -3632,12 +3626,7 @@ def test_the_proxy_count_in_the_docs_matches_the_handlers_that_exist(tmp_path):
     }
     assert paths, "no /api/claudexor/ routes are registered"
     for path in sorted(paths):
-        # The map spells path params by name, not by their brace form for the
-        # two-segment removal route; compare on the stable prefix.
-        prefix = re.split(r"\{", path)[0].rstrip("/")
-        assert any(prefix in line for line in gateway_lines), (
-            f"{path} is registered but the gateway map never names it"
-        )
+        assert path in documented, f"{path} is registered but the endpoint registry never names it"
 
 
 # ---------------------------------------------------------------------------

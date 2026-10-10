@@ -1,4 +1,8 @@
-"""Effective task status helpers shared by tools and gateways."""
+"""Effective task status helpers shared by tools and gateways.
+
+Only pooled execution owners enter worker-boot orphan inference; direct,
+presence and unknown owners are never inferred dead from a later worker boot.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from datetime import datetime, timezone
 from contextlib import nullcontext
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from ouroboros.observability import timed_phase
 from ouroboros.headless import (
     ARTIFACT_STATUS_FAILED,
     ARTIFACT_STATUS_FINALIZING,
@@ -29,6 +34,7 @@ from ouroboros.post_task_checkpoint import (
     _TERMINAL_ACCOUNTING_SCRUB_FIELDS,
     project_replica_task_result_fields,
 )
+from ouroboros.task_result_facts import selected_task_results
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
     STATUS_CANCELLED,
@@ -40,7 +46,6 @@ from ouroboros.task_results import (
     STATUS_RUNNING,
     STATUS_SCHEDULED,
     cancellation_blocks_child_result,
-    list_task_results,
     load_task_result,
     validate_task_id,
 )
@@ -714,12 +719,14 @@ def reconcile_orphaned_running_tasks(
     task-done seam sends. This module stays free of a supervisor import.
     """
     from ouroboros.task_custody import attempt_basis
-    from ouroboros.task_results import list_task_results, write_task_result
+    from ouroboros.task_results import write_task_result
+    from ouroboros.obligations import result_rows
 
     root = pathlib.Path(drive_root)
     healed = 0
     try:
-        running = list_task_results(root, statuses=[STATUS_RUNNING, STATUS_INTERRUPTED])
+        running = [row for row in result_rows(root, "nonterminal", exclude=exclude_task_ids)
+                   if row.get("status") in {STATUS_RUNNING, STATUS_INTERRUPTED}]
     except Exception:
         return 0
     for row in running:
@@ -741,7 +748,7 @@ def reconcile_orphaned_running_tasks(
             log.debug("Orphan reconcile skipped %s: cancel authority unreadable", task_id, exc_info=True)
             continue
         try:
-            effective = load_effective_task_result(root, task_id, materialize_artifacts=False)
+            effective = effective_task_result(root, row, materialize_artifacts=False)
         except Exception:
             continue
         eff_status = str(effective.get("status") or "").strip().lower()
@@ -1194,6 +1201,7 @@ def wait_for_effective_tasks(
     return out
 
 
+@timed_phase("child_lookup")
 def find_child_tasks(
     drive_root: pathlib.Path,
     *,
@@ -1247,8 +1255,7 @@ def find_child_tasks(
             materialize_artifacts=materialize_artifacts,
             _events_index=events_index,
         )
-        for item in list_task_results(pathlib.Path(drive_root))
-        if _raw_row_may_match(item)
+        for item in selected_task_results(pathlib.Path(drive_root), _raw_row_may_match)
     ):
         tid = str(row.get("task_id") or "")
         if not tid or tid == excluded:

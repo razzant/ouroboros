@@ -31,6 +31,11 @@ results and admitted rows with missing receipts remain unknown. Dispatch
 possibility lives monotonically on the row and receipt. Deletion reads the
 receipt from the table's exact root and preserves accepted or unknown obligations.
 
+A refusal at admission is a hold, not a stored witness. An older admission
+consumes only its own firing point, never a later authored one. A custody re-run
+of an already-possible occurrence is marked again even after its row is deleted
+or a successor occurrence replaced it.
+
 A recurring row that waited keeps ONE overdue occurrence (no catch-up burst) and,
 once admitted, moves to the next FUTURE cron point: a delayed run may land
 between two cron instants. That reading of "the row waits" is the author's.
@@ -638,6 +643,7 @@ def _write_receipt(item: Dict[str, Any], record: Dict[str, Any]) -> bool:
             result="Scheduled task queued.", metadata=dict(task.get("metadata") or {}),
             schedule_id=item["schedule_id"], schedule_name=str(record.get("name") or ""),
             schedule_admission=receipt,
+            **({"reasoning_effort": task["reasoning_effort"]} if task.get("reasoning_effort") else {}),
             **({"billing_group": task["metadata"]["billing_group"]}
                if (task.get("metadata") or {}).get("billing_group") else {}),
             **{key: task[key] for key in ("_owner_hold", "_consciousness_continuation") if key in task})

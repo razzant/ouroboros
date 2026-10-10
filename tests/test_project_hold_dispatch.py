@@ -5,7 +5,7 @@ import pytest
 
 from ouroboros.task_results import load_task_result
 from supervisor import queue, workers
-from tests.test_project_hold_recovery import accepted, restore_unreadable, worker
+from tests.test_project_hold_recovery import accepted, restore_unreadable, resume_after_app_stop, worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 
 pytestmark = pytest.mark.serial
@@ -176,6 +176,8 @@ def test_hold_keeps_identity_and_frozen_prepared_resource(host, tmp_path, monkey
     row[change] = row.get(change, 0) + 1 if change in {'chat_id', 'routing_generation'} else 'changed'
     path.write_text(json.dumps(data), encoding="utf-8")
     sent = worker(host, monkeypatch)
+    if frozen and change in {'routing_generation', 'working_dir'}:
+        resume_after_app_stop(host, 'held')
     workers.assign_tasks()
     if frozen and change in {'routing_generation', 'working_dir'}:
         assert [row['id'] for row in sent] == ['held']
@@ -194,6 +196,9 @@ def test_benign_activity_keeps_full_tuple_and_prepared_resource(host, tmp_path, 
     registry.update_project(host.root, 'target', name='Renamed')
     registry.create_project(host.root, 'neighbour')
     sent = worker(host, monkeypatch)
+    workers.assign_tasks()
+    assert not sent, 'registry recovery alone must not release work held after Quit/crash'
+    resume_after_app_stop(host, 'held')
     workers.assign_tasks()
     assert [row['id'] for row in sent] == ['held']
     assert sent[0]['workspace_root'] == prepared['workspace_root']

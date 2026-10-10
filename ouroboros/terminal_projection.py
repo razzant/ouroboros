@@ -6,6 +6,9 @@ A separate short-lived projection
 lock serializes callbacks, never holding the result lock across reentrant IO.
 The chat row's token heals append/receipt-write crashes. Main uses the existing
 bounded outbox; its external send/register crash gap remains at-least-once.
+
+The same rows are the source of a memory page's host stamp (``stamp_facts``,
+``part_stamp``): read and copied, never written or interpreted here.
 """
 from __future__ import annotations
 
@@ -13,11 +16,13 @@ import json
 import logging
 import pathlib
 import uuid
+from collections import Counter
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Iterable
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.task_results import (
+    _TRULY_TERMINAL_STATUSES,
     is_reconciled_presence_placeholder, load_task_result, resolve_task_lineage, task_result_path, write_task_result,
 )
 from ouroboros.utils import jsonl_chain_handles, utc_now_iso
@@ -29,9 +34,7 @@ SETTLEMENT_NONE, SETTLEMENT_DEFERRED, SETTLEMENT_SETTLED = "none", "deferred", "
 def _settled(row: dict) -> bool:
     """Settled for publication: a host-reconciled presence placeholder is not a result (the event
     re-runs), so it owes no terminal projection even when an earlier release already recorded readiness."""
-    from ouroboros.task_status import SETTLED_STATUSES
-
-    return (row.get("status") in SETTLED_STATUSES and not is_reconciled_presence_placeholder(row)
+    return (row.get("status") in _TRULY_TERMINAL_STATUSES and not is_reconciled_presence_placeholder(row)
             and row.get("admission_outcome") != "never_admitted")
 
 
@@ -61,9 +64,10 @@ def _files_ready(root: Any, tid: str, row: dict) -> bool:
 
 
 def _open(row: dict) -> bool:
+    checkpoint = row.get("root_phase_checkpoint")
+    if not isinstance(checkpoint, dict) or not checkpoint.get("post_task_synthesis"):
+        return False
     from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
-
-    checkpoint = row.get("root_phase_checkpoint") or {}
     return post_task_synthesis_is_open(checkpoint.get("post_task_synthesis"))
 
 
@@ -339,14 +343,127 @@ def reconcile_terminal_projections(drive_root: Any) -> int:
     each authority strictly: one bad sibling must not stall others or quarantine
     unknown bytes via a tolerant scan.
     """
-    from ouroboros.task_results import task_results_dir
+    from ouroboros.obligations import result_rows
 
     settled = 0
-    for path in sorted(task_results_dir(drive_root, create=False).glob("*.json")):
+    for row in result_rows(drive_root, "terminal_projection"):
         try:
-            row = load_task_result(drive_root, path.stem, strict=True)
-            if terminal_projection_owed(path.stem, row):
+            if terminal_projection_owed(row["task_id"], row):
                 settled += settle_terminal_projection(drive_root, row["task_id"]) == SETTLEMENT_SETTLED
         except Exception:
-            log.warning("Terminal projection reconciliation deferred for %s", path, exc_info=True)
+            log.warning("Terminal projection reconciliation deferred for %s", row["task_id"], exc_info=True)
     return settled
+
+
+# --- the host stamp of a memory page ------------------------------------------------------------
+
+_TERMINAL_SUMMARIES = frozenset({"terminal_root_projection", "terminal_result_projection"})
+
+
+def _source_address(address: Any) -> str | None:
+    """The text address of the stamp's source row; an entry without a well-formed address has none."""
+    from ouroboros.chat_chain import format_address
+
+    try:
+        return format_address(address)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _stamp_entry(task_id: str, row: dict, source: str, address: Any = None) -> dict:
+    """One task's stamp: the keys every page carries, then optional facts copied from the same source.
+
+    Copied, never interpreted: ``outcome_final`` and ``reason_code`` as the source
+    holds them, ``objective_status`` from its ``outcome_axes``; the axes themselves
+    stay with their source (one axis can be kilobytes of policy denials).
+    """
+    entry = {"task_id": task_id, "status": str(row.get("status") or ""), "outcome": str(row.get("outcome") or ""),
+             "outcome_phase": str(row.get("outcome_phase") or ""), "source": source,
+             "result_ref": row.get("result_ref") or {"kind": "task_result", "task_id": task_id,
+                                                      "reader": "get_task_result"}}
+    if row.get("reason_detail"):
+        entry["review_verdict"] = str(row["reason_detail"])
+    if isinstance(row.get("outcome_final"), bool):
+        entry["outcome_final"] = row["outcome_final"]
+    if row.get("reason_code"):
+        entry["reason_code"] = str(row["reason_code"])
+    axes = row.get("outcome_axes")
+    objective = axes.get("objective") if isinstance(axes, dict) else None
+    if isinstance(objective, dict) and objective.get("status"):
+        entry["objective_status"] = str(objective["status"])
+    where = _source_address(address) if address is not None else None
+    if where:
+        entry["source_address"] = where
+    return entry
+
+
+def _result_entry(root: pathlib.Path, task_id: str) -> dict:
+    from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
+
+    try:
+        result = load_task_result(root, task_id, strict=True)  # strict: never moves the file
+    except (OSError, ValueError):
+        result = None
+    if not isinstance(result, dict) or not result:
+        return {"task_id": task_id, "status": "not_recorded"}
+    try:
+        phase = outcome_phase(result, {})
+    except (KeyError, TypeError, ValueError, AttributeError):
+        phase = ""
+    return _stamp_entry(task_id, {**result, "outcome_phase": phase,
+                                  "outcome": OUTCOME_PHASE_HEADLINE.get(phase, "")}, "task_results")
+
+
+def stamp_facts(root: Any, task_ids: Iterable[Any], *, rows: Iterable[Any] = ()) -> dict[str, dict]:
+    """The host's facts about each task, keyed by task id in the order asked: a page's stamp.
+
+    Per task, first match wins: its terminal projection row, then its host facts row
+    (both among ``rows``, the page's already-read ``(address, row[, pos])`` entries;
+    a repeated row of one task takes the last), then the strict task result (the
+    file never moves), else ``not_recorded``. There is no pass over the chat chain.
+    """
+    terminal: dict[str, tuple] = {}
+    host_facts: dict[str, tuple] = {}
+    for entry in rows:
+        address, row = entry[0], entry[1]
+        task = str(row.get("task_id") or "")
+        if row.get("type") != "task_summary" or not task:
+            continue
+        if row.get("summary_kind") in _TERMINAL_SUMMARIES:
+            terminal[task] = (address, row)
+        elif row.get("summary_kind") == "host_task_facts":
+            host_facts[task] = (address, row)
+    facts: dict[str, dict] = {}
+    for task in dict.fromkeys(str(t) for t in task_ids if str(t or "")):
+        if task in terminal:
+            address, row = terminal[task]
+            facts[task] = _stamp_entry(task, row, str(row["summary_kind"]), address)
+        elif task in host_facts:
+            address, row = host_facts[task]
+            facts[task] = _stamp_entry(task, row, "host_task_facts", address)
+        else:
+            facts[task] = _result_entry(pathlib.Path(root), task)
+    return facts
+
+
+def part_stamp(page_stamps: Iterable[Any]) -> dict:
+    """A part's stamp from its member pages' stamps, losing no failure.
+
+    ``counts`` holds how many tasks there are per ``(source, outcome_phase)``;
+    ``tasks`` keeps in full every task whose phase is not ``done`` or whose stamp
+    did not come from a terminal projection. A task stamped on two pages counts
+    once, by its later stamp.
+    """
+    latest: dict[str, dict] = {}
+    for stamp in page_stamps:
+        for entry in (stamp.get("tasks") if isinstance(stamp, dict) else None) or []:
+            if isinstance(entry, dict) and str(entry.get("task_id") or ""):
+                latest[str(entry["task_id"])] = entry
+    counts = Counter((str(entry.get("source") or ""), str(entry.get("outcome_phase") or ""))
+                     for entry in latest.values())
+    kept = [entry for entry in latest.values()
+            if entry.get("outcome_phase") != "done" or entry.get("source") not in _TERMINAL_SUMMARIES]
+    return {"tasks": kept,
+            "counts": [{"source": source, "outcome_phase": phase, "tasks": n}
+                       for (source, phase), n in sorted(counts.items())],
+            "computed_at": utc_now_iso()}

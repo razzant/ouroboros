@@ -5,7 +5,8 @@
 // browser. The memory arrives as a gateway payload here: no dictionary lives in the repo.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import * as acorn from './vendor/acorn.mjs';
 import {
     applyPayload, createTranslator, currentPayload, englishTag, entryText, flushMisses, fmt, fmtInto,
     localeDirection, lookupString, missKeyFor, pendingMisses, pluralSelectMap, setLanguage, setMissTransport, tr, translateString, tx,
@@ -382,6 +383,35 @@ test('owner-supplied names are left alone while the chrome around them is transl
     assert.equal(input.getAttribute('placeholder'), 'Поиск');
 });
 
+test('authored content outside a transcript keeps every text and attribute and reports no miss', () => {
+    applyPayload(RU);
+    assert.ok(SKIP_ROOTS.includes('[data-i18n-authored]'));
+    const authored = (node) => { node.dataset.i18nAuthored = ''; return node; };
+    // A delivered document in the reader: a file named like a known word, an unknown size
+    // line, and Markdown whose link and image reference carry author titles.
+    const identity = authored(el('div', { class: 'document-reader-identity' },
+        el('h2', { class: 'document-reader-title' }, 'Settings'),
+        el('div', { class: 'document-reader-meta' }, 'Quarterly numbers')));
+    const link = el('a', { class: 'md-link', href: 'https://example.com/', title: 'Settings' }, 'Search');
+    const content = authored(el('div', { class: 'document-reader-markdown' },
+        el('p', {}, link, ' and the rest'),
+        el('span', { title: 'Quarterly numbers', 'aria-label': 'Main Chat' }, 'Image: chart')));
+    const body = el('div', { class: 'document-reader-body', 'aria-label': 'Search' }, content);
+    const close = el('button', { class: 'btn btn-default', title: 'Settings' }, 'Settings');
+    const root = el('dialog', { class: 'document-reader' }, identity, el('div', {}, close), body);
+    const before = [...snapshot(identity), ...snapshot(content)];
+    const translator = createTranslator();
+    translator.applyTo(root);
+    // What the observer hands over after a later write inside: the element, then its text.
+    translator.applyTo(link);
+    translator.applyTo(link.childNodes[0]);
+    assert.deepEqual([...snapshot(identity), ...snapshot(content)], before, 'known and unknown authored strings stay');
+    assert.deepEqual(pendingMisses(), [], 'and none is reported as a miss');
+    // The reader's own chrome around it is still translated.
+    assert.deepEqual([text(close), close.getAttribute('title'), body.getAttribute('aria-label')],
+        ['Настройки', 'Настройки', 'Поиск']);
+});
+
 test('a help paragraph of several sentences is an ordinary key; only the memory\'s own bound refuses', () => {
     applyPayload(RU);
     const sentence = 'Interface language for this installation: the desktop window, browsers, the Telegram app and ' +
@@ -732,4 +762,34 @@ test('the direction seam has no opinion on a language whose script the engine do
     if (known('de')) assert.equal(localeDirection('de'), 'ltr');
     // Northern Luri: Arabic script, and no plural data in the engines that ship its script.
     if (known('lrc')) assert.equal(localeDirection('lrc'), 'rtl', 'the script decides, not the plural data');
+});
+
+// The memory translates English source text, so Cyrillic typed into a module's literal would
+// reach every English reader as-is. Comments may quote the owner verbatim and never paint; a
+// glyph table spelled as \u escapes (the matrix rain) is artwork, not words.
+function cyrillicLiterals(source) {
+    const hits = [];
+    acorn.parse(source, {
+        ecmaVersion: 'latest', sourceType: 'module', locations: true,
+        onToken: (token) => {
+            if ([acorn.tokTypes.string, acorn.tokTypes.template].includes(token.type)
+                && /[\u0400-\u04FF]/.test(source.slice(token.start, token.end))) hits.push(token.loc.start.line);
+        },
+    });
+    return hits;
+}
+
+test('every string a module or page can paint is English source text: no Cyrillic literal', () => {
+    assert.deepEqual(cyrillicLiterals('// Настройки\nconst a = "Settings";'), [], 'a comment is not a literal');
+    assert.deepEqual(cyrillicLiterals('const glyphs = "\\u0430\\u0431";'), [], 'an escaped glyph table is not text');
+    assert.deepEqual(cyrillicLiterals('const a = "Settings";\nconst b = `Настройки ${a}`;\nconst c = \'Поиск\';'), [2, 3]);
+    const modules = new URL('../modules/', import.meta.url);
+    const files = readdirSync(modules).filter((name) => name.endsWith('.js'));
+    assert.ok(files.includes('subagents_settings.js') && files.length > 100, 'the scan reads the module directory');
+    const hits = files.flatMap((name) => cyrillicLiterals(readFileSync(new URL(name, modules), 'utf8'))
+        .map((line) => `web/modules/${name}:${line}`));
+    assert.deepEqual(hits, []);
+    for (const page of ['../index.html', '../onboarding_template.html']) {
+        assert.doesNotMatch(readFileSync(new URL(page, import.meta.url), 'utf8'), /[\u0400-\u04FF]/, page);
+    }
 });

@@ -323,34 +323,13 @@ def _retire_dead_model_consumers(job: dict, *, captured_timeout: bool = False) -
             or job["meta"].get("task", {}).get("id") != job["task_id"]
             or job["task"].get("id") != job["task_id"]):
         return
-    try:
-        from ouroboros.tool_custody import retire_tool_invocations
-        retire_tool_invocations(
-            pathlib.Path(job["task"].get("budget_drive_root") or job["drive_root"]),
-            job["task_id"], str(job["task"].get("root_task_id") or job["task_id"]),
-            pid=worker.proc.pid, process_birth=birth, task_attempt=job["attempt"])
-    except Exception:
-        log.warning("Confirmed worker death could not retire tool invocations for %s", job["task_id"], exc_info=True)
-    try:
-        from ouroboros.usage_accounting import _memoized_final_rows
-        from ouroboros.model_wait import retire_model_consumers
+    # One owner-ended writer: a write that fails keeps this positive death as a
+    # witness the next addressed Continue/Resume discharges (#1554).
+    from ouroboros.local_custody_repair import retire_ended_owner
 
-        root = pathlib.Path(job["task"].get("budget_drive_root") or job["drive_root"])
-        rows, integrity, _memo, _generation = _memoized_final_rows(root)
-        if not integrity:
-            raise ValueError("model consumer death custody unreadable")
-        consumers = {row["local_answer_consumer_id"]: job["attempt"] for row in rows
-                     if row.get("task_id") == job["task_id"]
-                     and row.get("root_task_id") == (job["task"].get("root_task_id") or job["task_id"])
-                     and row.get("local_answer_owner_pid") == worker.proc.pid
-                     and row.get("local_answer_owner_birth") == birth
-                     and type(row.get("local_answer_task_attempt")) is int
-                     and row["local_answer_task_attempt"] == job["attempt"]
-                     and isinstance(row.get("local_answer_consumer_id"), str) and row["local_answer_consumer_id"]}
-        if consumers:
-            retire_model_consumers(root, job["task_id"], consumers)
-    except Exception:
-        log.warning("Confirmed worker death could not retire model consumers for %s", job["task_id"], exc_info=True)
+    retire_ended_owner(pathlib.Path(job["task"].get("budget_drive_root") or job["drive_root"]),
+                       job["task_id"], str(job["task"].get("root_task_id") or job["task_id"]),
+                       pid=worker.proc.pid, birth=birth, attempt=job["attempt"], producer="worker_death")
 
 
 def _complete_exact_budget_pause_after_death(job: dict, root: pathlib.Path, task: dict,
@@ -395,6 +374,15 @@ def _complete_exact_budget_pause_after_death(job: dict, root: pathlib.Path, task
     grant = row.get("grant") if isinstance(row.get("grant"), dict) else {}
     fenced = bool(row and (state in LIVE_PAUSE_STATES or state == STATE_RESUMED or grant.get("consumed_at"))
                   and int(row.get("task_attempt") or 0) == int(attempt))
+    if fenced and state in LIVE_PAUSE_STATES and not row.get("source_ref"):
+        # Died while still settling, before its source existed: the same attempt's
+        # working state completes the exact pause instead of a terminal (#1543).
+        from ouroboros.working_checkpoint import complete_pause_from_working
+        try:
+            row = complete_pause_from_working(result_root, task_id, row, attempt) or row
+        except Exception:
+            log.warning("Source-less pause of %s could not be completed from its working state",
+                        task_id, exc_info=True)
     if not (fenced and state in LIVE_PAUSE_STATES and row.get("source_ref")):
         return False, fenced
     source = "worker_death_during_pausing"
@@ -607,8 +595,12 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
         from ouroboros.delegate_recovery import reconcile_unrecoverable_task
         reconcile_unrecoverable_task(root, task_id)
     else:
-        task = dict(task)
+        prior_task, task = task, dict(task)
         task["_attempt"] = attempt + 1
+        # The existing same-ID retry continues the saved work, not the original prompt.
+        from ouroboros.working_checkpoint import attach_recovery
+        attach_recovery(pathlib.Path(task.get("budget_drive_root") or root), task,
+                        source_task_id=task_id, from_attempt=attempt, cause="worker_crash", prior_task=prior_task)
         from ouroboros.delegate_recovery import prepare_worker_crash_handoff
         recovery_handoff = prepare_worker_crash_handoff(
             root, task, old_attempt=attempt, new_attempt=attempt + 1,
@@ -634,7 +626,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             )
         except Exception:
             log.debug("Crash-requeue retry reset failed for %s", task_id, exc_info=True)
-        with _queue_lock:
+        with queue.prepared_root_billing(task), _queue_lock:  # the ledger read happens before the lock
             if not _dead_job_is_current(job):
                 return
             _pool().RUNNING.pop(task_id)

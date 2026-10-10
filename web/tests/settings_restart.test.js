@@ -31,11 +31,12 @@ test('Restart now confirm-and-send sends exactly one non-queueable /restart', as
     assert.equal(seenOptions[0].danger, true);
     assert.equal(seenOptions[0].confirmLabel, 'Restart');
     // Truthful about the server's owner Restart (restart_retention.py):
-    // running work stops, saved pauses stay paused, never-started queued work
-    // is HELD for an explicit Resume — no longer "all queued tasks stop".
-    assert.match(seenOptions[0].body, /Running tasks stop/);
+    // eligible saved work and the previously runnable queue return; existing
+    // pauses, holds and limits are not released by Restart.
+    assert.match(seenOptions[0].body, /Running tasks stop, then eligible saved work resumes after the restart/);
     assert.match(seenOptions[0].body, /already paused stay paused/);
-    assert.match(seenOptions[0].body, /kept on hold .* wait for your Resume/);
+    assert.match(seenOptions[0].body, /Runnable queued tasks return to the queue/);
+    assert.match(seenOptions[0].body, /Existing holds and limits still apply/);
     assert.doesNotMatch(seenOptions[0].body, /queued tasks stop/);
     assert.doesNotMatch(seenOptions[0].body, /still pausing/);
 });

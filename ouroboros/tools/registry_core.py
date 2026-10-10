@@ -310,11 +310,12 @@ class ToolRegistry:
         self._handler_overrides: Dict[str, Callable] = {}
 
     _FROZEN_TOOL_MODULES = [
-        "browser", "claude_advisory_review", "compact_context", "control",
+        "browser", "compact_context", "control",
         "core", "delegate", "edit_ops", "evolution_stats", "followup", "git", "git_pr", "git_rollback", "github",
-        "health", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "project_journal", "presence",
+        "health", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "preflight_review",
+        "project_journal", "presence",
         "recent_tasks",
-        "query_code", "review", "search", "services", "shell", "skill_exec", "skill_publish",
+        "query_code", "review", "review_change", "search", "services", "shell", "skill_exec", "skill_publish",
         "skill_preflight", "subagent_integration", "task_tree", "tool_discovery", "verify", "vision",
     ]
 
@@ -1079,6 +1080,11 @@ class ToolRegistry:
                 except TypeError as e:
                     return f"⚠️ TOOL_ERROR ({name}): {e}", None
                 except Exception as e:
+                    from ouroboros.body_candidate import CandidateRefused
+
+                    if isinstance(e, CandidateRefused):  # e.g. a process inside the candidate without its isolation
+                        return ToolResult(status="blocked", code=e.code, text=f"⚠️ {e.code}: {e.text}",
+                                          meta={"operation_outcome": "completed_no_effect"}), None
                     return f"⚠️ TOOL_ERROR ({name}): {e}", None
         finally:
             if observed_skill is not None:
@@ -1177,10 +1183,17 @@ class ToolRegistry:
             public_arg_error = tool_resolution._prepare_public_builtin_args(entry, args)
             if public_arg_error:
                 return public_arg_error
+            # Normalize the public target first. Candidate binding must observe the
+            # same canonical path/root that the guard and handler will consume.
             path_normalization = tool_resolution._normalize_dispatch_path_args_result(self._ctx, name, args)
             _route_note = path_normalization.text
             if path_normalization.required_root == "active_workspace":
                 return ToolResult(status="blocked", code="ROOT_REQUIRED_ACTIVE_WORKSPACE", text=_route_note, meta={"required_root": "active_workspace"})
+            from ouroboros import body_candidate
+
+            if (candidate_refusal := body_candidate.authoring_seam(self._ctx, name, args)) is not None:
+                return ToolResult(status="blocked", code=candidate_refusal.code,
+                                  text=f"⚠️ {candidate_refusal.code}: {candidate_refusal.text}")
         selected_skill = bool(task_constraint and task_constraint.has_selected_skill)
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         effective_constraint = task_constraint

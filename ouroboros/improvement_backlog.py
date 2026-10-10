@@ -1,4 +1,9 @@
-"""Durable actionable improvement backlog stored in the knowledge base."""
+"""Durable actionable improvement backlog stored in the knowledge base.
+
+Writers (append, merge, close, groom) read-modify-write the file under an
+exclusive lock; readers take a shared lock. A repeated item is never dropped:
+its ``count`` is incremented. ``format_backlog_digest`` returns the ranked view
+of open items (priority, then recurrence count, then recency)."""
 
 from __future__ import annotations
 

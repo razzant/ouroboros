@@ -101,7 +101,8 @@ def test_lost_create_and_gateway_replacement_reuse_frozen_capture(setup, monkeyp
     assert len(gateway.creates) == 2 and len(set(gateway.creates)) == 1
     assert len(gateway.accepted_operations) == len(usage["ledger_attempt_ids"]) == 1
     assert gateway.closed == replacement.closed == 1
-    assert [row["state"] for row in ledger(root)] == ["reserved", "dispatched", "settled"]
+    # One current row per attempt; revision 3 = reserved, dispatched, settled.
+    assert [(row["state"], row["revision"]) for row in ledger(root)] == [("settled", 3)]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -117,7 +118,7 @@ def test_catalog_read_failure_does_not_guess_unsupported_or_dispatch(setup, monk
     assert caught.value.code == "daemon_unreachable"
     assert caught.value.physical_attempt_capture.state == "released"
     assert not gateway.uploads and not gateway.creates and gateway.closed == 1
-    assert [row["state"] for row in ledger(root)] == ["reserved", "released"]
+    assert [(row["state"], row["revision"]) for row in ledger(root)] == [("released", 2)]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -157,7 +158,8 @@ def test_known_terminal_null_message_settles_then_rejects_without_private_projec
     classified = classify_llm_exception(error)
     assert classified.kind == "provider_error" and not classified.retry_same_request
     assert plan_next_wire_retry({}, error=error) is None
-    assert [row["state"] for row in ledger(root)] == ["reserved", "dispatched", "settled"]
+    # One current row per attempt; revision 3 = reserved, dispatched, settled.
+    assert [(row["state"], row["revision"]) for row in ledger(root)] == [("settled", 3)]
     assert len(gateway.creates) == len(gateway.acks) == 1
     assert not hasattr(error, "model_result")
     public = json.dumps({"usage": error.usage, "ledger": ledger(root), "detail": gateway.detail(0)}) + caplog.text

@@ -23,6 +23,7 @@ import subprocess
 import types
 
 import pytest
+from tests._usage_store_testing import ledger_rows
 
 
 KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
@@ -272,8 +273,8 @@ def _stage_cycle_harness(tmp_path, monkeypatch, *, fingerprint):
         emit_progress_fn=progress.append,
         _current_review_tool_name="commit_reviewed",
         _review_advisory=[],
-        _last_triad_models=[], _last_scope_model="",
-        _last_triad_raw_results=[], _last_scope_raw_result={},
+        _last_triad_models=[],
+        _last_triad_raw_results=[],
         _review_degraded_reasons=[],
     )
     monkeypatch.setattr(git_mod, "commit_review_contract_fingerprint", lambda: "cf-1")
@@ -281,28 +282,25 @@ def _stage_cycle_harness(tmp_path, monkeypatch, *, fingerprint):
         git_mod, "_fingerprint_staged_diff",
         lambda repo_dir: {"ok": True, "fingerprint": fingerprint},
     )
-    monkeypatch.setattr(git_mod, "_advisory_and_tests_gate", lambda *a, **k: None)
+    monkeypatch.setattr(git_mod, "_preflight_and_tests_gate", lambda *a, **k: None)
     monkeypatch.setattr(git_mod, "_review_binding_precondition_error", lambda *a, **k: "")
     return git_mod, ctx, progress
 
 
 def _overflow_wave(dispatch):
-    """A wave whose BOTH sides land infra-blocked; ``dispatch`` controls
-    whether the (real) transport seam was reached before the refusal."""
+    """A wave that lands infra-blocked at assembly (no seat answered either part);
+    ``dispatch`` controls whether the (real) transport seam was reached before
+    the refusal."""
     from ouroboros.review_dispatch import stamp_review_paid_on_dispatch
-    from ouroboros.tools.scope_review import ScopeReviewResult
+    from ouroboros.review_ledger import CouplingOutcome
 
     def _wave(ctx, commit_message, **kwargs):
         if dispatch:
             stamp_review_paid_on_dispatch(ctx)  # simulate the route-executor seam
         ctx._last_review_block_reason = "fixed_overflow"
         ctx._last_review_critical_findings = []
-        scope = ScopeReviewResult(
-            blocked=True,
-            block_message="⚠️ SCOPE_REVIEW_BLOCKED: pack did not assemble.",
-            status="fixed_overflow",
-        )
-        return "⚠️ REVIEW_BLOCKED: prompt cannot fit.", scope, "fixed_overflow", []
+        coupling = CouplingOutcome(blocked=True, status="fixed_overflow")
+        return "⚠️ REVIEW_BLOCKED: prompt cannot fit.", coupling, "fixed_overflow", []
 
     return _wave
 
@@ -393,7 +391,7 @@ def test_advisory_replay_reasons_drive_the_stage_cycle_to_a_disclosed_pass(
     # The loud disclosure reached the advisory channel AND the commit result.
     assert any(expected_reason in w for w in ctx._review_advisory)
     result = git_mod._format_commit_result(ctx, "msg", "", "")
-    assert "no new triad+scope review was bought" in result
+    assert "no new review wave was bought" in result
     assert expected_reason in result
     events = [json.loads(line) for line in
               (ctx.drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -519,8 +517,7 @@ def test_strict_api_stamp_veto_releases_sync_and_async_attempts(tmp_path):
                                  drive_root=root, task_id="t", root_task_id="t")
 
     def refuse(root):
-        rows = (root / ua.LEDGER_REL).read_text().splitlines()
-        assert json.loads(rows[-1])["state"] == "reserved"
+        assert ledger_rows(root)[-1]["state"] == "reserved"
         raise RuntimeError("wallet unavailable")
 
     sync_root, sent = tmp_path / "sync", []

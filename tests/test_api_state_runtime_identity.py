@@ -18,6 +18,7 @@ import pytest
 from starlette.requests import Request
 
 from ouroboros.gateway.state import _git_checkout_identity, _runtime_repo_identity
+from ouroboros import usage_store
 
 
 SHA = "1234567890abcdef1234567890abcdef12345678"
@@ -104,7 +105,6 @@ def test_source_mode_state_gap_is_filled_from_the_checkout(tmp_path, monkeypatch
 def test_api_state_serves_the_honest_identity(tmp_path, monkeypatch, stamped):
     from ouroboros.gateway.state import api_state
     import ouroboros.config as config
-    from ouroboros import usage_accounting as ua
     from supervisor import queue, state, workers
 
     root = tmp_path / "data"
@@ -112,7 +112,7 @@ def test_api_state_serves_the_honest_identity(tmp_path, monkeypatch, stamped):
     (root / "logs").mkdir(parents=True)
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
-    ua.ensure_legacy_imported(root)
+    usage_store.migrate_from_journal(root)
     monkeypatch.setattr(config, "REPO_DIR", _plain_checkout(tmp_path / "repo"))
     monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 0.0)
     monkeypatch.setattr(state, "load_state", lambda: (

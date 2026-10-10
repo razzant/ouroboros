@@ -197,12 +197,16 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             record_last_delegation(route="codex", requested_model="fixture-model", applied_model="fixture-model",
                 run_id="browser-session", selected_subagent_id="fixture-session", drive_root=settings_server['data_dir'],
                 occurred_at="2026-09-18T12:00:01Z", outcome="succeeded", identity=execution_identity(session_actor))
+            # Neither fixture row is a reviewer: the owner confirms the empty review pool.
             response = page.request.post(settings_server['url'] + '/api/settings', data={
-                "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [actor, session_actor]})})
+                "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [actor, session_actor]}),
+                "allow_empty_review_pool": True})
             assert response.ok, response.text()
             open_settings()
             page.locator('[data-settings-tab="agents"]').click()
-            meta = page.locator('[data-subagent-meta]').first
+            # A past failure is history behind Details & history, never a standing caption.
+            page.locator('[data-subagent-details] > summary').first.click()
+            meta = page.locator('[data-subagent-last-task] dd').first
             expect(meta).to_contain_text('failed (quota_exhausted)', timeout=30_000)
             expect(meta).to_contain_text('2026-09-18T12:00:00Z')
             assert meta.evaluate("node => getComputedStyle(node).whiteSpace") == 'normal'
@@ -211,10 +215,14 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             page.screenshot(path=str(evidence / f'subagent-history-{engine}.png'))
             session_card = page.locator('[data-subagent-row]').nth(1)
             expect(session_card.locator('[data-subagent-field="access"]')).to_have_value('full')
-            expect(session_card.locator('[data-subagent-meta]')).to_contain_text('Last run:')
+            session_card.locator('[data-subagent-details] > summary').click()
+            expect(session_card.locator('[data-subagent-last-task] dd')).to_contain_text('codex session')
+            expect(session_card.locator('[data-subagent-last-task] dd')).not_to_contain_text('settings')
             session_card.screenshot(path=str(evidence / f'subagent-access-history-{engine}.png'))
             session_card.locator('[data-subagent-field="access"]').select_option('workspace_write')
-            expect(session_card.locator('[data-subagent-meta]')).to_contain_text('Earlier settings:')
+            expect(session_card.locator('[data-subagent-last-task] dd')).to_contain_text('Earlier settings · ')
+            # Editing a catalog that marks no reviewer asks the owner to confirm it again.
+            page.locator('[data-review-pool-allow-empty]').check()
             save()
             open_settings()
             page.locator('[data-settings-tab="agents"]').click()

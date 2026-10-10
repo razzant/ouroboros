@@ -29,8 +29,9 @@ Production seams under test — each docstring names the line a guard would catc
   (``_request``'s ``"_stable_prefix_blocks"`` pop entry is pinned by
   ``tests/test_handover_native_reset.py``: a declared string system is not split, so the
   key survives to the pop there.)
-* ``context_fit.ContextFitProjection.system_message`` — the ``STABLE_PREFIX_BLOCKS_KEY: 1``
-  declaration every projected system message carries.
+* ``context_fit.ContextFitProjection.system_message`` — the declaration every projected
+  system message carries: all nonempty stable blocks before the changing tail, including
+  the optional handbook; an empty block is never declared.
 
 Every guard asserts both directions: the projection applies where it must and is
 absent where it must not, and the canonical transcript is never mutated.
@@ -95,7 +96,7 @@ def _system_blocks(stable: str = STABLE, memory: str = MEMORY, evidence: str = E
 
 
 def _declared(*, task: str = TASK, declared: int = 1, **blocks):
-    """The Main context builder's shape: a 3-block system declaring ONE stable block."""
+    """A partial declaration: marked following blocks extend it only on supporting routes."""
     return [
         {"role": "system", "content": _system_blocks(**blocks), STABLE_PREFIX_BLOCKS_KEY: declared},
         {"role": "user", "content": task},
@@ -158,16 +159,28 @@ def test_declared_system_prefix_is_split_on_every_openai_family_route(monkeypatc
 
     assert messages == before, "the canonical transcript is never mutated"
     wire = kwargs["messages"]
+    if target["provider"] == "openrouter":
+        # OpenRouter turns block markers into explicit breakpoints for this family:
+        # each marked leading block stays its own system item, the unmarked tail moves.
+        marked = {"cache_control": {"type": "ephemeral"}}
+        assert wire[:2] == [{"role": "system", "content": [{"type": "text", "text": STABLE, **marked}]},
+                            {"role": "system", "content": [{"type": "text", "text": MEMORY, **marked}]}]
+        assert wire[2]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)
+        assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 1}
+        wire = [wire[0], *wire[2:]]
+    else:
+        # Without explicit breakpoints only the end of the leading system group is a
+        # lookup boundary: the changing memory block must not share it.
+        assert wire[0] == {"role": "system", "content": [{"type": "text", "text": STABLE}]}
+        assert wire[1]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, MEMORY, EVIDENCE)
+        assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 2}
     assert len(wire) == 3
-    assert wire[0] == {"role": "system", "content": [{"type": "text", "text": STABLE}]}
     assert wire[1]["role"] == "user"
     notice = wire[1]["content"]
     assert isinstance(notice, str)
-    assert notice == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, MEMORY, EVIDENCE)
     assert STABLE not in notice
     assert wire[2] == {"role": "user", "content": TASK}
     assert _no_declaration_on_wire(wire)
-    assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 2}
 
     # The affinity key reads block 0 and the model only, so the split copy and an
     # undeclared copy of the same messages land in the same cache bucket.
@@ -402,8 +415,38 @@ def test_split_moves_only_non_empty_tail_blocks_and_honors_the_declared_count():
     two[0][STABLE_PREFIX_BLOCKS_KEY] = 2
     projected, moved = split_leading_system_prefix(two)
     assert moved == 1
-    assert [block["text"] for block in projected[0]["content"]] == [STABLE, MEMORY]
-    assert projected[1]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)
+    assert [message["role"] for message in projected[:2]] == ["system", "system"]
+    assert [_system_texts(message) for message in projected[:2]] == [[STABLE], [MEMORY]]
+    assert projected[2]["content"] == _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)
+    assert split_leading_system_prefix(projected) == (projected, 0), "a projected copy is never split again"
+
+
+@pytest.mark.parametrize("placement", SYSTEM_PREFIX_SPLIT_PLACEMENTS)
+def test_keep_marked_keeps_only_leading_marked_blocks_as_separate_system_items(placement):
+    """Pins the ``keep_marked`` extension: after the declared blocks, every LEADING block
+    that carries its own marker stays a separate system item (its explicit breakpoint is
+    written and looked up on its own); the first unmarked block ends the extension, and
+    without ``keep_marked`` the declared count alone decides (the implicit-only routes)."""
+    messages = _declared()
+    before = copy.deepcopy(messages)
+    kept, moved = split_leading_system_prefix(messages, placement=placement, keep_marked=True)
+    plain, plain_moved = split_leading_system_prefix(messages, placement=placement)
+    assert messages == before
+    assert (moved, plain_moved) == (1, 2)
+    assert [_system_texts(message) for message in kept[:2]] == [[STABLE], [MEMORY]]
+    assert all(message["content"][0]["cache_control"] == {"type": "ephemeral"} for message in kept[:2])
+    assert [_system_texts(message) for message in plain[:1]] == [[STABLE]] and plain[1]["role"] != "system"
+    header = HOST_CONTEXT_NOTICE_AFTER_TASK if placement == "after_task" else HOST_CONTEXT_NOTICE_BEFORE_TASK
+    assert _notice(header, EVIDENCE) in [message["content"] for message in kept]
+    assert _notice(header, MEMORY, EVIDENCE) in [message["content"] for message in plain]
+    # An unmarked block between ends the extension: nothing after it is kept.
+    gap = copy.deepcopy(messages)
+    gap[0]["content"][1].pop("cache_control")
+    assert split_leading_system_prefix(gap, placement=placement, keep_marked=True)[1] == 2
+    # Every block marked: nothing would move, so the message stays whole.
+    whole = copy.deepcopy(messages)
+    whole[0]["content"][2]["cache_control"] = {"type": "ephemeral"}
+    assert split_leading_system_prefix(whole, keep_marked=True) == (whole, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -461,9 +504,9 @@ def test_round_two_wire_extends_round_one_byte_for_byte_under_one_session(monkey
     round1 = _build(client, _target(monkeypatch, client, "openai/gpt-6-sol", _OPENROUTER), round1_messages, tools)
     round2 = _build(client, _target(monkeypatch, client, "openai/gpt-6-sol", _OPENROUTER), round2_messages, tools)
 
-    assert len(round1["messages"]) == 3 and len(round2["messages"]) == 5
+    assert len(round1["messages"]) == 4 and len(round2["messages"]) == 6
     assert round2["messages"][:len(round1["messages"])] == round1["messages"]
-    assert round1["messages"][1] == round2["messages"][1], "the notice is byte-identical across rounds"
+    assert round1["messages"][2] == round2["messages"][2], "the notice is byte-identical across rounds"
     assert round1["tools"] == round2["tools"]
     assert round1["extra_body"]["session_id"] == round2["extra_body"]["session_id"]
     for header in (HOST_CONTEXT_NOTICE_BEFORE_TASK, HOST_CONTEXT_NOTICE_AFTER_TASK):
@@ -525,8 +568,8 @@ def test_explicit_cache_affinity_still_wins_and_a_reroute_still_rotates(monkeypa
     assert pinned["extra_body"]["session_id"] == explicit
     assert derived["extra_body"]["session_id"] != explicit
     assert pinned["messages"] == derived["messages"], "affinity never changes the projected wire"
-    assert pinned["messages"][0] == {"role": "system", "content": [{"type": "text", "text": STABLE}]}
-    assert pinned_target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 2}
+    assert pinned["messages"][0] == {"role": "system", "content": [{"type": "text", "text": STABLE, "cache_control": {"type": "ephemeral"}}]}
+    assert pinned_target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 1}
 
     rerouted = copy.deepcopy(pinned)
     client._rotate_openrouter_session_affinity(rerouted)
@@ -560,7 +603,7 @@ def test_usage_wire_layout_is_host_owned_and_names_this_calls_projection(monkeyp
     split_target = _target(monkeypatch, client, "openai/gpt-6-sol", _OPENROUTER)
     _build(client, split_target, _declared())
     _msg, usage = client._normalize_remote_response(_completion_body(copy.deepcopy(spoofed)), split_target, skip_cost_fetch=True)
-    assert usage["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 2}
+    assert usage["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 1}
     assert usage["wire_layout"] is not split_target["wire_layout"], "a copy, never the target's own dict"
     assert usage["prompt_tokens"] == 10 and usage["resolved_model"] == "openai/gpt-6-sol"
 
@@ -675,14 +718,14 @@ def test_claudexor_finish_reports_the_targets_wire_layout_and_discards_a_provide
 
 
 # ---------------------------------------------------------------------------
-# (h) the Main context builder declares one stable block on every projection
+# (h) the Main context builder declares its stable blocks on every projection
 # ---------------------------------------------------------------------------
 def _projection(mode: str, blocks):
     from ouroboros.context_fit import ContextFitProjection
 
     return ContextFitProjection(
         mode=mode, system_content_json=json.dumps(blocks), estimated_tokens=10,
-        calibrated_tokens=10, calibration_ratio=1.0, fits_known_window=None,
+        calibrated_tokens=10, calibration_ratio=1.0,
     )
 
 
@@ -698,38 +741,39 @@ def _plan(blocks):
     )
 
 
-def test_context_fit_declares_one_stable_block_on_every_projected_system_message(monkeypatch):
-    """Pins ``ContextFitProjection.system_message`` (context_fit.py: ``STABLE_PREFIX_BLOCKS_KEY: 1``):
-    the plan's first-round messages, the Low projection and ``reproject_transcript`` all
-    carry the declaration with the canonical 3-block content intact — and the declaration
-    is what makes the OpenAI-family builder split. Removing the stamp keeps every
-    transcript whole on the wire (the cold-cache regression the measurement exposed)."""
-    blocks = _system_blocks()
+@pytest.mark.parametrize("book", [False, True])
+@pytest.mark.parametrize("marked", [False, True])
+@pytest.mark.parametrize("memory", [MEMORY, "  \n"])
+def test_context_fit_declares_all_nonempty_stable_items_before_the_tail(monkeypatch, book, marked, memory):
+    """The declaration survives reprojection and keeps B out of the notice without markers."""
+    blocks = _system_blocks(memory=memory)
+    if book:
+        blocks.insert(1, {"type": "text", "text": "handbook", "cache_control": {"type": "ephemeral"}})
+    if not marked:
+        for block in blocks:
+            block.pop("cache_control", None)
     plan = _plan(blocks)
-
+    stable = [block for block in blocks[:-1] if block["text"].strip()]
     system = plan.max_projection.system_message()
-    assert system == {"role": "system", "content": blocks, STABLE_PREFIX_BLOCKS_KEY: 1}
+    assert system == {"role": "system", "content": stable + blocks[-1:], STABLE_PREFIX_BLOCKS_KEY: len(stable)}
     assert plan.messages_for("max") == [system, {"role": "user", "content": TASK}]
-    low = plan.messages_for("low")[0]
-    assert low[STABLE_PREFIX_BLOCKS_KEY] == 1 and low["content"] == blocks[:2]
-
-    history = [{"role": "system", "content": "stale captured view"},
-               {"role": "user", "content": TASK},
+    history = [{"role": "system", "content": "old"}, {"role": "user", "content": TASK},
                {"role": "assistant", "content": "working"}]
     rebuilt = plan.reproject_transcript(copy.deepcopy(history), "max")
-    assert rebuilt[0] == system and rebuilt[1:] == history[1:]
-    inserted = plan.reproject_transcript([{"role": "user", "content": TASK}], "low")
-    assert inserted[0][STABLE_PREFIX_BLOCKS_KEY] == 1 and inserted[1] == {"role": "user", "content": TASK}
-
-    # End to end: the declaration reaches the OpenAI-family wire builder.
+    assert rebuilt == [system, *history[1:]]
+    assert plan.reproject_transcript(history[1:], "max") == rebuilt
+    low = plan.messages_for("low")[0]
+    assert low[STABLE_PREFIX_BLOCKS_KEY] == len(low["content"]) - 1
     client = LLMClient(api_key="unused")
-    target = _target(monkeypatch, client, "openai/gpt-6-sol", _OPENROUTER)
-    wire = _build(client, target, rebuilt)["messages"]
-    assert wire[0] == {"role": "system", "content": [{"type": "text", "text": STABLE}]}
-    assert wire[1] == {"role": "user", "content": _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, MEMORY, EVIDENCE)}
-    assert wire[2:] == history[1:]
-    assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 2}
-    assert rebuilt[0] == system, "the canonical projected transcript is untouched"
+    for model, env in (("openai/gpt-6-sol", _OPENROUTER), ("openai::gpt-6-sol", {"OPENAI_API_KEY": "unused"})):
+        target = _target(monkeypatch, client, model, env)
+        wire = _build(client, target, rebuilt)["messages"]
+        assert [message["role"] for message in wire] == ["system"] * len(stable) + ["user", "user", "assistant"]
+        assert [message["content"][0]["text"] for message in wire[:len(stable)]] == [block["text"] for block in stable]
+        assert wire[len(stable)] == {"role": "user", "content": _notice(HOST_CONTEXT_NOTICE_BEFORE_TASK, EVIDENCE)}
+        assert wire[len(stable) + 1:] == history[1:]
+        assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 1}
+    assert rebuilt[0] == system
 
 
 def test_a_late_demoted_system_notice_keeps_its_place_after_the_projected_host_notice(monkeypatch):
@@ -752,8 +796,8 @@ def test_a_late_demoted_system_notice_keeps_its_place_after_the_projected_host_n
     kwargs = client._build_remote_kwargs(target, messages, "high", 512, "auto", None, None,
                                          skip_capability_fetch=True)
     wire = kwargs["messages"]
-    assert [m["role"] for m in wire] == ["system", "user", "user", "assistant", "user"]
-    assert wire[1]["content"].startswith(NOTICE_MARKER + HOST_CONTEXT_NOTICE_BEFORE_TASK)
-    assert wire[2]["content"] == TASK
-    assert wire[4]["content"] == NOTICE_MARKER + "late reminder"
-    assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 2}
+    assert [m["role"] for m in wire] == ["system", "system", "user", "user", "assistant", "user"]
+    assert wire[2]["content"].startswith(NOTICE_MARKER + HOST_CONTEXT_NOTICE_BEFORE_TASK)
+    assert wire[3]["content"] == TASK
+    assert wire[5]["content"] == NOTICE_MARKER + "late reminder"
+    assert target["wire_layout"] == {"system_prefix_split": True, "moved_blocks": 1}

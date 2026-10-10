@@ -179,7 +179,7 @@ def test_orphan_settlement_before_delayed_copyback_keeps_child_occurrence(tmp_pa
     monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T2)
     if child_state == 'recovered':  # no child terminal: only the queue/worker orphan proof ends it
         monkeypatch.setattr(time, 'time', lambda: 1_800_000_000.0)
-        (host / 'state').mkdir()
+        (host / 'state').mkdir(exist_ok=True)
         (host / 'state/queue_snapshot.json').write_text(json.dumps({'ts': '2027-01-15T08:00:00+00:00', 'pending': [], 'running': []}))
         append_jsonl(host / 'logs/events.jsonl', {'ts': T2, 'type': 'worker_boot'})
     else:

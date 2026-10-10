@@ -1,5 +1,0 @@
-391
-The Settings Appearance paragraph describes the install-wide Language control
-(OUROBOROS_UI_LANGUAGE through POST /api/ui/i18n/language, the select rows,
-the free Other field and import/export/regenerate) in place of the removed
-`language` UI preference.

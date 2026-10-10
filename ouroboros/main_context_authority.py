@@ -1,20 +1,64 @@
-"""Defensive, Main-only projection of continuation authority.
+"""Defensive continuation views for Main and delegated helpers.
 
-The exact task-result reader and child/external contracts keep their complete
-authority.  This module makes a deep provider-context copy: one predecessor
-account, an authored narrative for oversized terminal text when available, and
-an explicit source-resolvable gap when it is not.
+Root startup envelopes and exact task-result reads stay complete. Main's provider
+copy substitutes authored narratives or source-resolvable gaps for oversized raw
+answers. Helpers carry the predecessor's answer, contract core and owner words,
+with its fingerprint, read source and sized omissions; declared inputs keep only
+the reference. Neither projection mutates canonical authority.
 """
 
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Mapping
 from typing import Any, Dict, MutableSet, Optional
 
 from ouroboros.context_budget import PREDECESSOR_RESULT_INLINE_CHARS
 
 _RAW_AUTHORITY_KEYS = frozenset({"result", "final_answer"})
+
+
+def project_helper_predecessor_authority(
+    authority: Any, *, declared: bool = False,
+) -> Dict[str, Any]:
+    """Pure, idempotent brief of an envelope, or its declared-input reference.
+
+    The existing contract normalizer handles legacy bodies. Keep its envelope
+    kind: a bounded preview's wrapper can exceed the per-field wire allowance,
+    and relabelling it would make a rebuild collapse the preview and its digest
+    again. Answers/core fields keep that producer's whole-or-pointer semantics.
+    Omission sizes count serialized characters (without a string's quotes);
+    old name-only omissions have unknown sizes, represented by null.
+
+    A delegated child's contract applies it after the parent contract spread, and
+    direct work-order sessions apply it to their own contract, so both receive the
+    same brief. The brief does not carry the omitted evidence; its source names the
+    reader for the full result.
+    """
+    if not isinstance(authority, Mapping) or not authority:
+        return {}
+    from ouroboros.contracts.task_contract import build_task_contract
+
+    envelope = build_task_contract({"predecessor_authority": authority})["predecessor_authority"]
+    keep = {"kind", "source", "task_id", "authority_sha256", "authority_chars", "digest_semantics"}
+    if not declared:
+        keep.update({"status", "execution_status", "reason_code", "terminal_origin", "outcome_axes",
+                     "result", "task_contract", "origin_message_text", "origin_message_ref"})
+    prior = envelope.get("omitted_fields")
+    omitted = {}
+    if isinstance(prior, Mapping):
+        omitted = copy.deepcopy(dict(prior))
+    elif isinstance(prior, list):
+        omitted = {key: None for key in prior if isinstance(key, str)}
+    for key, value in envelope.items():
+        if key not in keep and key != "omitted_fields":
+            omitted[key] = len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)) - (
+                2 if isinstance(value, str) else 0)
+    return {
+        **{key: copy.deepcopy(value) for key, value in envelope.items() if key in keep},
+        "omitted_fields": dict(sorted(omitted.items())),
+    }
 
 
 def _canonical_result_ref(task_id: str) -> Dict[str, Any]:
@@ -260,4 +304,4 @@ def project_main_task_authority(
     return projection
 
 
-__all__ = ["project_main_task_authority"]
+__all__ = ["project_main_task_authority", "project_helper_predecessor_authority"]

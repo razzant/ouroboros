@@ -262,6 +262,8 @@ def _status_payload(include_models: bool) -> Dict[str, Any]:
         "profiles": {},
         "quota": [],
         "quota_absences": [],
+        # /v2/operations is distinct from agent_capabilities (reads.catalog).
+        "resource_capabilities_read": READ_NOT_READ,
         # PROVENANCE, per independent facet (BIBLE P1: missing data is a GAP,
         # never a value). `[]`/`{}` alone cannot say WHETHER the daemon was
         # asked: the owner's panel printed "no account connected" for three
@@ -302,8 +304,22 @@ def _status_payload(include_models: bool) -> Dict[str, Any]:
             payload["daemon"]["engine_version"] = gateway.engine_version
 
             def _quota_state() -> Dict[str, Any]:
+                from ouroboros.gateways.claudexor import account_resource_capabilities
+
+                try:
+                    capabilities = account_resource_capabilities(operations_call.result())
+                    payload["resource_capabilities_read"] = READ_OK
+                except Exception:
+                    payload["resource_capabilities_read"] = READ_FAILED
+                    capabilities = account_resource_capabilities([])
+                payload["resource_capabilities"] = capabilities
                 reader = getattr(gateway, "quota_state", None)
                 if callable(reader):
+                    if capabilities["read"]:
+                        result = reader(view="resources")
+                        if not isinstance(result, dict) or not isinstance(result.get("resources"), list):
+                            raise ClaudexorUnavailable("malformed_response", "Account resources were not returned")
+                        return result
                     return reader()
                 # Compatibility for old embedded gateway doubles. The shipped
                 # gateway has quota_state, so the live status path always uses
@@ -319,6 +335,7 @@ def _status_payload(include_models: bool) -> Dict[str, Any]:
             # unreachable state below WITHOUT downgrading the siblings that
             # landed, and a manifest refusal still fails OPEN.
             with ThreadPoolExecutor(max_workers=5) as pool:
+                operations_call = pool.submit(lambda: gateway.operations())
                 catalog_call = pool.submit(gateway.agent_capabilities)
                 manifests_call = pool.submit(gateway.harnesses)
                 profiles_call = pool.submit(gateway.credential_profiles)
@@ -326,7 +343,6 @@ def _status_payload(include_models: bool) -> Dict[str, Any]:
                 # Deferred lookup on purpose: the failure of THIS read (or a
                 # transport double that lacks the method) must land inside the
                 # future, where the absorbed fail-closed handling below owns it.
-                operations_call = pool.submit(lambda: gateway.operations())
             # Classify every submitted future INDEPENDENTLY, before consuming
             # any of them. Reading `.result()` in sequence would make a facet's
             # verdict depend on which sibling raised first — a catalog failure
@@ -453,6 +469,8 @@ def _status_payload(include_models: bool) -> Dict[str, Any]:
                 row for row in (raw_absences if isinstance(raw_absences, list) else [])
                 if isinstance(row, dict)
             ]
+            if isinstance(quota.get("resources"), list):
+                payload["resources"] = quota["resources"]
             if first_error is not None:
                 # At least one facet refused while others landed. The daemon is
                 # disclosed as unreachable AND the surviving facets keep their

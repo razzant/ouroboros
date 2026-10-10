@@ -342,6 +342,9 @@ def test_commit_gate_ceiling_reads_live_setting(monkeypatch, tmp_path):
     exhausted = check_review_cycles_ceiling(ctx, root_task_id="root-1")
     assert exhausted is not None and "REVIEW_CYCLES_EXHAUSTED" in exhausted["message"]
     assert exhausted["cycles_paid"] == 2 and exhausted["cap"] == 2
+    # The gate speaks of what it bought — review waves of the pool — never of a
+    # triad and a scope reviewer, which no longer exist as surfaces (FIX3 T1).
+    assert "paid review wave(s)" in exhausted["message"] and "triad" not in exhausted["message"].lower()
     # Another root task has its own ceiling.
     assert check_review_cycles_ceiling(ctx, root_task_id="root-2") is None
     # An unknown root never gates (fail-open, disclosed).
@@ -358,6 +361,42 @@ def test_commit_gate_ceiling_reads_live_setting(monkeypatch, tmp_path):
     # Garbage fails closed to the bounded default (2), never to "no cap".
     monkeypatch.setenv(KEY, "lots")
     assert check_review_cycles_ceiling(ctx, root_task_id="root-1") is not None
+
+
+@pytest.mark.parametrize("enforcement, reason", [
+    ("blocking", "identical_diff_refused"), ("blocking", "review_cycles_exhausted"), ("advisory", "identical_diff_refused"),
+])
+def test_t1_the_replay_disclosure_names_the_review_wave_not_a_triad(monkeypatch, enforcement, reason):
+    """The free-replay words the author and the owner read (progress note, Advisory
+    disclosure) name what was not bought — a review wave of the pool — never the retired
+    triad and scope reviewer (FIX3 T1); the identical-diff note still says the verdict is reused."""
+    from ouroboros.tools.commit_gate import disclose_commit_review_replay
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    notes, advisory = [], []
+    ctx = types.SimpleNamespace(_review_advisory=advisory, emit_progress_fn=notes.append)
+    disclose_commit_review_replay(ctx, {"replay_reason": reason, "advisory_replay": "Prior outcome: FAIL."})
+    [note], [disclosure] = notes, advisory
+    assert "triad" not in (note + disclosure).lower() and "scope reviewer" not in (note + disclosure).lower()
+    assert disclosure.startswith(f"Review enforcement=Advisory: no new review wave was bought for this commit ({reason})")
+    assert disclosure.endswith("Prior outcome: FAIL.")
+    if reason == "identical_diff_refused":
+        assert note == "Max Review Cycles: identical staged diff — reusing the recorded review verdict, no paid review-wave dispatch."
+    else:
+        assert note.startswith("Max Review Cycles: paid-cycle ceiling exhausted")
+
+
+def test_t1_the_commit_schema_explains_scope_by_the_coupling_questions():
+    """``commit_reviewed.scope`` is read by the panel's coupling questions as the intended
+    transformation (``resolve_intent``: goal > scope > commit subject); its description says
+    so and no longer promises a "scope reviewer" that no longer exists (FIX3 T1)."""
+    from ouroboros.tools import git
+    from ouroboros.tools.review_helpers import resolve_intent
+
+    [entry] = [entry for entry in git.get_tools() if entry.name == "commit_reviewed"]
+    description = entry.schema["parameters"]["properties"]["scope"]["description"]
+    assert "coupling questions" in description and "scope reviewer" not in description
+    assert resolve_intent("", "only the gate wording", "subject: x") == ("only the gate wording", "scope")
 
 
 def test_paid_cycle_count_counts_dispatched_money_only(tmp_path, monkeypatch):
@@ -398,30 +437,6 @@ def test_commit_gate_has_no_import_time_cap_constant():
     # refused free from the first verdict-block, not re-reviewed up to a cap.
     assert not hasattr(commit_gate, "check_blocked_attempt_cap")
     assert not hasattr(commit_gate, "blocked_attempt_fingerprint_cap")
-
-
-def test_advisory_review_schema_note_states_paid_cycle_semantics(monkeypatch):
-    from ouroboros.tools.claude_advisory_review import _identical_diff_cap_note
-
-    note = _identical_diff_cap_note()
-    assert "identical bytes are never re-reviewed for pay" in note
-    assert "identical_diff_refused" in note
-    assert "after 2 paid cycle(s)" in note
-    assert "per ROOT task" in note  # wording-5: the tree shares one ceiling
-    # Honesty caveat (synthesis F6): the identical-diff refusal replays only
-    # recorded VERDICT blocks, which a pure advisory line never mints — there
-    # the no-new-spend guarantee is the exhaustion free replay.
-    assert "Under blocking enforcement an identical resubmission after a recorded" in note
-    assert "a pure advisory line never mints verdict blocks" in note
-    assert "exhaustion free replay" in note
-    monkeypatch.setenv(KEY, "5")
-    assert "after 5 paid cycle(s)" in _identical_diff_cap_note()
-    monkeypatch.setenv(KEY, "unlimited")
-    note = _identical_diff_cap_note()
-    assert "no per-root-task ceiling" in note
-    assert "identical bytes are never re-reviewed for pay" in note  # knob-independent
-    source = (REPO / "ouroboros" / "tools" / "claude_advisory_review.py").read_text(encoding="utf-8")
-    assert "after 3 genuine" not in source
 
 
 # ---------------------------------------------------------------------------
@@ -547,8 +562,7 @@ def test_docs_describe_shared_key_and_new_module_size():
     arch = architecture_text(REPO)
     assert dev.count(KEY) >= 2 and "review_cycles.py" in dev
     assert f"| {KEY} |" in arch
-    # the LEGACY row documents the load-time migration, not a runtime binding
-    assert f"| {LEGACY} |" in arch and "MIGRATED into" in arch
+    assert f"| {LEGACY} |" in arch
     assert "Required+Blocking without one has no local count cap" not in dev
     assert "Required+Blocking with no explicit cap has no local count cap" not in arch
     module_lines = (REPO / "ouroboros" / "review_cycles.py").read_text(encoding="utf-8").splitlines()

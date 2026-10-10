@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from ouroboros import usage_accounting as ua
+from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
@@ -36,10 +35,7 @@ def _request(data_root, **overrides):
 
 
 def _ledger(data_root):
-    path = data_root / ua.LEDGER_REL
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return ledger_rows(data_root)
 
 
 def test_review_attribution_survives_api_transitions_and_subscription_identity(data_root):
@@ -63,7 +59,7 @@ def test_review_attribution_survives_api_transitions_and_subscription_identity(d
 
     rows = _ledger(data_root)
     attributed = [row for row in rows if row.get("attempt_id") == reservation.attempt_id]
-    assert [row["state"] for row in attributed] == ["reserved", "dispatched", "settled"]
+    assert [row["state"] for row in attributed] == ["settled"]
     assert all(
         (row["review_skill"], row["review_wave_id"], row["review_slot_id"])
         == ("happy_farm", "wave-7", "skill-triad-1")
@@ -85,19 +81,22 @@ def test_review_attribution_survives_api_transitions_and_subscription_identity(d
         )
 
 
-def test_legacy_subscription_replay_treats_missing_review_attribution_as_empty(data_root):
+def test_legacy_subscription_replay_treats_missing_review_attribution_as_empty(data_root, tmp_path):
+    from tests._usage_store_testing import write_journal
+
+    # The row as a release before review attribution journaled it (recorded
+    # in a scratch root, its review keys removed), imported by this root's
+    # one-time import.
+    scratch = tmp_path / "scratch"
     session_id = ua.record_subscription_session(
-        "session-before-attribution", drive_root=data_root, route="claude",
+        "session-before-attribution", drive_root=scratch, route="claude",
         model="claude-fable-5", task_id="task-old", root_task_id="root-old",
         prompt_tokens=20, completion_tokens=5, spend_usd=0.0,
     )
-    path = data_root / ua.LEDGER_REL
-    rows = _ledger(data_root)
-    for key in ("review_skill", "review_wave_id", "review_slot_id"):
-        rows[-1].pop(key, None)
-    path.write_text("".join(
-        json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows
-    ))
+    [row] = _ledger(scratch)
+    for key in ("review_skill", "review_wave_id", "review_slot_id", "revision", "seq"):
+        row.pop(key, None)
+    write_journal(data_root, [row])
 
     assert ua.record_subscription_session(
         "session-before-attribution", drive_root=data_root, route="claude",
@@ -257,6 +256,13 @@ def test_api_token_normalization_preserves_missing_zero_and_body_error_contracts
 
     rejected, cost, final = ua.usage_from_response({
         "error": {"code": 429, "message": "rate limited"}, "usage": None,
+    })
+    assert (rejected["prompt_tokens"], rejected["completion_tokens"]) == (None, None)
+    assert cost is None and final is False
+
+    rejected, cost, final = ua.usage_from_response({
+        "error": {"code": 429, "message": "rate limited"},
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0},
     })
     assert (rejected["prompt_tokens"], rejected["completion_tokens"]) == (0, 0)
     assert cost == 0.0 and final is True

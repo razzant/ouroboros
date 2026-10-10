@@ -50,7 +50,7 @@ from ouroboros.extension_ui_validation import (
 )
 from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME  # noqa: F401
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS  # noqa: F401
-from ouroboros.extension_isolated_deps import _isolated_python_site_dirs, async_isolated_site_dirs_scope, isolated_site_dirs_scope, is_skill_cache_path  # noqa: F401
+from ouroboros.extension_isolated_deps import _isolated_python_site_dirs, async_isolated_site_dirs_scope, invalidate_import_caches, isolated_site_dirs_scope, is_skill_cache_path  # noqa: F401
 from ouroboros.extension_child_catalog import (
     _out_of_process_handler_proxy,  # noqa: F401
     _stage_out_of_process_surfaces,
@@ -698,7 +698,7 @@ def load_extension(
     module_key = _module_key(skill.name)
     api: Optional[PluginAPIImpl] = None
     try:
-        importlib.invalidate_caches()
+        invalidate_import_caches()
         staged_import_root, entry_path = _stage_extension_import_tree(
             skill,
             state_dir=state_dir,

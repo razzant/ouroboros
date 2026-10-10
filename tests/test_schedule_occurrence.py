@@ -78,7 +78,7 @@ def test_capacity_waits_on_the_row_without_phantom_roots(q, monkeypatch):
     from ouroboros import consciousness_allowance
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "1")
     monkeypatch.setattr(consciousness_allowance, "allowance_window", lambda _root: {
-        "status": "available", "limit_usd": 10.0, "accounted_usd": 0.0, "unknown_unmetered": 0, "resets_at": ""})
+        "status": "available", "limit_usd": 10.0, "settled_usd": 0.0, "accounted_usd": 0.0, "unknown_unmetered": 0, "resets_at": ""})
     q.pending.append({"id": "live-wake", "delegation_role": "root", "metadata": {"initiator": "consciousness"}})
     _row(q, intent={"kind": "system_repo"}, metadata={"initiator": "consciousness"})
     for _ in range(3):
@@ -105,7 +105,7 @@ def test_a_named_continuation_is_outside_the_cap_but_not_outside_money(q, monkey
     from ouroboros import consciousness_allowance
 
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "1")
-    window = {"status": "available", "limit_usd": 10.0, "accounted_usd": 0.0, "unknown_unmetered": 0, "resets_at": ""}
+    window = {"status": "available", "limit_usd": 10.0, "settled_usd": 0.0, "accounted_usd": 0.0, "unknown_unmetered": 0, "resets_at": ""}
     monkeypatch.setattr(consciousness_allowance, "allowance_window", lambda _root: dict(window))
     q.pending.append({"id": "live-wake", "delegation_role": "root", "metadata": {"initiator": "consciousness"}})
     wake = {"initiator": "consciousness"}
@@ -119,7 +119,7 @@ def test_a_named_continuation_is_outside_the_cap_but_not_outside_money(q, monkey
     assert [t["id"] for t in q.pending if t["id"] != "live-wake"] == [rows["cont"]["occurrence"]["task_id"]]
     assert rows["spont"]["hold"]["reason"] == "consciousness_task_limit"
     assert q.queue.live_consciousness_root_count() == 1  # the continuation is not counted
-    window.update(status="exhausted", accounted_usd=10.0)
+    window.update(status="exhausted", settled_usd=10.0, accounted_usd=10.0)
     _row(q, "cont2", intent={"kind": "system_repo"}, metadata=wake, continuation_of={"task_id": "t0"})
     q.queue.check_scheduled_tasks()
     assert _rows(q)["cont2"]["hold"]["reason"] == "consciousness_allowance_exhausted"
@@ -491,14 +491,14 @@ def test_the_allowance_is_read_just_before_admission_not_during_prepare(q, monke
     from ouroboros import consciousness_allowance
     from supervisor import schedule_occurrence as occurrences
 
-    window = {"status": "available", "limit_usd": 10.0, "accounted_usd": 0.0, "unknown_unmetered": 0, "resets_at": ""}
+    window = {"status": "available", "limit_usd": 10.0, "settled_usd": 0.0, "accounted_usd": 0.0, "unknown_unmetered": 0, "resets_at": ""}
     monkeypatch.setattr(consciousness_allowance, "allowance_window", lambda _root: dict(window))
     _row(q, intent={"kind": "system_repo"}, metadata={"initiator": "consciousness"})
     real_prepare = occurrences.prepare
 
     def prepare_then_spend(claimed):
         prepared = real_prepare(claimed)
-        window.update(status="exhausted", accounted_usd=10.0)  # spent while the prepare ran
+        window.update(status="exhausted", settled_usd=10.0, accounted_usd=10.0)  # spent while the prepare ran
         return prepared
 
     monkeypatch.setattr(occurrences, "prepare", prepare_then_spend)

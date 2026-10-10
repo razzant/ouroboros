@@ -66,7 +66,8 @@ def test_desktop_pr_matrix_keeps_merge_checkout_and_pr_base_evidence_secret_free
     assert WORKFLOW["permissions"] == {"contents": "read"}
     job = WORKFLOW["jobs"]["full-test"]
     assert "secrets." not in json.dumps(job)
-    assert not job.get("permissions")
+    # The book-growth exception reads PR label events, without any write grant.
+    assert job["permissions"] == {"contents": "read", "pull-requests": "read"}
     checkout = job["steps"][0]
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"] == {"fetch-depth": 0}  # Default PR checkout tests the merge ref.
@@ -76,8 +77,8 @@ def test_desktop_pr_matrix_keeps_merge_checkout_and_pr_base_evidence_secret_free
     assert _value(base, event="push", ref="refs/heads/ouroboros-stable") == "previous-tip"
 
 
-# "17 3 * * *" is a cron string this workflow does not carry: an event bearing
-# a stale cron still admits no ordinary job.
+# This workflow carries no schedule (owner, 2026-10-05): an event bearing any
+# cron, current or stale, admits no ordinary job.
 @pytest.mark.parametrize("cron", ["37 4 * * *", pytest.param("17 3 * * *", id="foreign-cron")])
 def test_scheduled_main_runs_do_not_enter_the_ordinary_matrix(cron):
     for name in ("quick-test", "full-test"):
@@ -170,3 +171,49 @@ def test_landed_push_desktop_matrix_runs_in_this_repository_only():
                              ("push", "refs/heads/ouroboros-stable", ""),
                              ("workflow_dispatch", "refs/heads/candidate", ""), ("push", "refs/tags/v7.0.0", "")):
         assert _value(job["if"], event=event, ref=ref, base=base, repository="someone/private-copy")
+
+
+def test_the_windows_leg_runs_the_owner_attachment_browser_module_and_refuses_a_skip(tmp_path):
+    """Real Windows confined reads behind the attachment route, in THIS matrix (no second one):
+    one module's Chromium cases, never the UI lane's guard, and a run with no case or a skip fails."""
+    import subprocess
+    import sys
+
+    job = WORKFLOW["jobs"]["full-test"]
+    steps = {step.get("id"): step for step in job["steps"] if step.get("id")}
+    install, run = steps["attachment_browser_install"], steps["attachment_browser"]
+    for step in (install, run):
+        assert "!cancelled()" in step["if"] and "runner.os == 'Windows'" in step["if"]
+        assert isinstance(step["timeout-minutes"], int) and "continue-on-error" not in step
+    assert "steps.attachment_browser_install.outcome == 'success'" in run["if"]
+    # The fixture refuses an interpreter that can import an installed ouroboros, and this job's
+    # shared env installs the checkout: both steps use their own dependency-only env, synced from
+    # the same lock as the setup action's test profile (safe_test keeps PATH, so a bare `python`
+    # would be the shared env's).
+    shared = next(step for step in job["steps"] if step.get("uses") == "./.github/actions/setup-python-env")
+    assert shared.get("with", {}).get("install-project", "true") == "true", "the shared env is left as it is"
+    action = yaml.safe_load((ROOT / ".github/actions/setup-python-env/action.yml").read_text(encoding="utf-8"))
+    sync_script = next(step["run"] for step in action["runs"]["steps"] if step.get("name") == "Sync locked dependencies")
+    profile = re.search(r'^\s*test\) (uv sync [^;]+?) "\$\{PROJECT_ARGS\[@\]\}"', sync_script, re.M).group(1)
+    env_root = install["env"]["UV_PROJECT_ENVIRONMENT"]
+    assert env_root.startswith("${{ runner.temp }}/"), "outside the checkout the fixture copies"
+    assert run["env"]["ATTACHMENT_PYTHON"] == f"{env_root}/Scripts/python.exe"
+    base, sync, playwright = install["run"].strip().splitlines()
+    # No trailing newline to capture: Git Bash keeps a Windows CR inside $(...).
+    assert base == 'base="$(python -c ' + "'import sys; print(sys._base_executable, end=\"\")'" + ')"'
+    assert sync == f'{profile} --no-install-project --python "$base"'
+    assert playwright == '"$UV_PROJECT_ENVIRONMENT/Scripts/python.exe" -m playwright install chromium'
+    assert run["env"]["OUROBOROS_RUN_UI_SMOKE"] == "1"
+    assert install["env"]["PLAYWRIGHT_BROWSERS_PATH"] == run["env"]["PLAYWRIGHT_BROWSERS_PATH"]
+    command, check = run["run"].strip().splitlines()
+    assert command.startswith('"$ATTACHMENT_PYTHON" -I -S scripts/safe_test.py -- "$ATTACHMENT_PYTHON" -m pytest '
+                              "tests/test_chat_attachments_browser.py")
+    assert " -m ui_browser -k chromium " in command and "--require-ui-browser" not in command
+    assert "matrix" not in json.dumps(run) and job["strategy"]["matrix"].keys() == {"os"}
+    # The skip guard, run as written against a junit report of each shape.
+    for tests, skipped, ok in ((3, 0, True), (3, 1, False), (0, 0, False)):
+        report = tmp_path / "attachment-browser.xml"
+        report.write_text(f'<testsuites><testsuite tests="{tests}" skipped="{skipped}"/></testsuites>', encoding="utf-8")
+        script = check.split('python -c "', 1)[1].rsplit('" "$RUNNER_TEMP', 1)[0]
+        result = subprocess.run([sys.executable, "-c", script, str(report)], capture_output=True, text=True)
+        assert (result.returncode == 0) is ok, (tests, skipped, result.stdout, result.stderr)

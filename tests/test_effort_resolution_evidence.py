@@ -23,6 +23,7 @@ from tests.test_claudexor_observed_attempt import _write_telemetry
 from tests.test_llm_claudexor import MODEL, ledger
 from tests.test_llm_claudexor import result as _model_result
 from tests.test_llm_claudexor import setup as _model_fixture
+from tests._usage_store_testing import ledger_rows
 
 _owned_gateway_uses_each_test_transport = _owned_fixture
 fake_route = _route_fixture
@@ -132,7 +133,6 @@ def test_final_session_report_reaches_review_ledger_and_last_execution(tmp_path,
 
     from ouroboros.review_substrate import run_review_request
     from ouroboros.reviewer_slot_config import record_reviewer_slot_executions, reviewer_slot_last_executions
-    from ouroboros.usage_accounting import LEDGER_REL
 
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "canonical-data")
     fake_route.detail = _terminal_detail('[]')
@@ -148,7 +148,7 @@ def test_final_session_report_reaches_review_ledger_and_last_execution(tmp_path,
     effective = reviewer_slot_last_executions()[slot.slot_id]["effective"]
     assert effective["effort_resolution"] == report
     assert "effort" not in effective  # Prepared effort must not become an applied scalar.
-    rows = [json.loads(line) for line in (tmp_path / LEDGER_REL).read_text().splitlines()]
+    rows = ledger_rows(tmp_path)
     assert any(row.get("effort_resolution") == report for row in rows)
 
 
@@ -174,7 +174,7 @@ def test_shared_model_fixture_survives_real_driver_and_monetary_settlement(model
     assert usage["effort"]["report_source"] == ("provider_applied_options" if reported else None)
     assert usage["claudexor"]["applied_options"] == response["appliedOptions"]
     rows = ledger(root)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "settled"]
+    assert [row["state"] for row in rows] == ["settled"]
     assert rows[-1]["effort_resolution"] == report
     assert rows[-1]["effort"] == usage["effort"]
     assert rows[-1]["cost_usd"] == 0.25

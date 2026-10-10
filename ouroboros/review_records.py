@@ -12,7 +12,8 @@ review_substrate.py re-exports every name.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional
+import uuid
+from typing import Any, Dict, List, Mapping, Optional
 
 from ouroboros.review_execution import ReviewRouteKind, delivery_retrieves
 
@@ -219,7 +220,9 @@ class ReviewSlot:
     # Optional manual credential pin (Q2-в); '' = the daemon's rotation (D28).
     session_profile: str = ""
     transport_timeout_sec: Optional[float] = None
-    # Optional configured-subagent binding (resolved at admission; '' = direct).
+    # The catalog row this seat is (``slot_id == subagent_id`` for a pool row;
+    # '' for a row built from a bare model). An IDENTITY fact only: it says
+    # nothing about delivery (F8) — see ``native_retrieval_override``.
     subagent_id: str = ""
     # Host sampling hint, resolved at dispatch; an explicit temperature wins.
     default_temperature: float | None = None
@@ -230,28 +233,28 @@ class ReviewSlot:
     declared_effort: str = ""
     # Captured preference; empty explicitly preserves the legacy request shape.
     processing_preference: str = ""
-    # A surface that decides delivery for its OWN rows states it here. The scope
-    # gate does: every scope row is a retrieving reviewer, so a bare api row runs
-    # the bounded native inspection episode on its own route without a fabricated
-    # actor id. ``None`` leaves the actor-binding rule below in force.
+    # An api row's delivery, stated by whoever built the row: ``True`` — the
+    # bounded native inspection episode on its own route (the catalog's
+    # ``native``), ``False`` — the assembled packet (``packet``). The pool
+    # builder sets it explicitly in both directions; ``None`` (a row built from a
+    # bare model, or a session row) means the packet. Never derived from the
+    # presence of a subagent id (F8).
     native_retrieval_override: Optional[bool] = None
 
     @property
     def native_retrieval(self) -> bool:
-        # An api-route actor row: bounded native tool rounds, never the packet.
-        if str(getattr(self.route, "value", self.route) or "") != ReviewRouteKind.API_CHAT.value:
-            return False
-        if self.native_retrieval_override is not None:
-            return bool(self.native_retrieval_override)
-        return bool(str(self.subagent_id or "").strip())
+        return (
+            str(getattr(self.route, "value", self.route) or "") == ReviewRouteKind.API_CHAT.value
+            and self.native_retrieval_override is True
+        )
 
     @property
     def retrieves(self) -> bool:
         # DELIVERY class for admission/fit/authority; transport tests the route.
-        # For a slot OBJECT this property is the truth: the surface-declared
-        # override belongs to the row, and ``delivery_retrieves`` stays the
-        # shared predicate for callers that hold only a route and an actor id.
-        return self.native_retrieval or delivery_retrieves(self.route, self.subagent_id)
+        # A session row always retrieves; an api row retrieves exactly when it
+        # reads natively. ``delivery_retrieves`` is the same predicate for
+        # callers that hold only a route and the native fact.
+        return delivery_retrieves(self.route, self.native_retrieval)
 
 
 @dataclass
@@ -292,6 +295,27 @@ class ReviewRequest:
     reconciliation_identity: Dict[str, Any] = field(default_factory=dict)
     task_attempt: Any = None
     default_temperature: float | None = None
+    # The round its sends are billed to (#1544), set by resolve_review_wave or by a fan-out
+    # naming one round for its rows. Attribution only: no identity, no prompt-cache split.
+    resolved_wave_id: str = ""
+
+
+def new_review_wave_id() -> str:
+    """A fresh review round id, for a review that names no wave and has no paid-cycle key."""
+    return f"wave-{uuid.uuid4().hex[:16]}"
+
+
+def resolve_review_wave(request: ReviewRequest, review_meta: Mapping[str, Any], inherited: str = "") -> str:
+    """The round every reviewer send of ``request`` is billed to: the caller's wave
+    (skill and plan review), the inherited scope's, the round already recorded on the
+    request, the review's paid-cycle identity (``retry_key``: one per commit, scope or
+    acceptance cycle, shared by all its slots and by a resumed run of it), or a fresh
+    id. Recorded as ``request.resolved_wave_id``, so the returned run and a replay of
+    the stored request keep it; the caller's ``usage_attribution`` stays as given."""
+    wave = str(review_meta.get("review_wave_id") or inherited or getattr(request, "resolved_wave_id", "")
+               or getattr(request, "retry_key", "") or "") or new_review_wave_id()
+    request.resolved_wave_id = wave
+    return wave
 
 
 @dataclass

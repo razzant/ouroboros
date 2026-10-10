@@ -1,3 +1,13 @@
+"""Skill review lifecycle: job file, history, events and post-review reconciliation.
+
+Writes ``review_job.json`` and the ``skill_review_*`` events. The result payload
+keeps the review verdict, ``deps_*`` and ``extension_*`` outcomes as separate
+fields, so a failed dependency install or extension load never rewrites the
+verdict. A replayed (unchanged) verdict dispatches no reviewer panel but still
+resumes dependency installation when it is executable. Review auto-enable only
+fires while no ``enabled.json`` exists, so it never overrides an owner disable.
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -31,6 +41,7 @@ from ouroboros.skill_loader import (
     skill_identity_collision_names,
     skill_review_gate,
     skill_state_dir,
+    skill_state_dir_path,
 )
 from ouroboros.skill_review import (
     SkillReviewOutcome,
@@ -61,8 +72,13 @@ _STALE_REVIEW_JOB_SEC = int(os.environ.get("OUROBOROS_SKILL_REVIEW_JOB_STALE_SEC
 ReviewImpl = Callable[..., SkillReviewOutcome]
 
 
+_REVIEW_JOB_FILENAME = "review_job.json"
+
+
 def review_job_state_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
-    return skill_state_dir(pathlib.Path(drive_root), skill_name) / "review_job.json"
+    """The job file for writers (creates the state dir); readers that must not
+    materialize state resolve it through ``skill_state_dir_path``."""
+    return skill_state_dir(pathlib.Path(drive_root), skill_name) / _REVIEW_JOB_FILENAME
 
 
 def _write_review_job(path: pathlib.Path, data: Dict[str, Any]) -> None:
@@ -112,35 +128,61 @@ def skill_review_ui_projection(
     drive_root: pathlib.Path, skill_name: str,
 ) -> Dict[str, Any]:
     """Sanitized current run, the last ten rows in its review group, and the
-    exact count of older group rows that ten-row window leaves out."""
+    exact count of older group rows that ten-row window leaves out.
+
+    A ``running`` run whose process is gone or whose heartbeat is stale is
+    presented as ``interrupted`` by the predicate the heal owners use; this
+    read writes nothing — boot, the maintenance pass and the next review start
+    persist the interruption."""
     cache_key = (str(drive_root), str(skill_name))
+    # Non-creating: a list read must not leave state/skills/<name>/ behind.
+    job_path = skill_state_dir_path(pathlib.Path(drive_root), skill_name) / _REVIEW_JOB_FILENAME
     stamp = (
-        _file_stamp(review_job_state_path(drive_root, skill_name)),
+        _file_stamp(job_path),
         _file_stamp(skill_review_history.review_history_path(drive_root, skill_name)),
     )
     cached = _UI_PROJECTION_CACHE.get(cache_key)
     if cached is not None and cached[0] == stamp:
-        return cached[1]
-    current = _read_review_job(review_job_state_path(drive_root, skill_name))
-    all_history = skill_review_history.load_history(drive_root, skill_name, limit=0)
-    group_id = str(current.get("group_id") or "")
-    if not group_id and all_history:
-        group_id = str(all_history[-1].get("group_id") or "")
-    group_rows = [row for row in all_history if not group_id or row.get("group_id") == group_id]
-    history = group_rows[-10:]
-    projection: Dict[str, Any]
-    if not current and not history:
-        projection = {}
+        projection, current = cached[1], cached[2]
     else:
-        projection = {
-            "current": _review_ui_row(current) if current else {},
-            "history": [_review_ui_row(row) for row in history],
-            # Group-scoped disclosed bound (BIBLE P1): the exact number of
-            # older rows the ten-row window left out, 0 included.
-            "history_omitted": max(0, len(group_rows) - len(history)),
-        }
-    _UI_PROJECTION_CACHE[cache_key] = (stamp, projection)
-    return projection
+        current = _read_review_job(job_path)
+        all_history = skill_review_history.load_history(drive_root, skill_name, limit=0)
+        group_id = str(current.get("group_id") or "")
+        if not group_id and all_history:
+            group_id = str(all_history[-1].get("group_id") or "")
+        group_rows = [row for row in all_history if not group_id or row.get("group_id") == group_id]
+        history = group_rows[-10:]
+        if not current and not history:
+            projection = {}
+        else:
+            projection = {
+                "current": _review_ui_row(current) if current else {},
+                "history": [_review_ui_row(row) for row in history],
+                # Group-scoped disclosed bound (BIBLE P1): the exact number of
+                # older rows the ten-row window left out, 0 included.
+                "history_omitted": max(0, len(group_rows) - len(history)),
+            }
+        _UI_PROJECTION_CACHE[cache_key] = (stamp, projection, current)
+    # Liveness is not a file fact — a pid dies without a byte changing — so the
+    # memo above never answers it.
+    return _present_dead_running_job(projection, current)
+
+
+def _present_dead_running_job(projection: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    """Read-only twin of ``mark_stale_review_job_interrupted``: the same
+    ``interrupted`` status, lifecycle status and terminal reason the heal would
+    persist, on a copy of the projection, with no write."""
+    interrupt_reason = _running_job_interrupt_reason(current)
+    if interrupt_reason is None:
+        return projection
+    shown = dict(projection)
+    shown["current"] = {
+        **projection.get("current", {}),
+        "status": "interrupted",
+        "lifecycle_status": "interrupted",
+        "terminal_reason": interrupt_reason,
+    }
+    return shown
 
 
 def _events_path(drive_root: pathlib.Path) -> pathlib.Path:
@@ -485,6 +527,24 @@ def _append_interrupted_review_progress(
     )
 
 
+def _running_job_interrupt_reason(
+    data: Dict[str, Any], *, stale_after_sec: int = _STALE_REVIEW_JOB_SEC,
+) -> str | None:
+    """Why a ``running`` review job is dead: ``owner_process_exited`` when its
+    pid is gone, ``heartbeat_stale`` when the heartbeat is older than
+    ``stale_after_sec``; ``None`` for a live run or any other status. Shared by
+    the heal (which persists it) and the UI projection (which only shows it)."""
+    if str(data.get("status") or "") != "running":
+        return None
+    pid = int(data.get("pid") or 0)
+    heartbeat_age = _iso_age_sec(str(data.get("last_heartbeat_at") or data.get("started_at") or ""))
+    if pid and not _pid_alive(pid):
+        return "owner_process_exited"
+    if heartbeat_age and heartbeat_age > stale_after_sec:
+        return "heartbeat_stale"
+    return None
+
+
 def mark_stale_review_job_interrupted(
     drive_root: pathlib.Path,
     skill_name: str,
@@ -494,13 +554,8 @@ def mark_stale_review_job_interrupted(
 ) -> None:
     path = review_job_state_path(drive_root, skill_name)
     data = _read_review_job(path)
-    if str(data.get("status") or "") != "running":
-        return
-    pid = int(data.get("pid") or 0)
-    heartbeat_age = _iso_age_sec(str(data.get("last_heartbeat_at") or data.get("started_at") or ""))
-    pid_dead = bool(pid and not _pid_alive(pid))
-    heartbeat_stale = bool(heartbeat_age and heartbeat_age > stale_after_sec)
-    if not (pid_dead or heartbeat_stale):
+    interrupt_reason = _running_job_interrupt_reason(data, stale_after_sec=stale_after_sec)
+    if interrupt_reason is None:
         return
     now = utc_now_iso()
     payload = {
@@ -509,7 +564,7 @@ def mark_stale_review_job_interrupted(
         "lifecycle_status": "interrupted",
         "finished_at": now,
         "interrupted_at": now,
-        "interrupt_reason": "owner_process_exited" if pid_dead else "heartbeat_stale",
+        "interrupt_reason": interrupt_reason,
         "content_hash": data.get("content_hash") or current_content_hash,
     }
     payload["terminal_reason"] = payload["interrupt_reason"]

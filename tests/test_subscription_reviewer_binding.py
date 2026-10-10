@@ -73,17 +73,22 @@ def test_plan_fit_excludes_only_the_small_account_of_same_model(accounts):
     assert not error
 
 
-def test_scope_sizing_uses_frozen_role_pin_and_not_main(accounts):
-    """Each scope row's window — and therefore its output reserve — resolves
-    under the row's OWN frozen role pin and credential profile."""
-    from ouroboros.tools.scope_review import _window_scaled_reserves
+def test_retrieving_seat_sizing_uses_frozen_role_pin_and_not_main(accounts):
+    """Each retrieving seat's window — and therefore its output reserve —
+    resolves under the seat's OWN frozen role pin and credential profile."""
+    from ouroboros.reviewer_window import window_scaled_reserves
+    from ouroboros.tools.review_multi_model import _review_output_budget
     from ouroboros.tools.scope_window import scope_window
 
     first = scope_window(MODEL, model_role="reviewer:scope-a", credential_profile_id="account-a")
     second = scope_window(MODEL, model_role="reviewer:scope-b", credential_profile_id="account-b")
     assert (first.window_tokens, second.window_tokens) == (200_000, 800_000)
-    assert _window_scaled_reserves(first.window_tokens)[0] == 50_000
-    assert _window_scaled_reserves(second.window_tokens)[0] == 100_000
+    # The brief's first-send bound scales the one review output budget by the
+    # seat's own window (review_brief_coupling.first_send_bound): a quarter of
+    # the small window, the full budget where the window has room for it.
+    scaled = [window_scaled_reserves(w.window_tokens, output_reserve=_review_output_budget(), tokenizer_margin=50_000)[0]
+              for w in (first, second)]
+    assert scaled == [50_000, _review_output_budget()]
 
 
 def test_triad_fit_uses_the_already_frozen_rows(tmp_path, accounts, monkeypatch):

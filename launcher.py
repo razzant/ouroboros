@@ -19,13 +19,9 @@ import webbrowser
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
-# WA6: set sys.dont_write_bytecode BEFORE importing any project module. A signed
-# macOS .app must never write __pycache__/*.pyc into its own bundle at runtime
-# (that breaks the codesign seal and triggers AppTranslocation). os.environ alone
-# is INSUFFICIENT for THIS process: PYTHONDONTWRITEBYTECODE is only read at
-# interpreter startup, so mutating os.environ later does not stop the current
-# process's own subsequent imports — only sys.dont_write_bytecode does. The env
-# vars set further below propagate the same policy to child processes.
+# Seal-safe imports: the current interpreter needs the flag before project imports;
+# PYTHONDONTWRITEBYTECODE alone only affects later child interpreters. Bundle writes
+# would invalidate a macOS signature and trigger AppTranslocation.
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
@@ -51,10 +47,9 @@ from ouroboros.config import (
 from ouroboros.launcher_bootstrap import (
     BootstrapContext,
     bootstrap_repo as _bootstrap_repo,
-    check_git as _check_git,
+    check_git as _check_git, launcher_sources_changed, remember_loaded_checkout,
     install_deps as _install_deps_impl,
-    embedded_python_env,
-    update_external_host,
+    embedded_python_env, update_external_host,
     parse_launch_options,
     automatic_launch_allowed,
     sync_existing_repo_from_bundle as _sync_existing_repo_from_bundle_impl,
@@ -63,7 +58,7 @@ from ouroboros.launcher_onboarding import (
     prepare_first_run_settings as _prepare_first_run_settings,
     present_first_run_onboarding as _present_first_run_onboarding,
 )
-from ouroboros.launcher_background import (Background, activate_running_instance, background_env,
+from ouroboros.launcher_background import (Background, DesktopApi, activate_running_instance, background_env,
                                            request_tray_cleanup, stop_tray_before_exit)
 from ouroboros.launcher_server_reaper import (
     reap_same_install_strays as _reap_same_install_strays_impl,
@@ -136,13 +131,13 @@ _handlers: list[logging.Handler] = [_file_handler]
 if not getattr(sys, "frozen", False):
     _handlers.append(logging.StreamHandler())
 logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=_handlers)
-# Secret-redaction filter (shared SSOT in ouroboros.observability) + quiet
-# third-party HTTP request-URL lines (they can carry URL credentials).
+# Shared SSOTs: redaction filter, uncaught exceptions into these handlers; quiet request-URL lines (credentials).
 try:
     from ouroboros.observability import SecretRedactingLogFilter as _RedactFilter
-
     for _handler in _handlers:
         _handler.addFilter(_RedactFilter())
+    from ouroboros.process_logging import install_exception_hooks
+    install_exception_hooks()
 except Exception:
     pass  # defensive: a broken observability import must not kill the launcher
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -375,6 +370,9 @@ def _cleanup_recorded_server_group_for_pid(pid: int, reason: str = "agent_exit")
 def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     """Start server.py as the managed agent subprocess."""
     global _agent_proc, _agent_job
+    # Stdlib-only, so it loads even when the server's own imports are broken; imported
+    # before the spawn, because an undrained pipe would block the server.
+    from ouroboros.process_logging import copy_capped_output
 
     settings = _load_settings()
     _apply_settings_to_env(settings)
@@ -396,14 +394,9 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     env["OUROBOROS_APP_VERSION"] = str(APP_VERSION)
     env["OUROBOROS_MANAGED_BY_LAUNCHER"] = "1"
     env["OUROBOROS_MANAGED_REPO_DIR"] = str(REPO_DIR.resolve())
-    # Owner Surface Fact: the launcher alone knows presentation; `_headless` is decided in main() before the
-    # lifecycle loop ever calls start_agent(), and every managed restart funnels
-    # back through here, so the export is re-stamped fresh each time. Absence of
-    # the var (source mode, Docker, Colab, CLI server) truthfully means "web".
-    # Env-only by design — never a SETTINGS_DEFAULTS key (pop-on-absent would
-    # erase an injected value). Known bounded lie: a SIGKILLed launcher can
-    # orphan the server with a stale "desktop_window" until the next launcher
-    # start reaps it — the same envelope OUROBOROS_MANAGED_BY_LAUNCHER accepts.
+    # Launcher-owned presentation is re-stamped for every generation; other hosts default
+    # to web. After a killed launcher it can remain stale until the next owned reap.
+    # Env-only: a SETTINGS_DEFAULTS entry would pop an injected value when absent on disk.
     env["OUROBOROS_PRESENTATION"] = (
         str(os.environ.get("OUROBOROS_PRESENTATION") or "web")
         if _external_ui else "browser_fallback" if _headless else "desktop_window"
@@ -415,9 +408,7 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     else:
         env.pop("OUROBOROS_EXTERNAL_HOST_UPDATE", None)
         env.pop("OUROBOROS_EXTERNAL_HOST_RESULT", None)
-    # The server runs out of the managed repo, not the bundle: without this the
-    # bundled payloads (node, ripgrep) are invisible to it (platform_layer.
-    # bundled_resource_bases).
+    # The managed server still resolves payloads from this bundle.
     env[BUNDLE_DIR_ENV] = str(_bundle_dir())
 
     server_py = REPO_DIR / "server.py"
@@ -430,6 +421,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
         "stderr": subprocess.STDOUT,
     }
     if IS_WINDOWS:
+        env["OUROBOROS_LAUNCHER_STOP_STDIN"] = "1"
+        popen_kwargs["stdin"] = subprocess.PIPE
         popen_kwargs["creationflags"] = (
             popen_kwargs.get("creationflags", 0)
             | _CREATE_NEW_PROCESS_GROUP
@@ -469,55 +462,9 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
         log.info("Agent pid %d assigned to Windows Job Object", proc.pid)
 
     _write_server_process_record(proc, port=port, server_py=server_py, server_host_source=host_source)
-
-    def _stream_output() -> None:
-        # Size-capped copy (CPL4-C5): same bound as the server.log stdlib
-        # handler (2 MB live + numbered backups). Rotation failure must never
-        # kill the copy thread — worst case the live file keeps growing, which
-        # is exactly the pre-cap behavior.
-        max_bytes = 2 * 1024 * 1024
-        backups = 3
-
-        def _rotate(log_path: pathlib.Path) -> None:
-            try:
-                for index in range(backups - 1, 0, -1):
-                    older = log_path.with_name(f"{log_path.name}.{index}")
-                    if older.exists():
-                        os.replace(older, log_path.with_name(f"{log_path.name}.{index + 1}"))
-                if log_path.exists():
-                    os.replace(log_path, log_path.with_name(f"{log_path.name}.1"))
-            except OSError:
-                pass
-
-        log_path = DATA_DIR / "logs" / "agent_stdout.log"
-        try:
-            written = log_path.stat().st_size if log_path.exists() else 0
-        except OSError:
-            written = 0
-        handle = None
-        try:
-            handle = open(log_path, "a", encoding="utf-8")
-            for line in iter(proc.stdout.readline, b""):
-                decoded = line.decode("utf-8", errors="replace")
-                if written + len(decoded) > max_bytes:
-                    handle.close()
-                    handle = None
-                    _rotate(log_path)
-                    handle = open(log_path, "a", encoding="utf-8")
-                    written = 0
-                handle.write(decoded)
-                handle.flush()
-                written += len(decoded)
-        except Exception:
-            pass
-        finally:
-            if handle is not None:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-
-    threading.Thread(target=_stream_output, daemon=True).start()
+    # The server blocks once its output pipe fills, so the copy drains until the pipe ends.
+    threading.Thread(target=copy_capped_output, args=(proc.stdout, DATA_DIR / "logs" / "agent_stdout.log"),
+                     kwargs={"report": log}, name="agent-output-copy", daemon=True).start()
     return proc
 
 
@@ -534,8 +481,20 @@ def stop_agent() -> None:
 
     log.info("Stopping agent (pid=%s)...", proc.pid)
     try:
-        # Graceful phase signals only the server: it owns its Manager and workers (#1142).
-        proc.terminate()
+        # Windows terminate is forced: its owned stdin asks the server to drain first.
+        if IS_WINDOWS and proc.stdin is not None:
+            try:
+                proc.stdin.write(b"quit\n")
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                log.warning("Launcher stop pipe unavailable; retaining the exit wait and fallback")
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass  # A failed pipe must still reach the wait/forced cleanup.
+        else:
+            proc.terminate()
         proc.wait(timeout=LAUNCHER_STOP_GRACE_SEC)
     except subprocess.TimeoutExpired:
         if IS_WINDOWS and job is not None:
@@ -746,6 +705,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         _external_host_result = update_external_host(_external_host_update, EMBEDDED_PYTHON, log, _shutdown_event)
         if _shutdown_event.is_set():
             break  # Native preparation has reaped its owned processes before returning.
+        remember_loaded_checkout(REPO_DIR)  # the commit this launcher's own modules came from
         proc = start_agent(port)
         if _shutdown_event.is_set():
             stop_agent()
@@ -809,10 +769,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             log.info("Agent requested restart (exit code 42). Restarting...")
             _sync_existing_repo_from_bundle()
             if not _install_deps():
-                # An evolved checkout may have added requirements its reviewed
-                # commit depends on. Pause visibly and retry once — pip failures
-                # are often transient (index/network) — instead of restarting as
-                # if nothing happened.
+                # Retry dependency sync once before letting imports fail under the crash fuse.
                 log.error(
                     "Dependency install failed after the restart request; "
                     "retrying once in %ds.", _DEPS_RETRY_DELAY_SEC,
@@ -826,9 +783,12 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
                         "import them — see the pip output above for the cause.",
                         MAX_CRASH_RESTARTS, CRASH_WINDOW_SEC,
                     )
-            if _external_seed_bundle is not None:
+            if _external_seed_bundle is not None or launcher_sources_changed(REPO_DIR, bundle_dir=_bundle_dir()):
+                argv = list(_launch_argv)
+                if getattr(sys, "frozen", False):
+                    argv += ["--seed-bundle", str(_bundle_dir())]
                 release_pid_lock()
-                os.execv(EMBEDDED_PYTHON, [EMBEDDED_PYTHON, str(REPO_DIR / "launcher.py"), *_launch_argv])
+                os.execv(EMBEDDED_PYTHON, [EMBEDDED_PYTHON, str(REPO_DIR / "launcher.py"), *argv])
             # No port sweep here: _pre_generation_cleanup owns it next iteration.
             continue
 
@@ -1451,7 +1411,8 @@ def main(argv=()):
         with urllib.request.urlopen(full_url, timeout=60) as resp, target.open("wb") as fh:  # noqa: S310 - localhost validated above
             shutil.copyfileobj(resp, fh)
 
-    class MainApi:
+    class MainApi(DesktopApi):  # alerts, shell facts and system notifications: launcher_background.DesktopApi
+        _background = background
         @staticmethod
         def _native_confirm(title: str, message: str) -> bool:
             return bool(_webview_window and _webview_window.create_confirmation_dialog(title, message))
@@ -1514,9 +1475,6 @@ def main(argv=()):
 
         def open_external_url(self, url: str) -> dict:
             return _open_external_url(url)
-        def request_attention(self, sound: bool = True, title: str = "", body: str = "", cue_when_visible: bool = True) -> dict:
-            return background.attention(bool(sound), str(title or ""), str(body or ""), bool(cue_when_visible))
-        notify_owner = request_attention  # newer pages send the alert text; older launchers lack this name
 
         def save_bytes_to_downloads(self, filename: str, b64: str) -> dict:
             try:

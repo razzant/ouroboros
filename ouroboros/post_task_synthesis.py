@@ -2,7 +2,8 @@
 
 The LLM-heavy best-effort memory work the post-task orchestrator
 (``agent_task_pipeline._run_post_task_processing_async``) dispatches after a
-task ends: the tool-trace summary, the free host facts row, chat/scratchpad
+task ends: the tool-trace summary, the free host facts row, the fallback
+memory draft (only while consciousness is off), scratchpad
 consolidation, the execution reflection with its child-task evidence, the
 durable improvement backlog and reflection memory actions, plus the shared
 pre-synthesis usage snapshot and the compact review projection those prompts
@@ -19,6 +20,7 @@ from dataclasses import replace
 from typing import Any, Callable, Dict
 from ouroboros.dialogue_provenance import presence_provenance_fields
 from ouroboros.llm_claudexor import propagate_model_error
+from ouroboros.observability import without_finalization_timing
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.subagent_messages import initiator_meta
 from ouroboros.synthesis_cost_text import _summary_row_cost_fields, _synthesis_cost_usd, _synthesis_usage_snapshot_text
@@ -384,7 +386,9 @@ def _child_task_evidence(env: Any, task: Dict[str, Any], limit: int = 6000) -> t
     """Compact evidence from child/subagent results for parent experience review.
 
     Returns the prompt text AND the rows it was rendered from: the caller needs
-    the typed child outcomes, and one walk is the only walk (P7)."""
+    the typed child outcomes. This one child-evidence walk serves admission and
+    the prompt; a qualified reflection separately reads canonical receipt lineage
+    without changing this walk's source or eligibility semantics."""
     task_id = str(task.get("id") or "")
     if not task_id:
         return "", []
@@ -443,7 +447,7 @@ def _pre_synthesis_usage_snapshot(
     terminal checkpoint remains the sole final authority after their own model
     calls settle.
     """
-    snapshot = json.loads(json.dumps(usage, ensure_ascii=False, default=str))
+    snapshot = json.loads(json.dumps(without_finalization_timing(usage), ensure_ascii=False, default=str))
     if not _atp()._is_root_post_task(task):
         return snapshot
 
@@ -493,12 +497,19 @@ def _pre_synthesis_usage_snapshot(
     return snapshot
 
 
-def _compact_review_projection(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the public review projection without copying raw actor output."""
+def _compact_review_projection(llm_trace: Dict[str, Any], task: Dict[str, Any] | None = None,
+                               drive_root: Any = None) -> Dict[str, Any]:
+    """Build the public review projection without copying raw actor output: the trace's
+    acceptance runs, then this task's own review-ledger records (``task_ledger_records``)."""
     try:
+        from ouroboros.review_projection import task_ledger_records
         from ouroboros.review_substrate import compact_review_projection
 
-        return compact_review_projection(llm_trace.get("review_runs") or [])
+        records, omitted = task_ledger_records(task or {}, drive_root)
+        projection = compact_review_projection(llm_trace.get("review_runs") or [], records=records)
+        if records:
+            projection["review_records_omitted"] = omitted
+        return projection
     except Exception:
         log.debug("Failed to build compact review projection", exc_info=True)
         return {"panels": []}
@@ -524,7 +535,7 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
         canonical_root = pathlib.Path(task.get("budget_drive_root") or drive_logs.parent)
         result_root = pathlib.Path(getattr(env, "drive_root", canonical_root))
         stored_result = _atp().load_task_result(result_root, task_id) or {}
-        review_projection = _compact_review_projection(llm_trace)
+        review_projection = _compact_review_projection(llm_trace, task, canonical_root)
         # TZ-2 C2: how many files the task rescued into its store(s) — positive, zero or
         # unknown — by stat alone; the fact discloses that no hash was computed. A split
         # non-Project root synthesizes on the canonical drive (parent env and task): its
@@ -614,72 +625,47 @@ def _post_task_paid_interruption(errors: Any) -> str:
     return str((unresolved[-1].get("kind") or "stage_error")) if unresolved else ""
 
 
-def _run_chat_consolidation(env, memory, llm, task, drive_logs):
-    """Run dialogue-block consolidation inside the root post-task worker."""
+def _run_memory_fallback_draft(env: Any, task: Dict[str, Any], llm: Any, drive_logs: pathlib.Path,
+                               llm_trace: Dict[str, Any]) -> str:
+    """Run the fallback memory draft (``memory_fallback``) inside the root post-task worker.
+
+    With consciousness on it reads one state and makes no call. Otherwise at most one
+    Light call, scoped and billed as consolidation; a refusal with a receipt and a
+    returned failure read ``degraded``, a budget or unknown-provider kind interrupts.
+    """
     try:
-        from ouroboros import consolidator as _c
+        from ouroboros import memory_fallback
+        from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
 
-        should_consolidate = _c.should_consolidate
-        consolidate = _c.consolidate
-        chat_path = drive_logs / "chat.jsonl"
-        blocks_path = env.drive_path("memory") / "dialogue_blocks.json"
-        meta_path = env.drive_path("memory") / "dialogue_meta.json"
-        if should_consolidate(meta_path, chat_path):
-            _id, _ident, _llm, _logs = task.get("id"), memory.load_identity(), llm, drive_logs
-            from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
+        base_scope = current_usage_scope()
+        scope = (replace(base_scope, category="consolidation", source="memory_fallback") if base_scope is not None
+                 else UsageScope(drive_root=env.drive_root, category="consolidation", source="memory_fallback"))
+        with usage_scope(scope):
+            run = memory_fallback.run_fallback_draft(env, task, llm, drive_logs, llm_trace)
+        usage = run.usage
+        if usage and (usage.get("cost") or usage.get("prompt_tokens")):
+            from supervisor.state import update_budget_from_usage
+            update_budget_from_usage(usage)
+        if run.outcome in ("consciousness_on", "not_activated", "nothing"):
+            return ""
+        from ouroboros.knowledge import observed_route_stamp
 
-            base_scope = current_usage_scope()
-            chat_scope = (
-                replace(base_scope, category="consolidation", source="chat_consolidation")
-                if base_scope is not None
-                else UsageScope(
-                    drive_root=task.get("budget_drive_root") or env.drive_root,
-                    task_id=str(_id or ""),
-                    root_task_id=str(task.get("root_task_id") or _id or ""),
-                    category="consolidation",
-                    source="chat_consolidation",
-                )
-            )
-
-            with usage_scope(chat_scope):
-                from ouroboros.tools.registry import ToolContext
-                knowledge_context = ToolContext(
-                    repo_dir=getattr(env, "repo_dir", env.drive_root),
-                    drive_root=pathlib.Path(task.get("budget_drive_root") or env.drive_root),
-                    budget_drive_root=str(task.get("budget_drive_root") or env.drive_root),
-                    task_id=str(_id or ""), project_id=str(task.get("project_id") or ""))
-                u = consolidate(chat_path=chat_path, blocks_path=blocks_path,
-                                meta_path=meta_path, llm_client=_llm, identity_text=_ident,
-                                knowledge_context=knowledge_context,
-                                room_registry_root=knowledge_context.budget_drive_root)
-            if u:
-                # A run that produced no block and a run that never happened look the
-                # same in this stream without a written count; last_error_kind names the
-                # LAST error any attempt recorded (recovered splits keep theirs), which
-                # is weaker than "the run failed" and is reported under that honest name.
-                errors = u.get("_consolidation_errors") or []
-                from ouroboros.room_consolidation import consolidation_coverage
-
-                # Coverage is measured from the run's own per-unit facts (no new
-                # ledger); cost stays None when any call's spend is unknown.
-                append_jsonl(_logs / "events.jsonl", {"ts": utc_now_iso(),
-                    "type": "chat_block_consolidation", "task_id": _id,
-                    "blocks_written": u.get("_blocks_written"),
-                    "last_error_kind": (errors[-1] or {}).get("kind") if errors else None,
-                    "coverage": consolidation_coverage(u.get("_coverage")),
-                    "cost_usd": (
-                        round(float(u["cost"]), 6)
-                        if u.get("cost") is not None
-                        else None
-                    )})
-                if u.get("cost") or u.get("prompt_tokens"):
-                    from supervisor.state import update_budget_from_usage
-                    update_budget_from_usage(u)
-                return _post_task_paid_interruption(errors)
+        reason = (run.kind if run.outcome == "refused"
+                  else _post_task_paid_interruption(run.errors) if run.outcome == "failed" else "")
+        try:
+            append_jsonl(pathlib.Path(drive_logs) / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "memory_fallback_draft", "task_id": str(task.get("id") or ""),
+                "unit": run.unit.describe() if run.unit else None, "outcome": run.outcome, "kind": run.kind or None,
+                "record_id": run.record_id or None, "input_tokens": run.input_tokens,
+                "accounted_upper_bound_usd": round(float(usage["cost"]), 6) if usage.get("cost") is not None else None,
+                "route": observed_route_stamp(usage) if usage else None})
+        except Exception:
+            log.debug("memory_fallback_draft event was not recorded", exc_info=True)
+        return reason
     except Exception as error:
         propagate_paid_interruption(error)
-        log.warning("Chat block consolidation setup failed", exc_info=True)
-        return "stage_setup_failed"  # an ordinary failure isolated to this stage, never `completed`
+        log.debug("Fallback memory draft setup failed", exc_info=True)
+        return "stage_setup_failed"
 
 
 def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
@@ -747,15 +733,23 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
         cost_usd=synthesis_cost,
         child_failure_classes=child_classes,
     ):
+        from ouroboros.presence_delivery import receipts_prompt_section, task_delivery_receipts
+
         trace_summary = build_trace_summary(llm_trace, all_calls=True)
         reflection_usage = dict(usage)
         # Reflection's legacy durable cost_usd field now records this
         # same subtree snapshot instead of silently reverting to own cost.
         reflection_usage["cost"] = synthesis_cost
+        canonical_root = pathlib.Path(task.get("budget_drive_root") or env.drive_root)
+        # Episodic evidence for this one new prompt, read only once a reflection
+        # will be written: the transport receipts the host already appended to the
+        # canonical chat chain for this task's lineage (no store, no wait), shown
+        # bounded and retained whole as a source this reflection's read_file opens.
+        receipts = task_delivery_receipts(canonical_root, task)
         from ouroboros.tools.registry import ToolContext
         knowledge_context = ToolContext(
             repo_dir=getattr(env, "repo_dir", env.drive_root),
-            drive_root=pathlib.Path(task.get("budget_drive_root") or env.drive_root),
+            drive_root=canonical_root,
             project_id=str(task.get("project_id") or ""),
             task_id=str(task.get("id") or ""))
         entry = generate_reflection(
@@ -764,7 +758,8 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
             review_evidence=review_evidence,
             child_evidence=child_evidence,
             usage_snapshot_text=_synthesis_usage_snapshot_text(usage),
-            sealed_final_text=sealed_final_prompt_section(sealed_final),
+            sealed_final_text=(sealed_final_prompt_section(sealed_final)
+                               + receipts_prompt_section(receipts, knowledge_context)),
             child_failure_classes=child_classes,
             knowledge_context=knowledge_context,
         )
@@ -819,6 +814,7 @@ def park_late_phase(env: Any, task: Dict[str, Any], stage: str, remaining: list,
     callback); ``late`` is what the phase already holds (completed steps, a
     stopped correction's draft); the original money scope rides along. One
     actor-source payload carries them; the checkpoint stays open ``paused``.
+    Durable copies omit boot-relative timing; live delivery keeps its clocks.
     False means nothing was saved: the caller keeps its honest ``degraded``.
     """
     import dataclasses
@@ -846,7 +842,8 @@ def park_late_phase(env: Any, task: Dict[str, Any], stage: str, remaining: list,
                    "marks": sorted(late.marks), "drafts": dict(late.drafts), "task": task,
                    "env": {"drive_root": str(env.drive_root), "repo_dir": str(getattr(env, "repo_dir", "") or "")},
                    "money_scope": dataclasses.asdict(scope) if scope is not None else None,
-                   "usage": usage, "usage_snapshot": usage_snapshot, "trace": trace,
+                   "usage": without_finalization_timing(usage),
+                   "usage_snapshot": without_finalization_timing(usage_snapshot), "trace": trace,
                    "review_evidence": review_evidence, "sealed_final": sealed_final, "drive_logs": str(drive_logs),
                    "reflection_callback": reflection_callback_spec(callback), **state}
         ref = store_actor_source_bytes(roots[0], task_id, category="context_checkpoints",

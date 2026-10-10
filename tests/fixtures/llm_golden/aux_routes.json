@@ -71,11 +71,8 @@
             "candidate_raw_sha256": "69f463206f5ea364a2c7ec910fe282a900526307a7b590c33d28830b2af385a4",
             "candidate_raw_size_bytes": 167,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "unresolved"
-            ]
+            "state": "unresolved",
+            "transitions": 4
           }
         ],
         "unused_script_steps": 0
@@ -169,11 +166,8 @@
             "candidate_raw_sha256": "6425ed4e83a79243dfa1dc34d698305c58cf442cfa090485afb324e39761f70a",
             "candidate_raw_size_bytes": 130,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": false
           }
@@ -297,11 +291,8 @@
             "candidate_raw_sha256": "9ebedbe1092687b2751dcfc27491538406b3d1ef3c3089d84a47a984f9c84438",
             "candidate_raw_size_bytes": 206,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 3,
             "prompt_cache_ttl": "",
             "cost_final": true
           }
@@ -417,11 +408,8 @@
             "candidate_raw_sha256": "2ee78765489f606716c6d5f6db21a846ed51617487267c3cc3d674c6186da417",
             "candidate_raw_size_bytes": 182,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 3,
             "prompt_cache_ttl": "",
             "cost_final": true
           }
@@ -817,6 +805,14 @@
               "applied_actions": [],
               "task_local": false,
               "attempt_id_present": true
+            },
+            "_vision_query_receipt": {
+              "model": "google/gemini-3.6-flash",
+              "digests": [
+                "d9a91006648a07994f921b2656d13eb568d38f94120b8b6f369cdd3786d28e86",
+                "8aaea11f65ce8bda38dd376b60575ac8a00294263f5d47cefb63a0b18467f8d2"
+              ],
+              "note": ""
             }
           },
           "ledger_attempt_count": 1
@@ -887,11 +883,8 @@
             "candidate_raw_sha256": "bfcf640285cf7097a2e11914346af8880ad2dcbf12023d596ce9d7bd995a72ed",
             "candidate_raw_size_bytes": 338,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": true
           }

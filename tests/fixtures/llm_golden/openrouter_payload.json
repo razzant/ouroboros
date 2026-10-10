@@ -1236,8 +1236,8 @@
       }
     },
     {
-      "id": "openrouter.payload.blind_model_image_placeholder",
-      "route": "a model without native vision receives an explicit image placeholder",
+      "id": "openrouter.payload.image_block_reaches_the_wire",
+      "route": "an image block reaches the OpenRouter payload as the send policy gave it, whatever the model name",
       "spec": {
         "env": {
           "OPENROUTER_API_KEY": "or-fixture-key"
@@ -1280,8 +1280,10 @@
                     "text": "look"
                   },
                   {
-                    "type": "text",
-                    "text": "[image omitted: model has no vision — screenshot]"
+                    "type": "image_url",
+                    "image_url": {
+                      "url": "data:image/png;base64,AAA"
+                    }
                   }
                 ]
               }
@@ -1294,7 +1296,7 @@
               }
             }
           },
-          "value_sha256": "aed846a3a10e3f842a555bf8d372ad82b2478d80d0c90fa744b0dec3c63b9977"
+          "value_sha256": "1cd3226d3cfd6e135f357111501b366f5883a2b1b70dc4d749bb8117088f0bfa"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -1401,7 +1403,7 @@
     },
     {
       "id": "openrouter.payload.openai_family_system_prefix_split",
-      "route": "OpenRouter openai/ family: a builder-declared 3-block system keeps only its stable block on the wire, the remaining blocks ride as ONE [SYSTEM NOTICE] user message before the task, and the sticky session is prefix-only (measured 2026-09-25: OpenAI's public API reuses a prompt cache for the whole leading system section as one unit under one routing key)",
+      "route": "OpenRouter openai/ family: a builder-declared 3-block system keeps its stable block and each following marked block as separate system items with their markers (OpenRouter turns them into explicit prompt_cache_breakpoints, guide read 2026-10-03), the unmarked rest rides as ONE [SYSTEM NOTICE] user message before the task, and the sticky session is prefix-only (measured 2026-09-25 under one routing key)",
       "spec": {
         "env": {
           "OPENROUTER_API_KEY": "or-fixture-key"
@@ -1454,13 +1456,28 @@
                 "content": [
                   {
                     "type": "text",
-                    "text": "stable policy prefix"
+                    "text": "stable policy prefix",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "semi-stable memory block",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
                   }
                 ]
               },
               {
                 "role": "user",
-                "content": "[SYSTEM NOTICE]\nHost context for this turn: memory, knowledge index, runtime facts and recent activity, rendered by the runtime as a continuation of the system prompt. Not written by my human and not a message to answer; the message to act on follows next.\n\nsemi-stable memory block\n\nmutable task evidence"
+                "content": "[SYSTEM NOTICE]\nHost context for this turn: memory, knowledge index, runtime facts and recent activity, rendered by the runtime as a continuation of the system prompt. Not written by my human and not a message to answer; the message to act on follows next.\n\nmutable task evidence"
               },
               {
                 "role": "user",
@@ -1476,7 +1493,7 @@
               "session_id": "ouroboros-session-254615c202ffb1309fea7d9e5316083e"
             }
           },
-          "value_sha256": "28234a3882088dedab5cef719fcac76f9011787c5724318d7ab3a55dc5651810"
+          "value_sha256": "4fcb56bc34913ce3fae7561f4e892068e8656b7359c94de0a74484c37dd40f1e"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -1722,11 +1739,8 @@
             "candidate_raw_sha256": "e430a01d4e8363513e703af1967143deed81b76fca8b96d197c471e98a745d51",
             "candidate_raw_size_bytes": 737,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "1h",
             "cost_final": true
           }
@@ -1904,11 +1918,8 @@
             "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
             "candidate_raw_size_bytes": 271,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": false
           }
@@ -1917,8 +1928,8 @@
       }
     },
     {
-      "id": "openrouter.dispatch.generation_cost_backfill",
-      "route": "usage without cost triggers the OpenRouter generation-cost fetch",
+      "id": "openrouter.dispatch.missing_cost_stays_nonfinal",
+      "route": "usage without cost keeps the answer and nonfinal money without a generation GET",
       "spec": {
         "env": {
           "OPENROUTER_API_KEY": "or-fixture-key"
@@ -1941,15 +1952,6 @@
               "usage": {
                 "prompt_tokens": 200,
                 "completion_tokens": 10
-              }
-            }
-          },
-          {
-            "kind": "response",
-            "status_code": 200,
-            "json": {
-              "data": {
-                "total_cost": 0.0077
               }
             }
           }
@@ -1996,10 +1998,10 @@
               "report_source": null
             },
             "response_finish_reason": "stop",
-            "cost": 0.0077,
+            "cost": null,
             "provider": "openrouter",
             "resolved_model": "x-ai/grok-4.5",
-            "cost_final": true,
+            "cost_final": false,
             "request_wire": {
               "requested_effort": "medium",
               "applied_effort": "medium",
@@ -2057,16 +2059,6 @@
               "model": "x-ai/grok-4.5"
             },
             "payload_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1"
-          },
-          {
-            "transport": "requests.get",
-            "url": "https://openrouter.ai/api/v1/generation?id=gen-fixture-2",
-            "headers": [
-              "Authorization"
-            ],
-            "timeout": 5,
-            "payload": {},
-            "payload_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
           }
         ],
         "physical_attempts": [
@@ -2077,16 +2069,28 @@
             "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
             "candidate_raw_size_bytes": 271,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": false
           }
         ],
-        "unused_script_steps": 0
+        "unused_script_steps": 0,
+        "pricing_calls": [
+          {
+            "model": "x-ai/grok-4.5",
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "allow_live_fetch": true,
+            "provider": "openrouter"
+          }
+        ]
       }
     },
     {
@@ -2245,11 +2249,8 @@
             "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
             "candidate_raw_size_bytes": 271,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": true
           }
@@ -2480,11 +2481,8 @@
             "candidate_raw_sha256": "18aa195e409cc792cf5212e3f6d3ba66df62579ee1b17d88f7f74390f2363466",
             "candidate_raw_size_bytes": 566,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": true
           }
@@ -2658,11 +2656,8 @@
             "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
             "candidate_raw_size_bytes": 271,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": true
           }
@@ -2804,13 +2799,10 @@
             "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
             "candidate_raw_size_bytes": 271,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 5,
             "prompt_cache_ttl": "",
-            "cost_final": true
+            "cost_final": false
           }
         ],
         "unused_script_steps": 0
@@ -2969,9 +2961,9 @@
             "prompt_cache_ttl": "1h",
             "cost_final": true,
             "prompt_cache_breakpoints_reduced": {
-              "declared": 6,
+              "declared": 5,
               "kept": 4,
-              "dropped": 2
+              "dropped": 1
             },
             "request_wire": {
               "requested_effort": "medium",
@@ -2986,7 +2978,7 @@
               "reason_code": "requested_wire_form",
               "source_profile_fingerprint": "5123c189414df91b972f8d20078a251c6b26563d52feb572364a70836d591302",
               "accepted_profile_fingerprint": "5123c189414df91b972f8d20078a251c6b26563d52feb572364a70836d591302",
-              "candidate_sha256": "a37d8eb2c30f67ed9d5185ce8da8bd78785e76aa72832ad4f71416d0aabc7743",
+              "candidate_sha256": "405c9475c8198e3b05aa644766398a06223d85c47ec287897fbb0cbb8c83317e",
               "ladder_ordinal": 1,
               "applied_actions": [],
               "task_local": false,
@@ -3058,6 +3050,10 @@
                 {
                   "content": [
                     {
+                      "cache_control": {
+                        "ttl": "1h",
+                        "type": "ephemeral"
+                      },
                       "text": "a1",
                       "type": "text"
                     }
@@ -3077,10 +3073,6 @@
               "model": "anthropic/claude-sonnet-4.6",
               "tools": [
                 {
-                  "cache_control": {
-                    "ttl": "1h",
-                    "type": "ephemeral"
-                  },
                   "function": {
                     "description": "read",
                     "name": "read_file",
@@ -3098,7 +3090,7 @@
                 }
               ]
             },
-            "payload_sha256": "a37d8eb2c30f67ed9d5185ce8da8bd78785e76aa72832ad4f71416d0aabc7743"
+            "payload_sha256": "405c9475c8198e3b05aa644766398a06223d85c47ec287897fbb0cbb8c83317e"
           }
         ],
         "physical_attempts": [
@@ -3106,14 +3098,11 @@
             "source": "llm.chat",
             "model": "anthropic/claude-sonnet-4.6",
             "provider": "openrouter",
-            "candidate_raw_sha256": "a37d8eb2c30f67ed9d5185ce8da8bd78785e76aa72832ad4f71416d0aabc7743",
+            "candidate_raw_sha256": "405c9475c8198e3b05aa644766398a06223d85c47ec287897fbb0cbb8c83317e",
             "candidate_raw_size_bytes": 885,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "1h",
             "cost_final": true
           }
@@ -3272,11 +3261,8 @@
             "candidate_raw_sha256": "6f2d90a0440d1604e7ea4a1467adcf2adb94127b312b0cd047f59b8112a253b8",
             "candidate_raw_size_bytes": 150,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": true
           }
@@ -3499,11 +3485,8 @@
             "candidate_raw_sha256": "466313bb0d49bcab44fc6dbe525dd551a4cb061e004e207a2ddbbf5115a9338a",
             "candidate_raw_size_bytes": 586,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 4,
             "prompt_cache_ttl": "5m",
             "cost_final": true
           }

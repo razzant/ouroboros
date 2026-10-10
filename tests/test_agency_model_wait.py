@@ -59,7 +59,11 @@ def test_resource_refusal_does_not_suspend_cyber_execution(live_wait, tmp_path, 
         advisory = next(row for row in events if row["type"] == "safety_advisory")
         assert advisory["assessment_allowed"] is False and code in advisory["assessment"]
     assert len(transport.accepted_operations) == 1
-    assert [row["state"] for row in ledger(root)] == ["reserved", "dispatched", "released"]
+    rows = ledger(root)
+    # The refusal's private evidence adds one metadata revision, not another call.
+    assert [(row["state"], row["revision"]) for row in rows] == [("released", 4)]
+    assert rows[0]["physical_failure"]["stage"] == "raised_exception"
+    assert rows[0]["physical_failure"]["evidence_ref"]
     assert current_model_wait() is controller and not controller.closed
     assert "wait_for_resources" not in json.dumps(transport.uploads[0][0])
 

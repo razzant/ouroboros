@@ -213,10 +213,10 @@ def test_the_governance_tiers_account_for_the_chapters_not_the_membership_page()
     governance tiers select, measure and disclose chapter sources, so an
     entrypoint's own membership page never stands in for the book it lists."""
     from ouroboros.reference_books import book_path_role
-    from ouroboros.tools.preflight_review_prompt import advisory_governance_context
+    from ouroboros.tools.governance_context import governance_context
 
-    rows = {row["path"]: row for row in advisory_governance_context(
-        REPO, touched_paths=["ouroboros/loop.py"]).manifest}
+    rows = {row["path"]: row for row in governance_context(
+        REPO, surface="preflight", touched_paths=["ouroboros/loop.py"], delivery="retrieving").manifest}
     entrypoints = sum(len((REPO / rel).read_text(encoding="utf-8"))
                       for rel in BOOK_ENTRYPOINTS.values())
     chapters = [row for path, row in rows.items() if book_path_role(path) == "chapter"]
@@ -260,7 +260,6 @@ def test_a_non_constitutional_plan_pointer_maps_the_chapters(tmp_path):
 
     mapped = _architecture_navigation(REPO, "unused")
     assert "Source: `docs/architecture/01-high-level-architecture.md`" in mapped
-    assert "Devtools boundary" in mapped
     # An unreadable book falls back to mapping the supplied text rather than
     # dropping the architecture pointer entirely.
     fallback = _architecture_navigation(tmp_path, "# Doc\n\n## Section\n\nBody\n")
@@ -277,30 +276,6 @@ def test_the_scope_session_governance_map_addresses_chapters():
     # The checklist book arrives as its applicable section plus a pointer to the
     # rest, so the navigation names it without mapping it.
     assert "`docs/CHECKLISTS.md` — the complete checklist book" in maps
-
-
-def test_a_mandatory_full_read_pointer_enumerates_the_chapter_closure(tmp_path):
-    from ouroboros.reference_books import load_reference_book
-    from ouroboros.tools.claude_advisory_review import _mandatory_read_pointer
-
-    pointer = _mandatory_read_pointer(REPO, "docs/DEVELOPMENT.md")
-    chapters = load_reference_book(REPO, "development").chapters
-    assert "membership page, NOT the book" in pointer
-    for chapter in chapters:
-        assert str((REPO / chapter.source_path).resolve()) in pointer, chapter.source_path
-    assert f"({len(chapters[0].raw):,} bytes)" in pointer
-
-    # A non-book document and a sectioned pointer keep their existing form.
-    assert "membership page" not in _mandatory_read_pointer(REPO, "BIBLE.md")
-    sectioned = _mandatory_read_pointer(REPO, "docs/CHECKLISTS.md", section="Repo Commit Checklist")
-    assert "'## Repo Commit Checklist' section" in sectioned
-
-    # An unassemblable book says its coverage is unknown; it never reports a
-    # membership page as the whole book.
-    _chaptered_corpus(tmp_path)
-    (tmp_path / "docs/development/only.md").unlink()
-    broken = _mandatory_read_pointer(tmp_path, "docs/DEVELOPMENT.md")
-    assert "coverage is UNKNOWN" in broken
 
 
 def test_a_crlf_checkout_still_withholds_the_chapter_its_composed_book_carries(tmp_path):

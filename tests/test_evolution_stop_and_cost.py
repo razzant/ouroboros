@@ -52,8 +52,10 @@ def test_reconstruct_task_cost_never_fabricates_zero_when_ledger_unavailable(
     import supervisor.state as state
 
     monkeypatch.setattr(state, "DRIVE_ROOT", tmp_path)
+    from ouroboros import usage_store
+
     monkeypatch.setattr(
-        accounting, "ensure_legacy_imported",
+        usage_store, "store_tier",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(accounting.UsageLedgerCorrupt("bad")),
     )
     fields = state.reconstruct_task_cost("paid-task", fields=True)

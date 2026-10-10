@@ -236,7 +236,6 @@ def test_failed_commit_roster_stamp_drops_unsent_process_local_reservation(
                 "models": ["test/model"], "routes": ["api_chat"],
                 "efforts": ["high"], "slot_ids": ["slot-1"],
             }},
-            [],
         )
 
     assert getattr(ctx, "_review_reserved_roster", None) is None
@@ -266,7 +265,6 @@ def test_spent_owner_window_does_not_stamp_zero_dispatch_commit_roster(
             "models": ["test/model"], "routes": ["api_chat"],
             "efforts": ["high"], "slot_ids": ["slot-1"],
         }},
-        [],
     )
 
     assert stamp_calls == []
@@ -678,32 +676,28 @@ def test_coordinator_rejoins_exact_recovery_after_spent_owner_deadline(
     assert row.get("pending_invocation_id", "") == ""
 
 
-def test_durable_triad_and_scope_rows_carry_delegated_restart_identity():
+def test_durable_rows_carry_delegated_restart_identity():
+    """One wave, one row shape: every seat's actor record — a packet seat's and a
+    retrieving seat's alike — carries the delegated restart identity."""
     from ouroboros.tools.review import _parse_model_response
-    from ouroboros.tools.review_helpers import build_scope_actor_record
-    from ouroboros.tools.scope_review import ScopeReviewResult
-    from ouroboros.triad_review import parse_model_review_results
+    from ouroboros.triad_review import parse_seat_answers
 
-    envelope = _parse_model_response("cursor/test", {
-        "choices": [{"message": {"content": "[]"}}], "slot_id": "slot_1",
-        "operation_id": "op-1", "operation_state": "in_flight",
-        "late_result_pending": True,
-        "usage": {
-            "pending_invocation_id": "inv-1", "delegated_run_id": "run-1",
-        },
-    }, None)
-    triad = parse_model_review_results({"results": [envelope]})
-    triad_row = triad.actor_records[0].to_dict()
-    assert triad_row["pending_invocation_id"] == "inv-1"
-    assert triad_row["delegated_run_id"] == "run-1"
+    def _envelope(slot_id, op, inv, run):
+        return _parse_model_response("cursor/test", {
+            "choices": [{"message": {"content": "[]"}}], "slot_id": slot_id,
+            "operation_id": op, "operation_state": "in_flight",
+            "late_result_pending": True,
+            "usage": {"pending_invocation_id": inv, "delegated_run_id": run},
+        }, None)
 
-    scope_row = build_scope_actor_record(ScopeReviewResult(
-        model_id="cursor/test", operation_id="op-2", operation_state="in_flight",
-        late_result_pending=True, pending_invocation_id="inv-2",
-        delegated_run_id="run-2",
-    ), slot_id="scope_slot_1")
-    assert scope_row["pending_invocation_id"] == "inv-2"
-    assert scope_row["delegated_run_id"] == "run-2"
+    parsed = parse_seat_answers(
+        {"results": [_envelope("slot_1", "op-1", "inv-1", "run-1"), _envelope("slot_2", "op-2", "inv-2", "run-2")]},
+        {"slot_1": ("change",), "slot_2": ("change", "coupling")})
+    rows = {record.slot_id: record.to_dict() for record in parsed.actor_records}
+    assert rows["slot_1"]["pending_invocation_id"] == "inv-1"
+    assert rows["slot_1"]["delegated_run_id"] == "run-1"
+    assert rows["slot_2"]["pending_invocation_id"] == "inv-2"
+    assert rows["slot_2"]["delegated_run_id"] == "run-2"
 
 
 def test_review_does_not_retry_an_unknown_dispatched_api_attempt(tmp_path):
@@ -926,3 +920,59 @@ def test_a_collection_while_a_released_slot_runs_keeps_the_settled_roster(tmp_pa
     assert len(frames) == 1, [frame["text"] for frame in frames]
     assert "3 of 3 reviewer slot(s) settled (3 ok, 0 failed)" in frames[0]["text"]
     assert not custody._RELEASED_WAVES
+
+
+def test_poll_blind_spot_on_a_started_run_projects_in_flight_never_settled_or_retried():
+    """#1547 link 2, the classifier table: a typed observation blind spot on a
+    STARTED delegated run is ``in_flight`` — not the settled failure a started
+    run's other exceptions become, and never a $0 retry."""
+    from ouroboros.review_custody import _worker_exception_operation_state as state_of
+    from ouroboros.review_execution import ReviewPollUnavailable
+
+    blind = ReviewPollUnavailable("blind on both reads", run_id="run-9")
+    assert state_of(blind, {}) == "in_flight"
+    assert state_of(blind, {"pending_invocation_id": "inv-9"}) == "in_flight"
+    assert state_of(TimeoutError("slot budget exceeded"), {"pending_invocation_id": "inv-9"}) == "settled"
+
+
+def test_an_unobservable_live_session_stays_pending_for_an_attach_only_rejoin(tmp_path):
+    """#1547 link 2 at the custody seam: the worker that could not observe its
+    live run ends ``in_flight`` with its pending invocation re-registered, the
+    row is a typed delivery failure (not a settled terminal, no replay cache),
+    and the next collect rejoins the SAME operation with that token instead of
+    dispatching a second paid run."""
+    from types import SimpleNamespace
+
+    from ouroboros.review_custody import _attempt_key, run_custodied_review_slots
+    from ouroboros.review_execution import ReviewPollUnavailable, ReviewRouteKind
+    from ouroboros.review_substrate import ReviewActorRecord, ReviewRequest, ReviewSlot
+    from ouroboros.usage_accounting import UsageScope
+
+    calls, ctx = [], SimpleNamespace(drive_root=tmp_path, task_id="blind-1547")
+    request = ReviewRequest(surface="plan_review", goal="review", task_id="blind-1547",
+                            retry_key="plan_review:blind-1547")
+    slot = ReviewSlot(slot_id="seat", model="cursor/test", route=ReviewRouteKind.AGENT_SESSION, timeout_sec=10.0)
+
+    def run_slot(slot, operation_id, retry_state, _deadline, _checkpoint):
+        calls.append((operation_id, dict(retry_state)))
+        if len(calls) == 1:
+            retry_state["pending_invocation_id"], retry_state["delegated_run_id"] = "inv-b", "run-b"
+            raise ReviewPollUnavailable("blind on both reads", run_id="run-b")
+        return ReviewActorRecord(slot_id=slot.slot_id, model=slot.model, status="ok", raw_text="[]")
+
+    def error_actor(slot, error, operation_id="", operation_state="settled"):
+        return ReviewActorRecord(slot_id=slot.slot_id, model=slot.model, status="error", error=error,
+                                 operation_id=operation_id, operation_state=operation_state,
+                                 late_result_pending=operation_state == "in_flight")
+
+    args = dict(request=request, slots=[slot], usage_ctx=ctx, task_id=request.task_id, usage_meta={},
+                review_usage_scope=UsageScope(drive_root=tmp_path, task_id=request.task_id),
+                run_slot=run_slot, error_actor=error_actor)
+    [first] = run_custodied_review_slots(**args)
+    assert first.operation_state == "in_flight" and first.late_result_pending is True
+    assert first.failure_code == "review_poll_unavailable" and first.usage["pending_invocation_id"] == "inv-b"
+    assert ctx._review_pending_invocations[_attempt_key(request, slot)]["pending_invocation_id"] == "inv-b"
+    assert not getattr(ctx, "_review_settled_attempts", {})
+    [second] = run_custodied_review_slots(**args)
+    assert second.status == "ok" and second.operation_id == first.operation_id
+    assert calls[1] == (first.operation_id, {"pending_invocation_id": "inv-b"})

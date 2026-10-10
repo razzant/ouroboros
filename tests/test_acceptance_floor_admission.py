@@ -51,10 +51,34 @@ from tests.test_acceptance_delivery import (
 )
 
 
-def test_the_floor_priced_wave_that_does_not_fit_is_still_refused(monkeypatch, tmp_path):
-    """The floor is the admission line, not a bypass: when even one send per
-    paid row does not fit the remaining root budget, the panel is refused as
-    before — through the real gate — and no reviewer is called."""
+class _KnownPricedLLM(_EpisodeLLM):
+    """The delivery suite's scripted reviewer whose provider reports a FINAL price
+    for each send: KNOWN spend, the only money a limit decides on (#1487). The
+    suite's own replies carry no usable price, so they stay unresolved exposure."""
+
+    def chat(self, **kwargs):
+        from ouroboros import usage_accounting as ua
+
+        request = ua.AttemptRequest(reservation_usd=self.reservation_usd, drive_root=self.drive_root,
+                                    model="openai/fake-reviewer", provider="openrouter")
+        return ua.execute_physical_attempt(request, lambda: self._reply(kwargs),
+                                           extractor=lambda reply: (reply[1], self.reservation_usd, True))
+
+
+def _known_charge(scope, cost):
+    from ouroboros import usage_accounting as ua
+
+    with ua.usage_scope(scope):
+        held = ua.reserve_attempt(ua.AttemptRequest(model="openai/fake-reviewer", provider="openrouter",
+                                                    reservation_usd=cost))
+        ua.mark_dispatched(held)
+        ua.settle_attempt(held, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=cost, cost_final=True)
+
+
+def test_a_wave_at_the_known_root_limit_is_still_refused(monkeypatch, tmp_path):
+    """The floor is the admission line, not a bypass: once the root's KNOWN spend
+    has reached its limit (#1487: the reservation's own rule), the panel is refused
+    as before — through the real gate — and no reviewer is called."""
     from ouroboros import loop as loop_mod
     from ouroboros import usage_accounting as ua
 
@@ -64,7 +88,8 @@ def test_the_floor_priced_wave_that_does_not_fit_is_still_refused(monkeypatch, t
     llm = _EpisodeLLM(tmp_path, [{"content": json.dumps(_CLEAN_VERDICT)}] * 2, scoped=True)
     _real_panel(monkeypatch, llm, stub_gate=False)
     scope = _root_scope(tmp_path, root_limit_usd=0.5)
-    _seed_root_ledger(scope, cost=0.45)  # $0.05 left: less than one send (~$0.07)
+    _seed_root_ledger(scope)
+    _known_charge(scope, 0.5)  # known spend is at the $0.50 limit
     ctx = _acceptance_ctx(tmp_path, evidence=dict(_ACCEPTANCE_PACKET), repo_dir=str(governance),
                           workspace_root=str(workspace), workspace_mode="project")
     with ua.usage_scope(scope):
@@ -193,11 +218,11 @@ def test_projecting_an_exhausted_cap_emits_no_review_cycles_exhausted_event(monk
 # Required+Blocking count cap is exercised by the `fixed`/`adaptive` policies alone.
 def test_the_per_send_wallet_fence_still_binds_after_an_admitted_dispatch(monkeypatch, tmp_path):
     """The per-send wallet binding at dispatch is what actually protects money,
-    proven with PRICED sends: the wave gate admits on ONE send per paid row, so
-    a nearly spent wallet admits the panel; the native episode's first send is
-    reserved and settled, its second send is refused by the ledger
-    (`budget_exhausted`), and the accounted total never exceeds the root
-    limit. The coarse admission is a filter, never the fence."""
+    proven with PRICED sends: the wave gate admits while known spend is below
+    the limit; the native episode's first send is reserved and settled at a
+    final price that brings known spend to the root limit, so its second send
+    is refused by the ledger (`budget_exhausted`). The coarse admission is a
+    filter, never the fence."""
     from ouroboros import loop as loop_mod
     from ouroboros import usage_accounting as ua
 
@@ -205,13 +230,13 @@ def test_the_per_send_wallet_fence_still_binds_after_an_admitted_dispatch(monkey
     _offline_env(monkeypatch, _ROW_NATIVE)
     _priced_offline_model(monkeypatch)
     governance, workspace = _roots(tmp_path)
-    llm = _EpisodeLLM(
+    llm = _KnownPricedLLM(
         tmp_path, [], scoped=True, reservation_usd=0.06,
         native_script=[{"tool_calls": [_tool_call("read_file", {"path": "greeting.txt"})]},
                        {"content": json.dumps(_CLEAN_VERDICT)}],
     )
     _real_panel(monkeypatch, llm, stub_gate=False)
-    limit = 0.1  # one priced send (0.06) fits; the second (0.12 cumulative) does not
+    limit = 0.06  # the first send's known $0.06 reaches the limit; the second is refused
     scope = _root_scope(tmp_path, root_limit_usd=limit)
     _seed_root_ledger(scope)
     ctx = _acceptance_ctx(tmp_path, evidence=dict(_ACCEPTANCE_PACKET), repo_dir=str(governance),
@@ -224,7 +249,8 @@ def test_the_per_send_wallet_fence_still_binds_after_an_admitted_dispatch(monkey
     assert result.aggregate_signal == "DEGRADED"
     projection = ua.usage_projection(tmp_path, root_task_id="root-delivery")
     spent = float(projection["limit_usd"]) - float(projection["remaining_known_usd"])
-    assert projection["limit_usd"] == limit and 0.06 <= spent <= limit
+    assert projection["limit_usd"] == limit and spent == pytest.approx(0.06)
+    assert projection["settled_usd"] == pytest.approx(0.06)
 
 
 # ---------------------------------------------------------------------------
@@ -449,19 +475,18 @@ def test_a_panel_whose_evidence_build_ate_the_margin_dispatches_and_the_deadline
 # ---------------------------------------------------------------------------
 
 
-def test_an_absent_ledger_polls_known_zero_through_the_reader_and_creates_only_state_dir(
-        tmp_path):
-    """Owner R56 (2): on a fresh root with NO usage ledger the coordination
-    poll answers a KNOWN zero settled spend THROUGH the canonical locked reader
-    (no fast path answers ahead of it), and the ONLY change to the tree is the
-    empty `state/` directory the reader's lock lives in — the lock file itself
-    is released and unlinked before the poll returns. Pinned as the EXACT
-    observed set: one empty directory, no file with content, no events row, no
-    ctx attribute, and a second poll leaves the tree byte-identical to the
-    first. The relayed numbers are the reader's own projection, key by key."""
+def test_an_empty_store_polls_known_zero_through_the_reader_and_writes_nothing(tmp_path):
+    """Owner R56 (2): on a root whose usage store holds no attempt the
+    coordination poll answers a KNOWN zero settled spend THROUGH the canonical
+    reader (no fast path answers ahead of it) and changes nothing at all. The
+    store exists as in production: the supervisor's lifecycle job creates it
+    before any worker (and so any poll) exists. Pinned as the EXACT observed
+    tree, byte for byte, across two polls; no events row, no ctx attribute.
+    The relayed numbers are the reader's own projection, key by key."""
     import queue
 
     from ouroboros import delegate_custody as custody
+    from ouroboros import usage_store
     from ouroboros.delegate_supervision import coordination_live_context
     from ouroboros.usage_accounting import usage_breakdown
 
@@ -473,6 +498,7 @@ def test_an_absent_ledger_polls_known_zero_through_the_reader_and_creates_only_s
     )
     root = custody.custody_root(ctx)
     assert sorted(root.rglob("*")) == []  # genuinely fresh
+    usage_store.migrate_from_journal(root)  # the lifecycle job, before any worker
     attrs_before = set(vars(ctx))
     known_zero = {
         "state": "known", "settled_usd": 0.0, "accounted_usd": 0.0,
@@ -480,16 +506,15 @@ def test_an_absent_ledger_polls_known_zero_through_the_reader_and_creates_only_s
     }
 
     def _tree():
-        return [(path.relative_to(root).as_posix(), path.is_dir(), path.is_file())
-                for path in sorted(root.rglob("*"))]
+        return {path.relative_to(root).as_posix(): path.read_bytes() if path.is_file() else None
+                for path in sorted(root.rglob("*"))}
 
-    assert coordination_live_context(ctx)["settled_spend"] == known_zero
-    after_first = _tree()
-    assert after_first == [("state", True, False)]  # the empty lock directory, and nothing else
-    assert list((root / "state").iterdir()) == []  # the lock file was released and unlinked
-
-    assert coordination_live_context(ctx)["settled_spend"] == known_zero
-    assert _tree() == after_first  # the second poll changed nothing
+    before = _tree()
+    events_before = custody.event_log_path(root).read_bytes()
+    for _ in range(2):
+        assert coordination_live_context(ctx)["settled_spend"] == known_zero
+        assert _tree() == before  # the poll changed nothing
+    assert custody.event_log_path(root).read_bytes() == events_before  # no events row
     assert set(vars(ctx)) == attrs_before
     assert ctx.event_queue.empty() and ctx.pending_events == []
 
@@ -499,22 +524,25 @@ def test_an_absent_ledger_polls_known_zero_through_the_reader_and_creates_only_s
         key: value for key, value in known_zero.items() if key != "state"}
 
 
-def test_a_stale_ledger_lock_is_the_readers_removal_and_the_poll_stays_known_zero(tmp_path):
-    """The maintenance a poll inherits from the canonical reader is bounded,
-    not a closed list of two: a `state/usage_attempts.lock` left behind by a
-    dead writer and older than the reader's 90 s stale window is REMOVED on the
-    way to the known-zero answer — by the reader's own lock acquisition
-    (`usage_ledger._locked` → `platform_layer.acquire_exclusive_file_lock`,
+@pytest.mark.parametrize("enforced", [False, True])
+def test_a_stale_name_lock_is_the_readers_removal_and_the_poll_stays_known_zero(
+        monkeypatch, tmp_path, enforced):
+    """The maintenance a poll inherits from the canonical reader is bounded:
+    on an installation without kernel file locks (the store's ``name`` tier)
+    every store access runs under the money name lock, so a
+    `state/usage_attempts.lock` left behind by a dead writer and older than the
+    lock's 90 s stale window is REMOVED by the reader's own lock acquisition
+    (`usage_ledger._named_lock` → `platform_layer.acquire_exclusive_file_lock`,
     whose stale-age branch unlinks the file and retries), never by the poll,
-    which writes nothing of its own. Pinned as the EXACT observed set on an
-    otherwise fresh root: the stale lock is gone, the tree afterwards is the
-    empty `state/` directory and nothing else, the answer is the reader's own
-    known zero, no events row, no ctx attribute, and a second poll leaves the
-    tree byte-identical to the first."""
+    which writes nothing of its own. On the ``enforced`` tier SQLite's own
+    locks serialize the store and the same file is inert: left untouched.
+    Pinned as the EXACT observed tree; the answer is the reader's own known
+    zero; no events row; no ctx attribute; a second poll changes nothing."""
     import os
     import queue
 
     from ouroboros import delegate_custody as custody
+    from ouroboros import platform_layer, usage_store
     from ouroboros.delegate_supervision import coordination_live_context
 
     ctx = SimpleNamespace(
@@ -524,28 +552,34 @@ def test_a_stale_ledger_lock_is_the_readers_removal_and_the_poll_stays_known_zer
         pending_events=[], event_queue=queue.Queue(),
     )
     root = custody.custody_root(ctx)
-    assert sorted(root.rglob("*")) == []  # genuinely fresh
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda _path: enforced)
+    usage_store.migrate_from_journal(root)  # the lifecycle job decides the tier once
+    usage_store.forget(root)
+
+    def _tree():
+        return {path.relative_to(root).as_posix(): path.read_bytes() if path.is_file() else None
+                for path in sorted(root.rglob("*"))}
+
+    migrated = _tree()
     stale_lock = root / "state" / "usage_attempts.lock"
-    stale_lock.parent.mkdir()
     stale_lock.write_text("pid=999999 ts=0\n", encoding="utf-8")
     os.utime(stale_lock, (0, 0))  # a dead writer's lock, aged to the epoch: far past 90 s
+    with_stale = _tree()
+    events_before = custody.event_log_path(root).read_bytes()
     attrs_before = set(vars(ctx))
     known_zero = {
         "state": "known", "settled_usd": 0.0, "accounted_usd": 0.0,
         "cost_final": True, "unknown_unmetered": 0, "integrity_degraded": False,
     }
 
-    def _tree():
-        return [(path.relative_to(root).as_posix(), path.is_dir(), path.is_file())
-                for path in sorted(root.rglob("*"))]
-
-    assert _tree() == [("state", True, False), ("state/usage_attempts.lock", False, True)]
-
     assert coordination_live_context(ctx)["settled_spend"] == known_zero
-    assert not stale_lock.exists()  # the reader's stale-age branch removed it, then released its own
     after_first = _tree()
-    assert after_first == [("state", True, False)]  # the empty lock directory, and nothing else
-    assert not custody.event_log_path(root).exists()  # no events row
+    if enforced:
+        assert after_first == with_stale  # inert on the enforced tier
+    else:
+        assert not stale_lock.exists()  # the reader's stale-age branch removed it, then released its own
+        assert after_first == migrated
+    assert custody.event_log_path(root).read_bytes() == events_before  # no events row
 
     assert coordination_live_context(ctx)["settled_spend"] == known_zero
     assert _tree() == after_first  # the second poll changed nothing
@@ -623,6 +657,9 @@ def test_the_whole_coordination_poll_writes_nothing_and_reports_an_unlatched_tas
     monkeypatch.delenv("OUROBOROS_FINALIZATION_GRACE_SEC", raising=False)
     settings_path, settings_before = _legacy_settings(monkeypatch, tmp_path)
     result_file = task_result_path(tmp_path, "root-floor-band", create=False)
+    from ouroboros import usage_store
+
+    usage_store.migrate_from_journal(tmp_path)  # the lifecycle job, before any worker
     before = (events.read_bytes(), result_file.read_bytes())
     attrs_before = set(vars(ctx))
 
@@ -651,41 +688,38 @@ def test_the_whole_coordination_poll_writes_nothing_and_reports_an_unlatched_tas
     assert getattr(ctx, "_time_budget_started_at", None) is not None
 
 
-def test_a_single_crash_torn_ledger_gets_the_quarantine_every_reader_performs(
+def test_a_single_crash_torn_journal_gets_the_quarantine_its_one_time_import_performs(
         monkeypatch, tmp_path):
     """The one CONTENT write among the bounded maintenance a poll inherits from
-    the canonical ledger reader (the empty `state/` directory on a
-    never-initialized root and the stale-lock removal are pinned above), in its
-    exact bounded shape — proven for a SINGLE crash mid-append (a crash inside
-    the repair itself, the torn quarantine sink, is a known residual — draft
-    issue #586 — and deliberately not exercised here). The
-    crash leaves a half-written final
-    ledger row; the settled-spend fact reads that ledger, so the poll performs
-    the repair EVERY reader of the ledger performs — truncate to the intact
-    prefix, one quarantine row holding the torn bytes verbatim, one
-    `usage_ledger_tail_quarantined` event — then reports the survivors as
+    the canonical reader: on a root whose store was exported back to a journal
+    (the downgrade step) and whose older release then crashed mid-append, the
+    first read runs the one-time import, and the import repairs the journal
+    exactly as every journal reader did — truncate to the intact prefix, one
+    quarantine row holding the torn bytes verbatim, one
+    `usage_ledger_tail_quarantined` event — before retiring it as
+    ``usage_attempts.jsonl.imported``; the poll then reports the survivors as
     degraded integrity rather than final cost. Nothing else moves: the
     settings bytes and mtime, every earlier event row, the task result, the
-    queue and the ctx attributes are unchanged, and a second poll over the
-    repaired ledger writes nothing at all."""
+    queue and the ctx attributes are unchanged, and a second poll writes
+    nothing at all."""
     import base64
 
-    from ouroboros import delegate_custody as custody, usage_accounting as ua
+    from ouroboros import delegate_custody as custody, usage_accounting as ua, usage_store
     from ouroboros.delegate_supervision import coordination_live_context
     from ouroboros.task_results import task_result_path
     from ouroboros.usage_ledger import LEDGER_REL, QUARANTINE_REL
 
     ctx, events = _floor_band_ctx(monkeypatch, tmp_path, seconds_left=620)
     settings_path, settings_before = _legacy_settings(monkeypatch, tmp_path)
-    # Seed the ledger the POLL itself will read (the custody root it resolves),
-    # through the real attempt path — the truncation below is then proof that
-    # this exact file was the one the poll opened.
+    # Seed the money the POLL itself will read (the custody root it resolves),
+    # through the real attempt path, then export it as a journal.
     root = custody.custody_root(ctx)
     with ua.usage_scope(ua.UsageScope(
             drive_root=root, task_id="root-floor-band", root_task_id="root-floor-band")):
         ua.execute_physical_attempt(
             ua.AttemptRequest(model="local-review-test", provider="local", reservation_usd=0.0),
             lambda: ({"content": "seed"}, {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0}))
+    usage_store.export_journal(root)
     ledger, quarantine = root / LEDGER_REL, root / QUARANTINE_REL
     intact, torn = ledger.read_bytes(), b'{"seq": 99, "attempt_id": "half-writ'
     ledger.write_bytes(intact + torn)  # the process died mid-append
@@ -698,7 +732,7 @@ def test_a_single_crash_torn_ledger_gets_the_quarantine_every_reader_performs(
     assert "reason" not in spend  # no read error: the repair is not a failure path
     assert spend["state"] == "partial" and spend["integrity_degraded"] is True
     assert spend["cost_final"] is False  # a quarantined tail never claims final cost
-    assert ledger.read_bytes() == intact  # truncated to the intact prefix, nothing more
+    assert ledger.read_bytes() == intact  # imported and kept in place, truncated to the intact prefix
     rows = [json.loads(line) for line in quarantine.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1 and base64.b64decode(rows[0]["raw_base64"]) == torn
     assert rows[0]["source"] == str(ledger)
@@ -710,10 +744,12 @@ def test_a_single_crash_torn_ledger_gets_the_quarantine_every_reader_performs(
     assert result_file.read_bytes() == before[1] and set(vars(ctx)) == before[2]
     assert ctx.event_queue.empty() and ctx.pending_events == []
 
-    # The repaired ledger is the healthy case again: the second poll writes nothing.
-    steady = (ledger.read_bytes(), quarantine.read_bytes(), events.read_bytes())
+    # The imported store is the healthy case again: the second poll writes nothing.
+    steady = (ledger.read_bytes(), quarantine.read_bytes(), events.read_bytes(),
+              (root / usage_store.STORE_REL).read_bytes())
     coordination_live_context(ctx)
-    assert (ledger.read_bytes(), quarantine.read_bytes(), events.read_bytes()) == steady
+    assert (ledger.read_bytes(), quarantine.read_bytes(), events.read_bytes(),
+            (root / usage_store.STORE_REL).read_bytes()) == steady
 
 
 def test_a_descendant_poll_gets_the_wallet_axis_and_no_time_axis_at_all(monkeypatch, tmp_path):

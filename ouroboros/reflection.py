@@ -1,4 +1,13 @@
-"""Generate post-task process-memory reflections for non-trivial/error runs."""
+"""Generate post-task process-memory reflections for non-trivial/error runs.
+
+Prompt inputs: the run's exact initial text (never a prefix) after the
+``run_origin`` provenance, and the all-calls listing from
+``post_task_synthesis.build_trace_summary(all_calls=True)``. When that listing
+cut an argument or a failed/repeated call's answer, the redacted per-call record
+(with ``round_id`` when known) is retained through ``retain_memory_source`` and
+named as optional reading. The prompt is fitted by the consolidation seam; an
+unknown Light window skips its token fit check.
+"""
 
 from __future__ import annotations
 
@@ -362,8 +371,9 @@ def record_memory_action_skip(events: pathlib.Path, action: Dict[str, Any], reas
     and ``apply_memory_actions`` on a bound action — so the event names the reason
     and, as ``input_ref``, what the seam that dropped the lesson had retained: the
     validator's exact task-input prompt (the rejected reflection text itself is not
-    retained), a bound action's exact task-source copy of its reflection entry, or
-    the canonical log pointer. It can warn, never raise: an audit-write failure
+    retained), a bound action's exact task-source copy of its reflection entry, else
+    ``source_unavailable`` for a project-scoped task or the canonical log pointer.
+    It can warn, never raise: an audit-write failure
     must not discard the independent later lessons of the same batch."""
     try:
         recorded = append_jsonl(events, {"ts": utc_now_iso(), "type": "reflection_memory_action_skipped",
@@ -491,7 +501,7 @@ def _verbatim_trace_pointer(knowledge_context: Any, llm_trace: Dict[str, Any]) -
     if not any(_cut(tc, count) for _, tc, count, _, _ in _fold_identical_calls(tool_calls)):
         return ""
     try:
-        from ouroboros.consolidator import retain_memory_source
+        from ouroboros.chat_chain import retain_memory_source
         from ouroboros.observability import redact_projection
 
         def _exact_ref(tc: Dict[str, Any]) -> str:
@@ -583,12 +593,14 @@ def generate_reflection(
         knowledge_context = ToolContext(repo_dir=root, drive_root=root,
             project_id=str(task.get("project_id") or ""),
             task_id=str(task.get("id") or task.get("task_id") or "reflection"))
+    from ouroboros.context_input_selection import historical_inputs_prompt_section
+
     prompt = prompt_template.format(
         goal=str(task.get("text") or "(no goal text)"),
         # The listing arrives whole: this call's prompt is fitted by the consolidation seam,
         # so a literal cut here only hid the calls the lesson is about.
         trace_summary=trace_summary + _verbatim_trace_pointer(knowledge_context, llm_trace),
-        task_inputs=task_inputs_prompt_section(review_evidence),
+        task_inputs=task_inputs_prompt_section(review_evidence) + historical_inputs_prompt_section(review_evidence),
         tool_usage=_tool_usage_profile(llm_trace),
         error_details=error_details,
         review_evidence=review_evidence_text,
@@ -602,7 +614,7 @@ def generate_reflection(
         from ouroboros.settings_scales import resolve_effort
 
         knowledge = KnowledgeReadContext(knowledge_context, "task_reflection")
-        from ouroboros.consolidator import retain_memory_source
+        from ouroboros.chat_chain import retain_memory_source
         complete_prompt = KNOWLEDGE_MAINTENANCE_PROMPT + prompt
         source_ref = retain_memory_source(knowledge_context, "task_input_reflection", complete_prompt.encode("utf-8"))
         raw_reflection_text, refl_usage = _call_consolidation_llm(
@@ -939,7 +951,7 @@ def _bind_reflection_action_source(canonical: pathlib.Path, entry: Dict[str, Any
     try:
         from types import SimpleNamespace
 
-        from ouroboros.consolidator import retain_memory_source
+        from ouroboros.chat_chain import retain_memory_source
 
         ref = retain_memory_source(
             SimpleNamespace(drive_root=canonical, task_id=str(entry.get("task_id") or "reflection")),

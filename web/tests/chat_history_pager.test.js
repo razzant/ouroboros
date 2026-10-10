@@ -89,21 +89,6 @@ test('empty pages are walked over, never becoming a reading position or a newer 
     assert.equal(h.calls.length, spent, 'walking back across empty pages costs no request');
 });
 
-test('a resume carries each page row count and tolerates a saved page without one', async () => {
-    const h = harness({ fetch: cursor => cursor === 'before:A:1' ? page(1, { messages: [] }) : page(2) });
-    h.pager.acceptRecent(page(0));
-    await h.pager.older();
-    const saved = h.pager.exportResume();
-    assert.deepEqual(saved.pages.map(item => item.rows), [1, 0]);
-    assert.equal(saved.focus, 0, 'an empty page never becomes the saved reading position');
-    const legacy = harness();
-    const stripped = { focus: saved.focus, pages: saved.pages.map(({ rows: _rows, ...rest }) => rest) };
-    assert.equal((await legacy.pager.restore(stripped)).status, 'applied');
-    assert.equal(legacy.pager.getState().pageCount, 2);
-    assert.equal(legacy.pager.getState().canNewer, false);
-    assert.equal(legacy.pager.getState().firstPage.rows, 1, 'an unknown row count is learned on re-read');
-});
-
 test('a re-read page keeps its frozen boundaries while its row count is refreshed', async () => {
     let zero = false;
     const h = harness({ fetch: cursor => cursor === 'replay:A:0'
@@ -116,7 +101,7 @@ test('a re-read page keeps its frozen boundaries while its row count is refreshe
     await h.pager.newer();
     // The refreshed descriptor lives in the page list; its now-empty cache entry
     // is released at once, like any other empty page.
-    assert.deepEqual({ ...h.pager.exportResume().pages.find(item => item.index === 0) },
+    assert.deepEqual({ ...h.pager.getState().firstPage },
         { id: 'history-page-1-0', chain: 1, index: 0, requestCursor: 'replay:A:0',
             nextCursor: 'before:A:1', hasMore: true, rows: 0, loaded: true, coverage: null });
     assert.equal(h.pager.getState().cachedPages.some(item => item.index === 0), false);
@@ -238,32 +223,16 @@ test('latest starts a new frozen chain after success, retaining old protected co
     assert.equal(h.calls.at(-1).cursor, 'before:B:1');
 });
 
-test('a protected old page remains the bookmark source after latest rebases the chain', async () => {
-    const coverage = { v: 1, view: 'bound-A', spans: { chat: { from: 10, to: 20 } } };
+test('a protected old page stays mounted after latest rebases the chain', async () => {
     const h = harness({ fetch: cursor => cursor === null ? page(0, { chain: 'B' })
-        : cursor === 'before:A:1' ? { ...page(1), coverage }
-            : page(Number(cursor.split(':').at(-1)), { chain: cursor.split(':')[1] }) });
+        : page(Number(cursor.split(':').at(-1)), { chain: cursor.split(':')[1] }) });
     h.pager.acceptRecent(page(0));
     const old = await h.pager.older();
     h.protectedIds.add(old.page.id);
     await h.pager.latest();
     assert.equal(h.pager.getState().firstPage.requestCursor, 'replay:B:0');
-    assert.ok(h.pager.getState().cachedPages.some(item => item.id === old.page.id));
-
-    const saved = h.pager.exportResume(old.page.id);
-    assert.deepEqual(saved, { pages: [old.page], focus: 0 },
-        'the retained descriptor carries its own replay cursor, continuation and bound coverage');
-
-    const reopened = harness({ fetch: cursor => cursor === 'replay:A:1'
-        ? { ...page(1), coverage } : page(2) });
-    assert.equal((await reopened.pager.restore(saved)).status, 'applied');
-    assert.equal(reopened.calls[0].cursor, 'replay:A:1');
-    assert.equal(reopened.pager.getState().firstPage.id, old.page.id);
-    assert.deepEqual(reopened.pager.getState().firstPage.coverage, coverage);
-    await reopened.pager.older();
-    assert.equal(reopened.calls[1].cursor, 'before:A:2');
-    assert.equal(new Set(reopened.pager.getState().cachedPages.map(item => item.id)).size, 2,
-        'the continuation cannot overwrite the retained page after indices are rebased');
+    assert.ok(h.pager.getState().cachedPages.some(item => item.id === old.page.id),
+        'the reader still sees it until they leave it');
 });
 
 test('a failed latest read leaves the old chain available and retries the same request', async () => {

@@ -50,8 +50,10 @@ def _sub():
     return review_substrate
 
 
-def _transport_error_status(error: Any) -> str:
+def _transport_error_status(error: Any, *, failure_phase: str = "") -> str:
     """Classify transport failures without depending on a non-empty message."""
+    if failure_phase == "authority":
+        return "authority_error"
     error_type = type(error).__name__ if isinstance(error, BaseException) else ""
     error_text = str(error or "")
     if (
@@ -78,6 +80,14 @@ def _public_review_reason(value: Any) -> str:
     if not text:
         return ""
     return str(_sub().redact_projection(text).value)
+
+
+def _actor_reason(row: Dict[str, Any], reason: str) -> str:
+    """Keep the reported failure beside the reason the existing card displays."""
+    cause = str(row.get("reported_cause") or "")
+    if cause and cause not in reason:
+        reason = f"{reason}\nReported cause: {cause}".strip()
+    return _public_review_reason(reason)
 
 
 def awaiting_panel_reason(slot_ids: List[str], configured: int, aggregate: str) -> str:
@@ -118,7 +128,7 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
         transport = (
             "not_dispatched" if not_dispatched
             else ("success" if str(row.get("status") or "") in {"ok", "empty"}
-                  else _transport_error_status(error))
+                  else _transport_error_status(error, failure_phase=str(usage.get("review_failure_phase") or "")))
         )
     criteria = parsed.get("criteria_used") if isinstance(parsed, dict) else []
     criteria = criteria if isinstance(criteria, list) else []
@@ -184,7 +194,7 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
             "findings": len(parsed_findings),
         },
         "quorum_contribution": bool(row.get("quorum_contribution")),
-        "reason": _public_review_reason(reason),
+        "reason": _actor_reason(row, reason),
         "enforcement_impact": str(row.get("enforcement_impact") or "abstains"),
         # Preserve the physical identity when the logical actor times out.
         "operation_id": str(row.get("operation_id") or ""),
@@ -292,8 +302,119 @@ def build_review_binding(
     }
 
 
-def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
-    """Project existing audit runs without copying raw prompts or responses."""
+def _panel_transport(statuses: List[str]) -> str:
+    """One panel's transport word over the words of its collected actors."""
+    if "authority_error" in statuses and all(word in {"authority_error", "not_dispatched"} for word in statuses):
+        return "authority_error"  # a local refusal plus withheld rows has no provider failure
+    for word in ("success", "not_dispatched", "timeout", "authority_error"):
+        if statuses and all(status == word for status in statuses):
+            return word
+    return "partial" if "success" in statuses else "provider_transport_error"
+
+
+# The newest review-ledger records of one task a task projection carries; the rest
+# stay in the ledger, and the projection says whether any exist.
+LEDGER_RECORD_PANELS = 5
+# A ledger seat's ``status`` once a readable answer arrived, as the parse word.
+_LEDGER_PARSE = {"responded": "valid", "partial": "partial"}
+
+
+def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+    """One ledger seat as a card reviewer: the parts it was asked, each part's answer
+    with its findings COUNTED (the bodies ride once, bounded, in ``findings``), and the
+    observed model, else the requested one (``panel_facts`` counts the unobserved)."""
+    status, surface = str(seat.get("status") or ""), str(record.get("surface") or "review")
+    requested = seat.get("requested") if isinstance(seat.get("requested"), dict) else {}
+    observed = str(seat.get("observed_model") or "")
+    model = observed if observed not in ("", "unknown") else str(requested.get("model") or "")
+    answers = seat.get("answers") if isinstance(seat.get("answers"), dict) else {}
+    parts = [str(part) for part in seat.get("parts") or [] if part in answers] or list(answers)
+    findings: List[Dict[str, Any]] = []
+    counted: Dict[str, Dict[str, Any]] = {}
+    for part in parts:
+        answer = answers[part] if isinstance(answers[part], dict) else {}
+        listed = [item for item in answer.get("findings") or [] if isinstance(item, dict)]
+        findings += listed
+        counted[part] = {"status": str(answer.get("status") or ""), "verdict": str(answer.get("verdict") or ""),
+                         "findings": len(listed), "critical": int(answer.get("critical") or 0),
+                         "coverage": str(answer.get("coverage") or "")}
+    contributes = status in _LEDGER_PARSE and not seat.get("additional")
+    ref = next((item.get("ref") for item in seat.get("source_refs") or []
+                if isinstance(item, dict) and item.get("role") == "observability_response"), None)
+    actor = {
+        "slot_id": str(seat.get("seat_id") or ""), "model": model,
+        "provider": _sub().provider_for_model(model) if model else "unknown",
+        "actor_role": f"{surface} {'additional ' if seat.get('additional') else ''}reviewer",
+        "transport_status": str(seat.get("transport_status") or ("success" if status in _LEDGER_PARSE else status or "unknown")),
+        "parse_status": _LEDGER_PARSE.get(status, "none"),
+        "semantic_verdict": str(((record.get("verdict") or {}).get("per_row") or {}).get(seat.get("seat_id")) or ""),
+        "quorum_contribution": contributes,
+        "enforcement_impact": str(record.get("enforcement") or "unknown") if contributes else "abstains",
+        "operation_state": str(seat.get("operation_state") or ""),
+        "parts": parts, "answers": counted, "response_ref": _response_ref_projection(ref),
+        "reason": _actor_reason(seat, str(seat.get("raw_text") or seat.get("failure_code") or "")
+                                if status not in _LEDGER_PARSE else ""),
+    }
+    actor.update({key: seat[key] for key in _sub().TYPED_FAILURE_FACT_KEYS if seat.get(key) not in (None, "")})
+    actor.update(_sub().disclosed_list_projection(
+        findings, key="findings", limit=_sub().MAX_PROJECTED_ACTOR_FINDINGS, item=_sub().projected_finding_row))
+    return actor
+
+
+def ledger_record_panel(record: Dict[str, Any]) -> Dict[str, Any]:
+    """One review-ledger record (``review_ledger.build_wave_record``) as a card panel:
+    the record's ``panel`` facts (who sat and why) and every seat's answer per brief
+    part. The aggregate is the record's own; the record file stays the full source."""
+    from ouroboros.review_ledger import LEDGER_SUBDIR
+
+    verdict = record.get("verdict") if isinstance(record.get("verdict"), dict) else {}
+    quorum = verdict.get("quorum") if isinstance(verdict.get("quorum"), dict) else {}
+    actors = [_ledger_seat_actor(seat, record) for seat in record.get("rows") or [] if isinstance(seat, dict)]
+    parsed = {actor["parse_status"] for actor in actors}
+    facts = dict(record.get("panel") or {}) if isinstance(record.get("panel"), dict) else {}
+    if facts.get("reason"):
+        facts["reason"] = _public_review_reason(facts["reason"])
+    aggregate, record_id = str(verdict.get("aggregate") or "UNKNOWN").upper(), str(record.get("record_id") or "")
+    return {
+        "panel_id": record_id, "record_id": record_id, "ts": str(record.get("ts") or ""),
+        "surface": str(record.get("surface") or "review"), "authority": "review_ledger",
+        "aggregate_signal": aggregate,
+        "transport_status": _panel_transport([actor["transport_status"] for actor in actors]),
+        "parse_status": "valid" if parsed == {"valid"} else ("none" if parsed <= {"none"} else "partial"),
+        "coverage": dict(verdict.get("per_question") or {}),
+        "quorum": {"required": int(quorum.get("required") or 0), "contributed": int(quorum.get("responded") or 0),
+                   "configured": int(quorum.get("assigned") or 0)},
+        "reason": "" if aggregate == "PASS" else str(verdict.get("reason") or ""),
+        "enforcement_impact": str(record.get("enforcement") or "unknown"),
+        "panel_facts": facts, "actors": actors, "superseded": False,
+        "source_ref": {"kind": "review_ledger_record", "path": f"state/{LEDGER_SUBDIR}/{record_id}.json"},
+    }
+
+
+def task_ledger_records(task: Dict[str, Any], drive_root: Any) -> tuple:
+    """This task's own newest review-ledger records, oldest first, each read whole (an
+    index row lacks the panel and the answers a card prints), and whether older ones
+    exist: ``0``, ``"1+"`` or ``"unknown"`` (an archived segment may hold some), as
+    ``## Review records`` says it. The ledger lives on the canonical data root."""
+    task_id, root = str(task.get("id") or ""), task.get("budget_drive_root") or drive_root
+    if not task_id or not root:
+        return [], 0
+    try:
+        from ouroboros import review_ledger as ledger
+
+        rows = [row for row in ledger.recent_records(root, task_id=task_id, limit=32, hot_only=True)
+                if row.get("task_id") == task_id]
+        records = [ledger.load_record(root, str(row.get("record_id") or "")) for row in rows[:LEDGER_RECORD_PANELS]]
+        more = "1+" if len(rows) > LEDGER_RECORD_PANELS else ("unknown" if ledger.archived_segments_exist(root) else 0)
+    except Exception:
+        logging.getLogger(__name__).debug("Review ledger records unavailable for task %s", task_id, exc_info=True)
+        return [], "unknown"
+    return [record for record in reversed(records) if record], more
+
+
+def compact_review_projection(review_runs: Any, records: Any = ()) -> Dict[str, Any]:
+    """Project existing audit runs without copying raw prompts or responses, then the
+    given review-ledger ``records`` (:func:`ledger_record_panel`), in their order."""
     panels: List[Dict[str, Any]] = []
     for index, raw_run in enumerate(review_runs or []):
         if not isinstance(raw_run, dict):
@@ -306,15 +427,7 @@ def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
         contributing = sum(1 for actor in actors if actor["quorum_contribution"])
         awaited = [actor["slot_id"] for actor in actors if actor["transport_status"] == AWAITING_PROJECTION]
         collected = [actor for actor in actors if actor["transport_status"] != AWAITING_PROJECTION]
-        transport_statuses = [actor["transport_status"] for actor in collected]
-        transport = (
-            "success" if transport_statuses and all(s == "success" for s in transport_statuses)
-            else ("partial" if "success" in transport_statuses else (
-                "not_dispatched" if transport_statuses and all(s == "not_dispatched" for s in transport_statuses)
-                else ("timeout" if transport_statuses and all(s == "timeout" for s in transport_statuses)
-                      else "provider_transport_error")
-            ))
-        )
+        transport = _panel_transport([actor["transport_status"] for actor in collected])
         parse = "valid" if collected and all(a["parse_status"] == "valid" for a in collected) else "malformed"
         reasons = raw_run.get("degraded_reasons") if isinstance(raw_run.get("degraded_reasons"), list) else []
         reasons = [str(item) for item in reasons]
@@ -384,6 +497,7 @@ def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
             if raw_run.get(key) not in (None, ""):
                 panel[key] = str(raw_run.get(key))
         panels.append(panel)
+    panels.extend(ledger_record_panel(record) for record in records or () if isinstance(record, dict))
     return {"panels": panels}
 
 

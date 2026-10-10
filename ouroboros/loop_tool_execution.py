@@ -601,13 +601,12 @@ def _execute_browser_tool_bound(
         return {"tool_call_id": tc.get("id"), "fn_name": fn_name, "result": result,
                 "is_error": True, "args_for_log": {}, "is_code_tool": False}
     if tool_ctx is not None and generation is not None:
-        # Pin the expectation for the tool body: _ensure_browser re-checks it
-        # at the exact moment it captures the generation, which closes the
-        # check-then-run window (safety checks between here and the handler
-        # can be long). _ensure_browser's own legitimate replacements update
-        # the pin, so a mid-call error after such a replacement is never
-        # mistaken for a timeout retirement.
-        setattr(tool_ctx, "_active_browser_generation", generation)
+        from ouroboros.tools.browser import browser_call_scope
+
+        # Bind before safety checks, in this invocation's context: after a
+        # timeout the replacement worker may already be running another call.
+        with browser_call_scope(tool_ctx, generation):
+            return _execute_single_tool(tools, tc, drive_logs, task_id, invocation)
     return _execute_single_tool(tools, tc, drive_logs, task_id, invocation)
 
 

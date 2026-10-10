@@ -341,9 +341,10 @@ function navigationHarness({ pendingWork }) {
     const instance = () => {
         const inst = {
             page: { hidden: false, isConnected: true, dataset: {} }, generation: 0, draft: 'Yes, after the tag',
-            refreshes: 0, destroyed: false,
-            hasPendingWork: () => pendingWork, hasPaintedHistory: () => true, restoreScrollPosition() {},
-            getScrollState: () => null, cancelHistoryPaint() { this.generation += 1; },
+            refreshes: 0, destroyed: false, latestShown: 0, transientCloses: 0,
+            hasPendingWork: () => pendingWork, hasPaintedHistory: () => true, showLatest() { this.latestShown += 1; },
+            closeTransient() { this.transientCloses += 1; },
+            cancelHistoryPaint() { this.generation += 1; },
             destroy() { this.destroyed = true; this.page.isConnected = false; },
             refreshHistory({ revision }) {
                 const own = ++this.refreshes && this.generation;
@@ -361,7 +362,7 @@ function navigationHarness({ pendingWork }) {
     const context = vm.createContext({
         navState: { activeProjectId: null, mobileDrawerOpen: false },
         projectInstances: new Map(), projectPaintRequests: new Map(), projectReveals: new Map(),
-        projectScrollStash: new Map(), lastProjectRows: [project], state: { projectSeenRevision: {} },
+        lastProjectRows: [project], state: { projectSeenRevision: {} }, mainChat: null,
         projectPanelTitle: {}, projectPanelBody: {}, ctx: {},
         showPage: async () => true, syncNavigationState() {}, createChatInstance: instance,
         markProjectViewed: async (id, revision) => { acked.push([id, revision]); },
@@ -375,6 +376,49 @@ function navigationHarness({ pendingWork }) {
     return { acked, built, held, project, context, api: context.api };
 }
 
+// A document a chat opened (the reader, the file dialog) is a modal over the whole
+// app: when its room leaves the screen without being destroyed it closes, and only it.
+for (const pendingWork of [true, false]) {
+    test(`a ${pendingWork ? 'kept pending-work' : 'destroyed'} room leaving the screen leaves no document open over the next view`, async () => {
+        const h = navigationHarness({ pendingWork });
+        const main = { transientCloses: 0, closeTransient() { this.transientCloses += 1; }, showLatest() {} };
+        Object.assign(h.context, { mainChat: main });
+        h.context.state.activePage = 'chat';
+        await h.api.open();
+        assert.equal(main.transientCloses, 1, 'a room shown over Main closes the document Main had open');
+        const room = h.built[0];
+        assert.equal(room.transientCloses, 0, 'the room shown keeps its own');
+        h.api.close();
+        if (pendingWork) {
+            assert.ok(room.transientCloses > 0, 'the kept room closes its document before it is hidden');
+            assert.deepEqual([room.destroyed, room.page.hidden, room.page.dataset.pendingWork], [false, true, '1'],
+                'and is kept with its staged files');
+            assert.equal(room.draft, 'Yes, after the tag');
+        } else {
+            assert.equal(room.destroyed, true, 'a room without pending work is destroyed, its document with it');
+        }
+        await h.api.open();
+        assert.equal(h.built.at(-1) === room, pendingWork, pendingWork ? 'the kept room is reused' : 'a new room is built');
+        assert.equal(main.transientCloses, 2);
+    });
+}
+
+test('leaving a Project for Main returns Main to its newest message', async () => {
+    const h = navigationHarness({ pendingWork: false });
+    const main = { latestShown: 0, showLatest() { this.latestShown += 1; } };
+    Object.assign(h.context, { mainChat: main });
+    h.context.state.activePage = 'chat';
+    await h.api.open();
+    h.api.close();
+    assert.equal(main.latestShown, 1, 'the panel closed over Main: Main opens at its newest message');
+    h.api.close();
+    assert.equal(main.latestShown, 1, 'closing with no Project open moves nothing');
+    h.context.state.activePage = 'settings';
+    await h.api.open();
+    h.api.close();
+    assert.equal(main.latestShown, 1, 'on another page Main moves when Chat is shown again, not before');
+});
+
 for (const pendingWork of [true, false]) {
     test(`an ordinary reopen of a ${pendingWork ? 'retained pending-work' : 'rebuilt'} room decides its own read while an old question reveal is held`, async () => {
         const h = navigationHarness({ pendingWork });
@@ -382,9 +426,11 @@ for (const pendingWork of [true, false]) {
         await flush();
         assert.equal(h.held.length, 1, 'the question detail read is held');
         assert.deepEqual(h.acked, [], 'landing on the question is not reading');
+        assert.equal(h.built[0].latestShown, 0, 'a question opened from Main lands on the question');
         h.api.close();
         await h.api.open();
         const [first, reopened] = [h.built[0], h.built.at(-1)];
+        assert.equal(reopened.latestShown, 1, 'an ordinary reopen lands at the newest message (owner decision 2026-10-05)');
         assert.equal(reopened === first, pendingWork, pendingWork ? 'the survivor is reused' : 'a new room is built');
         assert.equal(first.destroyed, !pendingWork);
         assert.deepEqual(h.acked, [['p1', 5]], 'the reader at the newest message has read, the reveal still held');

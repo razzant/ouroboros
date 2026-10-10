@@ -34,18 +34,22 @@ export function costBucketPresentation(info) {
     return details ? `${formatUsd2(cost)} (pending, ${details})` : `${formatUsd2(cost)} (pending)`;
 }
 
-/** Pure cost-dashboard projection: null/unavailable never renders as $0. */
+/** Pure cost-dashboard projection: null/unavailable never renders as $0.
+ * The limit is set against KNOWN spend (settled: confirmed + estimated), the number
+ * that refuses new paid calls (#1487); reservations and unresolved upper bounds are
+ * shown beside it as open holds, never added in. */
 export function costDashboardPresentation(data) {
     if (!data) return { state: 'loading' };
     const accounting = data.accounting || {};
     if (accounting.available === false) return { state: 'unavailable' };
-    const accounted = optionalFiniteNumber(accounting.accounted_usd);
+    const known = optionalFiniteNumber(accounting.settled_usd);
     const confirmed = optionalFiniteNumber(accounting.confirmed_usd);
+    const estimated = optionalFiniteNumber(accounting.estimated_usd);
     const reserved = optionalFiniteNumber(accounting.reserved_usd);
     const unresolved = optionalFiniteNumber(accounting.unresolved_upper_bound_usd);
     const unknown = optionalFiniteNumber(accounting.unknown_unmetered);
     const calls = optionalFiniteNumber(data.total_calls);
-    if ([accounted, confirmed, reserved, unresolved, unknown, calls].some(value => value === null)) {
+    if ([known, confirmed, estimated, reserved, unresolved, unknown, calls].some(value => value === null)) {
         return { state: 'unavailable' };
     }
     const rawLimit = optionalFiniteNumber(accounting.limit_usd);
@@ -60,8 +64,9 @@ export function costDashboardPresentation(data) {
     const openCause = nonFinal !== null && nonFinal > 0 ? ` (${Math.trunc(nonFinal)} open)` : '';
     return {
         state: 'available',
-        accountedLimit: `${formatUsd2(accounted)} / ${limit > 0 ? formatUsd2(limit) : '∞'}`,
+        knownLimit: `${formatUsd2(known)} / ${limit > 0 ? formatUsd2(limit) : '∞'}`,
         confirmed: formatUsd2(confirmed),
+        estimated: formatUsd2(estimated),
         reserved: formatUsd2(reserved),
         unresolved: formatUsd2(unresolved),
         unknown: String(Math.trunc(unknown)),
@@ -90,15 +95,16 @@ export function initCosts({ state, mount }) {
                     <div class="form-field ui-field">
                         <label for="s-per-task-cost">Per-task Cost Cap ($)</label>
                         <input id="s-per-task-cost" class="ui-control" type="number" value="50" aria-describedby="costs-per-task-note">
-                        <div class="settings-inline-note ui-field-help" id="costs-per-task-note">Hard dispatch cap for the whole root task tree. In-flight calls settle normally; increasing the cap does not auto-resume paused work.</div>
+                        <div class="settings-inline-note ui-field-help" id="costs-per-task-note">Hard dispatch cap for the whole root task tree, reached when its known spend (confirmed and estimated) gets there. In-flight calls settle normally; increasing the cap does not auto-resume paused work.</div>
                     </div>
                 </div>
                 <button class="btn btn-save costs-budget-save" id="btn-save-budget">Save Budget</button>
                 <div id="budget-save-status" class="settings-inline-status"></div>
             </div>
             <div class="costs-stats-grid">
-                <div class="stat-card"><div class="label">Accounted / Limit</div><div class="value" id="cost-accounted-limit">Loading…</div></div>
+                <div class="stat-card"><div class="label">Known spend / Limit</div><div class="value" id="cost-known-limit">Loading…</div></div>
                 <div class="stat-card"><div class="label">Confirmed</div><div class="value" id="cost-confirmed">—</div></div>
+                <div class="stat-card"><div class="label">Estimated</div><div class="value" id="cost-estimated">—</div></div>
                 <div class="stat-card"><div class="label">Reserved</div><div class="value" id="cost-reserved">—</div></div>
                 <div class="stat-card"><div class="label">Unresolved upper bound</div><div class="value" id="cost-unresolved">—</div></div>
                 <div class="stat-card"><div class="label">Unknown / unmetered</div><div class="value" id="cost-unknown">—</div></div>
@@ -165,17 +171,17 @@ export function initCosts({ state, mount }) {
 
     async function loadCosts() {
         const renderLoading = () => {
-            document.getElementById('cost-accounted-limit').textContent = 'Loading…';
-            ['cost-confirmed', 'cost-reserved', 'cost-unresolved', 'cost-unknown',
+            document.getElementById('cost-known-limit').textContent = 'Loading…';
+            ['cost-confirmed', 'cost-estimated', 'cost-reserved', 'cost-unresolved', 'cost-unknown',
                 'cost-calls', 'cost-top-model'].forEach((id) => {
                 document.getElementById(id).textContent = '—';
             });
             document.getElementById('cost-final').textContent = 'Loading…';
         };
         const renderUnavailable = () => {
-            ['cost-accounted-limit', 'cost-confirmed', 'cost-reserved', 'cost-unresolved',
+            ['cost-known-limit', 'cost-confirmed', 'cost-estimated', 'cost-reserved', 'cost-unresolved',
                 'cost-unknown', 'cost-calls', 'cost-top-model'].forEach((id) => {
-                document.getElementById(id).textContent = id === 'cost-accounted-limit' ? 'Unavailable' : '—';
+                document.getElementById(id).textContent = id === 'cost-known-limit' ? 'Unavailable' : '—';
             });
             document.getElementById('cost-final').textContent = 'Unavailable';
             ['cost-by-model', 'cost-by-key', 'cost-by-model-cat', 'cost-by-task-cat']
@@ -187,8 +193,9 @@ export function initCosts({ state, mount }) {
             const d = await resp.json();
             const presentation = costDashboardPresentation(d);
             if (!resp.ok || presentation.state !== 'available') throw new Error('accounting unavailable');
-            document.getElementById('cost-accounted-limit').textContent = presentation.accountedLimit;
+            document.getElementById('cost-known-limit').textContent = presentation.knownLimit;
             document.getElementById('cost-confirmed').textContent = presentation.confirmed;
+            document.getElementById('cost-estimated').textContent = presentation.estimated;
             document.getElementById('cost-reserved').textContent = presentation.reserved;
             document.getElementById('cost-unresolved').textContent = presentation.unresolved;
             document.getElementById('cost-unknown').textContent = presentation.unknown;

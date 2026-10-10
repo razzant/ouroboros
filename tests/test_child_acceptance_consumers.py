@@ -10,6 +10,8 @@ from tests.test_acceptance_delivery import (
     _CLEAN_VERDICT, _EpisodeLLM, _ROW_API, _ROW_NATIVE, _ROW_SESSION,
     _fake_session, _offline_env, _priced_offline_model, _real_panel, _roots, _tool_call,
 )
+from tests.test_acceptance_floor_admission import _KnownPricedLLM
+from tests._usage_store_testing import ledger_rows
 
 
 def _call(ctx, **kw):
@@ -36,7 +38,10 @@ def _ctx(tmp_path, workspace, governance, *, child=True, expired=False):
                            pending_events=[])
 
 
-@pytest.mark.parametrize(("limit", "expired", "sends"), [(1.0, False, 2), (0.15, False, 1), (1.0, True, 0)])
+# Each send settles a KNOWN $0.10. Known $0.10 below $0.15 admits the second send
+# although its own bound would cross the cap; known $0.10 AT a $0.10 cap refuses it.
+@pytest.mark.parametrize(("limit", "expired", "sends"),
+                         [(1.0, False, 2), (0.15, False, 2), (0.1, False, 1), (1.0, True, 0)])
 def test_child_one_native_reviewer_can_reason_again_but_inherits_money_and_deadline(monkeypatch, tmp_path, limit, expired, sends):
     from ouroboros import usage_accounting as ua
 
@@ -44,8 +49,8 @@ def test_child_one_native_reviewer_can_reason_again_but_inherits_money_and_deadl
     _priced_offline_model(monkeypatch)
     governance, workspace = _roots(tmp_path)
     ctx = _ctx(tmp_path, workspace, governance, expired=expired)
-    llm = _EpisodeLLM(tmp_path, [{"tool_calls": [_tool_call("read_file", {"path": "greeting.txt"})]},
-                               {"content": json.dumps(_CLEAN_VERDICT)}], scoped=True, reservation_usd=0.1)
+    llm = _KnownPricedLLM(tmp_path, [{"tool_calls": [_tool_call("read_file", {"path": "greeting.txt"})]},
+                                   {"content": json.dumps(_CLEAN_VERDICT)}], scoped=True, reservation_usd=0.1)
     seen = _real_panel(monkeypatch, llm, stub_gate=False)
     with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="child", root_task_id="root", root_limit_usd=limit)):
         result = _call(ctx, reviewer_slot_id="t_actor")
@@ -54,10 +59,12 @@ def test_child_one_native_reviewer_can_reason_again_but_inherits_money_and_deadl
     assert seen[0].deadline_at == ctx.task_metadata["deadline_at"]
     if sends == 2:
         assert any(m.get("role") == "tool" and "hello" in str(m) for m in llm.calls[-1]["messages"])
-    ledger = (tmp_path / "state/usage_attempts.jsonl").read_text() if sends else ""
+    if sends == 1:
+        assert result["actors"][0]["usage"]["native_end_reason"] == "budget_exhausted"
     if sends:
-        rows = [json.loads(line) for line in ledger.splitlines()]
+        rows = ledger_rows(tmp_path)
         assert all(r["root_task_id"] == "root" and r["task_id"] == "child" for r in rows)
+        assert ua.usage_projection(tmp_path, root_task_id="root")["settled_usd"] == pytest.approx(0.1 * sends)
     assert not (tmp_path / "state/child_review_cycles.json").exists()  # no extra cycle owner
 
 

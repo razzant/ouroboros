@@ -21,6 +21,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ouroboros.finalization_timing import (  # noqa: F401 — compatibility exports
+    emit_finalization_timing, mark_last_answer, stamp_finalization_enqueue,
+    task_timing, task_timing_scope, timed_phase, without_finalization_timing,
+)
 from ouroboros.secret_masking import SECRET_TOKEN_PATTERNS
 from ouroboros.utils import (
     atomic_write_json,
@@ -419,14 +423,17 @@ def _blob_ref_path(drive_root: pathlib.Path, ref: dict) -> pathlib.Path:
 def read_call_manifest_ref(drive_root: pathlib.Path, ref: dict, *, task_id: str) -> dict:
     """Read one exact task/call manifest, including a retired store alias."""
     call_id = str(ref.get("call_id") or "")
-    if not call_id or any(re.fullmatch(r"[A-Za-z0-9_.-]+", value) is None
-                          or value in {".", ".."} for value in (str(task_id), call_id)):
+    # System scopes (system:ui_translation, system:update_letter) use the
+    # same writer, whose filename is sanitized but whose identity stays exact.
+    safe_task = call_manifest_path(drive_root, str(task_id), call_id).parent.name
+    if not call_id or not task_id or any(re.fullmatch(r"[A-Za-z0-9_.-]+", value) is None
+                          or value in {".", ".."} for value in (safe_task, call_id)):
         raise ValueError("observability call manifest task/call identity mismatch")
     expected_sha = str(ref.get("sha256") or "")
     if not expected_sha:
         raise ValueError("observability call manifest ref has no sha256")
     try:
-        path = _ref_path(drive_root, ref, pathlib.Path("calls") / task_id / f"{call_id}.json")
+        path = _ref_path(drive_root, ref, pathlib.Path("calls") / safe_task / f"{call_id}.json")
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != expected_sha:
             raise ValueError("observability call manifest ref failed sha256 verification")
@@ -892,7 +899,8 @@ def retry_pending_child_ref_promotions(
     the maintenance generation's close, asked before every item and again at each
     publication's commit: a closed generation leaves the rest ``deferred``."""
 
-    from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR
+    from ouroboros.obligations import members
+    from ouroboros.task_custody import own_child_drives
     from ouroboros.task_status import SETTLED_STATUSES
     from ouroboros.task_results import load_task_result, validate_task_id
     from ouroboros.source_retention import (
@@ -902,12 +910,16 @@ def retry_pending_child_ref_promotions(
 
     parent = pathlib.Path(parent_drive_root)
     report: Dict[str, Any] = {"scanned": 0, "retried": [], "completed": [], "pending": [], "errors": [], "deferred": [], "unchanged": []}
-    directories = [(path, path / suffix) for base, suffix in
-                   ((parent / HEADLESS_TASKS_DIR, "data"), (parent / TASK_DRIVES_DIR, ""))
-                   if base.is_dir() for path in sorted(base.iterdir()) if path.is_dir()]
-    begin_retention_retries(parent, {path.name for path, _child in directories}, generation)
-    for task_dir, child_root in directories:
-        task_id = task_dir.name
+    candidates = members(parent, "promotions")
+    begin_retention_retries(parent, set(candidates), generation)
+    for task_id, facts in candidates.items():
+        child_root = next((pathlib.Path(facts[key]) for key in ("headless_child_drive_root", "child_drive_root")
+                           if facts.get(key)), None)
+        if child_root is None:
+            child_root = next((path for path in own_child_drives(parent, task_id) if path.is_dir()), None)
+        if child_root is None:
+            report["errors"].append({"task_id": task_id, "error": "child_drive_missing"})
+            continue
         report["scanned"] += 1
         try:
             validate_task_id(task_id)

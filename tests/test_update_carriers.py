@@ -375,8 +375,8 @@ def test_rollback_restores_pre_update_sha_after_carrier_resolved_apply(tmp_path,
         lambda reason: gate_calls.append(("close", reason)),
     )
     monkeypatch.setattr(
-        workers, "open_repo_writer_admission",
-        lambda expected_reason="": gate_calls.append(("open", expected_reason)),
+        workers, "open_repo_writer_admission_after_update_abort",
+        lambda expected_reason="": gate_calls.append(("open", expected_reason)) or True,
     )
 
     ok, message = update_merge.rollback_managed_update("carrier_test_rollback")

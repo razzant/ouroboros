@@ -451,7 +451,7 @@ def _revert_commit(
             f"⚠️ REVERT_BLOCKED: Commit {sha[:8]} touches protected file(s): "
             f"{format_protected_paths(protected_changes)}. "
             "Direct vcs_revert cannot create protected-path commits; stage the intended "
-            "revert manually and use commit_reviewed so the normal triad + scope review covers it.",
+            "revert manually and use commit_reviewed so the normal panel review covers it.",
             binding,
         )
     try:

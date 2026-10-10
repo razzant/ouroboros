@@ -6,8 +6,8 @@ isolation (rows-memo equivalence, window-doubling reader, SSE chain deltas,
 materialize_artifacts call sites); these tests pin the FULL-ENDPOINT budgets
 that only exist after the P1+P2 merges:
 
-* /api/state warm path: zero full ledger replays, one usage projection per
-  request handed into the evolution snapshot (no recompute inside it).
+* /api/state: zero whole-store reads, one usage projection per request handed
+  into the evolution snapshot (no recompute inside it).
 * /api/chat/history: a bounded byte-tail read of a large progress.jsonl and
   zero artifact materialization / disposition lookups in the annotation step.
 * /api/logs/{name}: the same bounded-read budget on a large events log.
@@ -22,13 +22,11 @@ import asyncio
 import json
 import logging
 import types
-from contextlib import contextmanager
 
 from starlette.requests import Request
 
 from ouroboros import usage_accounting as ua
-from ouroboros import usage_ledger
-from ouroboros import _usage_rows_memo as memo
+from ouroboros import usage_store
 
 
 def test_retained_execution_drive_tripwire_counts_both_roots(tmp_path, monkeypatch):
@@ -94,7 +92,7 @@ def _seeded_accounting_root(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     monkeypatch.setenv("TOTAL_BUDGET", "7.5")
-    ua.ensure_legacy_imported(root)
+    usage_store.migrate_from_journal(root)  # the lifecycle job, before any request
     settled = ua.reserve_attempt(ua.AttemptRequest(
         model="openai/gpt-5.2", provider="openai", reservation_usd=0.5,
         global_limit_usd=7.5, drive_root=root, task_id="settled",
@@ -110,10 +108,7 @@ def _seeded_accounting_root(tmp_path, monkeypatch):
         global_limit_usd=7.5, drive_root=root, task_id="reserved",
         root_task_id="root-1", category="task", source="test.perf",
     ))
-    # Seeding uses real writers, which now share the reader's prepared source.
-    # Evict this isolated root so the first endpoint really exercises a cold read.
-    with memo._LEDGER_READ_CACHE_LOCK:
-        memo._LEDGER_READ_CACHE.pop(str(root.resolve()), None)
+    usage_store.forget(root)  # the first endpoint call opens the store cold
     return root
 
 
@@ -173,8 +168,8 @@ def _install_tail_read_counter(monkeypatch):
 def test_api_state_warm_path_replays_ledger_zero_times_and_projects_once(
     tmp_path, monkeypatch,
 ):
-    """Full-endpoint /api/state budget: after one cold call, a warm call does
-    ZERO full ledger replays, and its single usage projection is the one the
+    """Full-endpoint /api/state budget: cold or warm, a call reads ZERO whole
+    stores (summary rows only), and its single usage projection is the one the
     (real) evolution snapshot consumes — no second projection anywhere.
 
     The kwarg-level de-triplication seam is pinned in
@@ -200,22 +195,21 @@ def test_api_state_warm_path_replays_ledger_zero_times_and_projects_once(
 
     cold = asyncio.run(api_state(_state_request(root)))
     assert cold.status_code == 200
-    assert counters["preparations"] == [str(root)]  # one parse outside the money lock
-    assert counters["full_reads"] == []
+    assert counters["migrations"] == counters["full_reads"] == []
 
-    counters["preparations"].clear()
     counters["projections"].clear()
     warm = asyncio.run(api_state(_state_request(root)))
     payload = json.loads(warm.body)
 
     assert warm.status_code == 200
-    assert counters["preparations"] == counters["full_reads"] == []
+    assert counters["migrations"] == counters["full_reads"] == []
     # One projection for the whole request; budget_remaining consumed it inside
     # the evolution snapshot instead of recomputing (a second entry here would
     # be the de-triplication regression this test exists to catch).
     assert len(counters["projections"]) == 1
     assert "budget_reserve_usd" in payload["evolution_state"]  # real snapshot ran
-    assert payload["spent_usd"] == 1.25  # settled 0.25 + reserved bound 1.0
+    assert payload["spent_usd"] == 0.25  # known (settled) spend; the $1.00 hold rides in accounting
+    assert payload["accounting"]["accounted_usd"] == 1.25
     assert payload["accounting"]["authority"] == "physical_attempt_ledger"
 
 
@@ -295,32 +289,26 @@ def test_chat_history_reads_bounded_progress_tail_with_zero_artifact_work(
 
 
 def _install_ledger_read_counters(monkeypatch):
-    """Count cold preparations, locked replays and both live projections."""
-    counters: dict = {"preparations": [], "full_reads": [], "projections": [], "breakdowns": []}
-    real_prepare, real_lock = memo._prepare_writer, ua._locked
-    lock_depth = 0
-    real_full_read = usage_ledger._read_records_locked
+    """Count journal imports, whole-store reads and both live projections."""
+    counters: dict = {"migrations": [], "full_reads": [], "projections": [], "breakdowns": []}
+    real_migrate = usage_store.migrate_from_journal
+    real_full_read = usage_store.read_usage_records
+    real_attempts = usage_store.Txn.attempts
     real_projection = ua.usage_projection
     real_breakdown = ua.usage_breakdown
 
-    @contextmanager
-    def counted_lock(*args, **kwargs):
-        nonlocal lock_depth
-        with real_lock(*args, **kwargs) as heartbeat:
-            lock_depth += 1
-            try:
-                yield heartbeat
-            finally:
-                lock_depth -= 1
-
-    def counted_preparation(target_root):
-        assert lock_depth == 0, "cold parsing must stay outside the monetary lock"
-        counters["preparations"].append(str(target_root))
-        return real_prepare(target_root)
+    def counted_migration(target_root):
+        counters["migrations"].append(str(target_root))
+        return real_migrate(target_root)
 
     def counted_full_read(target_root):
         counters["full_reads"].append(str(target_root))
         return real_full_read(target_root)
+
+    def counted_attempts(txn, where="1", params=()):
+        if str(where).strip() == "1":  # an unaddressed scan of every attempt
+            counters["full_reads"].append(str(txn.root))
+        return real_attempts(txn, where, params)
 
     def counted_projection(*args, **kwargs):
         counters["projections"].append(kwargs)
@@ -330,13 +318,9 @@ def _install_ledger_read_counters(monkeypatch):
         counters["breakdowns"].append(kwargs)
         return real_breakdown(*args, **kwargs)
 
-    monkeypatch.setattr(usage_ledger, "_read_records_locked", counted_full_read)
-    monkeypatch.setattr(usage_ledger, "_locked", counted_lock)
-    monkeypatch.setattr(ua, "_locked", counted_lock)
-    monkeypatch.setattr(memo, "_prepare_writer", counted_preparation)
-    # usage_accounting re-binds the substrate name at import; the memo resolves
-    # it in its own namespace, so the counter must cover both bindings.
-    monkeypatch.setattr(ua, "_read_records_locked", counted_full_read)
+    monkeypatch.setattr(usage_store, "migrate_from_journal", counted_migration)
+    monkeypatch.setattr(usage_store, "read_usage_records", counted_full_read)
+    monkeypatch.setattr(usage_store.Txn, "attempts", counted_attempts)
     monkeypatch.setattr(ua, "usage_projection", counted_projection)
     monkeypatch.setattr(ua, "usage_breakdown", counted_breakdown)
     return counters
@@ -349,9 +333,9 @@ def test_live_root_surfaces_replay_the_ledger_zero_times_when_warm(
     history (which projects a non-final root's subtree cost for the newest
     progress row) and GET /api/tasks/{id} (which derives cost_breakdown). The
     sibling budgets above seed a COMPLETED task, so neither live branch runs
-    there. Warm, each surface asks its projection exactly ONCE and the
-    memo/render cache answers it: ZERO full ledger replays under the monetary
-    lock, which is what made an oversized ledger cost seconds per open."""
+    there. Each surface asks its projection exactly ONCE and the store's
+    summary rows answer it: ZERO whole-store reads, which is what made an
+    oversized ledger cost seconds per open."""
     from ouroboros.gateway.history import make_chat_history_endpoint
     from ouroboros.gateway.tasks import _task_get_response
     from ouroboros.task_results import write_task_result
@@ -376,10 +360,8 @@ def test_live_root_surfaces_replay_the_ledger_zero_times_when_warm(
         app=types.SimpleNamespace(state=types.SimpleNamespace(drive_root=root)),
     )
     counters = _install_ledger_read_counters(monkeypatch)
-    asyncio.run(history(request))  # cold: fills the rows memo
-    assert counters["preparations"] == [str(root)]  # one parse outside the money lock
-    assert counters["full_reads"] == []
-    counters["preparations"].clear()
+    asyncio.run(history(request))  # cold: opens the store
+    assert counters["migrations"] == counters["full_reads"] == []
     counters["projections"].clear()
 
     messages = json.loads(asyncio.run(history(request)).body)["messages"]
@@ -387,7 +369,7 @@ def test_live_root_surfaces_replay_the_ledger_zero_times_when_warm(
 
     assert live_rows  # the live-root branch really ran (not a vacuous budget)
     assert live_rows[-1]["cost_accounting_status"] == "available"
-    assert counters["preparations"] == counters["full_reads"] == []
+    assert counters["migrations"] == counters["full_reads"] == []
     assert len(counters["projections"]) == 1  # one live-root projection, cached
     assert counters["projections"][0]["root_task_id"] == "root-1"
 
@@ -395,7 +377,7 @@ def test_live_root_surfaces_replay_the_ledger_zero_times_when_warm(
     payload = json.loads(_task_get_response(request).body)
 
     assert payload["cost_breakdown"]["authority"] == "physical_attempt_ledger"
-    assert counters["preparations"] == counters["full_reads"] == []
+    assert counters["migrations"] == counters["full_reads"] == []
     assert len(counters["breakdowns"]) == 1  # one subtree breakdown, cached
     assert counters["breakdowns"][0]["root_task_id"] == "root-1"
     assert counters["projections"] == []  # the detail path reads no projection
@@ -498,3 +480,41 @@ def test_sse_follow_tick_reads_only_appended_bytes_and_zero_artifact_work(
     assert end_offset - start_offset == appended_bytes  # ONLY the appended bytes
     assert all(offset > 0 for _p, offset, _e in reads)  # nothing re-read from 0
     assert artifact_counters == {"collect": 0, "copy": 0, "disposition": 0}
+
+
+def test_the_chronicle_journal_is_an_enrolled_hot_store_that_warns_only_past_its_threshold(tmp_path, monkeypatch):
+    """The memory journal is read on every task context, so it
+    is enrolled in the hot-store tripwire (DEVELOPMENT 03 projection-over-replay rule): quiet
+    at or below its threshold, one WARNING past it."""
+    from ouroboros import context_budget
+    from ouroboros.agent_startup_checks import _hot_store_thresholds, hot_store_growth_notes
+
+    assert ("memory/chronicle/records.jsonl", context_budget.CHRONICLE_JOURNAL_WARN_BYTES) in {
+        (relative, threshold) for relative, threshold, _remediation in _hot_store_thresholds()}
+    monkeypatch.setattr(context_budget, "CHRONICLE_JOURNAL_WARN_BYTES", 10)
+    env = types.SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+    journal = tmp_path / "memory" / "chronicle" / "records.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"x" * 10)
+    assert hot_store_growth_notes(env) == []
+    journal.write_bytes(b"x" * 11)
+    [note] = hot_store_growth_notes(env)
+    assert "memory/chronicle/records.jsonl" in note and "never delete records" in note
+
+
+def test_the_review_ledger_index_chain_is_an_enrolled_hot_store(tmp_path, monkeypatch):
+    """The ledger's hot index rotates itself; the rotated segments are replayed only by readers
+    that walk the chain, so the chain's total size is a tripwire like the chat archive chain."""
+    from ouroboros import context_budget
+    from ouroboros.agent_startup_checks import hot_store_growth_notes
+
+    monkeypatch.setattr(context_budget, "REVIEW_LEDGER_INDEX_WARN_BYTES", 10)
+    env = types.SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+    ledger = tmp_path / "state" / "review_ledger"
+    ledger.mkdir(parents=True)
+    (ledger / "index.jsonl").write_bytes(b"x" * 10)
+    (ledger / "rl-not-an-index.json").write_bytes(b"x" * 100)
+    assert hot_store_growth_notes(env) == []
+    (ledger / "index.20261007T000000.jsonl").write_bytes(b"x")
+    [note] = hot_store_growth_notes(env)
+    assert "state/review_ledger/index*.jsonl" in note and "never delete the newest" in note

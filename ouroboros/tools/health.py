@@ -46,6 +46,13 @@ def _codebase_health(ctx: ToolContext) -> str:
         lines.append(f"**Max function length:** {metrics['max_function_length']} lines")
         lines.append("\n### Size Headroom (information; official CI enforces the limits)")
         lines.extend(size_headroom_lines(inventory))
+        from ouroboros.reference_books import BOOK_GROWTH_RULE, book_balances, render_book_balance
+
+        books = book_balances(repo_dir)
+        if books:
+            lines.append("\n### Reference books (information; official CI enforces)")
+            lines.extend(f"  {render_book_balance(balance)}" for balance in books)
+            lines.append(f"  {BOOK_GROWTH_RULE}")
 
         from ouroboros.review import (
             MAX_FUNCTION_LINES,

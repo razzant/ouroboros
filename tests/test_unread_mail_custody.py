@@ -321,6 +321,8 @@ def test_the_drive_custody_pass_sweeps_the_canonical_mailboxes_the_seam_left(tmp
     from ouroboros import server_maintenance as sm
 
     data = tmp_path / "data"
+    from ouroboros.startup_migrations import prepare_startup_state
+    prepare_startup_state(data)
     monkeypatch.setattr(sm, "DATA_DIR", data)
     monkeypatch.setattr(sm, "_DRIVE_PRUNE_CURSOR", {"headless": "", "direct": ""})
     write_task_result(data, TASK, "completed", result="done", root_phase_checkpoint={"post_task_synthesis": "completed"})

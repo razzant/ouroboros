@@ -140,11 +140,18 @@ def checkpoint_pending_invocation(
         checkpoint(invocation_id)
     except Exception as exc:
         from ouroboros.review_execution import ReviewRouteUnavailable
+        from ouroboros.gateways.claudexor import run_failure_cause
 
-        on_failure()
+        cause = str(getattr(exc, "reported_cause", "") or f"{type(exc).__name__}: {exc}")
+        try:
+            on_failure()
+        except Exception as cleanup_error:
+            cause += f"; cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}"
         state.pop("pending_invocation_id", None)
-        raise ReviewRouteUnavailable(
+        refusal = ReviewRouteUnavailable(
             "the delegated review invocation could not be bound to its durable "
             "commit-review slot before dispatch; no run was started",
             code="review_custody_checkpoint_unwritable",
-        ) from exc
+        )
+        refusal.reported_cause = run_failure_cause({"safeMessage": cause})
+        raise refusal from exc

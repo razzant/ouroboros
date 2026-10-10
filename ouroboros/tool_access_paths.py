@@ -175,6 +175,7 @@ def workspace_mode_block_reason(ctx: Any) -> str:
     protected_values = (
         ("Ouroboros system repo", getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir", None)),
         ("Ouroboros repo", getattr(ctx, "repo_dir", None)),
+        ("Ouroboros serving repo", getattr(ctx, "serving_repo_dir", None)),
         ("Ouroboros data drive", getattr(ctx, "drive_root", None)),
         (
             "Ouroboros parent data drive",

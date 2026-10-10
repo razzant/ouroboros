@@ -56,8 +56,8 @@ export const VALUE_LADDER = [
 export const LADDER_FOOTNOTE =
     'Riding a plan is not free — it moves that work onto a subscription you already '
     + 'pay for instead of adding per-call API charges. What moves is exactly what you '
-    + 'route: commit, plan, skill review and task acceptance each follow their configured '
-    + 'triad row, so an all-subscription triad also puts each substantive task\'s '
+    + 'route: commit, plan, skill review and task acceptance all run on the review pool '
+    + '(the rows marked Reviewer), so an all-subscription pool also puts each substantive task\'s '
     + 'acceptance panel on the subscription: on the API it measured about 12 s and '
     + '$0.07 per model row per task; a session spends minutes of your window per task instead.';
 
@@ -818,6 +818,7 @@ export function createAgentsStep({
         get reads() { return store.reads; },
         refreshStatus() { return store.refresh(); },
         get availableSubagents() { return subagents.setting; },
+        get allowEmptyReviewPool() { return subagents.allowEmptyReviewPool; },
         setProcessingPreference(value) { subagents.setProcessingPreference(value); },
         /** Re-derive the provider list after the owner edits Accounts. */
         setSourceContext(context) {

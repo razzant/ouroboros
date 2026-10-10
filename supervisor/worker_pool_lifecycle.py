@@ -2,7 +2,8 @@
 
 A spawned or respawned slot is installed unassignable (``reaping=True``) and opens
 only when the child's own ``worker_ready`` row is observed, which is also where the
-SHA it booted is verified; a child alive but silent past the readiness window is
+checkout SHA sampled after initialization is compared with the managed baseline;
+a child alive but silent past the readiness window is
 torn down and replaced through the same respawn path, a bounded number of times.
 Its own entry-progress row permits one extension, still bounded from its birth.
 The pids workers ran under are recorded durably so an orphan surviving a restart
@@ -20,6 +21,7 @@ import logging
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import threading
 import time
@@ -51,6 +53,7 @@ def _pool():
 
 
 _WORKER_LIFECYCLE_LOCK = threading.RLock()
+_WORKER_SHA_LOOKUP_TIMEOUT_SEC = 2.0  # Local diagnostic I/O, like utils.get_git_info.
 
 
 def _serialized_worker_lifecycle(fn):
@@ -265,8 +268,9 @@ def _verify_worker_sha_after_spawn(
     ``respawn_worker`` install a slot with ``reaping=True`` (the marker the
     assignment path, the crash detector and the reaper already honour) and hand
     it here. A slot opens only when the child's own ``worker_ready`` row
-    (supervisor/worker_process.py) names its pid, and that row's ``git_sha`` is
-    verified against ``current_sha`` in the same step. A child that is alive
+    (supervisor/worker_process.py) names its pid. That row samples the checkout
+    after initialization; comparison with ``current_sha`` is diagnostic only,
+    not loaded-code attestation, authorship or review evidence. A child that is alive
     but silent past ``WORKER_READY_WINDOW_SEC`` is torn down and replaced;
     its own ``worker_starting`` row permits one extension to
     ``WORKER_READY_CEILING_SEC`` from birth. Replacement still runs
@@ -365,11 +369,53 @@ def _watch_booting_slots(
         pending.pop(wid)
 
 
+def _worker_sha_relation(expected_sha: str, observed_sha: str) -> Dict[str, Any]:
+    """Read ancestry without fetching or the mutating git index-repair path.
+
+    Only a negative answer needs a second read: shallow history cannot prove
+    non-ancestry, even when both commit objects are present locally.
+    """
+    if not expected_sha:
+        return {"relation": "not_applicable"}
+    if not observed_sha:
+        return {"relation": "unavailable", "relation_error": "missing_observed_sha"}
+    if observed_sha == expected_sha:
+        return {"relation": "equal"}
+    options = dict(cwd=_pool().REPO_DIR, capture_output=True, text=True,
+                   timeout=_WORKER_SHA_LOOKUP_TIMEOUT_SEC,
+                   env={**os.environ, "GIT_NO_LAZY_FETCH": "1"})
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", expected_sha, observed_sha],
+            **options,
+        )
+        if result.returncode == 0:
+            return {"relation": "descendant"}
+        if result.returncode == 1:
+            shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], **options)
+            if shallow.returncode == 0 and shallow.stdout.strip() == "false":
+                # An older ancestor and a different branch both belong here.
+                return {"relation": "non_descendant"}
+            return {"relation": "unavailable", "relation_returncode": shallow.returncode,
+                    "relation_error": ("shallow_history" if shallow.stdout.strip() == "true"
+                                       else "history_completeness_unavailable")}
+    except Exception as exc:
+        return {"relation": "unavailable", "relation_error": str(exc),
+                "relation_error_type": type(exc).__name__}
+    return {"relation": "unavailable", "relation_returncode": result.returncode,
+            "relation_error": result.stderr.strip()}
+
+
 def _open_ready_slot(
     wid: int, slot: Any, row: Dict[str, Any], expected_sha: str, owner_chat_id: int,
     started: float, attempt: int,
 ) -> None:
-    """The child confirmed ready: open the slot (if it is still ours) and verify its SHA."""
+    """Open the ready slot before the diagnostic checkout comparison.
+
+    Ancestry of the observed checkout against the baseline is diagnostic only:
+    a descendant stays in the supervisor log; a non-descendant or an unavailable
+    check also warns the owner chat; no baseline skips the comparison.
+    """
     with _queue_lock:
         owned = (_pool().WORKERS.get(wid) is slot
                  and not getattr(slot, "readiness_exhausted", False))
@@ -377,6 +423,8 @@ def _open_ready_slot(
             slot.reaping = False
     observed_sha = str(row.get("git_sha") or "").strip()
     ok = (bool(observed_sha) and observed_sha == expected_sha) if expected_sha else None
+    wait_sec = round(time.time() - started, 2)
+    relation = _worker_sha_relation(expected_sha, observed_sha)
     _supervisor_row({
         "type": "worker_sha_verify",
         "ok": ok,
@@ -384,14 +432,19 @@ def _open_ready_slot(
         "observed_sha": observed_sha,
         "worker_pid": row.get("pid"),
         "worker_id": wid,
-        "wait_sec": round(time.time() - started, 2),
+        "wait_sec": wait_sec,
         "attempt": attempt,
         "slot_opened": owned,
+        **relation,
     })
-    if ok is False and owner_chat_id:
+    if owner_chat_id and relation["relation"] in {"non_descendant", "unavailable"}:
+        observation = f"baseline {expected_sha[:8]}, observed {(observed_sha or 'unknown')[:8]}"
+        detail = ("is not a descendant of the recorded baseline"
+                  if relation["relation"] == "non_descendant"
+                  else "could not be compared with the recorded baseline")
         _pool().send_with_budget(
             owner_chat_id,
-            f"⚠️ Worker SHA mismatch after spawn: expected {expected_sha[:8]}, got {(observed_sha or 'unknown')[:8]}",
+            f"⚠️ Worker checkout sampled after initialization {detail}: {observation}.",
             role="system", system_type="worker_readiness_notice")
 
 
@@ -399,6 +452,9 @@ def _release_booting_slot(
     wid: int, slot: Any, started: float, attempt: int, reason: str, **detail: Any,
 ) -> None:
     """Hand a booting slot to the crash detector: ``reaping`` cleared if it is still ours, one typed row.
+
+    "Ours" means still registered in the pool and not readiness-exhausted; any other
+    slot is left untouched and the row records ``slot_released=False``.
 
     ``died_during_boot`` carries the exit code; ``watcher_error`` carries the error type and message.
     """
@@ -619,6 +675,7 @@ def kill_workers_for_update(
             disable_reason="managed_update",
             preserve_pending=True,
             preserve_running_task_ids=set(preserve_running_task_ids or ()),
+            retain_saved_work=True,  # the update's restart returns what was saved (#1563)
             reconcile_review_custody=False,  # Final death proof below owns this batch.
         )
         if kill_ok is False:
@@ -646,7 +703,7 @@ def kill_workers_for_update(
 
 def _kill_survivors() -> None:
     """Force-kill any workers and their descendant trees (daemon roots spared)."""
-    for w in _pool().WORKERS.values():
+    for w in list(_pool().WORKERS.values()):  # read outside the queue lock while a dead slot may retire
         pid = w.proc.pid
         if pid is None:
             continue

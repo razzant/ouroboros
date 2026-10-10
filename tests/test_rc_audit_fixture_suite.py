@@ -16,10 +16,17 @@ suite and the ABI-7a updater shim suite, whose N−1 byte forms are inline):
 - ``telegram_SKILL_v6.113.4.md`` — the bundled telegram extension manifest at
   f0313064 (the commit before ABI-1 added ``plugin_api``): a real pre-7.0
   extension manifest without the field.
+- ``settings_v6.87.5.json`` — the N−2 settings document (the epoch before the
+  structured review lanes: comma-list reviewer keys, the three review effort
+  keys and ``OUROBOROS_MODEL_DEEP_SELF_REVIEW`` as written, no
+  ``OUROBOROS_REVIEWER_SLOTS``, no ``OUROBOROS_SUBAGENTS``; all secret fields
+  empty). The review-pool migration suite reads it in one pass and in two.
 
 Pinned semantics: N−1 install → exit 1 with the expected check ids; clean
-7.0 install → exit 0; broken/unreadable install → exit 2; strict read-only
-guarantee (byte-for-byte fixture-tree snapshot before/after, no new files).
+7.0 install → exit 0 (its ``OUROBOROS_REVIEWER_SLOTS: ""`` default is a
+``migrated-setting`` NOTE since the review pool, never a block);
+broken/unreadable install → exit 2; strict read-only guarantee
+(byte-for-byte fixture-tree snapshot before/after, no new files).
 """
 
 from __future__ import annotations
@@ -753,7 +760,7 @@ def test_scope_document_matches_the_design_note_schema():
     assert scope["sources"]["inventories_frozen_at"] == module.INVENTORIES_FROZEN_AT
     ids = {c["id"] for c in scope["checks"]}
     assert ids == {"gateway-alias", "retired-setting", "comma-list",
-                   "plugin-api", "schema-stamp"}
+                   "migrated-setting", "plugin-api", "schema-stamp"}
     aliases = [c for c in scope["checks"] if c["id"] == "gateway-alias"]
     assert {c["removed"] for c in aliases} == {
         "cost_usd", "cost_usd_with_children", "telegram_chat_id",
@@ -768,15 +775,69 @@ def test_comma_list_class_is_snapped_from_settings_defaults_not_hardcoded():
     from ouroboros.settings_defaults import (
         RETIRED_COMMA_LIST_SETTING_KEYS,
         RETIRED_SETTING_KEYS,
+        REVIEW_POOL_MIGRATED_SETTING_KEYS,
     )
 
     assert set(RETIRED_COMMA_LIST_SETTING_KEYS) <= set(RETIRED_SETTING_KEYS)
+    assert set(REVIEW_POOL_MIGRATED_SETTING_KEYS) <= set(RETIRED_SETTING_KEYS)
+    assert not set(REVIEW_POOL_MIGRATED_SETTING_KEYS) & set(RETIRED_COMMA_LIST_SETTING_KEYS)
     module = _load_module()
     scope = module.build_scope()
     comma_keys = {c["key"] for c in scope["checks"] if c["id"] == "comma-list"}
     assert comma_keys == set(RETIRED_COMMA_LIST_SETTING_KEYS)
+    migrated_keys = {c["key"] for c in scope["checks"] if c["id"] == "migrated-setting"}
+    assert migrated_keys == set(REVIEW_POOL_MIGRATED_SETTING_KEYS)
     retired_keys = {c["key"] for c in scope["checks"] if c["id"] == "retired-setting"}
-    assert retired_keys == set(RETIRED_SETTING_KEYS) - set(RETIRED_COMMA_LIST_SETTING_KEYS)
+    assert retired_keys == (set(RETIRED_SETTING_KEYS) - set(RETIRED_COMMA_LIST_SETTING_KEYS)
+                            - set(REVIEW_POOL_MIGRATED_SETTING_KEYS))
+
+
+def test_migrated_setting_class_is_a_note_that_names_the_review_pool(tmp_path):
+    """PR-3 (review pool): the review-lane keys are inside RETIRED_SETTING_KEYS
+    but their stored value is MIGRATED, not dropped — so the auditor must not
+    tell an upgrading owner to move the value anywhere. Every key of the class
+    is a note, carries the shared «migrated» class line, and never blocks."""
+    from ouroboros.settings_defaults import (
+        REVIEW_POOL_MIGRATED_SETTING_KEYS,
+        REVIEW_POOL_MIGRATION_CLASS_LINE,
+    )
+
+    module = _load_module()
+    scope_checks = {c["key"]: c for c in module.build_scope()["checks"]
+                    if c["id"] == "migrated-setting"}
+    for key in REVIEW_POOL_MIGRATED_SETTING_KEYS:
+        assert scope_checks[key]["behavior"] == "migrated-on-load"
+        assert scope_checks[key]["migration"] == REVIEW_POOL_MIGRATION_CLASS_LINE
+    assert "OUROBOROS_SUBAGENTS" in REVIEW_POOL_MIGRATION_CLASS_LINE
+    assert "no action required" in REVIEW_POOL_MIGRATION_CLASS_LINE
+
+    data = _build_clean_70_install(tmp_path / "install")
+    document = json.loads((data / "settings.json").read_text(encoding="utf-8"))
+    document.update({
+        "OUROBOROS_REVIEWER_SLOTS": json.dumps({
+            "triad": [{"slot_id": "t", "route": {"kind": "api_chat", "target_id": "x/y"}, "delivery": "packet"}],
+            "scope": [{"slot_id": "s", "route": {"kind": "api_chat", "target_id": "x/y"}}],
+        }),
+        "OUROBOROS_EFFORT_REVIEW": "medium",
+        "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "x/z",
+    })
+    (data / "settings.json").write_text(json.dumps(document, indent=2), encoding="utf-8")
+    result = _run(data, "--json", str(tmp_path / "report.json"),
+                  isolated_root=tmp_path / "isol")
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    migrated = [f for f in report["findings"] if f["check_id"] == "migrated-setting"]
+    assert {f["subject"] for f in migrated} == {
+        "settings.json:OUROBOROS_REVIEWER_SLOTS",
+        "settings.json:OUROBOROS_EFFORT_REVIEW",
+        "settings.json:OUROBOROS_MODEL_DEEP_SELF_REVIEW",
+    }
+    assert all(f["severity"] == "note" for f in migrated)
+    assert all(REVIEW_POOL_MIGRATION_CLASS_LINE in f["detail"] for f in migrated)
+    assert report["summary"]["incompatible"] == 0
+    # The 7.0 lane key is never reported as a retired loss on any lane.
+    assert not any(f["check_id"] in ("retired-setting", "comma-list")
+                   and "REVIEWER_SLOTS" in f["subject"] for f in report["findings"])
 
 
 def test_scope_only_flag_prints_the_scope_and_exits_0(tmp_path):
@@ -813,6 +874,17 @@ def test_nminus1_fixtures_are_the_real_previous_minor_byte_forms():
                  if k.endswith(("_API_KEY", "_TOKEN", "_CREDENTIALS", "_PASSWORD"))
                  or k == "GITHUB_TOKEN"]
     assert secretish and all(not settings[k] for k in secretish)
+
+    n2 = json.loads((FIXTURES / "settings_v6.87.5.json").read_text("utf-8"))
+    for key in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODELS",
+                "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
+                "OUROBOROS_EFFORT_DEEP_SELF_REVIEW", "OUROBOROS_MODEL_DEEP_SELF_REVIEW"):
+        assert key in n2
+    assert "OUROBOROS_REVIEWER_SLOTS" not in n2 and "OUROBOROS_SUBAGENTS" not in n2
+    n2_secretish = [k for k in n2
+                    if k.endswith(("_API_KEY", "_TOKEN", "_CREDENTIALS", "_PASSWORD"))
+                    or k == "GITHUB_TOKEN"]
+    assert n2_secretish and all(not n2[k] for k in n2_secretish)
 
     row = json.loads((FIXTURES / "task_result_v6.113.4.json").read_text("utf-8"))
     assert "_schema_version" not in row
@@ -863,13 +935,20 @@ def test_retired_setting_migration_names_the_successor_when_the_table_has_one():
     «no replacement knob»: the wall-clock pair points at the activity model (the
     same truth the first-boot notice states), the truly knob-less keys keep the
     knob-less text."""
-    from ouroboros.settings_defaults import RETIRED_SETTING_SUCCESSORS
+    from ouroboros.settings_defaults import (
+        RETIRED_SETTING_SUCCESSORS,
+        REVIEW_POOL_MIGRATED_SETTING_KEYS,
+    )
 
     rc_audit = _load_module()
-    checks = {c["key"]: c for c in rc_audit.build_scope()["checks"] if c["id"] == "retired-setting"}
+    checks = {c["key"]: c for c in rc_audit.build_scope()["checks"]
+              if c["id"] in ("retired-setting", "migrated-setting")}
     for key, successors in RETIRED_SETTING_SUCCESSORS.items():
         assert "no replacement knob" not in checks[key]["migration"], key
         for successor in successors:
             assert successor in checks[key]["migration"], (key, successor)
+    # The migrated lane keys name their successor (the catalog) through the
+    # shared class line; a retired key with a successor is told to move the value.
+    assert set(REVIEW_POOL_MIGRATED_SETTING_KEYS) <= set(RETIRED_SETTING_SUCCESSORS)
     knobless = [k for k in checks if k not in RETIRED_SETTING_SUCCESSORS]
     assert knobless and all("no replacement knob" in checks[k]["migration"] for k in knobless)

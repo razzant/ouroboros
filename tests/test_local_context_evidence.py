@@ -27,7 +27,7 @@ def main_plan(manager, monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "runtime_settings", lambda: {"OUROBOROS_MODEL_CONTEXT_WINDOWS": {}})
     monkeypatch.setenv("OUROBOROS_MODEL_CONTEXT_WINDOWS", "{}")
-    monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: [])
+    monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: ([], ""))
 
     def build(mode="max", text="source", *, use_local=True, resolver=None):
         core = context_fit.ContextCore(
@@ -195,7 +195,6 @@ def test_running_local_dispatch_uses_serving_capacity_without_cloud_fallback(
                            profile="owner_max", rendered_mode="max", round_id="local-fit:round:2")
     assert fit.action == "send"
     assert fit.measurement.capacity_total_tokens == (window or None)
-    assert plan.max_projection.fits_known_window is (True if window else None)
     message, usage = client.chat(messages=messages,
                                  model="local-fixture", max_tokens=65536, use_local=True)
     assert message["content"] == "local answer"
@@ -219,10 +218,11 @@ def test_local_main_forecast_keeps_real_pressure_and_nano_headroom(manager, main
     fit = measure_main_fit(plan, messages, None, drive_root=tmp_path,
                            profile="owner_" + mode, rendered_mode=mode, round_id="local-fit:round:2")
     assert fit.action == "send"
-    assert plan.projection(mode).fits_known_window is True
     assert plan.output_reserve_tokens == local_context_limits(65536)[1]
+    # Nano's reserve is the reply floor: 8,192, or the local lane's smaller quarter-window ceiling.
     assert fit.measurement.response_reserve_tokens == (
-        NANO_MIN_HEADROOM_TOKENS if mode == "nano" else plan.output_reserve_tokens)
+        min(NANO_MIN_HEADROOM_TOKENS, plan.output_reserve_tokens) if mode == "nano" else plan.output_reserve_tokens)
+    assert fit.measurement.reply_allowance_tokens == plan.output_reserve_tokens  # a short input: the whole ceiling
     messages.append({"role": "user", "content": "pressure " * 100000})
     pressured = measure_main_fit(plan, messages, None, drive_root=tmp_path,
                                 profile="owner_" + mode, rendered_mode=mode, round_id="local-fit:round:3")
@@ -259,13 +259,12 @@ def test_main_forecast_rebinds_remote_local_restart_and_unknown(manager, main_pl
         assert active == plan.preferred_mode == plan.initial_mode == mode
         assert plan.output_reserve_tokens == reserve
         assert plan.window_tokens == window
-        assert plan.projection(mode).fits_known_window is (True if window else None)
         assert ce.is_known(plan) is bool(window)
         fit = context_fit.measure_main_fit(plan, messages, None, drive_root=tmp_path,
             profile="owner_" + mode, rendered_mode=mode, round_id="route-switch:round:2")
         assert fit.action == "send"
         assert fit.measurement.capacity_total_tokens == (window or None)
-        assert fit.measurement.response_reserve_tokens == (NANO_MIN_HEADROOM_TOKENS if mode == "nano" else reserve)
+        assert fit.measurement.response_reserve_tokens == (min(NANO_MIN_HEADROOM_TOKENS, reserve) if mode == "nano" else reserve)
 
 
 def test_actual_local_connection_error_is_not_a_synthetic_overflow(manager, monkeypatch):

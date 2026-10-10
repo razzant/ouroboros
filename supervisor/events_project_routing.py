@@ -61,6 +61,7 @@ def _emit_routing_receipt(
     options: Optional[list] = None,
     attachment_manifest: Optional[list] = None,
     publish: bool = True,
+    reasoning_effort: str = "",
 ) -> Dict[str, Any]:
     """Persist and publish one token-bound routing annotation receipt."""
     from ouroboros.project_dialogue import routing_refusal_cause
@@ -95,6 +96,7 @@ def _emit_routing_receipt(
                     cause=cause,
                     options=options,
                     attachment_manifest=attachment_manifest,
+                    reasoning_effort=reasoning_effort,
                     **project_address,
                 )
                 else "failed"
@@ -138,6 +140,7 @@ def _emit_routing_receipt(
             options=options,
             attachment_manifest=attachment_manifest,
             cause=cause,
+            reasoning_effort=reasoning_effort,
         )
     return receipt
 
@@ -153,6 +156,7 @@ def _publish_routing_ack(
     options: Optional[list] = None,
     attachment_manifest: Optional[list] = None,
     cause: str = "",
+    reasoning_effort: str = "",
 ) -> None:
     """Publish a live non-bubble acknowledgement after durable authority exists."""
     try:
@@ -182,6 +186,8 @@ def _publish_routing_ack(
                 ack_kwargs["attachment_manifest"] = attachment_manifest
             if str(cause or ""):
                 ack_kwargs["cause"] = str(cause)
+            if reasoning_effort:
+                ack_kwargs["reasoning_effort"] = str(reasoning_effort)
             if str(evt.get("routing_token") or ""):
                 ack_kwargs["routing_token"] = str(evt.get("routing_token"))
             ack(
@@ -533,6 +539,9 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
                 description=str(evt.get("objective") or ""),
                 expected_output=str(evt.get("expected_output") or ""),
                 suggested_name=suggested_name,
+                # The explicit starting effort is admission authority: a root interrupted
+                # before its worker's first write is Continued from THIS row.
+                **({"reasoning_effort": evt["reasoning_effort"]} if evt.get("reasoning_effort") else {}),
                 promotion_admission={
                     "status": admission_status,
                     "routing_token": str(evt.get("routing_token") or ""),
@@ -797,8 +806,10 @@ def _handle_ensure_project_scope(evt: Dict[str, Any], ctx: Any) -> None:
 def _handle_routing_manual_target(evt: Dict[str, Any], ctx: Any) -> None:
     """Publish the decision actor's typed abstention without routing work."""
     from ouroboros.project_dialogue import routing_options_with_labels
+    from ouroboros.settings_scales import EFFORT_SCALE
 
     options = routing_options_with_labels(ctx.DRIVE_ROOT, evt.get("options"))
+    effort = str(evt.get("reasoning_effort") or "")
     _emit_routing_receipt(
         ctx,
         evt,
@@ -815,4 +826,7 @@ def _handle_routing_manual_target(evt: Dict[str, Any], ctx: Any) -> None:
         # Durable carrier: the picker click re-forwards these staged specs to
         # the chosen destination long after the routing turn's metadata died.
         attachment_manifest=_events()._routing_attachments(evt.get("attachment_uploads")),
+        # The turn's explicit start for a New task picked here: the card is its only
+        # carrier once the turn ends (routing_decision reads it back on the click).
+        reasoning_effort=effort if effort in EFFORT_SCALE else "",
     )

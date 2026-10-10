@@ -209,9 +209,11 @@ def test_settings_template_follows_sprint_scaffold_defaults():
     assert template["OUROBOROS_MODEL"] == template["OUROBOROS_MODEL_LIGHT"]
     assert template["OUROBOROS_MODEL"] == template["OUROBOROS_MODEL_FALLBACKS"]
     actors = json.loads(template["OUROBOROS_SUBAGENTS"])
-    assert [row["route"]["target_id"] for row in actors["items"]] == [
-        template["OUROBOROS_MODEL"]
-    ]
+    # One actor row plus the packet review seats of the pool, all on the solve model.
+    assert {row["route"]["target_id"] for row in actors["items"]} == {template["OUROBOROS_MODEL"]}
+    assert [row for row in actors["items"] if not row.get("review_eligible")] == actors["items"][:1]
+    assert all(row["delivery"] == "packet" for row in actors["items"][1:])
+    assert "OUROBOROS_REVIEWER_SLOTS" not in template
     assert "OUROBOROS_MODEL_HEAVY" not in template
 
 

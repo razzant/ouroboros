@@ -774,9 +774,15 @@ def test_system_prompt_stance_and_bible_gating():
     assert "OMISSION NOTE: ARCHITECTURE navigation map not supplied" in plain
     assert checklist in plain
     assert "Convergence rule" not in plain
-    # The height rule sends an unverifiable claim back as a question or a note, never a blocker.
+    # The supplied checklist's height rule is the one home of what may block: no code copy beside it.
     assert "STRUCTURALLY" not in plain and "structurally unverifiable" not in lowered
-    assert "A claim you cannot check as written is a question to the author" in plain
+    assert "## Blocking rule" not in plain and "OMISSION NOTE: Plan Review Checklist" not in plain
+    # Without the section the code copy stands in, and the absence is named.
+    fallback = plan_packet.build_plan_review_system_prompt(
+        checklist_section="", constitutional=False, bible_text=None, cycle_index=1, enforcement="blocking")
+    assert "## Blocking rule" in fallback
+    assert "A claim you cannot check as written is a question to the author" in fallback
+    assert "OMISSION NOTE: Plan Review Checklist section not supplied by the host." in fallback
     assert "6. Subtraction" in plain and "7. Governance" not in plain
     assert "blocking" in lowered and "`breaks`" in plain
     assert "need_evidence" in plain

@@ -1,14 +1,16 @@
-"""Build a CANONICAL archived usage-ledger chain for the F1 (#1195) workload.
+"""Build the F1 (#1195) history workload: retained archive segments + a store.
 
 Shared by `tests/test_startup_historical_audit_server.py` (the real-server
 readiness-versus-history case) and runnable as a script for measurements.
 
-The chain is produced by the shipped compactor (`compact_usage_ledger_locked`)
-under the real monetary lock, so every segment, header, epoch step and
-`source_sha256` pin is exactly what production writes — this module never
-hand-authors an archive segment.  The first author's fixture reported
-`archive_materialized: false`; `archived_attempt_ids()` therefore returned the
-empty set immediately and the "967 segments" workload was never executed.
+The shape is an install upgraded from a compacted journal: the retired
+compactor left one archive segment per generation under
+`archive/usage_ledger/` (the folded attempts' rows, kept as evidence and read
+only by the explicit history audit), and the journal it left holds one
+aggregate per generation plus the live tail. The server's boot imports that
+journal into the usage store; the audit then asks the store and the retained
+evidence. The segments are plain retained rows (the audit's reader verifies
+no chain and no hashes), so this module writes them directly.
 
 Everything here writes to a caller-supplied synthetic root.  It never reads or
 touches the owner's data root.
@@ -27,6 +29,8 @@ import time
 if __package__ is None and str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+_CASH = 0.000123
+
 
 def _old_ts(age_days: float) -> str:
     moment = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=age_days)
@@ -34,7 +38,7 @@ def _old_ts(age_days: float) -> str:
 
 
 def _attempt_row(seq: int, attempt_id: str, task_id: str, ts: str, state: str) -> dict:
-    """One valid attempt row (the ledger requires every chain to begin reserved)."""
+    """One valid attempt row (every chain begins reserved)."""
     row = {
         "seq": seq,
         "ts": ts,
@@ -53,7 +57,7 @@ def _attempt_row(seq: int, attempt_id: str, task_id: str, ts: str, state: str) -
     elif state == "released":
         row["reason"] = "fixture_release"
     else:
-        row["cost_usd"] = 0.000123
+        row["cost_usd"] = _CASH
         row["cost_final"] = True
         row["pricing_known"] = True
         row["prompt_tokens"] = 11
@@ -61,10 +65,9 @@ def _attempt_row(seq: int, attempt_id: str, task_id: str, ts: str, state: str) -
     return row
 
 
-# The ledger's state machine: reserved -> dispatched -> settled (3 rows), or the
-# shorter reserved -> released (2 rows).  Both finals are foldable, so a chain
-# of either shape is archivable.  `_chain_shapes` hits an EXACT row count with a
-# mix of the two, which is what "N valid attempt rows per generation" means.
+# reserved -> dispatched -> settled (3 rows), or reserved -> released (2 rows).
+# `_chain_shapes` hits an EXACT row count with a mix of the two, which is what
+# "N valid attempt rows per generation" means.
 def _chain_shapes(rows: int) -> list[tuple[str, ...]]:
     long_chain = ("reserved", "dispatched", "settled")
     short_chain = ("reserved", "released")
@@ -76,60 +79,44 @@ def _chain_shapes(rows: int) -> list[tuple[str, ...]]:
     return [long_chain] * longs + [short_chain] * shorts
 
 
-def _last_seq(ledger: Path) -> int:
-    if not ledger.exists():
-        return 0
-    last = 0
-    with ledger.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                last = int(json.loads(line).get("seq") or last)
-            except ValueError:
-                continue
-    return last
-
-
 def build_chain(root: Path, *, generations: int, rows_per_generation: int,
                 progress_every: int = 0) -> dict:
-    """Append + compact `generations` times, leaving a real archived chain.
+    """Write one retained archive segment per generation and return bounded
+    counting facts plus (under ``"_aggregates"``) the journal aggregate each
+    generation folded into."""
+    from ouroboros.usage_ledger import ARCHIVE_SEGMENT_DIR_REL
 
-    Returns bounded counting facts.  Raises if any pass fails to commit, so a
-    fixture can never silently degrade into "no archive" the way the first
-    author's run did.
-    """
-    from ouroboros.usage_compaction import compact_usage_ledger_locked
-    from ouroboros.usage_ledger import ARCHIVE_SEGMENT_DIR_REL, LEDGER_REL, _locked
-
-    ledger = root / LEDGER_REL
-    ledger.parent.mkdir(parents=True, exist_ok=True)
+    directory = root / ARCHIVE_SEGMENT_DIR_REL
+    directory.mkdir(parents=True, exist_ok=True)
     archived_ids: list[str] = []
+    aggregates: list[dict] = []
     started = time.monotonic()
     for generation in range(1, generations + 1):
-        seq = _last_seq(ledger)
-        ts = _old_ts(30 + generations - generation)  # every row is far past the fold horizon
-        lines = []
-        for index, shape in enumerate(_chain_shapes(rows_per_generation)):
+        ts = _old_ts(30 + generations - generation)
+        lines, seq, settled = [], 0, 0
+        shapes = _chain_shapes(rows_per_generation)
+        for index, shape in enumerate(shapes):
             attempt_id = f"a{generation:04d}-{index:06d}"
             archived_ids.append(attempt_id)
+            settled += shape[-1] == "settled"
             for state in shape:
                 seq += 1
                 lines.append(json.dumps(
                     _attempt_row(seq, attempt_id, f"task-{index % 17:03d}", ts, state),
                     separators=(",", ":"),
                 ))
-        with ledger.open("a", encoding="utf-8") as handle:
-            handle.write("".join(line + "\n" for line in lines))
-        with _locked(root) as heartbeat:
-            receipt = compact_usage_ledger_locked(root, heartbeat=heartbeat)
-        if receipt is None:
-            raise RuntimeError(f"compaction pass {generation} did not commit; chain would be incomplete")
+        (directory / f"segment_{generation:04d}.jsonl").write_text(
+            "".join(line + "\n" for line in lines), encoding="utf-8")
+        aggregates.append({
+            "attempt_id": f"fold-{generation:04d}", "task_id": "task-000", "root_task_id": "task-000",
+            "model": "fixture::model", "provider": "fixture", "category": "agent", "source": "fixture",
+            "folded_attempt_count": len(shapes), "cost_usd": round(settled * _CASH, 12),
+            "cost_final": True, "pricing_known": True, "ts": ts,
+        })
         if progress_every and generation % progress_every == 0:
             print(f"  generation {generation}/{generations} "
                   f"({time.monotonic() - started:.1f}s)", file=sys.stderr, flush=True)
-    segments = sorted((root / ARCHIVE_SEGMENT_DIR_REL).glob("*.jsonl"))
+    segments = sorted(directory.glob("*.jsonl"))
     return {
         "generations": generations,
         "rows_per_generation": rows_per_generation,
@@ -138,40 +125,33 @@ def build_chain(root: Path, *, generations: int, rows_per_generation: int,
         "archived_attempt_ids_expected": len(archived_ids),
         "segments_on_disk": len(segments),
         "archive_bytes": sum(path.stat().st_size for path in segments),
-        "live_ledger_bytes": ledger.stat().st_size,
         "build_seconds": time.monotonic() - started,
         "first_archived_attempt_id": archived_ids[0] if archived_ids else "",
         "last_archived_attempt_id": archived_ids[-1] if archived_ids else "",
+        "_aggregates": aggregates,
     }
 
 
-def add_live_tail(root: Path, *, rows: int) -> list[str]:
-    """Append recent (unfoldable) attempts so the live replay is non-empty too."""
-    from ouroboros.usage_ledger import LEDGER_REL
-
-    ledger = root / LEDGER_REL
-    seq = _last_seq(ledger)
+def live_tail(rows: int) -> tuple[list[str], list[dict]]:
+    """Recent attempt chains (never folded) and their ids."""
     ts = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    ids = []
-    with ledger.open("a", encoding="utf-8") as handle:
-        for index, shape in enumerate(_chain_shapes(rows)):
-            attempt_id = f"live-{index:06d}"
-            ids.append(attempt_id)
-            for state in shape:
-                seq += 1
-                handle.write(json.dumps(
-                    _attempt_row(seq, attempt_id, f"task-{index % 17:03d}", ts, state),
-                    separators=(",", ":"),
-                ) + "\n")
-    return ids
+    ids, chain_rows = [], []
+    for index, shape in enumerate(_chain_shapes(rows)):
+        attempt_id = f"live-{index:06d}"
+        ids.append(attempt_id)
+        for state in shape:
+            row = _attempt_row(0, attempt_id, f"task-{index % 17:03d}", ts, state)
+            row.pop("seq")
+            chain_rows.append(row)
+    return ids, chain_rows
 
 
 def write_seal_manifests(root: Path, *, archived: list[str], live: list[str],
                          missing: int) -> dict:
     """Seal manifests over archived / live / absent attempt identities.
 
-    The archived identities are the ones that force `archived_attempt_ids()` to
-    run: they are absent from the live replay by construction.
+    The archived identities are the ones that force the retained-evidence scan:
+    they are absent from the store by construction.
     """
     counts = {"archived": 0, "live": 0, "missing": 0}
     calls = root / "observability" / "calls"
@@ -203,15 +183,25 @@ def write_seal_manifests(root: Path, *, archived: list[str], live: list[str],
 def prepare_root(root: Path, *, generations: int, rows_per_generation: int,
                  archived_seals: int, live_rows: int, live_seals: int,
                  missing_seals: int, progress_every: int = 0) -> dict:
-    """Full F1 fixture: archived chain + live tail + the three seal identities."""
+    """Full F1 fixture: retained segments, the journal the next boot imports
+    (aggregates + live tail) and the three seal identities. A store an earlier
+    boot of this synthetic root created is removed so the journal is imported
+    exactly as on an upgrade."""
+    from ouroboros.usage_store import STORE_REL
+    from tests._usage_store_testing import write_compacted_journal
+
     (root / "state").mkdir(parents=True, exist_ok=True)
     (root / "logs").mkdir(parents=True, exist_ok=True)
+    for stale in (root / STORE_REL,):
+        if stale.exists():
+            stale.unlink()
     facts = build_chain(root, generations=generations,
                         rows_per_generation=rows_per_generation,
                         progress_every=progress_every)
-    live_ids = add_live_tail(root, rows=live_rows)
-    # Archived identities are sampled across the whole chain, not just its head,
-    # so the union really has to be materialised.
+    live_ids, live_rows_written = live_tail(live_rows)
+    journal = write_compacted_journal(root, facts.pop("_aggregates"), live_rows_written)
+    facts["journal_bytes"] = journal.stat().st_size
+    # Archived identities are sampled across the whole chain, not just its head.
     per_generation = len(_chain_shapes(rows_per_generation))
     step = max(1, facts["archived_attempt_ids_expected"] // max(1, archived_seals))
     archived_sample = [

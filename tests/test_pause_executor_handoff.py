@@ -10,6 +10,7 @@ from ouroboros import usage_accounting as ua
 from ouroboros import owner_pause
 from ouroboros.llm_attempt import _deadline_checked_send, require_physical_dispatch_window
 from ouroboros.task_results import write_task_result
+from tests._usage_store_testing import attempt_rows_in_start_order
 
 pytestmark = pytest.mark.serial
 
@@ -66,7 +67,7 @@ def test_sync_executor_accepts_before_pause_and_waits_without_launch_lock(tmp_pa
         release.set()
         thread.join(5)
     assert not thread.is_alive() and observed == ["copied", "paid answer"]
-    assert ua.read_usage_records(tmp_path, final_only=True)[0]["state"] == "settled"
+    assert attempt_rows_in_start_order(tmp_path)[0]["state"] == "settled"
 
 
 def test_async_executor_accepts_before_pause_and_keeps_context(tmp_path, monkeypatch):
@@ -93,7 +94,7 @@ def test_async_executor_accepts_before_pause_and_keeps_context(tmp_path, monkeyp
             assert await ua.execute_physical_attempt_async(request(), wrapped, before_dispatch=prepare, extractor=extract) == "answer"
             assert ua.last_physical_attempt_capture().state == "settled"
     asyncio.run(call())
-    assert ua.read_usage_records(tmp_path, final_only=True)[0]["state"] == "settled"
+    assert attempt_rows_in_start_order(tmp_path)[0]["state"] == "settled"
 
 
 def test_async_cancel_during_accounting_joins_and_retains_exact_answer(tmp_path, monkeypatch):
@@ -136,7 +137,7 @@ def test_async_cancel_during_accounting_joins_and_retains_exact_answer(tmp_path,
     finally:
         release.set()
     rows = ua.read_usage_records(tmp_path)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "settled"]
+    assert [row["state"] for row in rows] == ["settled"]
 
 
 def test_handed_sender_still_obeys_stop(tmp_path, monkeypatch):
@@ -159,7 +160,7 @@ def test_handed_sender_still_obeys_stop(tmp_path, monkeypatch):
             with pytest.raises(Exception, match="cancelled"):
                 await ua.execute_physical_attempt_async(request(), send)
     asyncio.run(call())
-    assert ua.read_usage_records(tmp_path, final_only=True)[0]["state"] == "released"
+    assert attempt_rows_in_start_order(tmp_path)[0]["state"] == "released"
 
 
 
@@ -204,7 +205,7 @@ def test_async_cancel_before_sender_entry_releases_and_keeps_cancellation(tmp_pa
             with pytest.raises(asyncio.CancelledError):
                 await ua.execute_physical_attempt_async(request(), send)
     asyncio.run(call())
-    assert ua.read_usage_records(tmp_path, final_only=True)[0]["state"] == "released"
+    assert attempt_rows_in_start_order(tmp_path)[0]["state"] == "released"
 
 
 

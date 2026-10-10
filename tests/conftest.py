@@ -5,6 +5,7 @@
 # runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
 import functools
+import json
 import os
 import pathlib
 import shutil
@@ -35,6 +36,8 @@ _SAFE_TEMP_ROOT = os.environ.get("OUROBOROS_TEST_TEMP_ROOT", "")
 # Repo root for a live-DATA run, which has no pytest data dir to hang it off. Created lazily,
 # so the hermetic lane never creates an unused temp dir.
 _PYTEST_REPO_FALLBACK = None
+_NEVER_INHERITED = ("OUROBOROS_MANAGED_BY_LAUNCHER", "OUROBOROS_MANAGED_REPO_DIR",
+                    "OUROBOROS_REVIEW_RUN_CAP_USD", "OUROBOROS_CLAUDEXOR_ATTACH_HOME")
 if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     _LIVE_DATA_ROOT = (
         os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT")
@@ -63,8 +66,10 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     # launcher's root under safe_test, the invoking temp directory otherwise.
     _PYTEST_DEFAULTS["GIT_CEILING_DIRECTORIES"] = str(_PYTEST_ROOT.parent)
     os.environ.update(_PYTEST_DEFAULTS)
-    os.environ.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
-    os.environ.pop("OUROBOROS_MANAGED_REPO_DIR", None)
+    # Run identities, never lane controls: launcher authority, and the isolated
+    # review's run cap / attach-only engine selection (no test reaches a host engine).
+    for _key in _NEVER_INHERITED:
+        os.environ.pop(_key, None)
     os.environ["OUROBOROS_TEST_LIVE_DATA_ROOT"] = _LIVE_DATA_ROOT
     _PYTEST_DATA_DIR = pathlib.Path(os.environ["OUROBOROS_DATA_DIR"])
     if _SAFE_TEMP_ROOT:
@@ -75,6 +80,87 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
 import pytest
 pytest.register_assert_rewrite("tests.ui_media_delivery_smoke")
 pytest_plugins = ["tests.browser_lane", "tests.ci_evidence"]
+
+
+# Measuring a reviewer's window (`reviewer_context_window` / `scope_window` ->
+# `capability_evidence.probe`) asks OpenRouter's live `/models` catalog through
+# `LLMClient.openrouter_context_length(allow_fetch=True)`; a retrieving work
+# order, the `## Review` block's cost hint and the retrieving brief all measure.
+# The answer lands in these CLASS caches for the rest of the process, so a later
+# unrelated send already strips a field the catalog lists as unsupported (the
+# `test_llm_no_proxy` parameter-rejection retry then has nothing left to drop).
+_PROVIDER_CATALOG_CLASS_STATE = (
+    "_SUPPORTED_PARAMS_CACHE", "_SUPPORTED_PARAMS_FETCHED",
+    "_CONTEXT_LENGTH_CACHE", "_CAPABILITIES_FETCH_OK",
+)
+_PROVIDER_CATALOG_PRISTINE = {
+    "_SUPPORTED_PARAMS_CACHE": {}, "_SUPPORTED_PARAMS_FETCHED": False,
+    "_CONTEXT_LENGTH_CACHE": {}, "_CAPABILITIES_FETCH_OK": False,
+}
+
+
+def _provider_catalog_class():
+    """The real ``LLMClient``, found from the capability mixin that owns the catalog state.
+
+    Not ``ouroboros.llm.LLMClient`` read blindly: a test may monkeypatch that name with a
+    stand-in (a function, a fake class), and its patch can still be in force when the
+    autouse teardown below runs.
+    """
+    module = sys.modules.get("ouroboros.llm_capability_policy")
+    mixin = getattr(module, "_CapabilityPolicyMixin", None)
+    if mixin is None:
+        return None
+    current = getattr(sys.modules.get("ouroboros.llm"), "LLMClient", None)
+    if isinstance(current, type) and current.__module__ == "ouroboros.llm" and issubclass(current, mixin):
+        return current
+    real = [cls for cls in mixin.__subclasses__()
+            if cls.__name__ == "LLMClient" and cls.__module__ == "ouroboros.llm"]
+    return real[-1] if real else None
+
+
+def _provider_catalog_snapshot(cls):
+    import copy
+    return {name: copy.copy(getattr(cls, name)) for name in _PROVIDER_CATALOG_CLASS_STATE}
+
+
+def _restore_provider_catalog(cls, saved):
+    for name, value in saved.items():
+        current = getattr(cls, name)
+        if isinstance(current, dict) and isinstance(value, dict):
+            current.clear()
+            current.update(value)  # the mixin's dict object itself, not a rebinding
+        else:
+            setattr(cls, name, value)
+
+
+@pytest.fixture(autouse=True)
+def _provider_catalog_state_returns():
+    """Hand `LLMClient`'s provider-catalog class state back as the test found it.
+
+    A class not yet imported when the test started is found pristine; a test
+    that imports it and fetches gives the empty caches back.
+    """
+    cls = _provider_catalog_class()
+    saved = _provider_catalog_snapshot(cls) if cls is not None else None
+    yield
+    cls = _provider_catalog_class()
+    if cls is not None:
+        _restore_provider_catalog(cls, saved if saved is not None else _PROVIDER_CATALOG_PRISTINE)
+
+
+@pytest.fixture
+def provider_catalog_offline(monkeypatch):
+    """Keep the window probe local: no live catalog fetch for this test.
+
+    Yields the state as found, keyed by `LLMClient` attribute name, so a test can
+    pin that a preparation leaves exactly these caches untouched.
+    """
+    from ouroboros.llm import LLMClient
+
+    saved = _provider_catalog_snapshot(LLMClient)
+    monkeypatch.setattr(LLMClient, "_fetch_openrouter_capabilities", classmethod(lambda cls: None))
+    yield saved
+    _restore_provider_catalog(LLMClient, saved)
 
 
 @pytest.fixture
@@ -175,8 +261,8 @@ def _isolated_child_env(value) -> dict:
     if not value.get("OUROBOROS_SETTINGS_PATH"):
         child_env["OUROBOROS_SETTINGS_PATH"] = str(
             pathlib.Path(child_env["OUROBOROS_DATA_DIR"]) / "settings.json")
-    child_env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
-    child_env.pop("OUROBOROS_MANAGED_REPO_DIR", None)
+    for key in _NEVER_INHERITED:
+        child_env.pop(key, None)
     child_env["OUROBOROS_PYTEST_ACTIVE"] = "1"
     child_env["OUROBOROS_TEST_LIVE_DATA_ROOT"] = _PYTEST_CHILD_LIVE_ROOT
     return child_env
@@ -602,6 +688,17 @@ def _reset_custody_memo_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _reset_accepted_ids_between_tests():
+    """The named-ingress index (``message_ingress._AcceptedIds``) is keyed by chat-log path:
+    no folded prefix outlives its test, whatever the next one writes at that path."""
+    from supervisor.message_ingress import reset_accepted_ids
+
+    reset_accepted_ids()
+    yield
+    reset_accepted_ids()
+
+
+@pytest.fixture(autouse=True)
 def _unlatch_supervisor_event_bus_between_tests():
     """A TestClient lifespan runs the server shutdown, whose ``workers.shutdown_event_q()``
     latches ``_EVENT_Q_SHUTDOWN`` for the rest of the xdist worker; the next test in that
@@ -632,6 +729,26 @@ def _clear_server_stop_flags_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _keep_process_logging_out_of_the_pytest_process(monkeypatch):
+    """Restart and shutdown tests run ``server.main()`` in this process and launcher tests import
+    ``launcher``; each would run the per-process logging bootstrap here, leaving root handlers
+    bound to that test's tmp dir and captured stderr, the root level at INFO and both excepthooks
+    replaced for the rest of the xdist worker. A later test then logged through the stale handlers
+    (the supervisor-watchdog stack test lost its watchdog thread that way, red only in the full
+    battery). The pytest process owns its own logging: the bootstrap is a no-op here and both hooks
+    are restored after every test; tests/test_process_logging.py runs the bootstrap in fresh
+    interpreters."""
+    import sys
+    import threading
+
+    from ouroboros import process_logging
+
+    monkeypatch.setattr(process_logging, "_configured", True)
+    monkeypatch.setattr(threading, "excepthook", threading.excepthook)
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+
+
+@pytest.fixture(autouse=True)
 def _restore_gateway_settings_bindings_between_tests():
     """``server._sync_gateway_settings_module()`` copies the server module's CURRENT
     ``load_settings`` / ``save_settings`` / ``_apply_settings_to_env`` /
@@ -659,6 +776,45 @@ def _restore_gateway_settings_bindings_between_tests():
             if value is None:
                 continue
             setattr(_gateway_settings, name, value)
+
+
+def shared_settings_document_left_behind(root: pathlib.Path | None) -> list[str] | None:
+    """The keys of a ``settings.json`` a test left at the worker-shared pytest data root,
+    or ``None`` when nothing was left (or there is no bound root). The file is REMOVED so the
+    victims stay green; the caller names the leaker. Plain function so the contract is
+    testable without pytest plumbing."""
+    if root is None:
+        return None
+    path = root / "settings.json"
+    if not path.exists():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        keys = sorted(document) if isinstance(document, dict) else ["<not a JSON object>"]
+    except (OSError, ValueError):
+        keys = ["<unreadable>"]
+    path.unlink()
+    return keys
+
+
+@pytest.fixture(autouse=True)
+def _no_settings_document_left_at_the_shared_root():
+    """``config.SETTINGS_PATH`` is bound ONCE per xdist worker (``_bind_pytest_runtime_roots``)
+    and nothing resets the file between tests, so a test that persists a document there hands
+    its settings to every later test of that worker — a document without a subagent catalog
+    reads, since the read seam mints the factory reviewer rows for it, as a disk catalog that
+    shadowed the victims' ``OUROBOROS_SUBAGENTS`` (five ``delegate_start`` refusals in
+    tests/test_delegated_skill_payload.py after ``test_extensions_api.py``'s settings POST,
+    whose ``server.save_settings`` patch never covered the gateway's owner writer). Name the
+    leaker, not the victim: the test that left the file fails, and the file is removed."""
+    yield
+    keys = shared_settings_document_left_behind(_PYTEST_DATA_DIR)
+    if keys is not None:
+        pytest.fail(
+            "this test left a settings document at the worker-shared pytest data root "
+            f"({_PYTEST_DATA_DIR / 'settings.json'}; keys: {', '.join(keys)}); point "
+            "ouroboros.config.SETTINGS_PATH at the test's own tree (monkeypatch) or patch the writer it reaches"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -795,7 +951,8 @@ def _isolate_workspace_executor_globals():
     (services._LOCK is non-reentrant, so calling a service helper there would deadlock).
     """
     try:
-        from ouroboros import workspace_executor as we
+        from ouroboros import owned_shutdown, workspace_executor as we
+        owned_shutdown._GENERATION_STOP = owned_shutdown._Stop()  # the one owned-work stop is per process
     except Exception:
         we = None
     try:

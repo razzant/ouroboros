@@ -714,12 +714,11 @@ def _enqueue_retry(
     from ouroboros.task_results import STATUS_FAILED, load_task_result, write_task_result
     from supervisor.cancel_publication import _custody_disclosure_fields
 
-    retried = dict(task)
-    retried["original_task_id"] = task_id
-    retried["id"] = retry_task_id or task_id
-    retried["_attempt"] = attempt + 1
-    retried["timeout_retry_from"] = task_id
-    retried["timeout_retry_at"] = utc_now_iso()
+    retried = {**task, "original_task_id": task_id, "id": retry_task_id or task_id, "_attempt": attempt + 1,
+               "timeout_retry_from": task_id, "timeout_retry_at": utc_now_iso()}
+    from ouroboros.working_checkpoint import attach_recovery  # the same retry continues the killed attempt's work
+    attach_recovery(pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT), retried,
+                    source_task_id=task_id, from_attempt=attempt, cause="idle_timeout", prior_task=task)
     if retry_task_id and retry_task_id != task_id:
         from ouroboros.artifacts import handoff_task_attachments_for_retry
         from ouroboros.owner_mailbox import copy_owner_mailbox_for_retry

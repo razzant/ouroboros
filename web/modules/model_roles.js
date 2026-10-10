@@ -1,7 +1,7 @@
 // The shared Models editor for Settings and onboarding. Model strings remain
 // the routing authority; account and context choices belong to the exact role.
 // Catalog arrival only enriches choices. It never authors an assignment.
-import { fetchJson } from './api_client.js';
+import { apiClient, fetchJson } from './api_client.js';
 import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog } from './settings_catalog.js';
 import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_status_store.js';
 import { parseModelSource, composeModelSource, configuredApiProviders, indexProfilesByHarness,
@@ -89,6 +89,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     let processingPreference = '', processingTouched = false;
     const catalogs = new Map();
     const requests = new Map();
+    const responseEdits = new WeakSet();
     const host = () => getDoc()?.getElementById(hostId);
 
     function rowState(slot, value, index = -1) {
@@ -132,7 +133,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return result;
     }
 
-    function changed() { onChange(collect()); }
+    function changed(slot = '') { onChange(collect(), { slot }); }
     function rowErrors(row) {
         const errors = [];
         if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Economy or inherited processing.` });
@@ -150,6 +151,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         ...rows.flatMap((row) => rowErrors(row).map(({ message }) => message)),
     ]; }
     function effectiveSource(row) { return row.source === 'inherit' ? rows.find((entry) => entry.slot.slot === 'main')?.source || 'openrouter' : row.source; }
+    function responseModel(row) {
+        const selected = row.source === 'inherit' ? rows.find((entry) => entry.slot.slot === 'main') : row;
+        return selected ? composeModelSource(selected.source, selected.model) : '';
+    }
     function sourceId(row) { const source = effectiveSource(row); return source.startsWith('subscription:') ? source.slice(13) : ''; }
     function catalogKey(row) { return JSON.stringify([sourceId(row), row.account]); }
     // A saved source whose key is gone stays selectable and labelled; discovery
@@ -184,6 +189,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 <label class="ui-field">Window <input id="${escapeHtml(inputIdFor(row))}-context" class="ui-control" data-model-role-context type="number" min="0" step="1"
                     placeholder="Auto" value="${escapeHtml(row.context || '')}" aria-label="${escapeHtml(row.slot.label)} context window"></label>
                 <span data-model-context-note>${escapeHtml(modelContextNote(currentItem(row), row.context))}</span>
+            </div>
+            <div class="model-role-context">
+                <label class="ui-field">Maximum response <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} maximum response"></label>
+                <button type="button" class="btn btn-default" data-response-apply>Apply maximum</button>
+                <span class="ui-field-help" data-response-note>Auto. Applies to this exact model and server; blank restores metadata.</span>
             </div></details>`;
     }
 
@@ -237,6 +247,14 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         for (const row of rows) {
             const node = element.querySelector(`[data-model-role="${row.id}"]`);
             if (!node) continue;
+            const responseIdentity = JSON.stringify([responseModel(row), row.local, row.account]);
+            if (row.responseIdentity && row.responseIdentity !== responseIdentity) {
+                const field = node.querySelector('[data-response-limit]');
+                if (field) { field.value = ''; responseEdits.delete(field); }
+                const note = node.querySelector('[data-response-note]');
+                if (note) note.textContent = 'Route changed; open details to read its maximum, or apply a new value.';
+            }
+            row.responseIdentity = responseIdentity;
             const source = node.querySelector('[data-model-role-source]');
         const sourceHtml = selectHtml('', sourceGroupsFor(row, {
                 catalogKnown: catalog.sources_read_state === 'ok', accountsKnown: store.accountsKnown,
@@ -301,31 +319,80 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return promise;
     }
 
+    async function responseLimit(row, node, apply = false) {
+        // A queued disclosure preview must not supersede an explicit Apply.
+        if (!apply && row.responseApplying) return;
+        const field = node.querySelector('[data-response-limit]');
+        const note = node.querySelector('[data-response-note]');
+        const value = Number(field.value || 0);
+        if (apply && (field.validity.badInput || !Number.isSafeInteger(value) || value < 0)) {
+            note.textContent = 'Maximum response must be a positive whole number, or Auto.';
+            field.setAttribute('aria-invalid', 'true'); return;
+        }
+        const model = responseModel(row);
+        if (!model || model.endsWith('::')) { note.textContent = 'Choose a model to check its maximum response.'; return; }
+        const identity = JSON.stringify([model, row.local, row.account]);
+        const draft = field.value;
+        const sequence = row.responseSequence = (row.responseSequence || 0) + 1;
+        if (apply) row.responseApplying = sequence;
+        const current = () => !destroyed && sequence === row.responseSequence && node.isConnected
+            && identity === JSON.stringify([responseModel(row), row.local, row.account]);
+        try {
+            const data = await apiClient.responseLimitPreview({ model, local: row.local, account: row.account });
+            if (!current()) return;
+            if (!data.response_limit || !data.route) throw new Error('Maximum response is not checked');
+            let evidence = data.response_limit;
+            if (apply) {
+                const result = await apiClient.ownerCapabilityAck({ ...data.route, route_fp: evidence.route_fp, max_output_tokens: value });
+                if (!current()) return;
+                if (!result.ok) throw new Error(result.error || 'Maximum response could not be saved');
+                evidence = result.ack;
+            }
+            // Edits can precede the deferred toggle which starts this read.
+            if (!apply && !responseEdits.has(field) && field.value === draft) field.value = evidence.source === 'owner_ack' ? String(evidence.max_output_tokens || '') : '';
+            field.setAttribute('aria-invalid', 'false');
+            const source = evidence.source === 'owner_ack' ? 'your maximum' : 'model metadata';
+            const endpoint = data.route.base_url ? new URL(data.route.base_url) : null;
+            const server = endpoint ? ` Server: ${endpoint.host}${endpoint.pathname.replace(/\/$/, '')}.` : '';
+            note.textContent = `${evidence.max_output_tokens && !evidence.stale ? `${evidence.max_output_tokens.toLocaleString('en-US')} tokens · ${source}` : 'Auto: maximum response unknown'}.${server} Context window is separate.${data.route.provider === 'claudexor' ? ' Planning allowance only; the native engine controls its response.' : ''}`;
+        } catch (error) { if (current()) note.textContent = error.message; }
+        finally { if (row.responseApplying === sequence) row.responseApplying = 0; }
+    }
+
     function bindRows(element) {
         for (const row of rows) {
             const node = element.querySelector(`[data-model-role="${row.id}"]`);
             node.querySelector('[data-model-role-source]').addEventListener('change', (event) => {
                 row.source = sourceFromChoice(event.target.value); row.model = ''; row.account = ''; row.context = 0;
-                changed(); render();
+                changed(row.slot.slot); render();
                 host()?.querySelector(`[data-model-role="${row.id}"] [data-model-role-model]`)?.focus();
             });
+            node.querySelector('.model-role-details')?.addEventListener('toggle', (event) => {
+                if (event.target.open) void responseLimit(row, node);
+            });
+            node.querySelector('[data-response-apply]')?.addEventListener('click', () => { void responseLimit(row, node, true); });
+            node.querySelector('[data-response-limit]')?.addEventListener('input', (event) => { responseEdits.add(event.target); });
             const input = getDoc().getElementById(inputIdFor(row));
             input.addEventListener('input', () => {
                 row.model = input.value;
+                const cap = node.querySelector('[data-response-limit]');
+                if (cap) { cap.value = ''; responseEdits.delete(cap); }
+                const capNote = node.querySelector('[data-response-note]');
+                if (capNote) capNote.textContent = 'Route changed; open details to read its maximum, or apply a new value.';
                 if (row.source === 'inherit' && row.model) row.source = effectiveSource(row);
                 if (!row.model && !['main', 'fallback'].includes(row.slot.slot)) row.source = 'inherit';
                 if (row.model.includes('::')) Object.assign(row, parseModelSource(row.model));
-                changed(); updateCatalogViews();
+                changed(row.slot.slot); updateCatalogViews();
                 for (const item of rows) void refreshRow(item);
             });
             node.querySelector('[data-model-role-account]').addEventListener('change', (event) => {
-                row.account = event.target.value; changed(); updateCatalogViews(); void refreshRow(row);
+                row.account = event.target.value; changed(row.slot.slot); updateCatalogViews(); void refreshRow(row);
             });
             node.querySelector('[data-model-role-context]')?.addEventListener('input', (event) => {
-                row.context = event.target.value; changed(); updateCatalogViews();
+                row.context = event.target.value; changed(row.slot.slot); updateCatalogViews();
             });
             node.querySelector('[data-model-role-processing]')?.addEventListener('change', (event) => {
-                row.processing_preference = event.target.value; changed(); updateCatalogViews();
+                row.processing_preference = event.target.value; changed(row.slot.slot); updateCatalogViews();
             });
             for (const [selector, delta] of [['[data-model-up]', -1], ['[data-model-down]', 1]]) {
                 node.querySelector(selector)?.addEventListener('click', () => {

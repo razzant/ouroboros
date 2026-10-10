@@ -188,7 +188,7 @@ def test_i3_serialized_request_prefix_matches_an_owner_turn(tmp_path, monkeypatc
         msgs, _ = build_llm_messages(env=env, memory=memory, task=task)
         prefix = [json.dumps(msgs[0]["content"][i], sort_keys=True) for i in (0, 1)]
         assert prefix == owner_prefix, level
-        assert "cache_control" not in msgs[0]["content"][2]
+        assert "cache_control" not in msgs[0]["content"][-1]
         reg = _registry(tmp_path, task["metadata"], task_id="t-owner")
         assert json.dumps(reg.schemas(), sort_keys=True) == owner_tools, level
         assert reg.capability_omissions() == owner_reg.capability_omissions(), level
@@ -530,9 +530,10 @@ def test_subagent_payload_lands_the_origin_on_the_child_metadata():
 
 
 def test_schedule_subagent_event_names_the_origin():
-    """The tool stamps ``origin_metadata`` on the schedule event beside the envelope."""
+    """The tool stamps ``origin_metadata`` on the schedule event beside the envelope:
+    the consciousness origin and the owner's words that caused the tree, by value."""
     source = pathlib.Path("ouroboros/tools/control_scheduling.py").read_text(encoding="utf-8")
-    assert '"origin_metadata": consciousness_origin_metadata(metadata),' in source
+    assert '"origin_metadata": {**consciousness_origin_metadata(metadata), **owner_origin},' in source
     handler = pathlib.Path("supervisor/events_schedule_task.py").read_text(encoding="utf-8")
     assert '"origin_metadata": evt.get("origin_metadata"),' in handler
 
@@ -717,7 +718,7 @@ def test_deep_review_request_carries_the_origin_to_the_one_door(tmp_path, monkey
     monkeypatch.setattr("supervisor.workers._worker_pool_execution_state",
                         lambda: {"available": True, "disabled_reason": ""})
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window",
-                        lambda root, now=None: {"status": "available", "limit_usd": 20.0, "accounted_usd": 0.0,
+                        lambda root, now=None: {"status": "available", "limit_usd": 20.0, "settled_usd": 0.0, "accounted_usd": 0.0,
                                                 "remaining_usd": 20.0, "unknown_unmetered": 0, "resets_at": ""})
     handed: list = []
     sup = types.SimpleNamespace(queue_deep_self_review_task=lambda **kw: handed.append(kw))
@@ -748,7 +749,7 @@ def test_the_allowance_is_read_before_the_queue_lock(tmp_path, monkeypatch):
 
     def _window(root, now=None):
         seen.append(queue._queue_lock._is_owned())
-        return {"status": "available", "limit_usd": 20.0, "accounted_usd": 0.0, "remaining_usd": 20.0,
+        return {"status": "available", "limit_usd": 20.0, "settled_usd": 0.0, "accounted_usd": 0.0, "remaining_usd": 20.0,
                 "unknown_unmetered": 0, "resets_at": ""}
 
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window", _window)
@@ -795,7 +796,7 @@ def test_campaign_keeps_the_origin_and_its_cycle_tasks_inherit_it(tmp_path, monk
     monkeypatch.setattr(queue, "send_with_budget", lambda *a, **k: None)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window",
-                        lambda root, now=None: {"status": "available", "limit_usd": 20.0, "accounted_usd": 0.0,
+                        lambda root, now=None: {"status": "available", "limit_usd": 20.0, "settled_usd": 0.0, "accounted_usd": 0.0,
                                                 "remaining_usd": 20.0, "unknown_unmetered": 0, "resets_at": ""})
     queue.enqueue_evolution_task_if_needed()
     assert len(pending) == 1
@@ -810,7 +811,7 @@ def test_campaign_keeps_the_origin_and_its_cycle_tasks_inherit_it(tmp_path, monk
     sent: list = []
     monkeypatch.setattr(queue, "send_with_budget", lambda cid, text, **kw: sent.append(text))
     monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window",
-                        lambda root, now=None: {"status": "exhausted", "limit_usd": 20.0, "accounted_usd": 21.0,
+                        lambda root, now=None: {"status": "exhausted", "limit_usd": 20.0, "settled_usd": 21.0, "accounted_usd": 21.0,
                                                 "remaining_usd": 0.0, "unknown_unmetered": 0, "resets_at": "2027-01-01T00:00:00+00:00"})
     queue.enqueue_evolution_task_if_needed()
     queue.enqueue_evolution_task_if_needed()

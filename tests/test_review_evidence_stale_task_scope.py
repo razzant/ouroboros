@@ -26,7 +26,7 @@ def _repo(tmp_path):
 
 def _seed_state_with_stale(drive_root, repo_key, *, stale_task_id):
     st = AdvisoryReviewState()
-    st.add_run(AdvisoryRunRecord(
+    st.advisory_runs.append(AdvisoryRunRecord(
         snapshot_hash="deadbeef", commit_message="m", status="fresh",
         ts="2026-08-31T00:00:00", repo_key=repo_key,
     ))
@@ -80,8 +80,9 @@ def test_stale_task_id_round_trips_through_save_load(tmp_path):
     drive = tmp_path / "drive"
     (drive / "state").mkdir(parents=True)
     st = AdvisoryReviewState()
-    # mark_repo_stale only records the marker when there is an invalidatable run.
-    st.add_run(AdvisoryRunRecord(
+    # mark_repo_stale only records the marker when there is an invalidatable run
+    # (a row a former install wrote; no writer remains).
+    st.advisory_runs.append(AdvisoryRunRecord(
         snapshot_hash="0ff1ce", commit_message="m", status="fresh",
         ts="2026-08-31T08:00:00", repo_key="k",
     ))
@@ -99,7 +100,7 @@ def test_invalidate_advisory_after_mutation_records_the_task_id(tmp_path):
     (drive / "state").mkdir(parents=True)
     repo = _repo(tmp_path)
     st = AdvisoryReviewState()
-    st.add_run(AdvisoryRunRecord(
+    st.advisory_runs.append(AdvisoryRunRecord(
         snapshot_hash="cafef00d", commit_message="m", status="fresh",
         ts="2026-08-31T00:00:00", repo_key=make_repo_key(repo),
     ))
@@ -112,20 +113,3 @@ def test_invalidate_advisory_after_mutation_records_the_task_id(tmp_path):
         mutating_task_id="t-abc",
     )
     assert load_state(drive).last_stale_task_id == "t-abc"
-
-
-def test_add_run_clears_the_stale_task_id(tmp_path):
-    drive = tmp_path / "drive"
-    (drive / "state").mkdir(parents=True)
-    repo = _repo(tmp_path)
-    rk = make_repo_key(repo)
-    st = AdvisoryReviewState()
-    st.mark_repo_stale(
-        repo_key=rk, reason_ts="2026-08-31T12:00:00", reason="r",
-        stale_repo_key=rk, stale_task_id="taskA",
-    )
-    st.add_run(AdvisoryRunRecord(
-        snapshot_hash="feedface", commit_message="m", status="fresh",
-        ts="2026-08-31T13:00:00", repo_key=rk,
-    ))
-    assert st.last_stale_task_id == ""

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import contextvars
+import dataclasses
+import functools
 import json
 import logging
 import os
@@ -20,10 +24,11 @@ except ImportError:
     _HAS_STEALTH = False
 
 from ouroboros import browser_policy
-from ouroboros.config import runtime_setting
 from ouroboros.tool_access import active_tool_profile
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.tools.tool_result import _compose_execute_result, _publish_tool_result, ToolResult
+from ouroboros.tools.tool_result import (
+    LegacyTextResultAdapter, ToolResult, _compose_execute_result, _publish_tool_result,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +37,43 @@ _playwright_ready_engines: set[tuple[str, str]] = set()
 _playwright_browsers_path_managed = False
 _MISSING_EXECUTABLE_RE = re.compile(r"Executable doesn't exist at ([^\n]+)")
 _SUPPORTED_BROWSER_ENGINES = frozenset({"chromium", "webkit"})
+
+
+@dataclasses.dataclass
+class _BrowserCall:
+    ctx: ToolContext
+    generation: Any
+
+
+_browser_call: contextvars.ContextVar[_BrowserCall | None] = contextvars.ContextVar("browser_call", default=None)
+
+
+@contextlib.contextmanager
+def browser_call_scope(ctx: ToolContext, generation: Any = None):
+    """An invocation's expectation, advanced only by its own replacements.
+
+    The loop binds the submitted generation before safety checks; direct calls
+    bind at entry. Nested browser helpers share the cell, concurrent calls do
+    not. Resetting also keeps a reused worker from inheriting a finished call.
+    """
+    current = _browser_call.get()
+    if generation is None and current is not None and current.ctx is ctx:
+        yield current
+        return
+    call = _BrowserCall(ctx, generation if generation is not None else ctx.browser_state)
+    token = _browser_call.set(call)
+    try:
+        yield call
+    finally:
+        _browser_call.reset(token)
+
+
+def _bound_browser_call(fn):
+    @functools.wraps(fn)
+    def bound(ctx, *args, **kwargs):
+        with browser_call_scope(ctx):
+            return fn(ctx, *args, **kwargs)
+    return bound
 
 
 def _runtime_mode_for_browser(ctx: Any) -> str:
@@ -345,6 +387,7 @@ def _default_context_options(engine: str) -> Dict[str, Any]:
     return options
 
 
+@_bound_browser_call
 def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str = ""):
     """Create or reuse this context's browser; no module-level Playwright state.
 
@@ -354,9 +397,9 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     the abandoned call onto the NEXT command's state."""
     engine = _normalize_browser_engine(engine)
     requested_device = str(device or "").strip()
-    bs = ctx.browser_state
-    expected = getattr(ctx, "_active_browser_generation", None)
-    if expected is not None and bs is not expected:
+    call = _browser_call.get()
+    bs = call.generation
+    if ctx.browser_state is not bs:
         # The submit wrapper pinned the generation this call is bound to; a
         # mismatch here means the call's own timeout retired it before the
         # session ever opened — refuse without touching the NEXT command's
@@ -373,16 +416,18 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     if stored_thread_id is not None and stored_thread_id != current_thread_id:
         log.info("Thread switch detected (old=%s, new=%s). Detaching browser for this context.",
                  stored_thread_id, current_thread_id)
-        _retired, bs = _detach_browser(ctx)
-        setattr(ctx, "_active_browser_generation", bs)
+        _retired, bs = _detach_browser(ctx, expected=bs)
     elif bs.browser is not None and (
         stored_engine != engine
         or stored_device.lower() != requested_device.lower()
     ):
         log.info("Browser engine/device changed (%s/%s -> %s/%s); recreating context.",
                  stored_engine or "chromium", stored_device, engine, requested_device)
-        bs = cleanup_browser(ctx)
-        setattr(ctx, "_active_browser_generation", bs)
+        bs = cleanup_browser(ctx, expected=bs)
+
+    if bs is None:
+        raise RuntimeError(_SESSION_RETIRED_VOID)
+    call.generation = bs
 
     if bs.browser is not None:
         try:
@@ -390,8 +435,10 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
                 return bs.page, bs
         except Exception:
             log.debug("Browser connection check failed", exc_info=True)
-        bs = cleanup_browser(ctx)
-        setattr(ctx, "_active_browser_generation", bs)
+        bs = cleanup_browser(ctx, expected=bs)
+        if bs is None:
+            raise RuntimeError(_SESSION_RETIRED_VOID)
+        call.generation = bs
 
     readonly_subagent = _readonly_subagent(ctx)
     _ensure_playwright_installed(engine=engine, allow_install=not readonly_subagent)
@@ -422,7 +469,10 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     bs.page = bs_context.new_page()
 
     if _HAS_STEALTH:
-        stealth = Stealth()
+        # The iframe.contentWindow evasion intercepts every page's iframe.srcdoc
+        # setter and never calls the native one, so srcdoc frames (module widgets)
+        # render empty (#1606). Every other evasion stays.
+        stealth = Stealth(iframe_content_window=False)
         stealth.apply_stealth_sync(bs.page)
 
     bs.page.set_default_timeout(30000)
@@ -469,7 +519,30 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
             route.continue_()
 
     bs_context.route("**/*", route_request)
+    # Facts of THIS generation, set only once it is fully set up: a reused
+    # generation reports its own, a retired one never borrows a newer one's.
+    version = str(getattr(bs.browser, "version", "") or "unknown version")
+    setattr(bs, "browser_conditions", f"Browser conditions: {engine} {version} (Playwright); " + (
+        "playwright-stealth evasions applied except iframe.contentWindow." if _HAS_STEALTH
+        else "playwright-stealth is not installed, so no stealth evasions were applied."))
     return bs.page, bs
+
+
+def _observed(ctx: ToolContext, bs: Any, text: str) -> str:
+    """One successful observation of the call's own generation, with its host notes.
+
+    The generation's browser conditions (and any blocked-request diagnostic) reach
+    the model for screenshots and DOM/evaluate reads alike; the extracted data
+    stays unannotated in ``producer_text`` for programmatic readers."""
+    notes = tuple(note for note in (str(getattr(bs, "request_block_reason", "") or ""),
+                                    str(getattr(bs, "browser_conditions", "") or "")) if note)
+    if not notes:
+        return text
+    composed = text
+    for note in notes:
+        composed = _compose_execute_result(composed, note, "")
+    return _publish_tool_result(ctx, dataclasses.replace(
+        LegacyTextResultAdapter.from_text("", text), text=composed, producer_text=text, host_annotations=notes))
 
 
 # The in-process bound on ABANDONED browser generations that still hold live
@@ -481,10 +554,15 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
 _RETIRED_GENERATIONS_MAX = 3
 
 # One process-wide lock for every read-modify-write of a context's
-# ``_retired_browser_generations`` list: the timeout path (main thread) and
-# the prune (worker thread) race otherwise, and a lost update silently drops
-# an unclosed generation from the backlog bound.
+# ``_retired_browser_generations`` list and for every swap of its
+# ``browser_state`` slot: the timeout path (main thread) and the worker race
+# otherwise, and a lost update silently drops an unclosed generation from the
+# backlog bound or replaces the next command's state.
 _retired_generations_lock = threading.Lock()
+
+# The void result of a call whose generation its own timeout retired.
+_SESSION_RETIRED_VOID = ("⚠️ BROWSER_SESSION_RETIRED: this call timed out and its "
+                         "browser session was retired; the result is void.")
 
 
 def _live_retired_generations(ctx: ToolContext) -> list:
@@ -496,7 +574,7 @@ def _live_retired_generations(ctx: ToolContext) -> list:
         return list(rows)
 
 
-def _detach_browser(ctx: ToolContext) -> tuple[Any, Any]:
+def _detach_browser(ctx: ToolContext, expected: Any = None) -> tuple[Any, Any]:
     """Retire the context's browser GENERATION without touching Playwright.
 
     The shared ``ctx.browser_state`` is REPLACED with a fresh object; returns
@@ -507,13 +585,19 @@ def _detach_browser(ctx: ToolContext) -> tuple[Any, Any]:
     brand-new state no stale thread can reach. Callers that continue working
     (the _ensure_browser internal recreations) use FRESH directly and never
     re-read the shared slot, so an external timeout retirement landing in
-    between cannot rebind them onto the next command's state."""
-    retired = ctx.browser_state
+    between cannot rebind them onto the next command's state.
+
+    With ``expected`` the swap is a compare-and-swap: it happens only while the
+    slot still holds that generation, else ``(None, None)`` and nothing changes.
+    Every swap of the slot is this one, under one lock."""
     from ouroboros.tools.registry import BrowserState  # lazy: avoids the import cycle
 
     fresh = BrowserState()
-    ctx.browser_state = fresh
     with _retired_generations_lock:
+        retired = ctx.browser_state
+        if expected is not None and retired is not expected:
+            return None, None
+        ctx.browser_state = fresh
         rows = list(getattr(ctx, "_retired_browser_generations", []))
         rows.append(retired)
         setattr(ctx, "_retired_browser_generations", rows)
@@ -570,20 +654,21 @@ def cleanup_browser_handles(retired: Any) -> None:
     setattr(retired, "_cleanup_done", True)
 
 
-def cleanup_browser(ctx: ToolContext) -> Any:
+def cleanup_browser(ctx: ToolContext, expected: Any = None) -> Any:
     """Retire and close the context's CURRENT browser generation (owner-thread
     callers only — the timeout path detaches here and closes on the worker).
     Returns the FRESH generation so a continuing caller never re-reads the
-    shared slot."""
-    retired, fresh = _detach_browser(ctx)
-    cleanup_browser_handles(retired)
+    shared slot; with ``expected``, None when the slot no longer holds it."""
+    retired, fresh = _detach_browser(ctx, expected)
+    if fresh is not None:
+        cleanup_browser_handles(retired)
     return fresh
 
 
 def _is_infrastructure_error(obj: Any) -> bool:
-    """Detect context-state or legacy string-based browser infrastructure failures."""
-    if hasattr(obj, "browser_state"):
-        bs = obj.browser_state
+    """Detect generation-state, context-state or legacy string-based failures."""
+    if hasattr(obj, "browser_state") or hasattr(obj, "pw_instance"):
+        bs = getattr(obj, "browser_state", obj)
         if bs.browser is None or bs.pw_instance is None:
             return True
         try:
@@ -635,34 +720,16 @@ _MARKDOWN_JS = """() => {
 
 
 def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
-    """Hand a fresh screenshot to a vision-capable active model natively.
+    """Add a fresh screenshot to the conversation as a native image block.
 
     The screenshot is saved to ``data/uploads/screenshots/<ts>.png`` (the
-    re-view path used by eviction placeholders) and injected as a user-role
-    image block via the existing multipart-preserving merge. The TOOL result
-    stays a plain string — the tool-message contract is unchanged. Non-vision
-    models keep the analyze_screenshot/vlm_query flow.
+    re-view path used by eviction placeholders) and merged into the canonical
+    user turn via the existing multipart-preserving merge, whatever the route:
+    the send-time image policy (``vision_routing``) decides whether this route
+    receives its pixels, a caption or a marker. The TOOL result stays a plain
+    string — the tool-message contract is unchanged.
     """
     try:
-        from ouroboros.provider_models import supports_vision
-
-        # Resolve the model THIS task is actually running on (the loop publishes
-        # ctx.active_model each round, incl. switch_model / per-task overrides);
-        # fall back to the per-task override, then the global env default. Reading
-        # OUROBOROS_MODEL alone misclassified vision when the live model differed.
-        active_model = (
-            str(getattr(ctx, "active_model", "") or "")
-            or str(getattr(ctx, "task_model_override", "") or "")
-            or str(runtime_setting("OUROBOROS_MODEL", "") or "")
-        )
-        from ouroboros.model_slots import task_model_binding
-        from ouroboros.model_wait import current_model_wait
-        waiter = current_model_wait()
-        role, account = task_model_binding({"task_metadata": getattr(ctx, "task_metadata", {})},
-            context_fit_plan=getattr(ctx, "context_fit_plan", None),
-            overrides=waiter.overrides if waiter else None)
-        if supports_vision(active_model, model_role=role, model_account_override=account) is False:
-            return ""
         messages = getattr(ctx, "messages", None)
         if not isinstance(messages, list):
             return ""
@@ -685,7 +752,8 @@ def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
                 "_source_path": str(shot_path),
             },
         ])
-        return "The screenshot is attached to your context natively (vision model). "
+        return ("The screenshot is in your context as an image; the image-input mode and this route decide "
+                "whether you receive its pixels, a caption or a marker. ")
     except Exception:
         log.debug("native screenshot injection failed", exc_info=True)
         return ""
@@ -894,6 +962,7 @@ def _navigation_block_reason(page: Any, bs: Any, ctx: ToolContext, restricted: b
     return ""
 
 
+@_bound_browser_call
 def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  wait_for: str = "", timeout: int = 30000,
                  viewport: str = "", engine: str = "chromium", device: str = "", state: str = "visible") -> str:
@@ -902,7 +971,8 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
         str(url or ""), ctx, restricted=readonly_subagent,
         runtime_mode=_runtime_mode_for_browser(ctx)):
         return "⚠️ " + reason
-    entry_generation = ctx.browser_state
+    call = _browser_call.get()
+    entry_generation = call.generation
     try:
         page, entry_generation = _ensure_browser(ctx, engine=engine, device=device)
         setattr(entry_generation, "request_block_reason", "")
@@ -918,26 +988,27 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
             return "⚠️ " + reason
         if not waited[0]:
             return waited[1]
-        return _compose_execute_result(_extract_page_output(page, output, ctx, bs=entry_generation),
-                                       getattr(entry_generation, "request_block_reason", ""), "")
+        return _observed(ctx, entry_generation, _extract_page_output(page, output, ctx, bs=entry_generation))
     except Exception as e:
-        if ctx.browser_state is not entry_generation and \
-                ctx.browser_state is not getattr(ctx, "_active_browser_generation", None):
-            # This call was abandoned by a timeout and its generation retired
-            # (#440 fix-forward): the shared state now belongs to the NEXT
-            # command. Close only OUR retired generation — we ARE its owner
-            # thread — and never touch or retry against the replacement. (A
-            # slot that MATCHES the pinned expectation means _ensure_browser
-            # itself legitimately replaced the generation and then failed —
-            # an ordinary error, handled below, never a false RETIRED.)
-            cleanup_browser_handles(entry_generation)
-            return ("⚠️ BROWSER_SESSION_RETIRED: this call timed out and its "
-                    "browser session was retired; the result is void.")
-        if reason := getattr(entry_generation, "request_block_reason", ""):
+        own = call.generation
+        if ctx.browser_state is not own:
+            # Only this invocation's legitimate replacements advance its
+            # expectation; a later call opening the shared slot never does.
+            cleanup_browser_handles(own)
+            return _SESSION_RETIRED_VOID
+        if reason := getattr(own, "request_block_reason", ""):
             return "⚠️ " + reason
-        if _is_infrastructure_error(ctx):
+        if _is_infrastructure_error(own):
             log.warning("Browser infrastructure error: %s. Cleaning up and retrying...", e)
-            cleanup_browser(ctx)
+            # The ONE deliberate retry replaces the call's OWN generation and
+            # moves the pin to the replacement it made, as _ensure_browser's
+            # own replacements do. A timeout retirement that took the slot
+            # during the checks above wins the swap: the call is abandoned.
+            fresh = cleanup_browser(ctx, expected=own)
+            if fresh is None:
+                cleanup_browser_handles(own)
+                return _SESSION_RETIRED_VOID
+            call.generation = fresh
             page, entry_generation = _ensure_browser(ctx, engine=engine, device=device)
             setattr(entry_generation, "request_block_reason", "")
             page.set_default_timeout(int(timeout) if timeout else 30000)
@@ -949,8 +1020,7 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                 return "⚠️ " + reason
             if not waited[0]:
                 return waited[1]
-            return _compose_execute_result(_extract_page_output(page, output, ctx, bs=entry_generation),
-                                           getattr(entry_generation, "request_block_reason", ""), "")
+            return _observed(ctx, entry_generation, _extract_page_output(page, output, ctx, bs=entry_generation))
         raise
 
 
@@ -964,6 +1034,7 @@ def _apply_viewport(page: Any, viewport: str) -> None:
         log.warning("Invalid viewport '%s', expected WxH (e.g. '375x812')", viewport)
 
 
+@_bound_browser_call
 def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     value: str = "", timeout: int = 5000,
                     engine: str = "", device: str = "", state: str = "visible") -> str:
@@ -984,13 +1055,15 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
     ):
         return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: local-readonly subagents cannot run arbitrary browser JavaScript."
 
-    generation_cell = [ctx.browser_state]
+    call = _browser_call.get()
+    generation_cell = [call.generation]
+    observation = [False]  # screenshot/evaluate returned page state, not an action receipt
 
     def _do_action():
         page, generation_cell[0] = _ensure_browser(
             ctx,
-            engine=engine or getattr(ctx.browser_state, "_browser_engine", "chromium") or "chromium",
-            device=device or getattr(ctx.browser_state, "_browser_device", "") or "",
+            engine=engine or getattr(call.generation, "_browser_engine", "chromium") or "chromium",
+            device=device or getattr(call.generation, "_browser_device", "") or "",
         )
         setattr(generation_cell[0], "request_block_reason", "")
         # The caller timeout (default 5000) keeps its explicit click/fill/select
@@ -1027,6 +1100,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
             # Land the capture in the CALL's own generation, never in a
             # replacement the shared slot may hold after a timeout retirement.
             generation_cell[0].last_screenshot_b64 = b64
+            observation[0] = True
             if readonly_subagent:
                 return (
                     f"Screenshot captured ({len(b64)} bytes base64). "
@@ -1041,6 +1115,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                 return "Error: value (JS code) required for evaluate"
             result = _evaluate_bounded(page, _evaluate_source(value), effective_default_ms)
             out = str(result)
+            observation[0] = True
             return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
         elif normalized_action == "scroll":
             direction = value or "down"
@@ -1058,23 +1133,21 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
 
     try:
         result = _do_action()
+        if observation[0]:
+            return _observed(ctx, generation_cell[0], result)
         return _compose_execute_result(result, getattr(generation_cell[0], "request_block_reason", ""), "")
     except Exception as e:
-        if ctx.browser_state is not generation_cell[0] and \
-                ctx.browser_state is not getattr(ctx, "_active_browser_generation", None):
-            # Abandoned-by-timeout call (#440 fix-forward): close only OUR
-            # retired generation on its own thread; never touch the next
-            # command's session. (A slot matching the pinned expectation is
-            # _ensure_browser's own legitimate replacement that then failed
-            # — an ordinary error, never a false RETIRED.)
-            cleanup_browser_handles(generation_cell[0])
-            return ("⚠️ BROWSER_SESSION_RETIRED: this call timed out and its "
-                    "browser session was retired; the result is void.")
-        if reason := getattr(generation_cell[0], "request_block_reason", ""):
+        own = call.generation
+        if ctx.browser_state is not own:
+            cleanup_browser_handles(own)
+            return _SESSION_RETIRED_VOID
+        if reason := getattr(own, "request_block_reason", ""):
             return "⚠️ " + reason
-        if _is_infrastructure_error(ctx):
+        if _is_infrastructure_error(own):
             log.warning("Browser action connection failed; preserving unknown outcome: %s", e)
-            cleanup_browser(ctx)
+            if cleanup_browser(ctx, expected=own) is None:
+                cleanup_browser_handles(own)
+                return _SESSION_RETIRED_VOID
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR", text=(
                 "⚠️ BROWSER_ACTION_OUTCOME_UNKNOWN: the browser connection failed. "
                 "The action may already have taken effect and was not repeated. "

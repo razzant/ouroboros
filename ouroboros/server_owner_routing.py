@@ -617,7 +617,10 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         )
         event = {
             "type": "promote_chat_to_task", "task_id": task_id,
-            "routing_token": routing_token, "objective": text or image_caption,
+            # A wordless attachment message takes its canonical row's placeholder as
+            # the objective, the same text a direct turn receives; attachments ride below.
+            "routing_token": routing_token,
+            "objective": text or image_caption or str(incoming.get("log_text") or ""),
             "chat_id": chat_id, "project_id": project_id,
             "client_message_id": client_message_id, "task_constraint": task_constraint,
             "force_plan": True, "force_plan_source": task_metadata.get("force_plan_source"),

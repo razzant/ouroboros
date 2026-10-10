@@ -128,6 +128,18 @@ def _isolated_python_site_dirs(skill_dir: pathlib.Path) -> List[pathlib.Path]:
     return out
 
 
+def invalidate_import_caches() -> None:
+    """Run ``importlib.invalidate_caches()`` under the importer-cache lock.
+
+    CPython's ``PathFinder`` sweep snapshots ``sys.path_importer_cache`` and
+    then deletes its ``None`` entries by key, so two overlapping sweeps can
+    delete one key twice (``KeyError``).  Every Ouroboros-owned sweep and importer
+    cache removal holds ``_lock``; plugin import, register and handlers do not.
+    """
+    with _lock:
+        importlib.invalidate_caches()
+
+
 def inject_isolated_site_dirs(skill_dir: pathlib.Path) -> List[str]:
     """Temporarily expose reviewed isolated Python deps to an extension."""
 
@@ -145,7 +157,7 @@ def inject_isolated_site_dirs(skill_dir: pathlib.Path) -> List[str]:
                 injected.append(site_str)
                 continue
             sys.path.insert(0, site_str)
-            importlib.invalidate_caches()
+            invalidate_import_caches()
             _injected_site_dir_refs[site_str] = 1
             injected.append(site_str)
     return injected
@@ -345,7 +357,7 @@ def release_isolated_site_dirs(site_dirs: Sequence[str]) -> None:
             except BaseException as exc:
                 cleanup_error = cleanup_error or exc
             try:
-                importlib.invalidate_caches()
+                invalidate_import_caches()
             except BaseException as exc:
                 cleanup_error = cleanup_error or exc
             _injected_site_dir_refs.pop(site_str, None)

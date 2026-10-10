@@ -56,6 +56,31 @@ def test_the_snapshot_is_registered_autouse_for_every_test(request):
     assert "_os_environ_isolation" in request.fixturenames
 
 
+def test_a_settings_document_left_at_the_shared_root_is_named_and_removed(tmp_path):
+    """The settings file is the other worker-shared state: ``config.SETTINGS_PATH`` is bound
+    once per worker, so a document a test persists there is read by every later test of the
+    worker (the read seam even mints factory reviewer rows for one without a catalog, which
+    then shadow the victims' environment catalog). The detector names the keys and clears
+    the file; a root without a document, or no bound root, is nothing to report."""
+    import json
+
+    from tests.conftest import shared_settings_document_left_behind
+
+    assert shared_settings_document_left_behind(None) is None
+    assert shared_settings_document_left_behind(tmp_path) is None
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"OUROBOROS_RUNTIME_MODE": "advanced", "MINIMAX_REGION": "x"}), encoding="utf-8")
+    assert shared_settings_document_left_behind(tmp_path) == ["MINIMAX_REGION", "OUROBOROS_RUNTIME_MODE"]
+    assert not path.exists(), "the victims of the next tests must not read it"
+    path.write_text("not json", encoding="utf-8")
+    assert shared_settings_document_left_behind(tmp_path) == ["<unreadable>"]
+    assert not path.exists()
+
+
+def test_the_shared_settings_detector_is_registered_autouse_for_every_test(request):
+    assert "_no_settings_document_left_at_the_shared_root" in request.fixturenames
+
+
 @pytest.mark.parametrize("prior_stop", [False, True])
 def test_service_fixture_isolates_real_panic_admission_latches(tmp_path, monkeypatch, request, prior_stop):
     from ouroboros import workspace_executor

@@ -71,6 +71,29 @@ class TestCustodyAggregation:
         evidence = custody.task_execution_evidence(drive, "child-1")
         assert evidence["applied_access_profiles"] == ["workspace_write"]
 
+    def test_inherited_source_debt_counts_for_the_continuing_task(self, tmp_path):
+        """A continuation that adopted a partial-source predecessor's snapshot carries
+        that source debt (``inherited_sources``) even when its own brief was complete,
+        so the task's evidence must not count the run as a clean success."""
+        drive = _drive(tmp_path)
+        inherited = {
+            "work_order_source_request": {"schema": 1, "kind": "complete_work_order",
+                                          "coverage": "partial", "complete_chars": 100,
+                                          "complete_sha256": "0" * 64},
+            "work_order_fingerprint": "f" * 64, "work_order_coverage": "partial",
+            "verified_source_ranges": [[0, 40]],
+        }
+        for run_id, request in (("run-plain", {}), ("run-cont", {"inherited_sources": [inherited]})):
+            assert custody.emit(drive, custody.STARTED, {
+                "run_id": run_id, "task_id": "child-1", "route": "claude", "model": "",
+                "max_seconds": 300, "work_order_coverage": "complete",
+                "work_order_source_request": request,
+            })
+            _emit_settled(drive, run_id)
+        evidence = custody.task_execution_evidence(drive, "child-1")
+        assert evidence["delegated_runs_source_unresolved"] == 1
+        assert evidence["delegated_runs_succeeded"] == 1  # the plain run stays a success
+
     def test_no_rows_is_zero_runs_not_an_error(self, tmp_path):
         drive = _drive(tmp_path)
         evidence = custody.task_execution_evidence(drive, "child-1")

@@ -21,7 +21,7 @@ def test_available_subagents_is_one_canonical_settings_editor() -> None:
     assert "collectSubagentsSettings" in host
     assert "OUROBOROS_SUBAGENT_HARNESS" not in editor
     assert "OUROBOROS_SUBAGENT_PROFILE" not in editor
-    assert "MAX_AVAILABLE_SUBAGENTS = 10" in editor
+    assert "MAX_AVAILABLE_SUBAGENTS = 26" in editor
     assert 'class="available-subagent-heading"' in editor
     assert 'Subagent ${ordinal}' in editor
     assert 'data-subagent-field="recommended_use"' in editor
@@ -41,11 +41,11 @@ def test_every_list_editor_reveals_its_added_entry_through_the_shared_helper() -
     assert "export function revealNewRow(row, field)" in helper
     assert "scrollIntoView?.({ block: 'nearest' })" in helper
     assert "focus?.({ preventScroll: true })" in helper
-    for name in ("subagents_settings.js", "reviewer_slots.js", "mcp_settings.js", "settings.js"):
+    for name in ("subagents_settings.js", "mcp_settings.js", "settings.js"):
         source = _read(MODULES / name)
         assert re.search(r"import \{[^}]*\brevealNewRow\b[^}]*\} from './ui_helpers\.js'", source), name
         assert "revealNewRow(" in source, f"{name} never calls the shared reveal"
-    for name in ("subagents_settings.js", "reviewer_slots.js", "mcp_settings.js"):
+    for name in ("subagents_settings.js", "mcp_settings.js"):
         assert "scrollIntoView" not in _read(MODULES / name), f"{name} rolls its own reveal"
 
 
@@ -74,16 +74,19 @@ def test_a_fresh_subagent_row_invites_and_only_a_save_attempt_makes_it_red() -> 
     assert "`Row ${index + 1}`" not in editor
 
 
-def test_route_editor_extraction_does_not_merge_reviewer_semantics() -> None:
+def test_the_review_pool_is_a_catalog_mark_and_the_route_primitives_stay_reviewer_free() -> None:
+    """The lane editor is gone: a reviewer is a catalog row marked Reviewer, owned by
+    the catalog editor, and the shared route primitives know nothing of review."""
     primitive = _read(MODULES / "route_editor_primitives.js")
-    reviewer = _read(MODULES / "reviewer_slots.js")
     editor = _read(MODULES / "subagents_settings.js")
-    assert "route_editor_primitives.js" in reviewer
+    assert not (MODULES / "reviewer_slots.js").exists()
+    assert not (ROOT / "web" / "reviewer_slots.css").exists()
     assert "route_editor_primitives.js" in editor
-    assert "credentialField: 'profile_id'" in reviewer
     assert "credentialField: 'credential_profile_id'" in editor
-    assert "OUROBOROS_REVIEWER_SLOTS" not in primitive
-    assert "buildReviewerSlotsSetting" not in primitive
+    assert 'data-subagent-field="review_eligible"' in editor
+    for lane_term in ("OUROBOROS_REVIEWER_SLOTS", "buildReviewerSlotsSetting", "review_eligible"):
+        assert lane_term not in primitive, lane_term
+        assert lane_term == "review_eligible" or lane_term not in editor, lane_term
 
 
 def test_heavy_card_is_gone_but_provider_test_contract_and_controls_remain() -> None:
@@ -115,7 +118,8 @@ def test_onboarding_previews_and_commits_the_visible_owner_draft() -> None:
     assert "'/api/onboarding/subagents/preview'" in client
     assert "response?.available_subagents" in _read(MODULES / "subagents_settings.js")
     assert "refreshSubagentsPreview" in step
-    assert "OUROBOROS_SUBAGENTS: agentsStep?.availableSubagents" in wizard
+    assert "OUROBOROS_SUBAGENTS: catalogDraft()," in wizard
+    assert "function catalogDraft() { return agentsStep?.availableSubagents || state.availableSubagents; }" in wizard
     assert "Heavy', trim(state.heavyModel)" not in wizard
     assert "OUROBOROS_MODEL_HEAVY" not in wizard
 
@@ -156,11 +160,14 @@ def test_status_refresh_and_active_task_copy_keep_the_frozen_semantics() -> None
 
 
 def test_new_frontend_modules_stay_within_the_context_target() -> None:
+    from ouroboros.size_ratchet_manifest import BAND_PATHS
+
     for name in (
         "route_editor_primitives.js", "subagent_status_primitives.js", "subagents_settings.js",
     ):
         lines = _read(MODULES / name).count("\n") + 1
-        assert lines <= 1000, f"{name} grew to {lines} lines"
+        # Past the target only as a 1001-1500 band entry whose reason the manifest records.
+        assert lines <= 1000 or BAND_PATHS.get(f"web/modules/{name}"), f"{name} grew to {lines} lines"
 
 
 def test_effort_choice_mirrors_track_the_python_scale() -> None:

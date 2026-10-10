@@ -1,2 +1,0 @@
-483
-The module map names the note path: schedule_notes.py (a due kind:"notify" row consumed then shown as a signed reminder System row), the notify argument of schedule_followup, the note rows of scheduled_tasks.json, and host_notify.py, where a granted skill writes one signed skill_notice System row.

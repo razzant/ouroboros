@@ -172,6 +172,10 @@ def test_testclient_settings_hot_reload_uses_app_state_drive_root(tmp_path, monk
     srv.app.app.state.repo_dir = tmp_path / "repo"  # type: ignore[attr-defined]
     settings = {"OUROBOROS_SKILLS_REPO_PATH": str(old_repo), "OUROBOROS_RUNTIME_MODE": "advanced"}
     _patch_lifespan_for_drive_root_test(monkeypatch, srv, settings)
+    # The POST persists through the gateway's owner writer (``config.SETTINGS_PATH``), not
+    # through the ``server.save_settings`` name patched above: keep the document it writes
+    # in this test's tree instead of the worker-shared pytest data root.
+    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", drive_root / "settings.json")
     monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: str(old_repo))
     calls: list[tuple[pathlib.Path, str | None]] = []
     monkeypatch.setattr(
@@ -415,7 +419,9 @@ def test_api_extensions_index_uses_one_request_local_repo_identity(
 
     assert response.status_code == 200
     assert config_reads == [request_repo]
-    assert reconcile_calls == [(drive_root, request_repo)]
+    # A passive read: the review-job heal belongs to boot, the maintenance pass
+    # and the next review start, never to the Skills list GET.
+    assert reconcile_calls == []
     assert build_calls == [(drive_root, request_repo)]
 
 
@@ -492,7 +498,9 @@ def test_extensions_index_collision_row_skips_lifecycle_projections(
         "state": "hard_block",
         "reason": "",
     }
-    assert schedule_inputs == [[collision]]
+    # The list read syncs no schedules: the scheduler tick and the lifecycle
+    # actions own that duty.
+    assert schedule_inputs == []
     assert not (drive_root / "state").exists()
 
 
@@ -1809,7 +1817,12 @@ def test_api_skill_review_offloads_to_thread_and_returns_outcome(tmp_path, monke
         _stop_patches(patches)
 
 
-def test_lifecycle_queue_endpoint_marks_stale_review_job_interrupted(tmp_path, monkeypatch):
+def test_lifecycle_queue_endpoint_leaves_stale_review_job_to_its_owners(tmp_path, monkeypatch):
+    """The queue GET is polled every second during a lifecycle action; it reads
+    the snapshot and heals nothing — ``reconcile_stale_review_jobs`` (boot, the
+    maintenance pass) still heals the same dead job."""
+    from ouroboros.skill_review_runner import reconcile_stale_review_jobs
+
     client, drive_root, patches = _make_client(tmp_path, monkeypatch)
     job_dir = drive_root / "state" / "skills" / "alpha"
     job_dir.mkdir(parents=True)
@@ -1828,10 +1841,16 @@ def test_lifecycle_queue_endpoint_marks_stale_review_job_interrupted(tmp_path, m
         ),
         encoding="utf-8",
     )
+    before = job_path.read_bytes()
     monkeypatch.setattr("ouroboros.skill_review_runner._pid_alive", lambda _pid: False)
     try:
         resp = client.get("/api/skills/lifecycle-queue")
         assert resp.status_code == 200
+        assert "active" in resp.json()
+        assert job_path.read_bytes() == before
+        assert not (drive_root / "logs" / "progress.jsonl").exists()
+
+        assert reconcile_stale_review_jobs(drive_root, repo_path="") == 1
         data = json.loads(job_path.read_text(encoding="utf-8"))
         assert data["status"] == "interrupted"
         assert data["interrupt_reason"] == "owner_process_exited"
@@ -2094,5 +2113,248 @@ def test_extensions_index_carries_the_preflight_failed_fact(tmp_path, monkeypatc
         rows = client.get("/api/extensions").json()["skills"]
         row = next(item for item in rows if item["name"] == "ext_preflight")
         assert row["review_gate"]["preflight_failed"] is False
+    finally:
+        _stop_patches(patches)
+
+
+# ---------------------------------------------------------------------------
+# Passive Skills list read (DEVELOPMENT "Passive GET"): no lock wait, no heal,
+# no schedule sync, no state-dir creation, one settings read per skill.
+# ---------------------------------------------------------------------------
+
+
+def _log_bytes(drive_root: pathlib.Path) -> dict:
+    logs = drive_root / "logs"
+    return {
+        name: ((logs / name).read_bytes() if (logs / name).exists() else None)
+        for name in ("chat.jsonl", "progress.jsonl", "events.jsonl")
+    }
+
+
+def test_api_extensions_index_returns_while_queue_lock_is_held(tmp_path, monkeypatch):
+    """The list read takes no supervisor queue lock: it answers while another
+    thread holds ``_queue_lock`` and answers the same list once it is free."""
+    import threading
+
+    import supervisor.queue as supervisor_queue
+
+    skills_root = tmp_path / "skills"
+    _write_ext(skills_root, "ext_lock", permissions=["tool"], plugin="def register(api):\n    pass\n")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    held = threading.Event()
+    release = threading.Event()
+    answered: list = []
+
+    def hold_lock():
+        with supervisor_queue._queue_lock:
+            held.set()
+            release.wait(timeout=30)
+
+    def read_list():
+        answered.append(client.get("/api/extensions"))
+
+    holder = threading.Thread(target=hold_lock, daemon=True)
+    reader = threading.Thread(target=read_list, daemon=True)
+    try:
+        holder.start()
+        assert held.wait(timeout=5)
+        reader.start()
+        reader.join(timeout=5)
+        assert not reader.is_alive(), "GET /api/extensions waited for the supervisor queue lock"
+        assert not release.is_set()
+        release.set()
+        holder.join(timeout=5)
+        locked = answered[0]
+        assert locked.status_code == 200
+        assert [row["name"] for row in locked.json()["skills"]] == ["ext_lock"]
+        free = client.get("/api/extensions")
+        assert free.status_code == 200
+        assert free.json() == locked.json()
+    finally:
+        release.set()
+        _stop_patches(patches)
+
+
+def test_skills_list_reads_call_no_heal_or_schedule_sync_while_toggle_still_syncs(tmp_path, monkeypatch):
+    """GET /api/extensions and GET /api/skills/lifecycle-queue call neither
+    ``reconcile_stale_review_jobs`` nor ``sync_skill_schedules``; a lifecycle
+    action (the toggle) still mirrors the schedule table."""
+    import ouroboros.skill_review_runner as review_runner
+    import supervisor.queue as supervisor_queue
+
+    skills_root = tmp_path / "skills"
+    _write_ext(skills_root, "ext_passive", permissions=["tool"], plugin="def register(api):\n    pass\n")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    calls = {"reconcile_stale_review_jobs": 0, "sync_skill_schedules": 0}
+
+    def _count(module, attr):
+        original = getattr(module, attr)
+
+        def counted(*args, **kwargs):
+            calls[attr] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(module, attr, counted)
+
+    # Armed after the app is built (see tests/test_gateway_widgets.py).
+    _count(review_runner, "reconcile_stale_review_jobs")
+    _count(supervisor_queue, "sync_skill_schedules")
+    try:
+        assert client.get("/api/extensions").status_code == 200
+        assert client.get("/api/skills/lifecycle-queue").status_code == 200
+        assert calls == {"reconcile_stale_review_jobs": 0, "sync_skill_schedules": 0}
+
+        resp = client.post("/api/skills/ext_passive/toggle", json={"enabled": False})
+        assert resp.status_code == 200, resp.text
+        assert calls["sync_skill_schedules"] == 1
+        assert calls["reconcile_stale_review_jobs"] == 0
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_extensions_index_creates_no_skill_state_dirs_on_a_fresh_root(tmp_path, monkeypatch):
+    """One list read leaves a fresh data root without ``state/skills/<name>/``:
+    every reader the GET reaches answers a missing directory exactly like a
+    missing file. A writer still creates the directory it writes into."""
+    from ouroboros.extension_health import read_extension_health, record_extension_health
+    from ouroboros.marketplace.isolated_deps import read_deps_state
+    from ouroboros.marketplace.provenance import read_provenance, read_publication_record
+    from ouroboros.skill_review_runner import skill_review_ui_projection
+
+    skills_root = tmp_path / "skills"
+    plugin = "def register(api):\n    pass\n"
+    _write_ext(skills_root, "ext_fresh", permissions=["tool"], plugin=plugin)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    hub_dir = _write_ext(drive_root / "skills" / "clawhub", "hub_fresh", permissions=["tool"], plugin=plugin)
+    (hub_dir / ".clawhub.json").write_text("{}\n", encoding="utf-8")
+    try:
+        resp = client.get("/api/extensions")
+        assert resp.status_code == 200
+        rows = {row["name"]: row for row in resp.json()["skills"]}
+        assert rows["ext_fresh"]["published"] is None
+        assert rows["ext_fresh"]["skill_review"] == {}
+        assert rows["hub_fresh"]["source"] == "clawhub"
+        assert "provenance" not in rows["hub_fresh"]
+        assert not (drive_root / "state" / "skills").exists()
+
+        assert read_extension_health(drive_root, "ext_fresh") is None
+        assert read_provenance(drive_root, "hub_fresh") is None
+        assert read_publication_record(drive_root, "ext_fresh") == (None, None)
+        assert read_deps_state(drive_root, "ext_fresh") == {}
+        assert skill_review_ui_projection(drive_root, "ext_fresh") == {}
+        assert not (drive_root / "state" / "skills").exists()
+
+        record_extension_health(drive_root, "ext_fresh", status="inactive")
+        assert (drive_root / "state" / "skills" / "ext_fresh" / "health.json").is_file()
+        assert read_extension_health(drive_root, "ext_fresh") is not None
+    finally:
+        _stop_patches(patches)
+
+
+def test_extension_rows_reuse_the_runtime_grant_status(tmp_path, monkeypatch):
+    """An extension row carries the grant status its runtime state computed
+    (one settings read per skill); a non-extension row still computes its own."""
+    import ouroboros.gateway.extensions as extensions_api
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill
+
+    skills_root = tmp_path / "skills"
+    _write_ext(
+        skills_root, "ext_grants", permissions=["tool"],
+        plugin="def register(api):\n    pass\n", env_from_settings=["TELEGRAM_BOT_TOKEN"],
+    )
+    note_dir = skills_root / "note_grants"
+    note_dir.mkdir(parents=True)
+    (note_dir / "SKILL.md").write_text(
+        "---\nname: note_grants\ndescription: Notes.\nversion: 0.1.0\ntype: instruction\n---\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    row_calls: list[str] = []
+    real = extensions_api.grant_status_for_skill
+
+    def counted(root, skill):
+        row_calls.append(skill.name)
+        return real(root, skill)
+
+    monkeypatch.setattr(extensions_api, "grant_status_for_skill", counted)
+    try:
+        resp = client.get("/api/extensions")
+        assert resp.status_code == 200
+        rows = {row["name"]: row for row in resp.json()["skills"]}
+        assert "ext_grants" not in row_calls
+        assert row_calls.count("note_grants") == 1
+        assert rows["ext_grants"]["grants"]["requested_keys"] == ["TELEGRAM_BOT_TOKEN"]
+        for name in ("ext_grants", "note_grants"):
+            loaded = find_skill(drive_root, name, repo_path=str(skills_root))
+            assert rows[name]["grants"] == grant_status_for_skill(drive_root, loaded)
+    finally:
+        _stop_patches(patches)
+
+
+def test_api_extensions_index_presents_dead_running_review_job_as_interrupted_without_writing(
+    tmp_path, monkeypatch,
+):
+    """A ``running`` review job whose process is gone (or whose heartbeat is
+    stale) is shown as interrupted by the read; the file on disk and the
+    chat/progress/events logs stay unchanged. A live job stays ``running``, and
+    the file-stamp memo never freezes the liveness answer."""
+    import ouroboros.skill_review_runner as review_runner
+    from ouroboros.utils import utc_now_iso
+
+    skills_root = tmp_path / "skills"
+    _write_ext(skills_root, "alpha", permissions=[], plugin="def register(api):\n    pass\n")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    client, drive_root, patches = _make_client(tmp_path, monkeypatch)
+    job_path = review_runner.review_job_state_path(drive_root, "alpha")
+    alive = {"value": True}
+    monkeypatch.setattr(review_runner, "_pid_alive", lambda _pid: alive["value"])
+
+    def write_job(**overrides) -> bytes:
+        now = utc_now_iso()
+        job = {
+            "status": "running", "lifecycle_status": "running", "skill": "alpha",
+            "content_hash": "abc", "job_id": "skill-job-live", "group_id": "manual:alpha",
+            "review_round": 1, "snapshot_attempt": 1, "started_at": now,
+            "last_heartbeat_at": now, "pid": 424242,
+        }
+        job.update(overrides)
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+        return job_path.read_bytes()
+
+    def current() -> dict:
+        resp = client.get("/api/extensions")
+        assert resp.status_code == 200
+        row = next(r for r in resp.json()["skills"] if r["name"] == "alpha")
+        return row["skill_review"]["current"]
+
+    try:
+        before = write_job()
+        logs_before = _log_bytes(drive_root)
+        live = current()
+        assert live["status"] == "running"
+        assert live["lifecycle_status"] == "running"
+        assert "terminal_reason" not in live
+
+        alive["value"] = False  # the worker dies; not a byte changes on disk
+        dead = current()
+        assert dead["status"] == "interrupted"
+        assert dead["lifecycle_status"] == "interrupted"
+        assert dead["terminal_reason"] == "owner_process_exited"
+        assert dead["job_id"] == "skill-job-live"
+        assert job_path.read_bytes() == before
+        assert not (job_path.parent / "review_history.jsonl").exists()
+        assert _log_bytes(drive_root) == logs_before
+
+        alive["value"] = True
+        before = write_job(last_heartbeat_at="2020-01-01T00:00:00+00:00")
+        stale = current()
+        assert stale["status"] == "interrupted"
+        assert stale["terminal_reason"] == "heartbeat_stale"
+        assert job_path.read_bytes() == before
+        assert _log_bytes(drive_root) == logs_before
     finally:
         _stop_patches(patches)

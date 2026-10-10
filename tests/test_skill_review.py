@@ -7,11 +7,11 @@ that stop it under each enforcement mode, the fail returned on a critical findin
 distinct fail reasons kept for one item and surfaced in the retry coaching, and the
 payload-mutation refusals between hashing and the frozen pack.
 
-The advisory pre-review, the parsing and aggregation layer, the prompt and payload packs,
-the rendered review block and the rebuttal ledger were split verbatim into
-``tests/test_skill_advisory_pre_review.py``, ``tests/test_skill_review_aggregation.py``,
+The parsing and aggregation layer, the prompt and payload packs, the rendered review block
+and the rebuttal ledger were split verbatim into ``tests/test_skill_review_aggregation.py``,
 ``tests/test_skill_review_packs.py``, ``tests/test_skill_review_rendering.py`` and
-``tests/test_skill_review_rebuttals.py``; the reviewer-array builders, the skill builder and
+``tests/test_skill_review_rebuttals.py`` (no advisory critic feeds the skill reviewer any
+more); the reviewer-array builders, the skill builder and
 the context factory they share live in ``tests/_skill_review_shared.py``.
 """
 from __future__ import annotations
@@ -35,44 +35,6 @@ from tests._skill_review_shared import (
     _pass_array_for_script_skill,
     _patch_review,
 )
-
-
-def test_skill_advisory_pytest_guard_precedes_availability(tmp_path, monkeypatch):
-    import ouroboros.skill_review as skill_review
-    from ouroboros.tools import claude_advisory_review as advisory
-
-    monkeypatch.setattr(
-        advisory,
-        "advisory_gate_unavailability_reason",
-        lambda: (_ for _ in ()).throw(AssertionError("availability must not be evaluated")),
-    )
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "sentinel")
-
-    ctx = _make_ctx(tmp_path)
-    assert skill_review._run_skill_advisory_pre_review(
-        ctx, skill_name="weather", file_pack="pack"
-    ) == {}
-    assert not (ctx.drive_root / "logs" / "events.jsonl").exists()
-
-
-def test_skill_advisory_missing_internal_symbol_is_loud_not_silent(tmp_path, monkeypatch):
-    """The retired hasattr probe made a renamed internal silently no-op the
-    skill advisory forever. The typed public entry (run_advisory_critic) makes
-    that state a VISIBLE fail-open error with a durable warning event."""
-    import ouroboros.skill_review as skill_review
-    from ouroboros.tools import claude_advisory_review as advisory
-
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setattr(advisory, "advisory_gate_unavailability_reason", lambda: None)
-    monkeypatch.delattr(advisory, "_run_claude_advisory")
-
-    ctx = _make_ctx(tmp_path)
-    result = skill_review._run_skill_advisory_pre_review(
-        ctx, skill_name="weather", file_pack="pack"
-    )
-    assert result.get("status") == "error"
-    events_path = ctx.drive_root / "logs" / "events.jsonl"
-    assert "skill_advisory_pre_review_warning" in events_path.read_text(encoding="utf-8")
 
 
 def _fail_array_on_manifest() -> str:
@@ -395,9 +357,8 @@ def test_review_skill_keeps_distinct_fail_reasons_for_same_item(tmp_path, monkey
             ]
         }
     )
-    with patch("ouroboros.skill_review_prompt._run_skill_advisory_pre_review", return_value={"status": "empty"}):
-        with _patch_review(canned):
-            outcome = review_skill(ctx, "weather")
+    with _patch_review(canned):
+        outcome = review_skill(ctx, "weather")
     bug_reasons = [
         f["reason"] for f in outcome.findings
         if f.get("item") == "bug_hunting" and f.get("verdict") == "FAIL"

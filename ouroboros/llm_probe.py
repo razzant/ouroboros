@@ -59,6 +59,14 @@ def _accounted_send(
     )
 
 
+def accounted_one_shot(target: dict[str, Any], candidate: dict[str, Any], send, *, source: str) -> Any:
+    """One accounted provider-test send attributed to ``system:<source>``; at most one physical attempt."""
+    task_id = f"system:{source}"
+    with usage_scope(UsageScope(task_id=task_id, root_task_id=task_id, category="provider_test",
+                                non_task_operation=True, source=source)), physical_attempt_limit(1):
+        return _accounted_send(target, candidate, send, source=source)
+
+
 def probe_oversized_context(
     client,
     model: str,
@@ -278,11 +286,10 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
 def _probe_candidate(target: Mapping[str, Any]) -> dict[str, Any]:
     provider = str(target.get("provider") or "")
     model = str(target.get("resolved_model") or "")
-    token_key = (
-        "max_completion_tokens"
-        if provider == "openai" and model.startswith(("gpt-5", "o1", "o3", "o4"))
-        else "max_tokens"
-    )
+    # The send path's provider-wide rule (``_build_remote_kwargs``): official direct
+    # OpenAI Chat takes the current completion-token carrier for every model; a model
+    # name is not evidence of which carrier a route accepts.
+    token_key = "max_completion_tokens" if provider == "openai" else "max_tokens"
     candidate: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": PROVIDER_TEST_PROMPT}],
@@ -382,16 +389,7 @@ def probe_provider_readiness(
         else:
             raise ValueError("unsupported provider route")
 
-        with usage_scope(UsageScope(
-            task_id="system:provider_test",
-            root_task_id="system:provider_test",
-            category="provider_test",
-            non_task_operation=True,
-            source="provider_test",
-        )), physical_attempt_limit(1):
-            response = _accounted_send(
-                target, candidate, dispatch, source="provider_test",
-            )
+        response = accounted_one_shot(target, candidate, dispatch, source="provider_test")
         if not _valid_completion_envelope(response, provider):
             raise ProbeEnvelopeError("provider returned no completion envelope")
         return {
@@ -413,6 +411,7 @@ def probe_provider_readiness(
 __all__ = [
     "PROVIDER_TEST_MAX_TOKENS",
     "PROVIDER_TEST_PROMPT",
+    "accounted_one_shot",
     "controlled_probe_error",
     "probe_oversized_context",
     "probe_provider_readiness",
@@ -431,7 +430,7 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
     from ouroboros.transport_custody import is_loopback_base_url
     try:
         if provider_for_model(model) == "claudexor":
-            from ouroboros.llm_claudexor import model_catalog
+            from ouroboros.llm_claudexor import catalog_admits_model, model_catalog
             from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
             source, native_model = parse_claudexor_model(model)
             account = (model_role_option(MODEL_ACCOUNTS_KEY, model_role)
@@ -454,7 +453,7 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
                     and (not account or catalog.get("credentialProfileId") == account)
                     and (not effective.get("accountFingerprint")
                          or catalog.get("accountFingerprint") == effective["accountFingerprint"])
-                    and any(item.get("id") == native_model for item in catalog.get("models", []))):
+                    and catalog_admits_model(catalog, native_model)):
                 return {"kind": "upstream_catalog", "source": source,
                         "observed_at": catalog["observedAt"], "provenance": catalog["provenance"],
                         "credential_profile_id": catalog.get("credentialProfileId"),

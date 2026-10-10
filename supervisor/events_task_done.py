@@ -117,7 +117,7 @@ def _completed_lifecycle_display(
 
 
 def _terminal_cost_lineage(task_id: str, task: dict, result: dict, evt: dict) -> dict:
-    """The result-derived scopes used by both projection and its equality memo."""
+    """The result-derived scopes used by projection and its write-boundary check."""
     from ouroboros.task_results import resolve_task_lineage
 
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
@@ -246,40 +246,49 @@ def _authoritative_terminal_cost(
 
 
 def _terminal_cost_probe(
-    drive_root: pathlib.Path, task_id: str, current: dict, *,
-    breakdown: Dict[str, Any] | None = None, canonical_only: bool = False,
+    drive_root: pathlib.Path, task_id: str, current: dict,
 ) -> tuple[str, dict, tuple[bool, str] | None]:
-    """Classify the ordinary refresh's inputs, not permission to write.
-
-    Maintenance uses canonical_only with its indexed snapshot: foreign authority
-    is reported BEFORE accounting, which can import legacy rows on fallback.
-    """
+    """Compare one owner's addressed task/root summaries with its stored cost."""
     from ouroboros.task_status import SETTLED_STATUSES
+    from ouroboros import usage_store
+    from ouroboros._usage_rows import _with_integrity
 
     if current.get("status") not in SETTLED_STATUSES:
         return "ineligible", {}, None
     checkpoint = current.get("root_phase_checkpoint") or {}
     if post_task_synthesis_is_open(checkpoint.get("post_task_synthesis")):
         return "ineligible", {}, None
-    if canonical_only and pathlib.Path(current.get("budget_drive_root") or drive_root).resolve() != drive_root.resolve():
-        return "foreign", {}, None
-    fields = _authoritative_terminal_cost(
-        task_id, current, current, {}, drive_root, breakdown=breakdown, canonical_only=canonical_only)
     lineage = _terminal_cost_lineage(task_id, current, current, {})
     scopes = bool(lineage["is_root_task"]), str(lineage["root_task_id"])
+    authority = pathlib.Path(current.get("budget_drive_root") or drive_root).resolve()
+    degraded = usage_store.integrity_degraded(authority)
+    with usage_store.read(authority) as txn:
+        breakdown = {"integrity_degraded": degraded,
+                     "by_task": {task_id: _with_integrity(txn.bucket("task", task_id).render_breakdown(), degraded)},
+                     "by_root": {scopes[1]: _with_integrity(txn.bucket("root", scopes[1]).render_breakdown(), degraded)}
+                     if scopes[0] else {}}
+    fields = _authoritative_terminal_cost(task_id, current, current, {}, authority,
+                                          breakdown=breakdown, canonical_only=True)
     if fields.get("cost_accounting_status") != "available":
         return "unavailable", fields, scopes
     return ("equal" if all(current.get(key) == value for key, value in fields.items()) else "differs"), fields, scopes
 
 
 def _refresh_terminal_task_cost(
-    drive_root: pathlib.Path, task_id: str, *, breakdown: Dict[str, Any] | None = None,
+    drive_root: pathlib.Path, task_id: str, *, current: dict | None = None,
 ) -> bool:
-    """Refresh bookkeeping only; a supplied breakdown is bound to drive_root."""
+    """True when this owner's stored projection equals its addressed summaries.
+
+    A caller can reuse its pass's result read. The field writer still merges
+    with the latest row and rechecks terminal/post-task ownership.
+    """
     from ouroboros.task_status import SETTLED_STATUSES
 
-    current = load_task_result(drive_root, task_id, strict=True) or {}
-    outcome, fields, _ = _terminal_cost_probe(pathlib.Path(drive_root), task_id, current, breakdown=breakdown)
+    if current is None:
+        current = load_task_result(drive_root, task_id, strict=True) or {}
+    outcome, fields, _ = _terminal_cost_probe(pathlib.Path(drive_root), task_id, current)
+    if outcome == "equal":
+        return True
     if outcome != "differs":
         return False
 
@@ -287,6 +296,10 @@ def _refresh_terminal_task_cost(
         post = (latest.get("root_phase_checkpoint") or {}).get("post_task_synthesis")
         if latest.get("status") not in SETTLED_STATUSES or post_task_synthesis_is_open(post):
             raise ValueError("Cost refresh lost terminal task ownership")
+        if (any(latest.get(key) != current.get(key) for key in
+                ("budget_drive_root", "owner_pause", "review_operations"))
+                or _terminal_cost_lineage(task_id, latest, latest, {}) != _terminal_cost_lineage(task_id, current, current, {})):
+            raise ValueError("Cost refresh ownership or monetary scope changed")
         return {**patch, "status": latest["status"]}
 
     stored = write_task_result(
@@ -453,13 +466,15 @@ def _finish_task_done_dispatch(
             # carried no cost field at all.
             _cost_meta = carry_cost_meta(
                 {"accounted_upper_bound_usd": None, **task_done_event})
+            role = str(task.get("role") or "").strip()
+            role_suffix = f" ({role})" if role else ""
             progress_meta = {
                 "subagent_event": subagent_event,
                 "subagent_task_id": str(task_id or ""),
                 "root_task_id": str(task.get("root_task_id") or ""),
                 "parent_task_id": str(task.get("parent_task_id") or ""),
                 "delegation_role": "subagent",
-                "subagent_role": str(task.get("role") or ""),
+                "subagent_role": role,
                 "write_surface": str(constraint.get("surface") or ""),
                 "status": status,
                 # C2/C12 (ABI-3): the honest cost names plus EVERY openness/
@@ -508,12 +523,14 @@ def _finish_task_done_dispatch(
                 progress_meta["model_execution"] = task_done_event["model_execution"]
             ctx.send_with_budget(
                 chat_id,
-                f"{icon} Subagent {task_id} {verb} ({task.get('role') or 'researcher'}).",
+                f"{icon} Subagent {task_id} {verb}{role_suffix}.",
                 is_progress=True,
                 task_id=str(task_id or ""),
                 progress_meta=progress_meta,
                 role="system", system_type="subagent_terminal_notice")
 
+    from ouroboros.obligations import drive_finished
+    drive_finished(ctx.DRIVE_ROOT, {**task, "id": task_id}, final_task_result)
     from supervisor.queue import _queue_lock, clear_acceptance_fence_for_root
 
     with _queue_lock:

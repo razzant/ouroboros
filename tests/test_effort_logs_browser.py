@@ -30,7 +30,7 @@ from supervisor.events_budget import _handle_llm_usage
 from tests.test_delegated_activity_browser import engine_ui as engine_ui
 from tests.test_subscription_setup_browser import capture
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
-from tests.test_usage_writer_view import root as root
+from tests._usage_store_testing import root as root
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"

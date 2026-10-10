@@ -68,6 +68,31 @@ def test_prepare_messages_for_local_context_preserves_core_and_compacts_non_core
 
 
 
+def test_local_compaction_keeps_the_memory_view_sections_and_compacts_the_rest():
+    """The memory view's headings survive local compaction in their blocks: ``My story``
+    in the stable block; the shared understanding, marks and the room (its heading
+    carries the room label and head, matched before the parenthesis) in the dynamic one.
+    A neighbouring non-core section is still compacted in both blocks."""
+    from ouroboros.llm_local import _compact_local_text
+
+    stable = ("## My story\n\nSTORY BODY\n\n"
+              "## Knowledge base\n\n" + ("K" * 4000) + "\n")
+    compacted = _compact_local_text(stable, "semi_stable")
+    assert "STORY BODY" in compacted
+    assert "K" * 4000 not in compacted and "[Compacted for local-model context" in compacted
+
+    dynamic = ("## Shared understanding\n\nORIENTATION BODY\n\n"
+               "## Marks I keep in view\n\nMARKS BODY\n\n"
+               "## This room (Project seven [chat_id=7]) — head 12\n\nROOM BODY\n\n"
+               "## Recent tools\n\n" + ("T" * 4000) + "\n")
+    compacted = _compact_local_text(dynamic, "dynamic")
+    for body in ("ORIENTATION BODY", "MARKS BODY", "ROOM BODY"):
+        assert body in compacted
+    assert "T" * 4000 not in compacted and "[Compacted for local-model context" in compacted
+    # The new headings are not preserved where they do not live.
+    assert "MARKS BODY" not in _compact_local_text("## Marks I keep in view\n\nMARKS BODY\n", "static")
+
+
 def test_prepare_messages_for_local_context_raises_when_core_still_too_large():
     from ouroboros.llm import LLMClient, LocalContextTooLargeError
 

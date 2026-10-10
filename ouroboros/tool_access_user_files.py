@@ -156,6 +156,7 @@ def user_files_path_block_reason(
     protected_values: list[Any] = [
         getattr(ctx, "drive_root", None),
         getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir", None),
+        getattr(ctx, "serving_repo_dir", None),  # a bound body candidate never unprotects the running checkout
     ]
     meta = getattr(ctx, "task_metadata", {})
     if isinstance(meta, dict):

@@ -24,6 +24,8 @@ def task(tid="attempt", **extra):
 
 @pytest.fixture
 def room(q):  # noqa: F811
+    from ouroboros.startup_migrations import prepare_startup_state
+    prepare_startup_state(q.root)
     registry.create_project(q.root, "target", name="Target")
     registry.create_project(q.root, "other", name="Other")
     return q

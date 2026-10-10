@@ -98,11 +98,14 @@ def retained_tool_custody(root: Any, task_id: str, row: dict, *, excluding: str 
 
 
 def retire_tool_invocations(root: Any, task_id: str, root_task_id: str, *,
-                            pid: int, process_birth: str, task_attempt: int) -> None:
-    """Called only by retained-Process confirmed-death owners; exact claim match.
+                            pid: int, process_birth: str, task_attempt: int, holder: str = "") -> None:
+    """Called only with positive evidence the exact local owner ended; exact claim match.
 
-    Keep unknown-effect history and independent custody. Legacy/unattributable
-    claims are not evidence about this dead worker and remain untouched.
+    Evidence: a retained-Process confirmed death, or ``local_custody_repair``'s
+    witness / platform-qualified absence. ``holder`` names the task result the
+    claim lives on when it is not the member's own (a member not yet published
+    claims on its root's row). Keep unknown-effect history and independent
+    custody. Legacy/unattributable claims are not evidence and remain untouched.
     """
     from ouroboros.task_results import (
         require_writable_task_result_schema, stamp_task_result_schema, task_result_path,
@@ -114,12 +117,12 @@ def retire_tool_invocations(root: Any, task_id: str, root_task_id: str, *,
     identity = {"pid": pid, "process_birth": process_birth, "task_attempt": task_attempt}
     def retire(current):
         require_writable_task_result_schema(current)
-        if current.get("task_id") != task_id or not current.get("status"):
+        if current.get("task_id") != (holder or task_id) or not current.get("status"):
             raise ValueError("tool_invocation_authority_unreadable")
         claims = dict(current.get("launch_handoffs") or {})
         retired = dict(current.get("retired_tool_invocations") or {})
         for op, claim in list(claims.items()):
-            if (claim.get("local_owner") != identity or claim.get("task_id") != task_id
+            if (not isinstance(claim, dict) or claim.get("local_owner") != identity or claim.get("task_id") != task_id
                     or claim.get("root_task_id") != root_task_id):
                 continue
             fact = {**claim, "state": "owner_dead", "retired_at": utc_now_iso(),
@@ -133,7 +136,7 @@ def retire_tool_invocations(root: Any, task_id: str, root_task_id: str, *,
             return None
         return stamp_task_result_schema({**current, "launch_handoffs": claims,
                                          "retired_tool_invocations": retired})
-    update_json_locked(task_result_path(root, task_id), retire, strict_existing_dict=True)
+    update_json_locked(task_result_path(root, holder or task_id), retire, strict_existing_dict=True)
 
 def task_process_blockers(drive_root: Any, task_ids: set[str]) -> list[dict]:
     """Strict read of existing canonical executor custody without backend I/O.

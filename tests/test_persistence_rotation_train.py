@@ -185,7 +185,7 @@ def test_legacy_money_import_fails_closed_on_an_unreadable_chain(tmp_path, hide)
     never reached that except, and the hidden ``llm_usage`` rows would have
     been silently excluded from the imported monetary baseline."""
     from ouroboros.usage_ledger import UsageAccountingError
-    from ouroboros.usage_legacy_import import _legacy_snapshot
+    from ouroboros.usage_journal import legacy_snapshot as _legacy_snapshot
 
     events_path = tmp_path / "logs" / "events.jsonl"
     append_jsonl(events_path, {"type": "llm_usage", "model": "m1", "cost": 0.5})
@@ -271,7 +271,7 @@ def test_worker_boot_event_found_when_the_new_live_log_outgrew_the_cursor(tmp_pa
 
 
 def test_legacy_snapshot_includes_rotated_llm_usage(tmp_path):
-    from ouroboros.usage_legacy_import import _legacy_snapshot
+    from ouroboros.usage_journal import legacy_snapshot as _legacy_snapshot
 
     events_path = tmp_path / "logs" / "events.jsonl"
     append_jsonl(events_path, {"type": "llm_usage", "model": "m1", "cost": 0.5,
@@ -316,15 +316,42 @@ def test_iter_jsonl_chain_objects_chronological(tmp_path):
     assert [row["i"] for row in iter_jsonl_chain_objects(path)] == [0, 1, 2]
 
 
-def test_launcher_stdout_copy_is_size_capped():
-    """Source pin (CPL4-C5): the pipe-copy thread rotates agent_stdout.log."""
-    import inspect
+@pytest.mark.serial
+def test_launcher_stdout_copy_is_size_capped(monkeypatch, tmp_path):
+    """CPL4-C5: the launcher drains a real server pipe into a rotated agent_stdout.log.
+
+    The copier's own byte, failure and gap rules: tests/test_capped_output_copy.py.
+    """
+    import subprocess
+    import threading
 
     import launcher
+    from ouroboros import process_logging
+    from ouroboros.process_logging import SERVER_LOG_MAX_BYTES
 
-    src = inspect.getsource(launcher.start_agent)
-    assert "max_bytes = 2 * 1024 * 1024" in src
-    assert 'os.replace(log_path, log_path.with_name(f"{log_path.name}.1"))' in src
+    data_dir, repo_dir = tmp_path / "data", tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "server.py").write_text("", encoding="utf-8")
+    line = b"x" * 1023 + b"\n"
+    producer = f"import sys\nfor _ in range(5120): sys.stdout.buffer.write({line!r})\n"
+    monkeypatch.setattr(launcher, "IS_WINDOWS", False)
+    monkeypatch.setattr(launcher, "DATA_DIR", data_dir)
+    monkeypatch.setattr(launcher, "REPO_DIR", repo_dir)
+    monkeypatch.setattr(launcher, "_load_settings", lambda: {})
+    monkeypatch.setattr(launcher, "_apply_settings_to_env", lambda _settings: None)
+    monkeypatch.setattr(launcher, "process_group_id", lambda _pid: None)
+    monkeypatch.setattr(launcher, "_hidden_popen",
+                        lambda _cmd, **kwargs: subprocess.Popen([sys.executable, "-c", producer], **kwargs))
+    drained, copy = threading.Event(), process_logging.copy_capped_output
+    monkeypatch.setattr(process_logging, "copy_capped_output", lambda *a, **k: (copy(*a, **k), drained.set()))
+
+    proc = launcher.start_agent(port=9877)
+    assert proc.wait(timeout=120) == 0 and drained.wait(timeout=120)
+    proc.stdout.close()
+    log_path = data_dir / "logs" / "agent_stdout.log"
+    rotated = [log_path.with_name(f"agent_stdout.log.{index}") for index in (2, 1)]
+    assert [path.stat().st_size for path in (*rotated, log_path)] == [SERVER_LOG_MAX_BYTES] * 2 + [1024 * 1024]
+    assert b"".join(path.read_bytes() for path in (*rotated, log_path)) == line * 5120
 
 
 def test_supervisor_tick_rotates_the_train():

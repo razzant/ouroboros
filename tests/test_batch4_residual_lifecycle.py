@@ -8,6 +8,7 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_batch4_repair_compositions import _running
 from tests.test_hurry_initial_lifecycle import pool, _enqueue_origin  # noqa: F401 - pytest fixture
+from tests._usage_store_testing import ledger_rows
 
 pytestmark = pytest.mark.serial
 
@@ -136,7 +137,7 @@ def test_launch_authority_wait_rejoins_typed_controls(tmp_path, monkeypatch, rea
             while isinstance(control.previous_error, model_wait.ModelWaitInterrupted):
                 control = control.previous_error
             assert isinstance(control.previous_error, _PhysicalSendNotStarted)
-    assert not (tmp_path / 'state/usage_attempts.jsonl').exists()
+    assert not ledger_rows(tmp_path)
 
 
 @pytest.mark.parametrize('outcome', ['refused', 'unknown', 'dynamic'])

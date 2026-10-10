@@ -159,6 +159,21 @@ def test_actor_projection_carries_bounded_disclosed_finding_rows():
     }]
     assert actors["triad-shape"]["findings_omitted"] == 0
 
+def test_actor_binding_is_attempt_identity():
+    """A changed actor reference mints a new custody attempt key (#285 class):
+    the pool row's ``subagent_id`` is part of the seat's identity."""
+    from ouroboros.review_custody import _attempt_key
+    from ouroboros.review_execution import ReviewRouteKind
+
+    request = SimpleNamespace(retry_key="", slot_messages={}, surface="multi_model_review",
+                              task_id="t", call_type="multi_model_review")
+    base = dict(slot_id="t1", model="openai/gpt-5.6-terra", effort="medium",
+                route=ReviewRouteKind.API_CHAT)
+    a = ReviewSlot(subagent_id="api-critic", **base)
+    b = ReviewSlot(subagent_id="", **base)
+    assert _attempt_key(request, a) != _attempt_key(request, b)
+
+
 def test_spent_owner_deadline_does_not_dispatch_a_review_worker(tmp_path):
     calls = []
     paid = []

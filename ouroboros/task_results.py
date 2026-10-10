@@ -489,7 +489,7 @@ def claim_task_acceptance_review_cycle(
     *,
     claimed_by_task_id: str,
 ) -> Dict[str, Any]:
-    """Atomically dedupe and claim one paid root-acceptance panel dispatch."""
+    """Atomically claim one paid root-acceptance panel dispatch; a prior claim for the binding or paid identity answers ``unknown`` (never a second dispatch)."""
 
     binding_fields = {
         key: str((review_binding or {}).get(key) or "").strip().lower()
@@ -934,11 +934,9 @@ def write_task_result(
             "updated_at": now,
         }))
 
-    # Never fall back to an unlocked read/merge/write: stale state would let timing, not the monotonic
-    # reducer, pick a completed-vs-cancelled winner. Callers retry or fail their transition explicitly.
-    return update_json_locked(
-        path,
-        _merge,
+    from ouroboros.obligations import update_result
+    return update_result(
+        path, _merge, writer=update_json_locked,
         strict_existing_dict=bool(strict_existing_dict),
         reject_existing_empty_dict=bool(strict_existing_dict),
     )

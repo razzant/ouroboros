@@ -12,6 +12,7 @@ import pytest
 
 from ouroboros.llm import LLMClient, supports_message_cache_control
 from ouroboros.tools.review_helpers import cached_prompt_blocks
+from tests._usage_store_testing import ledger_rows
 
 # The shipped global default (config.SETTINGS_DEFAULTS["OUROBOROS_PROMPT_CACHE_TTL"]):
 # the review lanes' former REVIEW_CACHE_TTL constant collapsed into that setting, so
@@ -339,7 +340,7 @@ def test_finalizer_never_marks_non_openrouter_routes(provider, model):
 
 def test_finalizer_leaves_unsupported_openrouter_family_untouched():
     client = LLMClient(api_key="unused")
-    target = _openrouter_target("openai/gpt-5.5")
+    target = _openrouter_target("x-ai/grok-4")
     kwargs = client._build_remote_kwargs(
         target, _review_pack(), "high", 512, "auto", None, _tools(),
         skip_capability_fetch=True,
@@ -349,7 +350,7 @@ def test_finalizer_leaves_unsupported_openrouter_family_untouched():
     assert client._normalize_payload_cache_ttl(target, kwargs) is None
 
     assert kwargs == before
-    assert not supports_message_cache_control("openai/gpt-5.5")
+    assert not supports_message_cache_control("x-ai/grok-4")
 
 
 def test_finalizer_keeps_gemini_markers_bare_and_adds_no_tool_marker():
@@ -686,16 +687,16 @@ def test_finalizer_reduces_over_cap_breakpoints_and_discloses_the_reduction(monk
     )
 
     payload = captured["payload"]
-    # tools(1) + system(2) + first message block(1) survive; the tail markers are dropped.
+    # No free slot for schemas: system(2) + first message blocks(2) survive.
     assert len(_markers(payload)) == 4
-    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert all("cache_control" not in tool for tool in payload["tools"])
     assert [("cache_control" in block) for block in payload["messages"][0]["content"]] == [
-        True, False, False, False,
+        True, True, False, False,
     ]
     assert [block["text"] for block in payload["messages"][0]["content"]] == [
         "evidence 0", "evidence 1", "evidence 2", "evidence 3",
     ]
-    assert usage["prompt_cache_breakpoints_reduced"] == {"declared": 7, "kept": 4, "dropped": 3}
+    assert usage["prompt_cache_breakpoints_reduced"] == {"declared": 6, "kept": 4, "dropped": 2}
     assert usage["prompt_cache_ttl"] == "1h"
 
 
@@ -991,7 +992,7 @@ def test_cached_prompt_blocks_projects_the_global_setting(monkeypatch):
 def test_reviewer_models_support_cache_markers_where_expected():
     assert supports_message_cache_control("anthropic/claude-fable-5")
     assert supports_message_cache_control("google/gemini-3.5-flash")
-    assert not supports_message_cache_control("openai/gpt-5.6-sol")
+    assert supports_message_cache_control("openai/gpt-5.6-sol")
 
 
 # ---------------------------------------------------------------------------
@@ -1225,7 +1226,6 @@ def test_is_tos_rejection_classification():
 
 
 def test_tos_rejection_settles_zero_with_reason(tmp_path):
-    import json as _json
 
     from ouroboros import usage_accounting as ua
 
@@ -1242,10 +1242,7 @@ def test_tos_rejection_settles_zero_with_reason(tmp_path):
     assert projection["settled_usd"] == 0.0
     assert projection["attempt_counts"].get("settled") == 1
 
-    rows = [
-        _json.loads(line)
-        for line in (tmp_path / "state" / "usage_attempts.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    rows = ledger_rows(tmp_path)
     settled = [row for row in rows if row.get("state") == "settled"]
     assert settled and settled[-1]["settle_reason"] == "tos_rejection"
     assert settled[-1]["cost_usd"] == 0.0
@@ -1298,7 +1295,12 @@ def test_review_wave_admission_fail_open_paths(tmp_path):
     assert review_wave_admission(tmp_path, root_task_id="ghost", models=["m"], prompt_chars=10)["fits"]
 
 
-def test_review_wave_admission_blocks_known_overrun(tmp_path, monkeypatch):
+def test_review_wave_admission_decides_on_known_spend_not_the_wave_estimate(tmp_path, monkeypatch):
+    """#1487: the wave is admitted while KNOWN spend is below the limit, exactly what
+    each seat's reservation checks; an estimate above the remainder is disclosed,
+    never an earlier refusal. Known spend at the limit refuses."""
+    import dataclasses
+
     from ouroboros import pricing as pricing_mod
     from ouroboros import usage_accounting as ua
 
@@ -1325,11 +1327,18 @@ def test_review_wave_admission_blocks_known_overrun(tmp_path, monkeypatch):
     admission = ua.review_wave_admission(
         tmp_path, root_task_id="root1",
         models=["anthropic/claude-fable-5"] * 3,
-        prompt_chars=4_000_000,  # ~1M tokens per slot — cannot fit $1 remaining
+        prompt_chars=4_000_000,  # ~1M tokens per slot — far above the $1 remaining
     )
-    assert admission["estimated_wave_usd"] is not None
-    assert admission["remaining_usd"] == pytest.approx(1.0)
-    assert not admission["fits"]
+    assert admission["estimated_wave_usd"] > admission["remaining_usd"] == pytest.approx(1.0)
+    assert admission["known_usd"] == pytest.approx(4.0)
+    assert admission["fits"]  # disclosed, not refused: the seats' own fences bind per send
+
+    reservation = ua.reserve_attempt(dataclasses.replace(request, reservation_usd=1.0))
+    ua.mark_dispatched(reservation)
+    ua.settle_attempt(reservation, {}, cost_usd=1.0, cost_final=True)
+    at_limit = ua.review_wave_admission(
+        tmp_path, root_task_id="root1", models=["anthropic/claude-fable-5"], prompt_chars=10)
+    assert at_limit["remaining_usd"] == 0.0 and not at_limit["fits"]
 
 
 # ---------------------------------------------------------------------------
@@ -1484,16 +1493,19 @@ def test_supervisor_handles_review_wave_budget_event(monkeypatch):
     assert captured.get("surface") == "skill_review"
 
 
-def test_scope_review_usage_flows_through_substrate_once():
-    """Behavioral pin for the v6.69.0 dedup: one scope call → exactly one
+def test_review_seat_usage_flows_through_substrate_once():
+    """Behavioral pin for the v6.69.0 dedup: one seat call → exactly one
     llm_usage event, emitted by the review substrate per-slot path (the former
-    job-level re-emit in run_scope_review is gone)."""
-    from ouroboros.tools.scope_review import _call_scope_llm
+    job-level re-emit of the scope role is gone with the role)."""
+    import asyncio
+
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.tools.review_multi_model import _query_model
 
     events = []
 
     class _Ctx:
-        task_id = "scope-task"
+        task_id = "seat-task"
         event_queue = None
         pending_events = events
         drive_root = "/tmp"
@@ -1513,15 +1525,15 @@ def test_scope_review_usage_flows_through_substrate_once():
 
     rs.ReviewCoordinator.__init__ = _patched
     try:
-        raw, usage, err = _call_scope_llm(
-            "", scope_model="anthropic/claude-fable-5", ctx=_Ctx(),
-            session_task="review the staged change", session_root="/tmp")
+        _model, payload, err = asyncio.run(_query_model(
+            _StubLLM(), "anthropic/claude-fable-5", [{"role": "user", "content": "review"}],
+            asyncio.Semaphore(1), ctx=_Ctx(), slot_id="slot_1", route=ReviewRouteKind.API_CHAT))
     finally:
         rs.ReviewCoordinator.__init__ = original
-    assert err == "" and raw
+    assert err is None and payload["choices"][0]["message"]["content"]
     usage_events = [e for e in events if e.get("type") == "llm_usage"]
     assert len(usage_events) == 1
-    assert usage_events[0]["source"] == "review_substrate:scope_review"
+    assert usage_events[0]["source"] == "review_substrate:multi_model_review"
     assert usage_events[0]["ledger_attempt_ids"] == ["a1"]
 
 

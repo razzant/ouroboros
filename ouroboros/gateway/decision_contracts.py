@@ -52,7 +52,9 @@ class DecisionResponse(TypedDict, total=False):
     for a non-root addressee). Routing adds dispatched
     (confirmed durable receipt), task_id (derived promoted id), latest_status
     (superseding status on 409), reason/detail diagnostics, and cause (the
-    owner-facing sentence for a refused routing act).
+    owner-facing sentence for a refused routing act). A New task picked from a
+    card that carried an explicit start adds reasoning_effort, read from the
+    admitted root's own row; a steered existing task never reports one.
 
     Model waits distinguish accepted (202, applied false) from the worker's
     applied_request_id. wait carries the current projection and revision;
@@ -75,6 +77,7 @@ class DecisionResponse(TypedDict, total=False):
     reason: str
     detail: str
     cause: str
+    reasoning_effort: str
     request_id: str
     applied: bool
     saved: Optional[bool]

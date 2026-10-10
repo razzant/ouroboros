@@ -181,24 +181,20 @@ def test_structural_pagination_page_two_returns_the_next_rows(tmp_path):
     }
 
 
-def test_structural_pagination_beyond_cap_is_typed_truncation_not_no_results(tmp_path):
-    """#447 S3: collection stops at the 200-row cap, so an offset beyond it used
-    to render honest matches as "No results" (success-shaped completeness lie).
-    It must be a typed truncation instead, and a capped full page must say the
-    collection was capped rather than imply "N of N" completeness."""
+def test_structural_pagination_beyond_page_size_is_real_continuation(tmp_path):
+    """The 200 page-size ceiling must not become a false search-universe cap."""
     ctx = _ctx(tmp_path)
     for f in range(8):
         body = "\n".join(f"def fn_{f}_{i}():\n    return {i}" for i in range(30))
         (ctx.repo_dir / f"mod_{f}.py").write_text(body + "\n", encoding="utf-8")
 
-    # The collector may overshoot the 200 cap by up to one file's rows; the tail
-    # page past the cap must disclose the cap instead of implying completeness.
     tail = _structural_page(ctx, offset=200)
-    assert "collection capped at 200" in tail.splitlines()[0], tail[:200]
+    assert "40 of 240" in tail.splitlines()[0], tail[:200]
+    assert len(tail.split("\n\n", 1)[1].splitlines()) == 40
     assert "No results" not in tail
 
     beyond = _structural_page(ctx, offset=400)
-    assert beyond.startswith("⚠️ QUERY_CODE_TRUNCATED"), beyond[:200]
+    assert "0 of 240" in beyond and "offset=400" in beyond
     assert "No results" not in beyond
 
 
@@ -258,8 +254,7 @@ def test_published_item_schemas_are_derived_from_the_one_declaration():
     schema beside the constant is a second definition that can silently diverge."""
     from ouroboros.tools.core import _WRITE_FILE_ITEM_KEYS, _WRITE_FILE_ITEM_PROPERTIES
     from ouroboros.tools.core import get_tools as core_tools
-    from ouroboros.tools.edit_ops import _EDIT_BATCH_ITEM_KEYS, _EDIT_BATCH_ITEM_PROPERTIES
-    from ouroboros.tools.edit_ops import _EDIT_BATCH_ITEM_REQUIRED
+    from ouroboros.tools.edit_ops import _EDIT_BATCH_ITEM_KEYS, _EDIT_BATCH_ITEM_PROPERTIES, _EDIT_BATCH_ITEM_REQUIRED
     from ouroboros.tools.edit_ops import get_tools as edit_tools
 
     for tools, tool_name, payload_key, declared, allowed, required in (

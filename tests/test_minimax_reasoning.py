@@ -136,7 +136,7 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
     assert {key: replay.get(key) for key in reasoning} == reasoning
     assert replay["tool_calls"] == [CALL]
     assert "response_id" not in replay
-    assert [row["state"] for row in rows(isolated)] == ["reserved", "dispatched", "settled"] * 2
+    assert [(row["state"], row["revision"]) for row in rows(isolated)] == [("settled", 3)] * 2
 
 
 @pytest.mark.parametrize("reasoning", [
@@ -280,7 +280,7 @@ def test_owner_followups_keep_each_held_rounds_own_continuation(isolated, monkey
         assert {key: canonical[index][key] for key in expected} == expected
         assert {key: replay[index][key] for key in expected} == expected
         assert expected["reasoning_content"] not in progress + trace["reasoning_notes"]
-    assert [row["state"] for row in rows(isolated)] == ["reserved", "dispatched", "settled"] * 3
+    assert [(row["state"], row["revision"]) for row in rows(isolated)] == [("settled", 3)] * 3
 
 
 def test_completion_control_hold_preserves_its_row_before_next_http(isolated, make_client):
@@ -341,7 +341,8 @@ def test_incomplete_minimax_stream_keeps_unknown_and_never_resends(isolated, mak
         _call(client, [{"role": "user", "content": "lookup"}], stream=True, asynchronous=asynchronous)
     assert len(sent) == 1 and response.is_closed
     assert _capture_on_chain(caught.value).state == "unresolved"
-    assert [row["state"] for row in rows(isolated)] == ["reserved", "dispatched", "unresolved"]
+    assert [(row["state"], row["revision"]) for row in rows(isolated)] == [("unresolved", 4)]
+    assert rows(isolated)[0]["physical_failure"]
 
 
 @pytest.mark.parametrize("missing", ["split", "continuation"])

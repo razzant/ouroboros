@@ -1054,7 +1054,7 @@ def test_target_actor_is_durable_before_claim_and_survives_claim_crash(
         actor = manifests[0]["harness"]["target_runtime_actor"]
         assert actor["mismatches"] == []
         assert not any(actor["local_routes"].values())
-        assert actor["reviewer_slots"]["advisory"]["enabled"] is False
+        assert actor["review_pool"] and all(seat["delivery"] == "packet" for seat in actor["review_pool"])
         assert manifests[0]["available_subagents"] == actor["available_subagents"]
         observed["claim"] = True
         raise RuntimeError("synthetic claim-boundary crash")
@@ -1065,7 +1065,7 @@ def test_target_actor_is_durable_before_claim_and_survives_claim_crash(
     assert observed["claim"] is True
     final = _attempt_manifests(results / "chrome" / "abc")[0]
     assert final["extra"]["outcome"] == "adapter_error"
-    assert final["harness"]["target_runtime_actor"]["reviewer_slots"]
+    assert final["harness"]["target_runtime_actor"]["review_pool"]
 
 
 def test_two_overlapping_attempts_never_share_one_canonical_record(tmp_path, monkeypatch, capsys):

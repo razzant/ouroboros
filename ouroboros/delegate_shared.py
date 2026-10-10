@@ -215,6 +215,10 @@ def _confirmed_retry_chain(drive: Any, starter: str, reader: str) -> Tuple[str, 
     nor a task-authored predecessor is an edge. Read the whole root chain so a
     run started by an intermediate attempt has the same custody as the first.
     Queue-local supervisor globals are not available authority in a worker.
+
+    Returns the chain's task ids, or ``()`` unless every link is recorded and the
+    reader is the chain's leaf and its only pending/running attempt in a fresh
+    queue snapshot; stale, unreadable or ambiguous evidence grants nothing.
     """
     from ouroboros.task_results import load_task_result, _TRULY_TERMINAL_STATUSES
     from ouroboros.task_status import _load_queue_snapshot, queue_snapshot_observation
@@ -446,7 +450,7 @@ def orphan_capture_read_target(
     for row in rows:
         if str(row.task_id or "") != owner_tid:
             continue
-        cap_dir = custody.delegated_capture_dir(drive, row.task_id, row.snapshot_id or row.run_id)
+        cap_dir = custody.delegated_capture_dir(drive, row.task_id, custody.capture_key(row))
         if cap_dir.name != capture_name or not path_is_relative_to(resolved, cap_dir):
             continue
         retry_status, _entry, predecessor = retry_result_status(ctx, drive, str(row.run_id), state=state)

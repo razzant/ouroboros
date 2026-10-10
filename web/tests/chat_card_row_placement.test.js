@@ -172,7 +172,7 @@ test('history replay places stamped rows on their cards and keeps unplaceable on
     } finally { instance?.destroy(); restoreDom(prior); }
 });
 
-test('cold page restore admits its recent owner before the bookmarked content-only row', async () => {
+test('an older page places its content-only row inside the recent owner card', async () => {
     const recent = { task_id: 'r1', is_progress: true, text: 'Recent owner progress',
         ts: '2026-09-16T01:00:00Z', history_id: 'progress:90' };
     const receipt = { task_id: 'r1', role: 'system', system_type: 'host_progress',
@@ -194,20 +194,14 @@ test('cold page restore admits its recent owner before the bookmarked content-on
             state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},
             stateSnapshots: { begin: () => ({ generation: 1 }), gate() { return Promise.resolve(this.begin()); },
                 isCurrent: () => true, apply() {} }, chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true,
-            initialScrollState: { scrollTop: 80, stick: false,
-                historyAnchor: { historyId: 'progress:0', lineKey: 'old-live-key',
-                    lineLifecycleKey: 'cardrow|merge-receipt:source', cardChain: [{ taskId: 'r1', offset: 0 }], offset: 20 },
-                disclosures: { cards: [['r1', true]] },
-                history: { focus: 1, pages: [0, 1].map(index => ({ id: `history-page-1-${index}`,
-                    chain: 1, index, requestCursor: `page:${index}`, nextCursor: index ? null : 'page:1',
-                    hasMore: !index, rows: 1 })) } },
         });
         await instance.refreshHistory({ revision: 1 });
         const messages = globalThis.document.byId.get('chat-messages');
+        const button = messages.querySelector('.chat-load-older').querySelector('.chat-load-older-btn');
+        for (const handler of button.listeners.get('click')) await handler({ target: button });
         const card = walkCard(messages, 'r1');
         assert.deepEqual(calls, [null, 'page:1']);
         assert.ok(card);
-        assert.equal(card.dataset.expanded, '1');
         assert.equal(phasedLines(card, 'result').filter(line => line.dataset.liveLineKey === 'history-progress-0').length, 1,
             'the exact supplying page must place its receipt inside the recent owner');
         assert.equal(systemBubbles(messages).length, 0, 'the receipt never falls back to an orphan bubble');

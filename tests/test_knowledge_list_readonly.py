@@ -53,13 +53,21 @@ def test_list_with_no_knowledge_dir_creates_nothing(tmp_path):
     assert not (ctx.drive_root / "memory" / "knowledge").exists()
 
 
-def test_list_prefers_existing_index_verbatim(tmp_path):
-    """0-regression: when the write path has maintained an index, list returns it."""
+def test_list_retains_legacy_index_prose_without_treating_it_as_current_inventory(tmp_path):
+    """Current source projection cannot let a stale index reactivate a note.
+
+    Earlier prose remains exact and visibly historical until an authored overview.
+    """
     ctx = _Ctx(tmp_path / "drive")
     kdir = ctx.drive_root / "memory" / "knowledge"
     kdir.mkdir(parents=True)
     (kdir / INDEX_FILE).write_text("# Knowledge Base Index\n\n- **a**: alpha\n", encoding="utf-8")
-    assert _knowledge_list(ctx) == "# Knowledge Base Index\n\n- **a**: alpha\n"
+    before = {p: p.read_bytes() for p in kdir.iterdir()}
+    listing = _knowledge_list(ctx)
+    assert "# Knowledge Base Index\n\n- **a**: alpha\n" in listing
+    assert "historical context, not current authored summaries" in listing
+    assert "Archived notes: 0" in listing
+    assert before == {p: p.read_bytes() for p in kdir.iterdir()}
 
 
 def test_first_write_into_indexless_store_seeds_the_full_index(tmp_path):

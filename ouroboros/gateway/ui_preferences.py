@@ -1,4 +1,10 @@
-"""Owner-local UI preference endpoints."""
+"""Owner-local UI preference endpoints, stored in ``state/ui_preferences.json``.
+
+Keys: ``widget_order``, ``widget_size``, ``widget_start_mode`` (values from
+``extension_ui_validation.WIDGET_START_MODES``), ``nested_subagents_expanded``, the
+empty-Main ``welcome`` copy, the two side-section widths and ``project_seen_revision``.
+A POST may carry any subset of keys; an unknown key answers 400.
+"""
 from __future__ import annotations
 
 import pathlib

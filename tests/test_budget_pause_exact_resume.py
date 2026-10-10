@@ -282,17 +282,19 @@ def test_root_grant_refuses_a_cached_tree_snapshot_and_admits_a_fresh_read(tmp_p
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
     task, _row = _parked(tmp_path, monkeypatch, task_id="strict-root", scope="root")
-    usage_accounting._stash_root_accounting("strict-root", 1.0, 10.0)
+    usage_accounting._stash_root_accounting("strict-root", {"settled_usd": 1.0, "accounted_usd": 1.0}, 10.0)
     monkeypatch.setattr(usage_accounting, "usage_projection",
                         lambda *_a, **_k: (_ for _ in ()).throw(OSError("ledger unavailable")))
     refused = queue.resume_budget_paused_task("strict-root")
     assert refused["error"] == "root_accounting_unavailable" and refused["action"] == "retry_or_cancel"
     assert "_budget_pause" in task and "_budget_pause_resume" not in task
     monkeypatch.setattr(usage_accounting, "usage_projection",
-                        lambda *_a, **_k: {"accounted_usd": 10.0, "limit_usd": 10.0})
+                        lambda *_a, **_k: {"settled_usd": 10.0, "accounted_usd": 10.0, "limit_usd": 10.0})
     assert queue.resume_budget_paused_task("strict-root")["error"] == "root_hard_cap_exhausted"
+    # #1487: a $25 unresolved bound beside $1 of known spend is exposure, not spending:
+    # explicit Resume within the authorized $10 is granted.
     monkeypatch.setattr(usage_accounting, "usage_projection",
-                        lambda *_a, **_k: {"accounted_usd": 1.0, "limit_usd": 10.0})
+                        lambda *_a, **_k: {"settled_usd": 1.0, "accounted_usd": 26.0, "limit_usd": 10.0})
     assert queue.resume_budget_paused_task("strict-root")["ok"] is True
 
 
@@ -470,7 +472,7 @@ def test_graceful_rail_refreshes_planning_threshold_within_authorized_money(tmp_
     # wallet observation and a fresh, undegraded root-accounting read.
     monkeypatch.setattr(loop_budget, "_wrapup_global_remaining", lambda: 100.0)
     monkeypatch.setattr(loop_budget, "_loop_tree_accounting",
-                        lambda **_k: {"accounted_usd": 8.0, "age_sec": 0.0})
+                        lambda **_k: {"settled_usd": 8.0, "accounted_usd": 8.0, "age_sec": 0.0})
     monkeypatch.setattr(task_pacing, "resolve_budget_profile", lambda _c: {"cost_hard_stop_pct": 50})
     disclosure = budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
     assert disclosure["refreshed"] is True
@@ -487,7 +489,7 @@ def test_graceful_rail_refreshes_planning_threshold_within_authorized_money(tmp_
     # authorized room, and the owner's explicit act cannot invent any.
     ctx._accumulated_usage = {"cost": 10.0}
     monkeypatch.setattr(loop_budget, "_loop_tree_accounting",
-                        lambda **_k: {"accounted_usd": 10.0, "age_sec": 0.0})
+                        lambda **_k: {"settled_usd": 10.0, "accounted_usd": 10.0, "age_sec": 0.0})
     spent = budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
     assert spent["refreshed"] is False and spent["reason"] == "no_authorized_room"
 
@@ -514,7 +516,7 @@ def test_threshold_refresh_refuses_every_unknown_or_stale_money_fact(tmp_path, m
     ctx._accumulated_usage = {"cost": 8.0}
     monkeypatch.setattr(loop_budget, "_wrapup_global_remaining", lambda: None)
     monkeypatch.setattr(loop_budget, "_loop_tree_accounting",
-                        lambda **_k: {"accounted_usd": 8.0, "age_sec": 0.0})
+                        lambda **_k: {"settled_usd": 8.0, "accounted_usd": 8.0, "age_sec": 0.0})
     assert budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0) == {
         "refreshed": False, "reason": "wallet_unavailable", "wallet_basis": "ledger_unavailable",
         "dispatch_time_remaining_usd": 100.0}
@@ -523,8 +525,8 @@ def test_threshold_refresh_refuses_every_unknown_or_stale_money_fact(tmp_path, m
     monkeypatch.setattr(loop_budget, "_wrapup_global_remaining", lambda: 100.0)
     for tree, reason in (
         (None, "tree_spend_unavailable"),
-        ({"accounted_usd": 8.0, "age_sec": 0.0, "integrity_degraded": True}, "tree_accounting_degraded"),
-        ({"accounted_usd": None, "age_sec": 0.0}, "tree_spend_unknown"),
+        ({"settled_usd": 8.0, "accounted_usd": 8.0, "age_sec": 0.0, "integrity_degraded": True}, "tree_accounting_degraded"),
+        ({"settled_usd": None, "accounted_usd": None, "age_sec": 0.0}, "tree_spend_unknown"),
     ):
         ctx._cost_ceiling = _ceiling()
         monkeypatch.setattr(loop_budget, "_loop_tree_accounting", lambda _t=tree, **_k: _t)
@@ -547,7 +549,7 @@ def test_threshold_refresh_reads_the_ledger_now_never_a_cached_snapshot(tmp_path
     ctx._accumulated_usage = {"cost": 8.0}
     monkeypatch.setattr(task_pacing, "resolve_budget_profile", lambda _c: {"cost_hard_stop_pct": 50})
     monkeypatch.setattr(loop_budget, "_wrapup_global_remaining", lambda: 100.0)
-    usage_accounting._stash_root_accounting("q10-root", 8.0, 10.0)  # fresh, 0-age display cache
+    usage_accounting._stash_root_accounting("q10-root", {"settled_usd": 8.0, "accounted_usd": 8.0}, 10.0)  # fresh, 0-age display cache
     monkeypatch.setattr(usage_accounting, "usage_projection",
                         lambda *_a, **_k: (_ for _ in ()).throw(OSError("ledger unavailable")))
     with usage_scope(UsageScope(drive_root=tmp_path, task_id="q10-task", root_task_id="q10-root")):
@@ -555,7 +557,7 @@ def test_threshold_refresh_reads_the_ledger_now_never_a_cached_snapshot(tmp_path
         assert refused == {"refreshed": False, "reason": "tree_spend_unavailable", "wallet_basis": "ledger_projection"}
         assert ctx._cost_ceiling.ceiling_usd == 7.0
         monkeypatch.setattr(usage_accounting, "usage_projection",
-                            lambda *_a, **_k: {"accounted_usd": 8.0, "limit_usd": 10.0})
+                            lambda *_a, **_k: {"settled_usd": 8.0, "accounted_usd": 8.0, "limit_usd": 10.0})
         granted = budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
     assert granted["refreshed"] is True and granted["root_cap_basis"] == "root_accounting"
     assert ctx._cost_ceiling.ceiling_usd == pytest.approx(10.0)

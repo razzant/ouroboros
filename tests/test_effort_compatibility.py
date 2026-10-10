@@ -1,7 +1,6 @@
 """Effort constraints and evidence through the existing physical send drivers."""
 import asyncio
 import copy
-import json
 
 import pytest
 
@@ -24,6 +23,7 @@ from tests.test_request_wire_recovery_phase2b import (
 from tests.test_request_wire_recovery_phase2b import (
     evidence_root as _evidence_root,
 )
+from tests._usage_store_testing import ledger_rows
 
 evidence_root = _evidence_root
 
@@ -148,7 +148,7 @@ def test_enum_without_scalar_echo_reaches_driver_and_learns_only_after_success(
     assert usage["effort"]["sent"] == {"extra_body.reasoning": {"effort": applied, "exclude": False}}
     assert usage["effort"]["reported"] is None
     assert usage["request_wire"]["applied_effort_source"] == "sent_candidate"
-    rows = [json.loads(line) for line in (tmp_path / ua.LEDGER_REL).read_text().splitlines()]
+    rows = ledger_rows(tmp_path)
     assert rows[-1]["state"] == "settled"
     assert rows[-1]["effort"] == usage["effort"]
     assert "effort_resolution" not in rows[-1] and "effort_resolution" not in usage
@@ -461,13 +461,18 @@ def test_logical_input_binding_survives_preparation_but_rejects_changed_input(ev
 def test_real_driver_recovery_binds_timeout_capsule_and_clock(evidence_root, tmp_path, asynchronous, body_error, nano):
     from ouroboros.send_clock import MainSendClock, SendClockPolicy
 
-    target = {**_target(), **({"context_mode": "nano"} if nano else {})}
+    target = _target()
     source = _value_payload("nested", target, "ultra")
     if nano:
-        source["max_tokens"] = 200000  # Forces real allowance reduction before sealing.
+        source["max_tokens"] = 200000  # Forces real allowance reduction before sealing (the 128K window below).
     source["timeout"] = 123
     source["messages"][0]["_context_capsule"] = {"kind": "host-only"}
     original, sent = copy.deepcopy(source), []
+    # A rendered Nano reaches the send only through the bound Main context (no keyword on the call chain).
+    physical = ua.PhysicalAttemptContext(
+        profile="owner_nano", rendered_mode="nano", measurement_basis="cold_estimate", route_fp="r", round_id="x:round:1",
+        target_total_tokens=85_000, capacity_total_tokens=128_000, context_target_miss=False, automatic_pass_used=False,
+    ) if nano else None
 
     def send(**candidate):
         sent.append(copy.deepcopy(candidate))
@@ -478,7 +483,8 @@ def test_real_driver_recovery_binds_timeout_capsule_and_clock(evidence_root, tmp
         return _Response()
 
     client = LLMClient(api_key="unused")
-    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="binding")), MainSendClock(SendClockPolicy("UTC")).bound():
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="binding")), MainSendClock(SendClockPolicy("UTC")).bound(), \
+            ua.bind_physical_attempt_context(physical):
         if asynchronous:
             async def async_send(**candidate):
                 return send(**candidate)
@@ -490,7 +496,8 @@ def test_real_driver_recovery_binds_timeout_capsule_and_clock(evidence_root, tmp
     assert all(candidate["timeout"] == 123 for candidate in sent)
     assert all("_context_capsule" not in candidate["messages"][0] for candidate in sent)
     if nano:
-        assert all(candidate["max_tokens"] < original["max_tokens"] for candidate in sent)
+        assert all(8_192 <= candidate["max_tokens"] < original["max_tokens"] for candidate in sent)
+        assert len({candidate["max_tokens"] for candidate in sent}) == 1  # every rung: one rule on one source
 
 
 @pytest.mark.parametrize("control", ["budget", "stop"])
@@ -541,10 +548,8 @@ def test_original_preference_survives_native_mapping_in_usage_and_ledger(evidenc
         attach_processing_receipt(target, usage)
     assert usage["effort"]["requested"] == requested
     assert usage["effort"]["reported"] is None
-    rows = [json.loads(line) for line in (tmp_path / ua.LEDGER_REL).read_text().splitlines()]
-    reserved = next(row for row in rows if row["state"] == "reserved")
-    assert reserved["effort"] == usage["effort"]
-    assert rows[-1]["state"] == "settled"
+    rows = ledger_rows(tmp_path)  # one row per attempt: the settled row carries the candidate effort
+    assert [row["state"] for row in rows] == ["settled"]
     assert rows[-1]["effort"] == usage["effort"]
 
 
@@ -583,7 +588,7 @@ def test_native_omission_is_recorded_without_inventing_provider_effort(tmp_path,
         "requested": "ultra", "sent": {}, "sent_state": "omitted", "sent_source": "host_candidate",
         "reported": None, "report_source": None,
     }
-    rows = [json.loads(line) for line in (tmp_path / ua.LEDGER_REL).read_text().splitlines()]
+    rows = ledger_rows(tmp_path)
     assert rows[-1]["state"] == "settled"
     assert rows[-1]["effort"] == usage["effort"]
 
@@ -609,7 +614,7 @@ def test_local_driver_retains_known_intent_with_omitted_effort(tmp_path, monkeyp
         "requested": "ultra", "sent": {}, "sent_state": "omitted", "sent_source": "host_candidate",
         "reported": None, "report_source": None,
     }
-    rows = [json.loads(line) for line in (tmp_path / ua.LEDGER_REL).read_text().splitlines()]
+    rows = ledger_rows(tmp_path)
     assert rows[-1]["state"] == "settled" and rows[-1]["effort"] == usage["effort"]
 
 
@@ -635,9 +640,9 @@ def test_late_receipt_keeps_candidate_effort_without_inheriting_an_older_report(
         # A historical administrative row may contain an older observation.
         ua._transition(reservation, "settled", settle_reason="abandoned", cost_usd=None, cost_final=False,
                        effort={**request.effort, "reported": "high", "report_source": "provider_response"})
+        assert ledger_rows(tmp_path)[-1]["effort"]["reported"] == "high"
         ua.settle_attempt(reservation, {}, cost_usd=0.25, cost_final=True)
-    rows = [json.loads(line) for line in (tmp_path / ua.LEDGER_REL).read_text().splitlines()]
-    assert rows[-2]["effort"]["reported"] == "high"
+    rows = ledger_rows(tmp_path)
     assert rows[-1]["effort"] == request.effort
     assert rows[-1]["settle_reason"] == "late_receipt"
     assert rows[-1]["cost_usd"] == 0.25 and rows[-1]["cost_final"] is True

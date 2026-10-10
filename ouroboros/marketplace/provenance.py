@@ -18,7 +18,7 @@ import pathlib
 import re
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from ouroboros.skill_loader import skill_state_dir
+from ouroboros.skill_loader import skill_state_dir, skill_state_dir_path
 from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -57,9 +57,10 @@ def read_provenance(
     drive_root: pathlib.Path,
     skill_name: str,
 ) -> Optional[Dict[str, Any]]:
-    """Return the persisted provenance for ``skill_name`` or ``None``."""
-    state_dir = skill_state_dir(drive_root, skill_name)
-    target = state_dir / PROVENANCE_FILENAME
+    """Return the persisted provenance for ``skill_name`` or ``None``.
+
+    Non-creating: a missing state dir reads exactly like a missing file."""
+    target = skill_state_dir_path(drive_root, skill_name) / PROVENANCE_FILENAME
     if not target.is_file():
         return None
     return read_json_dict(target)
@@ -161,10 +162,9 @@ def read_publication_record(
     * ``(dict, None)`` — the validated ``published`` section, as stored.
     * ``(None, str)`` — the file exists but is malformed or fails the
       schema-v1 validation contract; the string is a typed diagnostic.
-      Reading never repairs or rewrites the file.
+      Reading never repairs or rewrites the file, and never creates the dir.
     """
-    state_dir = skill_state_dir(drive_root, skill_name)
-    target = state_dir / PUBLICATION_FILENAME
+    target = skill_state_dir_path(drive_root, skill_name) / PUBLICATION_FILENAME
     if not target.is_file():
         return None, None
     record = read_json_dict(target)

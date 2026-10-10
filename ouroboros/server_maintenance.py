@@ -49,6 +49,8 @@ def orphan_reconcile_write_guard(task_id: str, *, stop_event: Any = None):
     the settlement probe must prove absence; a process with no supervisor (no-provider boot) dispatches nothing."""
     from supervisor import queue
 
+    if queue.INITIALIZED:
+        queue.task_settlement_liveness(task_id)  # Prepare durable reads before the mutation interlock.
     with queue._queue_lock:
         yield not _stop_requested(stop_event) and (not queue.INITIALIZED or queue.task_settlement_liveness(task_id) is False)
 
@@ -68,7 +70,7 @@ def _live_task_ids() -> set:
     return _startup_live_task_ids(DATA_DIR)
 
 
-def _run_cancel_delivery_ref_sweep(drive_root: pathlib.Path) -> None:
+def _run_cancel_delivery_ref_sweep(drive_root: pathlib.Path, stop_event: Any = None) -> None:
     """20 s cancel/delivery/usage pass; history-sized work rides the 300 s reconcile pass."""
     try:
         try:
@@ -85,6 +87,12 @@ def _run_cancel_delivery_ref_sweep(drive_root: pathlib.Path) -> None:
             _step_recovered("terminal_delivery_replay")
         except Exception:
             _step_failed("terminal_delivery_replay")
+        try:
+            from ouroboros.pause_notices import reconcile_pause_notices
+            reconcile_pause_notices(drive_root, stop_requested=stop_event.is_set if stop_event is not None else None)
+            _step_recovered("pause_notice_replay")
+        except Exception:
+            _step_failed("pause_notice_replay")
         try:
             _reconcile_abandoned_usage(drive_root)
             _step_recovered("abandoned_usage_reconciliation")
@@ -211,7 +219,7 @@ def _periodic_supervisor_maintenance(
         if _CANCEL_INTENT_SWEEP_LOCK.acquire(blocking=False):
             _LAST_CANCEL_INTENT_SWEEP[0] = now
             _start_maintenance_thread(_CANCEL_INTENT_SWEEP_LOCK, "terminal-maintenance",
-                                      _run_cancel_delivery_ref_sweep, (pathlib.Path(DATA_DIR),))
+                                      _run_cancel_delivery_ref_sweep, (pathlib.Path(DATA_DIR), stop_event))
         else:
             _duty_busy(_CANCEL_INTENT_SWEEP_LOCK, 20)
     latch = _CUSTODY_SWEEP_LOCK  # a pass releases THIS object, never a later generation's
@@ -232,15 +240,12 @@ def _periodic_supervisor_maintenance(
 
 
 def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> None:
-    """The ~600 s custody block, OFF the thread that answers workers (INV-B).
-
-    Skill-payload hashing, the orphaned-process reaper, delegated-run reconciliation
-    (gateway handshake, custody replays, registration retirement) and the
-    settled-terminal cursor cost seconds to minutes — longer than any worker ack
-    wait. The caller took ``_CUSTODY_SWEEP_LOCK`` without blocking (busy => skip,
-    never queue); this pass releases it in ``finally``. Nothing serializes it
-    against assignment, so each step reads its CANDIDATES before the shared live
-    set, and the generation is re-read before every mutation."""
+    """Keep slow hashing, reaping and reconciliation off the worker-ack thread (INV-B).
+    The caller's nonblocking latch skips busy passes; ``finally`` releases that latch.
+    Assignment stays concurrent: read candidates before live sets and recheck the
+    generation before each mutation. Spawn only after releasing a failed-start latch,
+    at most once per sweep; healthy installs never spawn or wait here.
+    """
     try:
         try:
             if _stop_requested(stop_event):
@@ -283,7 +288,9 @@ def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> No
             step = "reconcile_delegated_runs"
             if _stop_requested(stop_event):
                 return
-            _reconcile_delegated_runs(_live_task_ids, stop_event=stop_event)
+            from ouroboros.delegate_custody_current import current_reads
+            with current_reads(DATA_DIR):
+                _reconcile_delegated_runs(_live_task_ids, stop_event=stop_event)
             step = "cursor_refresh_settled_terminals"
             if _stop_requested(stop_event):
                 return
@@ -365,22 +372,17 @@ def _startup_retired_settings_notice(settings: dict) -> None:
     """Tell the OWNER, in their chat, that retired keys in ``settings.json`` are NOT honored.
 
     ``config.normalize_settings_raw`` reports the loss on the module logger only, which an
-    owner who never opens the Logs panel does not see — and the reviewer comma-lists are
-    the case that matters: an install upgraded without authoring
-    ``OUROBOROS_REVIEWER_SLOTS`` silently runs the shipped default panel, and one that
-    authored it malformed has every review refused until it is repaired. The dropped sets
-    come from that same read seam (``config.retired_key_sets_seen``), the sentence is the
-    one the log line uses (``settings_defaults.retired_setting_keys_notice``, fed the
-    document's absent / authored / invalid state by
-    ``reviewer_slot_config.authored_reviewer_slots_state``), and the
-    dedupe is durable: ``state.json:retired_settings_notified`` keyed by the exact
-    retired-key set, so a restart or a supervisor revival never repeats it. Nothing is
-    sent — and nothing marked — while no owner chat is bound: the notice waits for the
-    first boot that has somewhere to deliver it.
+    owner who never opens the Logs panel does not see. The dropped sets come from that same
+    read seam (``config.retired_key_sets_seen``), the sentence is the one the log line uses
+    (``settings_defaults.retired_setting_keys_notice``), and the dedupe is durable:
+    ``state.json:retired_settings_notified`` keyed by the exact retired-key set, so a
+    restart or a supervisor revival never repeats it. Nothing is sent — and nothing
+    marked — while no owner chat is bound: the notice waits for the first boot that has
+    somewhere to deliver it. Which reviewers run is the review-pool migration's report
+    (``_startup_review_pool_notice``), not this one's.
     """
     try:
         from ouroboros.config import retired_key_sets_seen
-        from ouroboros.reviewer_slot_config import authored_reviewer_slots_state
         from ouroboros.settings_defaults import retired_setting_keys_notice
         from supervisor.message_bus import send_with_budget
         from supervisor.state import load_state, update_state
@@ -391,28 +393,193 @@ def _startup_retired_settings_notice(settings: dict) -> None:
             return
         notified = state.get("retired_settings_notified")
         notified = notified if isinstance(notified, dict) else {}
-        slots_state = authored_reviewer_slots_state(
-            str((settings or {}).get("OUROBOROS_REVIEWER_SLOTS") or ""))
         for dropped in retired_key_sets_seen():
             marker = ",".join(dropped)
             if marker in notified:
                 continue
             send_with_budget(
                 owner_chat,
-                "⚙️ Settings: " + retired_setting_keys_notice(
-                    dropped, reviewer_slots=slots_state),
+                "⚙️ Settings: " + retired_setting_keys_notice(dropped),
                 role="system", system_type="retired_settings_notice",
             )
-
-            def _mark(st: dict, key: str = marker) -> None:
-                seen = st.get("retired_settings_notified")
-                seen = dict(seen) if isinstance(seen, dict) else {}
-                seen[key] = utc_now_iso()
-                st["retired_settings_notified"] = seen
-
-            update_state(_mark)
+            update_state(lambda st, key=marker: _mark_retired_settings_notified(st, key))
     except Exception:
         log.debug("retired settings owner notice failed", exc_info=True)
+
+
+def _mark_retired_settings_notified(st: dict, marker: str) -> None:
+    """Stamp ``marker`` in the durable owner-notice ledger ``state.json:retired_settings_notified``."""
+    seen = st.get("retired_settings_notified")
+    seen = dict(seen) if isinstance(seen, dict) else {}
+    seen[marker] = utc_now_iso()
+    st["retired_settings_notified"] = seen
+
+
+def environment_retired_review_keys(environ: Dict[str, str] | None = None) -> tuple[str, ...]:
+    """The retired review keys the PROCESS ENVIRONMENT carries with a value: the review lanes
+    (``OUROBOROS_REVIEWER_SLOTS``), the per-surface review efforts / deep-review model and the
+    older reviewer comma-lists. No release reads them from the environment any more — the
+    environment merge (``config.load_settings``) walks ``SETTINGS_DEFAULTS``, which retired
+    them, and the pool migration reads the DOCUMENT — so an operator who still exports them
+    (a Docker/Linux unit, a Colab cell) configures nothing (D1-V03): the install runs its own
+    pool (the catalog in the document, else the factory rows)."""
+    from ouroboros.settings_defaults import RETIRED_COMMA_LIST_SETTING_KEYS, REVIEW_POOL_MIGRATED_SETTING_KEYS
+
+    env = os.environ if environ is None else environ
+    return tuple(key for key in REVIEW_POOL_MIGRATED_SETTING_KEYS + RETIRED_COMMA_LIST_SETTING_KEYS
+                 if str(env.get(key) or "").strip())
+
+
+def environment_review_notice(keys: tuple[str, ...]) -> str:
+    """The ONE sentence (log line and owner chat alike) for review keys found in the environment."""
+    plural = len(keys) != 1
+    return (
+        f"⚙️ Settings: the process environment sets {', '.join(keys)}, which {'are' if plural else 'is'} no longer "
+        "read: the review lanes and the reviewer lists became the review pool — the rows of the subagent "
+        "catalog marked “Reviewer” (OUROBOROS_SUBAGENTS, Settings → Agents). "
+        f"{'Those values were' if plural else 'That value was'} not applied; the install's own pool runs. "
+        "To configure the pool from the environment, set OUROBOROS_SUBAGENTS to a catalog with marked rows."
+    )
+
+
+def _startup_environment_review_notice() -> None:
+    """Say ONCE, loudly, that review keys set in the environment are not read (D1-V03 / VD3-03):
+    a WARNING on the server log at every boot, and the same sentence in the owner chat once per
+    exact key set (durable: ``state.json:retired_settings_notified`` under an ``environment:``
+    marker, the retired-settings notice's own ledger). Nothing is read from the environment
+    into the pool here or anywhere: the fact is loud, the behaviour unchanged."""
+    keys = environment_retired_review_keys()
+    if not keys:
+        return
+    text = environment_review_notice(keys)
+    log.warning(text)
+    try:
+        from supervisor.message_bus import send_with_budget
+        from supervisor.state import load_state, update_state
+
+        state = load_state()
+        owner_chat = int(state.get("owner_chat_id") or 0)
+        if not owner_chat:
+            return
+        marker = "environment:" + ",".join(keys)
+        notified = state.get("retired_settings_notified")
+        if marker in (notified if isinstance(notified, dict) else {}):
+            return
+        send_with_budget(owner_chat, text, role="system", system_type="retired_settings_notice")
+        update_state(lambda st: _mark_retired_settings_notified(st, marker))
+    except Exception:
+        log.debug("environment review keys owner notice failed", exc_info=True)
+
+
+REVIEW_POOL_MIGRATION_STATE_KEY = "review_pool_migrations"  # ``review_pool_receipts.STATE_KEY``
+REVIEW_POOL_NOTICE_TYPE = "review_pool_migration_notice"
+
+
+def review_pool_migration_records(state: dict | None = None) -> dict:
+    """The durable per-document migration records (``state.json:review_pool_migrations``):
+    ``input_sha256 -> {ts, snapshot, trigger, outcome, error, reported}`` — the ledger
+    ``review_pool_receipts`` keeps; this is the name the ``## Review`` block reads."""
+    from ouroboros.review_pool_receipts import migration_records
+
+    return migration_records(state)
+
+
+def review_pool_migration_payload(settings: dict, *, document: dict | None = None) -> dict | None:
+    """The review-pool payload's ``migration`` fact for this data root (``review_pool_receipts.migration_payload`` over
+    the ledger plus the snapshot files no record names yet). ``settings`` is what RUNS; ``document`` (default ``settings``)
+    is the settings document the receipt is judged against — the GET handler passes the document on disk (VD3-06)."""
+    from ouroboros.review_pool_receipts import migration_payload
+
+    return migration_payload(settings if document is None else document, DATA_DIR, review_pool_migration_records(), running=settings)
+
+
+def _startup_review_pool_notice(settings: dict) -> None:
+    """Tell the OWNER once about every review-lane -> review-pool migration recorded for this
+    data root, from the DURABLE receipts — never from this process's memory alone.
+
+    The migration itself is pure and runs at the read seam (``config.normalize_settings_raw``
+    -> ``review_pool_migration.apply_at_read_seam``) in whichever process reads an old document;
+    the process that SAVES the migrated document writes its receipts before that write
+    (``review_pool_receipts.persist_write_receipts`` from the persistence prologue and the Colab
+    writer): the snapshot ``state/review_migrations/<ts>-slots-to-pool.json`` and the
+    ``state.json`` record. This boot step first gives receipts, by the writer's rule, only to
+    the migrations deciding the document on disk now (``persist_boot_receipts``: the N-1 document
+    the boot read before any save; with no file, the defaults ``settings`` carries; never the
+    factory rows of defaults read before the wizard saved its own catalog), then reconciles a
+    record for every snapshot another process left without one (a Colab kernel, the launcher
+    menu, the UI before this supervisor generation), and sends ONE English owner-chat message
+    (``review_pool_migration.owner_message``) per record whose ``reported`` is still unset,
+    once an owner chat is bound. A migration that could not finish is reported the same way
+    (its snapshot carries the error; the lane keys stay in the document for the owner's catalog
+    save). A no-op outcome (the catalog was already a pool) leaves no receipt: nothing changed.
+    Each unreported record is judged against the document AS READ (``review_pool_receipts.document_as_read``: the
+    file as the seam leaves it, no environment); ``settings`` is what RUNS (the environment merged over it). A record
+    whose outcome no longer decides that document (the factory rows receipted at a file-less start before the wizard
+    saved its own catalog) is closed as history without a message (``review_pool_receipts.close_as_history``), never
+    delivered as if the owner's catalog were the environment's. Where the environment's catalog overrides the rows the
+    seam minted for a document without review settings of its own (``environment_overridable_keys``), the message names
+    THAT pool — loudly empty when none of its rows is marked. A never-configured document whose process environment
+    still carries the retired review keys is told those keys are no longer read (``environment_retired_review_keys``).
+    """
+    try:
+        from ouroboros import config, review_pool_receipts as receipts
+        from ouroboros.review_pool_migration import owner_message
+        from supervisor.message_bus import send_with_budget
+        from supervisor.state import load_state, update_state
+
+        receipts.persist_boot_receipts(DATA_DIR, config.SETTINGS_PATH, settings)
+        state = load_state()
+        owner_chat = int(state.get("owner_chat_id") or 0)
+        records = receipts.reconcile_records(DATA_DIR, state, update_state)
+        if not owner_chat:
+            return
+        document = receipts.document_as_read(config.SETTINGS_PATH, settings)
+        for digest, record in sorted(records.items(), key=lambda item: str(item[1].get("ts") or "")):
+            if record.get("reported"):
+                continue
+            snapshot = receipts.load_snapshot(DATA_DIR, record)
+            if snapshot is None:
+                log.warning("review pool migration snapshot missing, owner not told: %s", record.get("snapshot"))
+                continue
+            outcome = receipts.outcome_from_snapshot(snapshot)
+            snapshot_path = str(record.get("snapshot") or "")
+            if receipts.close_as_history(outcome, document, update_state, digest, record):
+                continue
+            in_force = receipts.environment_catalog_in_force(outcome, document, settings)
+            text = (_environment_pool_message(snapshot_path, in_force) if in_force is not None else
+                    owner_message(outcome, snapshot_path, environment_retired_keys=environment_retired_review_keys()))
+            if not text:
+                continue
+            send_with_budget(owner_chat, text, role="system", system_type=REVIEW_POOL_NOTICE_TYPE)
+            receipts.mark_reported(update_state, digest, record)
+    except Exception:
+        log.debug("review pool migration notice failed", exc_info=True)
+
+
+def _environment_pool_message(snapshot_path: str, catalog_text: str) -> str:
+    """The ONE owner-chat message when the catalog the environment carries, not the factory
+    rows the migration prepared, is the review pool: it names what runs, and says loudly
+    when that is nothing (``pool_empty`` — a configured fact, never a default panel)."""
+    from ouroboros import reviewer_slot_config as rs
+    from ouroboros.review_pool_migration import ROLLBACK_SENTENCE
+
+    where = (f"Snapshot: {snapshot_path}. {ROLLBACK_SENTENCE}" if snapshot_path
+             else "No snapshot could be written, so there is no rollback source.")
+    head = ("⚙️ Review pool: the subagent catalog set in the environment (OUROBOROS_SUBAGENTS) is in force. "
+            "This document had no review settings of its own (no authored review lanes, no saved subagent "
+            "catalog), so the factory reviewer rows were prepared for it — but a catalog the environment "
+            "carries is explicit configuration and runs instead; the factory rows do not.")
+    state = rs.review_pool_state(catalog_text)
+    if state["state"] == "error":
+        body = f"That catalog cannot be read ({state['error']}): no review runs until it is repaired."
+    elif state["state"] == "empty":
+        body = ("None of its rows is marked “Reviewer”, so the review pool is empty (pool_empty): reviews will not "
+                "run and will report not performed.")
+    else:
+        rows = rs.review_pool_rows({"OUROBOROS_SUBAGENTS": catalog_text})
+        body = (f"{len(rows)} reviewer rows, {len({row.target_id for row in rows})} distinct models: "
+                + "; ".join(f"{row.slot_id} ({row.target_id})" for row in rows) + ".")
+    return "\n".join([head, body, f"{where} Adjust in Settings → Agents or in the environment."])
 
 
 def _prune_event(event_type: str, keys: tuple, **reports: dict) -> None:
@@ -490,24 +657,56 @@ def prune_agent_media_uploads(
     return report
 
 
-def _startup_prune_sweeps(*, preserve_task_sources: bool = False) -> None:
-    """Startup hygiene: prune stale task drives/trees and orphaned temp files."""
-    try:
-        from ouroboros.headless import prune_task_trees
-        from ouroboros.utils import sweep_stale_temp_files
+_STARTUP_PRUNES_OWED = [False]
+_STARTUP_SOURCE_PRUNES_OWED = [False]
+_STARTUP_TREES_OWED = [False]
+_STARTUP_RECOVERY_GAPS = [False]
 
-        if preserve_task_sources:
-            log.warning("Startup task-source prune deferred: file recovery or ownership is unresolved")
-        else:
-            # Child and direct drives are settled off the loop thread by the reconcile pass
-            # (``_run_drive_custody_pass``): readiness waits on no child-store copy or hash.
-            # Startup sweeps only the top-level tmp_scripts fallback (no script can be live
-            # yet); the whole-tree walk for atomic temps is owed to the first reconcile pass.
-            prune_task_trees(DATA_DIR)
-            sweep_stale_temp_files(DATA_DIR, atomic_temps=False)
-            _STARTUP_TEMP_SWEEP_OWED[0] = True
-    except Exception:
-        log.debug("Task tree prune failed", exc_info=True)
+
+def _startup_prune_sweeps(*, preserve_task_sources=False, recovery_report=None):
+    """Owe housekeeping off-loop; fallback scripts can only be reaped before intake."""
+    _STARTUP_PRUNES_OWED[0] = _STARTUP_TREES_OWED[0] = _STARTUP_SOURCE_PRUNES_OWED[0] = True
+    _STARTUP_RECOVERY_GAPS[0] = bool(preserve_task_sources and (
+        recovery_report is None or recovery_report.get("errors") or "*" in recovery_report.get("unresolved", [])))
+    if not preserve_task_sources:
+        from ouroboros.utils import sweep_stale_temp_files
+        sweep_stale_temp_files(DATA_DIR, atomic_temps=False)
+        _STARTUP_TEMP_SWEEP_OWED[0] = True
+
+
+def _run_deferred_startup_prunes():
+    """Retry owed housekeeping; clear each duty only after success.
+    Tree/source pruning waits for gap-free recovery and complete recovery links;
+    mailbox and service-log duties retry independently, preserving protected trees."""
+    from ouroboros.startup_task_files import startup_tree_exclusions
+    from ouroboros.headless import prune_task_trees
+    if not _STARTUP_RECOVERY_GAPS[0] and (_STARTUP_TREES_OWED[0] or _STARTUP_SOURCE_PRUNES_OWED[0]):
+        exclusions = startup_tree_exclusions(DATA_DIR)
+        if exclusions is not None:
+            if _STARTUP_TREES_OWED[0]:
+                prune_task_trees(DATA_DIR, exclude_root_ids=exclusions)
+                _STARTUP_TREES_OWED[0] = False
+                _STARTUP_TEMP_SWEEP_OWED[0] = True
+            if _STARTUP_SOURCE_PRUNES_OWED[0]:
+                try:
+                    from ouroboros.owner_mailbox import sweep_settled_owner_mailboxes
+                    from ouroboros.tools.services import prune_service_logs
+                    _prune_event("owner_mailbox_sweep", ("removed",), report=sweep_settled_owner_mailboxes(DATA_DIR))
+                    _prune_event("runtime_artifact_prune", ("deleted_dirs", "deleted_files", "errors"),
+                                 services=prune_service_logs(DATA_DIR))
+                    _STARTUP_SOURCE_PRUNES_OWED[0] = False
+                except Exception:
+                    log.debug("Source housekeeping remains owed", exc_info=True)
+    if not _STARTUP_PRUNES_OWED[0]:
+        return
+    _STARTUP_PRUNES_OWED[0] = False
+    _startup_worktree_prune()
+    from ouroboros.delegate_custody_current import current_reads
+    with current_reads(DATA_DIR):
+        _prune_delegated_snapshots()
+    from ouroboros.delegate_state_sweep import sweep_settled_delegate_state
+    _prune_event("delegate_state_sweep", ("removed", "errors", "skipped"),
+                 report=sweep_settled_delegate_state(DATA_DIR))
     try:
         # CPL4-C11 (owner batch 3A): clear owner state of tombstoned-uninstalled
         # skills; grants survive as owner authority, reinstalls self-heal.
@@ -537,31 +736,12 @@ def _startup_prune_sweeps(*, preserve_task_sources: bool = False) -> None:
     except Exception:
         log.debug("Memory journal compaction failed", exc_info=True)
     try:
-        # CPL4-C18: unlink mailboxes whose task settled off the terminal
-        # dispatch path (fail-closed: no result keeps the mailbox).
-        from ouroboros.owner_mailbox import sweep_settled_owner_mailboxes
-
-        _prune_event("owner_mailbox_sweep", ("removed",), report=(
-            {} if preserve_task_sources else sweep_settled_owner_mailboxes(DATA_DIR)))
-    except Exception:
-        log.debug("Owner mailbox sweep failed", exc_info=True)
-    try:
         # CPL4-C21 (owner 6A): agent screenshots/views follow GC retention;
         # owner attachments in the uploads/ root are never touched.
         _prune_event("agent_media_prune", ("removed", "skipped", "errors"),
                      report=prune_agent_media_uploads(DATA_DIR))
     except Exception:
         log.debug("Agent media prune failed", exc_info=True)
-    if not preserve_task_sources:
-        try:
-            # Observability blobs are never deleted and never counted here: a startup census
-            # was 193k stat() calls that changed nothing (TZ-1 A).
-            from ouroboros.tools.services import prune_service_logs
-
-            _prune_event("runtime_artifact_prune", ("deleted_dirs", "deleted_files", "errors"),
-                         services=prune_service_logs(DATA_DIR))
-        except Exception:
-            log.debug("Runtime artifact prune failed", exc_info=True)
 
 
 def _cursor_refresh_settled_terminals(live_task_ids: Any = None) -> None:
@@ -601,7 +781,9 @@ def _startup_custody_sweep() -> None:
             log.info("Process custody reaper killed %d orphaned process(es): %s", len(reaped), reaped)
     except Exception:
         log.debug("Process custody startup reap failed", exc_info=True)
-    _reconcile_delegated_runs(_live_task_ids)
+    from ouroboros.delegate_custody_current import current_reads
+    with current_reads(DATA_DIR):
+        _reconcile_delegated_runs(_live_task_ids)
     try:
         # D1a boot backfill, ONCE per generation and AFTER the orphan reconcile
         # (so this generation's settlements are already visible to the audit):
@@ -611,13 +793,13 @@ def _startup_custody_sweep() -> None:
         # results instead and heals every generation-crossing stale row.
         from ouroboros.delegate_terminal import backfill_terminal_reconciliations
 
-        refreshed = backfill_terminal_reconciliations(DATA_DIR)
+        with current_reads(DATA_DIR):
+            refreshed = backfill_terminal_reconciliations(DATA_DIR)
         if refreshed:
             log.info("Boot custody backfill refreshed %d stored disclosure(s): %s",
                      len(refreshed), refreshed)
     except Exception:
         log.debug("Boot custody-disclosure backfill failed", exc_info=True)
-    _cursor_refresh_settled_terminals(_live_task_ids)
     try:
         # Boot half of the durable terminal outbox: an answer that was registered
         # as owed but whose send never completed (crash between settle and send)
@@ -628,16 +810,6 @@ def _startup_custody_sweep() -> None:
         replay_pending_deliveries(DATA_DIR)
     except Exception:
         log.debug("Boot replay of pending terminal deliveries failed", exc_info=True)
-    try:
-        # CPL4-C13: terminal+age sweep of delegate recovery/supervision files —
-        # beside the custody sweep, fail-closed on unreadable custody exactly
-        # like _prune_delegated_snapshots.
-        from ouroboros.delegate_state_sweep import sweep_settled_delegate_state
-
-        _prune_event("delegate_state_sweep", ("removed", "errors", "skipped"),
-                     report=sweep_settled_delegate_state(DATA_DIR))
-    except Exception:
-        log.debug("Delegate state sweep failed", exc_info=True)
 
 
 def _prune_delegated_snapshots() -> None:
@@ -650,20 +822,24 @@ def _prune_delegated_snapshots() -> None:
     custody rows and ``_iter_rows`` swallows its own OSError, so an unreadable log
     would replay as "no open runs", empty the keep-set and destroy every live
     snapshot with the child's only copy of its work. GC deletes only over PROVEN
-    settled && patch_disposed; an UNKNOWN custody state skips the prune, loudly."""
+    settled && patch_disposed; an UNKNOWN custody state skips the prune, loudly. So does an
+    owed obligations rebuild: a custody row that landed while its set could not be updated
+    is missing from the set until the next start merges it."""
     try:
         from ouroboros import delegate_custody as _delegate_custody
         from ouroboros import subagent_worktrees as _snap_worktrees
+        from ouroboros.obligations import REBUILD_MARK
         from supervisor.state import append_jsonl
 
-        if _delegate_custody.custody_log_unreadable(DATA_DIR):
-            log.warning(
-                "Delegated snapshot prune SKIPPED: custody event log exists but "
-                "cannot be read, so open snapshots are unknowable (fail-closed)")
+        reason = ("custody_log_unreadable" if _delegate_custody.custody_log_unreadable(DATA_DIR)
+                  else "obligations_rebuild_owed" if (DATA_DIR / "state" / "obligations" / REBUILD_MARK).exists()
+                  else "")
+        if reason:
+            log.warning("Delegated snapshot prune SKIPPED (%s): open snapshots are unknowable (fail-closed)", reason)
             if not append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "delegated_snapshot_prune_skipped",
-                "reason": "custody_log_unreadable",
+                "reason": reason,
             }):
                 # CR2-2: the log is unwritable too — the promised durable row
                 # could not land. Escalate loudly; the skip itself already
@@ -703,6 +879,12 @@ def _run_periodic_reconcile_sweep(marker: list, stop_event: Any = None, latch: A
     mutation owners, again before each publication commits."""
     try:
         _periodic_zombie_reconcile(on_orphans_healed=on_orphans_healed, stop_event=stop_event)
+        if not _stop_requested(stop_event) and (
+                _STARTUP_PRUNES_OWED[0] or _STARTUP_TREES_OWED[0] or _STARTUP_SOURCE_PRUNES_OWED[0]):
+            try:
+                _run_deferred_startup_prunes()
+            except Exception:
+                log.warning("Startup housekeeping remains deferred", exc_info=True)
         if _stop_requested(stop_event):
             return
         from ouroboros.review_operation import collect_orphaned_operations_softly
@@ -768,8 +950,8 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
 def _periodic_zombie_reconcile(*, on_orphans_healed: Any = None, stop_event: Any = None) -> None:
     """Heal zombie 'running' records on a supervisor cadence. A worker that died
     mid-review (crash / SIGKILL / manual stop) leaves ``review_job.json`` at running
-    forever in headless/no-UI runs, where the boot and ``GET /api/extensions``
-    reconciles never fire; the same death leaves ``task_results/<id>.json`` at
+    until the next boot reconcile (``GET /api/extensions`` is a passive read and
+    heals nothing); the same death leaves ``task_results/<id>.json`` at
     running. Both reconciles are liveness-gated (pid-dead / queue-empty + worker-boot
     evidence), so a live review or task is never touched. Off the loop thread, so
     ``stop_event`` (the generation token) is re-read before every step."""
@@ -821,9 +1003,9 @@ def _migrate_startup_cancel_latches(drive_root: pathlib.Path) -> None:
         # Phase A boot migration: legacy ``cancel_requested`` status latches
         # become ordinary durable cancel intents; the supervisor watchdog then
         # drives each through custody to a real settled outcome.
-        from ouroboros.cancel_intents import migrate_legacy_cancel_latches
+        from ouroboros.startup_migrations import migrate_cancel_latches
 
-        migrated = migrate_legacy_cancel_latches(drive_root)
+        migrated = migrate_cancel_latches(drive_root)
         if migrated:
             log.info("Migrated %d legacy cancel latch(es) to durable intents: %s",
                      len(migrated), migrated)
@@ -904,83 +1086,8 @@ def _startup_worker_pids(drive_root: pathlib.Path) -> set[int] | None:
 
 
 def _recover_terminal_task_files(drive_root: pathlib.Path, protected: set[str]) -> dict:
-    """Recover only known child directories, never infer a new model execution."""
-    from ouroboros.cancel_intents import cancel_pending
-    from ouroboros.headless import (
-        HEADLESS_TASKS_DIR,
-        TASK_DRIVES_DIR,
-        prepare_terminal_task_files,
-        terminal_task_files_ready,
-    )
-    from ouroboros.observability import _has_pending_ref_promotion
-    from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
-    from ouroboros.task_status import SETTLED_STATUSES, effective_task_result
-
-    root = pathlib.Path(drive_root)
-    report = {"recovered": [], "unresolved": [], "protected": sorted(protected), "errors": []}
-    for base, suffix in ((root / HEADLESS_TASKS_DIR, "data"), (root / TASK_DRIVES_DIR, "")):
-        try:
-            directories = sorted(base.iterdir())
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            report["errors"].append(str(exc))
-            report["unresolved"].append("*")
-            continue
-        for directory in directories:
-            if not directory.is_dir() or directory.is_symlink() or directory.name in protected:
-                continue
-            task_id, child_root = directory.name, directory / suffix
-            try:
-                base_resolved = base.resolve(strict=True)
-                directory_resolved = directory.resolve(strict=True)
-                if directory_resolved.parent != base_resolved:
-                    continue
-                if suffix and child_root.is_symlink():
-                    continue
-                child_root.resolve(strict=True).relative_to(directory_resolved)
-                validate_task_id(task_id)
-                current = load_task_result(root, task_id, strict=True) or {}
-                task = {**current, "id": task_id, "drive_root": str(child_root)}
-                ready = terminal_task_files_ready(root, task, current)
-                pending = _has_pending_ref_promotion(current.get("child_ref_promotion"))
-                if ready:
-                    continue  # History is already owed to the off-loop retry owner.
-                if not ready:
-                    source = load_task_result(child_root, task_id, strict=True) or {}
-                    if source.get("status") not in SETTLED_STATUSES:
-                        if (current.get("status") == "scheduled" and source.get("status") == "running"
-                                and source.get("started_at") and not source.get("_is_direct_chat")
-                                and not cancel_pending(root, task_id, strict=True)):
-                            # Older split roots omitted their canonical start.
-                            # Rebind only when the existing queue/worker/direct
-                            # ownership rules already prove this child orphaned.
-                            observed = effective_task_result(root, {
-                                **current, "child_drive_root": str(child_root),
-                            }, materialize_artifacts=False)
-                            if observed.get("reason_code") == "orphaned_running_after_worker_restart":
-                                write_task_result(
-                                    root, task_id, "running", child_drive_root=str(child_root),
-                                    budget_drive_root=str(root), started_at=source["started_at"],
-                                    ts=source.get("ts") or source["started_at"],
-                                )
-                                report.setdefault("rebound", []).append(task_id)
-                        if (pending or current.get("status") == "completed") and (
-                            suffix or current.get("headless_child_drive_root") or current.get("child_drive_root")
-                        ):
-                            report["unresolved"].append(task_id)
-                        continue  # Ordinary canonical task scratch has no child result.
-                    task = {**source, **current, "id": task_id, "drive_root": str(child_root)}
-                prepared = prepare_terminal_task_files(root, task)
-                settled = load_task_result(root, task_id, strict=True)
-                if prepared["error"] or not terminal_task_files_ready(root, task, settled):
-                    report["unresolved"].append(task_id)
-                else:
-                    report["recovered"].append(task_id)
-            except Exception as exc:
-                report["unresolved"].append(task_id)
-                report["errors"].append(f"{task_id}: {type(exc).__name__}: {exc}")
-    return report
+    from ouroboros.startup_task_files import recover_terminal_task_files
+    return recover_terminal_task_files(drive_root, protected)
 
 
 def _run_startup_task_recovery(
@@ -997,7 +1104,6 @@ def _run_startup_task_recovery(
     report = {"recovered": [], "unresolved": [], "protected": [], "errors": []}
     if skip_live_data:
         return report
-    _migrate_startup_cancel_latches(drive_root)
     from ouroboros.platform_layer import pid_is_alive
     if prior_worker_pids is None or any(pid_is_alive(pid) for pid in prior_worker_pids):
         report["errors"].append("prior_worker_ownership_unconfirmed")
@@ -1025,11 +1131,20 @@ def _run_startup_task_recovery(
         )
         _publish_expired_quiz_frames(expired_quizzes)
     except Exception:
+        report["errors"].append("orphan_recovery_failed")
         log.warning("Orphaned running-task reconciliation at startup failed", exc_info=True)
     try:
         from ouroboros.agent_task_pipeline import recover_pending_root_post_task_synthesis
 
         recover_pending_root_post_task_synthesis(drive_root, repo_dir, exclude_task_ids=excluded)
     except Exception:
+        report["errors"].append("synthesis_recovery_failed")
         log.warning("Root post-task synthesis recovery at startup failed", exc_info=True)
+    from ouroboros.obligations import members
+    try:
+        report["unresolved"].extend(facts.get("task_id", identity) for identity, facts in members(drive_root, "unknowns").items())
+    except Exception:
+        report["unresolved"].append("*")
+        report["errors"].append("unknown_obligations_unavailable")
+        log.warning("Startup repair gaps unavailable; destructive pruning remains deferred", exc_info=True)
     return report

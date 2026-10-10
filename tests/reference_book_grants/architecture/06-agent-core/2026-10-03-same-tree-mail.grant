@@ -1,5 +1,0 @@
-406
-Same-tree addressing for forward_to_worker (the `tree` relation beside `sibling`
-and `parent`, one label map, strict cancel read, the context-only guarantee and
-the ancestry/context distinction) is stated in the coordination paragraph; the
-chapter sat 25 bytes under its base when the change landed.

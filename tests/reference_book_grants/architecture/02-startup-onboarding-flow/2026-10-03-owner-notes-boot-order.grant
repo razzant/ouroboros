@@ -1,2 +1,0 @@
-198
-A provider boot starts the supervisor after the event bus and the extension reload: its first scheduler tick can show an overdue note, and the event bus keeps no history for a subscriber that attaches later. The chapter records that order in the existing gateway/supervisor sentence; no older text describes it.

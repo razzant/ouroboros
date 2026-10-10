@@ -142,6 +142,8 @@ def test_admission_freezes_reviewed_behavior_runtime_digests_and_authority(tmp_p
         "knowledge_list",
         "knowledge_read",
         "knowledge_write",
+        "memory_mark",
+        "memory_read",
         "recent_tasks",
         "steer_task",
         "update_identity",

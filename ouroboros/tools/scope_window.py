@@ -1,12 +1,12 @@
-"""Scope-reviewer WINDOW sizing: evidence-typed resolution + honest wording (RS5).
+"""Retrieving-seat WINDOW sizing: evidence-typed resolution + honest wording (RS5).
 
 Window size is not a condition of authority (owner decision 2026-09-17, BIBLE
-P3): a scope verdict rests on the reviewer's independence, the declared
+P3): a coupling verdict rests on the reviewer's independence, the declared
 required-source manifest and its recorded coverage. What this module answers is
-the one remaining sizing question — how large an output reserve the row's
-request may ask for — plus the provenance wording every diagnostic quotes.
-``scope_review`` re-imports these names under their private aliases, so its
-tests and callers keep exactly one patch point.
+the one remaining sizing question — how large an output reserve the seat's
+request may ask for, and the first-send bound its two-part brief must land
+under (``review_brief_coupling.first_send_bound``) — plus the provenance wording
+every diagnostic quotes.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from ouroboros.reviewer_window import (
 )
 
 # The conservative sizing fallback for a route with no Capability Evidence:
-# SIZING only, never an authority floor. `scope_review` imports it back rather
-# than defining a second copy.
+# SIZING only, never an authority floor. `review_brief_coupling` imports it
+# rather than defining a second copy.
 SCOPE_SIZING_FALLBACK_WINDOW = 200_000
 SCOPE_MODEL_DEFAULT = "openai/gpt-5.6-terra"
 

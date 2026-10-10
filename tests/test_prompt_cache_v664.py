@@ -133,7 +133,7 @@ def _sealed_transcripts():
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("model,cache_markers", [
-    ("openai/gpt-5.5", False), ("anthropic/claude-fable-5", True),
+    ("x-ai/grok-4", False), ("openai/gpt-5.5", True), ("anthropic/claude-fable-5", True),
 ])
 def test_openrouter_session_survives_marker_migration_on_sdk_wire(asynchronous, model, cache_markers):
     import httpx

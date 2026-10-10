@@ -11,6 +11,8 @@ import pathlib
 import types
 
 import pytest
+from tests._usage_store_testing import ledger_rows
+from tests.review_pool_rosters import pool_roster, pool_seat
 
 
 KEY = "OUROBOROS_REVIEW_MAX_CYCLES"
@@ -38,7 +40,6 @@ def _fake_manifest():
 
 def _wire_skill_wave(monkeypatch, tmp_path, *, content_hash, passes):
     import ouroboros.skill_review_passes as passes_mod
-    from ouroboros import config as cfg
     from ouroboros import skill_review
 
     drive = pathlib.Path(tmp_path)
@@ -63,7 +64,8 @@ def _wire_skill_wave(monkeypatch, tmp_path, *, content_hash, passes):
             requested_keys=[], granted_keys=[],
             requested_permissions=[], granted_permissions=[]),
     )
-    monkeypatch.setattr(cfg, "get_review_models", lambda: ["m1", "m2"])
+    # The review pool: two packet seats, slot_1 on m1 and slot_2 on m2.
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", pool_roster(pool_seat("slot_1", "m1"), pool_seat("slot_2", "m2")))
     monkeypatch.setattr(passes_mod, "run_skill_review_passes", passes)
     return skill
 
@@ -505,7 +507,7 @@ def test_bound_api_paid_stamp_waits_for_durable_sync_and_async_dispatch(tmp_path
         writes.append("paid")
 
     def _ledger_state(root):
-        rows = [json.loads(line) for line in (root / ua.LEDGER_REL).read_text().splitlines()]
+        rows = ledger_rows(root)
         return rows[-1]["state"]
 
     stamp = ReviewPaidStamp(_write_paid)

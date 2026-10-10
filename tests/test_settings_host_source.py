@@ -88,8 +88,13 @@ def test_actual_main_captures_source_after_binding(applied_host, tmp_path, monke
     class FakeServer:
         def __init__(self, _config):
             self.should_exit = False
+            self.stop_watcher_bound = False
+
+        def watch_launcher_stop(self):
+            self.stop_watcher_bound = True
 
         def run(self, *, sockets):
+            assert self.stop_watcher_bound
             assert sockets[0].getsockname()[1] > 0
             assert server_process._applied_server_host_source == expected_source
             assert server_process.applied_restart_settings()["OUROBOROS_SERVER_HOST"] == expected_host
@@ -130,6 +135,8 @@ def test_two_settings_restarts_do_not_invent_environment_authority(monkeypatch, 
     monkeypatch.setattr(sys, "argv", argv)
     calls = []
     monkeypatch.setattr(os, "execvpe", lambda executable, argv, env: calls.append((executable, argv, env)))
+    monkeypatch.setattr("ouroboros.process_custody.spawn_supervised",
+                        lambda argv, **kw: calls.append((argv[0], argv, kw["env"])))
     actual = "127.0.0.1"
     for desired in ("127.0.0.2", "127.0.0.4"):
         saved["OUROBOROS_SERVER_HOST"] = desired
@@ -151,6 +158,8 @@ def test_public_cli_reexec_argv_and_environment_override_remain_intact(monkeypat
     monkeypatch.setenv("OUROBOROS_SERVER_HOST", "0.0.0.0")
     captured = []
     monkeypatch.setattr(os, "execvpe", lambda executable, argv, env: captured.append((argv, env)))
+    monkeypatch.setattr("ouroboros.process_custody.spawn_supervised",
+                        lambda argv, **kw: captured.append((argv, kw["env"])))
     restart_current_process("0.0.0.0", 8765, repo_dir=tmp_path, log=logging.getLogger("test"))
     assert captured[0][0] == [sys.executable, *argv]
     assert captured[0][1]["OUROBOROS_SERVER_HOST"] == "0.0.0.0"

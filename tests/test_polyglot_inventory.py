@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pathlib
 
-
 import ouroboros.code_intelligence as ci
 from ouroboros.code_intelligence import _file_fact
 
@@ -76,9 +75,10 @@ def test_visible_fallback_when_treesitter_unavailable(tmp_path, monkeypatch):
     assert ff.symbols == []  # NOT a silent regex guess
 
 
-def test_non_code_file_indexed_not_unavailable(tmp_path):
+def test_non_code_file_discloses_unavailable_outline(tmp_path):
     ff = _fact(tmp_path, "notes.md", "# title\n")
-    assert ff.disposition == "indexed"
+    assert ff.disposition == "structural_unavailable:markdown"
+    assert ff.symbols == []
 
 
 def test_member_call_extracts_callee_not_receiver(tmp_path):
@@ -97,3 +97,36 @@ def test_member_call_extracts_callee_not_receiver(tmp_path):
     assert "doThing" in js_calls, js_calls
     assert "log" in js_calls, js_calls
     assert "console" not in js_calls and "obj" not in js_calls, js_calls
+
+
+def test_exported_const_is_symbol_with_any_initializer_inside_namespace(tmp_path):
+    ff = _fact(tmp_path, "util.ts", """export namespace util {
+  export const objectKeys = typeof Object.keys === 'function'
+    ? (obj: object) => Object.keys(obj)
+    : (obj: object) => [];
+  export let mutable = 1;
+  export var older = 2;
+}
+""")
+    symbols = {symbol.name: symbol for symbol in ff.symbols}
+    assert symbols["objectKeys"].kind == "constant"
+    assert symbols["objectKeys"].line_start == 2
+    assert symbols["objectKeys"].line_end == 4
+    assert symbols["mutable"].kind == "variable"
+    assert symbols["older"].kind == "variable"
+    assert any(call.name == "keys" and call.enclosing == "objectKeys" for call in ff.call_sites)
+    assert "typeof" not in symbols
+
+
+def test_name_fields_on_calls_or_properties_are_not_declarations(tmp_path):
+    ff = _fact(tmp_path, "m.js", "const obj = { property: 1 };\nobj.run();\nobj.member = 2;\n")
+    symbols = {symbol.name for symbol in ff.symbols}
+    assert symbols == {"obj"}
+
+
+def test_unknown_grammar_keeps_file_available_without_inventing_symbols(tmp_path):
+    ff = _fact(tmp_path, "m.unknown", "export const objectKeys = f();\n")
+    assert ff.language == "unknown"
+    assert ff.disposition == "structural_unavailable:unknown"
+    assert ff.symbols == []
+    assert ff.call_sites == []

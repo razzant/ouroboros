@@ -1,18 +1,21 @@
-"""A seal audit reads its selected history once, including cold and unknown paths."""
+"""A seal audit reads its retained history once per pass, including the unknown path."""
 
 import json
+import os
 import pathlib
-import time
-from types import SimpleNamespace
+import sys
+
+import pytest
 
 from ouroboros import model_send_seal as seals
-from ouroboros import usage_compaction as compaction
-from ouroboros.usage_ledger import UsageLedgerCorrupt
-from tests import fixtures_usage_compaction as usage_fixtures
+from tests import fixtures_usage_store as usage_fixtures
 from tests import test_model_send_seal as seal_fixtures
 
 
 data_root = seal_fixtures.data_root
+_UNREADABLE = pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="chmod-based unreadability needs a non-root POSIX user")
 
 
 def _manifest(root, attempt_id):
@@ -25,113 +28,88 @@ def _manifest(root, attempt_id):
     }), encoding="utf-8")
 
 
-def _archive_chain(root, count):
-    """Real compaction creates a short valid ledger for every linked generation."""
-    for _ in range(count):
-        attempt = usage_fixtures._settle(root, cost=0.0, cost_final=True)
-        assert usage_fixtures._compact(root) is not None
+def _archive(root, count):
+    """``count`` sealed attempts folded before the store existed: their rows
+    live only in a retained archive segment."""
+    attempts = [usage_fixtures._settle(root, cost=0.0, cost_final=True) for _ in range(count)]
+    usage_fixtures.fold_into_archive(root, [attempt.attempt_id for attempt in attempts])
+    for attempt in attempts:
         _manifest(root, attempt.attempt_id)
-    compaction._SEGMENT_CACHE.clear()
-    compaction._CHAIN_UNION_CACHE.clear()
+
+
+def _recording(monkeypatch, result=None):
+    calls = []
+    scan = seals._retained_attempt_ids
+
+    def recorded(root, wanted):
+        calls.append(set(wanted))
+        return scan(root, wanted) if result is None else result(root, wanted)
+
+    monkeypatch.setattr(seals, "_retained_attempt_ids", recorded)
+    return calls
 
 
 def test_live_only_sweep_never_loads_archive(data_root, monkeypatch):
     seal_fixtures._dispatch(data_root, "live")
-    queries = []
-    monkeypatch.setattr(compaction, "archived_attempt_ids", lambda root: queries.append(root))
+    calls = _recording(monkeypatch)
 
     report = seals.reconcile_model_send_seals(data_root)
 
     assert report["seals"] == report["sealed_attempts"] == 1
     assert report["facts_written"] == 0
-    assert queries == []
+    assert calls == [set()]  # every seal joined the store: nothing retained is wanted
 
 
-def test_large_seal_batch_reads_chain_once_even_after_cache_expiry(data_root, monkeypatch):
-    # The incident had 415 generations. Small genuine segments exercise the
-    # multiplier without copying gigabytes of private history into a fixture.
+def test_large_seal_batch_reads_retained_history_once(data_root, monkeypatch):
+    # The incident had 415 generations of folded history.
     count = 415
-    _archive_chain(data_root, count)
-    queries, loaded_segments, parsed_bytes = [], [], []
-    read_archive = compaction.archived_attempt_ids
-    load_segment = compaction._load_segment
-    parse = compaction._parse_ledger_lines
-    read_text = pathlib.Path.read_text
-    clock = [time.time() + 100]
-    monkeypatch.setattr(compaction, "time", SimpleNamespace(time=lambda: clock[0]))
+    _archive(data_root, count)
+    calls = _recording(monkeypatch)
+    opened = []
+    real_open = open
 
-    def query(root):
-        queries.append(root)
-        return read_archive(root)
+    def counting_open(path, *args, **kwargs):
+        if "usage_attempts" in str(path) or "usage_ledger" in str(path):
+            opened.append(str(path))
+        return real_open(path, *args, **kwargs)
 
-    def load(root, header, dir_fd):
-        loaded_segments.append(header["archive_rel"])
-        return load_segment(root, header, dir_fd)
-
-    def parse_bytes(payload):
-        parsed_bytes.append(len(payload))
-        return parse(payload)
-
-    def read_manifest(path, *args, **kwargs):
-        if path.parent.name == "batch":
-            clock[0] += compaction._SEGMENT_CACHE_TTL_SEC + 1
-        return read_text(path, *args, **kwargs)
-
-    monkeypatch.setattr(compaction, "archived_attempt_ids", query)
-    monkeypatch.setattr(compaction, "_load_segment", load)
-    monkeypatch.setattr(compaction, "_parse_ledger_lines", parse_bytes)
-    monkeypatch.setattr(pathlib.Path, "read_text", read_manifest)
-
+    monkeypatch.setattr("builtins.open", counting_open)
     report = seals.reconcile_model_send_seals(data_root)
 
     assert report["seals"] == count and report["facts_written"] == 0
-    assert len(queries) == 1
-    assert len(loaded_segments) == len(set(loaded_segments)) == count
-    segments = list((data_root / "archive" / "usage_ledger").glob("*.jsonl"))
-    assert len(parsed_bytes) == count
-    assert sum(parsed_bytes) == sum(path.stat().st_size for path in segments)
+    assert len(calls) == 1 and len(calls[0]) == count
+    assert len(opened) == len(set(opened))  # each retained file at most once per pass
 
 
-def test_each_sweep_rechecks_archive_and_does_not_retain_a_stale_answer(data_root, monkeypatch):
-    _archive_chain(data_root, 2)
-    queries, failures = [], []
-    read_archive = compaction.archived_attempt_ids
+@_UNREADABLE
+def test_each_sweep_rechecks_retained_history_and_keeps_no_stale_answer(data_root, monkeypatch):
+    from tests.fixtures_usage_store import ARCHIVE_SEGMENT_REL
 
-    def query(root):
-        queries.append(root)
-        try:
-            return read_archive(root)
-        except UsageLedgerCorrupt as exc:
-            failures.append(exc)
-            raise
-
-    monkeypatch.setattr(compaction, "archived_attempt_ids", query)
+    _archive(data_root, 2)
+    calls = _recording(monkeypatch)
     assert seals.reconcile_model_send_seals(data_root)["facts_written"] == 0
-    segment = next((data_root / "archive" / "usage_ledger").glob("*.jsonl"))
-    segment.write_text("unreadable archive\n", encoding="utf-8")
+    segment = data_root / ARCHIVE_SEGMENT_REL
+    segment.chmod(0)
     _manifest(data_root, "actually-absent")
+    try:
+        report = seals.reconcile_model_send_seals(data_root)
+    finally:
+        segment.chmod(0o644)
 
-    report = seals.reconcile_model_send_seals(data_root)
-
-    assert len(queries) == 2 and len(failures) == 1
-    assert report["seals"] == 3
+    assert len(calls) == 2
+    assert report["status"] == "unknown" and report["seals"] == 3
     assert report["orphan_seals"] == report["facts_written"] == 0
 
 
-def test_unknown_archive_is_attempted_once_and_forward_checks_continue(data_root, monkeypatch):
-    _archive_chain(data_root, 3)
+def test_unknown_history_is_attempted_once_and_forward_checks_continue(data_root, monkeypatch):
+    _archive(data_root, 3)
     live = seal_fixtures._dispatch(data_root, "live-missing-seal")
     pathlib.Path(live["candidate_manifest_ref"]["path"]).unlink()
-    queries = []
+    calls = _recording(monkeypatch, result=lambda _root, _wanted: None)
 
-    def unknown(root):
-        queries.append(root)
-        raise UsageLedgerCorrupt("compaction advanced during the archive read")
-
-    monkeypatch.setattr(compaction, "archived_attempt_ids", unknown)
     report = seals.reconcile_model_send_seals(data_root)
 
-    assert len(queries) == 1
+    assert len(calls) == 1
     assert report["seals"] == 3 and report["orphan_seals"] == 0
     assert report["unlogged_attempts"] == report["facts_written"] == 1
     assert seal_fixtures._violation_events(data_root)[0]["kind"] == "unlogged_attempt"
@@ -153,22 +131,3 @@ def test_manifest_selection_precedes_live_snapshot(data_root, monkeypatch):
     # snapshot also sees the new reservation and its forward sealing evidence.
     assert report["seals"] == 1 and report["sealed_attempts"] == 2
     assert report["facts_written"] == 0
-
-
-def test_compaction_after_live_snapshot_keeps_selected_attempts_recorded(data_root, monkeypatch):
-    _archive_chain(data_root, 1)
-    seal_fixtures._dispatch(data_root, "about-to-fold")
-    read_archive = compaction.archived_attempt_ids
-    queries = []
-
-    def compact_before_archive(root):
-        queries.append(root)
-        assert usage_fixtures._compact(root) is not None
-        seal_fixtures._dispatch(root, "arrived-during-archive-read")
-        return read_archive(root)
-
-    monkeypatch.setattr(compaction, "archived_attempt_ids", compact_before_archive)
-    report = seals.reconcile_model_send_seals(data_root)
-
-    assert len(queries) == 1
-    assert report["seals"] == 2 and report["facts_written"] == 0

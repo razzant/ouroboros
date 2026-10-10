@@ -1,26 +1,53 @@
-"""v6.37.0 guards (C2.1/C2.2/C2.3): the VLM lane must consult vision capability
-before sending an image — route to a vision-capable slot or surface a typed
-capability gap, never blind-send to a model that 404s and gets banged in a loop."""
+"""VLM route choice and the transport builder under "unknown is not no".
+
+The VLM lane consults route evidence, never a model's name: an explicitly named
+model is called even when its metadata says no (its refusal comes back typed), an
+automatic choice prefers a confirmed yes, then an unknown, and only a lane where
+every candidate is confirmed unable gets the typed ``VLM_NO_VISION_MODEL`` gap.
+The transport builder encodes the images it is given on every route.
+"""
 
 from types import SimpleNamespace
 
+import pytest
 
-def test_resolve_vlm_model_honors_vision_capability(monkeypatch):
+SEES = "google/gemini-3.5-flash"
+TEXT_ONLY = "z-ai/glm-5.2"
+
+
+@pytest.fixture
+def recorded(monkeypatch, tmp_path):
+    """One recorded OpenRouter catalog response in an isolated evidence store."""
+    from ouroboros.vision_routing import record_catalog_image_input
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    record_catalog_image_input("openrouter", "https://openrouter.ai/api/v1", [
+        {"id": SEES, "architecture": {"input_modalities": ["text", "image"]}},
+        {"id": TEXT_ONLY, "architecture": {"input_modalities": ["text"]}},
+    ], source="OpenRouter /models")
+
+
+def test_resolve_vlm_model_follows_route_evidence_not_names(recorded, monkeypatch):
     from ouroboros.tools import vision as V
     client = object()
-    # explicit model: honored ONLY if it actually supports vision
-    assert V._resolve_vlm_model(client, "google/gemini-3.5-flash") == "google/gemini-3.5-flash"
-    assert V._resolve_vlm_model(client, "z-ai/glm-5.2") == ""  # explicit blind -> typed gap
+    monkeypatch.setenv("OUROBOROS_MODEL_VISION", "")
+    # An explicit model is called even when its metadata says no (owner decision).
+    assert V._resolve_vlm_model(client, TEXT_ONLY) == TEXT_ONLY
+    assert V._resolve_vlm_model(client, "acme/never-listed-1") == "acme/never-listed-1"
 
-    # no explicit model: first VISION-capable candidate wins (blind active skipped)
+    # No explicit model: a confirmed yes first, then an unknown; a confirmed no is skipped.
     monkeypatch.setattr(
         V, "_vision_capable_slot_candidates",
-        lambda c, ctx=None: ["z-ai/glm-5.2", "google/gemini-3.5-flash", "openai/gpt-5.5"],
+        lambda c, ctx=None: [TEXT_ONLY, "acme/never-listed-1", SEES],
     )
-    assert V._resolve_vlm_model(client, "", ctx=SimpleNamespace()) == "google/gemini-3.5-flash"
+    assert V._resolve_vlm_model(client, "", ctx=SimpleNamespace()) == SEES
+    monkeypatch.setattr(V, "_vision_capable_slot_candidates",
+                        lambda c, ctx=None: [TEXT_ONLY, "acme/never-listed-1"])
+    assert V._resolve_vlm_model(client, "", ctx=SimpleNamespace()) == "acme/never-listed-1"
 
-    # nothing vision-capable -> "" so the caller surfaces VLM_NO_VISION_MODEL
-    monkeypatch.setattr(V, "_vision_capable_slot_candidates", lambda c, ctx=None: ["z-ai/glm-5.2"])
+    # Every candidate confirmed unable -> "" so the caller surfaces VLM_NO_VISION_MODEL.
+    monkeypatch.setattr(V, "_vision_capable_slot_candidates",
+                        lambda c, ctx=None: [TEXT_ONLY, "gigachat::GigaChat-2-Max"])
     assert V._resolve_vlm_model(client, "", ctx=SimpleNamespace()) == ""
 
 
@@ -42,28 +69,28 @@ def test_slot_candidates_prefer_active_then_light_dedup(monkeypatch):
     assert len(out) == len(set(out))  # de-duplicated, empties dropped
 
 
-def test_analyze_screenshot_no_vision_returns_typed_gap(monkeypatch):
+def test_analyze_screenshot_no_vision_names_why_without_forbidding_a_retry(recorded, monkeypatch):
     from ouroboros.tools import vision as V
-    monkeypatch.setattr(V, "_resolve_vlm_model", lambda *a, **k: "")
+    monkeypatch.setenv("OUROBOROS_MODEL_VISION", "")
+    monkeypatch.setattr(V, "_vision_capable_slot_candidates", lambda c, ctx=None: [TEXT_ONLY])
+    monkeypatch.setattr(V, "_get_llm_client", lambda: object())
     ctx = SimpleNamespace(browser_state=SimpleNamespace(last_screenshot_b64="aGk="))
     out = V._analyze_screenshot(ctx, prompt="check")
-    assert out == V._VLM_NO_VISION_MODEL_MSG
-    assert "Do NOT retry the image" in out
+    assert out.startswith("⚠️ VLM_NO_VISION_MODEL:")
+    assert TEXT_ONLY in out and "OpenRouter /models" in out  # names the route and its source
+    assert "Do NOT retry" not in out
 
 
-def test_build_remote_kwargs_vision_gate_uses_qualified_identity(monkeypatch):
-    """E1: the blind-model gate must consult supports_vision() with the QUALIFIED
-    identity (usage_model) — the stripped resolved_model has lost its provider
-    namespace, matched no vision prefix, and replaced the image with the omission
-    placeholder on every direct-provider install (incl. the shipped default
-    openai::gpt-5.6-terra). Same identity contract as the browser-screenshot
-    call site (tools/browser.py)."""
-    from ouroboros import provider_models
+@pytest.mark.parametrize("model", [
+    "openai::gpt-5.6-terra", "openai/gpt-5.6-sol", "deepseek/deepseek-chat", "acme/never-listed-1",
+])
+def test_build_remote_kwargs_encodes_the_images_it_receives(monkeypatch, tmp_path, model):
+    """The transport builder never re-judges capability: qualified, bare, listed or
+    unlisted, every OpenAI-shaped route carries the image block it is given."""
     from ouroboros.llm import LLMClient
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    # Static map authority only: a parallel test's overlay write must not flip verdicts.
-    monkeypatch.setattr(provider_models, "_VISION_OVERLAY", {})
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     client = LLMClient()
     msgs = [{
         "role": "user",
@@ -72,30 +99,13 @@ def test_build_remote_kwargs_vision_gate_uses_qualified_identity(monkeypatch):
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         ],
     }]
-
-    # Qualified direct-provider identity keeps its image block (was blinded).
-    direct = client._resolve_remote_target("openai::gpt-5.6-terra")
-    kwargs = client._build_remote_kwargs(direct, msgs, "high", 128, "auto", None, None)
+    target = client._resolve_remote_target(model)
+    kwargs = client._build_remote_kwargs(target, msgs, "high", 128, "auto", None, None,
+                                         skip_capability_fetch=True)
     assert [b.get("type") for b in kwargs["messages"][0]["content"]] == ["text", "image_url"]
 
-    # OpenRouter identities behave exactly as before: vision-capable keeps the
-    # image, a blind model still gets the honest omission placeholder.
-    sol = client._resolve_remote_target("openai/gpt-5.6-sol")
-    kwargs = client._build_remote_kwargs(
-        sol, msgs, "high", 128, "auto", None, None, skip_capability_fetch=True
-    )
-    assert [b.get("type") for b in kwargs["messages"][0]["content"]] == ["text", "image_url"]
 
-    blind = client._resolve_remote_target("deepseek/deepseek-chat")
-    kwargs = client._build_remote_kwargs(
-        blind, msgs, "high", 128, "auto", None, None, skip_capability_fetch=True
-    )
-    blocks = kwargs["messages"][0]["content"]
-    assert [b.get("type") for b in blocks] == ["text", "text"]
-    assert "image omitted" in blocks[1]["text"]
-
-
-def test_replace_image_blocks_with_placeholder_keeps_text_and_caption():
+def test_lane_placeholder_names_our_transport_and_keeps_text_and_caption():
     from ouroboros.llm import LLMClient
     msgs = [{
         "role": "user",
@@ -104,10 +114,14 @@ def test_replace_image_blocks_with_placeholder_keeps_text_and_caption():
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}, "_caption": "[browser shot]"},
         ],
     }]
-    out = LLMClient._replace_image_blocks_with_placeholder(msgs)
+    out = LLMClient._replace_image_blocks_with_placeholder(msgs, "local llama.cpp")
     blocks = out[0]["content"]
     assert blocks[0] == {"type": "text", "text": "look at this"}
     assert blocks[1]["type"] == "text"
-    assert "image omitted" in blocks[1]["text"] and "[browser shot]" in blocks[1]["text"]
+    assert "our local llama.cpp transport lane cannot carry images" in blocks[1]["text"]
+    assert "[browser shot]" in blocks[1]["text"] and "model has no vision" not in blocks[1]["text"]
     # canonical transcript untouched (deep copy)
     assert msgs[0]["content"][1]["type"] == "image_url"
+    # Text-only messages pass through untouched.
+    text_only = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    assert LLMClient._replace_image_blocks_with_placeholder(text_only, "GigaChat") is text_only

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mergeHistoricalTimelineItem, compareHistoryPosition } from '../modules/chat_history_replay.js';
-import { createChatHistoryPager } from '../modules/chat_history.js';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { delegatedActivityView, reconcileDelegatedItems } from '../modules/delegated_activity.js';
 
@@ -235,27 +234,4 @@ test('adopting a missing locator preserves the timestamp tie ordering witness', 
     }, '12:00'), true);
     assert.equal(record.items[0].headline, 'Running');
     assert.equal(record.items[0].sourceHistoryId, 'progress:1');
-});
-
-test('reopening a deep window fetches its exact page and retains newer navigation without cached bodies', async () => {
-    const response = index => ({ messages: [{ history_id: `chat:${index}` }], has_more: index < 4,
-        next_cursor: index < 4 ? `older-${index + 1}` : null, page_cursor: `page-${index}` });
-    const create = (calls, applied) => createChatHistoryPager({ maxPages: 1,
-        fetchPage: async cursor => { calls.push(cursor); return response(Number(cursor.split('-')[1])); },
-        applyPage: (messages, page) => applied.push(page.index), releasePage() {},
-    });
-    const first = create([], []);
-    first.acceptRecent(response(0));
-    await first.older(); await first.older();
-    const saved = first.exportResume();
-    assert.equal(JSON.stringify(saved).includes('messages'), false);
-    first.destroy();
-    const calls = [], applied = [], reopened = create(calls, applied);
-    await reopened.restore(saved);
-    assert.deepEqual(calls, ['page-2']);
-    assert.equal(reopened.getState().canNewer, true);
-    await reopened.newer();
-    assert.deepEqual(calls, ['page-2', 'page-1']);
-    assert.deepEqual(applied, [2, 1]);
-    reopened.destroy();
 });

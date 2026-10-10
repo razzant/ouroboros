@@ -8,6 +8,9 @@ from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
 
 from ouroboros.gateway.history_contracts import ChatHistoryResponse  # noqa: F401 -- public re-export
+from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
+    AttachmentManifestEntry, ChatAttachmentInbound, ChatAttachmentView,
+)
 from ouroboros.gateway.widgets import ExtensionLiveSnapshot, WidgetTab, WidgetsResponse
 from ouroboros.gateway.decision_contracts import DecisionRequest, DecisionResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.schedule_contracts import (  # noqa: F401 -- public re-exports
@@ -21,33 +24,6 @@ try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import Literal, NotRequired, Required, TypedDict  # type: ignore[assignment]
-
-
-class ChatAttachmentInbound(TypedDict, total=False):
-    """Reference to a file stored by /api/chat/upload under data/uploads/.
-    ``filename`` is its stored basename. Images reach vision models as
-    native image blocks."""
-
-    filename: str
-    display_name: str
-    mime: str
-
-
-class AttachmentManifestEntry(TypedDict, total=False):
-    """One declared task attachment after staging admission."""
-
-    ordinal: int
-    status: Literal["staged", "rejected"]
-    reason: str
-    label: str
-    root: str
-    relpath: str
-    abs_path: str
-    mime: str
-    is_image: bool
-    size: int
-    sha256: str
-    rule: str
 
 
 class ChatInbound(TypedDict):
@@ -112,6 +88,11 @@ class ChatOutbound(TypedDict):
     content: str
     ts: str
     ingress_accepted: NotRequired[bool]  # Canonical inbound row saved; not processing/start proof.
+    ingress_dispatched: NotRequired[bool]  # This live host process accepted the row and entered its dispatch.
+    ingress_pending: NotRequired[bool]  # This live host process accepted the row and has entered or refused neither yet.
+    ingress_undispatched: NotRequired[bool]  # History only: this process proved the row's write raised before dispatch.
+    attachments: NotRequired[List[ChatAttachmentView]]  # owner message's attachments (same views as history)
+    text_placeholder: NotRequired[bool]  # owner row whose text the host wrote (no words were sent); shown as no caption
     markdown: NotRequired[bool]
     is_progress: NotRequired[bool]
     task_id: NotRequired[str]
@@ -254,6 +235,7 @@ class ChatOutbound(TypedDict):
     target_label: NotRequired[str]
     project_id: NotRequired[str]
     project_name: NotRequired[str]
+    task_name: NotRequired[str]
     handoff_id: NotRequired[str]  # immutable origin/destination receipt identity
     terminal_time: NotRequired[Dict[str, Any]]  # host-owned occurrence, separate from publication ts
     completion_answer: NotRequired[str]  # a Project root's model-authored final answer, mirrored into Main (DESIGN)
@@ -480,10 +462,9 @@ class ExtensionLifecycleOutbound(TypedDict):
 
 
 class ProjectsChangedOutbound(TypedDict):
-    """Outbound notice that the project registry changed server-side (e.g. the
-    agent's ``promote_chat_to_task`` created/bound a project). The client refreshes
-    its project nav + WS-fan-out ``projectChatIds`` on receipt; ``chat_id`` lets it
-    learn the new project thread immediately, before the /api/state round-trip."""
+    """Outbound notice that the project registry changed server-side (e.g. the agent's ``promote_chat_to_task``
+    created/bound a project). The client refreshes its project nav + WS-fan-out ``projectChatIds`` on receipt;
+    ``chat_id`` lets it learn the new project thread immediately, before the /api/state round-trip."""
 
     type: Literal["projects_changed"]
     project_id: NotRequired[str]
@@ -510,6 +491,7 @@ class MessageAnnotationOutbound(TypedDict):
     # (routing:{client_message_id}:{routing_token}) from it; a frame without it renders text, never a card.
     routing_token: NotRequired[str]
     cause: NotRequired[str]
+    reasoning_effort: NotRequired[str]  # #1539: the explicit start a New task picked from this card requests
     ts: NotRequired[str]
 
 
@@ -570,7 +552,8 @@ class UpdateApplyErrorResponse(TypedDict):
     merge_plan: NotRequired[UpdateMergePlan]
     smoke: NotRequired[Dict[str, Any]]
     # Stash-first prologue disclosures (additive): how the owner's stashed work
-    # was unwound on an aborted update, and the wave-floor admission numbers.
+    # was unwound on an aborted update. The wave numbers rode the retired
+    # wave-floor refusal (#1487 removed it); the optional keys stay in the shape.
     stash_note: NotRequired[str]
     estimated_wave_usd: NotRequired[Optional[float]]
     remaining_usd: NotRequired[Optional[float]]
@@ -725,11 +708,18 @@ class ActiveChatActivity(ActiveDirectTurn):
     awaits explicit Resume. Direct paused turns keep their ID/kind. Unreadable
     live waits or Pause authority report unknown (incomplete census); unresolved owner-question detail reports
     required_question_unavailable. Managed rows have empty client_message_id."""
-
+    status: NotRequired[str]
+    outcome_axes: NotRequired[Dict[str, Any]]
+    reason_code: NotRequired[str]
+    root_phase_checkpoint: NotRequired[Dict[str, Any]]
+    timeout_retry_from: NotRequired[str]
+    original_task_id: NotRequired[str]
+    owner_wait: NotRequired[Dict[str, Any]]  # quiz-bound wait facts, independent of a Project pointer
     required_question: NotRequired[Dict[str, Any]]
     required_question_unavailable: NotRequired[bool]
     project_admission_hold: NotRequired[Dict[str, Any]]
-
+    pause_cause: NotRequired[str]  # budget | owner | restart | sleep | unknown; display only
+    finishing_reviews: NotRequired[bool]  # review work an owner Pause lets finish runs on; display only, no count
 
 class StateResponse(TypedDict):
     """Shape of ``GET /api/state`` (happy path)."""
@@ -941,7 +931,8 @@ class UploadResponse(TypedDict):
     path: str
     size: int
     sha256: NotRequired[str]
-    mime: str
+    mime: str  # the extension's type, as the model-input rail reads it
+    view: NotRequired[ChatAttachmentView]  # the sender's own bubble renders exactly this (kind proven from bytes)
 
 
 class ExtensionsIndexResponse(TypedDict, total=False):
@@ -1062,9 +1053,8 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     memory_mode: str
     project_id: str
     attachments: list[Dict[str, Any]]
-    # Partial staging is the default (В25c, capinv-447): omitted/true stages
-    # the good attachments and discloses rejected rows; explicit false keeps
-    # the old atomic all-or-nothing admission.
+    # Partial staging is the default (В25c, capinv-447): omitted/true stages the good
+    # attachments and discloses rejected rows; explicit false keeps the old atomic admission.
     allow_partial_attachments: bool
     acceptance_claims: list[Dict[str, Any]]
     # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
@@ -1082,6 +1072,7 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     expected_output: str
     constraints: str
     context_requires_self_body_docs: bool
+    reasoning_effort: str  # optional explicit starting effort: an EFFORT_SCALE tier, checked by the handler
     actor_id: str
     source: str
     metadata: Dict[str, Any]
@@ -1181,6 +1172,9 @@ class ClaudexorStatusResponse(TypedDict, total=False):
     profiles: Dict[str, Any]
     quota: List[Dict[str, Any]]
     quota_absences: List[Dict[str, Any]]
+    resources: List[Dict[str, Any]]
+    resource_capabilities: Dict[str, bool]
+    resource_capabilities_read: ClaudexorReadState
     reads: ClaudexorStatusReads
     # UNIFIED ACCOUNT MODEL feature fact (additive-optional): True only when the engine's own
     # /v2/operations catalog was read and advertises `GET /v2/account-pools` (every default CLI login
@@ -1571,6 +1565,8 @@ __all__ = [
     "FileBrowserListResponse",
     "ChatHistoryResponse",
     "AttachmentManifestEntry",
+    "ChatAttachmentInbound",
+    "ChatAttachmentView",
     "ExecutorRef",
     "TaskCreateRequest",
     "TaskCreateResponse",

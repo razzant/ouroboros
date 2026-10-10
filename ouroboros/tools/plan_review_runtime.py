@@ -340,14 +340,15 @@ def record_raw_plan_request_attempt(
 
 
 def plan_review_slots(default_effort: str = "") -> list:
-    """The configured commit-triad rows as plan-review ``ReviewSlot`` objects:
-    the shared ``triad_delivery_slots`` builder (one reader of the triad rows
-    for plan, skill and acceptance review) with plan review's own slot
-    properties — timeout, output budget, temperature — and the envelope's
-    ``reviewer_effort`` as the ORDER for this plan: it outranks each row's own
-    pinned effort, a compound route slug keeps its encoded effort, and ``''``
-    leaves every row at its own effort or the owner's review-effort setting,
-    exactly like the commit triad. The order is an ARGUMENT of this builder
+    """The review pool's rows as plan-review ``ReviewSlot`` objects: the shared
+    ``triad_delivery_slots`` builder (one reader of the pool for plan, skill
+    and acceptance review) with plan review's own slot properties — timeout,
+    output budget, temperature — and the envelope's ``reviewer_effort`` as the
+    ORDER for this plan: it outranks each row's own pinned effort, a compound
+    route slug keeps its encoded effort, and ``''`` leaves every row at its own
+    effort, else that compound effort, else the pool's
+    ``REVIEW_POOL_DEFAULT_EFFORT`` (never the retired ``OUROBOROS_EFFORT_REVIEW``
+    surface setting), exactly like the commit gate. The order is an ARGUMENT of this builder
     only, never a contextvar: the commit gate, scope, acceptance and skill
     review keep reading the untouched rows. Both delivery kinds ride; slot ids
     are the rows' own.
@@ -1297,13 +1298,13 @@ def plan_wave_slot_census(wave: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     wave's own records). The ONE reader every plan renderer asks before it words a slot:
     an answer that has not arrived is a gap, never a failure and never a verdict.
 
-    ``awaiting`` = a pending row released at the barrier (``review_slot_awaiting``), a
-    planned wait; ``unresolved`` = every other pending row (window expired, custody
-    lost) — exceptional, never worded as waiting; ``uncollected`` = reads pending but a
-    settled supplement of this cycle holds its terminal state; ``skipped`` = a typed $0
-    ``not_dispatched`` refusal; ``answered`` = ok; ``failed`` = every other row.
-    Pending custody outranks ``ok`` so an inconsistent row stays fail-closed. A roster
-    that is not a list classifies nothing: the custody ingress owns that anomaly."""
+    ``awaiting`` = ``operation_state=pending_dispatch`` (``review_slot_awaiting``);
+    ``unresolved`` = other pending rows (``in_flight``/``custody_lost``;
+    ``late_result_pending`` is true for both, only ``operation_state`` splits them);
+    ``uncollected`` = pending but a settled supplement holds its state; ``skipped`` = a typed
+    $0 ``not_dispatched`` refusal; ``answered`` = ok; ``failed`` = the rest. Pending custody
+    outranks ``ok`` so an inconsistent row stays fail-closed. A roster that is not a list
+    classifies nothing: the custody ingress owns that anomaly."""
     from ouroboros.review_records import review_slot_awaiting
 
     census: Dict[str, Any] = {name: [] for name in (

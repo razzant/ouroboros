@@ -283,7 +283,7 @@ def test_success_has_the_shared_response_and_ledger_shape(name):
     attempts = observed.get("physical_attempts") or []
     assert len(attempts) == 1 and returned.get("ledger_attempt_count") == 1
     assert attempts[0]["provider"] == driver.provider
-    assert attempts[0]["states"] == ["reserved", "dispatched", "settled"]
+    assert (attempts[0]["state"], attempts[0]["transitions"]) == ("settled", 3)
     assert observed["unused_script_steps"] == 0
 
 
@@ -342,7 +342,7 @@ def test_model_operation_control_reply_loss_rejoins_one_physical_generation():
     observed = _observe(driver.spec([driver.success_step], lose_model_create_reply=True))
     assert "raised" not in observed
     assert len(observed["sends"]) == 1 and observed["returned"]["ledger_attempt_count"] == 1
-    assert observed["physical_attempts"][0]["states"] == ["reserved", "dispatched", "settled"]
+    assert (observed["physical_attempts"][0]["state"], observed["physical_attempts"][0]["transitions"]) == ("settled", 3)
     assert observed["unused_script_steps"] == 0
     assert observed["model_control"] == {"create_posts": 2, "operations": 1, "unique_create_keys": 1, "cancels": []}
 
@@ -353,7 +353,8 @@ def test_model_operation_host_control_cancels_without_fabricating_result_or_rele
     assert "returned" not in observed
     assert observed["raised"]["code"] == "model_operation_interrupted"
     assert observed["raised"]["control_reason"] == "cancelled"
-    assert observed["physical_attempts"][0]["states"] == ["reserved", "dispatched", "unresolved"]
+    # Failure evidence adds one row revision, not another physical dispatch.
+    assert (observed["physical_attempts"][0]["state"], observed["physical_attempts"][0]["transitions"]) == ("unresolved", 4)
     assert len(observed["sends"]) == 1
     assert observed["model_control"]["create_posts"] == observed["model_control"]["operations"] == 1
     assert observed["model_control"]["cancels"] == [["op-0", "host_cancelled"]]

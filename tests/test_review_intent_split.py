@@ -22,9 +22,11 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _packet_default_panel(monkeypatch):
-    """This module pins the PACKET assembly of the default panel; the shipped
-    default triad reads the work itself since #1334, so pin packet explicitly."""
-    monkeypatch.setattr("ouroboros.reviewer_slot_config.DEFAULT_TRIAD_DELIVERY", "")
+    """This module pins the PACKET assembly of the review pool: three packet seats
+    on the factory models (the pool's own default delivery is native)."""
+    from tests.review_pool_rosters import set_review_pool
+
+    set_review_pool(monkeypatch)
 
 
 class TestResolveIntentSubjectOnly:
@@ -161,6 +163,7 @@ def test_triad_prompt_keeps_distinct_goal_and_scope_in_production_wiring(
         return ""
 
     def capture_review(*_args, **kwargs):
+        assert kwargs["row_plan"]["models"] == ["test/reviewer"]
         captured["prompt"] = kwargs["prompt"]
         return json.dumps({"results": []})
 
@@ -169,10 +172,12 @@ def test_triad_prompt_keeps_distinct_goal_and_scope_in_production_wiring(
     monkeypatch.setattr(_rbc, "capture_staged_diff",
                         lambda _repo, *, unified=3: "diff --git a/x.py b/x.py\n+x = 1")
     monkeypatch.setattr(review, "_preflight_check", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(review, "_load_checklist_section", lambda: "checklist")
+    monkeypatch.setattr(review, "_load_checklist_section", lambda *_a, **_k: "checklist")
     monkeypatch.setattr(review, "load_governance_doc", lambda *_args, **_kwargs: "governance")
     monkeypatch.setattr(review, "build_touched_file_pack", lambda *_args, **_kwargs: ("files", []))
-    monkeypatch.setattr(review._cfg, "get_review_models", lambda: ["test/reviewer"])
+    from tests.review_pool_rosters import set_review_pool
+
+    set_review_pool(monkeypatch, ["test/reviewer"])
     monkeypatch.setattr(review._cfg, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr(review, "_handle_multi_model_review", capture_review)
     ctx = SimpleNamespace(

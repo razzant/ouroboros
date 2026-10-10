@@ -900,8 +900,8 @@ def test_full_hurry_lifecycle_writes_zero_chat_rows_and_zero_bus_calls(tmp_path,
 
 
 def test_p3_commit_and_safety_surfaces_never_consult_hurry(monkeypatch, tmp_path):
-    """§19.7.2 item 10: no hurry predicate/import enters commit review, advisory
-    pre-review, triad/scope, deterministic gates, safety, or the tool boundary;
+    """§19.7.2 item 10: no hurry predicate/import enters commit review, the
+    preflight, triad/scope, deterministic gates, safety, or the tool boundary;
     and arming the latch leaves settings/env byte-identical."""
     import os
 
@@ -911,7 +911,8 @@ def test_p3_commit_and_safety_surfaces_never_consult_hurry(monkeypatch, tmp_path
         repo / "ouroboros" / "tools" / "registry.py",
         repo / "ouroboros" / "tools" / "git.py",
         repo / "ouroboros" / "tools" / "parallel_review.py",
-        repo / "ouroboros" / "tools" / "claude_advisory_review.py",
+        repo / "ouroboros" / "tools" / "commit_gate.py",
+        repo / "ouroboros" / "tools" / "preflight_review.py",
         repo / "prompts" / "SAFETY.md",
     ]
     for path in guarded:

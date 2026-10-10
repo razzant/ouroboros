@@ -28,14 +28,14 @@ from tests.test_tree_cost_ceiling import _ctx, _patch_execute_candidate
 
 _IDENTITY = ("model", "provider", "candidate_raw_sha256", "candidate_raw_size_bytes")
 _MESSAGES = [{"role": "system", "content": "policy"}, {"role": "user", "content": "wrap up"}]
-# The Main context builder's shape: a 3-block system declaring ONE byte-stable block
-# (context_fit.ContextFitProjection.system_message).
+# Main Max with a handbook: every stable item precedes the changing evidence.
 _DECLARED_MESSAGES = [
     {"role": "system", "content": [
         {"type": "text", "text": "policy", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "handbook", "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": "memory", "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": "evidence"},
-    ], STABLE_PREFIX_BLOCKS_KEY: 1},
+    ], STABLE_PREFIX_BLOCKS_KEY: 3},
     {"role": "user", "content": "wrap up"},
 ]
 _TOOLS = [{"type": "function", "function": {
@@ -97,7 +97,7 @@ def test_declared_system_prefix_split_is_projected_once_inside_the_candidate_bui
     """The prospective wrap-up candidate and the real send agree on the SPLIT copy, and
     the split happens INSIDE ``_build_remote_kwargs`` (llm_openai_compatible.py, the
     ``openai_family_route`` block before the direct/OpenRouter branch split): the spy sees
-    the canonical declared 3-block system ENTER the builder and the split copy LEAVE it,
+    the canonical declared system ENTER the builder and the split copy LEAVE it,
     on the priced build and on the sent build alike. A split that ran earlier (in the
     canonical transcript or ``chat()``) would show an already-split system entering; one
     that ran later (``_finalized_physical_candidate``) would show a whole system leaving;
@@ -142,14 +142,16 @@ def test_declared_system_prefix_split_is_projected_once_inside_the_candidate_bui
         key: getattr(prospective, key) for key in _IDENTITY}
     assert len(builds) == 2, "exactly one priced build and one sent build"
     for entering, wire, layout in builds:
-        assert entering[0][STABLE_PREFIX_BLOCKS_KEY] == 1 and len(entering[0]["content"]) == 3, \
-            "the canonical declared system enters the builder: nothing split it earlier"
-        assert wire[0] == {"role": "system", "content": [{"type": "text", "text": "policy"}]}
-        assert wire[1]["role"] == "user"
-        assert wire[1]["content"] == "[SYSTEM NOTICE]\n" + HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\nmemory\n\nevidence"
-        assert wire[2] == {"role": "user", "content": "wrap up"}
+        assert entering == canonical, "the canonical declaration enters the builder unsplit"
+        stable = entering[0]["content"][:-1]
+        assert entering[0][STABLE_PREFIX_BLOCKS_KEY] == len(stable)
+        assert [message["role"] for message in wire] == ["system"] * len(stable) + ["user", "user"]
+        assert [message["content"][0]["text"] for message in wire[:len(stable)]] == [block["text"] for block in stable]
+        assert all(("cache_control" in message["content"][0]) == model.startswith("openai/") for message in wire[:len(stable)])
+        assert wire[-2]["content"] == "[SYSTEM NOTICE]\n" + HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\nevidence"
+        assert wire[-1] == {"role": "user", "content": "wrap up"}
         assert all(STABLE_PREFIX_BLOCKS_KEY not in message for message in wire)
-        assert layout == {"system_prefix_split": True, "moved_blocks": 2}
+        assert layout == {"system_prefix_split": True, "moved_blocks": 1}
     assert builds[0][1] == builds[1][1], "the priced copy and the sent copy are one wire"
 
 
@@ -170,7 +172,7 @@ def _completion(text):
 def _last_fit_rail(monkeypatch, tmp_path, execute):
     """Drive the whole rail: last-fit decision -> admitted candidate -> the real send."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
-    monkeypatch.setattr("ouroboros.loop._loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0})
+    monkeypatch.setattr("ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0})
     # proxy, exact probe, prepared: one fits, two do not; then the FRESH send's own admission fits.
     answers = iter((True, False, True, False, True, False, True))
     monkeypatch.setattr(task_pacing, "wrapup_reservation_fits", lambda **_kwargs: next(answers))
@@ -179,7 +181,7 @@ def _last_fit_rail(monkeypatch, tmp_path, execute):
     logs.mkdir()
     ctx = _ctx(drive_logs=logs, llm=LLMClient(api_key="unused"), active_model="openai/gpt-test")
     ctx.messages = [dict(message) for message in _MESSAGES]
-    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile(None), root_cap_usd=50.0)
+    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=50.0)
     with usage_accounting.usage_scope(usage_accounting.UsageScope(
         drive_root=tmp_path, task_id="task1", root_task_id="task1",
     )):
@@ -254,3 +256,91 @@ def test_a_closed_dispatch_window_is_a_deadline_not_drift(monkeypatch, tmp_path)
 
     assert calls == [True], "a deadline refusal is never retried"
     assert "never reached" not in result[0]
+
+
+@pytest.mark.parametrize("mode", ["nano", "max"])
+def test_the_forced_lookahead_and_send_share_one_measurement_allowance_and_identity(monkeypatch, tmp_path, mode):
+    """A10: the priced wrap-up copy and the admitted forced send are measured ONCE under one bound
+    Main context, so a rendered Nano gets the window's reply (not the whole ceiling) on both, their
+    clock-free identity still matches, and a direct or drift send measures the same bytes to the same
+    allowance. Max keeps the ceiling on both (the quiet side)."""
+    from dataclasses import replace
+
+    from ouroboros import loop_forced_finalization as forced
+    from tests.test_context_fit_v664 import _plan
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
+    plan = replace(_plan(preferred=mode, window=128_000, known=True), initial_mode=mode)
+    owner_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, task_metadata={}, model_turn_state=None)
+    captured = []
+
+    def execute(request, send, before_dispatch):
+        captured.append(request)
+        raise _Captured()
+
+    _patch_execute_candidate(monkeypatch, llm_module, execute)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    messages = [{"role": "system", "content": "policy " * 2_000}, {"role": "user", "content": "wrap up " * 40_000}]
+    ctx = _ctx(drive_logs=logs, llm=LLMClient(api_key="unused"), active_model=plan.model, task_type="task",
+               tools=SimpleNamespace(_ctx=owner_ctx), messages=[dict(message) for message in messages], tool_schemas=_TOOLS)
+    with usage_accounting.usage_scope(usage_accounting.UsageScope(
+        drive_root=tmp_path, task_id="task1", root_task_id="task1",
+    )):
+        request, prepared = task_pacing.prepared_wrapup_candidate(ctx, copy.deepcopy(messages), allow_server_web_search=False)
+        assert (owner_ctx._forced_physical_context is not None) and owner_ctx._forced_physical_context.rendered_mode == mode
+        forced._call_forced_model_once(ctx, initial_messages=prepared, admitted_request=request)
+        assert owner_ctx._forced_physical_context is None  # consumed by the admitted send
+        ctx.messages = prepared
+        forced._call_forced_model_once(ctx)  # a direct / drift send: its own fresh measurement of the same bytes
+    assert len(captured) == 2, "both forced sends reached the physical executor"
+    admitted, direct = captured
+    assert admitted.max_completion_tokens == direct.max_completion_tokens == request.max_completion_tokens
+    assert admitted.candidate_clock_free_sha256 == request.candidate_clock_free_sha256 is not None
+    if mode == "nano":
+        assert 8_192 < request.max_completion_tokens < 65_536  # the 128K window's room, not the ceiling
+    else:
+        assert request.max_completion_tokens == 65_536
+    # Main's PLANNED allowance is measured on the canonical transcript, the sent one on the sealed
+    # candidate (the wire projection differs by a few hundred tokens at most, well inside the slack).
+    assert abs(ctx.accumulated_usage["_context_reply_allowance_tokens"] - request.max_completion_tokens) < 1_000
+
+
+@pytest.mark.parametrize("mode", ["nano", "max"])
+def test_the_budget_probe_prices_the_reply_the_window_leaves(monkeypatch, tmp_path, mode):
+    """The last-fit probe (a priced copy of the transcript, never sent) is built under its own Main
+    measurement: a rendered Nano reserves the reply its 128K window leaves, Max the whole ceiling."""
+    from dataclasses import replace
+
+    from tests.test_context_fit_v664 import _plan
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
+    monkeypatch.setattr("ouroboros.loop._loop_tree_accounting", lambda **_k: {"settled_usd": 20.0, "accounted_usd": 20.0})
+    plan = replace(_plan(preferred=mode, window=128_000, known=True), initial_mode=mode)
+    # The last-fit probe is an explicit profile's authored rail: the task carries that profile.
+    owner_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, task_metadata={}, model_turn_state=None,
+                                task_contract={"budget_profile": {"cost_hard_stop_pct": 50}})
+    priced = []
+
+    def fits(**kwargs):
+        if kwargs.get("request") is not None:  # the exact probe: record its price basis and stop here
+            priced.append(kwargs["request"])
+            raise _Captured()
+        return kwargs.get("reservation_count", 1) == 1  # the proxy: one fits, two do not, so the probe runs
+
+    monkeypatch.setattr(task_pacing, "wrapup_reservation_fits", fits)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    messages = [{"role": "system", "content": "policy " * 2_000}, {"role": "user", "content": "wrap up " * 40_000}]
+    ctx = _ctx(drive_logs=logs, llm=LLMClient(api_key="unused"), active_model=plan.model, task_type="task",
+               tools=SimpleNamespace(_ctx=owner_ctx), messages=[dict(message) for message in messages], tool_schemas=_TOOLS)
+    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=50.0)
+    with usage_accounting.usage_scope(usage_accounting.UsageScope(
+        drive_root=tmp_path, task_id="task1", root_task_id="task1",
+    )), pytest.raises(_Captured):
+        _check_budget_limits(ctx, None, ceiling)
+    [probe] = priced
+    if mode == "nano":
+        assert 8_192 < probe.max_completion_tokens < 65_536  # the window's room, not the ceiling
+    else:
+        assert probe.max_completion_tokens == 65_536

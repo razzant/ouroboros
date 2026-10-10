@@ -48,7 +48,7 @@ def _clock_rows(messages):
 
 
 def _ledger(root: Path):
-    return [json.loads(line) for line in (root / ua.LEDGER_REL).read_text().splitlines() if line.strip()]
+    return ledger_rows(root)
 
 
 def _sealed(row):
@@ -151,7 +151,7 @@ def test_each_remote_lane_measures_prices_seals_and_sends_one_clocked_candidate(
         assert messages[-1] == {"role": "user", "content": clock.notes[0]}
     assert clock.notes[0].startswith(sc.CLOCK_NOTE_PREFIX) and len(clock.notes) == 1
     rows = _ledger(root)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "settled"]
+    assert [row["state"] for row in rows] == ["settled"]
     assert {row["candidate_raw_sha256"] for row in rows} == {_digest(candidate)} == {_sealed(rows[-1])}
     assert rows[-1]["candidate_raw_size_bytes"] == len(_canonical_candidate_bytes(candidate))
     if not asynchronous:  # the async driver runs in its own context copy; the sync Main send is the consumer
@@ -339,7 +339,7 @@ def test_the_gigachat_sdk_sends_each_accounted_attempt_once_despite_its_env_retr
             LLMClient(api_key="unused")._chat_gigachat(target, [{"role": "user", "content": "привет"}], None,
                                                        "high", 64, "auto")
     assert built[0]._settings.max_retries == 0 and len(posts["chat"]) == 1
-    assert [row["state"] for row in _ledger(root)] == ["reserved", "dispatched", "unresolved"]
+    assert [row["state"] for row in _ledger(root)] == ["unresolved"]
 
 
 def test_the_gigachat_sdk_401_resend_repeats_the_sealed_attempt_and_claims_no_fresh_clock(
@@ -367,7 +367,7 @@ def test_the_gigachat_sdk_401_resend_repeats_the_sealed_attempt_and_claims_no_fr
     assert refused == resent and refused["messages"][0]["content"] == "second"
     assert refused["messages"][-1]["content"] == resent["messages"][-1]["content"] != first["messages"][-1]["content"]
     rows = _ledger(root)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "settled"] * 2  # two attempts, not three
+    assert [row["state"] for row in rows] == ["settled"] * 2  # two attempts, not three
 
 
 def test_every_claudexor_invocation_samples_anew_and_uploads_its_sealed_bytes(main_call, ticking):
@@ -381,8 +381,8 @@ def test_every_claudexor_invocation_samples_anew_and_uploads_its_sealed_bytes(ma
     assert answer and len(gateway.uploads) == 2
     lines = [upload[0]["messages"][-1]["content"] for upload in gateway.uploads]
     assert all(line.startswith(sc.CLOCK_NOTE_PREFIX) for line in lines) and lines[0] != lines[1]
-    rows = _ledger(ctx.drive_root)
-    for upload, row in zip(gateway.uploads, [r for r in rows if r["state"] == "dispatched"]):
+    rows = _ledger(ctx.drive_root)  # one current row per attempt; a dispatched one carries its manifest
+    for upload, row in zip(gateway.uploads, [r for r in rows if r.get("candidate_manifest_ref")]):
         assert {r["candidate_raw_sha256"] for r in rows if r["attempt_id"] == row["attempt_id"]} == {
             _digest(upload[0]), _sealed(row)}
     # The consumed (second) line joined the canonical transcript; the refused one did not.
@@ -560,7 +560,7 @@ def test_the_forced_final_is_admitted_on_the_fresh_requests_own_price(  # noqa: 
                                                       admission=admission)
         assert text == "ok" and len(sent) == 1 and drifts == []
         rows = _ledger(root)
-        fresh = next(row for row in rows if row["state"] == "reserved")
+        fresh = rows[-1]  # the one attempt's current row keeps its reservation bound
         body = {key: value for key, value in sent[0].items() if key != "timeout"}  # an SDK option, not the body
         assert {row["candidate_raw_sha256"] for row in rows} == {_digest(body)} == {_sealed(rows[-1])}
         # The fence reserved the FRESH price (1000 more estimated tokens), not the lookahead's.
@@ -571,7 +571,7 @@ def test_the_forced_final_is_admitted_on_the_fresh_requests_own_price(  # noqa: 
             forced._send_admitted_forced_candidate(ctx, ctx.messages, lookahead, "budget_exhausted",
                                                    admission=admission)
         assert sent == [] and drifts == []  # refused before a byte left; no unpredicated resend
-        assert [row["state"] for row in _ledger(root)] == ["reserved", "released"]
+        assert [row["state"] for row in _ledger(root)] == ["released"]
 
 
 def test_a_refused_fresh_forced_candidate_lands_on_the_unaffordable_fallback(monkeypatch):
@@ -621,6 +621,7 @@ def _forced_predicate(forced, admitted):
 from tests.test_llm_claudexor import setup as _gateway_setup  # noqa: E402
 from tests.test_model_wait import live_wait as _live_wait  # noqa: E402
 from tests.test_subscription_main_wait import main_call as _main_call  # noqa: E402
+from tests._usage_store_testing import ledger_rows
 
 setup = _gateway_setup
 live_wait = _live_wait
@@ -650,10 +651,10 @@ def test_native_anthropic_compatibility_retry_has_a_fresh_sealed_clock(transport
     assert len(clock.notes) == 2 and clock.notes[0] != clock.notes[1]
     for payload, note in zip(sent, clock.notes):
         assert payload["messages"][-1]["content"][-1] == {"type": "text", "text": note}
-    rows = [r for r in _ledger(root) if r["state"] == "reserved"]
+    rows = _ledger(root)  # one current row per attempt
     assert len(rows) == 2
     assert [r["candidate_raw_sha256"] for r in rows] == [_digest(p) for p in sent]
-    assert [_sealed(r) for r in _ledger(root) if r["state"] == "dispatched"] == [_digest(p) for p in sent]
+    assert [_sealed(r) for r in _ledger(root) if r.get("candidate_manifest_ref")] == [_digest(p) for p in sent]
     assert usage["request_wire"]["applied_effort"] == "provider_default"
 
 
@@ -705,4 +706,4 @@ def test_clock_refresh_preserves_composed_tool_dialect_and_effort_recovery(
     assert sent[-1]["tools"] == source["tools"] and source["messages"] == [{"role": "user", "content": "probe"}]
     assert usage["request_wire"]["applied_effort"] == ("medium" if dialect_first else "high")
     assert usage["request_wire"]["candidate_sha256"] == _digest(sent[-1])
-    assert [_sealed(row) for row in _ledger(tmp_path) if row["state"] == "dispatched"] == [_digest(p) for p in sent]
+    assert [_sealed(row) for row in _ledger(tmp_path) if row.get("candidate_manifest_ref")] == [_digest(p) for p in sent]

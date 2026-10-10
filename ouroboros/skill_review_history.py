@@ -1,4 +1,13 @@
-"""Read/write helpers for the existing append-only Skill Review history."""
+"""Read/write helpers for the existing append-only Skill Review history.
+
+Rows are never rewritten. ``append_history_once`` writes exactly one terminal
+row per ``job_id``; ``review_round`` / ``snapshot_attempt`` / ``snapshot_revised``
+for older rows are computed at read time by ``normalize_history``.
+
+Write-ahead dispatch markers carry ``usage_attribution_schema``
+(``physical_attempt_v1``). A failed marker write or direct history append never
+raises: it logs and emits the typed ``skill_review_history_append_failed`` event.
+"""
 
 from __future__ import annotations
 

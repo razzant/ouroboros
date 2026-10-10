@@ -144,7 +144,7 @@ def test_nano_real_fit_keeps_material_for_toolless_author(merged_range, letter_e
     repo, base, target, *_ = merged_range
     material = ul.collect_range_material(base, target, git=_capture_for(repo))
     plans = []
-    monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: [])
+    monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: ([], ""))
 
     def real_plan(env, memory, task):
         # Production fitting, with deterministic context/evidence instead of owner memory

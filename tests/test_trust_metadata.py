@@ -217,4 +217,3 @@ def test_architecture_registers_each_new_public_metadata_surface():
         "site/paper/index.html",
     ):
         assert path in architecture
-    assert "README remains the claim SSOT" in architecture

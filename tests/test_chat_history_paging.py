@@ -84,29 +84,39 @@ def test_quota_deferred_backdated_system_row_is_not_skipped(tmp_path):
     assert "backdated final" in {message["text"] for page in loaded for message in page["messages"]}
 
 
-def test_lineage_cap_does_not_permanently_remove_older_rows(tmp_path):
+def test_lineage_cap_keeps_the_newest_rows_and_discloses_the_cap(tmp_path):
+    """The conversation decides whether older pages exist: a room holding narration
+    alone has none, so a swarm larger than the cap keeps its newest lineage on the
+    recent page, and the window says the cap cut it."""
     write(tmp_path / "logs" / "progress.jsonl", [
         row(index, "progress", delegation_role="subagent", parent_task_id="parent",
             task_id="child", subagent_event="running") for index in range(310)
     ])
     loaded = list(pages(tmp_path))
-    messages = [message for page in loaded for message in page["messages"]]
-    assert len(loaded[0]["messages"]) == 300
-    assert len(messages) == 310
-    assert all(message["parent_task_id"] == "parent" for message in messages)
+    assert len(loaded) == 1 and len(loaded[0]["messages"]) == 300
+    assert loaded[0]["messages"][-1]["text"] == "progress-309"
+    assert "lineage_cap" in loaded[0]["window"]["truncated_by"]
+    assert all(message["parent_task_id"] == "parent" for message in loaded[0]["messages"])
 
 
-def test_sparse_project_empty_page_advances_without_false_eof(tmp_path):
+def test_sparse_project_opens_at_its_rows_without_parsing_other_rooms_archives(tmp_path, monkeypatch):
     from ouroboros.projects_registry import create_project
 
     project = create_project(tmp_path, "sparse", name="Sparse")
-    write(tmp_path / "archive" / "chat_20260901T000000.jsonl", [row(0, chat_id=project["chat_id"])])
-    for segment in range(1, 6):
-        write(tmp_path / "archive" / f"chat_20260901T00000{segment}.jsonl",
-              [row(index, text="foreign" + "x" * 2000) for index in range(350)])
+    archives = [tmp_path / "archive" / f"chat_20260901T00000{segment}.jsonl" for segment in range(6)]
+    write(archives[0], [row(index, chat_id=project["chat_id"]) for index in range(3)])
+    for archive in archives[1:]:
+        write(archive, [row(index, text="foreign" + "x" * 2000) for index in range(350)])
+    write(tmp_path / "logs" / "chat.jsonl", [row(9, text="foreign live")])
+    parsed, entries = [], HistorySource._entries
+    monkeypatch.setattr(HistorySource, "_entries", lambda self, start, end, gaps: (
+        parsed.append((self.source, start, end)), entries(self, start, end, gaps))[1])
     loaded = list(pages(tmp_path, chat_id=str(project["chat_id"])))
-    assert any(not page["messages"] and page["has_more"] for page in loaded[1:])
-    assert [message["text"] for page in loaded for message in page["messages"]] == ["human-0"]
+    assert len(loaded) == 1 and loaded[0]["window"]["complete"] is True
+    assert [message["text"] for message in loaded[0]["messages"]] == ["human-0", "human-1", "human-2"]
+    own_end, live_base = archives[0].stat().st_size, sum(archive.stat().st_size for archive in archives)
+    assert all(end <= own_end or start >= live_base for source, start, end in parsed if source == "chat"), \
+        "the five foreign archives are ruled out by their summaries, never parsed"
 
 
 def test_frozen_page_and_older_cursor_survive_rotation_and_live_append(tmp_path):

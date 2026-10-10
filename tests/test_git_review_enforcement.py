@@ -11,6 +11,8 @@ import sys
 
 import pytest
 
+from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
@@ -23,10 +25,19 @@ from tests._git_review_pipeline_shared import (
 
 
 @pytest.fixture(autouse=True)
-def _packet_default_panel(monkeypatch):
-    """This module pins the PACKET assembly of the default panel; the shipped
-    default triad reads the work itself since #1334, so pin packet explicitly."""
-    monkeypatch.setattr("ouroboros.reviewer_slot_config.DEFAULT_TRIAD_DELIVERY", "")
+def _mixed_default_panel(monkeypatch):
+    """This module pins one pool of three factory seats: two PACKET seats
+    (``review-1``, ``review-2``) that answer Part 1 only and one natively
+    retrieving seat (``review-3``) that also answers the coupling question, so a
+    verdict here is decided by the change findings under test and the coupling
+    question is answered rather than NOT_PERFORMED."""
+    from tests.review_pool_rosters import FACTORY_MODELS, pool_roster, pool_seat, set_review_pool
+
+    set_review_pool(monkeypatch, pool_roster(
+        pool_seat("review-1", FACTORY_MODELS[0]),
+        pool_seat("review-2", FACTORY_MODELS[1]),
+        pool_seat("review-3", FACTORY_MODELS[2], delivery="native"),
+    ))
 
 
 @pytest.fixture
@@ -90,12 +101,6 @@ class TestReviewHistoryBuilding:
 
 
 class TestReviewQuorumLogic:
-    # ``test_review_models_configured`` was removed in v5.8.3-rc.5 — the
-    # ``len(get_review_models()) >= 2`` quorum assertion is already covered
-    # in ``tests/test_settings_effort.py`` (3 cases). This class keeps the
-    # checklist-path / loader smoke tests below which are unique to the
-    # phase-7 pipeline contract.
-
     def test_checklist_path_exists(self):
         review = _get_review_module()
         assert review._CHECKLISTS_PATH.exists()
@@ -107,22 +112,40 @@ class TestReviewQuorumLogic:
         assert "code_quality" in section
 
 
+def _clean_coupling_matrix():
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
+
+    return [{"item": item, "verdict": "PASS", "severity": "advisory",
+             "reason": "checked the touched modules and their consumers against the staged diff; clean"}
+            for item in sorted(SCOPE_REQUIRED_ITEMS)]
+
+
 class TestReviewEnforcementModes:
     @staticmethod
     def _fake_result(*review_texts):
-        return json.dumps({
-            "results": [
-                {
-                    "model": f"model-{idx}",
-                    "verdict": "PASS",
-                    "text": text,
-                    "tokens_in": 0,
-                    "tokens_out": 0,
-                    "cost_estimate": 0.0,
-                }
-                for idx, text in enumerate(review_texts, start=1)
-            ]
+        """One wave of the module's pinned pool: the change texts land on the
+        packet seats ``review-1..n`` (contract A) and the retrieving seat
+        ``review-3`` answers both parts (contract B: a clean change block and a
+        clean coupling matrix), so a verdict here is decided by the change
+        findings under test and not by an unanswered coupling question."""
+        rows = [
+            {
+                "model": f"model-{idx}",
+                "slot_id": f"review-{idx}",
+                "verdict": "PASS",
+                "text": text,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "cost_estimate": 0.0,
+            }
+            for idx, text in enumerate(review_texts, start=1)
+        ]
+        rows.append({
+            "model": "retrieving-seat", "slot_id": "review-3", "verdict": "PASS",
+            "text": json.dumps({"change": [], "change_clean": True, "coupling": _clean_coupling_matrix()}),
+            "tokens_in": 0, "tokens_out": 0, "cost_estimate": 0.0,
         })
+        return json.dumps({"results": rows})
 
     @staticmethod
     def _mock_staged(monkeypatch, review_mod, changed_files="x.py", diff_text="diff --cached",
@@ -213,7 +236,62 @@ class TestReviewEnforcementModes:
         assert saved.count("material original finding") == 1
         assert saved.count("minor original finding") == 1
         assert saved.count("prior deterministic/preflight warning") == 1
-        assert saved.count("Note: 1 of 3 review models") == 1
+        assert saved.count("Note: 1 of 4 review models") == 1  # three seated answers + the failed row
+
+    @pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
+    def test_w2_an_empty_pool_is_a_typed_pool_empty_not_performed_never_a_key_problem(
+        self, review_ctx, monkeypatch, enforcement
+    ):
+        """The owner saved a catalog with no row marked Reviewer (the settings panel
+        promised: reviews will not run and report "not performed"). The gate states
+        exactly that, typed ``pool_empty``, dispatches nothing, and never blames
+        OPENROUTER_API_KEY (the old path sent ``models=[]`` to the executor and
+        reported its "models list is required" as an infrastructure failure)."""
+        from ouroboros.tools.review_helpers import REVIEW_POOL_EMPTY_SENTENCE
+        from tests.review_pool_rosters import FACTORY_MODELS, pool_roster, pool_seat, set_review_pool
+
+        review, ctx = review_ctx
+        self._mock_staged(monkeypatch, review, changed_files="x.py")
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+        set_review_pool(monkeypatch, pool_roster(pool_seat("helper", FACTORY_MODELS[0], marked=False)))
+        dispatched = []
+
+        def executor(*args, **kwargs):  # the executor's own answer to an empty model list
+            dispatched.append(kwargs.get("models"))
+            return json.dumps({"error": "models list is required"})
+
+        monkeypatch.setattr(review, "_handle_multi_model_review", executor)
+        result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
+        assert dispatched == [], "nothing is dispatched for an empty pool"
+        assert ctx._last_review_block_reason == "pool_empty"
+        said = result if enforcement == "blocking" else " ".join(w for w in ctx._review_advisory if isinstance(w, str))
+        if enforcement == "blocking":
+            assert result is not None and "REVIEW_BLOCKED: review NOT_PERFORMED" in result
+        else:
+            assert result is None
+        assert REVIEW_POOL_EMPTY_SENTENCE in said and "pool_empty" in said
+        assert "OPENROUTER_API_KEY" not in said and "models list is required" not in said
+
+    def test_w2_the_not_performed_sentence_names_the_reason_that_decided(self, review_ctx, monkeypatch):
+        """Under advisory enforcement an unresolved physical operation reduces to
+        NOT_PERFORMED ``review_late_result_pending``; the gate's sentence says so,
+        and does not claim that no seat answered the change."""
+        review, ctx = review_ctx
+        self._mock_staged(monkeypatch, review, changed_files="x.py")
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+        response = json.loads(self._fake_result(
+            '[{"item":"code_quality","verdict":"PASS","severity":"critical","reason":"ok"}]',
+            '[{"item":"code_quality","verdict":"PASS","severity":"critical","reason":"ok"}]'))
+        response["results"][0].update({"verdict": "ERROR", "text": "", "operation_state": "in_flight",
+                                       "late_result_pending": True})
+        monkeypatch.setattr(review, "_handle_multi_model_review", lambda *a, **kw: json.dumps(response))
+        assert review._run_unified_review(ctx, "candidate", repo_dir=ctx.repo_dir) is None
+        assert ctx._last_review_verdict["reason"] == "review_late_result_pending"
+        assert ctx._last_review_block_reason == "review_late_result_pending"
+        not_performed = [w for w in ctx._review_advisory if isinstance(w, str) and "review NOT_PERFORMED" in w]
+        assert len(not_performed) == 1, ctx._review_advisory
+        assert "remain unresolved" in not_performed[0] and "model-1" in not_performed[0]
+        assert "no seat answered the change" not in not_performed[0]
 
     @pytest.mark.parametrize("failure", ["nonzero_rc", "non_utf8_rc"])
     def test_uncapturable_staged_diff_blocks_instead_of_reviewing_a_placeholder(
@@ -325,6 +403,9 @@ class TestReviewEnforcementModes:
                 return huge_diff
             return ""
 
+        windows = {"openai/gpt-5.5": 128_000, "google/gemini-3.5-flash": 256_000,
+                   "anthropic/claude-fable-5": 1_000_000}
+        monkeypatch.setattr(review, "reviewer_context_window", lambda model, **_kw: windows[model])
         captured = {}
         monkeypatch.setattr(review, "run_cmd", fake_run_cmd)
         import ouroboros.tools.review_binary_context as _rbc
@@ -336,12 +417,16 @@ class TestReviewEnforcementModes:
             review, "build_touched_file_pack",
             lambda *_a, **_k: ("FULL SNAPSHOT\n" + ("x = 1\n" * 400_000), []),
         )
-        monkeypatch.setattr(review._cfg, "get_review_models", lambda: [
-            "openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-fable-5",
-        ])
+        models = ["openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-fable-5"]
+        set_review_pool(monkeypatch, pool_roster(
+            pool_seat("review-1", models[0]),
+            pool_seat("review-2", models[1]),
+            pool_seat("review-3", models[2], delivery="native"),
+        ))
 
         def fake_review(*_args, **kwargs):
             captured["prompt"] = kwargs["prompt"]
+            captured["models"] = kwargs["row_plan"]["models"]
             return self._fake_result(
                 '[{"item":"code_quality","verdict":"PASS","severity":"advisory","reason":"ok"}]',
                 '[{"item":"code_quality","verdict":"PASS","severity":"advisory","reason":"ok"}]',
@@ -350,18 +435,22 @@ class TestReviewEnforcementModes:
         monkeypatch.setattr(review, "_handle_multi_model_review", fake_review)
 
         assert review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir) is None
+        assert captured["models"] == models
         prompt = captured["prompt"]
         assert "TRIAD FIT NOTE" in prompt
         assert "FULL SNAPSHOT" not in prompt
         assert compact_diff in prompt
         assert huge_diff not in prompt
-        assert review.estimate_tokens(prompt) <= review.calibrated_input_token_limit(
-            "anthropic/claude-fable-5",
-            context_window=1_000_000,
-            output_reserve=review._review_output_budget(),
-            tokenizer_margin=50_000,
-            budget_cap=review.REVIEW_PROMPT_TOKEN_BUDGET,
-        )
+        # Both packet seats are needed for their quorum; the native seat reads
+        # its own brief and must not lend its larger window to this packet.
+        for model in captured["models"][:2]:
+            output, margin = review.window_scaled_reserves(
+                windows[model], output_reserve=review._review_output_budget(), tokenizer_margin=50_000,
+            )
+            assert review.estimate_tokens(prompt) <= review.calibrated_input_token_limit(
+                model, context_window=windows[model], output_reserve=output,
+                tokenizer_margin=margin, budget_cap=review.REVIEW_PROMPT_TOKEN_BUDGET,
+            )
 
     def test_triad_compact_rung_uses_hardened_capture_not_raw_run_cmd(self, review_ctx, monkeypatch):
         """The oversized ladder's compact rung called a RAW ``run_cmd(git diff
@@ -397,13 +486,21 @@ class TestReviewEnforcementModes:
         monkeypatch.setattr(
             review, "build_touched_file_pack",
             lambda *_a, **_k: ("FULL SNAPSHOT\n" + ("x = 1\n" * 400_000), []))
-        monkeypatch.setattr(review._cfg, "get_review_models", lambda: [
-            "openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-fable-5"])
+        models = ["openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-fable-5"]
+        set_review_pool(monkeypatch, pool_roster(
+            pool_seat("review-1", models[0]),
+            pool_seat("review-2", models[1]),
+            pool_seat("review-3", models[2], delivery="native"),
+        ))
 
+        windows = {"openai/gpt-5.5": 128_000, "google/gemini-3.5-flash": 256_000,
+                   "anthropic/claude-fable-5": 1_000_000}
+        monkeypatch.setattr(review, "reviewer_context_window", lambda model, **_kw: windows[model])
         captured = {}
 
         def fake_review(*_args, **kwargs):
             captured["prompt"] = kwargs["prompt"]
+            captured["models"] = kwargs["row_plan"]["models"]
             return self._fake_result(
                 '[{"item":"code_quality","verdict":"PASS","severity":"advisory","reason":"ok"}]',
                 '[{"item":"code_quality","verdict":"PASS","severity":"advisory","reason":"ok"}]')
@@ -411,6 +508,7 @@ class TestReviewEnforcementModes:
         monkeypatch.setattr(review, "_handle_multi_model_review", fake_review)
 
         assert review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir) is None
+        assert captured["models"] == models
         assert 0 in capture_calls, "compact rung must call capture_staged_diff(unified=0)"
         assert ["git", "diff", "--cached", "-U0"] not in run_cmd_calls, run_cmd_calls
         assert compact_diff in captured["prompt"]
@@ -422,16 +520,15 @@ class TestReviewEnforcementModes:
         monkeypatch.setattr(
             review,
             "_handle_multi_model_review",
-            lambda *args, **kwargs: self._fake_result(
-                "Error: timeout",
-                '[{"item":"code_quality","verdict":"PASS","severity":"critical","reason":"ok"}]',
-            ),
+            # two of the three seats time out: one responded seat is below the quorum of two
+            lambda *args, **kwargs: self._fake_result("Error: timeout", "Error: timeout"),
         )
         result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
         assert result is None
         assert any(
-            "only 1 of 2 review models responded successfully" in w.lower()
-            or "review enforcement=advisory" in w.lower()
+            isinstance(w, str) and (
+                "only 1 of 3 review models responded successfully" in w.lower()
+                or "review enforcement=advisory" in w.lower())
             for w in ctx._review_advisory
         )
 
@@ -508,7 +605,7 @@ class TestReviewEnforcementModes:
     def test_rename_out_of_ouroboros_without_tests_passes(self):
         """Regression (#447): a rename/deletion of a .py file out of
         ouroboros/ without staged tests is no longer refused — the lexical
-        tests-required predicate was removed (CHECKLISTS.md item 6 owns
+        tests-required predicate was removed (CHECKLISTS.md item 4 owns
         coverage semantically)."""
         review = _get_review_module()
         result = review._preflight_check(
@@ -531,9 +628,19 @@ class TestReviewEnforcementModes:
         assert "PREFLIGHT_BLOCKED" in result
         assert "ARCHITECTURE.md" in result
 
-    def test_rename_into_ouroboros_with_architecture_passes(self):
-        """Renaming a .py file into ouroboros/ + staging ARCHITECTURE.md passes check 4."""
+    def test_rename_into_ouroboros_with_architecture_passes(self, monkeypatch):
+        """Renaming a .py file into ouroboros/ + staging ARCHITECTURE.md passes check 4.
+
+        ARCHITECTURE.md is a version carrier: the version-neutral index lane reads
+        the staged carrier to compare its span with HEAD, so the lexical case
+        supplies an index and a HEAD of its own (an unreadable one is honest unavailable evidence).
+        """
+        from ouroboros import commit_admission
+
         review = _get_review_module()
+        show = lambda repo_dir, path: "# Ouroboros v3.24.0\n" if path == "docs/ARCHITECTURE.md" else None  # noqa: E731
+        monkeypatch.setattr(review, "_git_show_staged", show)
+        monkeypatch.setattr(commit_admission, "_head_text", show)  # HEAD's carrier equals the index's
         result = review._preflight_check(
             "move module into ouroboros",
             "D  docs/old_module.py\nA  ouroboros/new_module.py\nM  tests/test_new.py\nM  docs/ARCHITECTURE.md",
@@ -599,9 +706,14 @@ class TestReviewEnforcementModes:
         assert "PREFLIGHT_BLOCKED" in result
         assert "ARCHITECTURE.md" in result
 
-    def test_copied_module_with_architecture_passes(self):
+    def test_copied_module_with_architecture_passes(self, monkeypatch):
         """Copied .py file in ouroboros/ + ARCHITECTURE.md staged → passes."""
+        from ouroboros import commit_admission
+
         review = _get_review_module()
+        show = lambda repo_dir, path: "# Ouroboros v3.24.0\n" if path == "docs/ARCHITECTURE.md" else None  # noqa: E731
+        monkeypatch.setattr(review, "_git_show_staged", show)  # the staged carrier the neutral lane compares
+        monkeypatch.setattr(commit_admission, "_head_text", show)  # ... with HEAD's equal one
         result = review._preflight_check(
             "add copied module",
             "C  ouroboros/new_copy.py\nM  tests/test_new_copy.py\nM  docs/ARCHITECTURE.md",
@@ -632,9 +744,16 @@ class TestReviewEnforcementModes:
         )
         assert result is None
 
-    def test_deleted_architecture_does_not_satisfy_check4(self):
-        """Deleting ARCHITECTURE.md does not count as 'architecture doc staged'."""
+    def test_deleted_architecture_does_not_satisfy_check4(self, monkeypatch):
+        """Deleting ARCHITECTURE.md does not count as 'architecture doc staged'.
+
+        HEAD's file carries no version span here, so the release lane has no carrier
+        move to report and check 4 stays the subject.
+        """
+        from ouroboros import commit_admission
+
         review = _get_review_module()
+        monkeypatch.setattr(commit_admission, "_head_text", lambda repo_dir, path: "# Architecture\n")
         result = review._preflight_check(
             "add new module",
             "A  ouroboros/new_module.py\nM  tests/test_new.py\nD  docs/ARCHITECTURE.md",
@@ -706,7 +825,7 @@ def _mock_triad_gates(review, monkeypatch, *, changed=("uv.lock", "VERSION")):
     import ouroboros.tools.review_binary_context as _rbc
     monkeypatch.setattr(_rbc, "capture_staged_diff", lambda _repo, *, unified=3: "diff --cached")
     monkeypatch.setattr(review, "_preflight_check", lambda *a, **k: None)
-    monkeypatch.setattr(review, "_load_checklist_section", lambda: "## checklist")
+    monkeypatch.setattr(review, "_load_checklist_section", lambda *_a, **_k: "## checklist")
     monkeypatch.setattr(review, "load_governance_doc", lambda repo, rel, **k: f"{rel} PREFIX TEXT")
     captured = {}
 
@@ -773,7 +892,9 @@ def test_the_prepared_packet_carries_the_governance_disclosure_record(review_ctx
     assert manifest and all(
         set(row) == {"path", "tier", "disposition", "chars", "reason"} for row in manifest)
     assert {row["tier"] for row in manifest} <= {1, 2, 3}
-    assert prepared["governance_packet_slots"] == list(prepared["row_plan"]["slot_ids"])
+    plan = prepared["row_plan"]
+    assert prepared["governance_packet_slots"] == [
+        slot for slot, retrieves in zip(plan["slot_ids"], plan["retrieves"]) if not retrieves]
     assert ctx._last_triad_governance_manifest == manifest
 
 
@@ -811,7 +932,8 @@ def test_a_managed_subject_keeps_every_full_text(review_ctx, monkeypatch):
     import ouroboros.tools.review_subject as _subject
     fake_subject = SimpleNamespace(
         render_prompt_diff=lambda unified=3: "diff --managed", touched_paths=lambda: ["uv.lock"],
-        m0_tree="", staged_tree="", name_status=[("M", "uv.lock")],
+        m0_tree="", staged_tree="", name_status=[("M", "uv.lock")], diff="diff --managed",
+        header=lambda body_rendered=True: "### Managed-update resolution subject (M0→S)",
     )
     monkeypatch.setattr(_subject, "managed_review_subject", lambda ctx_, repo: fake_subject)
     monkeypatch.setattr(review, "triad_pack_exclusions",

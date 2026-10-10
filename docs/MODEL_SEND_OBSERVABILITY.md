@@ -3,8 +3,8 @@
 The physical-send observability contract is implemented in
 `ouroboros/model_send_seal.py`, wired at
 `llm_attempt._candidate_before_dispatch` and swept by the session-custodied
-history child `ouroboros/startup_historical_audit.py` (launched after
-supervisor readiness, off the readiness path);
+history child `ouroboros/startup_historical_audit.py` (explicit owner-started
+audit, never launched by boot);
 `tests/test_model_send_seal.py` verifies it. The claim is deliberately narrow:
 a reconstruction mismatch is an observability fact, not a dispatch gate.
 
@@ -70,50 +70,27 @@ The existing physical-candidate manifest carries a
   reconstructs the wire bytes exactly (modulo nothing).
 - `attempt_id` — the accounting join key.
 
-### 3.2 Verification on call (forward)
+### 3.2 Durable capture and explicit forward audit
 
-At the seam, in this order:
+The send seam holds one frozen request representation, verifies its in-memory
+identity and persists one durable pre-send record. It never calls
+`verify_sealed_candidate` or reads that record back. Persistence remains a
+precondition of dispatch.
 
-1. Serialize the wire-bound candidate to canonical bytes `W`.
-2. Persist the sealed record (persist, then gate).
-3. **Reconstruct** `R` from the durable record just written: read back the
-   blob, undo nothing — instead apply the SAME exclusion map to `W` (redaction
-   and custody projection are not invertible; §5.1) — and compare byte-for-byte
-   the comparable domain: `project(W, exclusions) == blob_bytes` AND
-   `sha256(W) == pre_redaction_sha256`.
-4. Any inequality → write the typed durable mismatch fact (§3.4). The call is
-   NOT blocked, and the verification never raises: this invariant is
-   observability, and `verify_sealed_candidate` is fail-soft by contract.
-
-Verification remains fail-soft for two reasons:
-
-- The refusal it would add is not the same question as the existing gate. The
-  in-memory identity re-check above this call still refuses dispatch when the
-  candidate itself changed between reservation and send — that is a candidate
-  fact and it stays fail-closed, unchanged. A reconstruction mismatch is a fact
-  about the RECORD (a corrupt blob, a tampered seal digest, a missing seal
-  block, an undisclosed exclusion class, a foreign serializer basis) — a
-  logging defect. Blocking a paid, otherwise-correct model call because the
-  audit copy on disk is unreadable trades the product's function for the
-  audit's tidiness, and it would let a full disk or a rotated file stop
-  cognition.
-- Fail-closed here would also be self-defeating: the durable fact IS the
-  disclosure, and a refusal path that can itself fail (write error, unreadable
-  root) would have to decide between a silent skip and a dead runtime.
-
-The mismatch must be disclosed without blocking dispatch.
-`tests/test_model_send_seal.py` pins exactly this — a corrupted blob, a
-tampered seal digest, a dropped seal block, an undisclosed exclusion class and
-a foreign basis each produce their typed fact while the attempt still settles.
-
-The added cost is one read-back and one projection per physical attempt —
-bounded, local, and on the same drive the record was just written to.
+The explicit audit compares the manifest's raw digest and size with the
+attempt's recorded digest and size, checks serializer/exclusion metadata and
+reads the CAS bytes to verify their digest. If an original candidate is supplied
+to `verify_sealed_candidate`, it also compares the exclusion-aware projection
+byte for byte. Without those original bytes, secret redaction and provider-native
+custody are not reversible; the audit reports only what the retained evidence
+can prove. It never fabricates a wire copy. Mismatches become typed durable
+facts; they do not gate a later model call.
 
 ### 3.3 Reverse direction (audit, `model_send` only)
 
-A bounded reconciliation sweep (runs inside the session-custodied history
-child `startup_historical_audit.py`, started by `server.py::_run_supervisor`
-after readiness — not on the readiness path, not a new scheduler):
+Run `python -m ouroboros.startup_historical_audit --data-root <root>` explicitly,
+or `python -m ouroboros.startup_migrations --data-root <root>` to rebuild current
+obligations and then audit. Neither job stamps an audit watermark. Both join directions stay:
 
 - every `model_send` seal ⟶ exactly one attempt row in the usage-accounting
   replay (any terminal state, including refused-before-dispatch);
@@ -204,7 +181,7 @@ per-record (`basis` names the rules), never heuristic.
 
 An SDK that mutates the dict it was handed (adding `stream: true`, coercing
 types) after the seal was computed. This is the historical reason the
-pre-dispatch re-check exists; reconstruction-based compare (§3.2) extends it
+pre-dispatch identity re-check exists; explicit audit (§3.2) checks its retained record
 from "our two copies agree" to "the durable record agrees with the wire".
 
 ## 6. Non-goals
@@ -224,9 +201,9 @@ from "our two copies agree" to "the durable record agrees with the wire".
   durable projection, writes typed mismatch facts and reconciles both join
   directions. The seal is an additive key under the existing manifest schema.
 - `startup_historical_audit.py` runs the bounded reconciliation as one
-  session-custodied child per generation, launched after supervisor readiness
-  (#1195 F1). Unknown accounting evidence does not become an orphan claim;
+  owner-started job or the rebuild job's audit step, never an automatic boot child. Unknown accounting evidence does not become an orphan claim;
   the sweep records facts without deleting records or fabricating attempts.
 - `tests/test_model_send_seal.py` covers reconstruction, typed divergence,
-  non-blocking dispatch and reverse joins. Compacted history is resolved through
-  the live/archive union described in [Usage compaction](USAGE_COMPACTION.md).
+  non-blocking dispatch and reverse joins. History folded before the usage store
+  existed is resolved through the retained evidence described in
+  [Usage store](USAGE_STORE.md#8-explicit-history-audit).

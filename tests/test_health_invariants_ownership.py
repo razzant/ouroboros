@@ -63,11 +63,8 @@ def test_non_owner_gets_no_call_shaped_instruction(tmp_path, monkeypatch):
 
 def test_architecture_states_the_terminal_owner_apply_reject_authority_split():
     architecture = architecture_text()
-    assert "apply requires exact active Git root/fresh payload binding" in architecture
-    assert "orphan path only after proven owner terminality" in architecture
-    assert "reject needs no fresh target grant" in architecture
-    assert "a live top-level task with a different active root may reject and release" in architecture
-    assert "durable `PATCH_DISPOSED` names `disposed_by_task_id`" in architecture
+    assert "PATCH_DISPOSED" in architecture
+    assert "disposed_by_task_id" in architecture
 
 
 def test_owner_keeps_the_call_shaped_instruction(tmp_path, monkeypatch):

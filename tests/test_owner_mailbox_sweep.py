@@ -69,4 +69,4 @@ def test_startup_prune_sweeps_run_the_mailbox_sweep():
 
     import ouroboros.server_maintenance as sm
 
-    assert "sweep_settled_owner_mailboxes" in inspect.getsource(sm._startup_prune_sweeps)
+    assert "sweep_settled_owner_mailboxes" in inspect.getsource(sm._run_deferred_startup_prunes)

@@ -18,8 +18,24 @@ def claimed_start_request(
     actor_ctx: Any = None, enforce_actor_idle: bool = False,
     **request_row: Any,
 ) -> Tuple[bool, Dict[str, Any]]:
-    """Atomically claim a fresh actor start and optional payload target."""
+    """Atomically claim a fresh actor start and optional payload target.
 
+    A start that continues IN a predecessor's snapshot (``capture_id``) claims
+    under that snapshot's one disposition lock, so no apply/reject of the
+    predecessor can interleave with its hand-over (``delegate_continuation``).
+    """
+    if request_row.get("capture_id") and request_row.get("continuation_of"):
+        from ouroboros.delegate_continuation import snapshot_handover
+
+        with snapshot_handover(drive, request_row) as refusal:
+            if refusal:
+                return False, refusal
+            return _claimed(drive, claim_target, payload_busy, actor_ctx, enforce_actor_idle, request_row)
+    return _claimed(drive, claim_target, payload_busy, actor_ctx, enforce_actor_idle, request_row)
+
+
+def _claimed(drive: pathlib.Path, claim_target: str, payload_busy: Callable[[pathlib.Path, pathlib.Path], str],
+             actor_ctx: Any, enforce_actor_idle: bool, request_row: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     from ouroboros.platform_layer import (
         acquire_exclusive_file_lock,
         release_exclusive_file_lock,
@@ -67,7 +83,8 @@ def claimed_start_request(
                 }
             from ouroboros.delegate_recovery import unsettled_start_ids
 
-            blockers = unsettled_start_ids(drive, task_id)
+            blockers = unsettled_start_ids(drive, task_id, continuing=str(
+                request_row.get("continuation_of") or ""))
             if any(blockers.values()):
                 if claim_target:
                     holder = payload_busy(drive, pathlib.Path(claim_target))

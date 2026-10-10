@@ -471,11 +471,8 @@
             "candidate_raw_sha256": "732a821605016ae4837f3619bff61cab76ebe9a5463e3fcb5f3a802bc8e0d2e8",
             "candidate_raw_size_bytes": 263,
             "candidate_measurement_kind": "canonical_json_v1",
-            "states": [
-              "reserved",
-              "dispatched",
-              "settled"
-            ],
+            "state": "settled",
+            "transitions": 3,
             "prompt_cache_ttl": "",
             "cost_final": false
           }

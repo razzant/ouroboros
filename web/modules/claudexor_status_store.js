@@ -63,7 +63,7 @@
 //
 // Pure helpers up top are node-tested without a DOM.
 
-import { apiFetch } from './api_client.js';
+import { apiFetch, createAccountReset, getAccountReset, refreshAccountResources } from './api_client.js';
 import { harnessPresentation } from './harness_presentation.js';
 
 export const STATUS_ENDPOINT = '/api/claudexor/status';
@@ -84,6 +84,66 @@ export const FACET_CATALOG = 'catalog';
 export const FACET_ACCOUNTS = 'accounts';
 export const FACET_QUOTA = 'quota';
 export const STATUS_FACETS = [FACET_CATALOG, FACET_ACCOUNTS, FACET_QUOTA];
+
+export const accountTargetKey = (target) => JSON.stringify([target.harness, target.profile_id]);
+const sameTarget = (a, b) => a?.harness === b?.harness && a?.profile_id === b?.profile_id;
+const quotaTarget = (row) => ({ harness: row?.subject?.harness, profile_id: row?.subject?.subject_id });
+const observationTime = values => Math.max(-Infinity, ...values.map(value => Date.parse(value || '')).filter(Number.isFinite));
+const keepObservation = (held, incoming, onTie) => held > incoming || (onTie && held === incoming);
+
+export function resourceCapabilitiesRead(payload) {
+    return payload?.resource_capabilities_read
+        ?? (payload?.resource_capabilities ? READ_OK : READ_NOT_READ);
+}
+
+export function resetRecoverable(action) {
+    return Boolean(action?.request && (!action.receipt || action.receipt.state === 'running'
+        || ['pending', 'unknown', 'already_used'].includes(action.receipt.outcome)));
+}
+
+const retainResetRequest = entry => resetRecoverable(entry) || (entry.request && !entry.refreshed
+    && ['reset', 'already_redeemed'].includes(entry.receipt?.outcome) && entry.receipt.readback?.state !== 'fresh');
+const resetReferences = action => [...(action.earlierRequests || []), action];
+const resetReference = ({ request, key, receipt, refreshed }) => ({ request, key, refreshed,
+    receipt: receipt ? { ...receipt, resources: null } : undefined });
+
+/** Receipts settle operations; their observations may predate the current display. */
+export function mergeAccountResources(snapshot, envelope, target = null, { preferPreviousOnTie = false } = {}) {
+    if (!snapshot || !Array.isArray(envelope?.snapshots) || !Array.isArray(envelope?.absences)) {
+        throw new Error('The account resource response could not be understood');
+    }
+    const addressed = (rows, key) => (rows || []).filter(row => sameTarget(key(row), target));
+    const merge = (held, incoming, key) => {
+        if (!target) return incoming;
+        const previous = addressed(held, key), next = addressed(incoming, key);
+        if (previous.length === next.length && next.every((row, index) => row === previous[index])) return held || [];
+        return [...(held || []).filter(row => !sameTarget(key(row), target)), ...next];
+    };
+    const quotaTime = (snapshots, absences) => observationTime(
+        addressed([...(snapshots || []), ...(absences || [])], quotaTarget).map(row => row.observed_at));
+    const keepQuota = target && keepObservation(quotaTime(snapshot.quota, snapshot.quota_absences),
+        quotaTime(envelope.snapshots, envelope.absences), preferPreviousOnTie);
+    let resources = envelope.resources;
+    if (target && Array.isArray(resources)) {
+        const held = addressed(snapshot.resources, row => row.target)[0];
+        const incoming = addressed(resources, row => row.target)[0];
+        if (held && incoming) {
+            const merged = { ...incoming };
+            for (const name of ['balances', 'spending', 'resets', 'diagnostics']) {
+                const time = facet => observationTime([facet?.observed_at, facet?.last_attempt_at]);
+                if (keepObservation(time(held[name]), time(incoming[name]), preferPreviousOnTie)) merged[name] = held[name];
+            }
+            resources = [Object.keys(merged).filter(name => name !== 'target')
+                .every(name => merged[name] === held[name]) ? held : merged];
+        } else if (!incoming && held && preferPreviousOnTie) resources = [held];
+    }
+    return {
+        ...snapshot,
+        quota: merge(snapshot.quota, keepQuota ? snapshot.quota : envelope.snapshots, quotaTarget),
+        quota_absences: merge(snapshot.quota_absences, keepQuota ? snapshot.quota_absences : envelope.absences, quotaTarget),
+        ...(Array.isArray(resources) ? { resources: merge(snapshot.resources, resources, row => row.target) } : {}),
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers.
@@ -489,6 +549,7 @@ export function createClaudexorStatusStore({
     fetchImpl = apiFetch,
     doc = () => (typeof document === 'undefined' ? null : document),
     pollMs = DEFAULT_POLL_MS,
+    storage = () => globalThis.localStorage,
 } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const inner = {
@@ -510,6 +571,8 @@ export function createClaudexorStatusStore({
         // answer is a fresh status payload, and a second committer of the
         // shared snapshot would be a second writer racing the first.
         wakeInFlight: null,
+        resourcesInFlight: null,
+        resourceActions: new Map(),
         queued: null,
         timer: 0,
         disposed: false,
@@ -517,6 +580,44 @@ export function createClaudexorStatusStore({
         holds: new Set(),
         visibilityBound: null,
     };
+
+    // Retain the exact request through response loss and closing this client window.
+    // Only operation references live here; credentials and provider binding stay host-side.
+    const storageKey = 'ouroboros.account-reset-requests';
+    try {
+        for (const entry of JSON.parse(storage()?.getItem(storageKey) || '[]')) {
+            if (entry?.key && entry.request?.target?.profile_id && entry.request?.target?.harness) {
+                const targetKey = accountTargetKey(entry.request.target);
+                const prior = inner.resourceActions.get(targetKey);
+                inner.resourceActions.set(targetKey, { ...resetReference(entry),
+                    earlierRequests: prior ? resetReferences(prior).filter(retainResetRequest).map(resetReference) : [] });
+            }
+        }
+    } catch { /* Unavailable client storage leaves the in-memory recovery path intact. */ }
+
+    function saveResetRequests() {
+        try {
+            storage()?.setItem(storageKey, JSON.stringify([...inner.resourceActions.values()]
+                .flatMap(resetReferences).filter(retainResetRequest).map(resetReference)));
+        } catch { /* The current page still retains the original request and key. */ }
+    }
+
+    function commitStatus(payload) {
+        for (const action of inner.resourceActions.values()) {
+            for (const request of resetReferences(action)) request.resourceRead = false;
+        }
+        if (!payload) return;
+        const held = inner.snapshot;
+        if (held && facetReadState(payload, FACET_QUOTA) !== READ_OK) {
+            payload = { ...payload, quota: held.quota, quota_absences: held.quota_absences, resources: held.resources };
+        }
+        // Agent discovery (reads.catalog) is independent of the operations catalog.
+        if (held && resourceCapabilitiesRead(payload) !== READ_OK) {
+            payload = { ...payload, resource_capabilities_read: resourceCapabilitiesRead(payload),
+                resources: held.resources, resource_capabilities: held.resource_capabilities };
+        }
+        inner.snapshot = payload;
+    }
 
     function facet(name) {
         // The store adds ONE dimension the wire cannot carry: this client has
@@ -638,8 +739,8 @@ export function createClaudexorStatusStore({
             inner.loading = false;
             inner.everSettled = true;
             inner.inFlight = null;
+            commitStatus(payload);
             if (payload) {
-                inner.snapshot = payload;
                 inner.snapshotHasModels = withModels;
                 inner.error = '';
             } else {
@@ -666,6 +767,7 @@ export function createClaudexorStatusStore({
     function refresh({ includeModels = false } = {}) {
         if (inner.disposed) return Promise.resolve(inner.snapshot);
         if (includeModels) inner.includeModels = true;
+        if (inner.resourcesInFlight) return inner.resourcesInFlight.then(() => refresh({ includeModels }));
         // A wake OWNS the reading while it runs: it ensures the daemon and then
         // reads, so its answer is the one worth having — and a GET beside it is
         // a second writer whose order against it cannot be established from the
@@ -687,6 +789,9 @@ export function createClaudexorStatusStore({
                     // re-entrant refresh keeps the models upgrade sticky).
                     if (inner.wakeInFlight) {
                         return inner.wakeInFlight.then(() => refresh({ includeModels: true }));
+                    }
+                    if (inner.resourcesInFlight) {
+                        return inner.resourcesInFlight.then(() => refresh({ includeModels: true }));
                     }
                     return startRead(true);
                 };
@@ -721,6 +826,7 @@ export function createClaudexorStatusStore({
     function wake() {
         if (inner.disposed) return Promise.resolve({ ok: false, error: 'store disposed' });
         if (inner.wakeInFlight) return inner.wakeInFlight;
+        if (inner.resourcesInFlight) return inner.resourcesInFlight.then(() => wake());
         const pendingRead = inner.inFlight;
         inner.wakeInFlight = (async () => {
             let outcome;
@@ -732,7 +838,7 @@ export function createClaudexorStatusStore({
                 if (resp && resp.ok && statusPayloadValid(data)) {
                     inner.loading = false;
                     inner.everSettled = true;
-                    inner.snapshot = data;
+                    commitStatus(data);
                     // The wake endpoint never carries model discovery
                     // (include_models=False server-side).
                     inner.snapshotHasModels = false;
@@ -768,6 +874,121 @@ export function createClaudexorStatusStore({
             return outcome;
         })();
         return inner.wakeInFlight;
+    }
+
+    // Serialize view writers with existing status/wake reads. This is transport
+    // ordering, not provider admission: disabled profiles use the same path.
+    function resourceWrite(work) {
+        const preceding = inner.resourcesInFlight || inner.wakeInFlight || inner.inFlight;
+        const pending = (async () => {
+            if (preceding) await preceding.catch(() => {});
+            if (inner.inFlight) await inner.inFlight.catch(() => {});
+            if (inner.disposed) return null;
+            return work();
+        })();
+        const settled = pending.finally(() => {
+            if (inner.resourcesInFlight === settled) inner.resourcesInFlight = null;
+            if (!inner.disposed) { notify(); armPoll(); }
+        });
+        inner.resourcesInFlight = settled;
+        return settled;
+    }
+
+    function resourceAction(target) {
+        return inner.resourceActions.get(target ? accountTargetKey(target) : 'all') || {};
+    }
+
+    function refreshResources(target = null) {
+        const key = target ? accountTargetKey(target) : 'all';
+        const entry = inner.resourceActions.get(key) || {};
+        if (entry.busy) return Promise.resolve(null);
+        entry.busy = true;
+        entry.error = '';
+        entry.activity = 'refresh';
+        inner.resourceActions.set(key, entry);
+        notify();
+        return resourceWrite(async () => {
+            try {
+                const envelope = await refreshAccountResources(target, { fetchImpl });
+                if (inner.disposed) return null;
+                inner.snapshot = mergeAccountResources(inner.snapshot, envelope, target);
+                entry.refreshed = true;
+                entry.resourceRead = true;
+                entry.refreshDone = true;
+                for (const action of target ? [entry] : inner.resourceActions.values()) {
+                    for (const request of resetReferences(action)) request.refreshed = true;
+                    action.earlierRequests = (action.earlierRequests || []).filter(retainResetRequest);
+                }
+                inner.generation += 1;
+                saveResetRequests();
+                return envelope;
+            } catch (err) {
+                entry.error = String(err?.message || err);
+                entry.refreshDone = false;
+                return null;
+            } finally { entry.busy = false; }
+        });
+    }
+
+    function resetAccount(request, { key = '', recover = false } = {}) {
+        const target = request.target;
+        const prior = resourceAction(target);
+        if (prior.busy) return Promise.resolve(null);
+        // Recovery reuses its key; new opaque keys also work on plain HTTP LAN clients.
+        const entry = recover ? (key ? resetReferences(prior).find(entry => entry.key === key) : prior)
+            : { request: structuredClone(request), key: key || globalThis.crypto?.randomUUID?.()
+                || `account-reset-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`, refreshed: false,
+                earlierRequests: resetReferences(prior).filter(retainResetRequest).map(resetReference) };
+        if (!entry?.request || !entry.key) return Promise.resolve(null);
+        entry.busy = true;
+        entry.error = '';
+        entry.activity = recover ? 'inspect' : 'reset';
+        const current = recover ? prior : entry;
+        current.busy = true;
+        inner.resourceActions.set(accountTargetKey(target), current);
+        saveResetRequests();
+        notify();
+        return resourceWrite(async () => {
+            // A full refresh may have completed while this request was queued.
+            // Its observation precedes dispatch and cannot prove post-reset freshness.
+            if (!recover) {
+                entry.refreshed = false;
+                entry.resourceRead = false;
+                entry.refreshDone = false;
+            }
+            try {
+                const receipt = recover && entry.receipt?.id && entry.receipt.state === 'running'
+                    ? await getAccountReset(entry.receipt.id, { fetchImpl })
+                    : await createAccountReset(entry.request, entry.key, { fetchImpl });
+                if (inner.disposed) return null;
+                if (!receipt?.id || !sameTarget(receipt.request?.target, target)
+                    || receipt.request.offer_id !== entry.request.offer_id
+                    || receipt.request.grant_id !== entry.request.grant_id) {
+                    throw new Error('The reset receipt did not match the requested operation');
+                }
+                entry.receipt = { ...receipt, resources: null };
+                if (receipt.resources) {
+                    const merged = mergeAccountResources(inner.snapshot, receipt.resources, target,
+                        { preferPreviousOnTie: recover });
+                    if (['quota', 'quota_absences', 'resources'].some(name => merged[name] !== inner.snapshot[name])) {
+                        inner.snapshot = merged;
+                        entry.resourceRead = true;
+                        inner.generation += 1;
+                    }
+                }
+                if (receipt.readback?.state === 'fresh') entry.refreshed = true;
+                return receipt;
+            } catch (err) {
+                // A timeout says nothing about whether the provider consumed a reset.
+                entry.error = String(err?.message || err);
+                return null;
+            } finally {
+                entry.busy = false;
+                current.busy = false;
+                current.earlierRequests = (current.earlierRequests || []).filter(retainResetRequest);
+                saveResetRequests();
+            }
+        });
     }
 
     /**
@@ -869,6 +1090,9 @@ export function createClaudexorStatusStore({
             return statusUnavailableNote(state, { error: detail, facet: name, subject });
         },
         refresh,
+        refreshResources,
+        resetAccount,
+        resourceAction,
         wake,
         subscribe,
         holdPolling,

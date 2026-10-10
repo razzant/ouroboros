@@ -821,13 +821,12 @@ def settle_acceptance_operation(usage_ctx: Any, *, retry_key: str, task_id: str,
                                 controller: Any = None) -> str:
     """Collect one wave of a terminal task purely, publish it and announce it once.
 
-    Returns ``announced`` (publication read back, row enqueued), ``published``
-    (read back; the row was already owed or delivered),
-    ``settled`` (nothing was pending), ``pending`` (still in flight),
-    ``unpublished`` (the canonical record or durable notice custody did not
-    take the settlement; retry duty remains), ``source_unreadable`` (a published source exists but cannot
-    be read: never duplicated from the checkpoint) or ``unavailable`` (no trace
-    and no canonical source).
+    A completed ``historical_acceptance`` run without a ``late_settlement`` is stamped and published as if advanced.
+    Returns ``announced`` (publication read back, row enqueued), ``published`` (read back; the row
+    was already owed or delivered), ``settled`` (nothing was pending), ``pending`` (still in
+    flight), ``unpublished`` (the canonical record or durable notice custody did not take the
+    settlement; retry duty remains), ``source_unreadable`` (a published source exists but cannot
+    be read: never duplicated from the checkpoint) or ``unavailable`` (no trace and no canonical source).
     """
     from ouroboros.loop_acceptance_review import acceptance_run_pending
     from ouroboros.review_dispatch import reconcile_pending_acceptance_runs

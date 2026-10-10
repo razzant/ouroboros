@@ -1,4 +1,12 @@
-"""UI render schema validation for extension widgets/settings."""
+"""UI render schema validation for extension widgets/settings.
+
+Framed widgets (``module``, ``iframe``): ``height`` and the module-only ``max_height``
+are finite numbers within ``WIDGET_FRAME_MIN_HEIGHT``..``WIDGET_FRAME_MAX_HEIGHT``,
+rounded to int, with ``height <= max_height``; a declarative widget accepts neither.
+``validate_runtime_ui_render`` also accepts a route-less ``iframe`` and returns it
+route-less. ``render.start`` defaults per kind via ``_START_MODE_DEFAULTS``
+(module and iframe ``manual``, declarative ``auto``).
+"""
 
 from __future__ import annotations
 

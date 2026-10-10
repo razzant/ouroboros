@@ -17,7 +17,9 @@ import copy
 import hashlib
 import inspect
 import json
+import math
 import threading
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set
 
 from ouroboros.anthropic_native_custody import is_replayed_native_content
@@ -184,19 +186,25 @@ def cache_ttl_seconds(applied_ttl: Any) -> Optional[int]:
 
 
 def supports_message_cache_control(model: str) -> bool:
-    """Whether the OpenRouter family honors message cache breakpoints."""
+    """Families whose message cache markers OpenRouter accepts or translates.
+
+    Dated external fact (OpenRouter prompt-caching guide, read 2026-10-03): a text
+    block's ``cache_control`` becomes ``prompt_cache_breakpoint`` on supporting
+    OpenAI models (GPT-5.6+), and its TTL is dropped toward OpenAI. Keeping the hint
+    is not a claim that every ``openai/`` model caches it; older ones ignore it.
+    """
     m = str(model or "").strip().lstrip("~")
-    return m.startswith("anthropic/") or m.startswith("google/gemini-")
+    return m.startswith(("anthropic/", "google/gemini-", "openai/"))
 
 
 def openai_family_model(model: str) -> bool:
     """Whether a model id names OpenAI's public-API family (``openai/…`` on OpenRouter,
     ``openai::…`` direct; the ``~`` processing prefix and a ``:online`` suffix keep it).
 
-    Dated external fact (probes 2026-09-25; inventory row in DEVELOPMENT §2): this family
-    reuses a prompt cache only for the WHOLE leading system section plus tool schemas as
-    one unit, or for an exact earlier prompt as a prefix, and the routing key partitions
-    it. That is why its send copy keeps mutable context out of the leading system message
+    Dated external fact (probes 2026-09-25; OpenAI prompt-caching guide read 2026-10-03):
+    without an explicit breakpoint this family looks a cache up only at message ends, and
+    in the leading system/developer group only at the END of its last message. That is
+    why its send copy keeps mutable context out of the leading system group
     (``llm_messages.split_leading_system_prefix``) and shares one sticky session per model
     and governance prefix (``_openrouter_session_identity``). OpenRouter ``openai/gpt-oss-*``
     ids are served by third parties and merely inherit the projection: disclosed, not gated.
@@ -453,12 +461,15 @@ def _attempt_request(
         key: payload[key] for key in ("system", "messages", "tools", "functions") if key in payload
     })
     from ouroboros.send_clock import record_candidate, split_clock_note
+    from ouroboros.vision_routing import note_candidate_images
+    from ouroboros.openrouter_cost import binding_for_target
 
     # The same bytes carry the Main clock line; its clock-free twin identifies
     # the candidate across two samples (the forced-final admission predicate).
     clock_note, clock_free = split_clock_note(payload)
     raw_sha256 = hashlib.sha256(raw).hexdigest()
     record_candidate(raw_sha256, clock_note)
+    note_candidate_images(raw_sha256, payload)  # the images it carries, for an image-refusal retry's predicate
     return AttemptRequest(
         model=str(target.get("usage_model") or target.get("resolved_model") or payload.get("model") or ""),
         provider=str(target.get("provider") or "unknown"),
@@ -478,6 +489,7 @@ def _attempt_request(
         submitted_processing_mode=submitted_processing_mode(target, payload),
         processing_basis=copy.deepcopy(target.get("processing_basis")),
         effort=effort_request_facts(target, payload),
+        provider_receipt_binding=binding_for_target(target),
         candidate_clock_free_sha256=(
             hashlib.sha256(_canonical_candidate_bytes(clock_free)).hexdigest()
             if clock_note is not None else None
@@ -515,67 +527,68 @@ def _finalized_physical_candidate(
     physical = _physical_candidate({key: value for key, value in payload.items() if key != "timeout"})
     if fresh_clock:
         physical = refresh_wire_clock(physical, api_surface=api_surface)
-    if target.get("context_mode") == "nano":
-        physical = _fit_output_payload(target, physical, api_surface)
+    physical = bound_reply_allowance(target, physical)
     return prepare_wire_payload_for_send(
         {**target, "contract_headers": processing_contract_headers(target, physical)},
         physical, api_surface=api_surface, logical_payload=payload,
     )
 
 
+def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply the exact-route output maximum, then Nano's window-room policy.
 
-def _prepared_input_measurement(target: Dict[str, Any], payload: Dict[str, Any]) -> dict:
-    """Current routes offer an actual-shape estimate, never an exact template count."""
+    ``context_budget.reply_allowance_tokens`` on THIS candidate: its own bounded count
+    (system, messages, tools) times the density Main measured with, against the bound
+    capacity (the local lane: its confirmed serving window); the local server's exact
+    count replaces the estimate and needs no slack. Low and Max retain the caller's
+    allowance up to the separate known output maximum (no window-room shrink). A
+    payload without a numeric field (the web-search Responses body) is left alone too;
+    the field is never created. An exact shortfall is the typed local overflow before
+    any send, carrying this candidate's facts; an estimate never refuses.
+    """
+    from ouroboros.context_budget import LocalContextTooLargeError, exact_reply_shortfall, reply_allowance_tokens
     from ouroboros.context_fit import bounded_prompt_tokens_for_payload
 
-    measured = target.get("local_input_measurement") or {}
-    if target.get("provider") == "local" and measured.get("supported") and measured.get("input_is_exact") is True:
-        from ouroboros.local_model_server import input_fingerprint
+    context = current_physical_attempt_context()
+    field = next((key for key in ("max_completion_tokens", "max_tokens", "max_output_tokens")
+                  if isinstance(payload.get(key), int) and not isinstance(payload.get(key), bool)), None)
+    if field is not None:
+        from ouroboros.response_limits import response_limit_for_target
+        payload = {**payload, field: response_limit_for_target(target).ceiling(payload[field])}
+    if context is None or field is None or context.rendered_mode != "nano":
+        return payload
+    window, measured, exact = context.capacity_total_tokens, target.get("local_input_measurement") or {}, False
+    if target.get("provider") == "local":
+        window = target.get("context_window_tokens") if target.get("context_window_confirmed") else window
+        if measured.get("supported") and measured.get("input_is_exact") is True:
+            from ouroboros.local_model_server import input_fingerprint
 
-        if measured.get("native_input_sha256") == input_fingerprint(payload):
-            return {"input_tokens": measured["input_tokens"], "input_is_exact": True,
-                    "tokenizer_template_provenance": measured.get("tokenizer_template_provenance"),
-                    "route_capacity_tokens": measured.get("context_window"), "route_capacity_confirmed": True}
-    context = {key: payload[key] for key in ("system", "messages", "input", "instructions", "tools", "functions") if key in payload}
-    chars = len(_canonical_candidate_bytes(context).decode("utf-8"))
-    return {"input_tokens": bounded_prompt_tokens_for_payload(context, chars),
-            "input_is_exact": False, "tokenizer_template_provenance": None,
-            "route_capacity_tokens": target.get("context_window_tokens", getattr(current_physical_attempt_context(), "capacity_total_tokens", None)),
-            "route_capacity_confirmed": bool(target.get("context_window_confirmed", False))}
+            exact = measured.get("native_input_sha256") == input_fingerprint(payload)
+    if exact:
+        raw = input_tokens = int(measured["input_tokens"])
+        window = measured.get("context_window") or window
+    else:
+        from ouroboros.request_wire_recovery import registered_source_payload
 
-
-def _fit_output_payload(target: Dict[str, Any], payload: Dict[str, Any], api_surface: str) -> Dict[str, Any]:
-    """Use the shared Nano arithmetic after native tool projection and before sealing."""
-    from dataclasses import asdict
-    from ouroboros.context_budget import OWNER_NANO_TARGET_TOKENS, NANO_MIN_HEADROOM_TOKENS
-    from ouroboros.context_fit import resolve_call_context_fit
-
-    field = next((key for key in ("max_completion_tokens", "max_tokens") if isinstance(payload.get(key), int)), None)
-    if field is None:
-        return payload  # An opaque route has no enforceable native output field here.
-    measured = _prepared_input_measurement(target, payload)
-    provider = target.get("provider")
-    # Local formatters can make additional internal generations outside this cap.
-    limit_enforced = provider == "openai" and field == "max_completion_tokens" or provider == "anthropic" and field == "max_tokens"
-
-    if provider == "local":
-        limit_enforced = measured["input_is_exact"] and (target.get("local_input_measurement") or {}).get("output_limit_enforced") is True
-    nano = target.get("context_mode") == "nano"
-    fit = resolve_call_context_fit(**measured, caller_max_tokens=payload[field],
-        total_target_tokens=OWNER_NANO_TARGET_TOKENS if nano else None,
-        minimum_free_tokens=NANO_MIN_HEADROOM_TOKENS if nano else 0, output_limit_enforced=limit_enforced,
-        reasoning_included_in_limit=True if limit_enforced else None)
-    facts = asdict(fit)
-    if provider == "local" and measured["input_is_exact"]:
-        facts["serving_process_id"] = target["local_input_measurement"].get("process_id")
-    target["call_context_fit"] = facts
-    if fit.effective_max_tokens <= 0 or measured["input_is_exact"] and fit.fit_status in {"unfit", "insufficient_headroom"}:
-        error = PhysicalAttemptPreparationFailed("Exact prepared input does not fit the selected context allowance")
-        error.call_context_fit = facts
+        source = registered_source_payload(payload) or payload  # a re-finalized wire form counts as its source
+        raw = bounded_prompt_tokens_for_payload(
+            {key: source[key] for key in ("system", "messages", "tools", "functions") if key in source}, 0)
+        input_tokens = math.ceil(raw * float(getattr(context, "measurement_density", None) or 1.0))
+    frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
+    candidate = {**payload, field: reply_allowance_tokens(
+        owner_nano=context.profile == "owner_nano", raw_input_tokens=raw, exact=exact, **frame)}
+    if exact and exact_reply_shortfall(**frame):
+        request = _attempt_request(target, candidate)
+        error = LocalContextTooLargeError(
+            f"the local model's window of {int(window)} tokens leaves {int(window) - input_tokens} for the reply "
+            f"after {input_tokens} exact input tokens, below the floor of {min(frame['caller_max_tokens'], 8_192)}")
+        error.refused_candidate = {
+            **{key: getattr(request, key) for key in (
+                "model", "provider", "max_completion_tokens", "candidate_measurement_kind", "candidate_raw_sha256",
+                "candidate_raw_size_bytes", "candidate_context_sha256", "candidate_context_size_bytes")},
+            "physical_context": asdict(context), "input_tokens": input_tokens, "context_window_tokens": int(window)}
         raise error
-    result = {**payload, field: fit.effective_max_tokens}
-    facts["candidate_raw_sha256"] = hashlib.sha256(_canonical_candidate_bytes(result)).hexdigest()
-    return result
+    return candidate
 
 
 def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptRequest):
@@ -619,23 +632,8 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 ),
             },
         )
-        # CPL-5 forward invariant (model-visible ⟺ logged): reconstruct the
-        # durable record just written and byte-compare it with the wire-bound
-        # candidate. A mismatch is a typed durable fact, never a second dispatch
-        # gate — the in-memory identity refusal above stays the only blocking
-        # authority. The fresh seam digests are reused so the raw candidate is
-        # not serialized again.
-        from ouroboros.model_send_seal import verify_sealed_candidate
-
-        verify_sealed_candidate(
-            reservation.drive_root,
-            task_id=task_id,
-            attempt_id=reservation.attempt_id,
-            candidate=candidate,
-            manifest_ref=persisted["manifest_ref"],
-            raw_sha256=fresh.candidate_raw_sha256,
-            raw_size_bytes=fresh.candidate_raw_size_bytes,
-        )
+        # One frozen send copy and one durable pre-send record. Disk read-back
+        # comparison is the explicit historical audit's work, not dispatch IO.
         if predicate is not None:
             try:
                 accepted = predicate(request)
@@ -753,11 +751,11 @@ class _PayloadCachePolicyMixin:
         must precede a shorter one — 5m tools before 1h system is a hard 400) and never
         creates a marker on an earlier segment; a bare marker is the provider default and
         ranks as 5m; the ONLY marker it ever adds is on the last tool schema, and only when
-        the tools segment carries none (unconditional on this family in both deleted sites —
-        a tool-free payload therefore stays uncached HERE, and system/messages never gain a
+        the tools segment carries none and fewer than four markers are already declared.
+        A tool-free payload therefore stays uncached HERE, and system/messages never gain a
         marker they did not declare; a tool-free lane is cached only by DECLARING its stable
         prefix at the caller, as the review surfaces and the safety supervisor do via
-        ``review_helpers.cached_prompt_blocks``); above the four-breakpoint cap the four EARLIEST
+        ``review_helpers.cached_prompt_blocks``; above the four-breakpoint cap the four EARLIEST
         (governance-prefix) markers are kept, the tail MARKERS — never content — are dropped
         and the reduction is disclosed in usage (rationale and the builder-side loud layer:
         ``docs/ARCHITECTURE.md``). Only this freshly assembled payload is normalized —
@@ -786,7 +784,9 @@ class _PayloadCachePolicyMixin:
         note: Optional[Dict[str, Any]] = None
         if _route_normalizes_cache_breakpoints(target):
             tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
-            if not any(isinstance(t, dict) and isinstance(t.get("cache_control"), dict) for t in tools):
+            if len(breakpoints) < self._MAX_CACHE_BREAKPOINTS and not any(
+                isinstance(t, dict) and isinstance(t.get("cache_control"), dict) for t in tools
+            ):
                 for tool in reversed(tools):
                     # Schema entries only — skips an appended openrouter:web_search tool.
                     if isinstance(tool, dict) and (

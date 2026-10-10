@@ -174,7 +174,10 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
                     assert intent["source"] == "http_single"
                     assert not intent.get("already_settled")
                     assert f.done.wait(5)
-                    until(lambda: owner.closed and post_task_model_wait(f.root, task_id) is None)
+                    # A finished post phase is the returned turn: close() flips `closed` BEFORE
+                    # it retires its consumer in this task result, a write custody must not straddle.
+                    thread.join(5)
+                    assert not thread.is_alive() and owner.closed and post_task_model_wait(f.root, task_id) is None
                     assert row["resolution"] == "cancelled"
                     observed["accepted_stop"] = intent["request_id"]
                     return intent
@@ -205,7 +208,7 @@ def test_native_post_task_wait_remains_addressable_after_dialogue_closes(phase, 
             assert f.engine.uploads[-1][0]["account"] == {"mode": "pin", "profileId": "replacement"}
         else:
             assert row["resolution"] == "cancelled"
-            assert f.stages == ["facts", "chat", "scratch", "reflection"]
+            assert f.stages == ["facts", "scratch", "reflection"]
         assert workers.drain_repo_writers(0) == []
         assert post_task_model_wait(f.root, task_id) is None
     finally:

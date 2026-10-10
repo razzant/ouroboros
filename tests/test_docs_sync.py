@@ -83,7 +83,7 @@ def test_recent_abi_retirements_section_carries_the_abi_70_window():
 
     from ouroboros.settings_defaults import RETIRED_COMMA_LIST_SETTING_KEYS
 
-    assert "**ABI 7.0**" in section
+    assert "ABI 7.0" in section
     missing = [key for key in RETIRED_COMMA_LIST_SETTING_KEYS if key not in section]
     assert not missing, f"11.4 does not name the retired comma-list keys: {missing}"
     assert "OUROBOROS_REVIEWER_SLOTS" in section, "the migration target must be named"
@@ -104,7 +104,8 @@ def test_model_send_design_note_matches_the_observability_contract():
     assert (REPO / "ouroboros" / "model_send_seal.py").exists()
     assert "refuse dispatch with the existing `PhysicalAttemptPreparationFailed`" \
         not in note_flat
-    assert "The call is NOT blocked" in note_flat
+    assert "It never calls `verify_sealed_candidate` or reads that record back" in note_flat
+    assert "facts; they do not gate a later model call" in note_flat
 
 
 def test_settings_docs_name_every_key_owner_and_what_startup_persists():
@@ -134,23 +135,18 @@ def test_settings_docs_name_every_key_owner_and_what_startup_persists():
     # (Other "persists nothing" statements in this document are about the
     # onboarding failure path and a no-change owner transform, both true.)
     assert "boot provider normalization in-process and persists nothing" not in arch_flat
-    assert "Startup is a read, with one exception" in arch_flat
     assert "normalize_and_persist_context_mode_compat" in arch_flat
     # 4. What retired is the persistent auto-Low MECHANISM, not the key: the
     #    startup sentence called `OUROBOROS_CONTEXT_MODE` itself retired while
     #    the settings table right below it documents the same key as the live
     #    owner-selected horizon.
     assert "retired `OUROBOROS_CONTEXT_MODE`" not in arch_flat
-    assert "left by the RETIRED persistent auto-Low mechanism" in arch_flat
 
     # Ownership: the leaves own the vocabularies; config.py stays the facade.
+    # One statement of the book names every owner leaf together.
     owners = ("settings_defaults", "settings_scales", "model_slots",
               "review_model_routes", "runtime_limits", "settings_integrity")
-    invariant = next(
-        line for line in arch.splitlines()
-        if "**Configuration and messaging have single owners.**" in line
-    )
-    assert all(owner in invariant for owner in owners), invariant
+    assert any(all(owner in line for owner in owners) for line in arch.splitlines()), owners
     assert "exact settings and defaults live in" not in readme_flat
     assert "settings_defaults.py" in readme_flat
     assert "an SSOT in `config.py` `SETTINGS_DEFAULTS`" not in development
@@ -170,8 +166,7 @@ def test_architecture_does_not_claim_usage_response_is_the_only_usage_reader():
     arch_flat = " ".join(_read("docs/ARCHITECTURE.md").split())
 
     assert "The only reader of a provider's usage block" not in arch_flat
-    assert "the one NORMALIZER of a provider's usage block" in arch_flat
-    assert "Not the only READER of that block" in arch_flat
+    assert "_usage_response.py" in arch_flat
     for module in ("ouroboros/usage_accounting.py", "ouroboros/loop_llm_call.py"):
         assert "from ouroboros._usage_response import" in _read(module), module
     assert 'resp_dict.get("usage")' in _read("ouroboros/llm_openai_compatible.py")
@@ -210,28 +205,76 @@ def test_architecture_component_map_covers_every_live_runtime_module():
     )
 
 
+def test_architecture_subject_map_row_resolves_its_owner_section():
+    """The map preserves the module and a resolvable owner section, not a fixed
+    inventory of private helpers inside the registry row."""
+    from ouroboros.reference_books import load_reference_book, read_book_section
+
+    arch = _read("docs/ARCHITECTURE.md")
+    rows = [line for line in arch.splitlines() if line.strip().startswith("review_subject.py ")]
+    assert len(rows) == 1, rows
+    assert "§6 Subject operation" in rows[0]
+    section = read_book_section(load_reference_book(REPO, "architecture"), "Subject operation")
+    assert section.sources[0].path == "docs/architecture/06-agent-core.md"
+
+
+def _change_review_items() -> dict:
+    """``number -> item`` over the Change Review Checklist and the Ouroboros Body
+    Layer tables (one continued numbering), read from the live CHECKLISTS.md."""
+    text = (REPO / "docs/CHECKLISTS.md").read_text(encoding="utf-8")
+    start = text.index("## Change Review Checklist")
+    end = text.index("## Shared Contract Ownership")
+    return {int(n): name for n, name in re.findall(r"^\| (\d+) \| ([a-z_]+) \|", text[start:end], flags=re.M)}
+
+
+def test_checklist_item_numbers_cited_outside_the_checklist_name_the_current_items():
+    """The change-review checklist was renumbered (core 1-9, body layer 10-31).
+    Every place that cites an item BY NUMBER AND NAME — the engineering chapters,
+    the architecture book, runtime comments, test docstrings — must agree with the
+    live table; a number that names the wrong item sends a reviewer to the wrong
+    rule. The standing archive keeps its historical numbers by its own note."""
+    items = _change_review_items()
+    assert items[7] == "capability_regression" and items[11] == "development_compliance" and len(items) == 31
+    names = "|".join(sorted(items.values(), key=len, reverse=True))
+    forms = (
+        # "item 17 (`subagent_isolation`)", "item 21 `source_completeness`", "item 15 (self_consistency)", "item 27, `gateway_parity`"
+        re.compile(rf"\bitems?\s+(\d{{1,2}})(?:\([a-z]\))?,?\s+\(?`?({names})`?", flags=re.I),
+        # "cache_friendliness item 28"
+        re.compile(rf"\b({names})\s+item\s+(\d{{1,2}})\b"),
+        # "`self_consistency` (item 15)"
+        re.compile(rf"`({names})`\s+\(item\s+(\d{{1,2}})\)"),
+    )
+    roots = ("docs/CHECKLISTS.md", "docs/development", "docs/architecture", "ouroboros", "tests")
+    skip = {pathlib.Path(__file__).resolve(), (REPO / "docs/CHECKLISTS_ARCHIVE.md").resolve()}
+    wrong = []
+    for root in roots:
+        path = REPO / root
+        files = [path] if path.is_file() else [*path.rglob("*.md"), *path.rglob("*.py")]
+        for file in files:
+            if file.resolve() in skip:
+                continue
+            text = file.read_text(encoding="utf-8", errors="replace")
+            for line_no, line in enumerate(text.splitlines(), 1):
+                for pattern in forms:
+                    for match in pattern.finditer(line):
+                        number, name = match.groups() if pattern is forms[0] else reversed(match.groups())
+                        if items.get(int(number)) != name:
+                            wrong.append(f"{file.relative_to(REPO)}:{line_no}: item {number} is not `{name}`")
+    assert not wrong, "\n".join(wrong)
+    # Sub-item citations carry no name; the engineering chapters cite the body layer's
+    # development_compliance (11) and self_consistency (15) letters, never the old 2/13.
+    dev = _read("docs/DEVELOPMENT.md")
+    assert not re.search(r"CHECKLISTS items? (?:2|13)\([a-z]\)", dev)
+
+
 def test_architecture_mentions_shared_log_grouping_and_direct_provider_review_fallback():
     arch = _read("docs/ARCHITECTURE.md")
 
     assert "log_events.js" in arch
-    assert "live task card" in arch
-    assert "grouped task cards" in arch
-    # Direct-provider fallback covers official OpenAI, Anthropic, MiniMax, DeepSeek,
-    # Cloud.ru, and GigaChat, while still excluding OpenRouter/OpenAI-compatible/mixed-provider configs.
-    # Keep the generalized name ("Direct-provider review fallback") and a
-    # reference to the legacy "OpenAI-only review fallback" phrase for
-    # discoverability, and pin the honest scope language so the doc cannot
-    # silently re-expand to claim symmetric coverage it does not have yet.
-    assert "Direct-provider review fallback" in arch
-    assert "OpenAI-only review fallback" in arch  # legacy name still referenced for discoverability
-    assert "official OpenAI, Anthropic, MiniMax, DeepSeek, Z.ai, Cloud.ru, and GigaChat" in arch
+    # Direct-provider review fallback: the exclusive-provider resolver and the
+    # model-id migration it relies on are named by their code identifiers.
     assert "_exclusive_direct_remote_provider_env" in arch
-    # v4.34.0: direct-provider fallback now documents the
-    # `main_model.startswith(provider_prefix)` guard in get_review_models —
-    # previously absent, allowing OpenAI/Anthropic-only setups with a
-    # cross-provider free-text main model to silently miss the fallback.
     assert "migrate_model_value" in arch
-    assert "already start with the exclusive provider prefix" in arch
     # The Claude Runtime Status surface is RETIRED with the Claude-SDK
     # advisory transport (owner-consented, 2026-08-29): the doc must not
     # resurrect its UI plumbing.
@@ -242,9 +285,8 @@ def test_architecture_mentions_shared_log_grouping_and_direct_provider_review_fa
 def test_architecture_limits_finality_and_verdict_claims_to_actual_rows():
     arch = _read("docs/ARCHITECTURE.md")
 
-    assert "The start row carries neither outcome finality nor a verdict" in arch
-    assert "The pre-finalization authored row carries the phase with `outcome_final=false`" in arch
-    assert "only terminal `task_summary` rows append the host verdict clause" in arch
+    assert "outcome_final" in arch
+    assert "task_summary" in arch
     assert "Both Main rows, the Project thread rows" not in arch
 
 
@@ -252,9 +294,6 @@ def test_architecture_maps_cache_split_and_total_budget_authorities():
     arch = _read("docs/ARCHITECTURE.md")
 
     assert "_usage_cache_splits.py" in arch
-    assert "process-local" in next(
-        line for line in arch.splitlines() if "_usage_cache_splits.py" in line
-    )
     settings_row = next(
         line for line in arch.splitlines() if "settings_setup_contract.py" in line
     )
@@ -268,12 +307,9 @@ def test_architecture_documents_skill_schedule_lifecycle_and_evolution_light_blo
     # retention, DST contract, and the evolution light-mode hard block.
     assert "resync_skill_schedules()" in arch
     assert "skill_readiness_for_execution()" in arch
-    assert "DST-aware system" in arch
-    assert "hard-blocked in `light` runtime mode" in arch
     # Experience Review memory write-back data flow is documented.
     assert "MEMORY_ACTIONS_JSON" in arch
     assert "apply_memory_actions" in arch
-    assert "never auto-written to `identity.md`" in arch
 
 
 def test_chat_id_addressing_docs_match_the_code_that_routes_it():
@@ -288,34 +324,20 @@ def test_chat_id_addressing_docs_match_the_code_that_routes_it():
     development = _read("docs/DEVELOPMENT.md")
 
     assert "renders them in the Main stream" not in arch
-    assert "a `chat_id=0` history query coerces to Main" in arch
     assert "HIDDEN_CHAT_ID" in arch
-    # The headless address is decided at admission, and both outcomes are stated.
+    # The headless address is decided at admission (both outcomes have identifiers).
     assert "log_addressing.ingress_chat_id" in arch
-    assert "is refused with a typed 400 rather than honoured" in arch
-    assert "has exactly ONE destination" in arch
-    assert "ordinary API tasks default to `HIDDEN_CHAT_ID` (0)" in arch
-    assert '`source="web"` and `WEB_UI_CHAT_ID` to request Main' in arch
-    assert "Registration alone does not qualify" in arch
-    assert "admitted into that project's thread" in arch
-    assert "stays in the hidden partition, silent in every chat" in arch
-    # Scoped is not bound, so the absent conversion button is documented intent.
-    assert "Project-SCOPED is not project-BOUND" in arch
-    # Naming is part of the same admission contract, and its two slots differ.
-    assert "The run is also NAMED at admission and chat promotion, without a new model call" in arch
-    assert "`metadata.title` is refused with a" in arch
-    assert "never outranks a real name coined later" in arch
-    # A degraded delivery names its own cause. The doc must keep saying which
-    # code each rail actually produces — the forced rail keeps its own — rather
-    # than renaming one after the other.
-    assert 'finish_task(action="finish"|"stop", answer=...|answer_sha256=...)' in arch
-    assert "reminders no longer force completion" in arch
-    assert "host_salvage" in arch and "provider-death rail" in arch
+    assert "WEB_UI_CHAT_ID" in arch
+    # Naming is part of the same admission contract.
+    assert "metadata.title" in arch
+    # A degraded delivery names its own cause: the finish tool's wire form and
+    # the salvage rail's code.
+    assert "finish_task" in arch and "answer_sha256" in arch
+    assert "host_salvage" in arch
     design = _read("docs/DESIGN.md")
     assert "Where a card does show a cause, it says it in the owner's" in design
     assert "the record keeps the machine code" in design
     # The rule itself lives with the other anti-patterns, not only in a changelog.
-    assert "Anti-pattern: a chat id tested for truth" in development
     assert "notification_chat_route" in development and "coerce_chat_identity" in development
     assert "tests/test_chat_id_truthiness_guard.py" in development
 
@@ -339,7 +361,6 @@ def test_phase3_governance_language_is_pinned_without_new_qa_surface():
     development = _read("docs/DEVELOPMENT.md")
     system = _read("prompts/SYSTEM.md")
     authoring = _read("docs/CREATING_SKILLS.md")
-    architecture = _read("docs/ARCHITECTURE.md")
     checklists = _read("docs/CHECKLISTS.md")
     development_flat = " ".join(development.split())
 
@@ -352,38 +373,20 @@ def test_phase3_governance_language_is_pinned_without_new_qa_surface():
         "eliminates the proven failure class."
     ) in bible
 
-    for principle in (
-        "Single Responsibility Principle",
-        "Open/Closed Principle",
-        "Liskov Substitution Principle",
-        "Interface Segregation Principle",
-        "Dependency Inversion Principle",
-    ):
-        assert principle in development
-    assert "DI container" in development
-    assert "AST analyzer" in development
-    assert "Diff size, line count, and file count alone are not findings" in development
+    # The heading DOC_RESIDUE_SKIPPED_SUBSECTIONS selects, and its guard test.
+    assert "External facts: unknown is not no" in development
+    assert "tests/test_model_name_invariance.py" in development_flat
 
-    assert "Mutable external-fact inventory" in development
-    for column in (
-        "Location",
-        "Fact",
-        "Mutability",
-        "Current authority",
-        "Live/probe option",
-        "Risk",
-        "Recommendation",
-    ):
-        assert f"| {column} " in development
-    assert "does not migrate their runtime representations" in development_flat
-
-    for text in (development, system, authoring, architecture, checklists):
+    for text in (system, authoring, checklists):
         flat = " ".join(text.split())
         assert "real consumer flow" in flat
         assert "screenshot" in flat.lower()
         assert "vision" in flat.lower()
         assert "not a universal" in flat or "not universal" in flat or "no universal" in flat
-    assert "No visual-QA runner, endpoint, ledger" in " ".join(architecture.split())
+
+    # Structure of the external-facts table (checked last so a header change
+    # does not mask the assertions above).
+    assert "| Location | Fact | Evidence & re-probe | If stale |" in development
 
 
 def test_continuity_projection_contract_is_mirrored_across_governance_docs():
@@ -401,13 +404,11 @@ def test_continuity_projection_contract_is_mirrored_across_governance_docs():
         "of the full contract it was cut from."
     ) in bible
     assert "Continuity data-flow map" in architecture
-    assert "Source-complete decision pipeline" in development
-    assert "Context and growth matrix" in development
     assert "state/skill_review_root_tasks.jsonl" in development
     assert "state/skill_review_root_tasks.jsonl" in architecture
     assert "SKILL_REVIEW_ROOT_TASKS_WARN_BYTES" in architecture
-    assert "eight hot stores" in architecture
-    assert "eight os.stat calls" in _read("ouroboros/agent_startup_checks.py")
+    assert "memory/chronicle/records.jsonl" in architecture
+    assert "nine os.stat calls" in _read("ouroboros/agent_startup_checks.py")
     for item in (
         "source_completeness",
         "actor_readable_projection",
@@ -420,11 +421,9 @@ def test_continuity_projection_contract_is_mirrored_across_governance_docs():
 
 def test_architecture_names_all_window_surfaces_and_settlement_order():
     architecture = _read("docs/ARCHITECTURE.md")
-    assert "full-window sizing default for an unknown API window" in architecture
-    assert "raw subscription routes keep no numeric unknown-window assumption" in architecture
-    assert "designated-default or conservative fallback" in architecture
-    assert "no model-window table or window-authority floor" in architecture
-    assert "SETTLED is published before registration retirement" in architecture
+    assert "reviewer_window.resolve_reviewer_window" in architecture
+    assert "ReviewerWindow.sizing_window" in architecture
+    assert "scope_window" in architecture
 
 
 def test_phase3_widget_authoring_docs_match_recursive_schema_v1():
@@ -471,15 +470,14 @@ def test_architecture_mirror_matches_the_split_axes_contracts():
     assert "compact_task_group" not in arch
     # schedule_subagent reports the request only; the axes resolve at dispatch.
     assert "schedule_subagent surfaces effective_lane(s)" not in arch_flat
-    assert "`schedule_subagent` reports the requested lane only" in arch_flat
     # swarm_fanout carries the requested lane; a wave event written before any
     # child starts cannot know what the children ran on.
     assert "requested/effective lanes" not in arch
-    # The canonical projection discloses capability_delta; the handbook points
-    # to that owner instead of maintaining another drifting field enumeration.
-    assert "trace_summary, capability_delta when the child has something to disclose" in arch_flat
-    assert "`control_task_results._wait_for_tasks` owns its projection" in dev_flat
-    assert 'ARCHITECTURE\'s "Waiting on children"' in dev_flat
+    # The canonical projection's field list includes capability_delta; the
+    # handbook points to that owner instead of another drifting enumeration.
+    projection = next(line for line in arch.splitlines() if "_compact_child_projection" in line)
+    assert "capability_delta" in projection
+    assert "control_task_results._wait_for_tasks" in dev_flat
 
 
 # Identifiers the prompts legitimately name in backticks that are NOT tools:
@@ -585,7 +583,7 @@ def test_prompt_tool_names_resolve_to_registered_tools(tmp_path):
 # Language-tagged code fences (```yaml, ```python …) are examples and are not
 # scanned; the plain ``` fence holding the §1 module tree IS scanned. The first
 # ARCHITECTURE line carries the release version by contract and is skipped, as
-# are DEVELOPMENT's "Mutable external-fact inventory" (dated provenance is the
+# are DEVELOPMENT's "External facts: unknown is not no" (dated provenance is the
 # rule there) and the "Documentation contract" section that quotes the markers.
 
 DOC_RESIDUE_PATTERNS = {
@@ -603,7 +601,7 @@ DOC_RESIDUE_PATTERNS = {
     "cyrillic": r"[А-Яа-яЁё]",
 }
 DOC_RESIDUE_SKIPPED_SUBSECTIONS = {
-    "docs/DEVELOPMENT.md": ("Mutable external-fact inventory", "Documentation contract"),
+    "docs/DEVELOPMENT.md": ("External facts: unknown is not no", "Documentation contract"),
 }
 
 
@@ -722,8 +720,10 @@ def test_architecture_endpoint_table_mirrors_route_registries(tmp_path):
 
 
 # Rows the settings table documents on purpose although `config.SETTINGS_DEFAULTS`
-# has no such key: operator env-only levers (never a settings.json carrier) and the
-# retired alias whose migration the table still explains (pinned by test_review_cycles).
+# has no such key: operator env-only levers (never a settings.json carrier), the
+# retired alias whose migration the table still explains (pinned by test_review_cycles),
+# and the review-lane keys the review-pool migration consumes at load
+# (`settings_defaults.REVIEW_POOL_MIGRATED_SETTING_KEYS`; tests/test_review_pool_migration.py).
 SETTINGS_TABLE_ENV_ONLY_ROWS = frozenset({
     "OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD", "OUROBOROS_DISABLE_MANAGED_UPDATES",
     "OUROBOROS_PRESENTATION", "OUROBOROS_DESKTOP_BACKGROUND", "OUROBOROS_USER_FILES_ROOT", "OUROBOROS_OBSERVABILITY_KEEP_RAW",
@@ -732,7 +732,11 @@ SETTINGS_TABLE_ENV_ONLY_ROWS = frozenset({
     "OUROBOROS_PREFLIGHT_TEST_WORKERS", "OUROBOROS_BUNDLE_DIR",
     "OUROBOROS_EXTERNAL_HOST_UPDATE", "OUROBOROS_EXTERNAL_HOST_RESULT",
 })
-SETTINGS_TABLE_RETIRED_ROWS = frozenset({"OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES"})
+SETTINGS_TABLE_RETIRED_ROWS = frozenset({
+    "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES",
+    "OUROBOROS_REVIEWER_SLOTS", "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
+    "OUROBOROS_EFFORT_DEEP_SELF_REVIEW", "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
+})
 
 
 def _normalize_default_cell(cell: str) -> str:

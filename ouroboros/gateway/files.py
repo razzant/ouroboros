@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import mimetypes
 import os
@@ -15,9 +16,10 @@ log = logging.getLogger(__name__)
 
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
+from ouroboros import chat_uploads
 from ouroboros.gateway._helpers import json_error, run_sync_to_completion
 from ouroboros.server_auth import is_loopback_host
 from ouroboros.utils import safe_relpath
@@ -441,7 +443,61 @@ async def api_files_read(request: Request) -> JSONResponse:
         return json_error(str(exc), status=500)
 
 
-async def api_files_download(request: Request) -> FileResponse | JSONResponse:
+_UPLOAD_GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EMLINK, errno.EINVAL, errno.EISDIR})
+
+
+def _open_chat_upload(upload: str) -> tuple[Any, os.stat_result, str, str]:
+    handle, observed = chat_uploads.open_upload(upload)
+    try:
+        mime, kind = chat_uploads.detect_media(handle.read(64), upload[33:])
+        handle.seek(0)
+    except BaseException:
+        handle.close()
+        raise
+    return handle, observed, mime, kind
+
+
+async def _serve_chat_upload(request: Request) -> Response:
+    """``?upload=<stored id>``: one owner chat attachment, independent of the Files root.
+
+    The same authentication as every API route; read through the confined open
+    (no link, FIFO or device; Windows by handle proof) and streamed from that one
+    descriptor with GET/HEAD and a single Range. Only bytes that prove an image,
+    video or audio type are inline; everything else (HTML, SVG, PDF, unknown) is
+    an ``application/octet-stream`` download. Always ``nosniff``, private cache,
+    a sandboxing CSP and same-origin resource policy.
+    """
+    params = request.query_params
+    upload = chat_uploads.upload_id(params.get("upload"))
+    if len(params.getlist("upload")) != 1 or "path" in params:
+        return json_error("upload must be the only file selector", status=400)
+    if not upload:
+        return json_error("Invalid upload id.", status=400)
+    try:
+        handle, observed, mime, kind = await run_sync_to_completion(_open_chat_upload, upload)
+    except OSError as exc:
+        if exc.errno is None or exc.errno in _UPLOAD_GONE:
+            return json_error("Attachment is missing or is not a regular file.", status=404,
+                              reason_code="upload_unavailable")
+        return json_error("Attachment could not be read.", status=503, reason_code="upload_unreadable")
+    from ouroboros.gateway.task_archive import DescriptorResponse
+
+    name = upload[33:]
+    inline = kind in {"image", "video", "audio"}
+    quoted = quote(name)
+    disposition = "inline" if inline else "attachment"
+    disposition += f"; filename*=utf-8''{quoted}" if quoted != name else f'; filename="{name}"'
+    headers = {"content-disposition": disposition, "x-content-type-options": "nosniff",
+               "cache-control": "private, max-age=86400", "cross-origin-resource-policy": "same-origin",
+               "content-security-policy": "sandbox" if inline else "default-src 'none'; sandbox"}
+    return DescriptorResponse(handle, name, observed, media_type=mime if inline else "application/octet-stream",
+                              headers=headers)
+
+
+async def api_files_download(request: Request) -> Response:
+    if "upload" in request.query_params:
+        # A separate early authority: chat attachments never depend on the Files root.
+        return await _serve_chat_upload(request)
     rel_path = request.query_params.get("path", "")
     try:
         if not rel_path:
@@ -805,47 +861,21 @@ def file_browser_routes() -> list[Route]:
     ]
 
 
-import uuid
-
-def _data_dir() -> pathlib.Path:
-    return pathlib.Path(os.environ.get(
-        "OUROBOROS_DATA_DIR",
-        pathlib.Path.home() / "Ouroboros" / "data",
-    ))
-
-
-def _safe_upload_basename(raw_name: str) -> str:
-    """The stored basename of a chat upload: basename only, spaces → ``_``, 200 chars."""
-    return os.path.basename(str(raw_name or "")).replace(" ", "_")[:200] or "upload"
-
-
-def _unique_upload_name(raw_name: str) -> str:
-    """``<uuid32>_<safe basename>`` — the ONE stored-name shape of chat uploads.
-
-    The 32-hex prefix is what ``artifacts.stage_task_attachments`` strips to
-    judge the secret-name rule on the ORIGINAL basename."""
-    return f"{uuid.uuid4().hex}_{_safe_upload_basename(raw_name)}"
-
-
 def store_chat_upload(
     source: pathlib.Path, display_name: str = "", *, data_dir: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """Copy an already-local file into ``data/uploads`` as a chat upload.
 
-    The Host Service owns source confinement; this shared store owns naming,
-    stable byte capture and atomic publication. Its historical return is a Path.
+    The Host Service owns source confinement; the shared store (``chat_uploads``)
+    owns naming, stable byte capture and atomic publication. Returns the Path.
     """
     source = pathlib.Path(source)
     return _store_chat_upload(source, display_name or source.name, data_dir=data_dir)[0]
 
 
-def _store_chat_upload(source: Any, display_name: str, *, data_dir=None) -> tuple[pathlib.Path, dict]:
-    """Store a confined path or completed borrowed multipart spool with measured facts."""
-    from ouroboros.artifacts import copy_artifact_file
-
-    upload_dir = (pathlib.Path(data_dir) if data_dir is not None else _data_dir()) / "uploads"
-    dest = upload_dir / _unique_upload_name(display_name)
-    return dest, copy_artifact_file(source, dest)
+def _store_chat_upload(source: Any, display_name: str, *, data_dir=None, pending: bool = False):
+    """Store a confined path or completed borrowed multipart spool: ``(path, measured ref)``."""
+    return chat_uploads.store_upload(source, display_name, data_dir=data_dir, pending=pending)
 
 
 async def api_chat_upload(request: Request) -> JSONResponse:
@@ -861,30 +891,38 @@ async def api_chat_upload(request: Request) -> JSONResponse:
     if not isinstance(upload, UploadFile):
         return JSONResponse({"ok": False, "error": "No valid file field"}, status_code=400)
 
-    safe_base = _safe_upload_basename(getattr(upload, "filename", "") or "upload")
+    safe_base = chat_uploads.safe_upload_name(getattr(upload, "filename", "") or "upload")
     def copy_and_close():
         # The worker owns the completed spool through copy AND close. Cleanup
         # cannot itself be cancelled at an async thread-pool checkpoint.
         try:
-            return _store_chat_upload(upload.file, safe_base)
+            return _store_chat_upload(upload.file, safe_base, pending=True)
         finally:
             upload.file.close()
 
-    dest, measured = await run_sync_to_completion(copy_and_close)
+    dest, ref = await run_sync_to_completion(copy_and_close)
 
+    # ``mime`` keeps its extension meaning (the model-input rail reads it); the
+    # byte-proven kind and the one attachment view are the display facts.
     mime = mimetypes.guess_type(safe_base)[0] or "application/octet-stream"
     return JSONResponse({
         "ok": True,
         "filename": dest.name,
         "display_name": safe_base,
         "path": str(dest),
-        **measured,
+        "size": ref["size"],
+        "sha256": ref["sha256"],
         "mime": mime,
+        "view": chat_uploads.attachment_view(ref),
     })
 
 
 async def api_chat_upload_delete(request: Request) -> JSONResponse:
-    """Delete a chat attachment from data/uploads/."""
+    """Delete a composer upload that no message has accepted (the failed-send cleanup).
+
+    An accepted original, another source's upload, or one stored before this
+    process started is refused (409) and kept: see ``chat_uploads`` pending guard.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -898,14 +936,13 @@ async def api_chat_upload_delete(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "Missing filename"}, status_code=400)
 
     safe_name = os.path.basename(filename)
-    if not safe_name or safe_name != filename or safe_name in {".", ".."}:
+    if not safe_name or safe_name != filename or safe_name in {".", ".."} or "\\" in filename:
         return JSONResponse({"ok": False, "error": "Invalid filename"}, status_code=400)
 
-    target = _data_dir() / "uploads" / safe_name
-    if not target.exists():
+    outcome = await run_sync_to_completion(chat_uploads.delete_pending_upload, safe_name)
+    if outcome == "missing":
         return JSONResponse({"ok": False, "error": "File not found"}, status_code=404)
-    if not target.is_file():
-        return JSONResponse({"ok": False, "error": "Invalid filename"}, status_code=400)
-
-    target.unlink()
+    if outcome == "accepted":
+        return JSONResponse({"ok": False, "error": "Attachment is not a pending upload; it is kept"},
+                            status_code=409)
     return JSONResponse({"ok": True, "filename": safe_name})

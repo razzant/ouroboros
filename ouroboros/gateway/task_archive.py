@@ -50,6 +50,7 @@ import anyio
 from starlette.responses import Response, StreamingResponse
 
 from ouroboros import artifacts as artifact_store
+from ouroboros.confined_files import DIR_FLAGS, POSIX_CONFINED, open_regular_at
 from ouroboros.gateway._helpers import json_error
 from ouroboros.task_custody import task_artifact_stores
 from ouroboros.task_status import load_effective_task_result
@@ -61,12 +62,8 @@ _CHUNK = 1024 * 1024
 _SERVABLE_STATUSES = frozenset({"", "ready"})
 # Gone, lost a directory, or turned into a link (ELOOP; EMLINK on some BSDs): not an I/O fault.
 _MEMBER_GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EMLINK})
-CONFINED = bool(os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
-                and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY"))
-_DIR_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-              | getattr(os, "O_CLOEXEC", 0))
-_FILE_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-               | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0))
+# The one POSIX confined-open vocabulary (``confined_files``); this module descends many segments.
+CONFINED, _DIR_FLAGS = POSIX_CONFINED, DIR_FLAGS
 _CHAT_MEDIA_DIGEST_RE = re.compile(r"chat-media-([0-9a-f]{64})\.[a-z0-9]+")
 _DELEGATED_SOURCE_RE = re.compile(r"source_handles/delegated_activity/([A-Za-z0-9][A-Za-z0-9_.-]*-([0-9a-f]{64})\.jsonl)")
 _ACCEPTANCE_SOURCE_RE = re.compile(r"source_handles/context_checkpoints/(acceptance-([0-9a-f]{64})\.json)")
@@ -166,15 +163,7 @@ def _open_member(parents: _Parents, route: Route) -> Tuple[Any, os.stat_result]:
     """A binary handle on the member itself plus the fstat of that descriptor; anything but a
     regular file is refused (an OSError without errno, like a failed verification)."""
     root, segments = route
-    fd = os.open(segments[-1], _FILE_FLAGS, dir_fd=parents.get(root, segments[:-1]))
-    try:
-        observed = os.fstat(fd)
-        if not stat.S_ISREG(observed.st_mode):
-            raise OSError(f"task file is not a regular file: {'/'.join(segments)}")
-    except BaseException:
-        os.close(fd)
-        raise
-    return os.fdopen(fd, "rb"), observed
+    return open_regular_at(parents.get(root, segments[:-1]), segments[-1])
 
 
 def directory_archives(stores: List[pathlib.Path], rows: Any, *, anchor: Any = None) -> Dict[str, Dict[str, Any]]:
@@ -353,13 +342,16 @@ def serve_task_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[
     return json_error("task source is unavailable or does not match its recorded identity", 404)
 
 
-class _DescriptorResponse(Response):
+class DescriptorResponse(Response):
     """The bytes of ONE already-open binary handle: GET/HEAD, ``Accept-Ranges`` and a single
     ``Range`` (206; an unsatisfiable one 416; several are served whole), headers from the fstat
-    of that descriptor. Never opens a path; the handle closes with the response."""
+    of that descriptor. Never opens a path; the handle closes with the response. ``media_type``
+    defaults to the name's guess; ``headers`` add a caller's policy (chat uploads)."""
 
-    def __init__(self, handle: Any, name: str, observed: os.stat_result, verified: Optional[str] = None) -> None:
-        super().__init__(content=None, media_type=mimetypes.guess_type(name)[0] or "application/octet-stream")
+    def __init__(self, handle: Any, name: str, observed: os.stat_result, verified: Optional[str] = None, *,
+                 media_type: Optional[str] = None, headers: Optional[Dict[str, str]] = None) -> None:
+        super().__init__(content=None, media_type=media_type or mimetypes.guess_type(name)[0]
+                         or "application/octet-stream", headers=headers)
         self._handle, self._size = handle, observed.st_size
         etag = hashlib.md5(f"{observed.st_mtime}-{observed.st_size}".encode(), usedforsecurity=False).hexdigest()
         self.headers.update({"content-length": str(self._size), "accept-ranges": "bytes", "etag": f'"{etag}"',
@@ -448,4 +440,4 @@ def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: st
                               404, reason_code="artifact_unverified", task_id=task_id, artifact=name)
         return json_error("artifact could not be read", 503, reason_code="artifact_unavailable",
                           task_id=task_id, artifact=name)
-    return _DescriptorResponse(handle, name, observed, str((expected or {}).get("sha256") or "") or None)
+    return DescriptorResponse(handle, name, observed, str((expected or {}).get("sha256") or "") or None)

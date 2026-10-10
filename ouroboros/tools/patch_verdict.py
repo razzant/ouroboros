@@ -83,6 +83,9 @@ def write_patch_verdict(
             "reason": str(reason or "")[:600],
             "patch_sha256": str(verdict.get("patch_sha256") or ""),
             "verdict_artifact_write_failed": artifact_write_failed,
+            # Where the verdict was judged (a shared child folder need not be the
+            # parent's); absent when no target is known, as on legacy rows.
+            **({"target_root": verdict["target_root"]} if verdict["target_root"] else {}),
         })
     except Exception:
         log.warning("subagent patch verdict custody row failed", exc_info=True)

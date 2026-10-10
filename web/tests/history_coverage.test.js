@@ -64,24 +64,28 @@ test('a retained empty source keeps its zero frontier when its first growth is r
         'without a retained frontier the same tail is ordinary pagination');
 });
 
-test('same-rowcount reread refreshes spans, empty saved descriptors have no loaded authority', async () => {
+test('a same-rowcount re-read refreshes the span it certifies', async () => {
     let current = coverage(0, 50, 100, { gaps: ['invalid_json'] });
-    const make = () => createChatHistoryPager({
+    const pager = createChatHistoryPager({
         fetchPage: () => ({ messages: [], page_cursor: 'p', next_cursor: null, has_more: false, coverage: current }),
         applyPage() {}, releasePage() {},
     });
-    const pager = make(); await pager.latest();
-    const saved = pager.exportResume();
-    let resolve;
-    const restored = createChatHistoryPager({ fetchPage: () => new Promise(done => { resolve = done; }), applyPage() {}, releasePage() {} });
-    const pending = restored.restore(saved);
-    assert.deepEqual(restored.getState().coverage, []);
-    await Promise.resolve();
+    await pager.latest();
+    assert.equal(historyCoverage(current, pager.getState().coverage).complete, false);
     current = coverage(0, 100);
-    resolve({ messages: [], page_cursor: 'p', next_cursor: null, has_more: false, coverage: current });
-    await pending;
-    assert.equal(historyCoverage(current, restored.getState().coverage).complete, true);
-    pager.destroy(); restored.destroy();
+    await pager.latest();
+    assert.equal(historyCoverage(current, pager.getState().coverage).complete, true);
+    pager.destroy();
+});
+
+test('narration never decides coverage: older-page narration spans are ignored, a failed recent span is a gap', () => {
+    const recent = coverage(80, 100);
+    const olderPage = { ...coverage(0, 80), spans: { chat: coverage(0, 80).spans.chat, progress: null } };
+    assert.deepEqual(historyCoverage(recent, [olderPage]), { complete: true, gaps: false, horizonGap: false });
+    const failed = { ...recent, spans: { ...recent.spans, progress: { from: 0, to: 0, chain: 'empty', gaps: ['read_error'] } } };
+    assert.equal(historyCoverage(failed, [olderPage]).gaps, true);
+    const unknown = { ...recent, spans: { chat: recent.spans.chat } };
+    assert.equal(historyCoverage(unknown, [olderPage]).gaps, true, 'an unreadable narration span stays disclosed');
 });
 
 test('rotation keeps earlier prefix witnesses; a replaced later archive cannot complete coverage', () => {

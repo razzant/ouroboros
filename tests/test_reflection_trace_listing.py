@@ -369,7 +369,7 @@ def test_trace_source_failure_is_disclosed(tmp_path, monkeypatch):
     def fail(*_args, **_kwargs):
         raise OSError("unavailable")
 
-    monkeypatch.setattr("ouroboros.consolidator.retain_memory_source", fail)
+    monkeypatch.setattr("ouroboros.chat_chain.retain_memory_source", fail)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     pointer = reflection._verbatim_trace_pointer(ctx, _streak_trace())
     assert "unavailable" in pointer and "omits" in pointer

@@ -10,7 +10,7 @@ import pytest
 from starlette.requests import Request
 
 from ouroboros.gateway.task_events import _TaskEventCursorFollower, api_task_events, iter_task_events
-from ouroboros.gateway.task_list_scan import raw_result_facts
+from ouroboros.task_result_facts import raw_result_facts
 from ouroboros.task_results import write_task_result
 
 
@@ -602,7 +602,7 @@ def test_post_keeps_gateway_additive_unknown_fields(tmp_path):
 
 def test_unreadable_results_are_disclosed_without_an_empty_view(tmp_path, monkeypatch, caplog):
     import pathlib
-    from ouroboros.gateway import task_list_scan
+    from ouroboros import task_result_facts as task_list_scan
     from ouroboros.server_routing_context import _main_routing_manifest
 
     root = seed(tmp_path / "data")

@@ -352,7 +352,7 @@ def test_a_room_whose_chat_holds_no_standalone_message_names_nothing(room, narro
 def test_a_bound_reached_before_the_newest_message_leaves_its_arrival_unknown(room, narrow_recent, monkeypatch):
     room.deliver("root answer", 5)
     child_words(room, 8)
-    monkeypatch.setattr(history_paging, "_PAGE_SCAN_ROWS", 2)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
     assert room.read(n_human="2")["window"]["latest_message"] is None
 
 
@@ -485,7 +485,7 @@ def test_older_pages_carry_a_bounded_search_on_to_the_newest_message(room, narro
     room.deliver("root answer", 5)
     child_words(room, 8)
     message_bus.log_chat("in", room.chat_id, 7, "owner asks", ts=ts(40))
-    monkeypatch.setattr(history_paging, "_PAGE_SCAN_ROWS", 3)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
     recent = room.read(n_human="2")
     answer = room.row_id("root answer")
     assert recent["window"]["latest_message"] is None, "unknown: the bound came before the answer"
@@ -511,7 +511,7 @@ def test_an_unreadable_row_interrupts_the_continued_search(room, narrow_recent, 
     with room.chat_log.open("ab") as stream:
         stream.write(b'{"direction": "out", "text": "torn\n')
     child_words(room, 8)
-    monkeypatch.setattr(history_paging, "_PAGE_SCAN_ROWS", 3)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
     recent = room.read(n_human="2")
     assert recent["window"]["latest_message"] is None and recent["window"]["latest_before"] > 0
     pages = follow(room, recent["next_cursor"])
@@ -532,7 +532,7 @@ def test_a_continued_search_reaching_the_clean_start_of_the_chat_proves_no_messa
             stream.write(b'{"direction": "out", "text": "torn\n')
     child_words(room, 8)
     message_bus.log_chat("in", room.chat_id, 7, "owner asks", ts=ts(40))
-    monkeypatch.setattr(history_paging, "_PAGE_SCAN_ROWS", 3)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
     recent = room.read(n_human="2")
     assert recent["window"]["latest_message"] is None and recent["window"]["latest_before"] > 0
     pages = follow(room, recent["next_cursor"])
@@ -549,8 +549,21 @@ def test_a_search_that_found_the_newest_message_is_not_continued(room, narrow_re
     recent = room.read(n_human="2")
     assert recent["window"]["latest_message"] == {"history_id": room.row_id("root answer"), "out_of_order": True}
     assert "latest_before" not in recent["window"]
-    monkeypatch.setattr(history_paging, "_PAGE_SCAN_ROWS", 3)
+    monkeypatch.setattr(history_paging, "_READ_CEILING_BYTES", 1)
     assert not any("latest_message" in page["window"] for page in follow(room, recent["next_cursor"]))
+
+
+def test_the_arrival_search_keeps_its_own_bound_below_the_page_ceiling(room, narrow_recent, monkeypatch):
+    """Naming the newest arrival is paid on every recent read: it stops at its own small
+    bound and passes the fact on, while the pages themselves read to their quota."""
+    room.deliver("root answer", 5)
+    child_words(room, 8)
+    monkeypatch.setattr(history_paging, "_ARRIVAL_SEARCH_BYTES", 1)
+    recent = room.read(n_human="2")
+    assert recent["window"]["latest_message"] is None and recent["window"]["latest_before"] > 0
+    older = room.read(cursor=recent["next_cursor"])
+    assert len([text for text in texts(older) if text.startswith("child note")]) == 2, \
+        "the page ceiling, not the arrival bound, governs an ordinary older page"
 
 
 def test_a_cursor_carries_its_quiet_fact_as_a_boolean_and_older_cursors_still_read(room):

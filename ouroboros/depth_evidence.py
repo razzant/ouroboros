@@ -68,7 +68,14 @@ def task_depth_provenance(row: Any) -> Dict[str, Any]:
 def build_depth_summary(
     root_contract: Any, subtree_statuses: Iterable[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Summarize host-visible depth without forcing a topology or parsing prose."""
+    """Summarize host-visible depth without forcing a topology or parsing prose.
+
+    Inputs are the root task contract and the subtree status rows only; a depth
+    fact absent from them stays None (status ``evidence_unknown``) and is never
+    reconstructed from live config. The result carries ``host_visible_only: True``
+    and is embedded by ``task_finalization`` as ``depth`` in the
+    ``swarm_efficiency`` rollup.
+    """
 
     contract = root_contract if isinstance(root_contract, dict) else {}
     budget = contract.get("delegation_budget") if isinstance(contract.get("delegation_budget"), dict) else {}

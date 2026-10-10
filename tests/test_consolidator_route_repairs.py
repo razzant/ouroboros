@@ -1,4 +1,8 @@
-"""Cross-owner regressions: actual fit/cache, local wire and typed interruption."""
+"""Cross-owner regressions of the shared Light call: actual fit/cache, local wire and typed interruption.
+
+Reflection, scratchpad and knowledge upkeep send through ``_call_consolidation_llm``;
+the retired dialogue writer's split/retry tests left with it.
+"""
 from copy import deepcopy
 import json
 from math import ceil
@@ -10,10 +14,7 @@ import pytest
 from ouroboros import capability_evidence as ce, config, consolidator as c, context_fit
 from ouroboros.llm import LLMClient
 from ouroboros.llm_claudexor import ClaudexorModelError
-from ouroboros.model_wait import ModelWaitInterrupted
-from tests.test_consolidator_context_fit import (
-    _LLM, _corrected_source, _paths, _source, _source_for_split, _summary, _window_for_split, _write_chat,
-)
+from tests.test_consolidator_context_fit import _LLM
 
 
 MODEL = "claudexor::test-source=exact-model"
@@ -57,6 +58,14 @@ def capacity(tmp_path, monkeypatch):
     return state
 
 
+def _call(llm, source="identity\nsource " * 20):
+    return c._call_consolidation_llm(llm, source, "Probe")
+
+
+def _fits(call, window, density=1.0):
+    return ceil(context_fit.estimate_context_prompt_tokens(call["messages"]) * density) + 16384 <= window
+
+
 def _prime(capacity, *, observed=None):
     return context_fit.resolve_context_fit_route(
         {"model": MODEL, "model_role": "light", "use_local_model": False,
@@ -83,7 +92,7 @@ def test_local_preflight_matches_actual_wire_normalization(capacity, monkeypatch
 
     monkeypatch.setattr(client, "_get_local_client", lambda: SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
-    # Establish what the real wire owner does, before asking consolidation to fit.
+    # Establish what the real wire owner does, before asking the Light call to fit.
     client.chat(messages=[{"role": "user", "content": "source"}], model="local-fixture",
                 max_tokens=16384, use_local=True)
     assert sent.pop()["max_tokens"] == 4096
@@ -91,11 +100,11 @@ def test_local_preflight_matches_actual_wire_normalization(capacity, monkeypatch
         {"model": "local-fixture", "model_role": "light", "use_local_model": True}, allow_fetch=True)[1]
     assert evidence.window_tokens == 16384
 
-    content, usage = _summary(client)
+    content, usage = _call(client)
 
     assert content == "local summary"
-    assert len(sent) == 2 and all(call["max_tokens"] == 4096 for call in sent)  # draft, then correction
-    assert all("identity" in call["messages"][0]["content"] for call in sent)
+    assert len(sent) == 1 and sent[0]["max_tokens"] == 4096
+    assert "identity" in sent[0]["messages"][0]["content"]
     assert not usage.get("_consolidation_errors")
 
 
@@ -107,17 +116,21 @@ def test_auto_and_pin_recover_fresh_exact_account_capacity(capacity, monkeypatch
     assert expected.credential_profile_id == "account-a" and ce.is_known(expected, require_fresh=True)
     capacity.resolutions.clear()
     llm = _LLM()
-    source = "whole source Ж🙂 " * 2000
+    source = "whole source Ж🙂 " * 30
 
-    content, _ = _summary(llm, source)
+    content, _ = _call(llm, source)
 
-    assert content and len(llm.calls) > 1
-    assert _source(llm.accepted) == source
-    assert all(call["model_account_override"] == pin and call["model_role"] == "light" for call in llm.calls)
-    assert all(context_fit.estimate_context_prompt_tokens(call["messages"]) + 16384 <= 17000 for call in llm.calls)
-    assert all(ev.route_fp == expected.route_fp for _, ev in capacity.resolutions)
-    # Discovery is carried into subsequent parts; exact identity hits the real cache.
-    assert len(capacity.catalog_calls) == 2
+    assert content and len(llm.calls) == 1
+    [call] = llm.calls
+    assert call["messages"][0]["content"] == source
+    assert call["model_account_override"] == pin and call["model_role"] == "light"
+    assert _fits(call, 17000)
+    assert capacity.resolutions and all(ev.route_fp == expected.route_fp for _, ev in capacity.resolutions)
+    # The exact account's known window bounds the request: a larger source is refused unsent.
+    refused = _LLM()
+    content, usage = _call(refused, "whole source Ж🙂 " * 2000)
+    assert not content and not refused.calls
+    assert usage["_consolidation_errors"][-1]["kind"] == "context_overflow"
 
 
 @pytest.mark.parametrize("change", ["stale", "missing_identity", "missing_window"])
@@ -129,62 +142,49 @@ def test_catalog_without_fresh_complete_evidence_stays_unknown(capacity, change)
     else:
         capacity.window = None
     llm = _LLM()
-    assert _summary(llm)[0]
-    assert len(llm.calls) == 2  # unknown capacity: one unchecked draft and one unchecked correction
+    assert _call(llm, "whole source Ж🙂 " * 2000)[0]
+    assert len(llm.calls) == 1  # unknown capacity: one unchecked request
     assert not ce.is_known(capacity.resolutions[-1][1], require_fresh=True)
 
 
-@pytest.mark.parametrize("receipt", ["success", "refusal"])
 @pytest.mark.parametrize("profile", ["account-a", "account-b"])
-def test_actual_rotated_account_rebinds_next_part_to_its_cache(capacity, receipt, profile):
-    source = _source_for_split()
-    actual_window = _window_for_split(source)
-    initial_window = actual_window + 2048
-    capacity.route, capacity.window = _route(profile, "identity-b"), actual_window
+def test_refusal_rebinds_its_facts_to_the_account_that_refused(capacity, profile):
+    capacity.route, capacity.window = _route(profile, "identity-b"), 16_900
     expected = _prime(capacity)
-    capacity.route, capacity.window = _route(), initial_window
-    _prime(capacity)
-    capacity.resolutions.clear()
+    capacity.route, capacity.window = _route(), 17000
+    initial = _prime(capacity)
+    assert initial.route_fp != expected.route_fp
+    actual = _route(profile, "identity-b")
 
-    def rotate(llm, _prompt):
-        if len(llm.calls) == 1:
-            actual = _route(profile, "identity-b")
-            if receipt == "refusal":
-                error = ClaudexorModelError({"code": "context_length_exceeded", "message": "too long"}, route=actual)
-                error.physical_attempt_capture = SimpleNamespace(state="settled")
-                raise error
-            llm.accepted.append(_prompt)
-            return {"content": "first summary"}, {"cost": None, "claudexor": {"route": actual}}
+    def refuse(llm, _prompt):
+        error = ClaudexorModelError({"code": "context_length_exceeded", "message": "too long"}, route=actual)
+        error.physical_attempt_capture = SimpleNamespace(state="settled")
+        raise error
 
-    llm = _LLM(effect=rotate)
-    assert _summary(llm, source)[0]
-    # The rebound (smaller) capacity applies to the very next request: the first
-    # part's correction no longer fits, so the part is split and re-drafted; the
-    # kept summaries are exactly the corrections, which cover the source once.
-    assert _corrected_source(llm.accepted) == source
-    assert _source(llm.accepted).endswith(source)
-    observed = [(task, ev) for task, ev in capacity.resolutions
-                if (task.get("model_route") or {}).get("accountFingerprint") == "identity-b"]
-    assert observed and all(ev.route_fp == expected.route_fp for _, ev in observed)
-    assert all(call["model_account_override"] == "" for call in llm.calls)
-    assert all(context_fit.estimate_context_prompt_tokens(call["messages"]) + 16384 <= actual_window
-               for call in llm.calls[1:])
+    llm = _LLM(effect=refuse)
+    content, usage = _call(llm)
+    assert not content and len(llm.calls) == 1 and llm.calls[0]["model_account_override"] == ""
+    [refused] = usage["_consolidation_errors"]
+    # The refusal belongs to the account that answered, not to the one discovery picked.
+    assert refused["route_fp"] == expected.route_fp and refused["capacity_tokens"] == 16_900
+    assert not refused["preflight_only"]
 
 
 def test_exact_account_density_is_read_from_the_existing_evidence_store(tmp_path, capacity):
     capacity.window = 18000
     evidence = _prime(capacity)
     ce.record_token_density(tmp_path, MODEL, route_fp=evidence.route_fp,
-                            prompt_chars=400000, prompt_tokens=200000, basis="bounded_proxy")
+                            prompt_chars=400000, prompt_tokens=200000, basis=ce.MAIN_DENSITY_BASIS)
     density = context_fit._route_calibration_ratio(None, evidence.route_fp, MODEL)
     assert density == 2.0
-    source = "full dense source Ж🙂 " * 2000
     llm = _LLM()
-    content, usage = _summary(llm, source)
-    assert content and len(llm.calls) > 1 and _source(llm.accepted) == source
-    assert all(ceil(context_fit.estimate_context_prompt_tokens(call["messages"]) * density) + 16384 <= 18000
-               for call in llm.calls)
-    assert all(failure["measurement_density"] == density for failure in usage["_consolidation_errors"])
+    content, usage = _call(llm, "full dense source Ж🙂 " * 30)
+    assert content and len(llm.calls) == 1 and _fits(llm.calls[0], 18000, density)
+    refused = _LLM()
+    content, usage = _call(refused, "full dense source Ж🙂 " * 2000)
+    assert not content and not refused.calls
+    [failure] = usage["_consolidation_errors"]
+    assert failure["kind"] == "context_overflow" and failure["measurement_density"] == density
 
 
 def test_quota_wait_reprepares_auto_with_the_new_accounts_capacity(tmp_path, capacity, monkeypatch):
@@ -209,16 +209,16 @@ def test_quota_wait_reprepares_auto_with_the_new_accounts_capacity(tmp_path, cap
         return {"content": "summary"}, {"cost": None, "claudexor": {"route": capacity.route}}
 
     monkeypatch.setattr(client, "_chat_remote", remote)
-    source = "all source Ж🙂 " * 1500
+    source = "all source Ж🙂 " * 30
     from ouroboros.task_results import write_task_result
     write_task_result(tmp_path, "consolidation-fixture", "running")
     with model_wait.task_model_wait_scope(
         task={"id": "consolidation-fixture"}, drive_root=tmp_path, event_queue=queue.Queue(),
         worker_slot_held=False, owner_control=lambda: None,
     ) as waiter:
-        content, usage = _summary(client, source)
-    assert content and len(calls) > 2 and usage["cost"] is None
-    assert _corrected_source(accepted) == source  # corrected coverage; drafts may repeat a redrafted part
+        content, usage = _call(client, source)
+    assert content == "summary" and len(calls) == 2 and usage["cost"] is None
+    assert accepted == [source]
     assert all(row["resolution"] == "resource_available" for row in waiter.waits.values())
     assert any(ev.credential_profile_id == "account-b" and ev.window_tokens == 17000
                for _, ev in capacity.resolutions)
@@ -230,79 +230,5 @@ def test_unavailable_route_metadata_keeps_an_ordinary_call(capacity, monkeypatch
 
     monkeypatch.setattr(config, "load_settings", unavailable)
     llm = _LLM()
-    assert _summary(llm)[0]
-    assert len(llm.calls) == 2
-
-
-def test_oversized_era_keeps_all_original_blocks(tmp_path, capacity):
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat, text_size=0)
-    originals = [{"range": "2025-01-01", "type": "summary", "message_count": 100,
-                  "content": f"old-{index} " * 3000} for index in range(10)]
-    c.atomic_write_json(blocks, originals)
-    llm = _LLM()
-    usage = c.consolidate(chat, blocks, meta, llm)
-    assert json.loads(blocks.read_text())[:10] == originals
-    assert len(json.loads(blocks.read_text())) == 11
-    assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
-    assert usage["_consolidation_errors"][-1]["kind"] == "context_overflow"
-    assert usage["_consolidation_errors"][-1]["preflight_only"]
-    assert all("Compress these older memory blocks" not in prompt for prompt in llm.accepted)
-
-
-@pytest.mark.parametrize("interrupt", ["quota", "owner", "deadline"])
-def test_learned_refusal_survives_typed_interruption_before_next_cycle(tmp_path, capacity, interrupt):
-    capacity.window = None
-    chat, blocks, meta = _paths(tmp_path)
-    rows = _write_chat(chat, text_size=30)
-    original = chat.read_bytes()
-    error = (ClaudexorModelError({"code": "subscription_window_exhausted", "message": "quota"}, route=_route())
-             if interrupt == "quota" else ModelWaitInterrupted(
-                 "finalize_requested" if interrupt == "owner" else "deadline", role="light"))
-
-    def fail(llm, _prompt):
-        if len(llm.calls) == 1:
-            refusal = ClaudexorModelError({"code": "context_length_exceeded", "message": "too long"}, route=_route())
-            refusal.physical_attempt_capture = SimpleNamespace(state="settled")
-            raise refusal
-        raise error
-
-    first = _LLM(effect=fail)
-    with pytest.raises(type(error)) as caught:
-        c.consolidate(chat, blocks, meta, first)
-    assert caught.value is error and len(first.calls) == 2
-    assert not blocks.exists() and chat.read_bytes() == original
-    saved = json.loads(meta.read_text())
-    assert saved.get("last_consolidated_offset", 0) == 0
-    original_size = len(first.calls[0]["messages"][0]["content"].encode("utf-8"))
-    assert saved["consolidation_retry"]["input_limit"]["input_bytes"] == original_size - 1
-
-    second = _LLM()
-    c.consolidate(chat, blocks, meta, second)
-    assert len(second.calls[0]["messages"][0]["content"].encode("utf-8")) < original_size
-    assert _source(second.accepted) == c._format_entries_for_block(rows, include_room_labels=True)
-    assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
-    assert chat.read_bytes() == original
-
-
-@pytest.mark.parametrize("change", ["source", "route"])
-def test_interrupted_refusal_bound_invalidates_for_changed_source_or_route(tmp_path, capacity, change):
-    capacity.window = None
-    chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat, text_size=0)
-
-    def fail(llm, _prompt):
-        if len(llm.calls) == 1:
-            raise ClaudexorModelError({"code": "context_length_exceeded", "message": "too long"}, route=_route())
-        raise ModelWaitInterrupted("deadline", role="light")
-
-    first = _LLM(effect=fail)
-    with pytest.raises(ModelWaitInterrupted):
-        c.consolidate(chat, blocks, meta, first)
-    assert meta.exists()
-    if change == "route":
-        capacity.route = _route("account-b", "identity-b")
-    second = _LLM()
-    c.consolidate(chat, blocks, meta, second, "changed identity" if change == "source" else "")
-    assert len(second.calls) == 2  # the released bound allows one whole draft and its correction
-    assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
+    assert _call(llm)[0]
+    assert len(llm.calls) == 1

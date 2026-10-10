@@ -29,6 +29,7 @@ from tests._skill_review_shared import (
     _pass_array_for_script_skill,
     _patch_review,
 )
+from tests.review_pool_rosters import set_review_pool
 
 
 def test_review_skill_prompt_includes_rebuttal_and_history(tmp_path, monkeypatch):
@@ -65,32 +66,10 @@ def test_review_skill_prompt_includes_rebuttal_and_history(tmp_path, monkeypatch
 
 
 def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
-    import ouroboros.skill_review_prompt as skill_review_prompt
-
     skills_root = _build_skill(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setattr(
-        "ouroboros.config.get_review_models",
-        lambda: [
-            "openai/gpt-5.5",
-            "google/gemini-3.5-flash",
-            "anthropic/claude-opus-4.6",
-        ],
-    )
+    set_review_pool(monkeypatch, ["openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-opus-4.6"])
     ctx = _make_ctx(tmp_path)
-    advisory_evidence = {
-        "status": "completed",
-        "model": "claude-opus",
-        "session_id": "sess-skill",
-        "raw_result": "advisory raw",
-    }
-    # The advisory pre-review moved to the prompt owner with the per-attempt
-    # assembly that calls it; patch it where that caller reads it.
-    monkeypatch.setattr(
-        skill_review_prompt,
-        "_run_skill_advisory_pre_review",
-        lambda *args, **kwargs: dict(advisory_evidence),
-    )
     prior_hash = compute_content_hash(skills_root / "weather")
     save_review_state(
         ctx.drive_root,
@@ -127,7 +106,7 @@ def test_review_skill_quorum_failure_on_one_responder(tmp_path, monkeypatch):
         outcome = review_skill(ctx, "weather")
     assert outcome.status == "pending"
     assert "quorum" in outcome.error.lower()
-    assert outcome.advisory_result == advisory_evidence
+    assert outcome.advisory_result == {}  # no advisory critic feeds the skill reviewer (3A)
     persisted = load_review_state(ctx.drive_root, "weather")
     assert persisted.status == "clean"
     assert persisted.content_hash == prior_hash
@@ -159,12 +138,11 @@ def test_review_skill_missing_skill_returns_pending_with_error(tmp_path, monkeyp
 
 
 def test_review_skill_malformed_reviewer_slots_block_before_any_reviewer(tmp_path, monkeypatch):
-    """#116: a malformed OUROBOROS_REVIEWER_SLOTS keeps the skill honestly
-    PENDING with the precise parse error — the reviewer wave is never
-    dispatched on the silently projected default panel."""
+    """#116: a malformed catalog (the review pool's SSOT) keeps the skill honestly
+    PENDING with the precise parse error — the reviewer wave is never dispatched."""
     skills_root = _build_skill(tmp_path)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", "{broken")
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", "{broken")
     ctx = _make_ctx(tmp_path)
 
     with patch(
@@ -174,7 +152,7 @@ def test_review_skill_malformed_reviewer_slots_block_before_any_reviewer(tmp_pat
         outcome = review_skill(ctx, "weather")
 
     assert outcome.status == "pending"
-    assert "invalid reviewer-slot configuration blocks skill review" in outcome.error
+    assert "invalid review pool configuration blocks skill review" in outcome.error
     assert "not valid JSON" in outcome.error
 
 
@@ -628,3 +606,23 @@ def test_skill_governance_discloses_unavailable_book_without_partial_body(tmp_pa
     assert "OMISSION" in text and "docs/ARCHITECTURE.md" in text
     assert "runtime.md" in text
     assert "Entrypoint body must not stand in" not in text
+
+
+def test_skill_review_prompt_includes_minimal_host_context(tmp_path):
+    import ouroboros.skill_review as skill_review
+
+    prompt, _stable_len = skill_review._build_review_prompt(
+        "demo",
+        tmp_path / "demo",
+        "{}",
+        "hash",
+        "plugin.py\nprint('ok')",
+    )
+
+    assert "docs/CREATING_SKILLS.md" in prompt
+    assert "ouroboros/contracts/plugin_api.py" in prompt
+    assert "ouroboros/extension_ui_validation.py" in prompt
+    assert "### ouroboros/extension_loader.py" not in prompt
+    assert "### web/modules/widgets.js" not in prompt
+    # No advisory critic feeds the skill reviewer, so no advisory evidence block exists.
+    assert "Advisory Pre-Review" not in prompt

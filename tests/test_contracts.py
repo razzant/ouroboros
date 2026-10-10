@@ -124,10 +124,14 @@ def test_public_api_is_stable():
 def test_budget_profile_frozen_key_set():
     """§11.1 additive ABI pin (v6.56.0): the normalized budget_profile key set.
 
-    ``cost_hard_stop_pct`` is the additive in-task cost hard-stop knob
-    (None -> historical 50%-of-remaining stop; 0 -> no in-task stop, never a
-    $0 ceiling). Removing or renaming any key here is a deliberate ABI break.
+    ``cost_hard_stop_pct`` is the additive in-task cost hard-stop knob of an
+    EXPLICIT experiment profile. The key and its accepted inputs are frozen; the
+    meaning of None changed by owner decision 2026-10-07 (#1128): None is no
+    explicit stop — not the old 50%-of-remaining default — and 0 stays the
+    explicit no-stop bench contract, never a $0 ceiling. Removing or renaming
+    any key here is a deliberate ABI break.
     """
+    from ouroboros import task_pacing
     from ouroboros.contracts.task_contract import normalize_budget_profile
 
     profile = normalize_budget_profile(None)
@@ -141,6 +145,11 @@ def test_budget_profile_frozen_key_set():
     assert profile["cost_hard_stop_pct"] is None
     assert normalize_budget_profile({"cost_hard_stop_pct": 0})["cost_hard_stop_pct"] == 0
     assert normalize_budget_profile({"cost_hard_stop_pct": "37"})["cost_hard_stop_pct"] == 37
+    # The semantic half of the pin: None resolves to no stop, explicit 37 to its authored share.
+    ordinary = task_pacing.resolve_cost_ceiling(100.0, profile, root_cap_usd=400.0)
+    assert (ordinary.state, ordinary.basis) == ("disabled", task_pacing.COST_BASIS_NO_DEFAULT_STOP)
+    authored = task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile({"cost_hard_stop_pct": "37"}))
+    assert (authored.state, authored.ceiling_usd) == ("active", 37.0)
 
 
 def test_task_contract_preserves_protected_artifact_policy():
@@ -1222,40 +1231,57 @@ def test_advisory_enforcement_not_self_overridable_triad(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("crit_item", ["forgotten_touchpoints", "intent_alignment"])
-def test_advisory_enforcement_not_self_overridable_scope(crit_item, tmp_path, monkeypatch):
-    """BIBLE P3 / NW-2: advisory mode must NOT block a critical SCOPE finding —
-    ``forgotten_touchpoints`` is the incident's scope item."""
+def test_advisory_enforcement_not_self_overridable_coupling(crit_item, tmp_path, monkeypatch):
+    """BIBLE P3 / NW-2: advisory mode must NOT block a critical COUPLING finding —
+    ``forgotten_touchpoints`` is the incident's Part-2 item. The reducer still
+    says FAIL (the fact: ``per_question.coupling``), the record keeps the seat's
+    finding, and the gate applies the owner's authority exactly where it does
+    for a Part-1 finding."""
     import importlib
     import json as _json
-    scope = importlib.import_module("ouroboros.tools.scope_review")
 
-    class _Ctx:
-        repo_dir = str(tmp_path)
-        task_id = "advisory-guard"
-        pending_events = []
+    from ouroboros import review_ledger as rl
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.tools.review_helpers import review_enforcement_blocks
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
 
-        def drive_logs(self):
-            return tmp_path
-
-    raw = []
-    for item_id in sorted(scope._SCOPE_REQUIRED_ITEMS):
-        if item_id == crit_item:
-            raw.append({"item": item_id, "verdict": "FAIL", "severity": "critical",
-                        "reason": f"Staged diff violates {item_id} per the fixture."})
-        else:
-            raw.append({"item": item_id, "verdict": "PASS", "severity": "advisory",
-                        "reason": f"Checked {item_id} against the staged fixture."})
+    review = importlib.import_module("ouroboros.tools.review")
+    ctx = _advisory_guard_make_git_ctx(tmp_path)
+    matrix = [{"item": item, "verdict": "FAIL" if item == crit_item else "PASS",
+               "severity": "critical" if item == crit_item else "advisory",
+               "reason": (f"Staged diff violates {item} per the fixture." if item == crit_item
+                          else f"Checked {item} against the staged diff and the touched modules; no issue.")}
+              for item in sorted(SCOPE_REQUIRED_ITEMS)]
+    two_part = _json.dumps({"change": [], "change_clean": True, "coupling": matrix})
+    results = [
+        {"model": "m1", "slot_id": "slot_1", "verdict": "UNKNOWN", "text": two_part},
+        {"model": "m2", "slot_id": "slot_2", "verdict": "UNKNOWN", "text": two_part},
+    ]
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    # Isolate advisory finding enforcement from the row's output sizing: this
-    # synthetic route is explicitly full-window.
-    from ouroboros.reviewer_window import ReviewerWindow
-
-    monkeypatch.setattr(scope, "_scope_window",
-                        lambda _model, **_k: ReviewerWindow(1_000_000, "confirmed"))
-    monkeypatch.setattr(scope, "_call_scope_llm",
-                        lambda *a, **k: (_json.dumps(raw), {"prompt_tokens": 1, "completion_tokens": 1}, None))
-    result = scope.run_scope_review(_Ctx(), "test commit", scope_model="test")
-    assert result.blocked is False, f"advisory mode must not block scope critical {crit_item!r} (58a52c4 class)"
+    prepared = {
+        "prompt": "", "stable_prefix_len": 0, "models": ["m1", "m2"], "routes": [ReviewRouteKind.API_CHAT] * 2,
+        "target_repo": ctx.repo_dir, "blocking_review": review_enforcement_blocks("advisory"), "layer": "body",
+        "task_evidence": None, "governance_manifest": [], "governance_packet_slots": [],
+        "retrieving_manifests": [], "brief_texts": {},
+        "row_plan": {"models": ["m1", "m2"], "routes": [ReviewRouteKind.API_CHAT] * 2, "slot_ids": ["slot_1", "slot_2"],
+                     "parts": [("change", "coupling")] * 2, "retrieves": [True, True],
+                     "session_tasks": ["BRIEF", "BRIEF"], "brief_shas": ["a", "b"]},
+    }
+    monkeypatch.setattr(review, "_handle_multi_model_review", lambda *a, **k: _json.dumps({"results": results}))
+    result = review._dispatch_unified_review(ctx, "test commit", prepared)
+    assert result is None, f"advisory mode must not block coupling critical {crit_item!r} (58a52c4 class)"
+    verdict = ctx._last_review_verdict
+    assert verdict["aggregate"] == "FAIL" and verdict["per_question"]["coupling"] == "FAIL"
+    assert verdict["per_question"]["change"] == "PASS"
+    coupling = ctx._last_coupling_result
+    # ``blocked`` is the gate's fact under the owner's enforcement (as the old
+    # scope result's was): advisory records the FAIL and blocks nothing.
+    assert coupling.blocked is False and coupling.verdict == "FAIL"
+    assert coupling.critical_findings[0]["item"] == crit_item
+    assert ctx._last_review_block_reason == "critical_findings"
+    assert ctx._review_advisory and crit_item in " ".join(str(note) for note in ctx._review_advisory)
+    rows = rl.build_rows({"triad_raw": ctx._last_triad_raw_results})
+    assert rl.reduce_verdict(rows)["aggregate"] == "FAIL"  # the record reduces to the same fact
 
 
 def test_skill_and_extension_permissions_are_kept_in_sync():

@@ -497,34 +497,28 @@ def _install_model_operation_fake(stack: contextlib.ExitStack, recorder: _Record
 # Case execution
 # ---------------------------------------------------------------------------
 def _ledger_projection(root: pathlib.Path) -> List[Dict[str, Any]]:
-    """Ordered physical attempts with their stable accounting facts."""
-    path = root / "state" / "usage_attempts.jsonl"
-    if not path.is_file():
-        return []
+    """Ordered physical attempts (by their first transition) with their stable
+    accounting facts. The usage store keeps one current row per attempt, so the
+    golden records its final state and durable row revisions (state transitions
+    and retained evidence updates) under the historical ``transitions`` key."""
+    from tests._usage_store_testing import attempt_rows_in_start_order
+
     attempts: List[Dict[str, Any]] = []
-    index: Dict[str, Dict[str, Any]] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        attempt_id = str(row.get("attempt_id") or "")
-        entry = index.get(attempt_id)
-        if entry is None:
-            entry = {
-                "source": row.get("source"),
-                "model": row.get("model"),
-                "provider": row.get("provider"),
-                "candidate_raw_sha256": row.get("candidate_raw_sha256"),
-                "candidate_raw_size_bytes": row.get("candidate_raw_size_bytes"),
-                "candidate_measurement_kind": row.get("candidate_measurement_kind"),
-                "states": [],
-            }
-            index[attempt_id] = entry
-            attempts.append(entry)
-        entry["states"].append(row.get("state"))
+    for row in attempt_rows_in_start_order(root):
+        entry = {
+            "source": row.get("source"),
+            "model": row.get("model"),
+            "provider": row.get("provider"),
+            "candidate_raw_sha256": row.get("candidate_raw_sha256"),
+            "candidate_raw_size_bytes": row.get("candidate_raw_size_bytes"),
+            "candidate_measurement_kind": row.get("candidate_measurement_kind"),
+            "state": row.get("state"),
+            "transitions": row.get("revision"),
+        }
         if row.get("state") == "settled":
             entry["prompt_cache_ttl"] = row.get("prompt_cache_ttl")
             entry["cost_final"] = row.get("cost_final")
+        attempts.append(entry)
     return attempts
 
 

@@ -568,7 +568,7 @@ def test_shell_regex_autocorrect_nonzero_still_fails():
 
 def test_live_tool_log_payload_includes_structured_result_metadata(tmp_path, monkeypatch):
     import pathlib
-    import time
+    import threading
     from types import SimpleNamespace
 
     import ouroboros.loop_tool_execution as loop_tool_execution
@@ -592,6 +592,21 @@ def test_live_tool_log_payload_includes_structured_result_metadata(tmp_path, mon
     drive_logs = tmp_path / "logs"
     drive_logs.mkdir()
     live_events = []
+    late_notice = threading.Event()
+
+    def put_nowait(envelope):
+        live_events.append(envelope)
+        if (envelope.get("data") or {}).get("type") == "tool_call_late":
+            late_notice.set()
+
+    def execute_result(_name, _args):
+        # Outlive the soft timeout by construction: return only once the
+        # terminal-wait notice was emitted.  A fixed 0.05s body raced a caller
+        # descheduled between submit and its 1ms wait, which then found the
+        # future already done and took the in-time branch.
+        late_notice.wait(30)
+        return ToolResult(status="ok", code="OK", text="OK")
+
     # D10 emptied FOREGROUND_MUTATIVE_TOOLS (claude_code_edit was its only
     # member); the terminal-wait plumbing stays wired for a successor, so pin
     # it with a fixture member.
@@ -600,11 +615,8 @@ def test_live_tool_log_payload_includes_structured_result_metadata(tmp_path, mon
     )
     tools = SimpleNamespace(
         CODE_TOOLS={"fake_code_tool"},
-        _ctx=SimpleNamespace(event_queue=SimpleNamespace(put_nowait=lambda envelope: live_events.append(envelope))),
-        execute_result=lambda _name, _args: (
-            time.sleep(0.05),
-            ToolResult(status="ok", code="OK", text="OK"),
-        )[1],
+        _ctx=SimpleNamespace(event_queue=SimpleNamespace(put_nowait=put_nowait)),
+        execute_result=execute_result,
     )
     result = _execute_with_timeout(
         tools,

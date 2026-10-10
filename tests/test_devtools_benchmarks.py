@@ -360,7 +360,8 @@ def test_gaia_adapter_wires_settings_and_solver(tmp_path):
     assert env["OUROBOROS_DATA_DIR"].startswith(str(tmp_path))
     assert env["OUROBOROS_MODEL"] == "google/gemini-2.5-pro"
     assert json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == "openai/gpt-5.5"
-    assert env["OUROBOROS_SCOPE_REVIEW_MODELS"] == "google/gemini-2.5-pro"
+    # The review pool rides the roster (test_benchmark_available_subagents pins its seats).
+    assert "OUROBOROS_SUBAGENTS" in env and "OUROBOROS_SCOPE_REVIEW_MODELS" not in env
     assert env["OUROBOROS_TASK_REVIEW_MODE"] == "required"
     assert env.get("CLAUDE_CODE_MODEL") != "google/gemini-2.5-pro"
     assert env["GAIA_OUROBOROS_URL"].startswith("http://127.0.0.1:")
@@ -1637,8 +1638,7 @@ def test_programbench_model_preflight_keeps_openrouter_ids_and_checks_solve_mode
             {
                 "OPENROUTER_API_KEY": "test-key",
                 "OUROBOROS_MODEL": "openai/gpt-5.5-mini",
-                "OUROBOROS_SUBAGENTS": single_model_subagents_setting("openai/gpt-5.5-mini"),
-                "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5-mini,openai/gpt-5.5-mini",
+                "OUROBOROS_SUBAGENTS": single_model_subagents_setting("openai/gpt-5.5-mini", review_slots=2),
             }
         ),
         encoding="utf-8",
@@ -1646,7 +1646,7 @@ def test_programbench_model_preflight_keeps_openrouter_ids_and_checks_solve_mode
     # provider/model is the canonical OpenRouter form: no rewrite, no error.
     slots = preflight_model_slots(settings, solve_model="openai/gpt-5.5-mini")
     assert slots["OUROBOROS_MODEL"] == "openai/gpt-5.5-mini"
-    assert slots["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5-mini,openai/gpt-5.5-mini"
+    assert "OUROBOROS_REVIEW_MODELS" not in slots
     with pytest.raises(SystemExit, match="does not match settings OUROBOROS_MODEL"):
         preflight_model_slots(settings, solve_model="anthropic/claude-sonnet-4.6")
 
@@ -1749,24 +1749,21 @@ def test_osworld_shell_action_does_not_fabricate_bash_history():
 
 
 def test_terminal_bench_metadata_declares_all_assisting_models(monkeypatch):
-    """NW-6: with task_review_mode=required the review triad (incl. a frontier
-    model) assists the measured run; metadata.yaml must declare every assisting
-    model, not only the measured one."""
+    """NW-6: with task_review_mode=required the review pool assists the measured
+    run; metadata.yaml must declare every model the container executes."""
     import sys as _sys
     spec = importlib.util.spec_from_file_location(
         "tb_run_for_meta", REPO_ROOT / "devtools" / "benchmarks" / "terminal_bench" / "run_tb.py")
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(_sys.modules, spec.name, module)  # dataclass field resolution needs this
     spec.loader.exec_module(module)
-    monkeypatch.delenv("OUROBOROS_REVIEW_MODELS", raising=False)
+    from devtools.benchmarks.common.model_slots import single_model_subagents_setting
+    panel = ["openai/gpt-5.5", "anthropic/claude-opus-5", "google/gemini-3.5-pro"]
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", single_model_subagents_setting("openai/gpt-5.5", review_models=panel))
     meta = module.leaderboard_metadata(
         agent_name="Ouroboros", org_name="Ouroboros",
         model="openai/gpt-5.5", light_model="google/gemini-3.5-flash")
-    # Every shipped default is read from the config SSOT and must be visible.
-    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
-
-    for helper in OPENROUTER_REVIEW_DEFAULTS["triad"]:
-        assert helper in meta
+    assert all(helper in meta for helper in panel)
     assert "scope_review" not in meta
     assert "commit_review_triad" in meta
     assert meta.count("model_name:") >= 3
@@ -6736,7 +6733,7 @@ def test_run_tb_manifest_records_the_model_the_run_actually_resolved(tmp_path, m
     monkeypatch.chdir(tmp_path)
     for key in (
         *MODEL_SLOT_KEYS, *model_slots._ACTIVE_LOCAL_ROUTE_KEYS,
-        model_slots.SUBAGENTS_SETTING, model_slots.REVIEWER_SLOTS_ENV, "USE_LOCAL_HEAVY",
+        model_slots.SUBAGENTS_SETTING, "OUROBOROS_REVIEWER_SLOTS", "USE_LOCAL_HEAVY",
     ):
         monkeypatch.setenv(key, "")
     settings = tmp_path / "settings.json"

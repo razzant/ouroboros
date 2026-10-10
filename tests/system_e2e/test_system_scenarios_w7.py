@@ -57,6 +57,7 @@ from tests.system_e2e.harness import (
     body_text,
     canned_review_answer,
     classify_call,
+    keyless_review_rows,
     keyless_settings,
     require_lane,
     start_server,
@@ -444,9 +445,11 @@ def test_s28_native_peers_exchange_addressed_turns_and_the_planner_receives_sele
                              model_ids=["mock-model", "mock-peer-a", "mock-peer-b"])
     before = _home_sentinel()
     with model:
+        # A scenario that passes its own catalog owns its review pool: the planner's
+        # wave below seats the keyless reviewer rows beside the two exchange peers.
         settings = keyless_settings(
             model, OUROBOROS_RUNTIME_MODE="advanced",
-            OUROBOROS_SUBAGENTS=_roster(_peer_row("peer-a"), _peer_row("peer-b")),
+            OUROBOROS_SUBAGENTS=_roster(_peer_row("peer-a"), _peer_row("peer-b"), *keyless_review_rows()),
             **_isolation_settings(pathlib.Path(root)))
         server = start_server(e2e_clone, root, settings)
         try:

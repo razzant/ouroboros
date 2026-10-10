@@ -87,14 +87,17 @@ def test_chat_document_card_uses_dialog_and_safe_download_fallbacks():
     assert "api?.download_file_to_downloads" in helper
     assert "await downloadBridge(url, filename, true)" in helper
 
-    # A card opens the explicit action dialog. Download retains the native bridge
-    # for durable files and the object-URL anchor fallback for live base64 bytes.
+    # A card opens the explicit action dialog (a Markdown/text card opens the
+    # document reader, whose Open and Download are these same actions). Download
+    # retains the native bridge for durable files and the object-URL anchor
+    # fallback for live base64 bytes.
     assert "className = 'chat-file-dialog'" in chat
     assert 'data-file-action="open"' in chat
     assert "open.hidden = !file.source.durable;" in chat
+    assert "createDocumentReader({ actions: fileActions" in chat
     # Host-bridge calls prefer the launcher-compatible address for the same
     # bytes and fall back to the canonical one; the browser keeps the canonical.
-    assert "dialogFile.source.bridge || dialogFile.source.durable," in chat
+    assert "await openViaHostBridge(file.source.bridge || file.source.durable, file.filename," in chat
     assert 'data-file-action="download"' in chat
     assert "await downloadViaHostBridge(source.bridge || source.durable, filename, { browserUrl: source.durable, streaming: true });" in chat
     assert "URL.createObjectURL(blob)" in chat

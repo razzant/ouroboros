@@ -332,7 +332,7 @@ def test_start_agent_exports_presentation_posture(monkeypatch, tmp_path):
     captured = {}
 
     class FakeStdout:
-        def readline(self):
+        def readline(self, _limit=-1):
             return b""
 
     class FakeProcess:
@@ -382,7 +382,7 @@ def test_start_agent_unix_uses_process_group_and_writes_server_record(monkeypatc
     captured = {}
 
     class FakeStdout:
-        def readline(self):
+        def readline(self, _limit=-1):
             return b""
 
     class FakeProcess:
@@ -582,7 +582,7 @@ def test_start_agent_windows_assigns_job_before_resume_and_records(monkeypatch, 
     calls: list[tuple[str, object]] = []
 
     class FakeStdout:
-        def readline(self):
+        def readline(self, _limit=-1):
             return b""
 
     class FakeProcess:
@@ -680,21 +680,56 @@ def test_external_source_launcher_keeps_older_seed_version_and_local_head(tmp_pa
     assert (seed / 'repo_bundle_manifest.json').read_bytes() == original_manifest
 
 
-def test_external_restart_reexecs_current_source_after_sync_in_same_process(tmp_path, monkeypatch):
+@pytest.mark.parametrize("packaged,helper_changed", [(False, True), (True, True), (True, False)])
+def test_external_restart_reexecs_current_source_after_sync_in_same_process(tmp_path, monkeypatch, packaged,
+                                                                            helper_changed):
     import launcher
+    from ouroboros import launcher_server_reaper
 
     class ReexecReached(BaseException):
         pass
 
+    class NextGeneration(BaseException):
+        pass
+
     calls = []
+    repo = tmp_path / 'repo'
+    monkeypatch.setattr(bootstrap_module, '_LOADED_CHECKOUT_SHA', '')
     process = types.SimpleNamespace(pid=12345, returncode=launcher.RESTART_EXIT_CODE,
                                     wait=lambda: None)
     monkeypatch.setattr(launcher, '_external_seed_bundle', tmp_path / 'seed')
     monkeypatch.setattr(launcher, 'REPO_DIR', tmp_path / 'repo')
     monkeypatch.setattr(launcher, '_launch_argv', ['--no-ui', '--seed-bundle', str(tmp_path / 'seed')])
+    if packaged:
+        seed = tmp_path / 'seed'
+        _write_bundle(_make_bundle_source(tmp_path), seed)
+        (seed / 'VERSION').write_text('4.50.0-rc.2\n')
+        bootstrap_module.ensure_managed_repo(_make_context(seed, tmp_path / 'repo'))
+        monkeypatch.setattr(launcher.sys, 'frozen', True, raising=False)
+        monkeypatch.setattr(launcher.sys, '_MEIPASS', str(seed), raising=False)
+        monkeypatch.setattr(launcher, '_external_seed_bundle', None)
+        monkeypatch.setattr(launcher, '_launch_argv', ['--launch-intent', 'owner'])
+        # The real detector decides. A frozen launcher imported this helper from its bundle
+        # (PyInstaller's frozen-module path); the checkout holds it at its repository path.
+        # A synthetic bundle, not a native frozen application run.
+        monkeypatch.setattr(launcher_server_reaper, '__file__', str(seed / 'ouroboros' / 'launcher_server_reaper.pyc'))
+        (repo / 'ouroboros').mkdir()
+        (repo / 'ouroboros' / 'launcher_server_reaper.py').write_text('GEN = 1\n')
+        _run(['git', 'add', '-A'], cwd=repo)
+        _run(['git', 'commit', '-m', 'loaded helper'], cwd=repo)
+
+    def start_agent(port):
+        calls.append('core')
+        if calls.count('core') > 1:
+            raise NextGeneration()
+        if packaged:  # the server lands the adopted candidate, then exits 42
+            (repo / ('ouroboros/launcher_server_reaper.py' if helper_changed else 'server.py')).write_text('GEN = 2\n')
+            _run(['git', 'commit', '-am', 'adopted candidate'], cwd=repo)
+        return process
+
     monkeypatch.setattr(launcher, '_pre_generation_cleanup', lambda port: [])
     monkeypatch.setattr(launcher, 'update_external_host', lambda *a: calls.append('native') or {})
-    monkeypatch.setattr(launcher, 'start_agent', lambda port: calls.append('core') or process)
+    monkeypatch.setattr(launcher, 'start_agent', start_agent)
     monkeypatch.setattr(launcher, '_poll_port_file', lambda **kw: 8765)
     monkeypatch.setattr(launcher, '_update_server_process_record_port', lambda *a: None)
     monkeypatch.setattr(launcher, '_wait_for_server', lambda *a, **kw: True)
@@ -715,12 +750,26 @@ def test_external_restart_reexecs_current_source_after_sync_in_same_process(tmp_
         try:
             launcher.agent_lifecycle_loop()
         except ReexecReached:
-            pass
+            assert helper_changed
+        except NextGeneration:
+            assert not helper_changed  # nothing the launcher loaded changed: the same process continues
+            assert calls == ['native', 'core', 'source', 'deps', 'native', 'core']
+            return
         else:
             raise AssertionError('The same process did not re-exec the source launcher')
     finally:
         launcher._shutdown_event.clear()
     assert calls[:5] == ['native', 'core', 'source', 'deps', 'release']
-    assert calls[5] == ('exec', launcher.EMBEDDED_PYTHON,
+    if not packaged:
+        assert calls[5] == ('exec', launcher.EMBEDDED_PYTHON,
                         [launcher.EMBEDDED_PYTHON, str(tmp_path / 'repo' / 'launcher.py'),
                          '--no-ui', '--seed-bundle', str(tmp_path / 'seed')])
+    else:
+        assert calls[5][2][:2] == [launcher.EMBEDDED_PYTHON, str(repo / 'launcher.py')]
+        options = bootstrap_module.parse_launch_options(calls[5][2][2:])
+        assert options.seed_bundle == seed and options.no_ui is False
+        monkeypatch.setattr(launcher.sys, 'frozen', False)
+        monkeypatch.setattr(launcher, '_external_seed_bundle', options.seed_bundle)
+        context = launcher._bootstrap_context()
+        assert context.bundle_dir == seed and context.app_version == '4.50.0-rc.2'
+        assert bootstrap_module.ensure_managed_repo(context) == 'unchanged'

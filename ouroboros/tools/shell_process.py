@@ -110,7 +110,14 @@ def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     shadow-import Ouroboros's own modules (R2). ``ctx.repo_dir`` stays pinned to
     the Ouroboros repo even in workspace mode, so this is the authoritative
     in-repo test. Every child receives the task environment; in-repo commands
-    retain the repository Python path."""
+    retain the repository Python path. A cwd inside the bound body candidate gets
+    the candidate's own isolated environment instead (``body_candidate``): its
+    code must never resolve the serving data root or repository."""
+    from ouroboros import body_candidate
+
+    isolated = body_candidate.process_environment(ctx, work_dir)
+    if isolated is not None:
+        return isolated
     env = runtime_environ()
     try:
         system_repo = pathlib.Path(getattr(ctx, "repo_dir")).resolve(strict=False)

@@ -38,12 +38,17 @@ from ouroboros.loop_round_limits import _drain_incoming_messages
 # ---------------------------------------------------------------------------
 
 
-def test_drain_incoming_messages_preserves_image_payload():
+def test_drain_incoming_messages_preserves_image_payload(tmp_path):
+    import base64
+    from tests.test_live_image_delivery import pixels
+
+    raw = pixels()
+    encoded = base64.b64encode(raw).decode()
     messages: list = []
     incoming_messages: queue.Queue = queue.Queue()
     incoming_messages.put({
         "text": "photo from telegram",
-        "image_base64": "aW1hZ2U=",
+        "image_base64": encoded,
         "image_mime": "image/png",
         "image_caption": "photo from telegram",
     })
@@ -51,7 +56,7 @@ def test_drain_incoming_messages_preserves_image_payload():
     _drain_incoming_messages(
         messages=messages,
         incoming_messages=incoming_messages,
-        drive_root=None,
+        drive_root=tmp_path,
         task_id="",
         event_queue=None,
         _owner_msg_seen=set(),
@@ -63,8 +68,10 @@ def test_drain_incoming_messages_preserves_image_payload():
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
     assert content[0]["text"] == "[Message from my human]: photo from telegram"
-    assert content[1]["type"] == "image_url"
-    assert content[1]["image_url"]["url"] == "data:image/png;base64,aW1hZ2U="
+    image, = [block for block in content if block["type"] == "image_url"]
+    assert image["image_url"]["url"] == "data:image/png;base64," + encoded
+    from pathlib import Path
+    assert Path(image["_source_path"]).read_bytes() == raw
 
 
 def test_owner_directives_survive_compaction_without_control_prose(tmp_path):

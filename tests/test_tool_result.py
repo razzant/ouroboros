@@ -30,9 +30,10 @@ _HISTORICAL_EPHEMERAL_BUILTIN_TEXT = (
 _LOCAL_READONLY_TEXT = (
     "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
     "local repo/data/history plus web/browser surfaces and enabled "
-    "external tools, but may not call first-party local tool "
-    "'commit_reviewed'. Parent tasks must perform writes, commits, review "
-    "gates, tool expansion, runtime control, shell, and skills. "
+    "external tools and may write knowledge notes, memory marks and "
+    "chronicle page drafts in its own name, but may not call first-party "
+    "local tool 'commit_reviewed'. Parent tasks must perform other writes, commits, "
+    "review gates, tool expansion, runtime control, shell, and skills. "
     "Nested readonly delegation is allowed only through schedule_subagent "
     "within configured depth/cap limits."
 )
@@ -41,7 +42,8 @@ _ACTING_BUILTIN_TEXT = (
     "write inside its assigned write root and run shell/services "
     "there, but may not call first-party tool 'commit_reviewed'. It cannot "
     "commit the live body, run review/runtime/skills lifecycle, enable "
-    "tools, or write cognitive memory; the parent applies isolated patches or verifies "
+    "tools, or write identity or scratchpad (chronicle pages and parts only "
+    "as its own drafts); the parent applies isolated patches or verifies "
     "shared external files and is the sole live-body committer."
 )
 _ACTING_EXTERNAL_TEXT = (

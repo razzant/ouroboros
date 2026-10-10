@@ -736,7 +736,6 @@ def test_startup_recovery_merges_child_acceptance_after_stale_scan(
 ):
     import ouroboros.agent_task_pipeline as pipeline
     import ouroboros.headless as headless
-    import ouroboros.task_results as task_results
     import ouroboros.usage_accounting as usage_accounting
     import supervisor.state as supervisor_state
 
@@ -755,16 +754,17 @@ def test_startup_recovery_merges_child_acceptance_after_stale_scan(
     )
     scan_complete = threading.Event()
     release_scan = threading.Event()
-    real_list = task_results.list_task_results
+    from ouroboros import obligations
+    real_list = obligations.result_rows
     outcome = {}
 
-    def delayed_list(root):
-        rows = real_list(root)
+    def delayed_list(root, name, **kwargs):
+        rows = list(real_list(root, name, **kwargs))
         scan_complete.set()
         assert release_scan.wait(5)
         return rows
 
-    monkeypatch.setattr(task_results, "list_task_results", delayed_list)
+    monkeypatch.setattr(obligations, "result_rows", delayed_list)
     monkeypatch.setattr(
         supervisor_state,
         "reconstruct_task_cost",

@@ -20,7 +20,20 @@ from ouroboros.route_spec import (
 
 SUBAGENTS_SETTING = "OUROBOROS_SUBAGENTS"
 SUBAGENTS_RECEIPT_KEY = "OUROBOROS_SUBAGENT_PRESET_RECEIPT"
-MAX_CONFIGURED_SUBAGENTS = 10
+# The one ceiling of the catalog AND of a review wave (the review pool IS the
+# marked part of this catalog, so the former per-lane caps fold into it).
+MAX_CONFIGURED_SUBAGENTS = 26
+# Delivery of an ``api_model`` row when it reviews: ``native`` reads the subject
+# with its own tool rounds, ``packet`` receives the assembled pack. A session row
+# always retrieves, so the field is meaningless (and refused) there.
+REVIEW_DELIVERY_NATIVE = "native"
+REVIEW_DELIVERY_PACKET = "packet"
+REVIEW_DELIVERIES = (REVIEW_DELIVERY_NATIVE, REVIEW_DELIVERY_PACKET)
+# Provenance of a row the runtime minted rather than the owner authored: from
+# a former review lane (the one-time migration) or from the factory panel.
+MINTED_FROM_REVIEW_LANE = "review_lane"
+MINTED_FROM_FACTORY_DEFAULT = "factory_default"
+MINTED_FROM_VALUES = (MINTED_FROM_REVIEW_LANE, MINTED_FROM_FACTORY_DEFAULT)
 SESSION_ACCESS_PROFILES = ("workspace_write", "full")
 SESSION_ACCESS_LOWERING = ("readonly", "workspace_write")
 # Removal marker, not a runtime gate: the singleton/Heavy reader is intentionally
@@ -35,7 +48,12 @@ SOURCE_INVALID = "invalid"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TOP_KEYS = frozenset({"enabled", "items"})
-_ROW_KEYS = frozenset({"subagent_id", "name", "recommended_use", "route", "effort", "processing_preference", "access", "enabled"})
+_ROW_KEYS = frozenset({
+    "subagent_id", "name", "recommended_use", "route", "effort", "processing_preference", "access", "enabled",
+    "review_eligible", "delivery", "minted_from",
+    # `coupling_focus` (a row's standing coupling brief) is NOT a key yet: step R
+    # decides whether it exists; the parser must refuse it until then.
+})
 _ROUTE_ALIASES = {
     ROUTE_KIND_API_MODEL: ROUTE_KIND_API_MODEL,
     ROUTE_KIND_AGENT_SESSION: ROUTE_KIND_AGENT_SESSION,
@@ -82,6 +100,16 @@ class ConfiguredSubagent:
     # stays editable, but no NEW use (delegation or reviewer reference) may
     # select it. Absent in older saved bytes, which means enabled.
     enabled: bool = True
+    # The owner's review mark: an enabled, marked row is a seat of the review
+    # pool (every review surface reads the pool; nothing else configures a
+    # reviewer). Absent in older saved bytes, which means unmarked.
+    review_eligible: bool = False
+    # ``native``/``packet`` on an api_model row (see REVIEW_DELIVERIES); "" on a
+    # session row, which always retrieves. Absent in saved bytes means native.
+    delivery: str = ""
+    # ``review_lane``/``factory_default`` when the runtime minted the row; "" for
+    # an owner-authored row. Round-trips as saved.
+    minted_from: str = ""
 
 
 @dataclass(frozen=True)
@@ -153,7 +181,12 @@ def _parse_payload(raw: Any) -> Mapping[str, Any]:
 
 
 def parse_configured_subagents(raw: Any) -> ConfiguredSubagents:
-    """Strict parser for stored JSON strings and owner-supplied JSON objects."""
+    """Strict parser for stored JSON strings and owner-supplied JSON objects.
+
+    The list-level and per-row ``enabled`` must be booleans (a row omitting it is
+    enabled). A session row's ``access`` defaults to ``full``; an API row has none
+    and refuses the key.
+    """
     from ouroboros.model_slots import normalize_processing_preference
 
     payload = _parse_payload(raw)
@@ -214,6 +247,9 @@ def parse_configured_subagents(raw: Any) -> ConfiguredSubagents:
         validate_compound_session_effort(
             route, effort, setting=SUBAGENTS_SETTING, where=where,
         )
+        review_eligible = row.get("review_eligible", False)
+        if not isinstance(review_eligible, bool):
+            raise ValueError(f"{SUBAGENTS_SETTING}: {where}.review_eligible must be a boolean")
         items.append(
             ConfiguredSubagent(
                 subagent_id=row_id,
@@ -223,9 +259,34 @@ def parse_configured_subagents(raw: Any) -> ConfiguredSubagents:
                 processing_preference=normalize_processing_preference(row.get("processing_preference")),
                 access=access,
                 enabled=row_enabled,
+                review_eligible=review_eligible,
+                delivery=_delivery(row, route, where),
+                minted_from=_minted_from(row.get("minted_from", ""), where),
             )
         )
     return ConfiguredSubagents(enabled=payload["enabled"], items=tuple(items))
+
+
+def _delivery(row: Mapping[str, Any], route: RouteSpec, where: str) -> str:
+    """``native``/``packet`` for an api row (absent = native); refused on a session row."""
+    if route.is_session:
+        if "delivery" in row:
+            raise ValueError(
+                f"{SUBAGENTS_SETTING}: {where}.delivery is meaningful only for api_model (a session row always retrieves)"
+            )
+        return ""
+    raw = row.get("delivery", REVIEW_DELIVERY_NATIVE)
+    if not isinstance(raw, str) or raw.strip().lower() not in REVIEW_DELIVERIES:
+        raise ValueError(f"{SUBAGENTS_SETTING}: {where}.delivery must be native or packet")
+    return raw.strip().lower()
+
+
+def _minted_from(raw: Any, where: str) -> str:
+    if raw is None or raw == "":
+        return ""
+    if not isinstance(raw, str) or raw.strip() not in MINTED_FROM_VALUES:
+        raise ValueError(f"{SUBAGENTS_SETTING}: {where}.minted_from must be review_lane or factory_default")
+    return raw.strip()
 
 
 def configured_subagents_dict(config: ConfiguredSubagents) -> dict[str, Any]:
@@ -253,6 +314,15 @@ def configured_subagents_dict(config: ConfiguredSubagents) -> dict[str, Any]:
         # fingerprint is the honest consequence of a changed configuration.
         if not row.enabled:
             payload["enabled"] = False
+        # The review fields follow the same rule: defaults (unmarked, native,
+        # owner-authored) are not written, so a document saved before they
+        # existed serializes to the same bytes.
+        if row.review_eligible:
+            payload["review_eligible"] = True
+        if row.delivery == REVIEW_DELIVERY_PACKET:
+            payload["delivery"] = REVIEW_DELIVERY_PACKET
+        if row.minted_from:
+            payload["minted_from"] = row.minted_from
         items.append(payload)
     return {"enabled": config.enabled, "items": items}
 
@@ -369,17 +439,30 @@ def validate_unique_engines(config: ConfiguredSubagents, settings: Mapping[str, 
 
     The handle IS the engine with baselines folded, so an unset row and an
     explicit row with the same effective value are one engine, and no two saved
-    rows can carry the same name.
+    rows the OWNER authored can carry the same name. Two deliberate exceptions,
+    both about the review pool (THESIS: a reviewer's two seats are the owner's
+    honest choice): the twins are BOTH marked review-eligible (the same engine
+    judging twice, e.g. once by packet and once natively), or at least one of
+    them is a row the runtime minted (``minted_from``) — the migration kept
+    what a lane ran beside the owner's own row of that engine, or beside its
+    own reviewer row (a former direct advisory or deep-review seat that
+    coincided with a direct triad seat: one marked reviewer, one unmarked
+    helper, both minted). Such a pair must survive an ordinary description edit
+    without deleting a row or changing an engine; twins share a handle as
+    ``<handle>~<id>``.
     """
-    seen: dict[tuple[str, str], int] = {}
+    seen: dict[tuple[str, str], tuple[int, ConfiguredSubagent]] = {}
     for index, row in enumerate(config.items):
         key = (row.route.kind, subagent_handle(row, settings))
         if key in seen:
+            first_index, first = seen[key]
+            if (row.review_eligible and first.review_eligible) or row.minted_from or first.minted_from:
+                continue
             raise ValueError(
-                f"{SUBAGENTS_SETTING}: items[{index}] runs the same engine as items[{seen[key]}] "
+                f"{SUBAGENTS_SETTING}: items[{index}] runs the same engine as items[{first_index}] "
                 f"({key[1]}); change its model, effort, access, account or processing, or remove it"
             )
-        seen[key] = index
+        seen[key] = (index, row)
 
 
 def roster_save_error(raw: Any, stored_settings: Mapping[str, Any], body: Mapping[str, Any]) -> str:
@@ -723,7 +806,13 @@ __all__ = [
     "INDEPENDENT_RECOMMENDATION",
     "LEGACY_SUBAGENT_COMPATIBILITY",
     "MAX_CONFIGURED_SUBAGENTS",
+    "MINTED_FROM_FACTORY_DEFAULT",
+    "MINTED_FROM_REVIEW_LANE",
+    "MINTED_FROM_VALUES",
     "PRIMARY_RECOMMENDATION",
+    "REVIEW_DELIVERIES",
+    "REVIEW_DELIVERY_NATIVE",
+    "REVIEW_DELIVERY_PACKET",
     "SCOUT_RECOMMENDATION",
     "SESSION_ACCESS_PROFILES",
     "SESSION_ACCESS_LOWERING",

@@ -516,7 +516,7 @@ def test_delivery_binds_published_bytes_to_submitted_digest(tmp_path, monkeypatc
     }
     config, executor = _stub_terminal_task_executor(tmp_path, monkeypatch, gateway_result)
     original, updated = b"synthetic-original-marker", b"synthetic-later-marker"
-    markers, submitted = [], []
+    markers, submitted, argvs = [], [], []
     calls = {"gateway": 0, "query": 0}
 
     def generate(_task, workspace, _agent_id):
@@ -530,10 +530,9 @@ def test_delivery_binds_published_bytes_to_submitted_digest(tmp_path, monkeypatc
         return dict(gateway_result)
 
     def command(argv, **_kwargs):
-        assert argv[:1] == ["docker"] and "exec" in argv
-        # These argv paths are in the Linux container, not the host filesystem.
-        # Host Path.resolve() would turn them into drive paths on Windows.
-        assert argv[-3:] == ["bash", "/workspace/submit.sh", "/workspace/final.poc"]
+        # Record, do not assert, here: after the paid gateway call the executor
+        # turns any exception into an infra_failed row, hiding the cause.
+        argvs.append(list(argv))
         submitted.append(markers[0].read_bytes())
         if change == "changed_back_after_submit":
             markers[0].write_bytes(original)
@@ -561,6 +560,10 @@ def test_delivery_binds_published_bytes_to_submitted_digest(tmp_path, monkeypatc
     monkeypatch.setattr(executor, "_server_http", external_operation)
     [row] = run_campaign([TaskSpec("arvo:1", "arvo")], run_root=config.run_root,
                          executor=executor.run_task, estimated_cost_usd=1, budget_cap_usd=10)
+    # Only --host is host-shaped; the rest runs inside the Linux container and
+    # stays a literal on every host (a resolved D:\workspace\final.poc names no file).
+    assert argvs == [["docker", "--host", executor.host.value, "exec", "--workdir", "/workspace",
+                      "workspace-123", "bash", "/workspace/submit.sh", "/workspace/final.poc"]]
     persisted = [json.loads(line) for line in (config.run_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()]
     assert persisted == [row]
     assert calls["gateway"] == len(submitted) == 1

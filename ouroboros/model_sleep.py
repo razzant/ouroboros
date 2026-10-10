@@ -4,14 +4,16 @@ Owner Batch4 (6B): ``await_messages`` keeps its default bounded in-slot wait;
 ``mode="warm"`` or ``"cold"`` is a SLEEP the model chooses itself — no minute
 threshold decides it. The model may select exact sources, and only those wake
 it: mail from named senders, the terminal of named tasks it can read, the
-terminal of delegated runs it owns, and an optional absolute wake time. With no
-source selected, any addressed mail wakes it (the default). Owner words and
-controls (Stop, Wrap up, Hurry, Pause, a quiz answer) are never filtered.
+terminal of delegated runs it owns, the exit of its own named services (warm
+only), and an optional absolute wake time. With no source selected, any
+addressed mail wakes it (the default). Owner words and controls (Stop, Wrap
+up, Hurry, Pause, a quiz answer) are never filtered.
 Unselected mail stays unread until the model is awake; nothing is acknowledged
 until the transcript delivered it.
 
 Readiness is read from the CANONICAL records every time — the mailbox file,
-the task results, the custody rows — never from a cursor or a sender-side
+the task results, the custody rows, the live service registry (execution facts
+of the start that was selected) — never from a cursor or a sender-side
 latch, so an event that lands between the first check and the park is seen by
 the first check after it: the sequence is check → install the wait → recheck.
 A terminal counts once as the stable fact that the task settled, never as a
@@ -80,12 +82,13 @@ def _canonical_root(ctx: Any) -> pathlib.Path:
     return pathlib.Path(getattr(ctx, "budget_drive_root", None) or ctx.drive_root)
 
 
-def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = None,
+def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = None, services: Any = None,
               wake_at: Any = None, wake_after_sec: Any = None) -> Dict[str, Any]:
     """Validate the selected sources; ``ValueError`` names the first bad one.
 
     Senders and tasks must be tasks this installation knows (a readable result);
-    runs must be delegated runs THIS task owns (its custody rows).
+    runs must be delegated runs THIS task owns (its custody rows); services must be
+    this task's own, each pinned to the start it has NOW (``_service_pins``).
     """
     from ouroboros.task_results import load_task_result, validate_task_id
 
@@ -102,8 +105,55 @@ def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = N
         missing = [run_id for run_id in chosen["runs"] if run_id not in owned]
         if missing:
             raise ValueError(f"runs: {', '.join(missing)} are not delegated runs of this task")
-    chosen["any_mail"] = not (chosen["senders"] or chosen["tasks"] or chosen["runs"])
+    pins = _service_pins(ctx, _ids(services, "services"))
+    if pins:  # absent otherwise: a sleep without services keeps its existing shape
+        chosen["services"] = pins
+    chosen["any_mail"] = not (chosen["senders"] or chosen["tasks"] or chosen["runs"] or pins)
     return chosen
+
+
+# What pins ONE start of a service: its ``task_id:name`` id is the lookup key a
+# stop/start reuses, so the start time and process identity (pid/pgid on the host,
+# the backend pid on an executor) tell a replacement apart.
+_SERVICE_IDENTITY = ("service_id", "started_at", "pid", "pgid", "backend_pid")
+
+
+def _service_pins(ctx: Any, names: List[str]) -> List[Dict[str, Any]]:
+    from ouroboros.tools import services as registry
+
+    pins = []
+    for name in names:
+        facts = registry.service_execution_facts(registry._service_key(ctx, name))
+        if facts is None:
+            raise ValueError(f"services: {name} is not a service of this task")
+        pins.append({"name": name, **{key: facts[key] for key in _SERVICE_IDENTITY if key in facts}})
+    return pins
+
+
+def _service_wake(pin: Dict[str, Any]) -> str:
+    """``""`` while the pinned start runs; its exit, else ``unknown`` — never success by absence.
+
+    Execution facts only (no readiness work). A record this process no longer holds
+    (stopped, replaced by a new start, a registry a Restart did not carry) or cannot
+    read is ``unknown``, as is a present record whose backend probe was inconclusive:
+    the woken model judges it; nothing counts or times a retry.
+    """
+    name = str(pin.get("name") or "")
+    try:
+        from ouroboros.tools.services import service_execution_facts
+
+        facts = service_execution_facts(str(pin.get("service_id") or ""))
+    except Exception:
+        log.warning("Service %s execution facts unreadable; waking as unknown", name, exc_info=True)
+        facts = None
+    if not facts or any(facts.get(key) != pin[key] for key in _SERVICE_IDENTITY if key in pin):
+        return f"service:{name}:unknown"
+    if facts.get("state") == "running":
+        return ""
+    if facts.get("state") == "exited":
+        code = facts.get("returncode")
+        return f"service:{name}:exited:{'unknown' if code is None else code}"
+    return f"service:{name}:unknown"
 
 
 def _owned_runs(ctx: Any) -> List[Tuple[str, bool]]:
@@ -145,6 +195,10 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any]) -> str:
         for run_id in chosen["runs"]:
             if run_id in settled:
                 return f"run:{run_id}"
+    for pin in chosen.get("services") or ():
+        observed = _service_wake(pin)
+        if observed:
+            return observed
     wake_at = parse_deadline_ts(chosen.get("wake_at") or "")
     if wake_at is not None and utc_now() >= wake_at:
         return "timeout"
@@ -233,8 +287,11 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
 
     Already ready (selected mail unread, a selected terminal reached, the time
     passed, owner input waiting): answered at once, nothing parks. A cold
-    request over live writers of this task is refused with the blockers.
+    request over live writers of this task is refused with the blockers, and one
+    selecting services is refused outright: the process that holds them ends.
     """
+    if mode == MODE_COLD and chosen.get("services"):
+        raise ValueError("services wake only a warm sleep: a cold sleep ends the process that holds them")
     ready = wake_reason(ctx, chosen)
     if ready:
         return {"reason": "ready", "woke_by": ready, "slept": False, "mode": mode}
@@ -268,7 +325,7 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
 
 
 def begin(ctx: Any) -> None:
-    """The sleep interval starts: excluded from execution until the task runs again."""
+    """A warm sleep or owner Pause starts: excluded until the task runs again."""
     waiter = getattr(ctx, "model_wait_context", None)
     if waiter is not None:
         waiter.sleep_started_monotonic = time.monotonic()
@@ -299,6 +356,13 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float) -> Dict[str,
             what = f"task {task_id} reaching {status} — read its result; settled is not success"
         elif outcome.startswith("run:"):
             what = f"delegated run {outcome[4:]} settling — inspect its outcome before building on it"
+        elif outcome.startswith("service:"):
+            _prefix, name, state, code = (outcome.split(":", 3) + ["", "", ""])[:4]
+            code = f"return code {code}" if code != "unknown" else "a return code this backend does not observe"
+            what = (f"service {name} exiting with {code} — read its logs; an exit is a fact, not a verdict"
+                    if state == "exited" else
+                    f"the selected start of service {name} becoming unobservable (stopped, replaced by a new start, "
+                    "lost to a restart, or an inconclusive backend probe) — its outcome is unknown, not success")
         elif outcome.startswith("mail:"):
             what = f"mail from {outcome[5:]}"
         elif outcome.startswith("control:") or outcome == "owner_text":

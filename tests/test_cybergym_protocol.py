@@ -42,7 +42,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     verify_mask_map,
 )
 from ouroboros.configured_subagents import parse_configured_subagents
-from ouroboros.reviewer_slot_config import parse_reviewer_slots
+from tests.test_cybergym_benchmark import RETIRED_REVIEW_KEYS
 
 
 def test_safe_ids_and_argv_are_path_safe(tmp_path):
@@ -1063,7 +1063,8 @@ def test_applied_settings_metadata_is_read_back_from_written_snapshot(tmp_path):
     assert applied["OUROBOROS_MAX_ROUNDS"] == 1000
     assert applied["OUROBOROS_PER_TASK_COST_USD"] == 20.0
     assert applied["OUROBOROS_MAX_WORKERS"] == 3
-    assert applied["OUROBOROS_REVIEW_MODELS"] == OFFICIAL_MODEL
+    assert not RETIRED_REVIEW_KEYS.intersection(applied)
+    assert not RETIRED_REVIEW_KEYS.intersection(metadata["model_slots"])
     assert applied["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
     assert applied["OUROBOROS_REVIEW_MAX_CYCLES"] == "2"
     assert applied["OUROBOROS_SAFETY_MODE"] == "off"
@@ -1075,14 +1076,11 @@ def test_applied_settings_metadata_is_read_back_from_written_snapshot(tmp_path):
     assert "CLAUDE_CODE_MODEL" not in applied  # retired transport setting
     assert "CLAUDE_AGENT_SDK_MODEL" not in applied  # retired transport setting
     assert applied["OUROBOROS_EFFORT_TASK"] == "high"
-    assert applied["OUROBOROS_EFFORT_REVIEW"] == "max"
-    assert applied["OUROBOROS_EFFORT_SCOPE_REVIEW"] == "max"
     subagents = parse_configured_subagents(applied["OUROBOROS_SUBAGENTS"])
-    assert subagents.enabled is False
-    reviewers = parse_reviewer_slots(applied["OUROBOROS_REVIEWER_SLOTS"])
-    assert len(reviewers.triad) == len(reviewers.scope) == 1
-    assert all(row.effort == "max" for row in (*reviewers.triad, *reviewers.scope))
-    assert reviewers.advisory.enabled is False
+    assert subagents.enabled is False  # delegation off; the review pool ignores that switch
+    [seat] = [row for row in subagents.items if row.review_eligible]
+    assert (seat.route.target_id, seat.effort, seat.delivery) == (OFFICIAL_MODEL, "max", "packet")
+    assert "OUROBOROS_REVIEWER_SLOTS" not in applied
 
 
 @pytest.mark.parametrize(

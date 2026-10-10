@@ -2991,17 +2991,16 @@ def test_ui_smoke_v679_subagent_depth_zero_round_trips_through_settings(direct_s
             pytest.skip(str(exc))
         raise
 @pytest.mark.ui_browser
-def test_ui_owner_context_mode_and_scope_slot_save(direct_server_with_data):
-    """Owner context intent and a scope-slot save, driven in a real browser.
+def test_ui_owner_context_mode_and_reviewer_row_save(direct_server_with_data):
+    """Owner context intent and a reviewer-row save, driven in a real browser.
 
     Two owner flows that source-string tests cannot certify:
 
     1. OWNER MAX. Switching an explicit Low to Max succeeds without a Main-route
        context-window confirmation; the frozen compatibility field remains false.
-    2. SCOPE SLOT. Saving a scope row whose route has no window evidence at all
-       completes with no confirmation: window size is not a condition of scope
-       authority (owner decision 2026-09-17), so there is nothing to confirm and
-       no ack is written.
+    2. REVIEWER ROW. A Reviewer row whose route has no window evidence saves with
+       no confirmation: window size is not a condition of review authority (owner
+       decision 2026-09-17), so no ack is written.
     """
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
@@ -3017,7 +3016,6 @@ def test_ui_owner_context_mode_and_scope_slot_save(direct_server_with_data):
     seeded = json.loads(settings_path.read_text(encoding="utf-8"))
     seeded["OUROBOROS_CONTEXT_MODE"] = "low"
     seeded["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
-    seeded["OUROBOROS_SCOPE_REVIEW_MODELS"] = seeded["OUROBOROS_MODEL"]
     settings_path.write_text(json.dumps(seeded), encoding="utf-8")
     direct_server_with_data["restart_server"]()
 
@@ -3055,30 +3053,26 @@ def test_ui_owner_context_mode_and_scope_slot_save(direct_server_with_data):
                 assert after["context_mode"] == "max"
                 assert after["context_mode_auto_low"] is False
 
-                # 2. A scope slot saves with no window question anywhere.
+                # 2. A reviewer row saves with no window question anywhere.
                 # Select the fixture's configured provider, then edit its model;
                 # the grouped combobox uses provider-specific API choices.
                 page.click('[data-nav-page="settings"]')
                 page.wait_for_selector("#s-context-mode", state="attached", timeout=30_000)
                 page.locator('[data-settings-tab="agents"]').click()
-                page.wait_for_selector("#reviewer-slots-section", timeout=30_000)
-                scope_route = page.locator(
-                    '#reviewer-scope-rows .reviewer-slot-row [data-slot-route]'
-                ).first
-                scope_route.wait_for(state="visible", timeout=30_000)
-                scope_route.select_option("api:openai-compatible")
-                assert scope_route.input_value() == "api:openai-compatible"
-                custom_input = page.locator(
-                    '#reviewer-scope-rows .reviewer-slot-row [data-slot-custom-api]'
-                ).first
+                row_route = page.locator('[data-subagent-row] [data-subagent-field="route"]').first
+                row_route.wait_for(state="visible", timeout=30_000)
+                row_route.select_option("api:openai-compatible")
+                assert row_route.input_value() == "api:openai-compatible"
+                custom_input = page.locator('[data-subagent-row] [data-subagent-field="model"]').first
                 custom_input.wait_for(state="visible", timeout=30_000)
                 custom_input.fill("scope-reviewer-x")
+                page.locator('[data-subagent-row] [data-subagent-field="review_eligible"]').first.check()
                 page.locator("#btn-save-settings").click()
                 page.wait_for_function(
                     "() => !document.querySelector('#btn-save-settings').disabled",
                     timeout=60_000,
                 )
-                page.screenshot(path=str(evidence_dir / "scope-slot-save-no-window-question.png"),
+                page.screenshot(path=str(evidence_dir / "reviewer-row-save-no-window-question.png"),
                                 full_page=True)
 
                 # No dialog of any kind: the owner is never asked to confirm a
@@ -3086,12 +3080,15 @@ def test_ui_owner_context_mode_and_scope_slot_save(direct_server_with_data):
                 assert page.locator(".confirm-dialog").count() == 0
                 status_text = page.locator("#settings-status").inner_text()
                 assert "context window" not in status_text, status_text
-                assert "Settings saved" in status_text or "No changes" in status_text, status_text
-                saved_slots = json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_REVIEWER_SLOTS"]
-                assert "scope-reviewer-x" in json.dumps(saved_slots)
+                assert "Settings saved" in status_text, status_text
+                stored = json.loads(settings_path.read_text(encoding="utf-8"))
+                assert "OUROBOROS_REVIEWER_SLOTS" not in stored
+                rows = json.loads(stored["OUROBOROS_SUBAGENTS"])["items"]
+                assert any(row["route"]["target_id"] == "openai-compatible::scope-reviewer-x"
+                           and row.get("review_eligible") is True for row in rows), rows
                 evidence_path = data_dir / "state" / "capability_evidence.json"
                 evidence = json.loads(evidence_path.read_text(encoding="utf-8")) if evidence_path.exists() else {}
-                assert not (evidence.get("owner_acks") or {}), "a scope slot save wrote an owner window ack"
+                assert not (evidence.get("owner_acks") or {}), "a reviewer row save wrote an owner window ack"
             finally:
                 browser.close()
     except PlaywrightError as exc:

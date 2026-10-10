@@ -22,14 +22,15 @@ engine — and nothing more.
 
 ``--harness-install codex`` (the Windows consumer lane) then goes one step further,
 on the same isolated toolchain: the engine's side-effect-free ``--dry-run`` disclosure
-must be admitted (an engine without a native Windows image refuses it typed), the
+must be admitted (an unsupported platform refuses it typed), the
 production ``install_missing_harness_cli`` performs the real pinned install from the
 npm registry into the engine's HOME-anchored toolchain under the disposable home, and
 the idempotent re-install's receipt must name a ``release_verified`` executable
-there — on Windows the package-native ``codex.exe``, never an npm shim. That
-executable must answer ``--version`` with the pin directly and by bare name through a
-shell-less Node spawn, and the production-started owned daemon's harness rows and
-``claudexor doctor`` must resolve the harness to it; that daemon is always stopped. It
+there — on Windows a native image or the package-declared Node entry, never an npm
+shell shim. It must answer ``--version`` with the pin, using the managed Node for a
+Node entry. The production-started owned daemon's harness rows and ``claudexor
+doctor`` must launch the bare harness through the engine's resolver and identify
+that same entry and version; that daemon is always stopped. It
 still proves no login, OAuth, account or model task.
 
 Usage:
@@ -42,6 +43,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -67,13 +69,6 @@ INSTALLABLE_HARNESSES = ("codex",)
 # Claudexor core's `managedNodeRoot(HOME)`: a local harness install lands in this
 # HOME-anchored toolchain, never beneath CLAUDEXOR_CONFIG_DIR.
 ENGINE_TOOLCHAIN = (".claudexor", "node")
-# How the engine launches a harness: Node's spawn of the bare name, no shell. On
-# Windows libuv appends only .com/.exe, so an npm .cmd/.ps1 shim cannot satisfy it.
-BY_NAME_PROBE = (
-    "const r=require('child_process').spawnSync(process.argv[1],['--version'],"
-    "{encoding:'utf8',timeout:%d});process.stdout.write(JSON.stringify({status:r.status,"
-    "error:r.error?String(r.error.code||r.error):null,stdout:r.stdout||''}))"
-) % (STEP_TIMEOUT_SEC * 1000 // 2)
 
 
 class WitnessFailure(RuntimeError):
@@ -221,8 +216,8 @@ def _contained_run(argv: Sequence[Any], code: str, env: Dict[str, str],
                    timeout: int = STEP_TIMEOUT_SEC) -> str:
     """``_run`` for a vendor executable: spawned inside a process container, always reaped.
 
-    ``subprocess.run(timeout=)`` kills only the direct child, and the by-name probe's own
-    Node timeout only its spawned child, so a vendor process tree could outlive the step.
+    ``subprocess.run(timeout=)`` kills only the direct child, while a vendor's Node
+    entry can start a native child, so its process tree could outlive the step.
     Here the whole tree is in custody from its first instruction, whatever the exit, and
     a member the container's kill sweep cannot prove gone is red.
     """
@@ -264,6 +259,34 @@ def _contained_run(argv: Sequence[Any], code: str, env: Dict[str, str],
     return stdout.strip()
 
 
+def _declared_node_entry(binary: pathlib.Path, harness: str, toolchain: pathlib.Path,
+                         version: str) -> bool:
+    """The Codex-only consumer's npm bin, not an arbitrary script or shell shim."""
+    if harness != "codex" or binary.suffix.lower() in {".cmd", ".bat", ".ps1"}:
+        return False
+    package_root = toolchain / "node_modules" / "@openai" / "codex"
+    manifest = package_root / "package.json"
+    try:
+        metadata = json.loads(manifest.read_text(encoding="utf-8"))
+        declared = metadata.get("bin")
+        if isinstance(declared, dict):
+            declared = declared.get(harness)
+        if (metadata.get("name") != "@openai/codex" or metadata.get("version") != version
+                or not isinstance(declared, str) or not declared
+                or package_root.resolve() not in manifest.resolve().parents
+                or package_root.resolve() not in binary.resolve().parents
+                or (package_root / declared).resolve() != binary.resolve()):
+            return False
+        with binary.open("rb") as source:
+            return source.readline(4096).strip() == b"#!/usr/bin/env node"
+    except (OSError, ValueError, AttributeError, RuntimeError):
+        return False
+
+
+def _reports_version(text: str, version: str) -> bool:
+    return re.search(r"(?<![0-9A-Za-z.+-])" + re.escape(version) + r"(?![0-9A-Za-z.+-])", text) is not None
+
+
 def verify_install_receipt(receipt: Dict[str, Any], harness: str, toolchain: pathlib.Path, *,
                            windows: bool = os.name == "nt") -> pathlib.Path:
     """The installed executable, once the receipt meets the embedding contract and more."""
@@ -287,8 +310,9 @@ def verify_install_receipt(receipt: Dict[str, Any], harness: str, toolchain: pat
              toolchain not in binary.parents),
             (f"it resolves outside the disposable engine toolchain {toolchain}", escapes),
             ("it is not an existing file", not binary.is_file()),
-            (f"it is not the package-native {harness}.exe image",
-             windows and binary.name.lower() != f"{harness}.exe"),
+            (f"it is neither the native {harness}.exe image nor the package-declared Node entry",
+             windows and binary.name.lower() != f"{harness}.exe"
+             and not _declared_node_entry(binary, harness, toolchain, receipt["pinnedVersion"])),
         ) if broken
     ]
     if problems:
@@ -306,7 +330,7 @@ def doctor_installed_check(report: Dict[str, Any], harness: str, binary: pathlib
     installed = next((item for item in checks if isinstance(item, dict)
                       and item.get("id") == "installed"), None) if isinstance(checks, list) else None
     detail = str((installed or {}).get("detail") or "")
-    if (not installed or installed.get("status") != "pass" or version not in detail
+    if (not installed or installed.get("status") != "pass" or not _reports_version(detail, version)
             or str(binary).lower() not in detail.lower()):
         raise WitnessFailure("harness_doctor_unresolved",
                              f"doctor does not resolve {harness} {version} to {binary}: {row}")
@@ -368,7 +392,7 @@ def doctor_witness(harness: str, command: List[str], env: Dict[str, str], binary
 
 
 def harness_install_witness(harness: str, node: pathlib.Path, command: List[str],
-                            cli_env: Dict[str, str]) -> Dict[str, Any]:
+                            cli_env: Dict[str, str], *, windows: bool = os.name == "nt") -> Dict[str, Any]:
     """Install the pinned vendor CLI through the production seam and prove what resolves."""
     toolchain = pathlib.Path(os.environ["HOME"]).joinpath(*ENGINE_TOOLCHAIN)
     if toolchain.exists():
@@ -378,7 +402,7 @@ def harness_install_witness(harness: str, node: pathlib.Path, command: List[str]
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     install = [*command, "harness", "install", harness, "--target", "local"]
-    # Side-effect free: an engine with no native image for this host refuses typed here.
+    # Side-effect free: an engine without a supported install recipe refuses typed here.
     disclosure = _cli_json([*install, "--dry-run", "--json"], "harness_install_refused", cli_env)
     try:
         install_missing_harness_cli(harness)
@@ -386,32 +410,23 @@ def harness_install_witness(harness: str, node: pathlib.Path, command: List[str]
         raise WitnessFailure(exc.code, f"production install_missing_harness_cli: {exc}") from exc
     receipt = _cli_json([*install, "--yes", "--json"], "harness_recheck_failed", cli_env,
                         get_claudexor_harness_install_timeout_sec())
-    binary = verify_install_receipt(receipt, harness, toolchain)
+    binary = verify_install_receipt(receipt, harness, toolchain, windows=windows)
     version = str(receipt["pinnedVersion"])
     if disclosure.get("pinnedVersion") != version:
         raise WitnessFailure("harness_pin_drift",
                              f"disclosed {disclosure.get('pinnedVersion')!r}, installed {version!r}")
-    # The engine's harness PATH order: the Node it runs on, then the managed toolchain.
+    # Direct execution retains process custody. The engine's own doctor below
+    # proves bare-name resolution, including npm's Node interpreter transport.
     harness_env = dict(cli_env, PATH=os.pathsep.join(
         [str(node.parent), str(binary.parent), cli_env.get("PATH", "")]))
-    direct = _contained_run([binary, "--version"], "harness_direct_failed", harness_env)
-    if version not in direct:
+    invocation = [node, binary] if windows and binary.name.lower() != f"{harness}.exe" else [binary]
+    direct = _contained_run([*invocation, "--version"], "harness_direct_failed", harness_env)
+    if not _reports_version(direct, version):
         raise WitnessFailure("harness_direct_failed", f"{binary} --version printed {direct!r}")
-    found = shutil.which(harness, path=harness_env["PATH"])
-    if not found or os.path.normcase(str(pathlib.Path(found).resolve())) != os.path.normcase(
-            str(binary.resolve())):
-        raise WitnessFailure("harness_by_name_unresolved", f"bare {harness!r} finds {found!r}, not {binary}")
-    try:
-        by_name = json.loads(_contained_run([node, "-e", BY_NAME_PROBE, harness],
-                                            "harness_by_name_failed", harness_env))
-    except ValueError as exc:
-        raise WitnessFailure("harness_by_name_failed", f"by-name probe printed no JSON: {exc}") from exc
-    if by_name.get("status") != 0 or version not in str(by_name.get("stdout")):
-        raise WitnessFailure("harness_by_name_failed", f"shell-less spawn of {harness!r}: {by_name}")
     return {
         "harness": harness, "pinned_version": version, "installed_binary": str(binary),
         "verification": receipt["verification"], "install_location": receipt["installLocation"],
-        "direct_version": direct, "by_name_version": str(by_name["stdout"]).strip(),
+        "direct_version": direct, "by_name_probe": "engine_doctor",
         "doctor": doctor_witness(harness, command, cli_env, binary, version),
     }
 
@@ -510,8 +525,9 @@ HARNESS_LIMITS = (
     "",
     "- **No login, OAuth, account or model task was attempted.** A green row says the "
     "pinned `{harness}` installed through Ouroboros's production installer seam and "
-    "launches, directly and by bare name without a shell, as the executable the engine's "
-    "doctor resolves — not that it can authenticate or run a task here.",
+    "launches directly (with managed Node for a Node entry), and the engine's doctor "
+    "launches the bare name and identifies that same entry and version — not that it "
+    "can authenticate or run a task here.",
     "- The doctor's overall `{harness}` status is reported, not asserted: with no "
     "credentials it is expected to be not ready; only its `installed` check is required.",
     "- Only `{harness}` was installed; Claude and every other vendor were not attempted.",

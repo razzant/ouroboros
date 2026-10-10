@@ -1,5 +1,12 @@
 import { apiFetch } from './api_client.js';
-/** WebSocket manager; connect after modules register listeners. */
+/** WebSocket manager; connect after modules register listeners.
+ *
+ * Outbound messages sent while the socket is down are queued in memory (at most
+ * 100; the oldest is dropped and announced as `outbound_dropped`) and flushed on
+ * the next open; `send(..., {queue: false})` skips the queue. A watchdog checks
+ * every 10 s and closes a socket that has delivered no inbound message for 45 s,
+ * which enters the normal reconnect path.
+ */
 
 // Consecutive healthy /api/state probes tolerated while the socket stays down
 // before recovery forces a reload (at most one per disconnect episode) — the

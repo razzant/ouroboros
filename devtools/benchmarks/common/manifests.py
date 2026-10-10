@@ -68,25 +68,29 @@ ACTIVE_MODEL_SLOT_KEYS = (
     "OUROBOROS_MODEL_VISION",
     "OUROBOROS_MODEL_CONSCIOUSNESS",
     "OUROBOROS_MODEL_FALLBACKS",
-    "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
     "OUROBOROS_WEBSEARCH_MODEL",
-    "OUROBOROS_REVIEWER_SLOTS",
-    "OUROBOROS_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODEL",
+    # The review pool is the marked rows of the roster (OUROBOROS_SUBAGENTS); the
+    # roster is projected separately (``available_subagents``), not as a slot.
     "OUROBOROS_EFFORT_TASK",
-    "OUROBOROS_EFFORT_REVIEW",
-    "OUROBOROS_EFFORT_SCOPE_REVIEW",
     *MODEL_ROUTE_OPTION_KEYS,
 )
 
-# Historical READ vocabulary. Old durable manifests can still carry Heavy and retain
-# their original meaning; new writers use ACTIVE_MODEL_SLOT_KEYS above. Keep the public
-# name for compatibility with existing artifact readers and cleanup code.
+# Historical READ vocabulary. Old durable manifests can still carry Heavy, the
+# lane-era reviewer panel and the retired comma keys and retain their original
+# meaning; new writers use ACTIVE_MODEL_SLOT_KEYS above. Keep the public name for
+# compatibility with existing artifact readers and cleanup code.
 MODEL_SLOT_KEYS = (
     "OUROBOROS_MODEL",
     "OUROBOROS_MODEL_HEAVY",
     "CLAUDE_CODE_MODEL",  # retired transport slot; old manifests still carry it
+    "OUROBOROS_REVIEWER_SLOTS",
+    "OUROBOROS_REVIEW_MODELS",
+    "OUROBOROS_SCOPE_REVIEW_MODELS",
+    "OUROBOROS_SCOPE_REVIEW_MODEL",
+    "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
+    "OUROBOROS_EFFORT_REVIEW",
+    "OUROBOROS_EFFORT_SCOPE_REVIEW",
+    "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
     *ACTIVE_MODEL_SLOT_KEYS[1:],
 )
 

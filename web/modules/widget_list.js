@@ -62,8 +62,8 @@ export function planWidgetListPatch(previousTabs, nextTabs) {
  * One Widgets-list read: the cards and the owner's card preferences under ONE
  * abort controller and ONE deadline that spans headers AND body of both.
  *
- * Failure asymmetry is deliberate and pre-existing: the cards ARE the page, so
- * a list failure aborts its preferences sibling and surfaces; a preferences
+ * Failure asymmetry is deliberate: the cards ARE the page, so a timeout or a
+ * list failure aborts its preferences sibling and surfaces; a preferences
  * failure degrades to `null` and the last known order is kept. The deadline
  * still covers a preferences-only stall, because `Promise.all` cannot settle
  * until both sides do.

@@ -204,12 +204,13 @@ def _opt_pct(value: Any) -> Any:
 
 
 def _opt_cost_hard_stop_pct(value: Any) -> Any:
-    """Like ``_opt_pct`` but FAIL-SAFE for the one percentage whose 0 is the
-    maximally-permissive setting (0 = NO in-task cost stop). A malformed value
-    must NOT silently collapse to 0 and disable the safety stop: a negative
-    number, a non-numeric, or a ``0 < v < 1`` fraction (a likely fraction-vs-
-    percent mix-up, e.g. 0.5 meaning "half") maps to None — the historical 50%
-    default — not to 0. An explicit 0 / 0.0 / "0" is honored verbatim."""
+    """Like ``_opt_pct`` but never collapsing to 0 for the one percentage whose 0
+    is an explicit bench contract (0 = NO in-task cost stop). A negative number,
+    a non-numeric, or a ``0 < v < 1`` fraction (a likely fraction-vs-percent
+    mix-up, e.g. 0.5 meaning "half") maps to None — no explicit percentage, the
+    same as an absent one — not to 0. An explicit 0 / 0.0 / "0" is honored
+    verbatim. The accepted-input contract is unchanged since v6.56.0; only the
+    meaning of None changed (owner 2026-10-07): it is no longer a 50% stop."""
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     try:
@@ -235,17 +236,19 @@ def normalize_budget_profile(value: Any) -> Dict[str, Any]:
     adaptive (passes stop early when the remaining window can no longer fit a
     review comfortably).
 
-    ``cost_hard_stop_pct`` (v6.56.0, additive): the in-task cost hard-stop as a
-    percentage of the budget remaining at task start. None -> the historical
-    default (50: the global component of the stop is half the remaining
-    budget). 0 -> NO in-task cost stop at all — the deadline/rounds axes and the
-    global between-task budget gate remain the only bounds, and cost milestones
-    become informational against the start snapshot. The ceiling is resolved in
-    ``task_pacing.resolve_cost_ceiling`` (typed; 0 maps to the ``disabled``
-    state, never a $0 ceiling; a per-task root cap contributes a second
-    min-component). A MALFORMED value (negative / non-numeric / a ``0<v<1``
-    fraction) maps to None (the 50% default), NOT to 0 — it must not silently
-    disable the stop (see ``_opt_cost_hard_stop_pct``).
+    ``cost_hard_stop_pct`` (v6.56.0, additive): an EXPLICIT experiment's
+    in-task cost stop as a percentage of the budget remaining at task start.
+    None -> no explicit percentage: an ordinary task has no early cost stop of
+    the host's own (owner 2026-10-07, #1128 — formerly the historical 50%
+    default); new paid calls are refused only when known spend reaches the real
+    global/root/group limits, and a producer's allowance (a consciousness wake)
+    still stops at its actual value. A positive value keeps the authored math
+    (that share of the starting wallet, min the per-task cap minus a planning
+    margin). 0 -> NO in-task cost stop at all (bench contract). The ceiling is
+    resolved in ``task_pacing.resolve_cost_ceiling`` (typed; 0 and None map to
+    ``disabled``, never a $0 ceiling). A MALFORMED value (negative /
+    non-numeric / a ``0<v<1`` fraction) maps to None like an absent one, never
+    to 0 (see ``_opt_cost_hard_stop_pct``).
     """
     v = value if isinstance(value, Mapping) else {}
     policy = str(v.get("improvement_policy") or "").strip().lower()

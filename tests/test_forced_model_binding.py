@@ -36,7 +36,9 @@ def acting(setup, monkeypatch):
     gateway.results *= 4
     gateway.dispatch *= 4
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "main-only", "fallback": ["fallback-only"]}))
-    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "inline")
+    # Auto is the mode that asks the route's catalog (Inline sends without asking),
+    # so these sends show which account binding that read used.
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
     catalogs = []
 
     def catalog(source, profile=None, *, requested_model=None):
@@ -225,7 +227,10 @@ def test_task_binding_priority_is_role_then_plan_then_frozen_actor(acting):
 
 
 @pytest.mark.parametrize("fallback", [False, True])
-def test_browser_attachment_uses_live_binding_before_main_send(acting, fallback):
+def test_browser_attachment_is_canonical_and_asks_no_catalog(acting, fallback):
+    """The screenshot joins the canonical turn on any binding; which account's catalog
+    decides what a route receives is the send's question (pinned by the ordinary
+    and prospective sends above), never the attach step's."""
     from ouroboros.tools.browser import _inject_native_screenshot
 
     ctx = acting.tools._ctx
@@ -240,7 +245,7 @@ def test_browser_attachment_uses_live_binding_before_main_send(acting, fallback)
                 "model": MODEL, "use_local": False, "model_account_override": "temporary-actor"}
         _inject_native_screenshot(ctx, "QUFBQQ==")
     assert ctx.messages and ctx.messages[-1]["content"][-1]["type"] == "image_url"
-    assert acting.catalogs[-1][1] == ("fallback-only" if fallback else "temporary-actor")
+    assert acting.catalogs == []
 
 
 @pytest.mark.parametrize("fallback", [False, True])
@@ -307,9 +312,12 @@ def test_the_dispatched_forced_result_replaces_the_loop_slot(acting, turn_engine
 @pytest.mark.parametrize("version", ["3.10.3", ""])
 def test_an_older_or_unobserved_engine_keeps_the_legacy_candidate_and_send(acting, monkeypatch, version):
     """No field at all, and the same bytes a slotless caller would have priced."""
-    from ouroboros import llm_claudexor
+    from ouroboros import llm_claudexor, send_clock
 
     monkeypatch.setattr(llm_claudexor, "owned_engine_version", lambda: version)
+    # Each candidate carries the host clock line to the second; price both at one instant.
+    instant = send_clock._now()
+    monkeypatch.setattr(send_clock, "_now", lambda: instant)
     _none, legacy, _messages = _admitted_wrapup(acting, opted=False)
     _slot, request, prepared = _admitted_wrapup(acting, TURN)
     assert request.candidate_raw_sha256 == legacy.candidate_raw_sha256
@@ -336,7 +344,7 @@ def test_the_budget_soft_landing_wraps_up_with_the_model_not_the_host_text(actin
     acting.ctx.messages = [{"role": "user", "content": "Please finish"}]
     acting.ctx.llm_trace = {}
     acting.tools._ctx.model_turn_state = ModelTurnState(deepcopy(TURN))
-    ceiling = task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile(None), root_cap_usd=0.5)
+    ceiling = task_pacing.resolve_cost_ceiling(100.0, normalize_budget_profile({"cost_hard_stop_pct": 50}), root_cap_usd=0.5)
     text, _usage, _trace = loop_module._soft_land_exhausted_ceiling(acting.ctx, ceiling)
     assert "Ответ 🐍" in text and "no working room" not in text
     assert acting.gateway.uploads[0][0]["nativeContinuation"] == TURN

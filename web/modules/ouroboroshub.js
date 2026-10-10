@@ -270,6 +270,7 @@ export function initOuroborosHub(pane, controlsHost = null) {
     }
     const state = {
         query: '',
+        catalog: null,
         results: [],
         listingByName: new Map(),
         listingUnavailable: false,
@@ -346,6 +347,46 @@ export function initOuroborosHub(pane, controlsHost = null) {
     let refreshGeneration = 0;
     let destroyed = false;
 
+    /** Filter the loaded catalog and listing by the query and paint; typing never reads the network. */
+    function applyQuery() {
+        if (destroyed || !Array.isArray(state.catalog)) return;
+        const query = state.query.trim().toLowerCase();
+        // The server search's fields (slug, name, description), applied to
+        // catalog rows and local submissions alike.
+        const matches = (...texts) => !query || texts.some((text) => String(text || '').toLowerCase().includes(query));
+        const catalogNames = new Set(state.catalog.map((row) => String(row.sanitized_name || row.slug || '')));
+        state.results = state.catalog.filter((row) => matches(row.slug, row.display_name, row.description));
+        const officialCount = state.results.length;
+        // A first-time submission is ABSENT from the catalog until its PR
+        // merges: a card row synthesized from the receipt-bearing listing
+        // entry keeps its submission history reachable. It is not official
+        // and not counted as a catalog skill.
+        for (const [name, skill] of state.listingByName) {
+            if (catalogNames.has(name)) continue;
+            if (!skill.published || typeof skill.published !== 'object') continue;
+            if (!matches(name, skill.description)) continue;
+            state.results.push({
+                slug: name,
+                sanitized_name: name,
+                display_name: name,
+                summary: String(skill.description || ''),
+                latest_version: '',
+                listing_only: true,
+            });
+        }
+        const localOnly = state.results.length - officialCount;
+        renderCards();
+        const counts = [
+            `${officialCount} official skill${officialCount === 1 ? '' : 's'}`,
+            localOnly ? `${localOnly} local submission${localOnly === 1 ? '' : 's'} not in the catalog` : '',
+        ].filter(Boolean).join(' · ');
+        // Filtering a catalog whose last refresh failed keeps saying so: the rows are the previous results.
+        if (state.catalogUnavailable) show(`Hub catalog unavailable. Showing previous results (${counts}). Refresh to retry.`, 'danger');
+        else show(state.listingUnavailable
+            ? 'Installed skills could not be read. Previous details are retained where available; Refresh to retry.'
+            : counts, state.listingUnavailable ? 'warn' : 'muted');
+    }
+
     async function refresh() {
         if (destroyed) return;
         // Stale-response guard: a slow earlier refresh must never overwrite
@@ -378,41 +419,10 @@ export function initOuroborosHub(pane, controlsHost = null) {
             }
             if (catalog.error) throw catalog.error;
             if (!Array.isArray(catalog.data?.results)) throw new Error('Hub catalog response is unavailable.');
-            const query = state.query.trim().toLowerCase();
-            // The server search's fields (slug, name, description), applied to
-            // catalog rows and local submissions alike.
-            const matches = (...texts) => !query || texts.some((text) => String(text || '').toLowerCase().includes(query));
-            const catalogNames = new Set(catalog.data.results.map((row) => String(row.sanitized_name || row.slug || '')));
-            state.results = catalog.data.results.filter((row) => matches(row.slug, row.display_name, row.description));
-            const officialCount = state.results.length;
+            state.catalog = catalog.data.results;
             state.catalogLoaded = true;
             state.catalogUnavailable = false;
-            // A first-time submission is ABSENT from the catalog until its PR
-            // merges: a card row synthesized from the receipt-bearing listing
-            // entry keeps its submission history reachable. It is not official
-            // and not counted as a catalog skill.
-            for (const [name, skill] of state.listingByName) {
-                if (catalogNames.has(name)) continue;
-                if (!skill.published || typeof skill.published !== 'object') continue;
-                if (!matches(name, skill.description)) continue;
-                state.results.push({
-                    slug: name,
-                    sanitized_name: name,
-                    display_name: name,
-                    summary: String(skill.description || ''),
-                    latest_version: '',
-                    listing_only: true,
-                });
-            }
-            const localOnly = state.results.length - officialCount;
-            renderCards();
-            show(state.listingUnavailable
-                ? 'Installed skills could not be read. Previous details are retained where available; Refresh to retry.'
-                : [
-                    `${officialCount} official skill${officialCount === 1 ? '' : 's'}`,
-                    localOnly ? `${localOnly} local submission${localOnly === 1 ? '' : 's'} not in the catalog` : '',
-                ].filter(Boolean).join(' · '),
-                state.listingUnavailable ? 'warn' : 'muted');
+            applyQuery();
         } catch (err) {
             if (destroyed || generation !== refreshGeneration) return;
             state.catalogUnavailable = true;
@@ -562,7 +572,8 @@ export function initOuroborosHub(pane, controlsHost = null) {
     queryInput.addEventListener('input', (event) => {
         state.query = event.target.value || '';
         clearTimeout(pane._ohTimer);
-        pane._ohTimer = setTimeout(refresh, 250);
+        // Local filter over the loaded catalog; Search and Refresh re-read it.
+        pane._ohTimer = setTimeout(applyQuery, 250);
     });
     controlsRoot.querySelector('[data-oh-search]').addEventListener('click', refresh);
     const disposeLifecycle = startLifecyclePoller(() => {

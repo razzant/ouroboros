@@ -1,4 +1,8 @@
-"""Private receipt parsing and reconciliation helpers for typed outcomes."""
+"""Private receipt parsing and reconciliation helpers for typed outcomes.
+
+Verification receipts are written only by ``tools/verify.py``; shell/process tools write
+none. Receipts reconcile by one typed identity key (kind + value), never across kinds.
+"""
 
 from __future__ import annotations
 

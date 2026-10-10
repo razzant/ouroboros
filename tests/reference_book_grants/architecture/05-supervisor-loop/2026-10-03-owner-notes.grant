@@ -1,2 +1,0 @@
-334
-The scheduler paragraph states that a kind:"notify" row is a note, never an occurrence or task: consumed in the tick write, then shown by schedule_notes.py, an unconfirmed show recorded as the row's last_error (shown in Activity and manage_schedules) and never retried.

@@ -212,6 +212,18 @@ def _image(toolchain: pathlib.Path, name: str = "codex.exe") -> pathlib.Path:
     return image
 
 
+def _node_entry(toolchain: pathlib.Path, *, string_bin=False, name="codex.js") -> pathlib.Path:
+    package = toolchain / "node_modules" / "@openai" / "codex"
+    entry = package / "bin" / name
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("#!/usr/bin/env node\nconsole.log('codex-cli 1.2.3');\n", encoding="utf-8")
+    (package / "package.json").write_text(json.dumps({
+        "name": "@openai/codex", "version": "1.2.3",
+        "bin": f"bin/{name}" if string_bin else {"codex": f"bin/{name}"},
+    }), encoding="utf-8")
+    return entry
+
+
 def test_the_receipt_must_name_the_release_verified_native_image_in_the_disposable_home(tmp_path):
     toolchain = tmp_path / "home" / ".claudexor" / "node"
     image = _image(toolchain)
@@ -235,24 +247,53 @@ def test_the_receipt_must_name_the_release_verified_native_image_in_the_disposab
         assert excinfo.value.code == "harness_receipt_invalid"
 
 
-def test_the_receipt_executable_must_resolve_inside_the_toolchain(tmp_path):
+@pytest.mark.parametrize("string_bin", [False, True])
+def test_windows_receipt_accepts_the_exact_npm_declared_node_entry(tmp_path, string_bin):
     toolchain = tmp_path / "home" / ".claudexor" / "node"
-    image = _image(toolchain)
+    entry = _node_entry(toolchain, string_bin=string_bin)
+    assert witness.verify_install_receipt(_receipt(entry), "codex", toolchain, windows=True) == entry
+
+
+@pytest.mark.parametrize("fault", ["bin", "version", "package", "header", "cmd", "ps1"])
+def test_windows_node_receipt_requires_package_binding_and_node_source(tmp_path, fault):
+    toolchain = tmp_path / "home" / ".claudexor" / "node"
+    entry = _node_entry(toolchain, name=f"codex.{fault}" if fault in {"cmd", "ps1"} else "codex.js")
+    manifest = entry.parent.parent / "package.json"
+    metadata = json.loads(manifest.read_text(encoding="utf-8"))
+    if fault == "bin":
+        metadata["bin"] = {"codex": "bin/another.js"}
+    elif fault == "version":
+        metadata["version"] = "1.2.30"
+    elif fault == "package":
+        metadata["name"] = "other-package"
+    elif fault == "header":
+        entry.write_text("#!/bin/sh\necho codex-cli 1.2.3\n", encoding="utf-8")
+    manifest.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(witness.WitnessFailure) as excinfo:
+        witness.verify_install_receipt(_receipt(entry), "codex", toolchain, windows=True)
+    assert excinfo.value.code == "harness_receipt_invalid"
+
+
+@pytest.mark.parametrize("kind", ["native", "node"])
+def test_the_receipt_executable_must_resolve_inside_the_toolchain(tmp_path, kind):
+    toolchain = tmp_path / "home" / ".claudexor" / "node"
+    image = _image(toolchain) if kind == "native" else _node_entry(toolchain)
     operator = tmp_path / "operator" / "bin"
     operator.mkdir(parents=True)
-    (operator / "codex.exe").write_text("", encoding="utf-8")
+    (operator / image.name).write_text("", encoding="utf-8")
     links = toolchain / "links"
     (links / "file").mkdir(parents=True)
-    inside, file_escape, dir_escape = links / "codex.exe", links / "file" / "codex.exe", links / "dir"
+    inside, file_escape, dir_escape = links / image.name, links / "file" / image.name, links / "dir"
     try:
         inside.symlink_to(image)  # npm's own bin links stay inside the toolchain
-        file_escape.symlink_to(operator / "codex.exe")
+        file_escape.symlink_to(operator / image.name)
         dir_escape.symlink_to(operator, target_is_directory=True)
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"this host cannot create symlinks: {exc}")
 
     assert witness.verify_install_receipt(_receipt(inside), "codex", toolchain, windows=True) == inside
-    for escape in (file_escape, dir_escape / "codex.exe"):
+    for escape in (file_escape, dir_escape / image.name):
         with pytest.raises(witness.WitnessFailure) as excinfo:
             witness.verify_install_receipt(_receipt(escape), "codex", toolchain, windows=True)
         assert excinfo.value.code == "harness_receipt_invalid"
@@ -295,26 +336,38 @@ def test_a_vendor_probe_leaves_no_process_behind(tmp_path, mode):
     assert not pid_is_alive(grandchild) or pid_is_zombie(grandchild)
 
 
-def test_the_vendor_probes_never_use_the_uncontained_runner(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["native", "node"])
+@pytest.mark.parametrize("version_output", ["codex-cli 1.2.3", "codex-cli 1.2.30"])
+def test_vendor_launch_uses_managed_transport_and_engine_doctor_in_custody(
+        tmp_path, monkeypatch, kind, version_output):
     import ouroboros.claudexor_daemon as owned
     import ouroboros.config as config
 
-    image = tmp_path / ".claudexor" / "node" / "bin" / ("codex.exe" if os.name == "nt" else "codex")
+    toolchain = tmp_path / ".claudexor" / "node"
+    node = tmp_path / "managed-node" / "node.exe"
+    image = (toolchain / "bin" / "codex.exe" if kind == "native" else
+             toolchain / "node_modules" / "@openai" / "codex" / "bin" / "codex.js")
 
     def install(_harness):
-        image.parent.mkdir(parents=True)
-        image.write_text("", encoding="utf-8")
-        image.chmod(0o755)
+        if kind == "node":
+            assert _node_entry(toolchain) == image
+        else:
+            image.parent.mkdir(parents=True)
+            image.write_text("", encoding="utf-8")
 
     def uncontained(*_args, **_kwargs):
         raise AssertionError("a vendor executable ran outside process custody")
 
-    probes = []
+    probes, doctors = [], []
 
     def contained(argv, code, env, timeout=0):
-        probes.append(code)
-        version = "codex-cli 1.2.3"
-        return version if code == "harness_direct_failed" else json.dumps({"status": 0, "stdout": version})
+        probes.append((list(argv), code))
+        assert env["PATH"].split(os.pathsep)[0] == str(node.parent)
+        return version_output
+
+    def doctor(*args):
+        doctors.append(args)
+        return {"daemon_stop": "stopped"}
 
     monkeypatch.setattr(witness.os, "environ", {"HOME": str(tmp_path)})
     monkeypatch.setattr(owned, "install_missing_harness_cli", install)
@@ -322,12 +375,20 @@ def test_the_vendor_probes_never_use_the_uncontained_runner(tmp_path, monkeypatc
     monkeypatch.setattr(witness, "_cli_json", lambda *_args, **_kwargs: _receipt(image))
     monkeypatch.setattr(witness, "_run", uncontained)
     monkeypatch.setattr(witness, "_contained_run", contained)
-    monkeypatch.setattr(witness, "doctor_witness", lambda *_args: {"daemon_stop": "stopped"})
+    monkeypatch.setattr(witness, "doctor_witness", doctor)
 
-    facts = witness.harness_install_witness("codex", tmp_path / "node" / "node", ["node", "cli"], {})
+    if version_output == "codex-cli 1.2.30":
+        with pytest.raises(witness.WitnessFailure) as excinfo:
+            witness.harness_install_witness("codex", node, ["node", "cli"], {}, windows=True)
+        assert excinfo.value.code == "harness_direct_failed" and not doctors
+    else:
+        facts = witness.harness_install_witness("codex", node, ["node", "cli"], {}, windows=True)
+        assert facts["direct_version"] == version_output
+        assert facts["by_name_probe"] == "engine_doctor"
+        assert doctors == [("codex", ["node", "cli"], {}, image, "1.2.3")]
 
-    assert probes == ["harness_direct_failed", "harness_by_name_failed"]
-    assert facts["direct_version"] == facts["by_name_version"] == "codex-cli 1.2.3"
+    expected = [image, "--version"] if kind == "native" else [node, image, "--version"]
+    assert probes == [(expected, "harness_direct_failed")]
 
 
 def test_doctor_must_resolve_the_harness_to_the_receipts_image_and_pin(tmp_path):
@@ -343,6 +404,7 @@ def test_doctor_must_resolve_the_harness_to_the_receipts_image_and_pin(tmp_path)
     # Not logged in is reported, not asserted: only the installed row is required.
     assert witness.doctor_installed_check(report(), "codex", image, "1.2.3")["status"] == "unavailable"
     for broken in (report(status="fail"), report(detail=f"codex-cli 1.2.2 at {image}"),
+                   report(detail=f"codex-cli 1.2.30 at {image}"),
                    report(detail="codex-cli 1.2.3 at C:\\other\\codex.exe"), {"harnesses": []}, {}):
         with pytest.raises(witness.WitnessFailure) as excinfo:
             witness.doctor_installed_check(broken, "codex", image, "1.2.3")

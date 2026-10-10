@@ -752,6 +752,7 @@ def test_structured_compaction_returns_one_bounded_tool_error_continuation(monke
     calls = []
 
     def fake_chat_observed(_client, **kwargs):
+        assert kwargs['max_tokens'] == 100
         calls.append(copy.deepcopy(kwargs["messages"]))
         if len(calls) == 1:
             return copy.deepcopy(message), _receipt_usage(receipts)

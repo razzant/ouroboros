@@ -20,7 +20,7 @@ _FALSE_LITERALS = frozenset({"0", "false", "no", "off"})
 
 from ouroboros.jsonl_tail import (  # noqa: E402
     ARCHIVE_BACKFILL_MAX,
-    TAIL_WINDOW_START_BYTES as _TAIL_WINDOW_START_BYTES,  # noqa: F401  (re-exported for gateway/history.py)
+    TAIL_WINDOW_START_BYTES as _TAIL_WINDOW_START_BYTES,  # noqa: F401  (re-exported for gateway/history_paging.py)
 )
 
 
@@ -144,7 +144,13 @@ def json_error(message: str, status: int = 500, **extra: Any) -> JSONResponse:
     return JSONResponse(payload, status_code=status)
 
 
-def json_exception(exc: BaseException, status: int = 500) -> JSONResponse:
+def json_exception(exc: BaseException, status: int | None = None, *, context: str = "") -> JSONResponse:
+    """Answer an exception as JSON. Without an explicit status it is an unexpected
+    failure, recorded here once with its stack (#1138); a caller that chooses a status
+    is giving a deliberate answer, which is not a crash report."""
+    if status is None:
+        logging.getLogger(__name__).error(context or "Unhandled gateway request failure", exc_info=exc)
+        status = 500
     return json_error(str(exc), status)
 
 

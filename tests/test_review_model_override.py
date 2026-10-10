@@ -10,7 +10,7 @@ import pytest
 from ouroboros import capability_evidence as ce
 from ouroboros.llm import LLMClient
 from ouroboros.review_records import ReviewSlot, apply_review_model_override
-from ouroboros.reviewer_slot_config import ConfiguredReviewerSlot, AdvisorySlotConfig
+from ouroboros.reviewer_slot_config import ConfiguredReviewerSlot
 from tests.test_llm_claudexor import MODEL, ROUTE, result, ledger, setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 
@@ -19,7 +19,9 @@ live_wait = wait_fixture
 
 
 def test_pure_projection_preserves_native_delivery_and_changes_only_one_role():
-    native = ReviewSlot(slot_id="critic", model=MODEL, effort="high", subagent_id="frozen-actor", session_profile="a")
+    # F8: the delivery class is the slot's own fact; the subagent id is identity only.
+    native = ReviewSlot(slot_id="critic", model=MODEL, effort="high", subagent_id="frozen-actor", session_profile="a",
+                        native_retrieval_override=True)
     other = replace(native, slot_id="other", session_profile="other-pin")
     override = {"reviewer:critic": {"model": "local-review", "model_account_override": "", "use_local": True},
                 "main": {"model": "unrelated", "model_account_override": "main", "use_local": False}}
@@ -30,8 +32,10 @@ def test_pure_projection_preserves_native_delivery_and_changes_only_one_role():
     assert apply_review_model_override(other, override) is other
     configured = ConfiguredReviewerSlot("critic", "api_chat", MODEL, subagent_id="actor")
     assert apply_review_model_override(configured, override).native_retrieval
-    assert apply_review_model_override(AdvisorySlotConfig(target_id=MODEL), {
-        "reviewer:advisory_slot_1": override["reviewer:critic"]}).use_local is True
+    # The override is keyed by the row's identity alone: a caller-named identity
+    # (the deep review's Main row, a preflight seat) takes the same projection.
+    assert apply_review_model_override(configured, {"reviewer:main": override["reviewer:critic"]},
+                                       slot_id="main").use_local is True
 
 
 @pytest.mark.parametrize("narrow", [False, True])
@@ -201,61 +205,18 @@ def test_raw_triad_query_keeps_frozen_profile_without_wait_override_rescuing_it(
     assert ledger(root)[-1]["state"] == "settled" and ledger(root)[-1]["cost_usd"] is None
 
 
-def test_raw_advisory_applies_override_before_credentials_size_and_real_dispatch(live_wait, monkeypatch):
-    from ouroboros.tools import claude_advisory_review as advisory, preflight_review_run as preflight
-    from ouroboros.tools.registry import ToolContext
-    from ouroboros import config, reviewer_slot_config
-
-    root, gateway, _client, controller, _events, _decide = live_wait
-    replacement = "claudexor::codex=replacement-model"
-    original = AdvisorySlotConfig(target_id=MODEL, profile_id="account-a", effort="high")
-    monkeypatch.setattr(reviewer_slot_config, "advisory_slot_config", lambda: original)
-    monkeypatch.setattr(preflight, "advisory_review_route", lambda: "api_chat")
-    monkeypatch.setattr("ouroboros.provider_models.model_has_credentials", lambda model: model == replacement)
-    monkeypatch.setattr(config, "DATA_DIR", root)
-    monkeypatch.setattr(advisory, "_build_advisory_prompt", lambda *_a, **_kw: "Review the supplied evidence.")
-    controller.overrides["reviewer:advisory_slot_1"] = {
-        "model": replacement, "model_account_override": "account-b", "use_local": False}
-    catalog_calls = []
-
-    def catalog(source, profile=None, *, requested_model=None):
-        catalog_calls.append((source, profile))
-        return {"source": source, "credentialProfileId": profile, "accountFingerprint": "fingerprint-b",
-                "observedAt": ce.utc_now_iso(), "provenance": "fixture",
-                "models": [{"id": "replacement-model", "contextWindow": 800_000}]}
-
-    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
-    sizes = []
-    real_size = advisory._api_window_skip_warning
-
-    def size(model, prompt, managed, slot=None):
-        sizes.append((model, slot.profile_id, slot.effort))
-        return real_size(model, prompt, managed, slot)
-
-    monkeypatch.setattr(advisory, "_api_window_skip_warning", size)
-    completed = result(route={**ROUTE, "model": "replacement-model", "credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"})
-    completed["message"] = {"content": '[{"item":"correctness","verdict":"PASS","severity":"advisory","reason":"checked"}]'}
-    gateway.results = [completed]
-    ctx = ToolContext(repo_dir=root, drive_root=root, task_id="task-one")
-    items, raw, model, _chars = preflight._run_claude_advisory(root, "Check", ctx, options={"include_repo_diff": False})
-    assert items and "ADVISORY_ERROR" not in raw and model == replacement
-    assert sizes == [(replacement, "account-b", "high")]
-    assert catalog_calls and all(profile == "account-b" for _source, profile in catalog_calls)
-    assert gateway.uploads[0][0]["model"] == "replacement-model"
-    assert gateway.uploads[0][0]["account"] == {"mode": "pin", "profileId": "account-b"}
-    assert gateway.uploads[0][0]["options"]["reasoningEffort"] == "high"
-    assert original.target_id == MODEL and original.profile_id == "account-a"
-    assert ledger(root)[-1]["state"] == "settled"
-
-
-def test_scope_reservation_and_send_use_prepared_profile_not_original_slot(setup, monkeypatch):
-    from ouroboros.tools import scope_review as scope, review_admission
+def test_retrieving_seat_sends_under_the_row_plan_profile_not_the_original_slot(setup, monkeypatch):
+    """The one wave dispatches each retrieving seat with the profile its row plan
+    carries (`session_profiles`), never the configured slot object's original
+    profile: the reservation, the catalog lookup and the pinned send all name
+    that account, and the seat's output reserve is scaled by THAT account's window."""
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.review_multi_model import _query_model, _review_output_budget
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
     from ouroboros import config
-    from tests.test_review_session_scope_wiring import _scope_matrix_rows
 
-    root, gateway, _client = setup
+    root, gateway, client = setup
     monkeypatch.setattr(config, "DATA_DIR", root)
     catalog_profiles = []
 
@@ -267,35 +228,27 @@ def test_scope_reservation_and_send_use_prepared_profile_not_original_slot(setup
 
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
     original = ReviewSlot("scope-one", MODEL, session_profile="account-a")
-    prepared = {"scope_model_id": MODEL, "prompt": "", "stable_prefix_len": 0,
-                "context_manifest": {}, "session_task": "Review the staged change", "repo_dir": root,
-                "slot_id": "scope-one", "route": ReviewRouteKind.API_CHAT, "slot_effort": "high",
-                "session_target": "", "session_profile": "account-b", "delegated": False,
-                "subagent_id": "", "use_local": False,
-                "window_binding": {"model_role": "reviewer:scope-one", "credential_profile_id": "account-b"}}
-    seats = review_admission.commit_gate_paid_seats(None, True, [{"slot": original, "prepared": prepared}])
-    assert seats[0]["max_completion_tokens"] == 50_000
     completed = result(route={**ROUTE, "credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"})
-    completed["message"] = {"content": json.dumps(_scope_matrix_rows())}
+    matrix = [{"item": item, "verdict": "PASS", "severity": "advisory", "reason": "ok"} for item in sorted(SCOPE_REQUIRED_ITEMS)]
+    completed["message"] = {"content": json.dumps({"change": [], "change_clean": True, "coupling": matrix})}
     gateway.results = [completed]
-    call_usage = []
-    real_scope_call = scope._call_scope_llm
 
-    def observe_call(*args, **kwargs):
-        assert kwargs["session_profile"] == "account-b"
-        value = real_scope_call(*args, **kwargs)
-        call_usage.append(value[1])
-        return value
+    async def seat():
+        return await _query_model(client, MODEL, [], asyncio.Semaphore(1),
+                                  ToolContext(repo_dir=root, drive_root=root, task_id="task-one"),
+                                  slot_id=original.slot_id, route=ReviewRouteKind.API_CHAT, effort="high",
+                                  session_profile="account-b", native_retrieval=True,
+                                  session_task="Review the staged change", session_root=str(root))
 
-    monkeypatch.setattr(scope, "_call_scope_llm", observe_call)
-    actual = scope.run_scope_review(ToolContext(repo_dir=root, drive_root=root, task_id="task-one"), "Review", prepared=prepared,
-                                    session_profile="ignored-original")
-    # Window size no longer decides authority: the row answers on the account it
-    # was PREPARED with, and that account's profile is what gets pinned.
-    assert actual.status == "responded"
+    _model, payload, _extra = asyncio.run(seat())
+    # Window size no longer decides authority: the seat answers on the account
+    # its row was PREPARED with, and that account's profile is what gets pinned.
+    assert "error" not in payload and payload["choices"][0]["message"]["content"]
     assert gateway.uploads[0][0]["account"] == {"mode": "pin", "profileId": "account-b"}
     assert catalog_profiles and set(catalog_profiles) == {"account-b"}
-    assert actual.tokens_in == 20 and ledger(root)[-1]["state"] == "settled"
-    assert actual.prompt_ref  # The real substrate persisted its actual request.
-    assert call_usage[0]["claudexor"]["output_reserve_tokens"] == 50_000
+    assert payload["usage"]["prompt_tokens"] == 20 and ledger(root)[-1]["state"] == "settled"
+    assert payload["prompt_ref"]  # The real substrate persisted its actual request.
+    # Every seat of the one wave reserves the one review output budget
+    # (review_multi_model._review_output_budget), the retrieving seat included.
+    assert payload["usage"]["claudexor"]["output_reserve_tokens"] == _review_output_budget()
     assert original.session_profile == "account-a"

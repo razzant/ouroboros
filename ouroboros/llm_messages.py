@@ -1,13 +1,13 @@
 """Transcript shaping for the wire and the reasoning-artifact contract.
 
 Providers disagree about where a system message may appear, whether a tool
-result may carry blocks, what a blind model does with an image, whose
-reasoning signatures they can validate, and how much of a leading system
-message their prompt cache can reuse. This module owns the send-copy
-transforms that answer those disagreements (``split_leading_system_prefix``
-included) and the predicates that decide when replayed reasoning is
-portable — never the canonical transcript, which every transform copies
-before touching.
+result may carry blocks, whose reasoning signatures they can validate, and how
+much of a leading system message their prompt cache can reuse; our own lanes
+that cannot carry image bytes leave a marker naming the lane. This module owns
+the send-copy transforms that answer those disagreements
+(``split_leading_system_prefix`` included) and the predicates that decide when
+replayed reasoning is portable — never the canonical transcript, which every
+transform copies before touching.
 """
 
 
@@ -21,10 +21,23 @@ from ouroboros.llm_attempt import _VALID_CACHE_TTLS
 from ouroboros.provider_models import normalize_model_identity
 
 # The Main context builder's declaration on its leading system message: how many leading
-# text blocks are byte-stable across conversations (governance). A provider whose prompt
-# cache treats the whole leading system section as one unit keeps only those blocks
-# there (``split_leading_system_prefix``). Host-only metadata: popped from every send copy.
+# text blocks are byte-stable across conversations (governance and books; with a memory
+# view, identity and my sealed story too: two). A provider that reads a cache only inside
+# the leading system group keeps only those blocks there, each as its own system item
+# (``split_leading_system_prefix``). Host-only metadata: popped from every send copy.
 STABLE_PREFIX_BLOCKS_KEY = "_stable_prefix_blocks"
+
+
+def own_lane_image_marker(lane: str, caption: str = "") -> str:
+    """The text standing where an image was on a lane of ours that cannot carry image bytes.
+
+    It names our transport, never the model: the limit is ours (the local
+    llama.cpp lane has no vision handler; the GigaChat lane flattens content to
+    text), not evidence about what the model can see.
+    """
+    suffix = f" — {caption}" if caption else ""
+    return f"[image omitted: our {lane} transport lane cannot carry images{suffix}]"
+
 
 # Byte-stable provenance header of the projected host-context notice (no clocks, hashes
 # or ids: round N+1's send copy must remain a prefix extension of round N's).
@@ -42,7 +55,7 @@ SYSTEM_PREFIX_SPLIT_PLACEMENTS = ("before_task", "after_task")
 
 
 def split_leading_system_prefix(
-    messages: List[Dict[str, Any]], *, placement: str = "before_task",
+    messages: List[Dict[str, Any]], *, placement: str = "before_task", keep_marked: bool = False,
 ) -> tuple[List[Dict[str, Any]], int]:
     """Project a declared leading system message for a whole-section prompt cache.
 
@@ -52,13 +65,20 @@ def split_leading_system_prefix(
     list of text blocks longer than the declared count, and no second system message
     leads the transcript; every other shape — string systems, undeclared multi-block
     review prompts, several leading system messages — comes back unchanged with ``0``.
-    The declared blocks stay the system message; the remaining non-empty text blocks
+    Each kept block becomes its own system message; the remaining non-empty text blocks
     become ONE ``[SYSTEM NOTICE]`` message with a byte-stable provenance header: a user
     message right before the task (``before_task``) or a developer message right after
     the first user message (``after_task``). A pure function of the canonical messages
     (never mutated), so round N+1's copy extends round N's and the prospective wrap-up
     candidate equals the send. Measured 2026-09-25 on ``openai/gpt-6-sol``: the next
     conversation's first round read 198,797 of 393,676 tokens from cache instead of 0.
+
+    ``keep_marked`` is for a route whose block markers become explicit cache breakpoints
+    (OpenRouter's translation for OpenAI): the leading blocks that already carry their own
+    ``cache_control`` after the declared ones stay separate system items too, since the
+    breakpoint ending each one is written and looked up on its own. Without explicit
+    breakpoints only the end of the leading system group is a lookup boundary, so a
+    changed knowledge block kept there would also lose the governance prefix before it.
     """
     if placement not in SYSTEM_PREFIX_SPLIT_PLACEMENTS:
         raise ValueError(f"unknown system prefix placement: {placement!r}")
@@ -76,11 +96,17 @@ def split_leading_system_prefix(
         and isinstance(block.get("text"), str) for block in content
     ):
         return messages, 0
+    while (keep_marked and declared < len(content) and isinstance(content[declared].get("cache_control"), dict)
+           and content[declared]["text"].strip()):  # an empty block is never a system item of its own
+        declared += 1
     moved = [block["text"] for block in content[declared:] if block["text"].strip()]
     if not moved:
         return messages, 0
-    system = {key: copy.deepcopy(value) for key, value in leading.items() if key != STABLE_PREFIX_BLOCKS_KEY}
-    system["content"] = copy.deepcopy(content[:declared])
+    systems = []
+    for block in content[:declared]:
+        system = {key: copy.deepcopy(value) for key, value in leading.items() if key != STABLE_PREFIX_BLOCKS_KEY}
+        system["content"] = [copy.deepcopy(block)]
+        systems.append(system)
     rest = [copy.deepcopy(message) for message in messages[1:]]
     body = "\n\n".join(moved)
     if placement == "after_task":
@@ -89,22 +115,25 @@ def split_leading_system_prefix(
         if first_user is not None:
             notice = _MessageShapingMixin._content_with_system_notice_marker(HOST_CONTEXT_NOTICE_AFTER_TASK + "\n\n" + body)
             rest.insert(first_user + 1, {"role": "developer", "content": notice})
-            return [system, *rest], len(moved)
+            return [*systems, *rest], len(moved)
     notice = _MessageShapingMixin._content_with_system_notice_marker(HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\n" + body)
-    return [system, {"role": "user", "content": notice}, *rest], len(moved)
+    return [*systems, {"role": "user", "content": notice}, *rest], len(moved)
 
 
-def project_declared_system_prefix(target: Dict[str, Any], messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def project_declared_system_prefix(
+    target: Dict[str, Any], messages: List[Dict[str, Any]], *, keep_marked: bool = False,
+) -> List[Dict[str, Any]]:
     """``split_leading_system_prefix`` for one send, its shape stamped on the per-call target.
 
     ``target["wire_layout"]`` rides into ``usage`` at the route's response normalizer (a
     per-call dict, never a thread-local, so a prospective build can never label another
     route's answer). Callers gate on the route: OpenAI's public API
-    (``llm_openai_compatible._project_openai_family_system``) and the Codex backend
-    (``llm_claudexor._request``), both of which reuse a donor's cached prefix only up to
-    the end of the leading system unit / input item.
+    (``llm_openai_compatible._project_openai_family_system``, which alone passes
+    ``keep_marked`` for OpenRouter's explicit breakpoints) and the Codex backend
+    (``llm_claudexor._request``, markers stripped), both of which otherwise reuse a donor's
+    cached prefix only up to the end of the leading system group.
     """
-    projected, moved_blocks = split_leading_system_prefix(messages)
+    projected, moved_blocks = split_leading_system_prefix(messages, keep_marked=keep_marked)
     if moved_blocks:
         target["wire_layout"] = {"system_prefix_split": True, "moved_blocks": moved_blocks}
     return projected
@@ -220,7 +249,7 @@ class _MessageShapingMixin:
                         else:
                             block.pop("cache_control", None)
                         # Known host metadata never leaves the send copy.
-                        for key in ("_caption", "_source_path", "_context_capsule"):
+                        for key in ("_caption", "_source_path", "_original_image_url", "_context_capsule"):
                             block.pop(key, None)
         return cleaned
 
@@ -282,11 +311,15 @@ class _MessageShapingMixin:
         return cleaned
 
     @staticmethod
-    def _replace_image_blocks_with_placeholder(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Replace image content-blocks with an explicit text placeholder for a
-        model that has NO native vision — a raw ``image_url`` sent to a blind model
-        is silently ignored or 404s. Mirrors the local llama.cpp and GigaChat lanes.
-        Returns a deep copy; the canonical transcript is untouched."""
+    def _replace_image_blocks_with_placeholder(messages: List[Dict[str, Any]], lane: str) -> List[Dict[str, Any]]:
+        """Replace image blocks with ``lane``'s marker on a lane of ours that cannot
+        carry image bytes (``own_lane_image_marker``). Whether a route receives an
+        image is the send policy's decision (``vision_routing``); this transport
+        limit only keeps base64 out of a text-only prompt. Returns a deep copy when
+        anything changes; the canonical transcript is untouched."""
+        if not any(isinstance(block, dict) and str(block.get("type") or "") in ("image_url", "image")
+                   for msg in messages if isinstance(msg.get("content"), list) for block in msg["content"]):
+            return messages
         cleaned = copy.deepcopy(messages)
         for msg in cleaned:
             content = msg.get("content")
@@ -294,9 +327,8 @@ class _MessageShapingMixin:
                 continue
             for idx, block in enumerate(content):
                 if isinstance(block, dict) and str(block.get("type") or "") in ("image_url", "image"):
-                    caption = str(block.get("_caption") or "").strip()
-                    suffix = f" — {caption}" if caption else ""
-                    content[idx] = {"type": "text", "text": f"[image omitted: model has no vision{suffix}]"}
+                    content[idx] = {"type": "text", "text": own_lane_image_marker(
+                        lane, str(block.get("_caption") or "").strip())}
         return cleaned
 
     @staticmethod

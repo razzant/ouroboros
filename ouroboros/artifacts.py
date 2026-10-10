@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import mimetypes
 import os
 import stat
 import pathlib
@@ -294,7 +293,8 @@ def stage_task_attachments(
                     manifest.append(_rejected(ordinal, label, "copy_failed"))
                     continue
             measured = stream_artifact_file(dest, expected=source_identity)
-            mime = mimetypes.guess_type(str(dest))[0] or "application/octet-stream"
+            from ouroboros.chat_uploads import file_media
+            mime, kind = file_media(dest)
             manifest.append({
                 **measured,
                 "ordinal": ordinal,
@@ -311,7 +311,7 @@ def stage_task_attachments(
                 # every runtime mode.
                 "abs_path": str(dest),
                 "mime": mime,
-                "is_image": mime.startswith("image/"),
+                "is_image": kind == "image",
             })
         except Exception:
             log.debug("stage_task_attachments: rejected a file on error", exc_info=True)
@@ -976,7 +976,7 @@ def materialize_tool_args_source(drive_root: Any, call: Dict[str, Any]) -> tuple
 def materialize_tool_result_source(
     drive_root: Union[pathlib.Path, str], task_id: str, call: Dict[str, Any],
 ) -> tuple[Any, bool, Dict[str, Any]]:
-    """Materialize a result under existing redaction; metadata carries its source or gap."""
+    """Materialize a result under existing redaction; metadata carries its source or gap. A partial result reads its verified actor source, then a matching redacted projection (re-persisted best-effort), else a source_unavailable gap."""
     result = call.get("result")
     legacy_match = (
         _LEGACY_TOOL_RESULT_TRUNCATION_RE.search(result)
@@ -1178,17 +1178,18 @@ def read_task_scratch_fingerprints(drive_root: Union[pathlib.Path, str], task_id
     return {str(k): str(v) for k, v in vals.items()} if isinstance(vals, dict) else {}
 
 
+class ArtifactIdentityError(OSError):
+    """Stable captured identity mismatch after a complete, unchanged file read."""
+    def __init__(self, message: str, *, source_path: Any, source_stamp: tuple):
+        super().__init__(message)
+        self.source_path, self.source_stamp = source_path, source_stamp
+
+
 def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -> Dict[str, Any]:
-    """Hash/copy one stable regular file in bounded chunks, verifying declared bytes.
-
-    The observed descriptor and path must still identify the same unchanged file
-    after EOF. A changed/missing source is an explicit failure; callers publish
-    only after this function returns. ``expected`` pins an earlier capture when
-    inheritance or copy-back must preserve its exact bytes.
-
-    A borrowed binary regular-file handle (including a completed multipart spool)
-    is read from offset zero and remains open. Its descriptor is verified; there
-    is no claim about an original pathname. Network/pipe streams are not inputs.
+    """Hash/copy regular bytes in bounded chunks; prove descriptor/path stability
+    through EOF and ``expected`` identity before publication. Missing/changing bytes
+    fail. Borrowed binary regular handles (completed spools included) read from zero,
+    stay open and prove only their descriptor; network/pipe streams are not inputs.
     """
     source_path = pathlib.Path(path) if isinstance(path, (str, os.PathLike)) else None
     digest, size = sha256(), 0
@@ -1215,13 +1216,14 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     result = {"size": size, "sha256": digest.hexdigest()}
     if size != before.st_size:
         raise OSError(f"artifact source size changed during read: {path}")
-    if isinstance(expected, dict) and expected.get("immutable") and (
-        not isinstance(expected.get("size"), int) or not expected.get("sha256")
-    ):
-        raise OSError(f"immutable artifact is missing its capture identity: {path}")
+    expected = expected if isinstance(expected, dict) else {}
+    if expected.get("immutable") and (not isinstance(expected.get("size"), int) or not expected.get("sha256")):
+        raise ArtifactIdentityError(f"immutable artifact is missing its capture identity: {path}",
+                                    source_path=source_path, source_stamp=identity(before))
     for key in ("size", "sha256"):
-        if isinstance(expected, dict) and expected.get(key) not in (None, "") and expected[key] != result[key]:
-            raise OSError(f"artifact source failed {key} verification: {path}")
+        if expected.get(key) not in (None, "") and expected[key] != result[key]:
+            raise ArtifactIdentityError(f"artifact source failed {key} verification: {path}",
+                                        source_path=source_path, source_stamp=identity(before))
     return result
 
 

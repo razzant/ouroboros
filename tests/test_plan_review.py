@@ -340,13 +340,14 @@ def test_disposition_without_task_id_returns_typed_state_error(tmp_path):
 
 
 def test_malformed_reviewer_slots_block_plan_review_before_any_dispatch(tmp_path, monkeypatch):
-    """#116: a malformed OUROBOROS_REVIEWER_SLOTS must refuse plan review loudly
-    (typed retryable unavailability, precise parse error in the message) BEFORE
-    any reviewer dispatch — never run the panel on the silently projected default models."""
+    """#116: a malformed review pool (the ``OUROBOROS_SUBAGENTS`` catalog, PR-3) must
+    refuse plan review loudly (typed retryable unavailability, precise parse error in
+    the message) BEFORE any reviewer dispatch — never run the panel on a silently
+    projected default."""
     import ouroboros.tools.plan_review as pr
     from ouroboros.tools.registry import ToolContext
 
-    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", "{broken")
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", "{broken")
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     ctx.task_id = "plan-slot-config"
     with (
@@ -357,12 +358,12 @@ def test_malformed_reviewer_slots_block_plan_review_before_any_dispatch(tmp_path
     ):
         result = pr._handle_plan_task(ctx, plan="P", goal="G", spec={"in_scope": ["x"], "affected_paths": []})
 
-    assert "Invalid reviewer-slot configuration blocks plan review" in result
+    assert "Invalid review pool configuration blocks plan review" in result
     assert "not valid JSON" in result
     # The pointer names a place that EXISTS: D-10 moved these rows out of the
     # Models tab and renamed the section, so the old wording sent the owner
     # looking for a heading no tab carries any more.
-    assert "Fix Review lanes on the Agents tab in Settings" in result
+    assert "Fix the Reviewer rows on the Agents tab in Settings" in result
     from ouroboros.task_results import load_plan_review_state
 
     assert load_plan_review_state(tmp_path, "plan-slot-config")["current_attempt"]["status"] == "unavailable"

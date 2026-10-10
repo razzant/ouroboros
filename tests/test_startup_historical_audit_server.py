@@ -1,9 +1,10 @@
 """F1 on the REAL server: readiness and the gateway do not wait for history.
 
 This boots `server.py` as a real process against an isolated data root that
-carries a real archived usage chain (built by the shipped compactor), then
-watches the ordering from outside: readiness is served, a trivial gateway
-request is answered, and the history audit is still running in another process.
+carries retained usage history (archive segments the retired compactor left,
+and the journal the boot imports into the usage store), then watches the
+ordering from outside: readiness is served, a trivial gateway request is
+answered, and the history audit is still running in another process.
 
 Gated behind `OUROBOROS_RUN_UI_SMOKE=1` like every other real-server case here.
 """
@@ -110,11 +111,12 @@ def test_real_server_serves_readiness_and_requests_while_history_runs_elsewhere(
     data_dir: pathlib.Path = direct_server_with_data["data_dir"]
 
     direct_server_with_data["stop_server"]()   # returns only after a PROVEN container reap
-    # The first generation's own audit child may have been reaped between creating
-    # the monetary lock file and writing its owner stamp. Such a stampless lock has
-    # no pid to prove dead, so the owner-aware acquirer would wait out its age grace
-    # and the fixture's compactor would time out. Every process of THIS data root is
-    # proven gone by the reap above, so an EMPTY lock here is an orphan by proof.
+    # The first generation's own children may have been reaped between creating
+    # the money name lock file and writing its owner stamp. Such a stampless lock
+    # has no pid to prove dead, so the owner-aware acquirer would wait out its age
+    # grace and the next boot's journal import would time out. Every process of
+    # THIS data root is proven gone by the reap above, so an EMPTY lock here is an
+    # orphan by proof.
     from ouroboros.usage_ledger import LOCK_REL
 
     orphan_lock = data_dir / LOCK_REL
@@ -133,19 +135,23 @@ def test_real_server_serves_readiness_and_requests_while_history_runs_elsewhere(
     expected_manifests = len(list((data_dir / "observability" / "calls").glob("*/*.json")))
     assert expected_manifests == sum(facts["seal_manifests"].values()), facts
 
-    from ouroboros import usage_compaction as uc
     from ouroboros import usage_ledger as ul
+    from ouroboros import usage_store
 
-    ledger_before = (data_dir / ul.LEDGER_REL).read_bytes()
+    journal_before = (data_dir / ul.LEDGER_REL).read_bytes()
     archive_before = sorted((path.name, path.stat().st_size)
-                            for path in (data_dir / uc.ARCHIVE_SEGMENT_DIR_REL).glob("*.jsonl"))
+                            for path in (data_dir / ul.ARCHIVE_SEGMENT_DIR_REL).glob("*.jsonl"))
     supervisor_log = data_dir / "logs" / "supervisor.jsonl"
     before_bytes = supervisor_log.stat().st_size if supervisor_log.exists() else 0
 
     sampler = _BootSampler(url)
+    from ouroboros.startup_historical_audit import HistoricalAudit
+    explicit = HistoricalAudit()
     sampler.start()
     try:
         direct_server_with_data["start_server"]()   # returns only once readiness is served
+        assert not _audit_records(data_dir, before_bytes), "boot must not launch a historical audit"
+        explicit.start(data_dir, pathlib.Path(__file__).resolve().parents[1])
         deadline = time.monotonic() + 120
         terminal = None
         while time.monotonic() < deadline:
@@ -154,6 +160,7 @@ def test_real_server_serves_readiness_and_requests_while_history_runs_elsewhere(
                 break
             time.sleep(0.05)
     finally:
+        explicit.stop()
         sampler.stop.set()
         sampler.join(timeout=10)
 
@@ -204,10 +211,11 @@ def test_real_server_serves_readiness_and_requests_while_history_runs_elsewhere(
     assert all(row.get("scope") == "session" for row in mine), mine
     custody_checked = True
 
-    # The monetary authority the pass read is byte-identical afterwards.
-    assert (data_dir / ul.LEDGER_REL).read_bytes() == ledger_before
+    # The boot imported the journal unchanged; the retained evidence the pass
+    # read is byte-identical afterwards.
+    assert (data_dir / usage_store.LEDGER_REL).read_bytes() == journal_before
     assert sorted((path.name, path.stat().st_size)
-                  for path in (data_dir / uc.ARCHIVE_SEGMENT_DIR_REL).glob("*.jsonl")) == archive_before
+                  for path in (data_dir / ul.ARCHIVE_SEGMENT_DIR_REL).glob("*.jsonl")) == archive_before
 
     evidence = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data_dir.parent)))
     evidence.mkdir(parents=True, exist_ok=True)

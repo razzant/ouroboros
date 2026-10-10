@@ -9,6 +9,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
+from ouroboros._usage_wait import receiver_abandonable
 from ouroboros.betterleaks_runtime import resolve_betterleaks
 from ouroboros.config import (
     SKILL_SOURCE_CLAWHUB,
@@ -22,6 +23,7 @@ from ouroboros.config import (
     get_ouroboroshub_catalog_url,
 )
 from ouroboros.llm import LLMClient
+from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.marketplace.provenance import write_publication_record
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.skill_loader import SkillPayloadUnreadable, _sanitize_skill_name
@@ -626,6 +628,7 @@ def _scan(
     return result
 
 
+@receiver_abandonable()
 def _select_optional_pr_core(
     ctx: ToolContext,
     attempt: _PublishAttempt,
@@ -1068,7 +1071,18 @@ def _submit_skill_to_hub(
                 "github_operation": getattr(exc, "operation", ""),
             }.items() if value},
         )
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, ModelWaitInterrupted) and exc.control_reason == "owner_pause":
+            # Keep this invocation's completed stages: Pause buys no formatter
+            # retry or publication, and claims no rollback of earlier effects.
+            abandoned = bool(getattr(exc, "receiver_abandoned", False))
+            return attempt.result(
+                ok=False, status="blocked", reason_code="owner_pause",
+                repair_hint="The owner paused publication; resume the task before deciding whether to retry.",
+                expected_repository=expected_repository,
+                extra_fields={"abandoned_model_attempt_ids": ",".join(getattr(exc, "ledger_attempt_ids", None) or []),
+                              "model_outcome": "unknown" if abandoned else "not_dispatched"},
+            )
         return attempt.result(
             ok=False,
             status="error",

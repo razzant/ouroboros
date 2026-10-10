@@ -1,4 +1,0 @@
-523
-The naming rule says English SOURCE copy and where translations live (the install
-memory under the data root, never a locale file in the repository), and which seam
-translates what at render.

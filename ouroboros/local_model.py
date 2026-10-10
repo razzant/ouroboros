@@ -22,6 +22,29 @@ log = logging.getLogger(__name__)
 _LOCAL_MODEL_DEFAULT_PORT = 8766
 # start_server appends this pair last, so a model path cannot supply it.
 _SERVING_CONTEXT_ARGV_RE = re.compile(r"\s--n_ctx[ =](\d+)$")
+# start_server places the artifact first: `--model <path> --port <port>`.
+_SERVING_MODEL_ARGV_RE = re.compile(r"\s--model (.+?) --port (\d+)(?:\s|$)")
+# huggingface_hub's cache layout: <cache>/models--<org>--<repo>/snapshots/<revision>/<path in repo>.
+_HF_CACHE_PATH_RE = re.compile(r"[/\\]models--([^/\\]+)[/\\]snapshots[/\\][^/\\]+[/\\](.+)$")
+
+
+def local_artifact_key(source: str = "", filename: str = "", *, model_path: str = "") -> str:
+    """One identity for a configured artifact and the file ``download_model`` serves for it.
+
+    A local file is its expanded path (the filename is unused there); a Hugging Face artifact is
+    ``hf:<repo>:<repo-relative path>`` from settings or its cache path. Basename selections
+    use the downloader's metadata resolver, never infer equivalence by dropping subfolders.
+    This resolves metadata only; it never downloads an artifact."""
+    if model_path:
+        cached = _HF_CACHE_PATH_RE.search(str(model_path))
+        return (f"hf:{cached.group(1).replace('--', '/')}:{cached.group(2).replace(chr(92), '/')}"
+                if cached else os.path.expanduser(str(model_path)))
+    source, filename = str(source or "").strip(), str(filename or "").strip()
+    if not source or os.path.isfile(source) or source.startswith(("/", "~")):
+        return os.path.expanduser(source)
+    filename = filename.replace(chr(92), '/')
+    resolved = LocalModelManager._resolve_hf_path(source, filename) if filename else filename
+    return f"hf:{source}:{resolved}"
 
 
 def local_model_settings(values: dict) -> dict:
@@ -722,6 +745,28 @@ class LocalModelManager:
         return {"context_window": capacity if known else None, "confirmed": known,
                 "source": "owned_server_arguments" if known else "serving_window_unobserved",
                 "process_id": process.pid if known else None}
+
+    def serving_artifact(self) -> Dict[str, Any]:
+        """The model file and port the live server was launched with, else ``{}``.
+
+        Saved settings stay pending until Stop/Start (``settings_application``), so a fact
+        about the serving model binds this launch identity, never the desired settings.
+        A worker reads the published, liveness-checked binding's own arguments."""
+        from ouroboros.utils import in_worker_process
+
+        if not in_worker_process():
+            process = self._proc
+            live = process is not None and process.poll() is None and self._status == "ready"
+            return {"model_path": str(self._model_path), "port": int(self._port)} if live and self._model_path else {}
+        evidence = self._published_serving_evidence()
+        if not evidence.get("confirmed"):
+            return {}
+        from ouroboros.platform_layer import process_command
+
+        match = _SERVING_MODEL_ARGV_RE.search(process_command(int(evidence["process_id"])))
+        if not match or int(match.group(2)) != int(evidence.get("port") or 0):
+            return {}
+        return {"model_path": match.group(1).strip('"'), "port": int(match.group(2))}
 
     def _published_serving_evidence(self) -> Dict[str, Any]:
         """A worker's view of the server its server process owns.

@@ -20,52 +20,52 @@ export function sameHistoryChain(head, span) {
 
 /** Coverage is byte delivery, never chronology, shared row identity or EOF.
  * The recent read supplies the horizon. A clean overlapping re-read can heal
- * a failed span; evicted bodies and saved descriptors cannot certify bytes.
+ * a failed span; evicted bodies cannot certify bytes. Completeness and gaps are
+ * the conversation's (the chat stream): narration (progress) pages alongside it
+ * but never decides coverage; an unreadable or failed narration span on the
+ * recent read is still a gap.
  */
 export function historyCoverage(recent, pages = []) {
-    let complete = true, gaps = pages.some(value => value?.v !== 1 || value.view !== recent?.view), horizonGap = false;
-    if (recent?.v !== 1) return { complete: false, gaps: true, horizonGap: false };
-    for (const source of ['chat', 'progress']) {
-        const horizon = recent.upper?.[source], head = recent.spans?.[source];
-        if (!Number.isSafeInteger(horizon) || !head) { complete = false; gaps = true; continue; }
-        const delivered = [recent, ...pages].filter(value => value?.v === 1 && value.view === recent.view)
-            .map(value => value.spans?.[source]);
-        // The newest read lists prefix witnesses through its trailing segments.
-        const sameChain = span => sameHistoryChain(head, span);
-        const valid = span => span && sameChain(span) && Array.isArray(span.gaps)
-                && Number.isSafeInteger(span.from) && Number.isSafeInteger(span.to)
-                && span.from >= 0 && span.from <= span.to;
-        // A formerly empty source owns no retained bytes. Its first write
-        // changes the chain witness without invalidating an older fragment,
-        // and its frontier stays zero: a first read starting above it is a gap.
-        const knownEmpty = span => span?.chain === 'empty' && span.from === 0 && span.to === 0
-            && Array.isArray(span.gaps) && !span.gaps.length;
-        const known = span => valid(span) || knownEmpty(span);
-        if (delivered.some(span => !known(span))) gaps = true;
-        const spans = delivered.filter(span => known(span) && !span.gaps.length)
-            .sort((a, b) => a.from - b.from);
-        const clean = [];
-        let end = null, start = null;
-        for (const span of spans) {
-            if (span.from > horizon) continue;
-            if (end !== null && span.from > end) gaps = true;
-            if (start === null) start = span.from;
-            if (!clean.length || span.from > clean.at(-1).to) clean.push({ ...span });
-            else clean.at(-1).to = Math.max(clean.at(-1).to, span.to);
-            end = Math.max(end ?? 0, Math.min(horizon, span.to));
-        }
-        // A failed read remains visible until a compatible clean read actually
-        // covers its bytes; simply dropping it cannot certify the fragment.
-        if (delivered.some(span => valid(span) && span.gaps.length
-            && !clean.some(range => range.from <= span.from && range.to >= span.to))) gaps = true;
-        if (end !== horizon) gaps = true;
-        if (start !== 0 || end !== horizon) complete = false;
-        const oldEnds = pages.filter(value => value?.view === recent.view)
-            .map(value => value?.spans?.[source]).filter(span => sameChain(span) || knownEmpty(span))
-            .map(span => span.to);
-        if (oldEnds.length && head.from > Math.max(...oldEnds)) horizonGap = true;
+    const horizon = recent?.upper?.chat, head = recent?.spans?.chat, narration = recent?.spans?.progress;
+    if (recent?.v !== 1 || !Number.isSafeInteger(horizon) || !head) return { complete: false, gaps: true, horizonGap: false };
+    let gaps = pages.some(value => value?.v !== 1 || value.view !== recent.view)
+        || (narration !== null && !(Array.isArray(narration?.gaps) && !narration.gaps.length));
+    const delivered = [recent, ...pages].filter(value => value?.v === 1 && value.view === recent.view)
+        .map(value => value.spans?.chat);
+    // The newest read lists prefix witnesses through its trailing segments.
+    const sameChain = span => sameHistoryChain(head, span);
+    const valid = span => span && sameChain(span) && Array.isArray(span.gaps)
+            && Number.isSafeInteger(span.from) && Number.isSafeInteger(span.to)
+            && span.from >= 0 && span.from <= span.to;
+    // A formerly empty source owns no retained bytes. Its first write
+    // changes the chain witness without invalidating an older fragment,
+    // and its frontier stays zero: a first read starting above it is a gap.
+    const knownEmpty = span => span?.chain === 'empty' && span.from === 0 && span.to === 0
+        && Array.isArray(span.gaps) && !span.gaps.length;
+    const known = span => valid(span) || knownEmpty(span);
+    if (delivered.some(span => !known(span))) gaps = true;
+    const spans = delivered.filter(span => known(span) && !span.gaps.length)
+        .sort((a, b) => a.from - b.from);
+    const clean = [];
+    let end = null, start = null;
+    for (const span of spans) {
+        if (span.from > horizon) continue;
+        if (end !== null && span.from > end) gaps = true;
+        if (start === null) start = span.from;
+        if (!clean.length || span.from > clean.at(-1).to) clean.push({ ...span });
+        else clean.at(-1).to = Math.max(clean.at(-1).to, span.to);
+        end = Math.max(end ?? 0, Math.min(horizon, span.to));
     }
-    return { complete: complete && !gaps, gaps, horizonGap };
+    // A failed read remains visible until a compatible clean read actually
+    // covers its bytes; simply dropping it cannot certify the fragment.
+    if (delivered.some(span => valid(span) && span.gaps.length
+        && !clean.some(range => range.from <= span.from && range.to >= span.to))) gaps = true;
+    if (end !== horizon) gaps = true;
+    const oldEnds = pages.filter(value => value?.view === recent.view)
+        .map(value => value?.spans?.chat).filter(span => sameChain(span) || knownEmpty(span))
+        .map(span => span.to);
+    const horizonGap = oldEnds.length > 0 && head.from > Math.max(...oldEnds);
+    return { complete: start === 0 && end === horizon && !gaps, gaps, horizonGap };
 }
 
 /** Chat's bounded archive-page owner. DOM, reading protection and live rows stay
@@ -238,30 +238,6 @@ export function createChatHistoryPager({
 
     return {
         getState,
-        exportResume(pageId = '') {
-            const chosen = pages.findIndex(page => page.id === pageId);
-            // A protected page from an older chain can remain mounted after
-            // latest() replaces the navigable window. Save its own frozen
-            // boundary, rather than silently switching the bookmark to latest.
-            if (pageId && chosen < 0 && cache.has(pageId)) {
-                return { pages: [cache.get(pageId).page], focus: 0 };
-            }
-            return pages.length ? { pages: [...pages], focus: chosen >= 0 ? chosen : focus } : null;
-        },
-        // A resume written before pages carried `rows` restores unchanged: an
-        // unknown row count is treated as non-empty until the page is re-read.
-        restore(saved) {
-            if (pages.length || !Array.isArray(saved?.pages) || !saved.pages.length
-                || !Number.isInteger(saved.focus) || !saved.pages[saved.focus]
-                || !saved.pages.every(page => typeof page.requestCursor === 'string'
-                    && typeof page.hasMore === 'boolean')) return Promise.resolve({ status: 'unavailable' });
-            pages = saved.pages.map((page, index) => Object.freeze({
-                ...page, index, loaded: false, coverage: null,
-            }));
-            focus = saved.focus;
-            chain = pages[focus].chain;
-            return request('restore', focus, pages[focus].requestCursor);
-        },
         // The first recent response owns the frozen chain. Later recent/live
         // refreshes are applied by chat itself, without registering their bodies
         // here or replacing the original page-zero continuation.

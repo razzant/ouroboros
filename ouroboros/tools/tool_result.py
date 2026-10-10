@@ -1,4 +1,13 @@
-"""Typed internal tool results with a byte-compatible legacy text adapter."""
+"""Typed internal tool results with a byte-compatible legacy text adapter.
+
+Host route and safety notes trail the producer payload in ``text``. When notes are
+added, ``producer_text`` keeps the payload captured before composition and
+``host_annotations`` the notes, both outside the bounded ``meta``; annotated ``text``
+and the typed status stay authoritative. Unannotated results leave both fields empty.
+``loop_tool_execution`` stores ``producer_text`` as a separate task source exposed as
+``PRODUCER_RESULT_SOURCE_JSON`` (distinct from ``FULL_RESULT_SOURCE_JSON``) and
+re-appends the notes when the annotated text is truncated.
+"""
 
 from __future__ import annotations
 
@@ -156,6 +165,15 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "use an authority permitted by the task contract",
         ),
+        # ``body_candidate.CandidateRefused``: the task's own-body candidate could not be
+        # prepared, resumed or isolated; nothing was changed and no process started.
+        **{code: _code_spec("blocked", "blocked", "warning", "inspect or repair the retained body candidate")
+           for code in (
+            "CANDIDATE_UNAVAILABLE", "CANDIDATE_PATH_OCCUPIED", "CANDIDATE_MISSING",
+            "CANDIDATE_OWNER_LIVE", "CANDIDATE_OWNER_PROCESSES_LIVE", "CANDIDATE_OWNER_CHANGED",
+            "CANDIDATE_NOT_APPLICABLE", "CANDIDATE_ALREADY_OWNED", "CANDIDATE_OWNER_UNKNOWN",
+            "CANDIDATE_ENVIRONMENT_UNAVAILABLE",
+        )},
         "CORE_PROTECTION_BLOCKED": _code_spec(
             "blocked",
             "protected_blocked",
@@ -615,6 +633,18 @@ def _publish_tool_result(ctx: Any, result: ToolResult) -> str:
     elif hasattr(ctx, _TOOL_RESULT_ATTR):
         setattr(ctx, _TOOL_RESULT_ATTR, result)
     return result.text
+
+
+def append_published_text(ctx: Any, text: str, suffix: str) -> str:
+    """Append ``suffix`` to a handler's returned text. A typed result this invocation
+    published for exactly that text grows the same suffix (status, code and meta stay),
+    so the registry still pairs the returned string with its typed result."""
+    if not suffix:
+        return text
+    prior = _published_tool_result(ctx, None)
+    if isinstance(prior, ToolResult) and prior.text == text:
+        return _publish_tool_result(ctx, _replace_tool_result(prior, text=text + suffix))
+    return text + suffix
 
 
 def _install_tool_result_sidecar(

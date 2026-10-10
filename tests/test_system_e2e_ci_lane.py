@@ -1,18 +1,18 @@
-"""The scheduled keyless `system-e2e-mock` CI job (owner 9A).
+"""The keyless `system-e2e-mock` CI job (owner 9A).
 
 `tests/system_e2e/` is gated three ways — the `integration` and `serial`
 markers plus the `OUROBOROS_E2E_DEEP` env var — precisely so that no existing
 CI pytest pass can reach it. That is what makes a suite nobody executes: the
 gates work, and then nothing opens them. This job is the one thing that does,
-and the plan's §8 pull-request lane was replaced by a daily schedule (owner
-9A) because the scenarios spawn real isolated servers and cost minutes.
+on manual dispatch and on release tags; the plan's §8 pull-request lane gave
+way to a daily schedule (owner 9A), and the schedule itself was removed on
+2026-10-05 because nobody read the nightly results (owner).
 
 Two properties are load-bearing enough to pin. The job must stay OFF push and
 pull_request, or the lane it was made cheap for becomes the slowest thing in
-every PR. And the daily schedule must not wake the PAID provider lane: a
-scheduled run carries the default branch in its ref, so `integration-test`
-leads with an explicit event guard that holds whatever ref conditions follow
-it, and no cron spends real provider credit.
+every PR. And no schedule may wake the PAID provider lane: a scheduled run
+carries the default branch in its ref, so `integration-test` leads with an
+explicit event guard that holds whatever ref conditions follow it.
 """
 
 from __future__ import annotations
@@ -91,42 +91,23 @@ def _job_text(job: str) -> str:
     return block.group(1)
 
 
-MOCK_CRON = "37 4 * * *"
-
-
-def test_the_workflow_carries_one_daily_off_peak_schedule_owned_by_one_job():
+def test_the_workflow_carries_no_schedule_and_no_job_admits_one():
     workflow = _workflow()
-    schedule = _triggers(workflow).get("schedule") or []
-    crons = [str(entry["cron"]) for entry in schedule]
-    # One cron: this keyless lane. The paid `e2e-live` stand runs only on its
-    # opt-in dispatch input (tests/test_e2e_live_ci_lane.py). A cron nobody
-    # binds to is a second nightly wake-up of every job gated on the bare
-    # event name.
-    assert crons == [MOCK_CRON], schedule
-    for entry in schedule:
-        minute, hour, day, month, weekday = str(entry["cron"]).split()
-        assert (day, month, weekday) == ("*", "*", "*"), entry
-        assert minute.isdigit() and hour.isdigit(), "one fixed daily time, not a range"
-        # On the hour is when everyone else's cron fires and GitHub's queue is
-        # deepest; an off-peak minute is the documented way to avoid the backlog.
-        assert int(minute) != 0, entry
-    # Every job that fires on `schedule` names ITS cron string, so a cron added
-    # for another lane never wakes it: a bare `github.event_name == 'schedule'` would.
+    # Owner, 2026-10-05: nobody read the nightly results, so the workflow runs
+    # nothing on a timer. A scheduled run would carry the default branch in its
+    # ref; the remaining `!= 'schedule'` guards (integration-test) keep paid
+    # lanes off one if a schedule ever returns.
+    assert "schedule" not in _triggers(workflow), _triggers(workflow)
     for name, job in workflow["jobs"].items():
         condition = " ".join(str(job.get("if", "")).split())
-        if "github.event_name == 'schedule'" not in condition:
-            continue  # `!= 'schedule'` guards (integration-test) keep a lane OFF every cron
-        assert "github.event.schedule ==" in condition, (name, condition)
-        assert "github.event_name == 'schedule' ||" not in condition, (name, condition)
+        assert "github.event_name == 'schedule'" not in condition, (name, condition)
 
 
-def test_the_scheduled_lane_never_runs_on_a_push_or_a_pull_request():
+def test_the_lane_runs_only_on_a_dispatch_or_a_release_tag():
     job = _workflow()["jobs"][JOB]
     condition = " ".join(str(job["if"]).split())
     assert condition == (
-        f"(github.event_name == 'schedule' && github.event.schedule == '{MOCK_CRON}')"
-        " || github.event_name == 'workflow_dispatch'"
-        " || startsWith(github.ref, 'refs/tags/v')"
+        "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')"
     )  # a release tag joins the lane to the release bar (batch №13 item 4); push/PR never, condition
     assert job["runs-on"] == "ubuntu-latest"
     # The budget must clear the suite, not merely exist. `> 0` accepted
@@ -138,7 +119,7 @@ def test_the_scheduled_lane_never_runs_on_a_push_or_a_pull_request():
     assert int(job["timeout-minutes"]) >= MIN_TIMEOUT_MINUTES
 
 
-def test_the_scheduled_lane_runs_the_keyless_suite_on_a_throwaway_root():
+def test_the_lane_runs_the_keyless_suite_on_a_throwaway_root():
     steps = _workflow()["jobs"][JOB]["steps"]
     assert [step.get("uses") for step in steps][:2] == [
         "actions/checkout@v4", "./.github/actions/setup-python-env",
@@ -161,14 +142,54 @@ def test_the_scheduled_lane_runs_the_keyless_suite_on_a_throwaway_root():
         assert all("runner.temp" in str(env[name]) for name in roots), env
 
 
-def test_the_scheduled_lane_asks_for_no_secret():
+def test_the_lane_uploads_its_servers_traces_and_never_a_settings_file():
+    """Owner, 2026-10-04: the traces are the most useful part of a CI run. The
+    scenario servers write their journals under pytest tmp_path trees — the
+    OUROBOROS_* roots of the run steps are what tests/conftest.py isolates FROM —
+    and bare pytest (no OUROBOROS_TEST_TEMP_ROOT, no TMPDIR on a hosted runner)
+    creates its session root `ouroboros-pytest-*` in the default temp directory,
+    /tmp. The upload names exactly that root, journals and task results only."""
+    jobs = _workflow()["jobs"]
+    steps = jobs[JOB]["steps"]
+    uploads = [step for step in steps if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+    assert len(uploads) == 1, uploads
+    upload = uploads[0]
+    assert steps.index(upload) == len(steps) - 1      # after both scenario passes
+    assert upload["if"] == "always()"
+    # Diagnostics only: a failed upload never reddens the job (the release bar needs it);
+    # both scenario passes still decide it.
+    assert upload.get("continue-on-error") is True
+    passes = [step for step in steps if "python -m pytest" in str(step.get("run", ""))]
+    assert len(passes) == 2 and not any("continue-on-error" in step for step in passes), passes
+    paid = next(step for step in jobs["e2e-live"]["steps"]
+                if str(step.get("uses", "")).startswith("actions/upload-artifact@"))
+    assert upload["uses"] == paid["uses"]             # one pinned action for both lanes
+    assert upload["with"]["name"] == "system-e2e-traces" and upload["with"]["retention-days"] == 30
+    assert upload["with"]["if-no-files-found"] == "warn"
+    lines = [line.strip() for line in str(upload["with"]["path"]).splitlines() if line.strip()]
+    root = "/tmp/ouroboros-pytest-*/"
+    includes = [line for line in lines if not line.startswith("!")]
+    # A keyless server carries no benchmark sentinel, so its journals past 800 KB rotate into
+    # data/archive/<prefix>_<ts>.jsonl (supervisor/state.py): the head of a long journal lives there.
+    assert includes == [f"{root}**/data/logs/**", f"{root}**/data/task_results/**",
+                        f"{root}**/data/archive/*.jsonl"], includes
+    assert [line for line in lines if line.startswith("!")] == [f"!{root}**/settings.json"], lines
+    # The root is the one conftest creates for a bare run, in the runner's default temp dir.
+    conftest = (REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    assert 'prefix="p" if _SAFE_TEMP_ROOT else "ouroboros-pytest-"' in conftest
+    for step in steps:
+        env = step.get("env") or {}
+        assert "TMPDIR" not in env and "OUROBOROS_TEST_TEMP_ROOT" not in env, step
+
+
+def test_the_lane_asks_for_no_secret():
     """Keyless by construction: a job gets a secret only by naming it."""
     assert "secrets." not in _job_text(JOB), _job_text(JOB)
 
 
-def test_the_daily_schedule_does_not_wake_the_paid_provider_lane():
-    """A scheduled run reports the default branch in github.ref. The leading
-    event guard keeps the schedule off the paid lane whatever ref conditions
+def test_a_schedule_would_not_wake_the_paid_provider_lane():
+    """A scheduled run would report the default branch in github.ref. The leading
+    event guard keeps any schedule off the paid lane whatever ref conditions
     follow it; the push workflow that serves branch pushes has no schedule."""
     condition = " ".join(str(_workflow()["jobs"]["integration-test"]["if"]).split())
     assert condition.startswith("github.event_name != 'schedule'"), condition

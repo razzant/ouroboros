@@ -9,7 +9,8 @@ an honest trajectory from the artifacts the installed adapter already writes:
 - ``agent/ouroboros-data/logs/progress.jsonl``     -> agent narration between calls
 - ``agent/ouroboros-data/logs/chat.jsonl``         -> final answer
 - ``agent/ouroboros-task-result.json``             -> final answer fallback
-- ``agent/ouroboros-data/state/usage_attempts.jsonl`` -> physical subtree totals
+- ``agent/ouroboros-data/state/usage.sqlite``     -> physical subtree totals
+  (``state/usage_attempts.jsonl`` for artifacts written before the usage store)
 - ``agent/ouroboros-run-summary.json``             -> root id + legacy fallback cost
 - ``agent/ouroboros-data/logs/events.jsonl``       -> legacy fallback tokens, version
 
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -92,26 +94,32 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _physical_metrics(agent_dir: Path) -> dict[str, Any] | None:
-    """Replay final physical attempts for this trial's root task.
-
-    The physical-attempt ledger is the monetary/token authority.  A corrupt or
-    quarantined ledger is never partially projected; callers then use the
-    legacy events + run-summary fallback for pre-ledger artifacts.
-    """
-    agent_dir = Path(agent_dir)
-    state_dir = agent_dir / "ouroboros-data" / "state"
-    ledger = state_dir / "usage_attempts.jsonl"
-    if not ledger.is_file() or (state_dir / "usage_attempts.quarantine.jsonl").exists():
-        return None
-
-    summary = _read_json(agent_dir / "ouroboros-run-summary.json")
-    root_task_id = str(summary.get("task_id") or "").strip()
-    if not root_task_id:
-        return None
-
+def _store_final_rows(path: Path) -> list[dict[str, Any]] | None:
+    """Every attempt's current row from the usage store (read-only, stdlib)."""
     try:
-        raw = ledger.read_text(encoding="utf-8")
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        records = conn.execute(
+            "SELECT attempt_id, root_task_id, kind, state, prompt_tokens, completion_tokens, cached_tokens,"
+            " cost_usd, cost_final FROM attempts").fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    names = ("attempt_id", "root_task_id", "kind", "state", "prompt_tokens", "completion_tokens",
+             "cached_tokens", "cost_usd", "cost_final")
+    rows = [dict(zip(names, record)) for record in records]
+    for row in rows:
+        row["cost_final"] = bool(row["cost_final"])
+    return rows
+
+
+def _journal_final_rows(path: Path) -> list[dict[str, Any]] | None:
+    """The last row of every attempt in a pre-store journal; ``None`` when torn."""
+    try:
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
     final_by_attempt: dict[str, dict[str, Any]] = {}
@@ -125,10 +133,36 @@ def _physical_metrics(agent_dir: Path) -> dict[str, Any] | None:
         if not isinstance(row, dict) or not str(row.get("attempt_id") or ""):
             return None
         final_by_attempt[str(row["attempt_id"])] = row
+    return list(final_by_attempt.values())
+
+
+def _physical_metrics(agent_dir: Path) -> dict[str, Any] | None:
+    """Replay final physical attempts for this trial's root task.
+
+    The physical-attempt ledger is the monetary/token authority.  A corrupt or
+    quarantined ledger is never partially projected; callers then use the
+    legacy events + run-summary fallback for pre-ledger artifacts.
+    """
+    agent_dir = Path(agent_dir)
+    state_dir = agent_dir / "ouroboros-data" / "state"
+    if (state_dir / "usage_attempts.quarantine.jsonl").exists():
+        return None
+    summary = _read_json(agent_dir / "ouroboros-run-summary.json")
+    root_task_id = str(summary.get("task_id") or "").strip()
+    if not root_task_id:
+        return None
+    if (state_dir / "usage.sqlite").is_file():
+        final_rows = _store_final_rows(state_dir / "usage.sqlite")
+    elif (state_dir / "usage_attempts.jsonl").is_file():
+        final_rows = _journal_final_rows(state_dir / "usage_attempts.jsonl")
+    else:
+        return None
+    if final_rows is None:
+        return None
 
     rows = [
         row
-        for row in final_by_attempt.values()
+        for row in final_rows
         if str(row.get("root_task_id") or "") == root_task_id
         and str(row.get("kind") or "attempt") not in {"legacy_metadata", "legacy_delta"}
     ]

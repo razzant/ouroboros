@@ -263,15 +263,44 @@ def test_config_sha256_is_secret_free_and_key_independent():
 # The run-wide budget ledger
 # --------------------------------------------------------------------------- #
 
-def test_lane_spend_sums_the_settled_product_ledger_and_counts_unknown_costs(tmp_path):
-    """rc.15 run3: telemetry summed 114.81, the product ledger 141.63 (skill review, advisory, synthesis write no row)."""
-    (state := tmp_path / "data" / "state").mkdir(parents=True)
-    rows = [{"state": "settled", "cost_final": True, "cost_usd": 1.5}, {"state": "settled", "cost_final": True, "cost_usd": 0.25},
-            {"state": "settled", "cost_final": True, "cost_usd": None}, {"state": "settled", "cost_final": False, "cost_usd": 99.0},
-            {"state": "pending", "cost_usd": 99.0}, {"state": "settled", "cost_final": True, "cost_usd": True}, "not json"]
-    (state / "usage_attempts.jsonl").write_text("\n".join(r if isinstance(r, str) else json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    assert run_live_lanes.lane_spend(tmp_path / "data") == (1.75, 2)
+def test_lane_spend_reads_the_usage_store_of_a_store_era_lane(tmp_path):
+    from ouroboros import usage_accounting as ua
+    from ouroboros import usage_store
+
+    data = tmp_path / "data"
+    (data / "state").mkdir(parents=True)
+    for cost, final in ((1.5, True), (0.25, True), (None, True), (99.0, False)):
+        held = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", drive_root=data, task_id="t",
+                                                    root_task_id="t", reservation_usd=0.0, global_limit_usd=1000.0))
+        ua.mark_dispatched(held)
+        ua.settle_attempt(held, {}, cost_usd=cost, cost_final=final)
+    ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", drive_root=data, task_id="t",
+                                         root_task_id="t", reservation_usd=99.0, global_limit_usd=1000.0))
+    usage_store.forget(data)
+    assert run_live_lanes.lane_spend(data) == (1.75, 0)  # an unknown price is never stored final
     assert run_live_lanes.lane_spend(tmp_path / "absent") == (0.0, 0)
+
+
+def test_lane_spend_of_a_journal_era_seed_is_its_journal_never_zero(tmp_path):
+    """``--seed`` may name a commit before the store: that lane writes the journal, and the run-wide budget must see
+    its spend (a zero would release the reservation and admit another paid attempt past the cap)."""
+    data = tmp_path / "data"
+    (data / "state").mkdir(parents=True)
+    rows = [{"attempt_id": "a", "state": "reserved", "cost_usd": None},
+            {"attempt_id": "a", "state": "settled", "cost_final": True, "cost_usd": 0.5},
+            {"attempt_id": "b", "state": "settled", "cost_final": True, "cost_usd": 0.25},
+            {"attempt_id": "c", "state": "settled", "cost_final": True, "cost_usd": None},
+            {"attempt_id": "d", "state": "settled", "cost_final": False, "cost_usd": 9.0}]
+    (data / "state" / "usage_attempts.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert run_live_lanes.lane_spend(data) == (0.75, 1)
+    # Through the run-wide ledger: the settled journal-era lane's $0.75 stays spent, so a second $1 attempt under
+    # a $1 cap is refused instead of being admitted against a zero.
+    budget = run_live_lanes.RunBudget(cap_usd=1.0, per_task_usd=1.0)
+    assert budget.admit(("SW1", 1), 1, data, dispatch_index=0)[0] is True
+    budget.settle(("SW1", 1))  # the lane finished: its durable spend replaces its reservation
+    admitted, facts = budget.admit(("SW1", 2), 1, tmp_path / "next", dispatch_index=1)
+    assert admitted is False and facts["spent_usd"] == 0.75
 
 
 def _ask(budget, job, root_tasks, root, waits: list | None = None, *, index: int = 0):
@@ -1052,8 +1081,7 @@ def test_commit_refusal_facts_name_every_typed_refusal():
     ledger = {"attempts": [
         {"attempt": 1, "phase": "preflight", "status": "blocked", "block_reason": "tests_preflight_blocked"},
         {"attempt": 2, "phase": "blocking_review", "status": "blocked", "block_reason": "scope_blocked"},
-        {"attempt": 3, "phase": "late_wait", "status": "reviewing", "block_reason": "review_late_result_pending"}],
-        "advisory_runs": [{"status": "stale"}, {"status": "bypassed"}]}
+        {"attempt": 3, "phase": "late_wait", "status": "reviewing", "block_reason": "review_late_result_pending"}]}
     tools = [
         {"tool": "preflight_review", "status": "ok",
          "result_preview": '{\n  "status": "preflight_blocked",\n  "error": "⚠️ PREFLIGHT_BLOCKED: VERSION is not in scope'},
@@ -1065,7 +1093,7 @@ def test_commit_refusal_facts_name_every_typed_refusal():
     assert facts["refusal_codes"] == ["PREFLIGHT_BLOCKED", "REVIEW_PENDING", "SCOPE_REVIEW_BLOCKED", "TESTS_PREFLIGHT_BLOCKED"]
     assert [a["block_reason"] for a in facts["commit_attempts"]] == [
         "tests_preflight_blocked", "scope_blocked", "review_late_result_pending"]
-    assert facts["advisory_run_statuses"] == ["stale", "bypassed"]
+    assert "advisory_run_statuses" not in facts
     assert facts["review_tool_calls"][1] == {"tool": "commit_reviewed", "status": "blocked", "code": "TESTS_PREFLIGHT_BLOCKED"}
     assert facts["terminal_status"] == "failed" and facts["terminal_reason_code"] == "budget_exhausted"
 
@@ -1086,6 +1114,8 @@ def test_sm1_changes_the_shared_palette_for_both_documents():
     commit = next(s for s in script if s.get("tool") == "commit_reviewed")["arguments"]
     assert commit["paths"] == written and "commit_message" in commit
     assert not any(key.startswith("skip_") for key in commit), "the stub rehearsal takes the full user path like the paid prompt"
+    # Decision 3A: the preflight is the author's optional choice, never a mandatory step of the path.
+    assert "preflight_review" not in prompt and not any(s.get("tool") == "preflight_review" for s in script)
     text = writes[0]["arguments"]["content"]
     original = (REPO_ROOT / scenarios.SM1_CSS_PATH).read_text(encoding="utf-8")
     assert scenarios.accent_value(text) == scenarios.SM1_NEW_ACCENT
@@ -1103,7 +1133,7 @@ def test_sm1_changes_the_shared_palette_for_both_documents():
 def test_sm1_stub_bumps_the_release_carriers_through_the_sync_ssot(tmp_path):
     """The stub's bump is a strictly-greater release version whose carriers come from
     ``release_sync`` (no hand list) and pass the product's own release admission gate; the
-    acceptance's advisory-row and vision-evidence readers tell the real rows from the audited ones."""
+    acceptance's vision-evidence reader tells the real rows from the others."""
     from ouroboros.commit_admission import release_metadata_preflight
     from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS
 
@@ -1132,9 +1162,6 @@ def test_sm1_stub_bumps_the_release_carriers_through_the_sync_ssot(tmp_path):
     assert scenarios.sm1_next_version("7.0.0-rc.14", {"v7.0.0-rc.15", "v7.0.0-rc.16"}) == "7.0.0-rc.17"
     assert scenarios.sm1_next_version("7.0.0", {"v7.0.1"}) == "7.0.2"
     assert not scenarios.version_is_bumped("7.0.0-rc.14", "7.0.0-rc.14") and not scenarios.version_is_bumped("7.0.0-rc.14", "7.0.0-rc.13")
-    assert scenarios.advisory_run_is_real({"status": "fresh"}) and scenarios.advisory_run_is_real({"status": "stale", "raw_result": "[]"})
-    assert not scenarios.advisory_run_is_real({"status": "bypassed", "bypass_reason": "skip_advisory_review"})
-    assert not scenarios.advisory_run_is_real({"status": "stale", "raw_result": "⚠️ ADVISORY_SKIPPED: prompt too large"})
     rows = [{"tool": "vlm_query"}, {"tool": "browser_action", "args": {"action": "click"}}, {"tool": "read_file"}]
     assert [r["tool"] for r in scenarios.vision_evidence_rows(rows)] == ["vlm_query"]
 

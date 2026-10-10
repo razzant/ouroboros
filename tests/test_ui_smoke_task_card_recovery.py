@@ -113,12 +113,12 @@ def test_bound_direct_task_header_and_review_cost_survive_reopen(
                 card = page.locator(card_selector)
                 # The subject is a DIRECT turn with narration rows: content, so
                 # the block wears the task-card chrome (DESIGN.md "Conversation
-                # activity block", owner decision 16.09) — a visible Working
+                # activity block", owner decision 16.09) — a visible Thinking
                 # chip, the coined title, a running indicator while it runs —
                 # and, inside a Project panel, no conversion control.
                 expect(card.locator("[data-live-phase]")).to_have_attribute("data-phase", "working", timeout=10_000)
                 expect(card.locator("[data-live-phase]")).to_be_visible()
-                expect(card.locator("[data-live-phase]")).to_have_text("Working")
+                expect(card.locator("[data-live-phase]")).to_have_text("Thinking")
                 expect(card.locator("[data-live-title]")).to_have_text("Analyze greeting context")
                 expect(card.locator("[data-turn-into-project]")).to_have_count(0)
                 expect(card.locator("[data-live-typing]")).to_be_visible()

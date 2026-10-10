@@ -61,9 +61,11 @@ Object.defineProperty(ElementStub.prototype, 'innerHTML', {
 const TS = '2026-09-15T12:00:00Z';
 const TASK = 'turn-a';
 
-function fixture(history = [], detail = { active_direct_turns: [] }) {
+function fixture(history = [], detail = { active_direct_turns: [] }, chatId = 1) {
     let historyReads = 0;
+    const requests = [];
     const env = installDom(async (url) => {
+        requests.push(String(url));
         const isHistory = String(url).startsWith('/api/chat/history');
         if (isHistory) historyReads++;
         return { ok: true, json: async () => isHistory
@@ -76,28 +78,190 @@ function fixture(history = [], detail = { active_direct_turns: [] }) {
         ws: { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
             isConnected: () => true, send() {} },
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
-        updateUnreadBadge() {}, chatId: 1, idPrefix: 'chat', mountEl: env.mount,
+        updateUnreadBadge() {}, chatId, idPrefix: 'chat', mountEl: env.mount,
         stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
     });
     const messages = document.byId.get('chat-messages');
     const nodes = (node) => [node, ...(node?.children || []).flatMap(nodes)];
     return {
-        instance, messages, historyReads: () => historyReads,
+        instance, messages, requests, historyReads: () => historyReads,
         card: (id = TASK) => walkCard(messages, id),
         rows: (id = TASK) => nodes(walkCard(messages, id)).filter((n) => n.classList?.contains('chat-live-line')),
         meta: (id = TASK) => walkCard(messages, id)?.querySelector('[data-live-meta]')?.innerHTML || '',
         status: () => env.mount.querySelector('.status-badge')?.textContent,
         typingHidden: () => messages.children
             .find((node) => String(node.className || '').includes('typing-bubble'))?.style.display === 'none',
-        emit: (type, row) => handlers.get(type)({ chat_id: 1, ts: TS, ...row }),
-        log: (row) => handlers.get('log')({ chat_id: 1, data: { task_id: TASK, ts: TS, ...invocation(row), ...row } }),
+        emit: (type, row) => handlers.get(type)({ chat_id: chatId, ts: TS, ...row }),
+        log: (row) => handlers.get('log')({ chat_id: chatId, data: { task_id: TASK, ts: TS, ...invocation(row), ...row } }),
         census: (rows) => instance.hydrateStateSnapshot({
             active_chat_activities: rows, active_chat_activities_complete: true, supervisor_ready: true,
         }, Infinity, ++generation),
         close() { instance.destroy(); restoreDom(env.prior); },
     };
 }
+
+const toolCarrier = (evidence, extra = {}) => ({ task_id: TASK, role: 'system', system_type: 'task_evidence',
+    text: '', ts: TS, narration: false, tool_evidence: evidence, ...extra });
+
+test('inert tool carrier restores a speechless card without invented narration or activity', async () => {
+    const f = fixture([toolCarrier({ observations: [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }] })]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        assert.ok(f.card());
+        assert.match(f.rows().map(row => row.innerHTML).join(' '), /1 tool call/);
+        assert.equal(f.card().querySelector('[data-live-phase]').hidden, true, 'history alone confers no liveness');
+        assert.equal(f.card().querySelector('[data-resume-run]'), null);
+        assert.equal(f.card().querySelector('[data-cancel-run]'), null);
+        assert.equal(f.card().querySelector('[data-live-title]').textContent, '');
+        assert.equal(f.messages.children.filter(row => row.classList.contains('chat-bubble')
+            && !row.classList.contains('typing-bubble')).length, 0);
+    } finally { f.close(); }
+});
+
+test('empty incomplete tool evidence stays visible and never reads as zero calls', async () => {
+    const f = fixture([toolCarrier({ observations: [], legacy: { calls: 0 }, coverage: {
+        source: 'logs/tools.jsonl', live_size: 0, live_window: 0, archives_bounded: true,
+        archives: 3, archives_available: 4, shown: 0, matched: 0, gaps: ['unreadable_source'] } })]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        assert.ok(f.card());
+        const text = f.rows().map(row => row.innerHTML).join(' ');
+        assert.match(text, /Tool history incomplete/);
+        assert.doesNotMatch(text, /0 tool calls/);
+        f.census([{ activity_id: TASK, chat_id: 1, kind: 'managed_task', phase: 'working' }]);
+        assert.equal(f.historyReads(), 1, 'census updates never replay tool history');
+    } finally { f.close(); }
+});
+
+test('a bounded physical window still settles all identified calls of a known task total', () => {
+    const record = {};
+    const view = noteToolHostMetrics(record, { calls: 1, errors: 1, evidence: { observations: [
+        { key: 'one', tool: 'read_file', fact: 'wait_ended', status: 'unknown' },
+        { key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' },
+    ], coverage: { live_size: 1000, live_window: 500, source: 'logs/tools.jsonl' } } });
+    assert.equal(view.errors, 0, 'verified late settlement retires the provisional wait error');
+    assert.match(view.headline, /wait ended/);
+    assert.doesNotMatch(view.fullBody, /incomplete/);
+    assert.match(view.fullBody, /Only recent tool history was read/);
+    assert.doesNotMatch(view.headline, /outcome unknown/);
+    assert.equal(record.toolFold.coverage.live_window, 500, 'physical read bounds remain separate raw evidence');
+});
+
+for (const archives of [0, 3, 4, 12]) test(`global tool read bounds preserve settled outcomes and receipt-only visibility: archives=${archives}`, async () => {
+    const coverage = { source: 'logs/tools.jsonl', live_size: 1000, live_window: 500,
+        archives: Math.min(archives, 3), archives_available: archives, archives_bounded: archives > 3, matched: 0, shown: 0 };
+    const record = {};
+    const view = noteToolHostMetrics(record, { calls: 2, evidence: { coverage, observations: ['one', 'two'].map(key =>
+        ({ key, tool: 'route_to_project', fact: 'settled', status: 'ok', receipt: true })) } });
+    assert.equal(view.headline, '2 tool calls');
+    assert.equal(view.receipt, true);
+    assert.match(view.fullBody, /Only recent tool history was read/);
+    const f = fixture([{ role: 'assistant', task_id: TASK, text: 'Hello', ts: TS },
+        toolCarrier({ coverage, observations: [] })]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        assert.equal(f.card(), null, 'ordinary bounded history invents no tool-only card for speech');
+    } finally { f.close(); }
+});
+
+test('positive per-task missing counts and actual read gaps remain visible independently of outcomes', () => {
+    const coverage = { source: 'logs/tools.jsonl', live_size: 10, live_window: 10, shown: 0, matched: 0, archives_bounded: true };
+    const empty = noteToolHostMetrics({}, { calls: 2, evidence: { coverage, observations: [] } });
+    assert.match(empty.headline, /2 tool calls.*outcome unknown/);
+    assert.match(empty.fullBody, /incomplete/);
+    for (const fact of ['started', 'wait_ended']) {
+        const view = noteToolHostMetrics({}, { evidence: { coverage,
+            observations: [{ key: fact, tool: 'read_file', fact, status: 'unknown' }] } });
+        assert.match(view.headline, /outcome unknown/);
+    }
+});
+
+for (const chatId of [1, 1234]) test(`canonical owner wait settles without a Project-pointer dependency in room ${chatId}`, async () => {
+    const f = fixture([toolCarrier({ observations: [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }] },
+        { chat_id: chatId })], { active_direct_turns: [] }, chatId);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const row = { activity_id: TASK, chat_id: chatId, kind: 'managed_task', phase: 'working',
+            required_question_unavailable: true, owner_wait: { owner_wait_state: 'waiting', quiz_state: 'open' } };
+        f.census([row]);
+        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Waiting for your answer');
+        assert.equal(f.status(), 'Waiting for your answer');
+        for (const owner_wait of [{ owner_wait_state: 'waiting', quiz_state: 'answered' },
+            { owner_wait_state: 'resumed', quiz_state: 'open' }, { wait_ended_at: TS, quiz_state: 'open' }]) {
+            f.census([{ ...row, owner_wait }]);
+            assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Working');
+            assert.equal(f.status(), 'Working...');
+        }
+        f.census([{ ...row, owner_wait: undefined }]);
+        assert.equal(f.status(), 'Activity unconfirmed');
+        f.census([{ ...row, owner_wait: { quiz_state: 'unknown' }, required_question_unavailable: false }]);
+        assert.equal(f.status(), 'Activity unconfirmed', 'unreadable wait facts do not imply resumed work');
+        f.census([{ ...row, phase: 'budget_paused', pause_cause: 'sleep' }]);
+        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Paused · sleep');
+        f.census([{ ...row, owner_wait: undefined, required_question_unavailable: false }]);
+        assert.equal(f.status(), 'Working...', 'no quiz evidence invents no wait');
+    } finally { f.close(); }
+});
+
+test('ordinary unfinished speech cannot settle the evidence card', async () => {
+    const f = fixture([
+        { role: 'assistant', task_id: TASK, text: 'I have started reading', ts: TS, task_phase: 'unfinished' },
+        toolCarrier({ observations: [{ key: 'one', tool: 'read_file', fact: 'started', status: 'unknown' }] },
+            { task_phase: 'unfinished' }),
+    ]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        assert.equal(f.card().dataset.finished, '0');
+        assert.equal(f.card().querySelector('[data-live-phase]').hidden, true);
+        f.census([{ activity_id: TASK, chat_id: 1, kind: 'managed_task', phase: 'queued' }]);
+        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Queued');
+        assert.equal(f.status(), 'Queued...');
+    } finally { f.close(); }
+});
+
+test('current confirmed pause exposes direct Resume with its cause and keeps refusal visible', async () => {
+    const f = fixture([toolCarrier({ observations: [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }] })]);
+    try {
+        document.body = new ElementStub('body', document);
+        await f.instance.refreshHistory({ revision: 1 });
+        const row = { activity_id: TASK, chat_id: 1, kind: 'direct_chat', phase: 'budget_paused', pause_cause: 'owner' };
+        f.census([row]);
+        const button = f.card().querySelector('[data-resume-run]');
+        assert.ok(button);
+        assert.equal(button.textContent, 'Resume');
+        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Paused · owner pause');
+        await button.listeners.get('click')[0]({ stopPropagation() {} });
+        assert.equal(f.requests.filter(url => url.endsWith(`/tasks/${TASK}/resume`)).length, 1);
+        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Paused · owner pause', 'a refusal invents no Running state');
+        for (const phase of ['budget_pausing', 'queued', 'working', 'unknown']) {
+            f.census([{ ...row, phase }]);
+            assert.equal(f.card().querySelector('[data-resume-run]'), null, phase);
+            assert.ok(f.card().querySelector('[data-cancel-run]'), `${phase}: positive current root remains stoppable`);
+        }
+        f.census([]);
+        assert.equal(f.card().querySelector('[data-cancel-run]'), null, 'complete census absence revokes the new authority');
+        await button.listeners.get('click')[0]({ stopPropagation() {} });
+        assert.equal(f.requests.filter(url => url.endsWith(`/tasks/${TASK}/resume`)).length, 1, 'detached stale button cannot resume');
+    } finally { f.close(); }
+});
+
+test('required answer, unavailable wait, and parallel active work keep separate header truth', async () => {
+    const f = fixture([toolCarrier({ observations: [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }] })]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const row = { activity_id: TASK, chat_id: 1, kind: 'managed_task', phase: 'working',
+            required_question: { owner_wait_state: 'waiting', quiz_state: 'open' } };
+        f.census([row]);
+        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Waiting for your answer');
+        assert.equal(f.status(), 'Waiting for your answer');
+        f.census([row, { activity_id: 'another', chat_id: 1, kind: 'managed_task', phase: 'working' }]);
+        assert.equal(f.status(), 'Working...', 'one waiting task cannot hide another task working');
+        f.census([{ ...row, required_question: null, required_question_unavailable: true }]);
+        assert.equal(f.card().querySelector('[data-live-phase]').textContent, 'Activity unconfirmed');
+        assert.equal(f.status(), 'Activity unconfirmed');
+    } finally { f.close(); }
+});
 
 const direct = (id = TASK) => [{ activity_id: id, chat_id: 1, kind: 'direct_chat', phase: 'thinking' }];
 const managed = (id = TASK) => [{ activity_id: id, chat_id: 1, kind: 'managed_task', phase: 'working' }];
@@ -304,6 +468,39 @@ test('a child frame that outruns the first history load leaves no root control i
         assert.ok(own?.querySelector('[data-turn-into-project]'), 'the root holds its conversion on its own row');
     } finally { f.close(); }
 });
+
+for (const replay of [false, true]) {
+    test(`optional child roles keep neutral titles, separate models and twin ids (${replay ? 'replay' : 'live'})`, async () => {
+        const children = [
+            ['omitted-child', {}, 'Subagent'],
+            ['null-child', { subagent_role: null }, 'Subagent'],
+            ['empty-child', { subagent_role: '' }, 'Subagent'],
+            ['spaces-child', { subagent_role: ' \t ' }, 'Subagent'],
+            ['named-child', { subagent_role: 'interface reviewer' }, 'interface reviewer'],
+            ['historic-child', { subagent_role: 'researcher' }, 'researcher'],
+        ];
+        const frames = children.map(([id, role]) => ({
+            role: 'system', system_type: 'subagent_started', is_progress: true,
+            text: `Subagent ${id} running.`, content: `Subagent ${id} running.`,
+            chat_id: 1, ts: TS, task_id: id, subagent_task_id: id,
+            subagent_event: 'running', parent_task_id: TASK, root_task_id: TASK,
+            delegation_role: 'subagent', model: 'openai/gpt-5.6-sol', ...role,
+        }));
+        const f = fixture(replay ? frames : []);
+        try {
+            if (replay) await f.instance.refreshHistory({ revision: 1 });
+            else for (const frame of frames) f.emit('chat', frame);
+            for (const [id, , role] of children) {
+                const card = f.card(id);
+                assert.ok(card, `child ${id} is rendered`);
+                const title = role === 'Subagent' ? `${role} (${id.slice(0, 8)})` : role;
+                assert.equal(card.querySelector('[data-live-title]').textContent, title);
+                assert.match(f.meta(id), /Agent model: gpt-5\.6-sol/);
+                assert.equal(card.dataset.parentTaskId, TASK);
+            }
+        } finally { f.close(); }
+    });
+}
 
 test('a wake-up is an ordinary direct block: an empty frame mints nothing, a tool call mints the block', () => {
     const f = fixture();

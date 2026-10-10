@@ -1535,7 +1535,7 @@ wheels = [
 
 [[package]]
 name = "ouroboros"
-version = "7.5.1"
+version = "7.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },

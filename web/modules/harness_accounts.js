@@ -39,6 +39,8 @@
 // Pure helpers up top are node-tested without a DOM.
 
 import { apiFetch } from './api_client.js';
+import { createAccountResourcesController, resourcePanelId, resourceReadGap,
+    resourceSummary, targetFor } from './account_resources.js';
 import {
     FACET_ACCOUNTS,
     FACET_CATALOG,
@@ -65,6 +67,7 @@ import {
 import { openConfirmDialog } from './confirm_dialog.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import { createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
+import { createHarnessMaintenanceController } from './harness_maintenance.js';
 import { formatRelativeAge } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
@@ -180,6 +183,8 @@ export function quotaSummary(snapshots, harnessId, subjectId = '',
         rows = freshRowsFor(alias);
     }
     let worst = null;
+    // A fully used ratio without a valid future reset is non-blocking and shown as
+    // "availability not proven", unless an explicit active cooldown is in effect.
     // The runtime's own bar, per snapshot: spent when a constraint is cooling down OR
     // its window is fully used with a future reset — ANY constraint, not just the highest
     // ratio. Reading exhaustion off `worst` alone hid a cooling constraint whenever
@@ -191,7 +196,7 @@ export function quotaSummary(snapshots, harnessId, subjectId = '',
     const scopedSpent = [];
     for (const snap of rows) {
         for (const constraint of snap.constraints || []) {
-            const used = Number(constraint.used_ratio);
+            const used = constraint.used_ratio;
             const fact = quotaConstraintFact(constraint, nowMs);
             const spent = fact.exhausted;
             const models = Array.isArray(constraint.applies_to_models)
@@ -214,7 +219,7 @@ export function quotaSummary(snapshots, harnessId, subjectId = '',
                 exhaustedResetsAt = fact.resetsAt;
             }
             unknown ||= fact.unknown;
-            if (!Number.isFinite(used)) continue;
+            if (typeof used !== 'number' || !Number.isFinite(used)) continue;
             if (!worst || used > worst.used) {
                 worst = { used, resetsAt: fact.unknown ? ''
                     : String(constraint.resets_at || constraint.cooldown_until || '') };
@@ -352,12 +357,8 @@ export function daemonAnswered(payload) {
     return STATUS_FACETS.some((facet) => facetReadState(payload, facet) === READ_OK);
 }
 
-// The Refresh button's honest label. It only ever RE-READS while the daemon is
-// alive, but with a sleeping daemon a plain re-read returns the same nothing
-// forever — so there it becomes an explicit owner action that STARTS the
-// daemon, and the label says so rather than hiding the side effect. ONE
-// predicate behind BOTH the label and the click, so they cannot drift apart
-// again (they were written separately once, and did).
+// Refresh updates resources while the daemon is alive. For a sleeping daemon,
+// the same predicate gives both the button and its handler an explicit start.
 export function refreshActionKind(payload) {
     return daemonAnswered(payload) ? 'refresh' : 'wake';
 }
@@ -384,6 +385,47 @@ function facetGapNames(reads) {
 }
 
 export function daemonStatusLine(payload, { checking = false, reads = null } = {}) {
+    return withEngineFacts(daemonBaseStatusLine(payload, { checking, reads }), payload);
+}
+
+// The engine's last stop and measured heap ride on whichever line the banner
+// finally shows: a refused facet read must not hide them (it is exactly when
+// the daemon misbehaves that they matter).
+function withEngineFacts(line, payload) {
+    const facts = engineFactsPhrase(payload);
+    if (!line || !facts || line.text.includes(facts)) return line;
+    return { ...line, text: `${line.text} · ${facts}` };
+}
+
+function engineFactsPhrase(payload) {
+    const daemon = payload?.daemon || {};
+    if (daemon.ownership_problem) return '';
+    const facts = [];
+    const exit = daemon.last_exit;
+    if (exit) {
+        const cause = String(exit.classification || 'unclassified').replaceAll('_', ' ');
+        const ending = exit.exit_signal != null ? ` (signal ${exit.exit_signal})`
+            : exit.exit_code != null ? ` (exit code ${exit.exit_code})` : '';
+        const phase = exit.phase === 'startup' ? ' during startup' : exit.phase ? ` while ${exit.phase}` : '';
+        const seen = typeof exit.observed_at === 'string' && exit.observed_at.length >= 16
+            ? `, seen ${exit.observed_at.slice(0, 16).replace('T', ' ')}${/(Z|[+-]00:?00)$/.test(exit.observed_at) ? ' UTC' : ''}` : '';
+        const when = exit.engine_version || seen ? ` · engine ${exit.engine_version || 'unknown'}${seen}` : '';
+        facts.push(`Last stop: ${cause}${phase}${ending}${when}`);
+    }
+    const memory = daemon.memory;
+    const measured = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const gib = (value) => (value / 2 ** 30).toFixed(1);
+    if (memory && measured(memory.heapLimitBytes)) {
+        if (measured(memory.heapUsedBytes)) {
+            facts.push(`Heap ${gib(memory.heapUsedBytes)} of ${gib(memory.heapLimitBytes)} GiB; headroom ${gib(memory.heapLimitBytes - memory.heapUsedBytes)} GiB`);
+        } else {
+            facts.push(`Heap limit ${gib(memory.heapLimitBytes)} GiB; use unknown`);
+        }
+    }
+    return facts.join(' · ');
+}
+
+function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) {
     const daemon = payload?.daemon || {};
     const runtime = daemon.runtime || {};
     const runtimeState = String(runtime.state || '');
@@ -456,18 +498,9 @@ export function daemonStatusLine(payload, { checking = false, reads = null } = {
         return { tone: 'muted', explainsUnread: true, text: 'No accounts connected yet. Connect installs Claudexor and starts Ouroboros’s own agent daemon automatically.' };
     }
     if (status === 'stale') {
-        // NOT a warning: the daemon is LAZY by design (the status read never
-        // spawns it), so "home exists, nothing answering" is the ordinary idle
-        // state, not a fault. Lead with what is true and what happens next; a
-        // genuine RUNTIME fault renders through the `error` branch above.
-        // Disclosed residual (both review lenses, 2026-08-08): `stale` is also
-        // what a CRASHED daemon lands in — the state machine cannot tell the two
-        // apart (the detail lives only in last_error, which the warn-toned line
-        // never showed either), so the only thing a crash loses here is the
-        // alarming tone. The sentence stays true for it: ensure_running restarts
-        // a dead daemon on the next login or delegated run, and a crash mid-run
-        // surfaces through that run's own typed failure, not this panel. Hence
-        // no "yet" — that word would claim it had never started.
+        // An idle owned home and an observed crash share this liveness state.
+        // daemonStatusLine appends any saved exit fact without changing tone;
+        // the next explicit wake or delegated run still owns restart policy.
         const version = runtime.version ? ` ${runtime.version}` : '';
         return { tone: 'muted', explainsUnread: true, text: `Claudexor${version} is installed; the agent daemon is not running. It starts automatically on the next login or delegated run.` };
     }
@@ -616,7 +649,7 @@ export function quotaSubjectAliases(row, payload) {
     return row.profile_id === `${row.harness}-default` ? [''] : [];
 }
 
-export function accountMetaLine(row, payload, { quotaRead = READ_OK, nowMs = Date.now() } = {}) {
+export function accountMetaLine(row, payload, { quotaRead = READ_OK, nowMs = Date.now(), action = {} } = {}) {
     // Line 2: everything that is NOT the account itself, in human words and at
     // muted ink. Order is the owner's — how much of the window is left, which
     // plan, who it is, when we last checked. (The former "Managed by the X
@@ -630,9 +663,11 @@ export function accountMetaLine(row, payload, { quotaRead = READ_OK, nowMs = Dat
         // its login is.
         parts.push('disabled — excluded from rotation');
     }
-    parts.push(quotaSummary(payload?.quota || [], row.harness, row.profile_id,
+    const resources = resourceSummary(row, payload, { known: quotaRead === READ_OK, action });
+    parts.push(resourceReadGap(action) ? resources : quotaSummary(payload?.quota || [], row.harness, row.profile_id,
         { quotaRead, nowMs, fallbackSubjectIds: quotaSubjectAliases(row, payload),
           absences: payload?.quota_absences || [] }).label);
+    if (!resourceReadGap(action) && resources) parts.push(resources);
     const identity = row.identity || {};
     if (identity.plan) parts.push(String(identity.plan));
     // The email is metadata only while it is not already the row's name.
@@ -839,8 +874,8 @@ export function serviceBannerLine(store, { wakeError = '', wakeBusy = false } = 
     // directly printed "could not be read" and dropped it.
     const states = new Set(bad.map((facet) => reads[facet]));
     if (bad.length === 3 && states.size === 1) {
-        return faultOutranksReassurance(service,
-            store.unavailableNote(bad[0], { subject: 'agents, accounts and limits' }));
+        return withEngineFacts(faultOutranksReassurance(service,
+            store.unavailableNote(bad[0], { subject: 'agents, accounts and limits' })), store.snapshot);
     }
     // A PARTIAL gap: name EVERY facet that could not be read — one sentence per
     // distinct way they failed — and let the closing reassurance cover only the
@@ -870,7 +905,8 @@ export function serviceBannerLine(store, { wakeError = '', wakeBusy = false } = 
     // backend stamps `reads` per facet on every answer, so a mixed verdict is
     // an ordinary state — and a muted "some facets were never asked · the rest
     // read normally" must not swallow a runtime that needs repair.
-    return faultOutranksReassurance(service, { tone, text: `${sentences.join(' ')}${tail}` });
+    return withEngineFacts(faultOutranksReassurance(service,
+        { tone, text: `${sentences.join(' ')}${tail}` }), store.snapshot);
 }
 
 export async function removeAccount(harness, profileId, { fetchImpl = apiFetch } = {}) {
@@ -908,6 +944,9 @@ export function removeAccountConfirmBody(name, family) {
         + 'unavailable until you repoint them.';
 }
 
+// A refused deletion stays an error (removeAccount throws). Only a receipt whose
+// disposition is vendor-owned, left unchanged and scoped to the OS user yields the
+// retained-credential warning; any other receipt yields no notice.
 export function vendorCredentialRetainedNotice(receipt, name, family) {
     const disposition = receipt?.vendorCredentialDisposition;
     if (!disposition || disposition.owner !== 'vendor'
@@ -925,6 +964,8 @@ const state = {
     store: claudexorStatus,
     loginCard: null,
     loginFamily: '',
+    resources: null,
+    maintenance: null,
     disposers: [],
     removeError: '',
     removeNotice: '',
@@ -949,10 +990,12 @@ export function renderAgentAccountsSection() {
         <div class="form-section" id="harness-accounts-section">
             <h3>Accounts</h3>
             <div class="settings-section-copy">
-                Subscriptions shared by Models, delegated subagents, and review lanes. Unpinned work
+                Subscriptions shared by Models, delegated subagents, and reviewers. Unpinned work
                 rotates across a family's enabled, signed-in accounts; a disabled account keeps its
                 login and stays out of rotation. Accounts live in Ouroboros's own agent home; your
                 personal logins are never read or imported.
+                Program updates replace files in place and may interrupt new starts. Returning to
+                an earlier version may require a download. Retry a waiting task separately.
             </div>
             <div id="harness-accounts-error" class="settings-inline-status" data-tone="error" hidden></div>
             <div id="harness-accounts-groups" class="agent-family-list"></div>
@@ -965,7 +1008,7 @@ export function renderAgentAccountsSection() {
 }
 
 export function accountRowFacts(row, payload,
-                                { accountsRead = READ_OK, quotaRead = READ_OK, nowMs = Date.now() } = {}) {
+                                { accountsRead = READ_OK, quotaRead = READ_OK, nowMs = Date.now(), action = {} } = {}) {
     // Each projection is gated by ITS OWN facet: the identity claim is the
     // ACCOUNTS read, the window is the QUOTA read, and one lands while the
     // other refuses. The panel used to render both off the retained snapshot
@@ -979,18 +1022,22 @@ export function accountRowFacts(row, payload,
     // than dressing a remembered percentage as current, and it never paints the
     // row red, because the exhausted styling is a claim about RIGHT NOW and the
     // reset it promises may already have happened.
+    if (action.resourceRead) quotaRead = READ_OK;
+    if (action.activity === 'refresh' && action.error) quotaRead = READ_FAILED;
     return {
         badge: verificationBadge(row, { known: accountsRead === READ_OK }),
         quota: quotaSummary(payload?.quota || [], row.harness, row.profile_id,
-            { quotaRead, nowMs, fallbackSubjectIds: quotaSubjectAliases(row, payload),
+            { quotaRead: resourceReadGap(action) ? READ_FAILED : quotaRead,
+              nowMs, fallbackSubjectIds: quotaSubjectAliases(row, payload),
               absences: payload?.quota_absences || [] }),
         name: accountName(row),
-        meta: accountMetaLine(row, payload, { quotaRead, nowMs }),
+        meta: accountMetaLine(row, payload, { quotaRead, nowMs, action }),
     };
 }
 
 function rowHtml(row, payload, facets = {}) {
-    const { badge, quota, name, meta } = accountRowFacts(row, payload, facets);
+    const action = facets.store?.resourceAction?.(targetFor(row)) || {};
+    const { badge, quota, name, meta } = accountRowFacts(row, payload, { ...facets, action });
     const loginAction = rowLoginAction(row, payload);
     // Row ACTIONS follow the engine's own routes, never the row's looks: a
     // named registry row (every row on a unified engine, the named profiles on
@@ -1008,6 +1055,7 @@ function rowHtml(row, payload, facets = {}) {
             </div>
             <div class="harness-account-meta muted">${escapeHtml(meta)}</div>
             <div class="harness-account-actions">
+                <button type="button" class="btn btn-default" data-resources aria-expanded="false" aria-controls="${escapeHtml(resourcePanelId(row))}">▸ Resources</button>
                 <button type="button" class="btn btn-default" data-harness-login>${escapeHtml(loginAction.label)}</button>${rowActions}
             </div>
         </div>
@@ -1026,11 +1074,12 @@ export function harnessFamilyMarkup(group, payload, facets) {
             <div class="agent-family-head">
                 <div class="agent-family-id">
                     <h4>${harnessIdentityMarkup(group.harness, { label: group.label })}</h4>
-                    <span class="ui-status" data-tone="${group.status.tone}">${escapeHtml(group.status.label)}</span>
+                    ${group.maintenanceOnly ? '' : `<span class="ui-status" data-tone="${group.status.tone}">${escapeHtml(group.status.label)}</span>`}
                     ${nextUp ? `<span class="ui-status" data-tone="muted" data-next-up>${escapeHtml(nextUp)}</span>` : ''}
                 </div>
-                <button type="button" class="btn btn-default" data-family-add>${escapeHtml(familyActionLabel(group, payload))}</button>
+                ${group.maintenanceOnly ? '' : `<button type="button" class="btn btn-default" data-family-add>${escapeHtml(familyActionLabel(group, payload))}</button>`}
             </div>
+            <div data-family-maintenance="${escapeHtml(group.harness)}"></div>
             <div class="agent-family-login" data-family-login="${escapeHtml(group.harness)}"></div>
             <div class="agent-family-rows">${body}</div>
         </section>
@@ -1061,10 +1110,11 @@ function renderRows() {
     // flight it says that instead of inviting a second one.
     const refreshEl = document.getElementById('btn-harness-refresh');
     if (refreshEl) {
+        const resourceBusy = state.store.resourceAction?.(null).busy;
         refreshEl.textContent = state.wakeBusy
             ? 'Starting the agent daemon…'
-            : refreshActionLabel(state.store.snapshot);
-        refreshEl.disabled = Boolean(state.wakeBusy);
+            : resourceBusy ? 'Refreshing…' : refreshActionLabel(state.store.snapshot);
+        refreshEl.disabled = Boolean(state.wakeBusy || resourceBusy);
     }
     if (!host) return;
     const errorBox = document.getElementById('harness-accounts-error');
@@ -1081,12 +1131,19 @@ function renderRows() {
     // innerHTML rebuild destroys a focused paste-code/name input before the
     // card's own render can see it. The capture must therefore wrap the
     // whole rebuild: same SSOT helper, one level up.
-    preserveCardFocus(host, () => {
-        host.innerHTML = accountGroups(payload, {
+    const repaint = () => preserveCardFocus(host, () => {
+        const groups = accountGroups(payload, {
             accountsRead,
             catalogKnown: state.store.catalogKnown,
-        })
-            .map((group) => harnessFamilyMarkup(group, payload, { accountsRead, quotaRead })).join('');
+        });
+        for (const harness of state.maintenance?.harnesses || []) {
+            if (!groups.some((group) => group.harness === harness)) groups.push({
+                harness, label: familyLabel(harness, payload, { catalogKnown: state.store.catalogKnown }),
+                rows: [], maintenanceOnly: true,
+            });
+        }
+        host.innerHTML = groups.map((group) => harnessFamilyMarkup(group, payload, { accountsRead, quotaRead, store: state.store })).join('');
+        state.resources?.mount(host, accountRows(payload), payload, quotaRead);
         host.querySelectorAll('[data-harness-login]').forEach((button) => {
             button.addEventListener('click', () => {
                 if (!state.initialized) return;
@@ -1138,7 +1195,10 @@ function renderRows() {
             });
         });
         state.loginCard?.render();
+        state.maintenance?.render();
     });
+    if (state.resources) state.resources.preserve(host, repaint);
+    else repaint();
 }
 
 async function toggleAccountEnabled(harness, profileId, enabled) {
@@ -1220,6 +1280,7 @@ export async function wakeDaemon() {
             : String(result?.error || 'request failed');
     }
     renderRows();
+    void state.maintenance?.refresh({ fresh: true });
 }
 
 // Harness ids are conservative tokens; escape defensively for the attribute
@@ -1264,8 +1325,9 @@ export async function startLogin(harness, profile) {
         ?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
 }
 
-/** Read the shared status once (the Refresh button, and the first paint). */
+/** Read the shared status once for passive consumers and first paint. */
 export function refreshHarnessStatus() {
+    void state.maintenance?.refresh({ fresh: true });
     return state.store.refresh();
 }
 
@@ -1281,14 +1343,14 @@ async function refreshHarnessStatusOnActivation() {
     // the panel can keep useful context.  That retained snapshot is not fresh
     // evidence for an owner-triggered write: a transient outage must never
     // turn yesterday's `stale + ready` into a wake request.
-    if (state.store.error) return null;
+    if (state.store.error) return state.maintenance?.refresh({ fresh: true });
     const daemon = snapshot?.daemon || state.store.snapshot?.daemon || {};
     if (String(daemon.state || '') === 'stale'
         && String(daemon.runtime?.state || '') === 'ready'
         && !daemon.ownership_problem) {
-        return wakeDaemon();
+        await wakeDaemon();
     }
-    return null;
+    return state.maintenance?.refresh({ fresh: true });
 }
 
 /**
@@ -1302,20 +1364,27 @@ export function initHarnessAccounts({ store = claudexorStatus } = {}) {
 async function _init(store) {
     _destroy();
     state.store = store;
+    state.resources = createAccountResourcesController({ store, render: renderRows });
     state.removeError = '';
     state.removeNotice = '';
     state.wakeError = '';
     state.wakeBusy = false;
+    state.maintenance = createHarnessMaintenanceController({
+        host: () => document.getElementById('harness-accounts-groups'),
+        onInventory: renderRows,
+        onSettled: () => state.store.refresh(),
+        visible: () => !document.hidden
+            && document.getElementById('harness-accounts-groups')?.offsetParent != null,
+    });
     ensureLoginCard();
     document.getElementById('btn-harness-refresh')
         ?.addEventListener('click', () => {
             if (!state.initialized) return;
             // A sleeping daemon cannot be re-read into existence: there the
-            // button is the owner's explicit start. Live, it stays a plain
-            // re-read. SAME predicate the LABEL uses (renderRows), so the two
-            // cannot disagree again.
+            // button is the owner's explicit start. Live, it refreshes account
+            // resources, then re-reads status with the same store.
             return refreshActionKind(state.store.snapshot) === 'refresh'
-                ? state.store.refresh()
+                ? refreshAllAccounts()
                 : wakeDaemon();
         });
     // The SHARED surface binding: the visibility predicate that lets this
@@ -1326,7 +1395,10 @@ async function _init(store) {
     // have gone quietly dead on arrival while its comment still promised that
     // a daemon coming up is picked up without a reload.
     state.disposers.push(bindStatusSurface(state.store, {
-        listener: () => renderRows(),
+        listener: (view) => {
+            renderRows();
+            if (!view?.loading) state.maintenance?.poll();
+        },
         elementId: 'harness-accounts-groups',
         onActivate: refreshHarnessStatusOnActivation,
     }));
@@ -1335,8 +1407,20 @@ async function _init(store) {
     // page may not be visible yet, and the panel would sit on "Checking
     // daemon…" until the first tick (#125).
     state.store.refresh();
+    void state.maintenance.refresh();
     renderRows();
     return true;
+}
+
+async function refreshAllAccounts() {
+    void state.maintenance?.refresh({ fresh: true });
+    if (!state.store.refreshResources) return state.store.refresh();
+    if (state.store.resourceAction(null).busy) return;
+    state.removeError = '';
+    const result = await state.store.refreshResources();
+    if (!result) state.removeError = state.store.resourceAction(null).error || 'Account refresh did not complete';
+    else await state.store.refresh();
+    renderRows();
 }
 
 /**
@@ -1354,6 +1438,8 @@ function _destroy() {
         try { dispose(); } catch (err) { /* a broken disposer must not block the rest */ }
     }
     state.initialized = false;
+    state.maintenance?.dispose();
+    state.maintenance = null;
     const card = state.loginCard;
     if (!card) return true;
     card.detach();

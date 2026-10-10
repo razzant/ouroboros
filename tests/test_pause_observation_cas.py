@@ -5,8 +5,8 @@ readiness pass (``sleep_wake``) read the durable pause row, observe custody or
 readiness OUTSIDE the queue lock, then record their observation. A real owner
 Resume (a grant), a grant then its revocation (back to a paused state), or a
 newer pause may land during that observation; the write compares the pause id,
-state AND grant it read, and a lost comparison is a benign stale observation
-that the next pass redoes. Driven through the real Resume/revoke/assignment
+state AND grant it read (a warm park's re-read: its wait id and state), and a
+lost comparison is a benign stale observation that the next pass redoes. Driven through the real Resume/revoke/assignment
 seams, never by rewriting the row by hand, except where a test names a newer
 writer explicitly.
 """
@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _mock_pause_observation
+from tests.test_owner_wait_pool import pool  # noqa: F401
 
 RUNNING_RUN = [{"run_id": "run-1", "state": "running", "stop_outcome": ""}]
 
@@ -244,3 +245,210 @@ def test_sleep_readiness_never_overwrites_a_newer_resume_or_pause(tmp_path, monk
     assert again[0]["ok"] is True and again[0]["grant_generation"] == 2
     row = budget_pause.budget_pause_row(tmp_path, "sleeper")
     assert row["grant"]["grant_id"] != grant_id and row["resume_generation"] == 2
+
+
+def _direct_warm_author(tmp_path, monkeypatch):
+    """A direct root the owner Paused while the run it sent still ran: the actor parks warm."""
+    from ouroboros import delegate_custody as dc
+    from ouroboros import owner_wait
+    from ouroboros.gateways import claudexor as gw
+    from ouroboros.model_wait import TaskModelWait
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from supervisor.owner_pause_control import request_owner_pause
+    from tests.test_direct_chat_turn_owner_control import _live_chat_agent
+
+    queue, state, _workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    write_task_result(tmp_path, "author", STATUS_RUNNING, chat_id=0)
+    _live_chat_agent(monkeypatch, task_id="author")
+    dc.record_started(tmp_path, dc.RunCustody(
+        run_id="run-own", task_id="author", route_id="r", model="m", project_id="p",
+        project_owned=False, root_task_id="author", ledger_root=str(tmp_path)))
+    remote = {"state": "running"}
+
+    class Daemon:
+        def handshake(self, **_kw):
+            return {"compatible": True}
+
+        def cancel_run(self, run_id, reason=""):
+            return {"accepted": True, "status": "accepted"}
+
+        def get_run(self, run_id, **_kw):
+            return {"lastSeq": 3, "summary": {"state": remote["state"], "spendUsd": 0.0}}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: Daemon())
+    assert request_owner_pause("author", request_id="press")["state"] == "requested"
+    ctx, limit = _loop_ctx(tmp_path, "author", direct=True)
+    ctx.pending_events, ctx.current_chat_id = [], 0
+    waiter = TaskModelWait(task={"id": "author", "budget_drive_root": str(tmp_path)},
+                           drive_root=tmp_path, event_queue=None, worker_slot_held=False)
+    waiter.tool_context, ctx.model_wait_context = ctx, waiter
+    ctx.owner_wait_callback = owner_wait.direct_owner_wait
+    return queue, remote, ctx, limit
+
+
+@pytest.mark.parametrize("resume_lands", [False, True])
+def test_warm_park_reread_never_restores_a_resumed_direct_stack(tmp_path, monkeypatch, resume_lands):
+    """The settle tick re-reads a warm direct park's runs off-lock while the actor thread
+    takes the owner's real Resume, writes ``resumed`` and saves newer working state. The
+    stale observation must not put ``waiting`` back: Restart would then retain the old
+    park's source over the newer cognition. Uncontested, the waiting park records it."""
+    import threading
+    import time
+
+    from ouroboros import budget_pause, owner_pause, owner_wait, working_checkpoint
+    from ouroboros.external_runs import EXTERNAL_STOP_CONFIRMED, EXTERNAL_STOP_REQUESTED
+    from ouroboros.task_results import load_task_result
+    from supervisor import owner_pause_control
+    from supervisor.budget_resume import resume_warm_owner_pause_root
+    from supervisor.restart_retention import RETAIN_OWNER_PAUSE, pause_retention
+
+    queue, remote, ctx, limit = _direct_warm_author(tmp_path, monkeypatch)
+    actor, real_observe, real_sleep = threading.current_thread(), budget_pause.observe_task_runs, time.sleep
+    observing, proceed, box = threading.Event(), threading.Event(), {}
+
+    def observe(root, task_id, **kw):  # the tick's custody read, held while the actor moves on
+        observed = real_observe(root, task_id, **kw)
+        if kw.get("reason") == "owner_pause_settlement_check":
+            observing.set()
+            assert proceed.wait(10)
+        return observed
+
+    def tick():
+        box["settled"] = owner_pause_control.settle_requested_owner_pauses(queue, now=100.0)
+
+    def poll(seconds):  # the parked direct actor's poll; other threads sleep for real
+        if threading.current_thread() is not actor or "tick" in box:
+            return real_sleep(min(seconds, 0.01))
+        box["parked"] = load_task_result(tmp_path, "author")["owner_wait"]
+        remote["state"] = "cancelled"  # the run obeys the stop the park requested
+        box["tick"] = threading.Thread(target=tick, daemon=True)
+        box["tick"].start()
+        assert observing.wait(10)
+        if not resume_lands:
+            proceed.set()
+            box["tick"].join(10)
+            box["recorded"] = load_task_result(tmp_path, "author")["owner_wait"]
+            box["retention"] = pause_retention(tmp_path, "author", 1)
+        box["resume"] = resume_warm_owner_pause_root("author")
+        return None
+
+    monkeypatch.setattr(budget_pause, "observe_task_runs", observe)
+    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
+    monkeypatch.setattr(owner_wait.time, "sleep", poll)
+    try:
+        cause = owner_wait.park_owner_pause_warm(limit, ctx, fence=owner_pause.read_fence(tmp_path, "author"),
+                                                 detached=[])
+        assert box["resume"]["ok"] and cause == "control:owner_resume", (box, cause)
+        # The resumed stack works on: its newer cognition lands in the rolling checkpoint.
+        limit.messages.append({"role": "tool", "tool_call_id": "call_b", "content": "done b after resume"})
+        limit.round_idx = 5
+        assert working_checkpoint.save_round(limit, "post_batch")
+    finally:
+        proceed.set()
+        if "tick" in box:
+            box["tick"].join(10)
+    parked = box["parked"]
+    assert parked["state"] == "waiting" and parked["reason"] == "owner_pause"
+    assert [run["state"] for run in parked["owner_pause"]["external_runs"]["runs"]] == [EXTERNAL_STOP_REQUESTED]
+    row = load_task_result(tmp_path, "author")["owner_wait"]
+    if not resume_lands:
+        # Not vacuous: the valid waiting park records the fresh facts, the tree settles,
+        # and that park is Restart's retained source until the owner's Resume.
+        recorded = box["recorded"]
+        assert recorded["state"] == "waiting" and recorded["wait_id"] == parked["wait_id"]
+        assert [run["state"] for run in recorded["owner_pause"]["external_runs"]["runs"]] == [
+            EXTERNAL_STOP_CONFIRMED]
+        assert box["settled"] == ["author"] and box["retention"] == RETAIN_OWNER_PAUSE
+        assert row["state"] == "resumed" and row["resume_reason"] == "control:owner_resume"
+        return
+    handoff = working_checkpoint.prepare_recovery(tmp_path, "author", from_attempt=1, cause="restart")
+    consumers = {"state": row["state"], "warm_paused": owner_pause_control._warm_paused_direct_turn(tmp_path, "author"),
+                 "restart_retains": pause_retention(tmp_path, "author", 1), "recovers": handoff.get("source_kind")}
+    assert consumers == {"state": "resumed", "warm_paused": False, "restart_retains": "",
+                         "recovers": working_checkpoint.SOURCE_WORKING}, consumers
+    assert row["wait_id"] == parked["wait_id"] and row["resume_reason"] == "control:owner_resume"
+    assert row["owner_pause"]["external_runs"] == parked["owner_pause"]["external_runs"], "the stale read wrote nothing"
+    recovered = working_checkpoint.load_recovery(ctx, handoff)
+    assert recovered["messages"][-1]["content"] == "done b after resume" and recovered["round_idx"] == 5
+
+
+@pytest.mark.parametrize("grant_lands", [False, True])
+def test_warm_park_reread_never_rewrites_a_granted_pool_mirror(pool, monkeypatch, grant_lands):  # noqa: F811
+    """The pooled twin. Today the grant and this re-read share the supervisor loop thread;
+    the same identity+state comparison keeps the durable row and its RUNNING mirror on the
+    real grant should they interleave, and never drops a live mirror's own fields."""
+    from ouroboros import budget_pause
+    from ouroboros.task_results import load_task_result
+    from supervisor import owner_pause_control, queue, worker_owner_wait, workers
+    from supervisor.restart_retention import RETAIN_OWNER_PAUSE, pause_retention
+
+    requested = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_requested"}]}
+    confirmed = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_confirmed"}]}
+    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "owner_pause": {"external_runs": requested}}
+    worker_owner_wait.handle_owner_wait({**pool.event, "checkpoint": wait}, workers)
+    assert pool.original.in_q.get_nowait()["phase"] == "parked"
+    with queue._queue_lock:
+        snapshot = {**pool.meta, "owner_wait": dict(pool.meta["owner_wait"])}  # the tick's RUNNING copy
+    assert owner_pause_control.warm_paused_member(snapshot)
+
+    def observe(root, task_id, **kw):
+        # The stack's Resume request lands meanwhile; with ``grant_lands`` the pool grants it.
+        worker_owner_wait.handle_owner_wait(
+            {**pool.event, "phase": "resume", "resume_reason": "control:owner_resume"}, workers)
+        if grant_lands:
+            worker_owner_wait.maintain_owner_wait_capacity()
+            assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
+        return confirmed
+
+    monkeypatch.setattr(budget_pause, "observe_task_runs", observe)
+    owner_pause_control._reread_warm_member(queue, "owner", snapshot)
+    durable, live = load_task_result(pool.root, "owner")["owner_wait"], pool.meta["owner_wait"]
+    if not grant_lands:
+        assert durable["state"] == live["state"] == "waiting"
+        assert durable["owner_pause"]["external_runs"] == live["owner_pause"]["external_runs"] == confirmed
+        assert live["resume_reason"] == "control:owner_resume", "the mirror's pending wake survives"
+        assert pause_retention(pool.root, "owner", 3) == RETAIN_OWNER_PAUSE
+        return
+    consumers = {"durable": durable["state"], "mirror": live["state"],
+                 "warm_paused": owner_pause_control.warm_paused_member(pool.meta),
+                 "restart_retains": pause_retention(pool.root, "owner", 3)}
+    assert consumers == {"durable": "resumed", "mirror": "resumed", "warm_paused": False,
+                         "restart_retains": ""}, consumers
+    assert durable["owner_pause"]["external_runs"] == live["owner_pause"]["external_runs"] == requested
+
+
+@pytest.mark.parametrize("landed", ["newer_park", "terminal"])
+def test_warm_park_reread_drops_only_a_superseded_row(pool, monkeypatch, landed):  # noqa: F811
+    """A newer park is a benign stale observation; a genuine refusal still reaches the tick's warning."""
+    from ouroboros import budget_pause
+    from ouroboros.owner_wait import OwnerWaitSuperseded, set_owner_wait
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor import owner_pause_control, queue, worker_owner_wait, workers
+
+    requested = {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_requested"}]}
+    wait = {**pool.wait, "quiz_id": "", "reason": "owner_pause", "owner_pause": {"external_runs": requested}}
+    worker_owner_wait.handle_owner_wait({**pool.event, "checkpoint": wait}, workers)
+    assert pool.original.in_q.get_nowait()["phase"] == "parked"
+    snapshot = {**pool.meta, "owner_wait": dict(pool.meta["owner_wait"])}
+
+    def observe(root, task_id, **kw):
+        if landed == "newer_park":
+            set_owner_wait(pool.root, "owner", {**snapshot["owner_wait"], "wait_id": "newer"}, expected_wait_id="wait")
+        else:
+            write_task_result(pool.root, "owner", "failed", result="ended meanwhile")
+        return {"custody_read": "ok", "runs": [{"run_id": "run-own", "state": "stop_confirmed"}]}
+
+    monkeypatch.setattr(budget_pause, "observe_task_runs", observe)
+    if landed == "terminal":
+        with pytest.raises(ValueError, match="terminal") as raised:
+            owner_pause_control._reread_warm_member(queue, "owner", snapshot)
+        assert not isinstance(raised.value, OwnerWaitSuperseded)
+    else:
+        owner_pause_control._reread_warm_member(queue, "owner", snapshot)
+        durable = load_task_result(pool.root, "owner")["owner_wait"]
+        assert durable["wait_id"] == "newer" and durable["owner_pause"]["external_runs"] == requested
+    assert pool.meta["owner_wait"]["owner_pause"]["external_runs"] == requested, "the mirror took nothing"

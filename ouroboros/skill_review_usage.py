@@ -6,7 +6,6 @@ import pathlib
 from typing import Any, Dict
 
 from ouroboros._usage_rows import _skill_review_usage_bucket
-from ouroboros._usage_rows_memo import _render_cached
 from ouroboros.usage_ledger import _drive_root
 
 
@@ -126,18 +125,16 @@ def skill_review_usage(
     drive_root: pathlib.Path | str | None = None, *, review_skill: str,
     review_wave_id: str,
 ) -> Dict[str, Any]:
-    """Return exact final physical attempts attributed to one skill/wave."""
+    """Return exact current physical attempts attributed to one skill/wave
+    (the ``(review_skill, review_wave_id)`` index; per-slot buckets follow)."""
+    from ouroboros import usage_store
+
     root = _drive_root(drive_root)
     skill, wave = str(review_skill or ""), str(review_wave_id or "")
-    cache_key = ("skill_review_usage", skill, wave, None, True)
-
-    def render(final: list, integrity_degraded: bool) -> Dict[str, Any]:
-        return _skill_review_usage_bucket(
-            final, review_skill=skill, review_wave_id=wave,
-            integrity_degraded=integrity_degraded,
-        )
-
-    return _render_cached(root, cache_key, render)
+    with usage_store.read(root) as txn:
+        rows = txn.attempts("review_skill = ? AND review_wave_id = ?", (skill, wave))
+        degraded = usage_store.integrity_degraded(root)
+    return _skill_review_usage_bucket(rows, review_skill=skill, review_wave_id=wave, integrity_degraded=degraded)
 
 
 __all__ = [

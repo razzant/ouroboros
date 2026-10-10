@@ -14,6 +14,12 @@ the provider window, owner deadline and paid ledger retain their own bounds.
 Every provider call is its own paid row; format repair reuses the final answer.
 Observed source coverage is diagnostic evidence beside that answer, never a
 quorum decision or a reason to buy another review.
+
+Landing: one ``[EPISODE_BUDGET]`` notice is posted per working view when the
+send reaches ``native_landing_at(bound)``; an applied authored view re-arms it.
+A non-delivering or incomplete end keeps a bounded, redacted
+``native_terminal_round`` copy and the ``native_*`` counters on the actor usage
+row, errored episodes included (``failure_custody``).
 """
 
 from __future__ import annotations
@@ -102,15 +108,18 @@ def review_native_transcript_bound(
     from ouroboros.tools.review_helpers import calibrated_input_token_limit
 
     ceiling = review_native_max_transcript_chars()
-    window = int(reviewer_context_window(str(model_id or ""), use_local=use_local,
-                                         model_role=model_role, credential_profile_id=credential_profile_id,
-                                         model_route=model_route))
+    sized = reviewer_context_window(str(model_id or ""), use_local=use_local,
+                                    model_role=model_role, credential_profile_id=credential_profile_id,
+                                    model_route=model_route)
+    window = int(sized)  # ``sized`` also carries the account the window was observed on
     if window <= 0:
         # No provider capacity is known: the existing owner transcript ceiling
         # still bounds this episode, without asserting a model window.
         return ceiling
     reserve, margin = window_scaled_reserves(
-        window, output_reserve=int(output_reserve or 0), tokenizer_margin=window // 8)
+        sized, output_reserve=int(output_reserve or 0), tokenizer_margin=window // 8,
+        model_id=model_id, binding=dict(use_local=use_local, model_role=model_role,
+                                       credential_profile_id=credential_profile_id, model_route=model_route))
     capacity = _CHARS_PER_ESTIMATED_TOKEN * max(0, int(calibrated_input_token_limit(
         str(model_id or ""), context_window=window, output_reserve=reserve,
         tokenizer_margin=margin, budget_cap=window)))

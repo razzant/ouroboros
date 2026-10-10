@@ -1,0 +1,454 @@
+{
+  "_provenance": "Captured from scripts/run_external_review.py at 578360c41, the wrapper before the review moved into ouroboros.tools.review_change: contributor lane over tests/_contributor_packet_shared.py with its commit-gate review cycle replaced by persist_golden_actors, normalized by normalized(). This is the pre-move side of an equivalence; never regenerate it from a later wrapper. One input was re-derived on 2026-10-07 with the SAME capture function (persist_golden_actors), not a later wrapper: the scope seat's fixture answer now covers the whole Intent / Scope Review Checklist, because the real scope reviewer refuses partial coverage; only s1's response blob identity (sha256/size) changed with it. Re-derived again on 2026-10-08 with the same capture function for PR-3 (one review pool): the retrieving seats t2 and s1 now answer contract B (one object with the change and the coupling blocks) because the pool asks a retrieving seat both parts of the brief; only their response blob identities (sha256/size) changed with it.",
+  "answered_slots_in_full_output": [
+    "s1",
+    "t1",
+    "t2"
+  ],
+  "evidence": {
+    "advisory": {
+      "included": false,
+      "reason": "excluded_by_external_pr_readiness_profile"
+    },
+    "budget": {
+      "authority": "isolated_review_ledger",
+      "note": "The run cap is the whole global limit of a ledger that starts empty and sees no host spend or concurrent host work; agent-session seats are recorded at settlement.",
+      "run_cap_usd": 5.0
+    },
+    "complete": true,
+    "cost_report": {
+      "note": "Actor-reported cost only; unreported/unknown slots are not treated as $0. The core usage ledger remains the monetary authority.",
+      "reported_actor_cost_usd": 0.0325,
+      "reported_cost_slots": [
+        "t1",
+        "s1"
+      ],
+      "unreported_or_unknown_cost_slots": [
+        "t2"
+      ]
+    },
+    "elapsed_sec": "<elapsed_sec>",
+    "exit_class": "passed",
+    "exit_code": 0,
+    "production_outcome": {
+      "block_reason": "",
+      "message": "Review passed.",
+      "status": "passed"
+    },
+    "raw_evidence_refs": [
+      {
+        "model_id": "openai/gpt-5.6-sol",
+        "prompt_ref": {
+          "call_id": "t1_prompt",
+          "full_payload_redacted": true,
+          "manifest_ref": {
+            "call_id": "t1_prompt",
+            "path": "$REVIEW_DRIVE/observability/calls/review/t1_prompt.json",
+            "sha256": "<manifest_sha256>"
+          },
+          "redacted_projection_ref": {
+            "compressed_size": "<compressed_size>",
+            "encoding": "gzip",
+            "kind": "json",
+            "path": "$REVIEW_DRIVE/observability/blobs/c7acd4b9212f457cfee9dc929a458c2304fb89df8c595597b274ea5e51985d35.json.gz",
+            "sha256": "c7acd4b9212f457cfee9dc929a458c2304fb89df8c595597b274ea5e51985d35",
+            "size": 176
+          },
+          "redaction": {
+            "count": 0,
+            "redacted": false,
+            "rules": []
+          }
+        },
+        "response_ref": {
+          "call_id": "t1_response",
+          "full_payload_redacted": true,
+          "manifest_ref": {
+            "call_id": "t1_response",
+            "path": "$REVIEW_DRIVE/observability/calls/review/t1_response.json",
+            "sha256": "<manifest_sha256>"
+          },
+          "redacted_projection_ref": {
+            "compressed_size": "<compressed_size>",
+            "encoding": "gzip",
+            "kind": "json",
+            "path": "$REVIEW_DRIVE/observability/blobs/f92ca226d8292e0e04ff9474c4b8ca659cc58842ee74aa38b5c1c7723b93c218.json.gz",
+            "sha256": "f92ca226d8292e0e04ff9474c4b8ca659cc58842ee74aa38b5c1c7723b93c218",
+            "size": 220
+          },
+          "redaction": {
+            "count": 0,
+            "redacted": false,
+            "rules": []
+          }
+        },
+        "slot": "t1",
+        "status": "responded"
+      },
+      {
+        "model_id": "codex=gpt-5.6-sol",
+        "prompt_ref": {
+          "call_id": "t2_prompt",
+          "full_payload_redacted": true,
+          "manifest_ref": {
+            "call_id": "t2_prompt",
+            "path": "$REVIEW_DRIVE/observability/calls/review/t2_prompt.json",
+            "sha256": "<manifest_sha256>"
+          },
+          "redacted_projection_ref": {
+            "compressed_size": "<compressed_size>",
+            "encoding": "gzip",
+            "kind": "json",
+            "path": "$REVIEW_DRIVE/observability/blobs/dc3ac1213d6ac31ddb2445ea9949bb5272c5998685482c73203ea38a8c095177.json.gz",
+            "sha256": "dc3ac1213d6ac31ddb2445ea9949bb5272c5998685482c73203ea38a8c095177",
+            "size": 203
+          },
+          "redaction": {
+            "count": 0,
+            "redacted": false,
+            "rules": []
+          }
+        },
+        "response_ref": {
+          "call_id": "t2_response",
+          "full_payload_redacted": true,
+          "manifest_ref": {
+            "call_id": "t2_response",
+            "path": "$REVIEW_DRIVE/observability/calls/review/t2_response.json",
+            "sha256": "<manifest_sha256>"
+          },
+          "redacted_projection_ref": {
+            "compressed_size": "<compressed_size>",
+            "encoding": "gzip",
+            "kind": "json",
+            "path": "$REVIEW_DRIVE/observability/blobs/ac79ce406c66da74771ef9eac589fc10f2ab5c5e9543327502bb576b23b52003.json.gz",
+            "sha256": "ac79ce406c66da74771ef9eac589fc10f2ab5c5e9543327502bb576b23b52003",
+            "size": 1739
+          },
+          "redaction": {
+            "count": 0,
+            "redacted": false,
+            "rules": []
+          }
+        },
+        "slot": "t2",
+        "status": "responded"
+      },
+      {
+        "model_id": "openai/gpt-5.6-sol",
+        "prompt_ref": {
+          "call_id": "s1_prompt",
+          "full_payload_redacted": true,
+          "manifest_ref": {
+            "call_id": "s1_prompt",
+            "path": "$REVIEW_DRIVE/observability/calls/review/s1_prompt.json",
+            "sha256": "<manifest_sha256>"
+          },
+          "redacted_projection_ref": {
+            "compressed_size": "<compressed_size>",
+            "encoding": "gzip",
+            "kind": "json",
+            "path": "$REVIEW_DRIVE/observability/blobs/c837a2f50c9007f6060187d20eda9bdb1da9d7f89f636e31b13ba1035ef25707.json.gz",
+            "sha256": "c837a2f50c9007f6060187d20eda9bdb1da9d7f89f636e31b13ba1035ef25707",
+            "size": 177
+          },
+          "redaction": {
+            "count": 0,
+            "redacted": false,
+            "rules": []
+          }
+        },
+        "response_ref": {
+          "call_id": "s1_response",
+          "full_payload_redacted": true,
+          "manifest_ref": {
+            "call_id": "s1_response",
+            "path": "$REVIEW_DRIVE/observability/calls/review/s1_response.json",
+            "sha256": "<manifest_sha256>"
+          },
+          "redacted_projection_ref": {
+            "compressed_size": "<compressed_size>",
+            "encoding": "gzip",
+            "kind": "json",
+            "path": "$REVIEW_DRIVE/observability/blobs/7b162d619c5c224a3a62f3a11dc75c57f6cb99567bf4eea6641abf87279605e8.json.gz",
+            "sha256": "7b162d619c5c224a3a62f3a11dc75c57f6cb99567bf4eea6641abf87279605e8",
+            "size": 1211
+          },
+          "redaction": {
+            "count": 0,
+            "redacted": false,
+            "rules": []
+          }
+        },
+        "slot": "s1",
+        "status": "responded"
+      }
+    ],
+    "release_metadata": {
+      "contributor_version_bump_required": false,
+      "final_production_review_required": true,
+      "owner": "maintainer_final_landing"
+    },
+    "result": "READY_FOR_INTEGRATION",
+    "review_completeness": {
+      "contract": "production_triad_quorum_plus_authoritative_scope",
+      "degraded_reasons": []
+    },
+    "review_config": {
+      "context_mode": "max",
+      "data_isolation": {
+        "attach_host_engine": true,
+        "review_data_root": "$REVIEW_DRIVE",
+        "run_cap_usd": 5.0
+      },
+      "execution_slot_config_source": "frozen_structured",
+      "profile": "external_pr_readiness",
+      "provider": "configured_per_slot",
+      "review_enforcement": "blocking",
+      "runtime_mode": "pro",
+      "scope_efforts": [
+        "xhigh"
+      ],
+      "scope_models": [
+        "openai/gpt-5.6-sol"
+      ],
+      "scope_slots": [
+        {
+          "effort": "xhigh",
+          "route": {
+            "kind": "api_chat",
+            "target_id": "openai/gpt-5.6-sol"
+          },
+          "slot_id": "s1"
+        }
+      ],
+      "slot_config_source": "settings",
+      "slot_plan_sha256": "e975f7b1ede873e471c52a2e0d40eeef445d18e1697e429e6dbba8a05ce94f06",
+      "triad_efforts": [
+        "high",
+        "high"
+      ],
+      "triad_models": [
+        "openai/gpt-5.6-sol",
+        "codex=gpt-5.6-sol"
+      ],
+      "triad_slots": [
+        {
+          "effort": "high",
+          "route": {
+            "kind": "api_chat",
+            "target_id": "openai/gpt-5.6-sol"
+          },
+          "slot_id": "t1"
+        },
+        {
+          "effort": "high",
+          "route": {
+            "kind": "agent_session",
+            "profile_id": "pinned",
+            "target_id": "codex=gpt-5.6-sol"
+          },
+          "slot_id": "t2"
+        }
+      ]
+    },
+    "review_execution": {
+      "consistent": true,
+      "effort_note": "Configured effort is recorded under configured slots. Applied effort is null unless the execution route exposes it.",
+      "mismatches": [],
+      "receipts": [
+        {
+          "actor_status": "responded",
+          "capability_delta": [],
+          "configured": {
+            "effort": "high",
+            "route": {
+              "kind": "api_chat",
+              "target_id": "openai/gpt-5.6-sol"
+            },
+            "slot_id": "t1"
+          },
+          "dispatched": {
+            "effort": "high",
+            "model": "openai/gpt-5.6-sol",
+            "profile_id": null,
+            "route_kind": "api_chat",
+            "session_target": null,
+            "subagent_id": null
+          },
+          "model_verification": "exact",
+          "observed": {
+            "access": null,
+            "custody_durable": null,
+            "delegated_run_id": null,
+            "effort": null,
+            "harness": null,
+            "model": "openai/gpt-5.6-sol",
+            "output_conformance": null,
+            "profile_id": null,
+            "provider": "openrouter",
+            "route_kind": "api_chat",
+            "settlement": null,
+            "verdict_method": null
+          },
+          "slot_id": "t1",
+          "surface": "triad"
+        },
+        {
+          "actor_status": "responded",
+          "capability_delta": [],
+          "configured": {
+            "effort": "high",
+            "route": {
+              "kind": "agent_session",
+              "profile_id": "pinned",
+              "target_id": "codex=gpt-5.6-sol"
+            },
+            "slot_id": "t2"
+          },
+          "dispatched": {
+            "effort": "high",
+            "model": "codex=gpt-5.6-sol",
+            "profile_id": "pinned",
+            "route_kind": "agent_session",
+            "session_target": "codex=gpt-5.6-sol",
+            "subagent_id": null
+          },
+          "model_verification": "exact",
+          "observed": {
+            "access": "readonly",
+            "custody_durable": true,
+            "delegated_run_id": "run-golden",
+            "effort": null,
+            "harness": "codex",
+            "model": "gpt-5.6-sol",
+            "output_conformance": "passed",
+            "profile_id": "pinned",
+            "provider": "claudexor",
+            "route_kind": "agent_session",
+            "settlement": {
+              "bound_at": "panel_complete_custody_replay",
+              "ledger_recorded": true,
+              "project_persistent": false,
+              "project_retired": true,
+              "settled": true
+            },
+            "verdict_method": "schema"
+          },
+          "slot_id": "t2",
+          "surface": "triad"
+        },
+        {
+          "actor_status": "responded",
+          "capability_delta": [],
+          "configured": {
+            "effort": "xhigh",
+            "route": {
+              "kind": "api_chat",
+              "target_id": "openai/gpt-5.6-sol"
+            },
+            "slot_id": "s1"
+          },
+          "dispatched": {
+            "effort": "xhigh",
+            "model": "openai/gpt-5.6-sol",
+            "profile_id": null,
+            "route_kind": "api_chat",
+            "session_target": null,
+            "subagent_id": null
+          },
+          "model_verification": "exact",
+          "observed": {
+            "access": null,
+            "custody_durable": null,
+            "delegated_run_id": null,
+            "effort": null,
+            "harness": null,
+            "model": "openai/gpt-5.6-sol",
+            "output_conformance": null,
+            "profile_id": null,
+            "provider": "openrouter",
+            "route_kind": "api_chat",
+            "settlement": null,
+            "verdict_method": null
+          },
+          "slot_id": "s1",
+          "surface": "scope"
+        }
+      ],
+      "session_transcript_artifacts": [
+        {
+          "chars": 42,
+          "sha256": "086c332b8192b2d6bf54628531662a6695ca6267aa550765871b795de69e87d4",
+          "slot_id": "t2",
+          "source_provenance_verified": true,
+          "source_redacted": false,
+          "surface": "triad"
+        }
+      ],
+      "telemetry_limitations": []
+    },
+    "review_profile": "external_pr_readiness",
+    "reviewed_at": "<reviewed_at>",
+    "schema_version": 2,
+    "snapshot": {
+      "base_ref": "base",
+      "base_script_sha256": "f0bc5c509292869a11ed9bde47d1256b426b3165ea7b8f4e1e54ee2b4e9c72bd",
+      "base_sha": "<base_sha>",
+      "changed_paths": [
+        "README.md",
+        "build.sh",
+        "docs/CHECKLISTS.md",
+        "docs/new_note.md",
+        "ouroboros/tools/review.py",
+        "scripts/run_external_review.py"
+      ],
+      "diff_sha256": "<diff_sha256>",
+      "head_ref": "<head_sha>",
+      "head_script_sha256": "2880d7dac63b5bc396ce637045792c8f257b50226641a34d8702ccd2d5898837",
+      "head_sha": "<head_sha>",
+      "head_tree_sha": "<head_tree_sha>",
+      "merge_base_sha": "<base_sha>",
+      "proposal_title": "Proposal: faster build",
+      "release_metadata_or_machinery_changed": true,
+      "release_sensitive_changes": {
+        "carrier_fields": [],
+        "changed": true,
+        "machinery_paths": [
+          "build.sh"
+        ]
+      },
+      "review_substrate_changed": [
+        "docs/CHECKLISTS.md",
+        "ouroboros/tools/review.py",
+        "scripts/run_external_review.py"
+      ],
+      "review_substrate_matches_base": false,
+      "reviewed_tree_sha": "<head_tree_sha>",
+      "target_config_sha256": "d7b810fe3067eb64006c6713cee9e5db71500086fb93e226f1978f2fbf8c035e",
+      "target_version": "1.2.3"
+    },
+    "trust": {
+      "execution_receipts_consistent": true,
+      "note": "Contributor evidence is not merge authorization or cryptographic proof of execution.",
+      "review_substrate_changed": [
+        "docs/CHECKLISTS.md",
+        "ouroboros/tools/review.py",
+        "scripts/run_external_review.py"
+      ],
+      "trusted_base_execution": "The review ran on the target base's own machinery: a proposal not already checked out at the base re-executes from a detached worktree of the base commit (owner decision 2026-08-19, D31)."
+    }
+  },
+  "exit_code": 0,
+  "session_transcripts": [
+    {
+      "chars": 42,
+      "sha256": "086c332b8192b2d6bf54628531662a6695ca6267aa550765871b795de69e87d4",
+      "slot_id": "t2",
+      "source_provenance_verified": true,
+      "source_redacted": false,
+      "surface": "triad",
+      "transcript": "full session transcript of t2\nEOF_SENTINEL"
+    }
+  ]
+}

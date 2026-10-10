@@ -169,7 +169,8 @@ class _ProviderRoutingMixin:
                 )
             finally:
                 try:
-                    _http_client.close()
+                    from ouroboros._usage_wait import close_after_model_send
+                    close_after_model_send(_http_client)
                 except Exception:
                     pass
 

@@ -75,6 +75,8 @@ def test_startup_does_not_retry_history_of_already_adopted_answer(tmp_path, monk
     write_task_result(child, "recovered", "completed", result="saved", artifact_status="ready")
     monkeypatch.setattr(observability, "promote_child_task_refs",
                         lambda *a, **k: pytest.fail("history walked on restart"))
+    from ouroboros.startup_migrations import prepare_startup_state
+    prepare_startup_state(parent)
     first = _recover_terminal_task_files(parent, set())
     assert first["recovered"] == ["recovered"]
     assert not first["errors"]

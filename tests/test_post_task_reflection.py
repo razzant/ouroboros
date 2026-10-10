@@ -218,7 +218,7 @@ def test_nested_pattern_register_follows_the_post_task_stage_protocol(phase, mon
         on_reflection=lambda entry, _llm: entries.append(entry))
     assert f.done.wait(5)
     checkpoint = load_task_result(f.root, f.task["id"])["root_phase_checkpoint"]
-    reflected = ["facts", "chat", "scratch", "task_reflection"]
+    reflected = ["facts", "scratch", "task_reflection"]
     stop = {"reflection_unknown": "provider_outcome_unknown", "pattern_unknown": "provider_outcome_unknown",
             "pattern_budget": "budget_exhausted", "pattern_deadline": "deadline"}.get(outcome)
     if stop:

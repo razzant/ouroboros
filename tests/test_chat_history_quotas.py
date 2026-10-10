@@ -711,14 +711,15 @@ def test_window_metadata_reports_quota_when_slice_cuts_only_system_rows(tmp_path
     assert len(human) == 3  # the slice really dropped the two oldest system rows
 
 
-def test_window_metadata_reports_archive_floor(tmp_path):
-    """More rotated segments exist than the 3-archive backfill bound and the
-    quota is still unmet -> the reader stopped at the archive floor."""
+def test_window_metadata_is_complete_when_the_read_reaches_the_oldest_archive(tmp_path):
+    """No archive count bounds the recent read (owner decision 2026-10-05): with
+    the quota unmet it reads back to the oldest archive, so the window is the
+    whole history, however many archives that takes."""
     logs = tmp_path / "logs"
     logs.mkdir()
     archive = tmp_path / "archive"
     archive.mkdir()
-    for idx in range(4):  # 4 archives > the 3-newest backfill bound
+    for idx in range(4):  # more archives than the retired 3-newest backfill bound
         (archive / f"progress_2026060{idx + 1}T000000.jsonl").write_text(
             json.dumps({
                 "ts": f"2026-06-0{idx + 1}T00:00:00Z",
@@ -733,11 +734,10 @@ def test_window_metadata_reports_archive_floor(tmp_path):
     (logs / "chat.jsonl").write_text("", encoding="utf-8")
 
     payload = _run_full(tmp_path, {})
-    assert payload["window"] == {"complete": False, "truncated_by": ["archive_floor"]}
+    assert payload["window"] == {"complete": True, "truncated_by": []}
+    assert payload["has_more"] is False
     texts = [m["text"] for m in payload["messages"]]
-    # The 3 newest archives were backfilled; the oldest stayed beyond the floor.
-    assert "archived-2" in texts and "archived-4" in texts and "live step" in texts
-    assert "archived-1" not in texts
+    assert {"archived-1", "archived-2", "archived-4", "live step"} <= set(texts)
 
 
 def test_window_metadata_reports_lineage_cap(tmp_path):

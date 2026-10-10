@@ -8,6 +8,18 @@ Until the owner decides, the first close asks once and stores the answer; dismis
 the question quits. A quit request (the indicator's Quit, Cmd+Q, sign-out, shutdown)
 and Panic never reach the question and are never cancelled. An alert never raises a
 window hidden on purpose. Linux and other hosts have no indicator: closing quits.
+
+Second launch: a manual one shows the running window (``activate_running_instance`` -> ``Background.listen``),
+an automatic one only logs. Windows signals a named auto-reset kernel event derived from the PID-lock
+path; elsewhere the loser sends SIGURG to the PID in the lock file (an older launcher without a handler
+ignores it). A lock loser never truncates the lock file. The listener starts right after the lock is
+taken; a request that arrives before pywebview has shown the window is kept until then and cancels a
+quiet start.
+
+``DesktopApi`` is the page's alert half of the window bridge (``launcher.MainApi`` inherits it): the
+attention cue, the shell's own facts, and the system notifications of ``desktop_notifications``,
+whose click opens the window and hands the page its token; it also carries the painted palette to
+the window's native caption (``launcher_appearance``).
 """
 from __future__ import annotations
 
@@ -20,7 +32,10 @@ import sys
 import threading
 import urllib.request
 
+from ouroboros.config import read_version
 from ouroboros.desktop_autostart import BACKGROUND_ENV, keep_running_choice, set_keep_running
+from ouroboros.desktop_notifications import UNAVAILABLE, capability, native_notifier, platform_name, refused
+from ouroboros.launcher_appearance import NativeAppearance
 from ouroboros.platform_layer import request_native_attention, signal_pid
 
 log = logging.getLogger("launcher.background")
@@ -29,8 +44,12 @@ CONSENT_TITLE = "Keep Ouroboros running?"
 CONSENT_MESSAGE = ("Ouroboros will keep working in the background: tasks, schedules, Telegram. "
                    "Keep it running in the background, or quit?")
 INDICATOR_WAIT_SEC = 3.0
+# Every first-party ``webview.start`` passes ``private_mode=False`` (launcher.py, launcher_onboarding.py):
+# pywebview's private mode erases the WebView's website data each time a window opens (ARCHITECTURE §3).
+PERSISTENT_WEBVIEW_STORAGE = True
 STATUS_POLL_SEC = 15.0
 _active = None  # the started indicator, for the exit and Panic paths
+_notifier = None  # the system-notification adapter, for the same paths (Windows' icons outlive a process)
 
 
 def indicator_class():
@@ -102,22 +121,23 @@ def activate_running_instance(lock_path) -> bool:
 
 
 def request_tray_cleanup() -> None:
-    """Panic: start removing the icon without waiting for it."""
-    if _active is not None:
-        try:
-            _active.stop(wait=0)
-        except Exception:
-            log.warning("Indicator cleanup request failed; Panic continues.", exc_info=True)
+    """Panic: start removing the icons without waiting for them."""
+    for owner in (_active, _notifier):
+        if owner is not None:
+            try:
+                owner.stop(wait=0)
+            except Exception:
+                log.warning("Icon cleanup request failed; Panic continues.", exc_info=True)
 
 
 def stop_tray_before_exit(release_lock, *, wait: float = 0.5) -> None:
-    """Remove the icon before an ordinary exit (bounded); Panic passes ``wait=0``."""
-    indicator = _active
-    if indicator is not None:
-        try:
-            indicator.stop(wait=wait)
-        except Exception:
-            log.warning("Indicator cleanup failed before process exit.", exc_info=True)
+    """Remove the icons before an ordinary exit (bounded each); Panic passes ``wait=0``."""
+    for owner in (_active, _notifier):
+        if owner is not None:
+            try:
+                owner.stop(wait=wait)
+            except Exception:
+                log.warning("Icon cleanup failed before process exit.", exc_info=True)
     release_lock()
 
 
@@ -254,8 +274,8 @@ class Indicator:
     def _shown(self) -> None:
         pass
 
-    def notify(self, title: str, body: str) -> bool:
-        """Show a native banner for an alert; False when there is none (the caller plays the sound)."""
+    def notify(self, title: str, body: str, sound: bool = True) -> bool:
+        """Show a native banner for an alert; False when there is certainly none (the caller plays the sound)."""
         return False
 
     def set_status(self, text: str) -> None:
@@ -277,6 +297,9 @@ class Background:
         self.window = None
         self.native_ready = False
         self.indicator = cls(self) if cls is not None else None
+        self.appearance = NativeAppearance()  # the window's caption tint follows its page (Windows)
+        global _notifier
+        self.notifications = _notifier = native_notifier(self.open_notification)
         self._asking = threading.Lock()
         self._poller = None
         # An open request (a second launch) can arrive during the boot, before the window exists: it is
@@ -319,6 +342,7 @@ class Background:
 
     def attach(self, window):
         self.window = window
+        self.appearance.attach(window)  # every window, indicator or not: its own before_show and close
         window.events.closing += self.closing
         window.events.shown += self._window_shown  # set for a hidden window too (pywebview 5.4)
         if self.indicator is not None:
@@ -397,13 +421,25 @@ class Background:
         will show its own browser banner asks first with ``cue_when_visible=False``: a visible
         window then gets nothing from here (that banner owns the sound) and answers "visible"."""
         if self.indicator is not None and self.indicator.hidden:
-            banner = self.indicator.notify(title or "Ouroboros", body or "Something needs your attention.")
+            banner = self.indicator.notify(title or "Ouroboros", body or "Something needs your attention.",
+                                           bool(sound))
             cue = request_native_attention(None, sound=bool(sound) and not banner)
             return {"ok": bool(banner or cue.get("ok")), "status": "background", "banner": bool(banner),
                     "sound_played": bool(cue.get("sound_played"))}
         if not cue_when_visible:
             return {"ok": False, "status": "visible"}
         return request_native_attention(self.window.show if self.window is not None else None, sound=bool(sound))
+
+    def open_notification(self, token: str) -> None:
+        """A system notification was clicked: open the window as it was left, then hand the page the
+        token it chose; the page maps it to the source (an unknown token after a reload only opens)."""
+        self.show_window()
+        if not token or self.window is None:
+            return
+        try:
+            self.window.evaluate_js(f"window.ouroNotifications && window.ouroNotifications.activate({json.dumps(token)})")
+        except Exception:
+            log.warning("The page could not be told which notification was clicked; the window is open.", exc_info=True)
 
     def _window_shown(self) -> None:
         """pywebview ``shown``: from now on a request opens the window; one kept since the boot does so now."""
@@ -461,3 +497,44 @@ class Background:
             self.indicator.set_status(status_line(self.read_port()))
             if self.shutdown.wait(STATUS_POLL_SEC):
                 return
+
+
+class DesktopApi:
+    """The page's alert half of the window bridge. A page feature-detects each method per call: a launcher
+    built before one of them simply lacks it (the page then falls back and says so, DESIGN §9)."""
+
+    _background = None  # set by the inheriting MainApi; a leading underscore keeps it off the bridge
+
+    def request_attention(self, sound: bool = True, title: str = "", body: str = "", cue_when_visible: bool = True) -> dict:
+        return self._background.attention(bool(sound), str(title or ""), str(body or ""), bool(cue_when_visible))
+
+    notify_owner = request_attention  # newer pages send the alert text; older launchers lack this name
+
+    def set_native_appearance(self, theme: str = "", page: float | None = None, sequence: int | None = None) -> dict:
+        """The page's painted palette for this window's native caption; the newest request wins."""
+        return self._background.appearance.request(theme, page, sequence)
+
+    def shell_info(self) -> dict:
+        """What this desktop app is: its own version (not the core's), its storage and its notifications."""
+        return {"shell_version": read_version(), "persistent_storage": PERSISTENT_WEBVIEW_STORAGE,
+                "native_notifications": self._notifier_answer("status")}
+
+    def request_native_notifications(self) -> dict:
+        """The system's one permission question. The page asks it only from the owner's own gesture
+        (switching notifications on, the Test button); a notification never does."""
+        return self._notifier_answer("ask")
+
+    def show_native_notification(self, title: str = "", body: str = "", sound: bool = True, token: str = "") -> dict:
+        """One system notification: ``submitted`` (the system took it and owns its sound: no page tone),
+        ``unknown`` (handed over, unanswered: it may still appear, so the page adds nothing) or a typed
+        refusal on which the page falls back."""
+        notifier = getattr(self._background, "notifications", None)
+        if notifier is None:
+            return refused(platform_name(), UNAVAILABLE, "no_platform_adapter")
+        return notifier.notify(str(title or ""), str(body or ""), bool(sound), str(token or ""))
+
+    def _notifier_answer(self, method: str) -> dict:
+        notifier = getattr(self._background, "notifications", None)
+        if notifier is None:
+            return capability(platform_name(), UNAVAILABLE, "no_platform_adapter")
+        return getattr(notifier, method)()

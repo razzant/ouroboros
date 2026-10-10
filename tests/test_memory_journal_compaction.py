@@ -54,7 +54,7 @@ def test_maintenance_does_not_create_missing_journals_or_directories(tmp_path):
 def test_startup_prune_still_reaches_compatibility_entry_point():
     import ouroboros.server_maintenance as maintenance
 
-    assert "compact_memory_journal_snapshots" in inspect.getsource(maintenance._startup_prune_sweeps)
+    assert "compact_memory_journal_snapshots" in inspect.getsource(maintenance._run_deferred_startup_prunes)
 
 
 def test_size_observation_does_not_follow_a_journal_symlink(tmp_path):
@@ -88,5 +88,5 @@ def test_startup_event_publishes_normal_journal_sizes(tmp_path, monkeypatch):
     assert rows[0]["report"]["journal_bytes"]["memory/knowledge_history.jsonl"] == len(b"full historical text\n")
     assert journal.read_bytes() == b"full historical text\n"
     # Pin the real startup caller, not only this unit invocation.
-    source = inspect.getsource(maintenance._startup_prune_sweeps)
+    source = inspect.getsource(maintenance._run_deferred_startup_prunes)
     assert '_prune_event("memory_journal_observation", ("journal_bytes", "errors")' in source

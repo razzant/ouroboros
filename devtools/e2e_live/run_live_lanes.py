@@ -19,9 +19,9 @@ before any spend, a run whose attempts can never all be admitted. The run-root t
 value lives only in each lane's 0600 settings file and is disclosed by fingerprint). The manifest names the
 model from the APPLIED settings file, not argv. Every lane leaves ``lanes/<id>_a<n>/result.json`` (checks,
 digests, grants by fingerprint, settings sha256, seed describe, the lane's spend, a typed refusal on infra
-failure) plus screenshots when a browser client exists; a watcher prints lane states, the running spend
-against the cap, free disk on ``/`` and ``/mnt/data`` and the key headroom from an informational, bounded,
-backing-off probe.
+failure) plus screenshots when a browser client exists and the key-redacted ``traces/`` bundle of the lane
+server's journals (``traces.py``); a watcher prints lane states, the running spend against the cap, free disk
+on ``/`` and ``/mnt/data`` and the key headroom from an informational, bounded, backing-off probe.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ import math
 import os
 import pathlib
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -63,7 +64,7 @@ from devtools.benchmarks.common.server_runner import (
     build_isolated_settings,
     seed_owner_state,
 )
-from devtools.e2e_live import stub_lane
+from devtools.e2e_live import stub_lane, traces
 from devtools.e2e_live.scenarios import SCENARIOS, STAND_PANEL_SETTINGS, LaneContext, diff_sha256, head_sha, now_iso
 from devtools.e2e_live.ui_probe import resolve_ui_client
 from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS, declared_model_settings
@@ -234,20 +235,19 @@ def credit_preflight(key: str, *, timeout: float = 10.0) -> dict:
 # --------------------------------------------------------------------------- #
 
 def lane_spend(data_root: pathlib.Path) -> tuple[float, int]:
-    """``(USD over the lane's SETTLED physical-attempt ledger rows, unknown-cost rows)``: ``state/usage_attempts.jsonl`` is
-    the product's money authority; ``llm_usage`` telemetry misses skill review/advisory/synthesis (run3: 114.81 vs 141.63)."""
-    path = pathlib.Path(data_root) / "state" / "usage_attempts.jsonl"
-    spent, unknown = 0.0, 0
-    for line in (path.read_text(encoding="utf-8").splitlines() if path.is_file() else []):
+    """``(USD over the lane's SETTLED physical-attempt rows, unknown-cost rows)`` from ``state/usage.sqlite``, the money authority (``llm_usage`` misses review/advisory/synthesis: 114.81 vs 141.63), or from the journal of a journal-era ``--seed`` lane, never zero."""
+    store, journal = (pathlib.Path(data_root) / "state" / name for name in ("usage.sqlite", "usage_attempts.jsonl"))
+    if store.is_file():
+        conn = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True)
         try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict) and row.get("state") == "settled" and row.get("cost_final") is True:
-            cost = row.get("cost_usd")
-            priced = isinstance(cost, (int, float)) and not isinstance(cost, bool)
-            spent, unknown = spent + (float(cost) if priced else 0.0), unknown + (0 if priced else 1)
-    return spent, unknown
+            costs = [None if c is None else float(c) for (c,) in conn.execute("SELECT cost_usd FROM attempts WHERE state='settled' AND cost_final=1")]
+        finally:
+            conn.close()
+    else:
+        from ouroboros.utils import iter_jsonl_objects  # skips a torn line, as the journal reader always did
+        costs = [r["cost_usd"] if type(r.get("cost_usd")) in (int, float) else None for r in (iter_jsonl_objects(journal) if journal.is_file() else ()) if r.get("state") == "settled" and r.get("cost_final") is True]
+    priced = [c for c in costs if c is not None]
+    return sum(priced), len(costs) - len(priced)
 
 
 class RunBudget:
@@ -586,7 +586,7 @@ def _lane_row(job: tuple[str, int], args: argparse.Namespace) -> dict:
             "title": SCENARIOS[sid].title, "status": "infra_error", "stub": bool(args.stub), "profile": args.profile,
             "self_mod": bool(args.self_mod), "preflight_test_workers": int(args.preflight_test_workers),
             "started_at": now_iso(), "checks": {}, "facts": {}, "error": "",
-            "screenshots": [], "ui": {"available": False, "reason": ""}, "budget": {},
+            "screenshots": [], "ui": {"available": False, "reason": ""}, "budget": {}, "traces": {"published": False, "reason": "lane_not_started"},
             "self_mod_absorb": {"expected": bool(args.self_mod) and SCENARIOS[sid].expects_absorb}}
 
 
@@ -665,8 +665,7 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
     sid, attempt = job
     scenario = SCENARIOS[sid]
     lane = out / "lanes" / f"{sid}_a{attempt}"
-    clone, data_root, shots = lane / "clone", lane / "data", lane / "shots"
-    settings_path = data_root / "settings.json"
+    clone, data_root, shots, settings_path = lane / "clone", lane / "data", lane / "shots", lane / "data" / "settings.json"
     started = time.time()
     row = _lane_row(job, args)
 
@@ -696,7 +695,7 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
             stub = stub_lane.routed_stub_model(scenario.stub_script(clone)).__enter__()
             child_model = stub_lane.STUB_CHILD_SLUG
             cfg = stub_lane.stub_settings(stub, template)
-        cfg.update(scenario.overrides(child_model))
+        cfg.update(scenario.overrides(child_model, cfg))
         if args.profile == "wiring":
             cfg["OUROBOROS_REVIEW_ENFORCEMENT"] = "advisory"
         # The lane's ceiling is its own reservation: disjoint from the other lanes', never the whole cap.
@@ -806,6 +805,7 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
         _apply_orphan_scan(row, survivors)
         row["budget"]["spent_usd"], row["budget"]["unknown_cost_rows"] = lane_spend(data_root)
         row["ended_at"], row["duration_sec"] = now_iso(), round(time.time() - started, 1)
+        row["traces"] = traces.publish_lane_traces(lane, data_root, traces.lane_secrets(settings_path, {args.key_env: key or os.environ.get(args.key_env, "")}))
         _record_row(out, lane, row)
         if args.prune_clones:
             shutil.rmtree(clone, ignore_errors=True)

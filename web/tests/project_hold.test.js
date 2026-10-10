@@ -24,7 +24,8 @@ test('held task is stationary across hydrated Chat, Project and Main receipt', (
     assert.deepEqual(status, { kind: 'online', text: hold.label, showDots: false });
     assert.equal(summarizeProjectActivities([{ ...held, required_question_unavailable: true }]).label, hold.label);
     assert.equal(summarizeProjectActivities([held]).motion, false);
-    assert.deepEqual(handoffPhase(held, null), { text: hold.label, className: 'warn' });
+    assert.equal(handoffPhase(held, null).text, hold.label);
+    assert.equal(handoffPhase(held, null).motion, false);
     assert.equal(handoffPhase(held, { status: 'failed' }).text, 'Failed');
     assert.equal(handoffPhase(held, null, false).text, 'Activity unconfirmed');
 });
@@ -65,10 +66,12 @@ test('same-ID recovery clears the hold; independent work and budget remain truth
 
 test('Main handoff keeps a budget pause beside the Project wait, as the sidebar does', () => {
     const paused = { ...held, phase: 'budget_paused' };
-    assert.deepEqual(handoffPhase(paused, null), { text: `Paused · ${hold.label}`, className: 'warn' });
+    assert.equal(handoffPhase(paused, null).text, `Paused · ${hold.label}`);
+    assert.equal(handoffPhase(paused, null).motion, false);
     assert.equal(handoffPhase(paused, null).text, summarizeProjectActivities([paused]).label);
-    assert.deepEqual(handoffPhase({ ...held, phase: 'budget_pausing' }, null), { text: `Pausing… · ${hold.label}`, className: 'warn' });
-    assert.deepEqual(handoffPhase(held, null), { text: hold.label, className: 'warn' });
+    assert.equal(handoffPhase({ ...held, phase: 'budget_pausing' }, null).text, `Pausing… · ${hold.label}`);
+    assert.equal(handoffPhase({ ...held, phase: 'budget_pausing' }, null).motion, false);
+    assert.equal(handoffPhase(held, null).text, hold.label);
     assert.equal(handoffPhase(paused, { status: 'cancelled' }).text, 'Cancelled');
 });
 
@@ -184,7 +187,8 @@ test('actual child queue hydration refreshes room status once and reconciles dep
     const { createChatInstance } = await import('../modules/chat.js');
     const { installDom, restoreDom, walkCard } = await import('./chat_dom_fixture.js');
     const settle = () => new Promise(resolve => setImmediate(resolve));
-    let queue = { pending: [{ id: 'child', task: { project_admission_hold: {} } }], running: [] };
+    let queue = { pending: [], running: [{ id: 'child', task: { project_admission_hold: {} } }] };
+    let connected = true;
     let detailStatus = 'running';
     const reads = [];
     const { prior, mount } = installDom(async url => {
@@ -199,7 +203,7 @@ test('actual child queue hydration refreshes room status once and reconciles dep
     });
     const handlers = new Map();
     const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
-        isConnected: () => true, send() {} };
+        isConnected: () => connected, send() {} };
     let instance;
     try {
         instance = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
@@ -217,6 +221,7 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         const status = () => globalThis.document.byId.get('chat-status').textContent;
         snapshot(); await settle();
         assert.equal(status(), 'Working...', 'the child has not entered its hold yet');
+        queue.pending = queue.running.splice(0);
         queue.pending[0].task.project_admission_hold = hold;
         snapshot();
         assert.equal(status(), 'Working...', 'the snapshot finishes before its queue read');
@@ -225,6 +230,21 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         const messages = globalThis.document.byId.get('chat-messages');
         const child = walkCard(messages, 'child');
         assert.equal(child.querySelector('[data-live-phase]').textContent, hold.label);
+        connected = false; handlers.get('close')();
+        snapshot(); await settle();
+        assert.equal(child.querySelector('[data-live-phase]').textContent, 'Activity unconfirmed');
+        assert.equal(child.querySelector('[data-live-phase]').dataset.motion, '0');
+        connected = true;
+        snapshot(); await settle();
+        assert.equal(child.querySelector('[data-live-phase]').textContent, hold.label,
+            'a fresh child queue read restores its own hold after reconnect');
+        assert.equal(child.querySelector('[data-live-phase]').dataset.motion, '0');
+        queue.pending[0].task.project_admission_hold = {};
+        snapshot(); await settle();
+        assert.equal(child.querySelector('[data-live-phase]').textContent, 'Queued');
+        assert.equal(child.querySelector('[data-live-phase]').dataset.motion, '0');
+        queue.pending[0].task.project_admission_hold = hold;
+        snapshot(); await settle();
         frame('working-sibling');
         assert.equal(status(), 'Working...', 'independent working card keeps room activity');
         handlers.get('log')({ chat_id: 7, data: { type: 'task_done', task_id: 'working-sibling', status: 'cancelled' } });

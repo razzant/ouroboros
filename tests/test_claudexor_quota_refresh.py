@@ -61,6 +61,9 @@ def _envelope() -> dict:
 
 
 def _request() -> Request:
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
     return Request({
         "type": "http",
         "http_version": "1.1",
@@ -72,7 +75,7 @@ def _request() -> Request:
         "headers": [],
         "client": ("127.0.0.1", 1),
         "server": ("127.0.0.1", 8765),
-    })
+    }, receive)
 
 
 def test_gateway_refresh_quota_posts_once_and_keeps_token_host_side(caplog, monkeypatch):
@@ -207,6 +210,10 @@ def test_owned_refresh_handshakes_then_calls_foreground_quota_once(monkeypatch, 
             calls.append("handshake")
             return {"compatible": True}
 
+        def operations(self):
+            calls.append("operations")
+            return []
+
         def refresh_quota(self):
             calls.append("refresh_quota")
             return envelope
@@ -220,7 +227,7 @@ def test_owned_refresh_handshakes_then_calls_foreground_quota_once(monkeypatch, 
     monkeypatch.setattr(gateway_module, "ClaudexorGateway", Gateway)
 
     assert _refresh_quota() is envelope
-    assert calls == ["handshake", "refresh_quota", "close"]
+    assert calls == ["handshake", "operations", "refresh_quota", "close"]
 
 
 def test_owned_refresh_stops_on_protocol_failure(monkeypatch, tmp_path):
@@ -282,7 +289,7 @@ def test_inbound_refresh_returns_exact_foreground_envelope_via_thread(monkeypatc
     "daemon_unreachable",
     "rate_limited",
 ])
-def test_inbound_refresh_uses_existing_transport_failure_contract(monkeypatch, code):
+def test_inbound_refresh_preserves_typed_engine_failure(monkeypatch, code):
     from ouroboros.gateway import claudexor_quota
 
     def refuse():
@@ -290,8 +297,9 @@ def test_inbound_refresh_uses_existing_transport_failure_contract(monkeypatch, c
 
     monkeypatch.setattr(claudexor_quota, "_refresh_quota", refuse)
     response = asyncio.run(claudexor_quota.api_claudexor_quota_refresh(_request()))
-    assert response.status_code == 503
-    assert json.loads(response.body) == {"error": f"{code}: typed upstream refusal"}
+    assert response.status_code == 429
+    assert json.loads(response.body) == {"error": "typed upstream refusal", "code": code,
+                                        "required_actions": []}
 
 
 def test_quota_refresh_route_is_post_only_and_indexed(tmp_path):

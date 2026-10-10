@@ -26,6 +26,7 @@ from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
 from tests.test_llm_claudexor import ROUTE, result
 from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_transport_death_retry import _events, _ledger
+from tests._usage_store_testing import dispatched_attempts
 
 setup = gateway_fixture
 PRIMARY = "primary/model"
@@ -120,8 +121,9 @@ def test_unknown_outcome_tries_the_configured_route_first_with_a_new_identity(da
     assert text == "answer from fb/one"
     assert [model for model, _messages in llm.sent] == [PRIMARY, "fb/one"]
     rows = _ledger(data_root)
-    assert [row["state"] for row in rows] == ["reserved", "dispatched", "unresolved", "reserved", "dispatched", "settled"]
-    old, new = rows[0]["attempt_id"], rows[3]["attempt_id"]
+    assert [(row["state"], row["revision"]) for row in rows] == [("unresolved", 4), ("settled", 3)]
+    assert rows[0]["physical_failure"]
+    old, new = rows[0]["attempt_id"], rows[1]["attempt_id"]
     assert old != new
     assert ua.usage_projection(data_root)["unresolved_upper_bound_usd"] == 1.0
     notices = _notices(llm.sent[-1][1])
@@ -138,7 +140,7 @@ def test_repeated_unknowns_move_on_through_the_configured_routes(data_root, tmp_
 
     assert text == "answer from fb/two"
     assert [model for model, _messages in llm.sent] == [PRIMARY, "fb/one", "fb/two"]
-    first, second, _third = (row["attempt_id"] for row in _ledger(data_root) if row["state"] == "dispatched")
+    first, second, _third = (row["attempt_id"] for row in dispatched_attempts(data_root))
     notices = _notices(llm.sent[-1][1])
     assert len(notices) == 2 and first in notices[0] and second in notices[1]
 
@@ -158,6 +160,40 @@ def test_fallback_can_recover_during_an_existing_primary_outage(data_root, tmp_p
     assert probes[0]["expected_route"] is None  # the old failed fallback is not the primary probe's identity
     assert usage["transport_recovery"]["old_outcome"] == "unknown"
     assert [row["state"] for row in _ledger(data_root)].count("unresolved") == 2
+
+
+@pytest.mark.parametrize("primary,ceiling_route_answers", [
+    (PRIMARY, False), (PRIMARY, True), ("openai/gpt-5.6-luna", False),
+])
+def test_a_ceiling_routes_tool_fit_stays_only_where_its_notice_stays(data_root, tmp_path, monkeypatch, primary,
+                                                                     ceiling_route_answers):
+    """A direct-OpenAI candidate fits the shared resident list and writes its notice into its transcript. A
+    cross-family candidate writes into its own copy: if it answers, both are adopted; if it fails, the copy goes
+    and the fit with it, so the next route sends the whole list and reads no notice. A same-family candidate
+    writes into the shared transcript, so its fit stays with its notice even when it fails."""
+    from ouroboros import provider_models
+
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::fb-direct,fb/two")
+    monkeypatch.setitem(provider_models.PROVIDER_TOOL_SCHEMA_LIMITS, "openai", 100)
+    llm = _RouteLLM(data_root, **{primary: [_death], "openai::fb-direct": [] if ceiling_route_answers else [_death]})
+    llm.default_model = lambda: primary
+    original, sent = llm.chat, []
+
+    def chat(**kwargs):
+        sent.append((kwargs["model"], len(kwargs["tools"] or []), "tool schemas in one request" in str(kwargs["messages"])))
+        return original(**kwargs)
+
+    llm.chat = chat
+    text, _usage, _trace, registry = _run(tmp_path, llm, direct=True)
+    (_primary, whole, _), (ceiling, fitted, told), *rest = sent
+    assert ceiling == "openai::fb-direct" and whole > 100 and fitted == 100 and told
+    left_out = getattr(registry._ctx, "_route_left_out_tool_names", None) or set()
+    if ceiling_route_answers:
+        assert text == "answer from openai::fb-direct" and not rest and len(left_out) == whole - 100
+    elif primary == PRIMARY:
+        assert text == "answer from fb/two" and rest == [("fb/two", whole, False)] and not left_out
+    else:
+        assert text == "answer from fb/two" and rest == [("fb/two", 100, True)] and len(left_out) == whole - 100
 
 
 def test_non_unknown_candidate_failure_cannot_buy_a_forced_summary_after_unknown():
@@ -205,7 +241,8 @@ def test_direct_stop_during_the_unknown_wait_sends_nothing_further(data_root, tm
     _text, usage, _trace, _registry = _run(tmp_path, llm, direct=True)
 
     assert [model for model, _messages in llm.sent] == [PRIMARY]
-    assert [row["state"] for row in _ledger(data_root)] == ["reserved", "dispatched", "unresolved"]
+    assert [(row["state"], row["revision"]) for row in _ledger(data_root)] == [("unresolved", 4)]
+    assert _ledger(data_root)[0]["physical_failure"]
     assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
 
 
@@ -372,7 +409,8 @@ def test_route_facts_reach_only_the_acting_routes_own_next_round(monkeypatch):
         messages = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "tool round"}]
         loop_model_call._call_round_model(SimpleNamespace(
             tools=SimpleNamespace(_ctx=tool_ctx), messages=messages, defer_resource_wait=defer,
-            attempt_cap=None, accumulated_usage={}, active_context_mode="max"))
+            attempt_cap=None, accumulated_usage={}, active_context_mode="max",
+            active_model="m", active_use_local=False, tool_schemas=[]))
         return messages
 
     assert call(True)[-1]["content"] == "tool round"  # a candidate's copy never takes the note

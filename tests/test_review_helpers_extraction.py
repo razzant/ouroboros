@@ -3,12 +3,13 @@
 ``review_helpers`` keeps the review plumbing every surface shares — the prompt
 token budget and its density calibration, drive-root resolution, event/usage
 emission, the wave budget gate, cached prompt blocks, governance-document
-loading, the scope actor record, the checklist section, the intent sections,
-and the pre-advisory worktree checks. Two owners sit beside it:
-``review_prompt_text`` (the fixed reviewer vocabulary and the sections
-rendered from prior rounds) and ``review_file_pack`` (what counts as
-sensitive/binary/oversized, the porcelain parsers, and the packs read from the
-working tree). Cross-references run through the parent's call-time handle
+loading, the scope actor record, the intent sections, and the pre-advisory
+worktree checks. Three owners sit beside it: ``review_prompt_text`` (the fixed
+reviewer vocabulary and the sections rendered from prior rounds),
+``review_file_pack`` (what counts as sensitive/binary/oversized, the porcelain
+parsers, and the packs read from the working tree) and ``review_checklist``
+(the layered change-review checklist and the fingerprint of the rules that
+ran). Cross-references run through the parent's call-time handle
 (the D18/D33 mechanical exception), and the parent re-exports every moved
 identity, so existing importers and monkeypatching tests see no change.
 """
@@ -19,6 +20,7 @@ import ast
 import pathlib
 
 from ouroboros.tools import (
+    review_checklist,
     review_file_pack,
     review_helpers,
     review_prompt_text,
@@ -27,7 +29,7 @@ from ouroboros.tools import (
 
 REPO = pathlib.Path(__file__).parents[1]
 
-_LEAVES = (review_prompt_text, review_file_pack)
+_LEAVES = (review_prompt_text, review_file_pack, review_checklist)
 
 _MOVED_OWNERS = {
     "_JSON_SECRET_RE": review_prompt_text,
@@ -37,6 +39,17 @@ _MOVED_OWNERS = {
     "REVIEW_THOROUGHNESS_BLOCK": review_prompt_text,
     "REVIEW_SEVERITY_THRESHOLDS": review_prompt_text,
     "REPO_ANTI_PATTERN_LOCK_GUARD": review_prompt_text,
+    "REPO_ANTI_PATTERN_LOCK_GUARD_CORE": review_prompt_text,
+    "anti_pattern_lock_guard": review_prompt_text,
+    "author_questions_block": review_prompt_text,
+    "goal_with_author_questions": review_prompt_text,
+    "BODY_CHECKLIST_SECTION": review_checklist,
+    "CHECKLIST_LAYERS": review_checklist,
+    "CHECKLIST_RELATIVE_PATH": review_checklist,
+    "CORE_CHECKLIST_SECTION": review_checklist,
+    "checklist_fingerprint": review_checklist,
+    "load_checklist_layers": review_checklist,
+    "load_checklist_section": review_checklist,
     "_ANTI_THRASHING_RULE_VERDICT": review_prompt_text,
     "_ANTI_THRASHING_RULE_ITEM_NAME": review_prompt_text,
     "_CONVERGENCE_RULE_TEXT": review_prompt_text,
@@ -93,7 +106,6 @@ _PARENT_OWNED = (
     "_run_review_preflight_tests",
     "build_blocking_findings_json_section",
     "build_goal_section",
-    "build_scope_actor_record",
     "build_scope_section",
     "build_skill_host_context",
     "cached_prompt_blocks",
@@ -103,10 +115,10 @@ _PARENT_OWNED = (
     "emit_review_usage",
     "format_advisory_error",
     "get_advisory_runtime_diagnostics",
-    "load_checklist_section",
     "load_governance_doc",
     "resolve_intent",
     "review_drive_root",
+    "review_history_with_obligations",
     "review_wave_budget_gate",
 )
 
@@ -167,7 +179,7 @@ def test_review_prompt_text_reads_nothing_from_the_repository():
 
 
 def test_review_helper_leaves_are_review_substrate_members():
-    """A PR editing either leaf must trip the contributor lane's trusted rerun."""
+    """A PR editing either leaf must show in the contributor packet's review_substrate_changed."""
     from scripts.run_external_review import _REVIEW_SUBSTRATE_PATHS
 
     for module in _LEAVES:
@@ -194,3 +206,4 @@ def test_review_helpers_extraction_size_bounds_have_meaningful_headroom():
     assert counts["ouroboros.tools.review_helpers"] <= 925
     assert counts["ouroboros.tools.review_prompt_text"] <= 1000
     assert counts["ouroboros.tools.review_file_pack"] <= 1000
+    assert counts["ouroboros.tools.review_checklist"] <= 300

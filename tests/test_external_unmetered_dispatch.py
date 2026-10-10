@@ -23,19 +23,11 @@ from ouroboros.tools import skill_exec
 from ouroboros.tools.registry import ToolContext
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from tests.test_skill_exec import _build_skill, _make_ctx, _mark_reviewed_and_enabled
+from tests._usage_store_testing import ledger_rows
 
 
 def _external_rows(drive_root: pathlib.Path) -> list[dict]:
-    path = drive_root / "state" / "usage_attempts.jsonl"
-    if not path.exists():
-        return []
-    return [
-        row
-        for raw in path.read_text(encoding="utf-8").splitlines()
-        if raw.strip()
-        for row in [json.loads(raw)]
-        if row.get("kind") == "external_unmetered"
-    ]
+    return [row for row in ledger_rows(drive_root) if row.get("kind") == "external_unmetered"]
 
 
 def _prepare_script_skill(

@@ -174,7 +174,6 @@ def test_vlm_query_honors_protected_artifact_policy(monkeypatch, tmp_path):
     assert "RESOURCE_POLICY_BLOCKED" in out
 
 
-# --- WA3 round-3: multi-scope review must not NameError on ScopeReviewResult ---
 # --- claudexor round: acceptance re-review must not be poisoned by stale verdict -
 def test_superseded_pre_revision_review_does_not_poison_objective():
     """claudexor finding (E/M): the objective reducer is worst-of-all-runs, so a
@@ -489,7 +488,8 @@ def test_vlm_child_reads_credential_named_runtime_content(tmp_path, monkeypatch)
         drive_root=str(data),
         task_constraint={"mode": "local_readonly_subagent"},
     )
-    monkeypatch.setattr(vision, "_downscale_image_for_vlm", lambda raw, mime: (raw, mime))
+    from tests.test_vision import _real_png_bytes
+    img.write_bytes(_real_png_bytes())
     payload, err = vision._load_local_image_payload(ctx, str(img))
     assert payload is not None and err == ""
 

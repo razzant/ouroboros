@@ -136,7 +136,7 @@ def test_api_conversion_binding_overrides_old_result_scope_on_restore(host, tmp_
     from starlette.requests import Request
     from ouroboros.gateway.tasks import _create_task_from_body
     from supervisor import queue, workers
-    from tests.test_project_hold_recovery import worker
+    from tests.test_project_hold_recovery import resume_after_app_stop, worker
 
     folder = tmp_path / "api-folder"
     folder.mkdir()
@@ -162,6 +162,9 @@ def test_api_conversion_binding_overrides_old_result_scope_on_restore(host, tmp_
     assert queue.restore_pending_from_snapshot() == 1
     assert bool(host.pending[0].get("_project_admission_restore_hold")) is stale
     sent = worker(host, monkeypatch)
+    workers.assign_tasks()
+    assert not sent
+    resume_after_app_stop(host, "converted")
     workers.assign_tasks()
     workers.assign_tasks()
     assert [row["id"] for row in sent] == ["converted"]

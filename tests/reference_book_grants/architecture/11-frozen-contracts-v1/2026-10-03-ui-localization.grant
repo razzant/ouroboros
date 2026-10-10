@@ -1,4 +1,0 @@
-201
-The gateway-envelope row names the interface-language twin modules
-(ui_i18n_contracts.py beside contracts.py; ui_i18n_types.js beside api_types.js)
-and the test that pins them.

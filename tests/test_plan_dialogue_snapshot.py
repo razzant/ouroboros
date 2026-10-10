@@ -378,7 +378,7 @@ def test_requested_related_room_replay_keeps_one_physical_panel_per_cycle(harnes
 
     class Executor(_HeldExecutor):
         def execute(self):
-            self.execute_calls += 1
+            super().execute()  # held: the send settles only once the test releases it
             answer = (json.dumps([_finding("main", "need_evidence", locator="chat:1")])
                       if self.execute_calls == 1 else CLEAN)
             return ReviewAttemptResult(message={"content": answer}, raw_text=answer,
@@ -386,13 +386,24 @@ def test_requested_related_room_replay_keeps_one_physical_panel_per_cycle(harnes
 
     executor = Executor()
     monkeypatch.setattr("ouroboros.review_substrate._review_route_executor", lambda *a, **k: executor)
+
+    def dispatch():
+        # A send that settles before the dispatch barrier registers the released
+        # roster is returned inline and writes no mailbox frame; hold each send
+        # until its dispatching call has returned at the barrier.
+        executor.release.clear()
+        try:
+            return _call(ctx)
+        finally:
+            executor.release.set()
+
     for cycle in (1, 2):
-        _call(ctx)
+        dispatch()
         wave = _state(harness)["waves"][-1]
         assert _wait_until(lambda: len(_mailbox_entries(harness.drive, ctx.task_id)) >= cycle)
         _collect(ctx, wave["request_fingerprint"])
     second = _state(harness)["waves"][-1]
-    replay = _call(ctx)
+    replay = dispatch()
     current = _state(harness)["waves"][-1]
     if current["request_fingerprint"] != second["request_fingerprint"]:
         assert _wait_until(lambda: len(_mailbox_entries(harness.drive, ctx.task_id)) >= 3)
@@ -402,7 +413,7 @@ def test_requested_related_room_replay_keeps_one_physical_panel_per_cycle(harnes
     assert executor.execute_calls == 2 and _state(harness)["cycles_paid"] == 2
     # A real update to requested evidence still earns the existing W3 refresh.
     append_jsonl(harness.drive / "logs/chat.jsonl", {"chat_id": 1, "text": "Main premise changed"})
-    _call(ctx)
+    dispatch()
     changed = _state(harness)["waves"][-1]
     assert _wait_until(lambda: len(_mailbox_entries(harness.drive, ctx.task_id)) >= 3)
     _collect(ctx, changed["request_fingerprint"])

@@ -12,12 +12,17 @@ from pathlib import Path
 
 from devtools.benchmarks.common import launcher_audit
 from ouroboros.configured_subagents import parse_configured_subagents
-from ouroboros.reviewer_slot_config import parse_reviewer_slots
 from tests._governance_docs_shared import architecture_text
 
 REPO = Path(__file__).resolve().parents[1]
 PROFILE = REPO / "devtools" / "benchmarks" / "cybergym" / "settings_base.json"
 MODEL = "deepseek/deepseek-v4-flash-0731"
+RETIRED_REVIEW_KEYS = {
+    "OUROBOROS_REVIEWER_SLOTS", "OUROBOROS_REVIEW_MODELS",
+    "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+    "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "OUROBOROS_EFFORT_REVIEW",
+    "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
+}
 
 
 def _settings() -> dict[str, object]:
@@ -27,12 +32,16 @@ def _settings() -> dict[str, object]:
 def test_profile_pins_one_canonical_model_and_review_panel():
     settings = _settings()
     assert settings["OUROBOROS_MODEL"] == MODEL
+    assert not RETIRED_REVIEW_KEYS.intersection(settings)
     configured = parse_configured_subagents(settings["OUROBOROS_SUBAGENTS"])
     # The template keeps the canonical actor available for review/copying; the
     # launcher turns it off in the applied cohort snapshot.
     assert configured.enabled is True
-    assert len(configured.items) == 1
-    actor = configured.items[0]
+    # The canonical actor plus the ONE packet review seat on the measured model
+    # (the review pool is the catalog's review-eligible rows).
+    assert len(configured.items) == 2
+    actor, reviewer = configured.items
+    assert not actor.review_eligible
     assert actor.subagent_id == "benchmark-model"
     assert actor.route.kind == "api_model"
     assert actor.route.credential_profile_id == ""
@@ -44,7 +53,6 @@ def test_profile_pins_one_canonical_model_and_review_panel():
         "OUROBOROS_MODEL_VISION",
         "OUROBOROS_MODEL_CONSCIOUSNESS",
         "OUROBOROS_MODEL_FALLBACKS",
-        "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
         "OUROBOROS_WEBSEARCH_MODEL",
     )
     for key in active_slots:
@@ -57,12 +65,10 @@ def test_profile_pins_one_canonical_model_and_review_panel():
     assert "OUROBOROS_MODEL_HEAVY" not in settings
     assert "USE_LOCAL_HEAVY" not in settings
 
-    reviewers = parse_reviewer_slots(settings["OUROBOROS_REVIEWER_SLOTS"])
-    assert [row.target_id for row in reviewers.triad] == [MODEL]
-    assert [row.target_id for row in reviewers.scope] == [MODEL]
-    assert all(row.effort == "max" for row in (*reviewers.triad, *reviewers.scope))
-    assert all(not row.is_session for row in (*reviewers.triad, *reviewers.scope))
-    assert reviewers.advisory.enabled is False
+    assert "OUROBOROS_REVIEWER_SLOTS" not in settings  # the lane key: retired by the pool
+    assert reviewer.review_eligible and reviewer.subagent_id == "benchmark-review-1"
+    assert (reviewer.route.kind, reviewer.route.target_id) == ("api_model", MODEL)
+    assert (reviewer.effort, reviewer.delivery) == ("max", "packet")
 
 
 def test_profile_records_safe_runtime_and_budget_defaults():
@@ -83,12 +89,6 @@ def test_profile_records_safe_runtime_and_budget_defaults():
         "OUROBOROS_EFFORT_EVOLUTION",
     ):
         assert settings[key] == "high", key
-    for key in (
-        "OUROBOROS_EFFORT_REVIEW",
-        "OUROBOROS_EFFORT_SCOPE_REVIEW",
-        "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
-    ):
-        assert settings[key] == "max", key
     for key in (
         "OUROBOROS_EFFORT_CONSCIOUSNESS",
     ):
@@ -147,7 +147,6 @@ def test_benchmark_inventory_points_to_cybergym_docs():
     architecture = architecture_text(REPO)
     assert "cybergym/" in common_readme
     assert "devtools/benchmarks/cybergym/" in architecture
-    assert "workspace-custody gate" in architecture
 
 
 def test_cybergym_docs_pin_the_owner_approved_contract():

@@ -1,6 +1,5 @@
 """Processing qualifiers survive reservation, native observations and settlement."""
 
-import json
 import copy
 
 import pytest
@@ -8,12 +7,13 @@ import pytest
 from ouroboros import usage_accounting as ua
 from ouroboros._usage_response import processing_receipt, usage_from_response
 from tests.test_usage_accounting import data_root as _usage_data_root
+from tests._usage_store_testing import ledger_rows
 
 data_root = _usage_data_root
 
 
 def rows(root):
-    return [json.loads(line) for line in (root / ua.LEDGER_REL).read_text().splitlines()]
+    return ledger_rows(root)
 
 
 def test_native_mode_reaches_pricing_before_send_and_observation_before_settlement(data_root, monkeypatch):
@@ -105,11 +105,11 @@ def test_session_processing_and_components_are_retained_once_without_repricing(d
     spend, estimated = disclosed_spend({}, attempt_execution=evidence)
     ua.record_subscription_session("session", drive_root=data_root, route="claude", spend_usd=spend,
                                    spend_estimated=estimated, attempt_execution=evidence)
-    before = (data_root / ua.LEDGER_REL).read_bytes()
+    before = ledger_rows(data_root)
     evidence[0]["usageCost"]["cashUsd"] = 90
     ua.record_subscription_session("session", drive_root=data_root, route="claude", spend_usd=90,
                                    attempt_execution=evidence)
-    assert (data_root / ua.LEDGER_REL).read_bytes() == before
+    assert ledger_rows(data_root) == before
     assert rows(data_root)[-1]["attempt_execution"] == original
     assert rows(data_root)[-1]["cost_usd"] is None
     assert ua.usage_projection(data_root)["unknown_unmetered"] == 1

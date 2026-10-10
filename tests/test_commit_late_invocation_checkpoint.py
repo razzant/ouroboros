@@ -12,7 +12,6 @@ import pytest
 
 from ouroboros import review_state as state_store
 from ouroboros.review_execution import ReviewRouteKind
-from ouroboros.review_records import ReviewSlot
 from ouroboros.tools.commit_gate import _record_commit_attempt
 from ouroboros.tools.git import _install_paid_dispatch_stamp
 from ouroboros.tools.parallel_review import _reserve_parallel_review_roster
@@ -31,11 +30,13 @@ def reserved(tmp_path):
         _current_review_rebuttal_sha256="", _review_reconcile_only=False,
     )
     _install_paid_dispatch_stamp(ctx, "fixture commit", time.time(), {"fingerprint": "original-subject"})
+    # ONE wave: a packet seat and a retrieving seat (both parts) ride the same
+    # surface roster; there is no second surface to reserve.
     _reserve_parallel_review_roster(
-        ctx, {"row_plan": {"models": ["fake/triad"], "routes": [ReviewRouteKind.AGENT_SESSION],
-                           "efforts": ["high"], "slot_ids": ["triad-a"]}},
-        [{"slot": ReviewSlot("scope-a", "fake/scope", route=ReviewRouteKind.AGENT_SESSION),
-          "prepared": object(), "final": None}],
+        ctx, {"row_plan": {"models": ["fake/packet", "fake/retrieving"],
+                           "routes": [ReviewRouteKind.API_CHAT, ReviewRouteKind.AGENT_SESSION],
+                           "efforts": ["high", "high"], "slot_ids": ["seat-a", "seat-b"],
+                           "parts": [("change",), ("change", "coupling")]}},
     )
     attempt = load(ctx)
     assert attempt.status == "reviewing" and attempt.paid
@@ -49,29 +50,29 @@ def load(ctx, *, number=None):
     )
 
 
-def args_for(ctx, surface="multi_model_review"):
+def args_for(ctx, seat=0):
     item = load(ctx)
-    row = item.triad_raw_results[0] if surface == "multi_model_review" else item.scope_raw_result["raw_results"][0]
+    row = item.triad_raw_results[seat]
     return dict(repo_key=item.repo_key, tool_name=item.tool_name, task_id=item.task_id,
-                attempt=item.attempt, review_retry_key=item.review_retry_key, surface=surface,
-                slot_id=row["slot_id"], operation_id=row["operation_id"], invocation_id="fixture-invocation-" + surface)
+                attempt=item.attempt, review_retry_key=item.review_retry_key, surface="multi_model_review",
+                slot_id=row["slot_id"], operation_id=row["operation_id"], invocation_id="fixture-invocation-" + row["slot_id"])
 
 
 def immutable_evidence(item):
     value = asdict(item)
     value.pop("updated_ts")
     value.pop("late_result_pending")
-    for row in value["triad_raw_results"] + value["scope_raw_result"]["raw_results"]:
+    for row in value["triad_raw_results"]:
         row.pop("pending_invocation_id", None)
         row.pop("late_result_pending", None)
     return value
 
 
 @pytest.mark.parametrize("status", ["reviewing", "reviewed", "succeeded", "failed", "blocked"])
-@pytest.mark.parametrize("surface", ["multi_model_review", "scope_review"])
-def test_exact_paid_checkpoint_survives_author_continuation(reserved, status, surface):
+@pytest.mark.parametrize("seat", [0, 1])
+def test_exact_paid_checkpoint_survives_author_continuation(reserved, status, seat):
     ctx = reserved
-    arguments = args_for(ctx, surface)
+    arguments = args_for(ctx, seat)
     _record_commit_attempt(ctx, "fixture commit", status, _strict=True)
     before = load(ctx)
     state_store.checkpoint_pending_review_invocation(ctx.drive_root, **arguments)
@@ -79,8 +80,8 @@ def test_exact_paid_checkpoint_survives_author_continuation(reserved, status, su
     assert after.status == status
     assert immutable_evidence(after) == immutable_evidence(before)
     assert after.paid and after.late_result_pending
-    rows = after.triad_raw_results if surface == "multi_model_review" else after.scope_raw_result["raw_results"]
-    assert rows[0]["pending_invocation_id"] == arguments["invocation_id"]
+    assert after.triad_raw_results[seat]["pending_invocation_id"] == arguments["invocation_id"]
+    assert "pending_invocation_id" not in after.triad_raw_results[1 - seat]
     assert len(state_store.load_state(ctx.drive_root).attempts) == 1
 
 
@@ -138,7 +139,7 @@ def test_exact_reservation_requirements_remain(reserved, defect):
 def test_delayed_checkpoint_closure_and_parallel_slot_keep_terminal_status(reserved):
     ctx = reserved
     checkpoint = ctx._review_pending_invocation_checkpoint
-    arguments = [args_for(ctx, surface) for surface in ("multi_model_review", "scope_review")]
+    arguments = [args_for(ctx, seat) for seat in (0, 1)]
     entered, release = threading.Barrier(3), threading.Event()
     def late(arguments):
         entered.wait(timeout=5)
@@ -157,7 +158,7 @@ def test_delayed_checkpoint_closure_and_parallel_slot_keep_terminal_status(reser
     after = load(ctx)
     assert after.status == "succeeded" and immutable_evidence(after) == immutable_evidence(before)
     assert after.triad_raw_results[0]["pending_invocation_id"] == arguments[0]["invocation_id"]
-    assert after.scope_raw_result["raw_results"][0]["pending_invocation_id"] == arguments[1]["invocation_id"]
+    assert after.triad_raw_results[1]["pending_invocation_id"] == arguments[1]["invocation_id"]
     state_store.checkpoint_pending_review_invocation(ctx.drive_root, **arguments[0])
     assert immutable_evidence(load(ctx)) == immutable_evidence(after)
     assert len(state_store.load_state(ctx.drive_root).attempts) == 1

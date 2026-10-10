@@ -198,6 +198,19 @@ def acceptance_evidence_ref_vocabulary(evidence: Any) -> Dict[str, str]:
             basis = PARTIAL_SECTION
         elif name == "skill_lifecycle" and ev.get("skill_lifecycle_complete") is False:
             basis = PARTIAL_SECTION
+        elif name == "historical_author_inputs" and isinstance(ev[name], dict) and (
+            ev[name].get("status") == "unavailable"
+            or any(
+                isinstance(anchor, dict) and (
+                    anchor.get("preview_complete") is False or anchor.get("status") == "unavailable"
+                )
+                for anchor in ev[name].get("anchors", [])
+            )
+        ):
+            # Host-recorded availability does not make a bounded preview (or a
+            # missing source) complete evidence. Use the existing partial rail;
+            # source readers and other complete exhibits keep their own rules.
+            basis = PARTIAL_SECTION
         elif name in DECLARED_INTENT_SECTIONS:
             basis = DECLARED_INTENT_SECTION
         elif tag in HOST_ATTESTED_SECTION_PROVENANCE:

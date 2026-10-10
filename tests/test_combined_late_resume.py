@@ -43,14 +43,14 @@ def test_one_resume_restores_post_task_and_dead_acceptance_preparation(late, tmp
             extractor=lambda response: (response[1], .01, True))
 
     def late_stage(*_a, **_kw):
-        entered.append('chat_consolidation')
+        entered.append('scratchpad_consolidation')
         if len(entered) == 1:
             assert request_owner_pause(f.tid, request_id='combined-late-pause')['ok']
         # A real unsent paid boundary observes the accepted Pause. No provider I/O.
         synthetic_chat(None)
 
-    monkeypatch.setattr(pipeline, '_run_chat_consolidation', late_stage)
-    monkeypatch.setattr(pipeline, '_run_scratchpad_consolidation', lambda *_a, **_k: None)
+    # The first paid late stage (scratchpad consolidation since the dialogue writer is retired).
+    monkeypatch.setattr(pipeline, '_run_scratchpad_consolidation', late_stage)
     monkeypatch.setattr(pipeline, '_run_reflection', lambda *_a, **_k: None)
     try:
         with usage_scope(UsageScope(drive_root=f.root, task_id=f.tid, root_task_id=f.tid,
@@ -84,7 +84,7 @@ def test_one_resume_restores_post_task_and_dead_acceptance_preparation(late, tmp
         assert not resumed['ok'], resumed
         assert read_fence(f.root, f.tid) == fence_before
         assert load_task_result(f.root, f.tid)['root_phase_checkpoint']['post_task_synthesis'] == 'paused'
-        assert entered == ['chat_consolidation'] and not late.calls
+        assert entered == ['scratchpad_consolidation'] and not late.calls
         return
     assert resumed['ok'], resumed
     from tests.test_review_operation_lifetime import until
@@ -104,7 +104,7 @@ def test_one_resume_restores_post_task_and_dead_acceptance_preparation(late, tmp
     assert len(late.calls) == 3
     assert set(after['review_operations']) == {preparation['owner_id']}
     assert after['acceptance_debt'] == before['acceptance_debt']
-    assert entered == ['chat_consolidation', 'chat_consolidation']
+    assert entered == ['scratchpad_consolidation', 'scratchpad_consolidation']
     assert all(scope.task_id == f.tid and scope.root_task_id == f.tid and scope.root_limit_usd == 4.0
                for scope, _ in late.calls)
     assert not q.resume_budget_paused_task(f.tid)['ok']

@@ -310,10 +310,13 @@ def test_only_evolution_push_stays_under_git_lock(
         current_task_type=task_type,
         task_id="evo",
         task_metadata={"evolution_transaction": claim},
+        _coupling_review_history={"snap": [{"round": 1, "status": "FAIL"}]},
     )
 
     assert git_tools._repo_commit_push(ctx, "test commit", skip_tests=True) == "ok"
     assert order == expected_order
+    # The commit closes the subject's coupling rounds; the next change starts fresh.
+    assert ctx._coupling_review_history == {}
 
 
 def test_revoked_publication_does_not_record_or_anchor_success(tmp_path, monkeypatch):
@@ -357,7 +360,7 @@ def test_revoked_publication_does_not_record_or_anchor_success(tmp_path, monkeyp
         repo_dir=tmp_path, drive_root=tmp_path, branch_dev="ouroboros",
         current_task_type="evolution", task_id="evo",
         task_metadata={"evolution_transaction": claim},
-        _scope_review_history={"keep": True},
+        _coupling_review_history={"keep": True},
     )
 
     result = git_tools._repo_commit_push(ctx, "test commit", skip_tests=True)
@@ -376,7 +379,7 @@ def test_revoked_publication_does_not_record_or_anchor_success(tmp_path, monkeyp
     assert failed["scope_raw_result"] == {"raw": "scope"}
     assert failed["degraded_reasons"] == ["recorded"]
     assert not getattr(ctx, "last_reviewed_commit_sha", "")
-    assert ctx._scope_review_history == {"keep": True}
+    assert ctx._coupling_review_history == {"keep": True}
 
 
 def test_postcommit_binding_failure_contains_evolution_commit(tmp_path, monkeypatch):

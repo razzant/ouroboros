@@ -27,13 +27,15 @@ import ast
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 from ouroboros.code_intelligence import CodeInventory, _resolve_relative_import
 
 DOMAIN_MANIFEST_RELPATH = "ouroboros/domains.toml"
 PERSISTENCE_DOC_RELPATH = "docs/PERSISTENCE.md"
 FROZEN_INVENTORY_RELPATH = "docs/inventories/FROZEN_CONTRACTS_INVENTORY.md"
+
+ARCHITECTURE_LIMIT_MARKER = "architecture_coverage_limit:"
 
 ARCHITECTURE_FACTS = (
     "owner_of",
@@ -145,7 +147,7 @@ def owner_of(
     repo_root: pathlib.Path,
     query: str,
     *,
-    inventory: CodeInventory | None = None,
+    inventory: CodeInventory | Callable[[], CodeInventory] | None = None,
 ) -> Tuple[DomainOwner, ...]:
     """Domain owner(s) of a module path, dotted module, or defined symbol.
 
@@ -153,7 +155,18 @@ def owner_of(
     symbol resolves through the code inventory to its defining module(s) and
     each definition inside the manifest population reports its owner. A target
     outside the runtime module population returns ``()`` — no domain owns it.
+    A symbol answer covers only population modules with an indexed outline in
+    that inventory; ``architecture_fact_rows`` discloses the others. A callable
+    ``inventory`` is called only for a bare symbol, so a tool can supply its own
+    admitted resource view without building it for manifest lookups.
     """
+    return _owner_lookup(repo_root, query, inventory)[0]
+
+
+def _owner_lookup(
+    repo_root: pathlib.Path, query: str, inventory: CodeInventory | Callable[[], CodeInventory] | None,
+) -> Tuple[Tuple[DomainOwner, ...], Tuple[str, ...]]:
+    """``owner_of`` rows plus the population modules a symbol lookup could not read."""
     manifest = load_domain_manifest(repo_root)
     text = str(query or "").strip().replace("\\", "/")
     if not text:
@@ -165,18 +178,20 @@ def owner_of(
         return DomainOwner(text, path, domain, manifest.domains.get(domain, ""), via)
 
     if norm in manifest.modules:
-        return (_owner(norm, "module_path"),)
+        return (_owner(norm, "module_path"),), ()
     if "/" in norm or norm.endswith(".py"):
-        return ()  # a real path outside the runtime module population
+        return (), ()  # a real path outside the runtime module population
     dotted_map = {_module_dotted(path): path for path in manifest.modules}
     if norm in dotted_map:
-        return (_owner(dotted_map[norm], "dotted_module"),)
+        return (_owner(dotted_map[norm], "dotted_module"),), ()
     if "." in norm:
-        return ()  # dotted, but not a population module
+        return (), ()  # dotted, but not a population module
     if inventory is None:
         from ouroboros.code_intelligence import build_code_inventory
 
         inventory = build_code_inventory(pathlib.Path(repo_root), persist=False)
+    elif callable(inventory):
+        inventory = inventory()
     from ouroboros.code_intelligence import symbol_definitions
 
     owners = {
@@ -184,7 +199,13 @@ def owner_of(
         for file, _symbol in symbol_definitions(inventory, norm)
         if file.path in manifest.modules
     }
-    return tuple(_owner(path, "symbol_definition") for path in sorted(owners))
+    # Enumeration/time limits, skipped files or syntax errors leave a module
+    # without an outline: a symbol there is unread, not absent.
+    outlined = {file.path for file in inventory.files
+                if file.disposition == "indexed" and not file.syntax_error}
+    unread = tuple(path for path in sorted(manifest.modules)
+                   if path not in outlined and (pathlib.Path(repo_root) / path).is_file())
+    return tuple(_owner(path, "symbol_definition") for path in sorted(owners)), unread
 
 
 # ---------------------------------------------------------------------------
@@ -566,13 +587,15 @@ def architecture_fact_rows(
     repo_root: pathlib.Path,
     query: str,
     *,
-    inventory: CodeInventory | None = None,
+    inventory: CodeInventory | Callable[[], CodeInventory] | None = None,
 ) -> List[str]:
     """Render one architecture fact as compact tool rows.
 
     ``query`` is ``"<fact> <argument>"`` where fact is one of
     ``ARCHITECTURE_FACTS``; for ``protected_contracts_affected`` the argument
     is a comma/space-separated changed-path list (or a pasted unified diff).
+    A row starting with ``ARCHITECTURE_LIMIT_MARKER`` qualifies the answer's
+    coverage; ``query_code`` reports it as a limit of an incomplete reply.
     """
     text = str(query or "").strip()
     fact, _, arg = text.partition(" ")
@@ -587,14 +610,20 @@ def architecture_fact_rows(
         raise ValueError(f"architecture fact {fact} requires an argument after the fact name")
     root = pathlib.Path(repo_root)
     if fact == "owner_of":
-        owners = owner_of(root, arg, inventory=inventory)
-        if not owners:
-            return [f"{arg}: no domain owner — not in the runtime module population "
-                    f"({DOMAIN_MANIFEST_RELPATH})"]
-        return [
+        owners, unread = _owner_lookup(root, arg, inventory)
+        rows = [
             f"{row.module} -> {row.domain} ({row.domain_title}) [{row.via}]"
             for row in owners
         ]
+        if unread:
+            if not rows:
+                rows.append(f"{arg}: no owning definition among outlined population "
+                            "modules; absence not established")
+            shown = ", ".join(unread[:5]) + (", …" if len(unread) > 5 else "")
+            rows.append(f"{ARCHITECTURE_LIMIT_MARKER} {len(unread)} population module(s) "
+                        f"without an indexed outline ({shown}); symbol owners may be missing")
+        return rows or [f"{arg}: no domain owner — not in the runtime module population "
+                        f"({DOMAIN_MANIFEST_RELPATH})"]
     if fact == "domain_dependencies":
         deps = domain_dependencies(root, arg)
         return [

@@ -12,7 +12,7 @@ is invented for an event a worker never stamped.
 from __future__ import annotations
 
 import inspect
-from pathlib import PurePath
+from pathlib import Path, PurePath
 import logging
 import re
 import threading
@@ -215,20 +215,27 @@ def test_the_loop_publishes_one_monotonic_stamp_per_tick_phase():
 
     Three coarse phases, one stamp each, every stamp taken on ``time.monotonic()``
     (OB-03: a wall-clock jump must never fabricate or mask a stall), and the drain
-    itself observes the worker-event lag it reports.
+    itself observes the worker-event lag it reports. Startup names the usage
+    store's one-time import as its own sub-phase, then returns to "startup".
     """
     import server
 
     source = inspect.getsource(server._run_supervisor)
     stamps = re.findall(
-        r'_loop_liveness\[1\], _loop_liveness\[0\] = loop_phase_facts\(\s*_loop_liveness, "(\w+)"'
+        r'_loop_liveness\[1\], _loop_liveness\[0\] = loop_phase_facts\(\s*_loop_liveness, "([\w:]+)"'
         r'[^)]*\), time\.(\w+)\(\)',
         source,
     )
     assert [phase for phase, _clock in stamps] == ["startup", "events", "maintenance", "assign"], stamps
     assert {clock for _phase, clock in stamps} == {"monotonic"}, stamps
-    # The bounded drain receives the loop's own liveness list and observes the lag itself.
+    # The usage store's one-time import runs as its own sub-phase, stamped the same way.
     from ouroboros import server_liveness
+
+    assert 'run_startup_phase(_loop_liveness, "startup:usage_store",' in source
+    helper = inspect.getsource(server_liveness.run_startup_phase)
+    assert re.findall(r'loop_phase_facts\(liveness, (\w+|"\w+")\), time\.(\w+)\(\)', helper) == [
+        ("phase", "monotonic"), ('"startup"', "monotonic")], helper
+    # The bounded drain receives the loop's own liveness list and observes the lag itself.
 
     assert re.search(r"drain_worker_events\(\s*get_event_q\(\), _event_ctx, _loop_liveness,", source), source
     assert "observe_worker_event_lag(liveness, evt)" in inspect.getsource(server_liveness.drain_worker_events)
@@ -264,6 +271,7 @@ def _run_custody_tick(monkeypatch, *, failing_step=None):
     monkeypatch.setattr(pc, "reap_orphaned_processes", _step("reap_orphaned_processes"))
     monkeypatch.setattr(sm, "_reconcile_delegated_runs", _step("reconcile_delegated_runs"))
     monkeypatch.setattr(sm, "_cursor_refresh_settled_terminals", _step("cursor_refresh_settled_terminals"))
+    monkeypatch.setattr("ouroboros.terminal_projection.reconcile_terminal_projections", _step("terminal_projection"))
     monkeypatch.setattr(
         "ouroboros.claudexor_daemon.get_owned_daemon",
         lambda: type("_D", (), {"clear_start_failure_latch": lambda self, **_k: False})(),
@@ -308,7 +316,7 @@ def test_failed_init_is_not_ready_on_the_state_api_while_boot_waiters_still_sett
 
     import ouroboros.config as config
     import server
-    from ouroboros import usage_accounting as ua
+    from ouroboros import usage_store
     from ouroboros.gateway.state import api_state
     from supervisor import queue as queue_mod, state as state_mod, workers
 
@@ -327,7 +335,8 @@ def test_failed_init_is_not_ready_on_the_state_api_while_boot_waiters_still_sett
     monkeypatch.setattr(server, "_start_supervisor_liveness_watchdog", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_startup_worker_pids", lambda _root: set())
     monkeypatch.setattr(server, "_run_startup_task_recovery", lambda *_a, **_k: None)
-    monkeypatch.setattr(server, "ensure_legacy_imported",
+    migrate = usage_store.migrate_from_journal
+    monkeypatch.setattr("ouroboros.usage_store.migrate_from_journal",
                         lambda _root: (_ for _ in ()).throw(RuntimeError("boot dependency refused")))
     server._run_supervisor({})
     assert init_done.is_set() and not ready.is_set()
@@ -343,7 +352,7 @@ def test_failed_init_is_not_ready_on_the_state_api_while_boot_waiters_still_sett
     (repo / ".git" / "refs" / "heads" / "ouroboros").write_text("1234567890abcdef1234567890abcdef12345678\n", encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
-    ua.ensure_legacy_imported(root)
+    migrate(root)  # the store the refused boot never created, so the state API reads money
     monkeypatch.setattr(config, "REPO_DIR", repo)
     monkeypatch.setattr(state_mod, "TOTAL_BUDGET_LIMIT", 0.0)
     monkeypatch.setattr(state_mod, "load_state", lambda: {"current_branch": None, "current_sha": None})
@@ -493,7 +502,7 @@ def test_the_watchdog_watches_startup_and_every_generation_exit_stops_it():
 
     source = inspect.getsource(server._run_supervisor)
     start = source.index("_start_supervisor_liveness_watchdog(_loop_liveness, _watchdog_stop)")
-    assert start < source.index("ensure_legacy_imported("), "the watchdog must start before init"
+    assert start < source.index("migrate_from_journal("), "the watchdog must start before init"
     assert source.index("\n    try:\n", source.index("prior_worker_pids:")) < start, "watchdog setup must use the init failure rail"
     assert source.index('loop_phase_facts(_loop_liveness, "startup", new_tick=True)') < start
     assert source.count("_watchdog_stop.set()") == 2, "init-failure exit and loop exit"
@@ -572,8 +581,11 @@ def test_stall_end_carries_samples_top_frames_and_the_last_stack(monkeypatch, jo
     closing row says how many samples it took, which repository frames they fold into (at
     most five) and the last stack - where the thread SPENT the stall, not only where it began."""
     import server
-    from ouroboros import server_liveness
+    from ouroboros import config, server_liveness
 
+    # Shared isolation uses an empty disposable repo. This read-only stack test
+    # needs its actual source root to exercise repository-frame attribution.
+    monkeypatch.setattr(config, "REPO_DIR", Path(__file__).resolve().parents[1])
     monkeypatch.setenv("OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC", "1")
     liveness = _live_liveness("maintenance")
     clock = _Clock(mono=liveness[0] + 100.0)
@@ -602,7 +614,7 @@ def test_stall_end_carries_samples_top_frames_and_the_last_stack(monkeypatch, jo
     assert end["samples"] >= 3 and 1 <= len(end["top_frames"]) <= 5
     assert sum(item["samples"] for item in end["top_frames"]) == end["samples"]
     hot = end["top_frames"][0]["frame"]
-    assert "test_supervisor_loop_measurements.py:_pretend_stalled_maintenance_step" in hot, hot
+    assert hot == "tests/test_supervisor_loop_measurements.py:_pretend_stalled_maintenance_step", hot
     assert any("_pretend_stalled_maintenance_step" in frame for frame in end["last_stack"])
     import sys
     runtime_only = [f"{sys.prefix}/lib/python3/threading.py:1 in wait".replace("\\", "/")]
