@@ -1,0 +1,3 @@
+81
+The MCP_SERVERS row names the stdio browser_bridge flag (PR #1401); the row's
+description was extended in place.

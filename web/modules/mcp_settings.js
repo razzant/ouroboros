@@ -10,7 +10,8 @@ const TRANSPORTS = [
     { value: 'stdio', label: 'Local process (stdio)' },
 ];
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
-    'command', 'args', 'auth_header', 'auth_token', 'allowed_tools', 'cwd', 'env', 'env_from_settings']);
+    'command', 'args', 'auth_header', 'auth_token', 'allowed_tools', 'cwd', 'env', 'env_from_settings',
+    'browser_bridge']);
 
 let mcpServers = [];
 let mcpStatusByServer = {};
@@ -39,6 +40,7 @@ function emptyServer() {
         auth_header: 'Authorization',
         auth_token: '',
         allowed_tools: [],
+        browser_bridge: false,
     };
 }
 
@@ -157,6 +159,12 @@ function renderServerCard(server, index) {
             </div>
             ${isStdio ? `
             <div class="form-row">
+                <label class="mcp-server-enabled">
+                    <input class="ui-checkbox" type="checkbox" data-mcp-field="browser_bridge" ${server.browser_bridge === true ? 'checked' : ''}>
+                    <span>Task-owned browser bridge (Playwright MCP; every action is checked against the current tab)</span>
+                </label>
+            </div>
+            <div class="form-row">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-args">Arguments (one per line)</label>
                     <textarea class="ui-control" id="mcp-${index}-args" aria-label="MCP server ${index + 1}: Arguments (one per line)" data-mcp-field="args" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;/path/to/folder" autocomplete="off" spellcheck="false">${escapeHtml(args.join('\n'))}</textarea>
@@ -230,8 +238,8 @@ function bindCardEvents(card) {
             const field = input.dataset.mcpField;
             const server = mcpServers[idx];
             if (!server) return;
-            if (field === 'enabled') {
-                server.enabled = Boolean(input.checked);
+            if (field === 'enabled' || field === 'browser_bridge') {
+                server[field] = Boolean(input.checked);
             } else if (field === 'allowed_tools') {
                 server.allowed_tools = String(input.value || '')
                     .split(',')
@@ -266,8 +274,8 @@ function bindCardEvents(card) {
             const field = input.dataset.mcpField;
             const server = mcpServers[idx];
             if (!server) return;
-            if (field === 'enabled') {
-                server.enabled = Boolean(input.checked);
+            if (field === 'enabled' || field === 'browser_bridge') {
+                server[field] = Boolean(input.checked);
                 notifyChanged();
             }
         });
@@ -497,6 +505,7 @@ export function applyMcpSettings(settings) {
             auth_header: String(s.auth_header ?? 'Authorization'),
             auth_token: String(s.auth_token ?? ''),
             allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
+            browser_bridge: s.browser_bridge === true,
         };
         savedMcpSecrets.set(server, {
             identity: String(s.id || s.slug || s.name || ''), value: server.auth_token,
@@ -550,6 +559,7 @@ export function collectMcpSettings() {
                 auth_header: String(s.auth_header || 'Authorization').trim() || 'Authorization',
                 auth_token: String(s.auth_token || ''),
                 allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
+                browser_bridge: transport === 'stdio' && s.browser_bridge === true,
             };
         }),
     };

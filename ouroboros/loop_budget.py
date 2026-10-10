@@ -657,7 +657,22 @@ def _cleanup_loop_resources(
     ctx.tools._ctx._delivery_control_required = False
     if ctx.drive_root is None or not ctx.task_id:
         return
-    if getattr(ctx.tools._ctx, "_budget_pausing", False):
+    pausing = bool(getattr(ctx.tools._ctx, "_budget_pausing", False))
+    try:
+        from ouroboros.mcp_task_sessions import stop_task
+
+        # Here, not in pre-acceptance service finalization: a task sent back to
+        # work keeps its bridge. A serialized pause releases this worker, and no
+        # other worker can inherit its process-local session, so it closes without
+        # ending the retained attempt. Warm waits never reach this cleanup.
+        bridge_outcomes = stop_task(ctx.tools._ctx, end_attempt=not pausing)
+    except Exception as exc:
+        bridge_outcomes = [{"closure": f"unconfirmed: {type(exc).__name__}: {exc}"}]
+    if bridge_outcomes:
+        _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
+            "checkpoint_kind": "mcp_browser_bridges_stopped", "bridges": bridge_outcomes,
+        })
+    if pausing:
         # The task is NOT terminal: its delegated runs stay under its custody
         # (observed and stop-requested on the durable pause row); the periodic
         # sweep keeps covering them. A terminal reconciliation here would

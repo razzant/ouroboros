@@ -382,6 +382,31 @@ def test_quiet_start_needs_an_automatic_launch_background_on_and_a_live_indicato
     assert background._poller is not None and background._poller.is_alive(), "the state line keeps updating"
 
 
+@pytest.mark.parametrize("already_ready", [False, True])
+def test_quiet_start_watches_readiness_seen_before_or_after_the_first_wait(settings, monkeypatch, make, already_ready):
+    class LateIcon(FakeIndicator):
+        def _launch(self):
+            return True  # The pump has started, but its icon is not visible yet.
+
+    choose(settings, "true")
+    background, window = make(indicator=LateIcon)
+    assert background.start_hidden("automatic")
+    if already_ready:
+        background.indicator.ready.set()
+    else:
+        waits = []
+        def late_ready(_timeout):
+            waits.append(True)
+            if len(waits) == 1:
+                return False
+            background.indicator.ready.set()
+            return True
+        monkeypatch.setattr(background.indicator.ready, "wait", late_ready)
+    background.run()
+    assert window.calls == [] and background.indicator.hidden
+    assert background._poller is not None and background._poller.is_alive()
+
+
 def test_a_hidden_window_comes_back_when_its_indicator_dies(settings, monkeypatch, make):
     choose(settings, "true")
     background, window = make()

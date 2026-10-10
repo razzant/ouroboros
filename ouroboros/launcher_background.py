@@ -356,6 +356,10 @@ class Background:
         self._indicator_up()  # the state poller starts only once the icon is visible
         if self.indicator.hidden:
             self.indicator.show_if_unavailable(self.window)
+        # Readiness can arrive during that second wait, or before _indicator_up.
+        # Every live indicator needs the poller, whichever observation saw it.
+        if self.indicator.ready.is_set():
+            self._watch()
 
     def closing(self):
         """pywebview ``closing``; False keeps the process, every other outcome quits."""

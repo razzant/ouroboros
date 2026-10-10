@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1176,3 +1177,90 @@ def test_real_crash_retry_keeps_prepared_scope_across_registry_activity(tmp_path
             assert retry["_project_admission"] == admitted["_project_admission"]
         assert retry["workspace_root"] == "/synthetic/frozen-resource"
         assert not done
+
+
+# ---------------------------------------------------------------------------
+# Test: a confirmed worker death settles what its browser bridges left
+# ---------------------------------------------------------------------------
+
+def _orphaned_bridge_browser(root, task_id):
+    """What a dead worker's bridge leaves: its server gone, its detached browser live."""
+    import os
+    import subprocess
+    import sys
+    from ouroboros import mcp_task_sessions
+    from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
+
+    marker = f"{CONTAINMENT_ENV_PREFIX}{mcp_task_sessions._scope(root, task_id)}deadbeef"
+    spawn = ("import subprocess, sys; print(subprocess.Popen([sys.executable, '-c', 'import time; "
+             "time.sleep(120)'], start_new_session=True, stdin=subprocess.DEVNULL, "
+             "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)")
+    server = subprocess.run([sys.executable, "-c", spawn], env={**os.environ, marker: "1"},
+                            capture_output=True, text=True, timeout=30, check=True)
+    return marker, int(server.stdout)
+
+
+def _bridge_retry_ctx(root, task_id):
+    return SimpleNamespace(task_id=task_id, task_attempt=2, task_lifecycle_bound=True, drive_root=root,
+                           task_metadata={}, task_contract={}, messages=[])
+
+
+@pytest.mark.serial  # Real marked processes (tests/conftest lane policy).
+@pytest.mark.skipif(sys.platform == "win32", reason="Detached environment-marker bridge custody is POSIX-only")
+@pytest.mark.parametrize("closure", ["confirmed", "unconfirmed", "scan_raises"])
+def test_confirmed_death_settles_bridge_scope_before_retry(tmp_path, monkeypatch, caplog, closure):
+    import os
+    import signal
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from ouroboros import mcp_client, mcp_task_sessions
+    from ouroboros.process_containment import pid_is_zombie, pids_with_env_marker
+    from supervisor.worker_health import recover_confirmed_dead_worker
+    from tests.test_mcp_task_browser_bridge import _entry, _server
+
+    for registry in ("_sessions", "_ended_attempts", "_failed_opens"):
+        monkeypatch.setattr(mcp_task_sessions, registry, type(getattr(mcp_task_sessions, registry))())
+    job, _events = _reserved_job(tmp_path, monkeypatch)
+    task_id = job["task_id"]
+    marker, orphan = _orphaned_bridge_browser(tmp_path, task_id)
+
+    def live():
+        return [pid for pid in pids_with_env_marker(marker) or [] if not pid_is_zombie(pid)]
+
+    order = []
+    actual_stop_scope = mcp_task_sessions.stop_scope
+
+    def stop_scope(root, scoped_task, **kwargs):
+        assert not q._queue_lock._is_owned() and task_id in W.RUNNING
+        order.append(("settle", root, scoped_task))
+        if closure == "scan_raises":
+            raise OSError("process table unreadable")
+        if closure == "unconfirmed":
+            return {"closure": "unconfirmed: process table unreadable"}
+        return actual_stop_scope(root, scoped_task, **kwargs)
+
+    monkeypatch.setattr(mcp_task_sessions, "stop_scope", stop_scope)
+    monkeypatch.setattr(q, "enqueue_task", lambda task, front=False: order.append(("retry", task["_attempt"])) or task)
+    retry = _bridge_retry_ctx(tmp_path, task_id)
+    cfg = mcp_client.normalize_server_config(_entry(_server(tmp_path)))
+    try:
+        assert live() == [orphan]
+        with caplog.at_level("ERROR", logger="ouroboros.mcp_task_sessions"):
+            recover_confirmed_dead_worker(job)
+        # The death stands whatever the scan says: retried once, slot released.
+        assert order == [("settle", tmp_path, task_id), ("retry", 2)]
+        assert task_id not in W.RUNNING
+        W.respawn_worker.assert_called_once_with(0)
+        if closure == "confirmed":
+            assert not live()
+            pytest.importorskip("mcp")
+            assert "browser_tabs" in {tool["name"] for tool in mcp_task_sessions.discover(cfg, retry, 15)}
+        else:
+            assert "Browser bridge closure unconfirmed" in caplog.text
+            assert live() == [orphan]  # Never reported closed: the retry may not reopen.
+            with pytest.raises(RuntimeError, match="earlier bridge processes are still live"):
+                mcp_task_sessions.discover(cfg, retry, 15)
+    finally:
+        mcp_task_sessions.stop_task(retry)
+        if live():
+            os.kill(orphan, signal.SIGKILL)

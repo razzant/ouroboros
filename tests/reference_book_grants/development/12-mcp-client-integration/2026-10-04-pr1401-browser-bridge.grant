@@ -1,0 +1,4 @@
+1118
+The browser_bridge boundary paragraph (PR #1401): task ownership, the page read and
+the request guard with what it never routes, and their enforcement tests; a new
+boundary of this chapter.

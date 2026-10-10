@@ -238,6 +238,12 @@ def recover_confirmed_dead_worker(job: dict) -> None:
             return
     w, task_id, task = job["worker"], job["task_id"], job["task"]
     root = pathlib.Path(job["drive_root"])
+    if task_id:
+        from ouroboros.mcp_task_sessions import settle_dead_task
+
+        # Its death revoked every bridge call; close what the bridges left
+        # behind before a retry of this task could need to open one again.
+        settle_dead_task(root, task_id)
     _pool()._reconcile_confirmed_dead_review_owner(int(getattr(w.proc, "pid", 0) or 0))
     if task_id and task:
         try:

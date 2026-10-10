@@ -35,7 +35,7 @@ from ouroboros.secret_masking import (
     mask_prefixed_secret,
     redact_known_values,
 )
-from ouroboros.tools.tool_result import ToolResult
+from ouroboros.tools.tool_result import ToolResult, _compose_execute_result_result, _replace_tool_result
 from ouroboros.platform_layer import IS_WINDOWS
 from ouroboros.config import get_runtime_mode
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
@@ -104,6 +104,7 @@ class MCPServerConfig:
     env: Dict[str, str] = field(default_factory=dict, repr=False)
     secret_values: tuple[str, ...] = field(default=(), repr=False)
     configuration_warnings: tuple[str, ...] = ()
+    browser_bridge: bool = False
 
     def has_auth(self) -> bool:
         return bool(self.auth_token.strip())
@@ -413,7 +414,8 @@ def normalize_server_config(
 
     try:
         known = {"id", "slug", "name", "label", "enabled", "transport", "url", "command",
-                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings"}
+                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings",
+                 "browser_bridge"}
         unknown = set(raw) - known
         warnings = ("Fields retained but not applied: " + ", ".join(sorted(map(str, unknown))),) if unknown else ()
         cwd = raw.get("cwd", "")
@@ -426,6 +428,9 @@ def normalize_server_config(
             raise ValueError("fields unsupported by this transport: " + ", ".join(key for key in unused if raw.get(key)))
         if transport == "stdio" and raw.get("auth_header", "Authorization") not in (None, "", "Authorization"):
             raise ValueError("auth_header is unsupported for stdio")
+        browser_bridge = raw.get("browser_bridge", False)
+        if not isinstance(browser_bridge, bool) or (browser_bridge and transport != "stdio"):
+            raise ValueError("browser_bridge must be a boolean and requires stdio")
         if transport == "stdio":
             url = ""
             command = _validate_stdio_command(raw.get("command"))
@@ -469,6 +474,7 @@ def normalize_server_config(
         env=env,
         secret_values=secret_values,
         configuration_warnings=warnings,
+        browser_bridge=browser_bridge,
     )
 
 
@@ -906,7 +912,11 @@ class MCPManager:
                 else:
                     new_servers[cfg.id] = MCPServerRuntime(config=cfg)
             self._servers = new_servers
-            return True
+        # Closing a held browser bridge waits for its process scan: never under this lock.
+        from ouroboros.mcp_task_sessions import revoke_changed
+
+        revoke_changed(new_configs if bool(settings.get("MCP_ENABLED")) else [])
+        return True
 
     # -- introspection ------------------------------------------------------
 
@@ -1077,14 +1087,29 @@ class MCPManager:
         attempted_at = datetime.now(timezone.utc).isoformat()
         token = _DISCOVERY_AUTHORITY.set(authority)
         try:
-            tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
+            if cfg.browser_bridge:
+                if authority is None:
+                    return {"ok": False, "not_started": True,
+                            "error": "MCP browser bridge requires a task discovery owner"}
+                from ouroboros.mcp_task_sessions import discover
+                from ouroboros.owner_pause import submit_async_preparation
+
+                async def _scoped_listing():
+                    async def _open():
+                        return await asyncio.to_thread(discover, cfg, authority, timeout)
+                    return await submit_async_preparation(_open, source=authority)
+
+                tools_raw = _run_async(_scoped_listing, join_timeout=timeout + 3)
+            else:
+                tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
         except OwnerPauseRefused as exc:
             return {"ok": False, "not_started": True, "error": f"MCP listing NOT STARTED: {exc}"}
         except BaseException as exc:  # noqa: BLE001 - surface any failure
             err_text = f"{type(exc).__name__}: {_redact_error_text(exc, cfg)}"
             with self._lock:
                 target = self._servers.get(server_id)
-                if target is not None:
+                # A failure of a replaced entry says nothing about its replacement.
+                if target is not None and target.config == cfg:
                     target.last_error = err_text
                     target.last_attempted = attempted_at
                     target.tools = []
@@ -1150,12 +1175,8 @@ class MCPManager:
         finished_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             target = self._servers.get(server_id)
-            if target is not None and target.config != cfg:
-                return {
-                    "ok": False,
-                    "error": f"stale MCP refresh discarded for server {server_id!r}",
-                }
-            if target is not None:
+            stale = not self._enabled or target is None or target.config != cfg
+            if not stale:
                 target.tools = deduped
                 target.tool_name_collisions = collisions
                 # A successful refresh with omissions keeps the omission note
@@ -1164,6 +1185,19 @@ class MCPManager:
                 target.last_error = "; ".join(omission_notes)
                 target.last_attempted = attempted_at
                 target.last_refreshed = finished_at
+        if stale:
+            closed = None
+            if cfg.browser_bridge:
+                # Settings changed between this listing's configuration read and its
+                # open, before revocation could see the session: close exactly it.
+                from ouroboros.mcp_task_sessions import release_stale
+
+                closed = release_stale(cfg, authority)
+            return {
+                "ok": False,
+                "error": f"stale MCP refresh discarded for server {server_id!r}",
+                **({"bridge_closure": closed["closure"]} if closed else {}),
+            }
         return {
             "ok": True,
             "server_id": cfg.id,
@@ -1187,14 +1221,16 @@ class MCPManager:
             if not self._enabled:
                 return {"refreshed": {}, "error": "MCP client is disabled."}
             ids = [cfg_id for cfg_id, rt in self._servers.items()
-                   if rt.config.enabled and not (unlisted_only and rt.last_attempted)]
+                   if rt.config.enabled and (authority is not None or not rt.config.browser_bridge)
+                   and not (unlisted_only and rt.last_attempted and not rt.config.browser_bridge)]
         for server_id in ids:
             outcomes[server_id] = self.refresh_server(server_id, authority=authority)
         return {"refreshed": outcomes}
 
     def refresh_all_background(self, *, reason: str = "settings") -> None:
         with self._lock:
-            should_start = self._enabled and any(rt.config.enabled for rt in self._servers.values())
+            should_start = self._enabled and any(
+                rt.config.enabled and not rt.config.browser_bridge for rt in self._servers.values())
             if not should_start or self._refresh_running:
                 return
             self._refresh_running = True
@@ -1222,6 +1258,9 @@ class MCPManager:
                 "error": "Invalid MCP server config: " + "; ".join(errors),
             }
         timeout = self._tool_timeout_sec
+        if cfg.browser_bridge:
+            return {"ok": False, "code": "MCP_TASK_OWNER_REQUIRED",
+                    "error": "Browser bridge probing requires a bound task; Settings will not launch it."}
         try:
             tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
         except BaseException as exc:  # noqa: BLE001
@@ -1283,7 +1322,7 @@ class MCPManager:
             return self._resolve_locked(prefixed_name)[0]
 
     def _call_tool_result(
-        self, prefixed_name: str, arguments: Dict[str, Any]
+        self, prefixed_name: str, arguments: Dict[str, Any], *, ctx: Any = None
     ) -> ToolResult:
         """Invoke one MCP tool while retaining host-attested provider facts."""
         with self._lock:
@@ -1291,13 +1330,34 @@ class MCPManager:
             timeout = self._tool_timeout_sec
         if resolution.status != "callable":
             return resolution.refusal(prefixed_name)
+        from ouroboros.mcp_task_sessions import BrowserBridgeBroken, BrowserBridgeTimeout
+
+        advice = note = ""
         try:
-            result = _run_async(
-                lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
-                join_timeout=timeout + 3,
-            )
+            if cfg.browser_bridge:
+                from ouroboros.mcp_task_sessions import call as scoped_call
+                result, advice, note = scoped_call(cfg, prefixed_name, tool.raw_name, arguments or {}, ctx, timeout)
+            else:
+                result = _run_async(
+                    lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
+                    join_timeout=timeout + 3,
+                )
             if not isinstance(result, ToolResult):
                 raise TypeError("MCP transport returned a non-ToolResult outcome")
+        except BrowserBridgeTimeout as exc:
+            return ToolResult(status="timeout", code="MCP_TIMEOUT",
+                              text=f"⚠️ MCP_TOOL_TIMEOUT: {_redact_error_text(exc, cfg)}",
+                              meta={"dynamic_provider": True})
+        except BrowserBridgeBroken as exc:
+            # The action's own connection closed before any answer (a broken observation
+            # refuses before dispatch instead): possibly submitted, never resent. No final
+            # response arrived, so the call is not recorded as returned.
+            broken = (f"⚠️ MCP_TOOL_ERROR: BROWSER_ACTION_OUTCOME_UNKNOWN — {_redact_error_text(exc, cfg)} "
+                      "Read the current page state before any retry.")
+            return ToolResult(status="error", code="MCP_ERROR", text=broken, meta={
+                "dynamic_provider": True, "host_verdict": True, "transport": "closed",
+                "dispatch": "possible" if exc.submitted else "none",
+                "effect": "unknown" if exc.submitted else "none", "bridge_closure": exc.closure})
         except asyncio.TimeoutError:
             text = (
                 f"⚠️ MCP_TOOL_TIMEOUT: server {cfg.id!r} did not respond in {timeout}s. "
@@ -1307,6 +1367,15 @@ class MCPManager:
             )
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text)
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
+            if cfg.browser_bridge:
+                from ouroboros.mcp_task_sessions import BrowserBridgeRefusal
+
+                if _is_task_control(exc):
+                    raise  # Stop and Pause reach the loop as they do from any Safety check.
+                if isinstance(exc, BrowserBridgeRefusal):  # Policy or Safety; nothing was dispatched.
+                    refusal = _redact_error_text(exc, cfg)  # Safety's verdict carries its own marker.
+                    return ToolResult(status="blocked", code=exc.code, meta={"dynamic_provider": True},
+                                      text=refusal if exc.code == "SAFETY_VIOLATION" else f"⚠️ {refusal}")
             body = f"⚠️ MCP_TOOL_ERROR: {type(exc).__name__}: {_redact_error_text(exc, cfg)}"
             text = _model_facing_result(cfg, tool.raw_name, body)
             return ToolResult(
@@ -1319,17 +1388,21 @@ class MCPManager:
         from ouroboros.owner_pause import record_mcp_call_returned
 
         record_mcp_call_returned(prefixed_name)
-        text = _model_facing_result(
-            cfg,
-            tool.raw_name,
-            _redact_error_text(result.text, cfg),
-        )
-        return ToolResult(
+        text = _redact_error_text(result.text, cfg)
+        if not (cfg.browser_bridge and result.meta.get("host_verdict")):
+            text = _model_facing_result(cfg, tool.raw_name, text)
+        final = ToolResult(
             status=result.status,
             code=result.code,
             text=text,
             meta={**dict(result.meta), "dynamic_provider": True},
         )
+        if not advice and not note:
+            return final
+        # The bridge's Safety assessment ran after its page read and its guard
+        # judged the call's requests: host notes, annotated like dispatch does.
+        return _replace_tool_result(_compose_execute_result_result(prefixed_name, final, note, advice),
+                                    meta_updates={"safety_warning": True} if advice else None)
 
     def call_tool(self, prefixed_name: str, arguments: Dict[str, Any]) -> str:
         """Synchronously invoke an MCP tool and return its text projection."""
@@ -1386,6 +1459,10 @@ def ensure_configured_from_settings(*, refresh: bool = False, authority: Any = N
     except OSError:
         mtime_ns = None
     if manager.is_configured() and manager.settings_mtime_ns() is None:
+        # The server process configures from saved Settings without an mtime; its
+        # direct turns still discover a task-owned bridge, which nothing else lists.
+        if refresh:
+            manager.refresh_all(authority=authority, unlisted_only=True)
         return
     changed = False
     if not (manager.is_configured() and manager.settings_mtime_ns() == mtime_ns):
@@ -1403,6 +1480,21 @@ def call_mcp_tool(name: str, arguments: Dict[str, Any]) -> str:
     return get_manager().call_tool(name, arguments or {})
 
 
-def _call_mcp_tool_result(name: str, arguments: Dict[str, Any]) -> ToolResult:
+def _is_task_control(exc: BaseException) -> bool:
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.owner_pause import OwnerPauseRefused
+
+    return isinstance(exc, (ModelWaitInterrupted, OwnerPauseRefused))
+
+
+def is_browser_bridge_tool(name: str) -> bool:
+    """Whether ``name`` resolves to a task-owned browser bridge server."""
+    manager = get_manager()
+    with manager._lock:
+        cfg = manager._resolve_locked(name)[1]
+    return bool(cfg is not None and cfg.browser_bridge)
+
+
+def _call_mcp_tool_result(name: str, arguments: Dict[str, Any], *, ctx: Any = None) -> ToolResult:
     """Internal typed ToolRegistry call helper."""
-    return get_manager()._call_tool_result(name, arguments or {})
+    return get_manager()._call_tool_result(name, arguments or {}, ctx=ctx)

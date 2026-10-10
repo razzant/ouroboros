@@ -995,10 +995,12 @@ def test_an_owner_restart_re_execs_without_the_inherited_runtime_mode_pin(monkey
     """
     import os
 
+    from ouroboros import platform_layer
     from ouroboros.config import BOOT_RUNTIME_MODE_ENV_KEY
     from ouroboros.server_control import restart_current_process
 
     captured = {}
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)  # The test captures exec's env on every host.
 
     def _capture_exec(_executable, _argv, env):
         captured["env"] = dict(env)

@@ -1,0 +1,3 @@
+391
+The rule for an SDK-owned spawn: plant a scoped ProcessContainer marker before
+birth (the MCP browser bridge, PR #1401).

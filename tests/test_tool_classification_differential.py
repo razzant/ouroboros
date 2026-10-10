@@ -377,6 +377,10 @@ CURRENT_PRODUCER_CONTRACTS = {
     "SAFETY_ADVICE": (False, "ok"),
     "LIGHT_MODE_REPO_CHANGED": (False, "ok"),
     "BROWSER_ACTION_OUTCOME_UNKNOWN": (True, "error"),
+    # Browser-bridge producers added after the frozen historical corpus. Pin
+    # their live refusal/timeout semantics without inventing historical rows.
+    "BROWSER_REQUEST_BLOCKED": (True, "blocked"),
+    "MCP_TOOL_TIMEOUT": (True, "timeout"),
     # tools/vision.py `_no_image_route`: no configured model could take the image at all,
     # told apart from VLM_NO_VISION_MODEL (every candidate confirmed unable); same VLM family answer.
     "VLM_NO_MODEL": (True, "vlm_error"),

@@ -1354,12 +1354,12 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         _hold_wedged_worker(task_id, task_type, worker_id, terminal_reason, runtime_sec,
                             _incident_chat_id(task, owner_chat_id, _q))
         return
-
+    from ouroboros.mcp_task_sessions import settle_dead_task
+    settle_dead_task(_q.DRIVE_ROOT, task_id)
     workers_mod._reconcile_confirmed_dead_review_owner(int(getattr(proc, "pid", 0) or 0))
     with _q._queue_lock:
         from supervisor.worker_health import _retire_dead_model_consumers
         _retire_dead_model_consumers(job, captured_timeout=True)
-
 
     try:
         from ouroboros.tools.services import archive_task_service_logs
