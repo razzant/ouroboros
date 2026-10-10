@@ -362,3 +362,35 @@ def test_zero_snapshot_retains_terminal_digest_and_does_not_consume_beacon(tmp_p
     assert waits._wait_attention_poll(ctx, "", ["active"])({}, {})["beacons"][0]["text"] == "decision required"
     assert waits._wait_attention_poll(ctx, "", ["active"])({}, {}) is None
     assert "TOOL_ARG_ERROR" in registry.execute("await_messages", {"timeout_sec": 0, "senders": ["missing"]})
+
+
+@pytest.mark.parametrize("selector", ["tasks", "senders"])
+@pytest.mark.parametrize("same_project", [True, False])
+def test_queue_only_peer_uses_the_admitted_project_lease(tmp_path, monkeypatch, selector, same_project):
+    from ouroboros.project_lease import candidate_is_leasable, running_project_ids
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.registry import ToolRegistry
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _, workers = _install_queue(tmp_path, monkeypatch)
+    peer = queue.enqueue_task({"id": "queued-peer", "type": "task", "chat_id": 0,
+        "root_task_id": "queued-peer", "project_id": "lane" if same_project else "other-lane"})
+    assert not peer.get("_admission_blocked"), peer
+    workers.RUNNING["sleeper"] = {"task": {"id": "sleeper", "project_id": "lane"}}
+    assert queue.persist_queue_snapshot(reason="queue-only-lease-regression")
+    assert load_task_result(tmp_path, "queued-peer", strict=True) is None
+    assert candidate_is_leasable(peer, running_project_ids(workers.RUNNING.values())) is (not same_project)
+    write_task_result(tmp_path, "sleeper", "running", project_id="lane", root_task_id="sleeper")
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id = ctx.root_task_id = "sleeper"
+    ctx.task_attempt = 1
+    ctx.project_id = "lane"
+    ctx.owner_wait_callback = lambda *_a, **_kw: "unknown"
+    out = registry.execute("await_messages", {selector: ["queued-peer"]})
+    if same_project:
+        assert "project lease" in out
+        assert not getattr(ctx, "_model_sleep", None)
+        assert not getattr(ctx, "_owner_wait_requested", None)
+    else:
+        assert json.loads(out)["reason"] == "sleep_armed"

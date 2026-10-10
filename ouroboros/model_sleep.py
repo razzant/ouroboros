@@ -337,11 +337,21 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
                 **({"wake_beacons": chosen["wake_beacons"]} if chosen.get("wake_beacons") else {})}
     if mode == MODE_WARM:
         from ouroboros.task_results import load_task_result
+        from ouroboros.task_status import _load_queue_snapshot, _queue_task_status
 
         project_id = str(getattr(ctx, "project_id", "") or (getattr(ctx, "task_metadata", None) or {}).get("project_id") or "")
         tree_id = str(getattr(ctx, "root_task_id", "") or ctx.task_id)
+        root = _canonical_root(ctx)
+        snapshot = None
         for selected in set(chosen.get("tasks", []) + chosen.get("senders", [])):
-            row = load_task_result(_canonical_root(ctx), selected, strict=True) or {}
+            row = load_task_result(root, selected, strict=True)
+            if row is None:
+                # Selection accepts admitted queue-only peers; their lease
+                # dependency must use that same authority before we park.
+                if snapshot is None:
+                    snapshot = _load_queue_snapshot(root)
+                status, queued = _queue_task_status(snapshot, selected)
+                row = {**queued, "status": status}
             if (project_id and row.get("project_id") == project_id
                     and str(row.get("root_task_id") or selected) != tree_id
                     and row.get("status") in {"requested", "scheduled"}):
