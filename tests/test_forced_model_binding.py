@@ -43,8 +43,11 @@ def acting(setup, monkeypatch):
 
     def catalog(source, profile=None, *, requested_model=None):
         catalogs.append((source, profile, requested_model))
+        # imageInput is the engine capability gate; modalities stay as fixture
+        # noise to prove the reader no longer consults them.
         return {"source": source, "credentialProfileId": profile, "models": [
-            {"id": requested_model, "inputModalities": ["text"] if profile == "main-only" else ["text", "image"]}]}
+            {"id": requested_model, "inputModalities": ["text", "image"],
+             "imageInput": profile != "main-only"}]}
 
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
     messages = [{"role": "system", "content": "Own SYSTEM"}, {"role": "user", "content": [

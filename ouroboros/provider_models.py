@@ -685,10 +685,16 @@ def supports_vision(model_id: str, *, model_role: str = "",
 
     A Claudexor route answers from the catalog of this call's role/account, never
     a global overlay; an API route answers from the fresh route-scoped catalog
-    record (``vision_routing.route_image_input``). A model's name is not
-    evidence, so every other case is None: image senders preserve input when the
-    fact is unknown and the actual call returns the route's own answer. Our own
-    lanes that cannot carry bytes (local, GigaChat) are the send policy's
+    record (``vision_routing.route_image_input``). For claudexor routes the
+    catalog entry's ``imageInput`` boolean is the ENGINE capability (model image
+    modality AND a build that carries images): ``True`` → inline; a present
+    entry without the field (or a catalog with no row for the model at all) is
+    an engine that claims no image transport → False (honest refusal, no
+    guessing from modalities). An unavailable catalog or an account/source
+    mismatch leaves the fact unknown → None: image senders preserve input then,
+    and the actual call can start the engine and return its normal typed
+    refusal. A model's name is not evidence, so every other case is None; our
+    own lanes that cannot carry bytes (local, GigaChat) are the send policy's
     transport fact, decided by lane, not a model fact. Metadata discovery never
     starts an engine or buys a model generation.
     """
@@ -712,8 +718,13 @@ def supports_vision(model_id: str, *, model_role: str = "",
         if catalog.get("source") != source or (account and catalog.get("credentialProfileId") != account):
             return None
         item = next((row for row in catalog.get("models", []) if row.get("id") == native_model), {})
-        modalities = item.get("inputModalities")
-        return "image" in modalities if isinstance(modalities, list) and modalities else None
+        # imageInput is the ENGINE capability (model image modality AND a build
+        # that carries images), declared by the catalog entry itself. A present
+        # catalog row without the field is an engine that does not claim image
+        # transport: False, an honest refusal — never guessed from the model's
+        # text modality list (inputModalities says the model accepts images, not
+        # that this build can carry them).
+        return item.get("imageInput") is True
     from ouroboros.vision_routing import route_image_input
 
     return route_image_input(model_id).verdict
