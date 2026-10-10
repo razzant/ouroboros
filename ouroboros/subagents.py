@@ -826,6 +826,16 @@ SUBAGENT_INTENT_FIELDS: tuple[str, ...] = (
     "requested_executor",
 )
 
+
+def subagent_intent_fields(source: Mapping[str, Any]) -> Dict[str, Any]:
+    """Carry declared intent through task projections without deciding or defaulting it.
+
+    Producers own normalization; admission owns ``required_model_lane``. Missing
+    fields remain missing, and dispatch writes its decisions under separate keys.
+    """
+    return {key: source[key] for key in SUBAGENT_INTENT_FIELDS if key in source}
+
+
 # Fields a stored subagent record may still carry from a schema that no longer
 # exists. They are IGNORED at dispatch and the reason is written onto the record;
 # a load never fails over one (BIBLE P1: no silent loss, and no crash either).

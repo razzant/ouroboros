@@ -23,7 +23,7 @@ from ouroboros.config import MAX_ACTIVE_SUBAGENTS_HARD_CAP
 from ouroboros.config import get_max_active_subagents_per_root
 from ouroboros.contracts.task_contract import build_task_contract
 from ouroboros.contracts.task_contract import normalize_allowed_resources
-from ouroboros.subagents import intended_lane as intended_subagent_lane
+from ouroboros.subagents import intended_lane as intended_subagent_lane, subagent_intent_fields
 from ouroboros.task_results import STATUS_SCHEDULED
 from ouroboros.tools.control_delegation import admitted_depth_cap
 from ouroboros.tools.control_delegation import check_delegation_admission
@@ -214,6 +214,11 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     requested_model_lane = str(evt.get("requested_model_lane") or evt.get("model_lane") or "auto").strip() or "auto"
     parent_model_lane = str(evt.get("parent_model_lane") or "").strip()
     requested_executor = str(evt.get("requested_executor") or "").strip().lower() or "auto"
+    intent = subagent_intent_fields(evt)
+    intent.update(requested_model_lane=requested_model_lane, parent_model_lane=parent_model_lane,
+                  requested_executor=requested_executor)
+    # The event cannot supply the lane this admission has yet to verify.
+    intent.pop("required_model_lane", None)
     task_group_id = str(evt.get("task_group_id") or "").strip()
     task_group = evt.get("task_group") if isinstance(evt.get("task_group"), dict) else {}
     subagent_envelope = evt.get("subagent_envelope") if isinstance(evt.get("subagent_envelope"), dict) else {}
@@ -319,9 +324,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         "task_constraint": task_constraint,
         "required_capabilities": required_capabilities,
         "model_lane": requested_model_lane,
-        "requested_model_lane": requested_model_lane,
-        "parent_model_lane": parent_model_lane,
-        "requested_executor": requested_executor,
+        **intent,
         "task_group_id": task_group_id,
         "task_group": task_group,
         "subagent_envelope": subagent_envelope,
@@ -456,6 +459,8 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             required_model_lane = str(getattr(decision, "required_lane", "") or "")
         except Exception:
             log.debug("Delegation reconciliation failed open for %s", tid, exc_info=True)
+    intent["required_model_lane"] = required_model_lane
+    result_fields.update(intent)
 
     if depth > max_depth:
         detail = f"Subagent rejected: subtask depth limit ({max_depth}) exceeded."
@@ -568,10 +573,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "depth_provenance": admitted_depth_provenance,
             "required_capabilities": required_capabilities,
             "model_lane": requested_model_lane,
-            "requested_model_lane": requested_model_lane,
-            "parent_model_lane": parent_model_lane,
-            "required_model_lane": required_model_lane,
-            "requested_executor": requested_executor,
+            **intent,
             "task_group_id": task_group_id,
             "task_group": task_group,
             "subagent_envelope": subagent_envelope,
