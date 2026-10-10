@@ -481,3 +481,76 @@ def test_queue_only_named_child_expands_and_wakes_for_its_live_sibling(tmp_path,
     wait_after_tools(ctx, messages, {"tool_calls": []}, {}, 1, [], set())
     assert len(calls) == 1
     assert "task live-sibling reaching completed" in messages[-1]["content"]
+
+
+def test_ledger_only_default_wait_returns_full_set_repair_not_selector_error(tmp_path, monkeypatch):
+    from ouroboros.task_tree_ledger import tree_ledger_append
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.utils import atomic_write_json, utc_now_iso
+
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.task_attempt = "t-wait", 1
+    ctx.task_metadata = {"root_task_id": ctx.task_id}
+    ctx.owner_wait_callback = lambda *_a: None
+    seed(tmp_path, "real")
+    atomic_write_json(tmp_path / "state" / "queue_snapshot.json",
+                      {"ts": utc_now_iso(), "pending": [], "running": []})
+    assert tree_ledger_append("t-wait", "note", "historical mention", task_id="ledger-only",
+                             data_root=tmp_path).startswith("OK")
+    assert waits._unminted_wait_ids(ctx, tmp_path, ["ledger-only"]) == [], "minted is not wakeable"
+    raw = registry.execute("wait_tasks", {"task_ids": ["real", "ledger-only"]})
+    view = json.loads(raw)
+    assert set(view["tasks"]) == {"real", "ledger-only"}
+    assert view["unknown_task_ids"] == ["ledger-only"]
+    assert "no waitable result/queue" in view["tasks"]["ledger-only"]["note"]
+    assert view["wait_short_circuited"]["waited_sec"] < 0.1
+    assert not getattr(ctx, "_model_sleep", None)
+    assert json.loads(registry.execute("wait_tasks", {"task_ids": ["real"]}))["reason"] == "sleep_armed"
+
+
+@pytest.mark.parametrize("selected", [{"tasks": ["child"]}, {"senders": ["child"]}])
+def test_sleep_note_describes_task_only_vs_selected_mail(tmp_path, selected):
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.task_attempt = "t-wait", 1
+    ctx.owner_wait_callback = lambda *_a: None
+    seed(tmp_path, "child")
+    view = json.loads(registry.execute("await_messages", selected))
+    assert view["reason"] == "sleep_armed"
+    assert ("selected senders' mail wakes" in view["note"]) == bool(selected.get("senders"))
+    assert "owner's messages and controls always" in view["note"]
+    if selected.get("tasks"):
+        assert "unselected mail stays unread" in view["note"]
+
+
+def test_beacon_fifo_survives_durable_cold_continuation_without_snapshot_consumption(tmp_path, monkeypatch):
+    from ouroboros import task_tree_ledger as ledger
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.owner_wait import continuation_state, restore_continuation_state, store_continuation_source
+
+    monkeypatch.setattr(ledger, "utc_now_iso", lambda: "2026-10-10T00:00:00Z")
+    ctx = native_context(tmp_path)
+    ctx.task_metadata = {"root_task_id": ctx.task_id}
+    for i in range(7):
+        assert ledger.tree_ledger_append(ctx.task_id, "question", f"q-{i}", task_id="child",
+                                        data_root=tmp_path).startswith("OK")
+    first = waits._wait_attention_poll(ctx, "", ["child"])({}, {})
+    assert [r["text"] for r in first["beacons"]] == [f"q-{i}" for i in range(5)]
+    state = continuation_state(ctx, [{"role": "user", "content": "retained"}], {}, {}, 3, [], set())
+    ref = store_continuation_source(ctx, state, "beacon-cold-test")
+    restored_state = json.loads(read_actor_source_bytes(tmp_path, ctx.task_id, ref))
+    resumed = native_context(tmp_path)
+    resumed.task_metadata = ctx.task_metadata
+    restore_continuation_state(SimpleNamespace(_ctx=resumed), restored_state, [], {}, {}, set())
+    snapshot = waits._wait_attention_poll(resumed, "", ["child"], consume=False)({}, {})
+    assert [r["text"] for r in snapshot["beacons"]] == ["q-5", "q-6"]
+    second = waits._wait_attention_poll(resumed, "", ["child"])({}, {})
+    assert second["beacons"] == snapshot["beacons"]
+    assert waits._wait_attention_poll(resumed, "", ["child"])({}, {}) is None
+    assert ledger.tree_ledger_append(ctx.task_id, "question", "fresh", task_id="child",
+                                    data_root=tmp_path).startswith("OK")
+    fresh = waits._wait_attention_poll(resumed, "", ["child"])({}, {})
+    assert [r["text"] for r in fresh["beacons"]] == ["fresh"]

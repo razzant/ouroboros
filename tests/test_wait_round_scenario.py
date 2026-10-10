@@ -81,12 +81,31 @@ def test_three_native_children_and_one_harness_wait_without_empty_rounds(tmp_pat
         time=real_time.time))
     sends = []
     absorbed = [False]
+    first_all_receipt = []
     def dispatch(call, _disposition, **_kw):
         # The scripted generation substitutes this transport seam, so retain
         # its normal host observation rather than reusing request one's stamp.
         from ouroboros.loop_delivery import completion_observation
         ctx._completion_observation = completion_observation(ctx, getattr(ctx, "_execution_trace", None) or {})
         sends.append(copy.deepcopy(call.messages))
+        # All children were admitted before request 1 (launch boundary 0).
+        # Count through the request that FIRST carries every terminal digest,
+        # not through completion bookkeeping. Inspect the actual model input,
+        # rather than inferring receipt from result-file writes alone.
+        for message in call.messages:
+            for line in str(message.get("content") or "").splitlines():
+                if not line.startswith("{"):
+                    continue
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    continue
+                tasks = payload.get("tasks", {})
+                if isinstance(tasks, dict) and all(
+                    isinstance(tasks.get(tid), dict) and tasks[tid].get("status") == "completed"
+                    and len(tasks[tid].get("child_result_sha256", "")) == 64 for tid in ids
+                ) and not first_all_receipt:
+                    first_all_receipt.append(len(sends))
         assert len(sends) <= 12, json.dumps(sends[-1][-4:], ensure_ascii=False)
         if all(task_status.load_effective_task_result(tmp_path, tid).get("status") == "completed" for tid in ids):
             from ouroboros.tools.join_ledger import _child_result_sha256
@@ -109,6 +128,10 @@ def test_three_native_children_and_one_harness_wait_without_empty_rounds(tmp_pat
     assert "All four" in result
     event_default = registry.schemas()[0] is not None and "attention_kind" in inspect.signature(write_task_message).parameters
     report = {"parent_rounds": len(sends), "simulated_seconds": clock[0], "terminal_children": len(ids),
+              "launch_parent_round": 0,
+              "first_all_results_parent_round": first_all_receipt[0] if first_all_receipt else None,
+              "launch_to_all_results_rounds": first_all_receipt[0] if first_all_receipt else None,
+              "post_receipt_completion_rounds": len(sends) - first_all_receipt[0] if first_all_receipt else None,
               "input_characters": sum(len(json.dumps(r, ensure_ascii=False)) for r in sends),
               "measurement": "scripted dispatch boundary; characters are not provider tokens",
               "tool_calls": [r["tool"] for r in trace["tool_calls"]],
@@ -117,9 +140,10 @@ def test_three_native_children_and_one_harness_wait_without_empty_rounds(tmp_pat
     (tmp_path / "wait_scenario.json").write_text(json.dumps(report), encoding="utf-8")
     print("WAIT_SCENARIO " + json.dumps(report))
     if event_default:
-        # Two meaningful wait returns + absorption + informed finish. The last
-        # two are completion obligations, not empty polling; do not weaken them
-        # to manufacture the TZ's <=3 whole-parent-request target.
+        # Request 3 receives all results and absorbs them; request 4 finishes.
+        # The TZ bounds launch-through-receipt, not total completion requests.
+        assert report["launch_to_all_results_rounds"] == 3
+        assert report["post_receipt_completion_rounds"] == 1
         assert len(sends) == 4
         assert report["max_wait_body"] <= 15_000
         assert any("routine parent context" in json.dumps(r) for r in sends[1:])

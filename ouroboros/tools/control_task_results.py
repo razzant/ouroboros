@@ -470,9 +470,9 @@ def _wait_attention_poll(
     """on_poll hook: break a sliced wait for the actor's mailbox or a child attention beacon
     (blocker/question/interface_contract/review_requested/delegation_constraint).
 
-    The cursor is context-local and per child: a beacon written before this
+    The cursor is per child and retained by owner_wait.continuation_state: a beacon written before this
     particular tool call is still delivered, while a later wait in the same
-    actor context does not replay it.  Equal-timestamp rows use their stable
+    actor's warm or restored cold context does not replay it. Equal-timestamp rows use their stable
     content identity, so the five-row response bound cannot strand the rest.
     """
     # tree_note/tree_read live in ouroboros/tools/task_tree.py (extracted for module size).
@@ -1046,7 +1046,8 @@ _WAIT_TASK_CLAMP_SEC = 3600
 _WAIT_TASKS_CLAMP_SEC = 7200
 
 
-def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List[str]) -> List[str]:
+def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List[str],
+                       require_waitable: bool = False) -> List[str]:
     """Ids with no trace on ANY surface this tree mints ids through: no task
     result, no queue-snapshot row, and no tree-ledger row naming them (v6.91).
 
@@ -1055,7 +1056,8 @@ def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List
     set. The typed marker (plus the actual children roster) lets the parent
     repair its wait set instead of starving on phantoms. Fail-soft per probe: an
     unreadable surface treats the id as KNOWN — a real child must never be
-    branded unknown on an I/O error."""
+    branded unknown on an I/O error. Event waits require a result/queue source:
+    a ledger mention alone proves an ID was minted, not a wakeable task."""
     from ouroboros.task_status import _load_queue_snapshot, _queue_task_status
 
     try:
@@ -1082,7 +1084,7 @@ def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List
             queue_status, _ = _queue_task_status(snapshot, tid)
             if queue_status:  # running/scheduled row, or "unknown" on a missing snapshot (fail-soft)
                 continue
-            if tid in ledger_ids:
+            if tid in ledger_ids and not require_waitable:
                 continue
         except Exception:
             continue  # unreadable surface: treat as known
@@ -1297,7 +1299,9 @@ def _wait_for_tasks(
     # registered" is a real state for a just-scheduled child — but a phantom id
     # is disclosed instead of silently starving the wait (wave2: three
     # hallucinated ids blocked 900s slices while the real lead went unwaited).
-    entry_unknown_ids = _unminted_wait_ids(ctx, status_drive_root, normalized_ids)
+    require_waitable = bool(timeout_sec is None and callable(getattr(ctx, "owner_wait_callback", None)))
+    entry_unknown_ids = (_unminted_wait_ids(ctx, status_drive_root, normalized_ids, True)
+                         if require_waitable else _unminted_wait_ids(ctx, status_drive_root, normalized_ids))
     ready_attention = None
     unknown_repair = bool(timeout_sec is None and entry_unknown_ids
                           and callable(getattr(ctx, "owner_wait_callback", None)))
@@ -1377,7 +1381,8 @@ def _wait_for_tasks(
         # row or result appeared) is a real child, not a phantom.
         unknown_ids = [tid for tid in entry_unknown_ids if not tasks.get(tid)]
         if unknown_ids:
-            unknown_ids = _unminted_wait_ids(ctx, status_drive_root, unknown_ids)
+            unknown_ids = (_unminted_wait_ids(ctx, status_drive_root, unknown_ids, True)
+                           if require_waitable else _unminted_wait_ids(ctx, status_drive_root, unknown_ids))
 
         # Compact STRUCTURAL projection (v6.71.2): the full public_task_result
         # envelope duplicated forensics (trace_refs, loop_outcome internals,
@@ -1396,11 +1401,12 @@ def _wait_for_tasks(
                     "status": None,
                     "unknown_task_id": True,
                     "note": (
-                        "UNKNOWN_TASK_ID: not yet registered or never scheduled — no task "
-                        "result, no queue row, and no tree-ledger row names this id in this "
-                        "tree. Check it against your schedule_subagent results / the "
+                        "UNKNOWN_TASK_ID: no waitable result/queue source" if require_waitable else
+                        "UNKNOWN_TASK_ID: not yet registered or never scheduled — no result, queue row or tree-ledger mention"
+                    ) + (
+                        ". Check it against your schedule_subagent results / the "
                         "children_roster below; an all_terminal wait cannot complete while "
-                        "it stays unscheduled."
+                        "its result/queue source is unavailable."
                     ),
                 }
                 continue

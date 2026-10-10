@@ -176,6 +176,12 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
             "_historical_author_inputs", "_pending_owner_dialogue",
         ) if getattr(ctx, key, None) is not None},
+        # A consumed beacon is cognition, not a process handle. Keep equal-time
+        # FIFO identities across cold continuation; snapshots never advance it.
+        "wait_attention_cursors": {key: {
+            "after_ts": cursor.get("after_ts", ""),
+            "seen_ids": sorted(cursor.get("seen_ids") or ()),
+        } for key, cursor in (getattr(ctx, "_wait_attention_cursors", None) or {}).items()},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
         "seen": sorted(seen), "owner_directives": getattr(ctx, "_owner_directives", []),
         "route": {key: getattr(ctx, key, None) for key in (
@@ -830,6 +836,11 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     for key, value in (state.get("context_observations") or {}).items():
         if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs", "_pending_owner_dialogue"}:
             setattr(ctx, key, value)
+    # Legacy sources without cursors keep their fresh first observation.
+    ctx._wait_attention_cursors = {key: {
+        "after_ts": cursor.get("after_ts", ""),
+        "seen_ids": set(cursor.get("seen_ids") or ()),
+    } for key, cursor in (state.get("wait_attention_cursors") or {}).items()}
     messages[:] = state["messages"]
     trace.update(state["trace"])
     usage.update(state["usage"])

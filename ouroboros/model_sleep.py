@@ -382,10 +382,11 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
     ctx._model_sleep = {"sleep_id": sleep_id, "mode": mode, **chosen}
     ctx._owner_wait_deadline_at = chosen.get("wake_at") or ""
     return {"reason": "sleep_armed", "sleep_id": sleep_id, "mode": mode, "slept": False,
-            "note": ("The sleep begins after this tool batch completes; you wake at the next round with the "
-                     "reason. Selected mail wakes you" if not chosen.get("any_mail")
-                     else "The sleep begins after this tool batch completes; any addressed mail wakes you")
-                    + "; the owner's messages and controls always do."}
+            "note": ("The sleep begins after this tool batch completes; selected sources and typed attention wake you"
+                     + ("; any addressed mail wakes you" if chosen.get("any_mail") else
+                        "; selected senders' mail wakes you" if chosen.get("senders") else
+                        "; routine unselected mail stays unread until the next round")
+                     + "; the owner's messages and controls always do.")}
 
 
 def begin(ctx: Any) -> None:

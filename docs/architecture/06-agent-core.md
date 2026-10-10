@@ -245,7 +245,7 @@ Children coordinate through `tree_note` and `tree_read`; only the parent may use
 
 #### Child handoffs and task waits
 
-**Waiting on children.** Default `wait_task`/`wait_tasks` park warm; unminted IDs immediately return a repair snapshot. Single waits capture named+LIVE direct siblings; batches are exact. Standalone waits hold one operation window minus `NESTED_SETTLEMENT_MARGIN_SEC`, with all-unminted registration grace. Explicit timeouts are bounded; zero snapshots. Existing hard rails remain.
+**Waiting on children.** Default `wait_task`/`wait_tasks` park warm; IDs without result/queue wake sources return a repair snapshot (a ledger mention alone is insufficient). Single waits capture named+LIVE direct siblings; batches are exact. Standalone waits keep minted-ID discovery and hold one operation window minus `NESTED_SETTLEMENT_MARGIN_SEC`, with all-unminted registration grace. Explicit timeouts are bounded; zero snapshots. `owner_wait.continuation_state` retains consumed beacon cursors, including same-timestamp FIFO identities; snapshots do not advance them. Existing hard rails remain.
 
 `control_task_results._compact_child_projection` retains outcomes, cost, hashes, `capability_delta` and verification/custody. `bounded_wait_response` caps whole JSON at 15,000 chars with exact actor-readable sources; retention failures stay unavailable. `get_task_result` explicitly reads full terminals, authority and sources; nonterminals stay compact. Known hashes omit result/trace, never current facts. `peek_task` diagnoses; `scripts/measure_wait_rounds.py` audits explicit task/round JSONL, never implicitly scans stores.
 
