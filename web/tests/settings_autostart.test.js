@@ -306,3 +306,59 @@ test('one Settings visit re-reads both host controls and one pagehide releases b
     assert.equal(block.handlers.size, 0);
     assert.equal(win.has('ouro:page-shown'), false);
 });
+
+function sharedSection() {
+    const block = fakeSection();
+    const attrs = (box) => {
+        box.attrs = new Map();
+        box.setAttribute = (name, value) => box.attrs.set(name, value);
+        box.removeAttribute = (name) => box.attrs.delete(name);
+    };
+    attrs(block.startup);
+    attrs(block.background);
+    const note = { id: 'settings-autostart-note', hidden: true, textContent: '' };
+    const startupStatus = block.section.querySelector('[data-autostart-status]');
+    const lookup = block.section.querySelector;
+    block.section.querySelector = (selector) => (selector === '[data-autostart-shared-note]' ? note : lookup(selector));
+    return { ...block, note, startupStatus };
+}
+
+function withHostReads(t, { startup, background }) {
+    const saved = { read: apiClient.desktopBackground };
+    apiClient.desktopBackground = background;
+    t.after(() => { apiClient.desktopBackground = saved.read; });
+    return withApi(t, { read: startup });
+}
+
+test('an environment fact is a plain note, and two rows that share it say it once for both', async (t) => {
+    const reason = 'Available only when the host runs the packaged desktop app.';
+    let background = { state: 'unavailable', reason };
+    const win = withHostReads(t, { startup: async () => ({ state: 'unavailable', reason }), background: async () => background });
+    const block = sharedSection();
+    bindAutostartControl(block.page);
+    await settle();
+    assert.equal(block.startupStatus.dataset.tone, undefined, 'a fact about the host is not a warning: no tone, no dot');
+    assert.equal(block.backgroundStatus.dataset.tone, undefined);
+    assert.equal(block.note.hidden, false);
+    assert.equal(block.note.textContent, reason, 'one sentence for both rows');
+    assert.equal(block.startupStatus.hidden, true);
+    assert.equal(block.backgroundStatus.hidden, true);
+    assert.equal(block.startup.attrs.get('aria-describedby'), 'settings-autostart-note');
+    assert.equal(block.background.attrs.get('aria-describedby'), 'settings-autostart-note');
+    // Different reasons stay under their own rows.
+    background = { state: 'unavailable', reason: 'Not available on Linux yet: closing the window quits Ouroboros.' };
+    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    await settle();
+    assert.equal(block.note.hidden, true);
+    assert.equal(block.startupStatus.hidden, false);
+    assert.equal(block.backgroundStatus.hidden, false);
+    assert.match(block.backgroundStatus.textContent, /Not available on Linux yet/);
+    assert.equal(block.startup.attrs.has('aria-describedby'), false);
+    // A state the owner can change keeps its warning.
+    background = { state: 'on' };
+    win.fire('ouro:page-shown', { detail: { page: 'settings' } });
+    await settle();
+    assert.equal(block.note.hidden, true);
+    assert.equal(block.startupStatus.textContent, reason);
+    assert.equal(block.startupStatus.hidden, false);
+});

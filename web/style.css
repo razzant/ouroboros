@@ -3238,7 +3238,8 @@ body.resizing-panels { user-select: none; }
     gap: var(--space-2);
     min-width: 0;
     padding: 0 var(--space-2);
-    /* The row's own width, not the viewport, decides when the open effort strip takes its own line. */
+    /* Size containment: the row's width never depends on what it holds, so the open effort
+       strip's measured fit (composer_owner_controls.js) cannot feed back into it. */
     container: composer / inline-size;
 }
 
@@ -3489,13 +3490,16 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 /* Effort range (variant D): a round glass button with the ring glyph (band = min..max,
-   dot = recommended) that opens inline into the labelled strip. A sibling of the pills,
-   never inside the phone swipe scroller; the same vocabulary as Swarm and Nano/Low/Max. */
+   dot = recommended) that opens inline into the strip. A sibling of the pills,
+   never inside the phone swipe scroller; the same vocabulary as Swarm and Nano/Low/Max.
+   The open strip never takes a second line: beside the pills when it fits, alone while
+   the pills step aside, scrolling inside itself only when nothing else fits
+   (composer_owner_controls.js sets data-fit, data-tight and --effort-seg-pad from measurement). */
 .chat-effort-range {
-    --effort-cap-width: 10px;
-    --effort-cap-height: 20px;
+    --effort-cap-width: var(--space-2);
+    --effort-band-inset: var(--space-1);
+    --effort-seg-pad: var(--space-2);
     --effort-glyph-size: 22px;
-    --effort-reset-size: 22px;
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -3573,42 +3577,39 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     align-items: center;
     align-self: stretch;
-    gap: var(--space-2);
     max-width: 0;
-    padding-right: 0;
     overflow: hidden;
     opacity: 0;
-    transition: max-width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.22s, padding 0.4s;
+    transition: max-width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.22s;
 }
 .chat-effort-range[data-open="true"] .chat-effort-body {
     max-width: 640px;
-    padding-right: 6px;
     opacity: 1;
 }
-.chat-effort-label {
-    color: var(--text-meta);
+/* Alone, the strip appears and disappears at once, together with the pills it replaces. */
+.chat-effort-range[data-fit="solo"] .chat-effort-body,
+.chat-effort-range[data-fit="overflow"] .chat-effort-body {
+    transition: none;
 }
-.chat-effort-sep {
-    flex: 0 0 auto;
-    width: 1px;
-    height: 14px;
-    background: rgba(var(--neutral-rgb), 0.14);
+.chat-toolbar-row[data-effort-solo="true"] .chat-composer-pills {
+    display: none;
 }
-/* The strip: one segment per level, width follows the label; the band and the three handles sit over it. */
+/* The strip: one segment per level, as wide as its word plus the padding; the band and the
+   three handles sit over it and share one vertical inset, so their edges meet exactly. */
 .chat-effort-strip {
     position: relative;
     flex: 0 0 auto;
     display: flex;
     align-self: stretch;
+    margin-right: var(--space-1);
     touch-action: none;
     cursor: pointer;
 }
 .chat-effort-band {
     position: absolute;
-    top: 4px;
-    bottom: 4px;
-    border-top: 1px solid var(--accent-25);
-    border-bottom: 1px solid var(--accent-25);
+    top: var(--effort-band-inset);
+    bottom: var(--effort-band-inset);
+    border-radius: 4px;
     background: var(--accent-10);
     pointer-events: none;
     transition: left 0.15s, width 0.15s;
@@ -3620,7 +3621,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0 10px;
+    padding: 0 var(--effort-seg-pad);
     color: var(--text-secondary);
     pointer-events: none;
     transition: color 0.15s;
@@ -3633,25 +3634,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .chat-effort-seg-text {
     display: block;
-    transition: transform 0.15s;
 }
-.chat-effort-seg[data-rec="true"] .chat-effort-seg-text {
-    transform: translateX(3px);
-}
-.chat-effort-seg[data-rec="true"]::before {
-    content: "";
-    position: absolute;
-    left: 5px;
-    top: 50%;
-    width: 5px;
-    height: 5px;
-    margin-top: -2.5px;
-    border-radius: 50%;
-    background: var(--accent);
-}
-/* Handles: the pill is the recommended level, the brackets are min and max. */
+/* Handles: the pill is the recommended level, the brackets are min and max. A tap or a key
+   moves every handle with the same short transition, so a pushed bracket keeps pace. */
 .chat-effort-handle {
     position: absolute;
+    top: var(--effort-band-inset);
+    bottom: var(--effort-band-inset);
     box-sizing: border-box;
     padding: 0;
     border: 0;
@@ -3660,12 +3649,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     touch-action: none;
     -webkit-tap-highlight-color: transparent;
     z-index: 3;
+    transition: left 0.15s, width 0.15s, box-shadow 0.15s;
 }
 .chat-effort-handle::before {
-    /* A finger-sized hit area around a thin bracket. */
     content: "";
     position: absolute;
-    inset: -10px -8px;
+    inset: 0;
 }
 .chat-effort-handle:focus-visible {
     outline: 2px solid var(--focus-accent-border);
@@ -3674,40 +3663,46 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-effort-handle[data-dragging="true"] {
     cursor: grabbing;
     z-index: 4;
+}
+/* While a drag runs, and when the layout itself changes (opening, a resize, a new padding),
+   the marks land with the words at once, so the pill never trails behind the word it names. */
+.chat-effort-range:is([data-dragging="true"], [data-settling="true"]) :is(.chat-effort-band, .chat-effort-handle, .chat-effort-seg) {
     transition: none;
 }
+/* The pill covers its whole segment; the word sits centred inside it. */
 .chat-effort-rec {
-    top: 4px;
-    bottom: 4px;
     z-index: 1;
     border: 1px solid var(--accent-55);
     border-radius: 999px;
     background: var(--accent-22);
-    transition: left 0.15s, width 0.15s, box-shadow 0.15s;
-}
-.chat-effort-rec::before {
-    inset: 0;
 }
 .chat-effort-rec[data-dragging="true"] {
     box-shadow: 0 0 0 4px var(--accent-18);
 }
+/* At var(--space-1) of padding and below, a full capsule would cut the corners of the word's box. */
+.chat-effort-range[data-tight="true"] .chat-effort-rec {
+    border-radius: calc(var(--effort-seg-pad) + var(--space-1));
+}
 .chat-effort-cap {
-    top: 50%;
     width: var(--effort-cap-width);
-    height: var(--effort-cap-height);
-    margin-top: calc(var(--effort-cap-height) / -2);
     border: 2px solid var(--accent);
     background: transparent;
-    transition: left 0.15s, box-shadow 0.15s;
 }
+/* A finger-sized hit area that grows outward, never over the pill or the round button. */
 .chat-effort-min {
     border-right: 0;
     border-radius: 4px 0 0 4px;
 }
+.chat-effort-min::before {
+    inset: -10px 0 -10px -12px;
+}
 .chat-effort-max {
-    margin-left: calc(var(--effort-cap-width) * -1);
     border-left: 0;
     border-radius: 0 4px 4px 0;
+    transform: translateX(-100%);
+}
+.chat-effort-max::before {
+    inset: -10px -12px -10px 0;
 }
 .chat-effort-cap[data-dragging="true"] {
     box-shadow: 0 0 0 4px var(--accent-22);
@@ -3720,71 +3715,40 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
         box-shadow: 0 0 0 3px var(--accent-18);
     }
 }
-/* The way back to Low · Medium · High: shown only while the range differs from it. */
-.chat-effort-reset {
-    flex: 0 0 auto;
-    display: inline-grid;
-    place-items: center;
-    width: var(--effort-reset-size);
-    height: var(--effort-reset-size);
-    margin-left: var(--space-1);
-    padding: 0;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    color: var(--text-meta);
-    cursor: pointer;
-    transition: width 0.2s, margin 0.2s, opacity 0.2s, color 0.15s, background 0.15s;
+/* Nothing fits even at the tightest padding (a 320 px phone, a pane dragged very narrow):
+   the strip scrolls inside the control and fades on the side that hides levels. A swipe on
+   a word scrolls, a handle still drags, the round button stays put. */
+.chat-effort-range[data-fit="overflow"] {
+    flex: 1 1 auto;
 }
-@media (hover: hover) {
-    .chat-effort-reset:hover {
-        color: var(--accent);
-        background: var(--accent-10);
-    }
+.chat-effort-range[data-fit="overflow"][data-open="true"] .chat-effort-body {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
 }
-.chat-effort-reset:focus-visible {
-    outline: 2px solid var(--focus-accent-border);
-    outline-offset: 2px;
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    touch-action: pan-x;
 }
-.chat-effort-reset[data-at-default="true"] {
-    width: 0;
-    margin-left: 0;
-    opacity: 0;
-    pointer-events: none;
-}
-.chat-effort-range[data-open="false"] .chat-effort-reset {
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip::-webkit-scrollbar {
     display: none;
 }
-/* A narrow composer column (a Project pane on a wide screen, a phone): the open strip
-   takes its own line, the label makes room, and the segments share the width. */
-@container composer (max-width: 759px) {
-    .chat-effort-range[data-open="true"] {
-        flex: 0 0 100%;
-    }
-    .chat-effort-range[data-open="true"] .chat-effort-body {
-        flex: 1 1 auto;
-        min-width: 0;
-        max-width: none;
-    }
-    .chat-effort-range[data-open="true"] .chat-effort-label,
-    .chat-effort-range[data-open="true"] .chat-effort-sep {
-        display: none;
-    }
-    .chat-effort-range[data-open="true"] .chat-effort-strip {
-        flex: 1 1 auto;
-        min-width: 0;
-    }
-    .chat-effort-range[data-open="true"] .chat-effort-seg {
-        flex: 1 1 0;
-        min-width: 0;
-        padding: 0 4px;
-    }
-    .chat-effort-range[data-open="true"] .chat-effort-seg[data-rec="true"]::before {
-        display: none;
-    }
-    .chat-effort-range[data-open="true"] .chat-effort-seg[data-rec="true"] .chat-effort-seg-text {
-        transform: none;
-    }
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip[data-scroll="start"] {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - var(--space-3)), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - var(--space-3)), transparent);
+}
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip[data-scroll="middle"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, black var(--space-3), black calc(100% - var(--space-3)), transparent);
+    mask-image: linear-gradient(to right, transparent, black var(--space-3), black calc(100% - var(--space-3)), transparent);
+}
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip[data-scroll="end"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, black var(--space-3));
+    mask-image: linear-gradient(to right, transparent, black var(--space-3));
 }
 
 /* === design-system:migrated-end === */

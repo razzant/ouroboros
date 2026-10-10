@@ -171,7 +171,9 @@ def test_the_toggle_never_enters_the_settings_draft():
     panel = markup[markup.index('data-settings-panel="behavior"'):]
     panel = panel[:panel.index("</section>")]
     assert "data-autostart-settings" in panel, "the block lives on the Behavior tab"
-    block = panel[panel.index("data-autostart-settings"):panel.index("<h3>Reasoning Effort</h3>")]
+    start = panel.index("data-autostart-settings")
+    end = panel.find('<div class="form-section"', start)
+    block = panel[start:end if end > 0 else len(panel)]
     assert "host computer" in block
     assert "Startup &amp; background" in block
     assert "data-autostart-settings" not in markup.split('data-settings-panel="appearance"')[1]

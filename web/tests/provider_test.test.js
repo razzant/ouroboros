@@ -88,8 +88,9 @@ test('access, supervisor, and review remain independent owner controls', () => {
 
 test('settings copy distinguishes Cyber configuration authority without auto-enabling evolution', () => {
     const html = renderSettingsPage();
-    const supervisor = html.split('<h3>Safety Supervisor</h3>')[1].split('<h3>Update Channel</h3>')[0];
-    const evolution = html.split('<h3>Post-Task Self-Evolution</h3>')[1].split('<h3>Background Cognition</h3>')[0];
+    // Each card up to the next one, wherever the Behavior order puts it.
+    const supervisor = html.split('<h3>Safety Supervisor</h3>')[1].split('<h3>')[0];
+    const evolution = html.split('<h3>Post-Task Self-Evolution</h3>')[1].split('<h3>')[0];
     assert.match(supervisor, /outside Cyber Pro, the agent cannot lower its own supervision/);
     assert.match(supervisor, /Cyber Pro also lets the agent configure Supervisor coverage/);
     assert.doesNotMatch(supervisor, /Owner-only/);

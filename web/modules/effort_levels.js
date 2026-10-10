@@ -4,7 +4,7 @@
 // sets as a standing level), the owner's range as the server reads it, and the English
 // label of a tier read through the catalog seam so a translated install hears the same word
 // the strip shows.
-import { fmt, fmtInto, tr } from './i18n.js';
+import { tr } from './i18n.js';
 
 export const EFFORT_SCALE = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const EFFORT_LABELS = Object.freeze({
@@ -62,34 +62,4 @@ export function normalizeEffortRange(range = {}) {
     const lower = (a, b) => (effortRank(a) <= effortRank(b) ? a : b);
     const higher = (a, b) => (effortRank(a) >= effortRank(b) ? a : b);
     return { min: lower(pick('min'), recommended), recommended, max: higher(pick('max'), recommended) };
-}
-
-/** The same read over a settings document (`GET /api/settings`), by the three flat keys. */
-export function effortRangeFromSettings(settings = {}) {
-    return normalizeEffortRange({
-        min: settings?.OUROBOROS_EFFORT_MIN, recommended: settings?.OUROBOROS_EFFORT_TASK, max: settings?.OUROBOROS_EFFORT_MAX,
-    });
-}
-
-export function sameEffortRange(a, b) {
-    return ['min', 'recommended', 'max'].every((key) => effortTier(a?.[key]) === effortTier(b?.[key]));
-}
-
-/** "Low · High · High" — the triple as one short phrase. */
-export function effortRangePhrase(range) {
-    const r = normalizeEffortRange(range);
-    return [r.min, r.recommended, r.max].map(effortText).join(' · ');
-}
-
-/** The Behavior tab's one read-only line about the range and where it is edited. */
-export const EFFORT_RANGE_SUMMARY_TEMPLATE = 'Effort range: {min} · {recommended} · {max} (minimum · recommended · maximum). Change it with the round Effort button next to Swarm in the chat.';
-const summaryParams = (settings) => {
-    const r = effortRangeFromSettings(settings);
-    return { min: effortText(r.min), recommended: effortText(r.recommended), max: effortText(r.max) };
-};
-export function effortRangeSummaryText(settings) {
-    return fmt(EFFORT_RANGE_SUMMARY_TEMPLATE, summaryParams(settings));
-}
-export function paintEffortRangeSummary(element, settings) {
-    if (element) fmtInto(element, EFFORT_RANGE_SUMMARY_TEMPLATE, summaryParams(settings));
 }

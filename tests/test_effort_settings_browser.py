@@ -1,4 +1,4 @@
-"""Rendered Settings: a reviewer row's effort select says Auto, and Behavior reads the range only."""
+"""Rendered Settings: a reviewer row's effort select says Auto, and Behavior has no effort section."""
 import pytest
 
 from tests import test_subscription_role_routes_browser as roles
@@ -41,9 +41,9 @@ def test_reviewer_effort_auto_caption_and_saved_preference(role_ui, tmp_path, wi
         page.locator('#btn-reload-settings').click()
     assert unset.locator('[data-subagent-field="effort"]').input_value() == 'medium'
     page.locator('[data-settings-tab="behavior"]').click()
-    line = page.locator('[data-effort-range-summary]')
-    assert line.inner_text() == ("Effort range: Low · High · High (minimum · recommended · maximum). "
-                                 "Change it with the round Effort button next to Swarm in the chat.")
+    behavior = page.locator('[data-settings-panel="behavior"]')
+    # The range lives in the composer alone: Behavior has no effort section, line or control.
+    assert behavior.locator('h3', has_text="Reasoning Effort").count() == 0
+    assert page.locator('[data-effort-range-summary]').count() == 0
     assert page.locator('[data-effort-target^="s-effort-"]').count() == 0, "Behavior has no effort controls left"
-    line.scroll_into_view_if_needed()
     page.screenshot(path=str(tmp_path / f"effort-settings-{width}.png"))

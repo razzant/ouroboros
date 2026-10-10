@@ -247,32 +247,45 @@ Two controls in the composer's pill row write a global owner setting rather than
 a fact about the next message: the Nano/Low/Max context mode and the **effort
 range**. Both save at once through their owner endpoint, show the server's refusal
 as a toast and read the one saved value back from `/api/state`, so Main and every
-Project composer show the same thing; Settings → Behavior only reads the range.
+Project composer show the same thing; the composer is the only place the range is
+shown or edited (Settings has no effort section).
 
 The effort range is a round button (the pills' height) wearing a ring glyph — a
 300° arc whose band is the minimum..maximum and whose dot is the recommended
-level. It opens **inline**, never as a dropdown, into a labelled seven-level
-strip (None · Low · Medium · High · X-High · Max · Ultra) with two brackets, the
-recommended pill and a reset that appears only while the range differs from Low ·
-Medium · High. The brackets push the recommended level along and it stays between
-them; a tap inside the range sets it, a tap outside moves the nearer bracket; a
-drag keeps the grab offset; when levels coincide the brackets stay reachable from
-either side of the pill. A stored tier outside the seven (`minimal`) shows at the
-nearest owner tier and is rewritten only when its own handle moves.
+level. It opens **inline**, never as a dropdown, into the seven-level strip (None ·
+Low · Medium · High · X-High · Max · Ultra) with two brackets and the recommended
+pill, and nothing else: no title word, no reset. A segment is its word plus
+`--effort-seg-pad` on each side; the pill covers its whole segment with the word
+centred, and the band, the pill and the brackets share one vertical inset, so their
+edges meet. Every handle pushes the ones it meets: a bracket carries the
+recommended level along, the pill carries a bracket past which it moves, a pushed
+bracket stays where it was pushed, and the brackets never cross. A tap inside the
+range sets the recommended level, a tap outside moves the nearer bracket; a drag
+keeps the grab offset and shows whole levels throughout. A stored tier outside the
+seven (`minimal`) shows at the nearest owner tier and is rewritten only when its own
+handle moves.
+
+**The open strip stays on the composer's line.** It sits beside the pills when it
+fits there (the padding may tighten to `--space-1`); otherwise Swarm and
+Nano/Low/Max step aside while it is open, and it appears and leaves at once with
+them (the padding may tighten to 3 px, the pill's corners tightening with it so it
+still covers its word); only when
+even that does not fit does the strip scroll inside itself, fading on the side that
+hides levels, while the round button stays put. The fit is measured from the row,
+so a Project pane, a phone and a translation need no breakpoint.
 
 **Hover is an accelerator; the press always works.** With a hovering fine pointer
-the strip opens about 160 ms after the pointer arrives and closes about 450 ms after
-it leaves, unless a press pinned it; the same press unpins. Touch and keyboard use
-the press alone: Enter or Space opens and focuses the recommended handle, arrows
-and PageUp/PageDown step a handle, Home and End take it to the ends, Esc closes and
-returns focus to the button, an outside press closes. The three handles are
-sliders whose value text names the level; closed, they leave the tab order. A
-narrow composer column — a phone, a Project pane on a wide screen — gives the open
-strip its own line, decided by the column, not the viewport, and never a page
-scroll. A change saves when the gesture ends, saves run one after another with the
-last winning, and Send waits for a pending save so the next root starts at the
-level the owner just chose; a refused save keeps the draft, says why and returns
-the control to the saved value — unsaved values are never shown as saved.
+the strip opens about 160 ms after the pointer arrives and closes a second after it
+leaves a 32 px zone around the control, unless a press pinned it; the same press
+unpins. Touch and keyboard use the press alone: Enter or Space opens and focuses the
+recommended handle, arrows and PageUp/PageDown step a handle, Home and End take it
+to the ends, Esc closes and returns focus to the button, an outside press closes.
+The three handles are sliders whose value text names the level; closed, they leave
+the tab order and the button's name states the range. A change saves when the
+gesture ends, saves run one after another with the last winning, and Send waits
+for a pending save so the next root starts at the level the owner just chose; a
+refused save keeps the draft, says why and returns the control to the saved value —
+unsaved values are never shown as saved.
 
 ### `.muted`
 
@@ -680,6 +693,19 @@ preference when it opens and on every reconnect; there is no file watcher.
   (`--type-body`, `--text-meta`) → content → optional note (`--type-meta`,
   `--text-meta`). The description explains what the section decides; the note
   carries consequences and caveats.
+- **Order by importance and expected use.** Put first what a typical install
+  needs most often or what matters most, and last what most installs set once or
+  never: left to right for tabs, header actions, toolbars and pill rows, top to
+  bottom for sections, cards and sidebar entries. Decide from what the control does
+  on desktop, browser, Docker and phone installs, not from counts: the UI never
+  measures use and never reorders itself. Related sections stay together and move
+  as a group. The exceptions: the default tab is first; a setup flow keeps its
+  order (connect an account, choose models, assign agents); an ordered scale and an
+  owner-defined order (Widgets) are never re-sorted; destructive actions and About
+  come last, while an emergency stop (Panic) stays where people reach for it; Send
+  and Save keep their usual place. A familiar location moves only for a clear gain,
+  and a new section takes the place this rule gives it, not the top because it is
+  new.
 - Subsections inside a section use a `--type-body` semibold heading and stay
   visually grouped with their own rows, their own add action in the head
   (List editors, below). A heading that floats equidistant between two groups
@@ -1637,7 +1663,7 @@ engineering rules; no second policy list may exist.
 never *look, I am still working*. It exists so the owner can leave the window
 and still be reached by a question or a finished task.
 
-**Startup & background.** Settings → Behavior owns host lifecycle choices, separate from the client-local Appearance controls. Sign-in startup is off until the owner opts in and always names the computer running Ouroboros, even in a remote client. OS registration is the truth: another copy, an OS-disabled entry and an unavailable app build remain visible rather than becoming a saved-settings guess. Automatic startup preserves Panic stops and saved pauses; an explicit owner start releases Panic. The second control, *keep Ouroboros running in the background when the window is closed*, is also off until chosen and lives in the host's settings. Until the owner decides, the first close of the desktop window asks once — Ouroboros will keep working in the background (tasks, schedules, Telegram): keep it running, or quit? — and the answer becomes that checkbox; dismissing the question quits. macOS labels its two buttons Keep running and Quit; Windows keeps its standard OK and Cancel, with a line saying that OK keeps it running and Cancel quits. While it is on, closing hides the window behind a live indicator (the Windows notification-area icon; the macOS menu-bar item and Dock) whose menu shows the server's real state (work only from confirmed phases; starting, an error, unconfirmed activity or no answer said as such) and offers Open, Panic and Quit; if no indicator appears the close quits, so a hidden process always has a visible way back. Quit, Cmd+Q and signing out always quit, unasked. A sign-in start stays hidden only when both checkboxes are on and the indicator actually appeared, and opening the app while it is still starting shows the window; there is no third "start minimized" setting. Linux shows the background control as not available yet and closing quits there. Android deliberately keeps its existing automatic boot entry by default, with the same Panic-preservation contract.
+**Startup & background.** Settings → Behavior owns host lifecycle choices, separate from the client-local Appearance controls. Sign-in startup is off until the owner opts in and always names the computer running Ouroboros, even in a remote client. OS registration is the truth: another copy, an OS-disabled entry and an unavailable app build remain visible rather than becoming a saved-settings guess. Automatic startup preserves Panic stops and saved pauses; an explicit owner start releases Panic. The second control, *keep Ouroboros running in the background when the window is closed*, is also off until chosen and lives in the host's settings. Until the owner decides, the first close of the desktop window asks once — Ouroboros will keep working in the background (tasks, schedules, Telegram): keep it running, or quit? — and the answer becomes that checkbox; dismissing the question quits. macOS labels its two buttons Keep running and Quit; Windows keeps its standard OK and Cancel, with a line saying that OK keeps it running and Cancel quits. While it is on, closing hides the window behind a live indicator (the Windows notification-area icon; the macOS menu-bar item and Dock) whose menu shows the server's real state (work only from confirmed phases; starting, an error, unconfirmed activity or no answer said as such) and offers Open, Panic and Quit; if no indicator appears the close quits, so a hidden process always has a visible way back. Quit, Cmd+Q and signing out always quit, unasked. A sign-in start stays hidden only when both checkboxes are on and the indicator actually appeared, and opening the app while it is still starting shows the window; there is no third "start minimized" setting. Linux shows the background control as not available yet and closing quits there. Android deliberately keeps its existing automatic boot entry by default, with the same Panic-preservation contract. The card is the last on Behavior: set once, and on a browser or Docker host it only explains itself. A control the host cannot offer says why as a plain note in meta ink (no warning dot); two controls with the same reason say it once, after both; a state the owner can change (another copy, an entry the OS turned off) is a warning, a failed read or write an error. Notes and statuses start at the checkbox label's text, a status dot hanging under the checkbox.
 
 **When the client runs.** Notifications are a property of a running client, and
 there is no push channel. On the desktop the Telegram bridge runs inside the same

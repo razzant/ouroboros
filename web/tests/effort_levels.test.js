@@ -4,8 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    EFFORT_OPTIONS, EFFORT_RANGE_DEFAULT, EFFORT_SCALE, OWNER_TIERS, effortLabel, effortRangeFromSettings,
-    effortRangePhrase, effortRangeSummaryText, effortText, normalizeEffortRange, ownerLevelIndex, sameEffortRange,
+    EFFORT_OPTIONS, EFFORT_RANGE_DEFAULT, EFFORT_SCALE, OWNER_TIERS, effortLabel, effortText, normalizeEffortRange, ownerLevelIndex,
 } from '../modules/effort_levels.js';
 import { EFFORT_CHOICES } from '../modules/route_editor_primitives.js';
 
@@ -30,17 +29,7 @@ test('a stored tier outside the owner tiers is shown at the nearest owner tier',
 test("the tolerant read: unknown values take the key's default, min lowers to rec, max rises to rec", () => {
     assert.deepEqual(normalizeEffortRange({}), EFFORT_RANGE_DEFAULT);
     // The owner's install: TASK=high, no MIN/MAX -> Low · High · High.
-    assert.deepEqual(effortRangeFromSettings({ OUROBOROS_EFFORT_TASK: 'high' }), { min: 'low', recommended: 'high', max: 'high' });
+    assert.deepEqual(normalizeEffortRange({ recommended: 'high' }), { min: 'low', recommended: 'high', max: 'high' });
     assert.deepEqual(normalizeEffortRange({ min: 'ultra', recommended: 'low', max: 'none' }), { min: 'low', recommended: 'low', max: 'low' });
     assert.deepEqual(normalizeEffortRange({ min: 'minimal', recommended: 'extreme', max: 'MAX' }), { min: 'minimal', recommended: 'medium', max: 'max' });
-    assert.ok(sameEffortRange({ min: 'low', recommended: 'medium', max: 'high' }, EFFORT_RANGE_DEFAULT));
-    assert.ok(!sameEffortRange({ min: 'minimal', recommended: 'medium', max: 'high' }, EFFORT_RANGE_DEFAULT));
-});
-
-test('the Behavior line names the triple and the one place it is edited', () => {
-    assert.equal(effortRangePhrase({ min: 'low', recommended: 'high', max: 'high' }), 'Low · High · High');
-    assert.equal(
-        effortRangeSummaryText({ OUROBOROS_EFFORT_TASK: 'high' }),
-        'Effort range: Low · High · High (minimum · recommended · maximum). Change it with the round Effort button next to Swarm in the chat.',
-    );
 });

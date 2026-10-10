@@ -4,7 +4,9 @@ import { setInlineStatus } from './ui_primitives.js';
 /* Startup & background: two immediate host controls, separate from the /api/settings draft.
    Sign-in startup is the OS registration; keep-running is the host's own settings choice
    (the desktop's first close may also set it). Both re-read when Settings opens, because the
-   OS or another client can change them meanwhile. */
+   OS or another client can change them meanwhile. A host that cannot offer a control says so
+   as a plain note (a fact about the host, not a problem); a state the owner can change is a
+   warning; a failed read or write is an error (docs/DESIGN.md §3-§5). */
 
 const STARTUP_NOTES = {
     unavailable: 'Sign-in startup is unavailable on this host.',
@@ -19,11 +21,17 @@ const BACKGROUND_NOTES = {
     off: '',
 };
 
-function bindHostToggle({ container, box, status, notes, noun, read, write }) {
+function paintNote(status, text) {
+    setInlineStatus(status, text, 'muted');
+    if (status?.dataset) delete status.dataset.tone;  // no status dot: a note, not a status
+}
+
+function bindHostToggle({ container, box, status, notes, noun, read, write, onPaint = () => {} }) {
     if (!container || !box) return null;
     let destroyed = false;
     let busy = false;
     let generation = 0;
+    let shown = null;  // what the row says now: { state, note } once a known state is painted
 
     const paint = ({ state, reason }) => {
         const known = Object.hasOwn(notes, state);
@@ -31,7 +39,15 @@ function bindHostToggle({ container, box, status, notes, noun, read, write }) {
         box.checked = state === 'on';
         box.disabled = state === 'unavailable';
         const note = known ? (reason || notes[state]) : '';
-        setInlineStatus(status, note, note ? 'warn' : 'muted');
+        if (state === 'unavailable') paintNote(status, note);
+        else setInlineStatus(status, note, note ? 'warn' : 'muted');
+        shown = known ? { state, note } : null;
+        onPaint();
+    };
+    const fail = (message) => {
+        setInlineStatus(status, message, 'danger');
+        shown = null;
+        onPaint();
     };
 
     const refresh = async () => {
@@ -45,7 +61,7 @@ function bindHostToggle({ container, box, status, notes, noun, read, write }) {
             if (destroyed || busy || current !== generation) return;
             container.hidden = false;
             box.disabled = true;
-            setInlineStatus(status, `Could not read the ${noun}: ${error.message}`, 'danger');
+            fail(`Could not read the ${noun}: ${error.message}`);
         }
     };
 
@@ -69,16 +85,19 @@ function bindHostToggle({ container, box, status, notes, noun, read, write }) {
             if (snapshot === undefined) {
                 box.checked = !wanted; // last observed value, not a claim about the current host state
                 box.disabled = true;
-                setInlineStatus(status, `Could not change the ${noun}: ${error.message}. Current host state could not be read; reopen Settings to retry.`, 'danger');
+                fail(`Could not change the ${noun}: ${error.message}. Current host state could not be read; reopen Settings to retry.`);
             } else {
                 paint(snapshot);
-                setInlineStatus(status, `Could not change the ${noun}: ${error.message}`, 'danger');
+                fail(`Could not change the ${noun}: ${error.message}`);
             }
         }
     };
 
     box.addEventListener('change', onChange);
     return {
+        box,
+        status,
+        shown: () => shown,
         refresh,
         dispose: () => {
             destroyed = true;
@@ -90,16 +109,35 @@ function bindHostToggle({ container, box, status, notes, noun, read, write }) {
 export function bindAutostartControl(page) {
     const section = page.querySelector('[data-autostart-settings]');
     if (!section) return () => {};
-    const controls = [
+    // Two rows that cannot be used for the same reason say it once, after both, for both.
+    const shared = section.querySelector('[data-autostart-shared-note]');
+    let controls = [];
+    const shareNote = () => {
+        const rows = controls.map((control) => control.shown());
+        const same = rows.length === 2 && rows.every((row) => row?.state === 'unavailable' && row.note)
+            && rows[0].note === rows[1].note;
+        if (shared) {
+            shared.hidden = !same;
+            shared.textContent = same ? rows[0].note : '';
+        }
+        for (const control of controls) {
+            if (control.status) control.status.hidden = Boolean(same && shared);
+            if (same && shared) control.box.setAttribute?.('aria-describedby', shared.id);
+            else control.box.removeAttribute?.('aria-describedby');
+        }
+    };
+    controls = [
         bindHostToggle({
             container: section, box: section.querySelector('[data-autostart-toggle]'),
             status: section.querySelector('[data-autostart-status]'), notes: STARTUP_NOTES, noun: 'host startup entry',
             read: () => apiClient.desktopAutostart(), write: (enabled) => apiClient.setDesktopAutostart(enabled),
+            onPaint: () => shareNote(),
         }),
         bindHostToggle({
             container: section.querySelector('[data-background-row]'), box: section.querySelector('[data-background-toggle]'),
             status: section.querySelector('[data-background-status]'), notes: BACKGROUND_NOTES, noun: 'background setting',
             read: () => apiClient.desktopBackground(), write: (enabled) => apiClient.setDesktopBackground(enabled),
+            onPaint: () => shareNote(),
         }),
     ].filter(Boolean);
     if (!controls.length) return () => {};

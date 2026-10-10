@@ -5,7 +5,6 @@ import { renderSubagentsSection } from './subagents_settings.js';
 import { languageBlockHtml } from './settings_language.js';
 import { modelRolesHost } from './model_roles.js';
 import { bindSecretReveal } from './settings_secrets.js';
-import { EFFORT_RANGE_SUMMARY_TEMPLATE } from './effort_levels.js';
 
 // Reads as a sequence: keys → secrets → which API models → who among the agents
 // does what → behavior → technical. "Agents", not "Coding agents" (D-10): the
@@ -295,16 +294,6 @@ export function renderSettingsPage() {
                         </div>
                     </details>
                     <div class="form-section compact">
-                        <h3>Legacy Compatibility</h3>
-                        <div class="form-row">
-                            <div class="form-field ui-field">
-                                <label for="s-openai-base-url">Legacy OpenAI Base URL</label>
-                                <input id="s-openai-base-url" placeholder="https://api.openai.com/v1 or compatible endpoint" class="ui-control" name="s-openai-base-url" type="text">
-                            </div>
-                        </div>
-                        <div class="settings-inline-note">Backward-compatibility escape hatch for older installs. For new custom providers, use the dedicated <code>OpenAI Compatible</code> card instead.</div>
-                    </div>
-                    <div class="form-section compact">
                         <h3>Network Gate</h3>
                         <div class="form-row">${secretField({
                             id: 's-network-password',
@@ -321,6 +310,16 @@ export function renderSettingsPage() {
                         </div>
                         <div class="settings-inline-note">Adds a password wall only for non-localhost app and API access. If you expose Ouroboros on LAN or Docker, set a password before sharing the URL.</div>
                         <div id="settings-lan-hint" class="settings-lan-hint" hidden></div>
+                    </div>
+                    <div class="form-section compact">
+                        <h3>Legacy Compatibility</h3>
+                        <div class="form-row">
+                            <div class="form-field ui-field">
+                                <label for="s-openai-base-url">Legacy OpenAI Base URL</label>
+                                <input id="s-openai-base-url" placeholder="https://api.openai.com/v1 or compatible endpoint" class="ui-control" name="s-openai-base-url" type="text">
+                            </div>
+                        </div>
+                        <div class="settings-inline-note">Backward-compatibility escape hatch for older installs. For new custom providers, use the dedicated <code>OpenAI Compatible</code> card instead.</div>
                     </div>
                 </section>
 
@@ -376,36 +375,6 @@ export function renderSettingsPage() {
                 </section>
 
                 <section class="settings-panel" data-settings-panel="behavior">
-                    <div class="form-section" data-autostart-settings hidden>
-                        <h3>Startup &amp; background</h3>
-                        <div class="settings-section-copy">
-                            Applies immediately to the host computer running Ouroboros, including when you
-                            connect from another device. Signing in preserves Panic stops and saved pauses.
-                            In the background, tasks, schedules and Telegram keep working; an icon reopens
-                            the window or quits.
-                        </div>
-                        <div class="settings-effort-card">
-                            <label class="local-toggle ui-field ui-field-inline">
-                                <input type="checkbox" class="ui-checkbox" data-autostart-toggle>
-                                Start Ouroboros on the host computer when you sign in
-                            </label>
-                            <div class="settings-inline-status" data-autostart-status role="status" aria-live="polite"></div>
-                            <div data-background-row hidden>
-                                <label class="local-toggle ui-field ui-field-inline">
-                                    <input type="checkbox" class="ui-checkbox" data-background-toggle>
-                                    When the window is closed, keep Ouroboros running in the background
-                                </label>
-                                <div class="settings-inline-status" data-background-status role="status" aria-live="polite"></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Reasoning Effort</h3>
-                        <!-- The range is edited in the chat alone (the round Effort button next to Swarm); this line reads the saved document. -->
-                        <div class="settings-section-copy" data-effort-range-summary>${EFFORT_RANGE_SUMMARY_TEMPLATE}</div>
-                    </div>
-
                     <div class="form-section">
                         <h3>Review Enforcement</h3>
                         <div class="settings-section-copy"><code>Advisory</code> keeps review visible but non-blocking. <code>Blocking</code> stops commits and reviewed-skill activation when critical findings remain unresolved.</div>
@@ -462,131 +431,6 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
-                        <h3>Image Input</h3>
-                        <div class="settings-section-copy">Auto sends images unless the model's own metadata says it cannot see them; then a model that can see writes a caption, or a short note takes the image's place. Inline always sends images, even when metadata says no; if the provider refuses one, you see the refusal and that image becomes a note. Caption always replaces images with text captions. Off replaces images with a note and starts no caption work. The local model and GigaChat cannot carry images in any mode: they get a caption or a note that says so.</div>
-                        <div class="settings-effort-card">
-                            <label>Image Input Mode</label>
-                            <input id="s-image-input-mode" type="hidden" value="auto">
-                            ${renderSegmentedField({
-                                target: 's-image-input-mode',
-                                modifier: 'data-image-input-group',
-                                options: [
-                                    { value: 'auto', label: 'Auto' },
-                                    { value: 'caption', label: 'Caption' },
-                                    { value: 'inline', label: 'Inline' },
-                                    { value: 'off', label: 'Off' },
-                                ],
-                            })}
-                        </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Skills</h3>
-                        <div class="settings-section-copy">
-                            Closed-loop skill development can auto-grant the keys and host permissions a skill declares after a fresh executable review for the current content hash.
-                            Leave this off when every skill permission should require a separate human approval.
-                        </div>
-                        <label class="local-toggle ui-field ui-field-inline" title="Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.">
-                            <input type="checkbox" id="s-auto-grant-reviewed-skills" class="ui-checkbox" name="s-auto-grant-reviewed-skills">
-                            Auto-grant reviewed skills' keys and permissions
-                        </label>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Context Mode</h3>
-                        <div class="settings-section-copy">
-                            Working-context size profile (separate axis from Runtime Mode and Review Enforcement).
-                            <code>Max</code> inlines ARCHITECTURE and DEVELOPMENT in full &mdash; for ~1M-context models (today's behavior).
-                            <code>Nano</code> is the compact owner window. <code>Low</code> fits ~250K / local models: ARCHITECTURE becomes a navigation map (read full sections on demand), DEVELOPMENT stays full for normal runnable tasks unless a structured non-development caller opts out, and memory compacts sooner. It governs Ouroboros's own working window: it never changes the model or reasoning effort, and the review panel runs in every mode.
-                            <br><strong>Human controlled:</strong> saved via the owner endpoint; saves immediately (no restart), and lowering requires Ouroboros to be idle.
-                        </div>
-                        <div class="settings-effort-card">
-                            <label>Context Mode</label>
-                            <input id="s-context-mode" type="hidden" value="max">
-                            ${renderSegmentedField({
-                                target: 's-context-mode',
-                                title: 'Saves immediately; no restart required. Lowering requires Ouroboros to be idle.',
-                                options: [
-                                    { value: 'nano', label: 'Nano' },
-                                    { value: 'low', label: 'Low' },
-                                    { value: 'max', label: 'Max' },
-                                ],
-                            })}
-                        </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Prompt Cache TTL</h3>
-                        <div class="settings-section-copy">
-                            How long provider prompt caches keep this agent's stable context warm (Anthropic-family routes; other providers manage caching implicitly).
-                            <code>1h</code> keeps the large stable prefix cached across long waits and review cycles &mdash; cache writes bill at 2&times; base input instead of 1.25&times;, but one wait longer than 5 minutes already pays that back on big contexts.
-                            <code>5m</code> is the provider default tier as an explicit value; <code>Default</code> sends bare markers (provider default, callers may still declare their own TTL).
-                            One honest global: it applies to every lane, including review and safety prompts.
-                        </div>
-                        <div class="settings-effort-card">
-                            <label>Prompt Cache TTL</label>
-                            <input id="s-prompt-cache-ttl" type="hidden" value="1h">
-                            ${renderSegmentedField({
-                                target: 's-prompt-cache-ttl',
-                                options: [
-                                    { value: 'default', label: 'Default' },
-                                    { value: '5m', label: '5m' },
-                                    { value: '1h', label: '1h' },
-                                ],
-                            })}
-                        </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Safety Supervisor</h3>
-                        <div class="settings-section-copy">
-                            Coverage of the LLM safety-supervisor layer (a separate axis from Runtime Mode).
-                            <code>Full</code> &mdash; every guarded tool call gets the LLM safety check.
-                            <code>Light</code> keeps the LLM check only for integration-policy tools; conditional shell/verify fall to the deterministic guards. Light is the default for new DESKTOP setups (authored by the first-run wizard); existing installs, web and Docker keep Full.
-                            <code>Off</code> makes no LLM safety calls. In every mode the deterministic registry sandbox, protected-path policy, and light-mode guards STAY ON &mdash; the LLM supervisor is a layer, not the floor. Lowering coverage emits a durable audit event per waved-through call.
-                            <br><strong>Configuration authority:</strong> outside Cyber Pro, the agent cannot lower its own supervision. Cyber Pro also lets the agent configure Supervisor coverage. Changes apply on the next task.
-                        </div>
-                        <div class="settings-effort-card">
-                            <label>Safety Supervisor</label>
-                            <input id="s-safety-mode" type="hidden" value="full">
-                            ${renderSegmentedField({
-                                target: 's-safety-mode',
-                                title: 'Lowering coverage here prompts for confirmation.',
-                                options: [
-                                    { value: 'full', label: 'Full' },
-                                    { value: 'light', label: 'Light' },
-                                    { value: 'off', label: 'Off' },
-                                ],
-                            })}
-                            <div class="settings-inline-note" data-policy-state="supervisor" role="status" aria-live="polite"></div>
-                            <div id="s-safety-skip-counter" class="settings-section-copy"></div>
-                        </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Update Channel</h3>
-                        <div class="settings-section-copy">
-                            Chooses which official branch Update checks. Your local work branch stays <code>ouroboros</code>.
-                            <code>Stable</code> follows released code on <code>main</code> (default),
-                            <code>QA</code> follows <code>ouroboros-stable</code>, and
-                            <code>Development</code> follows <code>ouroboros</code>.
-                        </div>
-                        <div class="settings-effort-card">
-                            <label>Official Update Source</label>
-                            <input id="s-update-channel" type="hidden" value="stable">
-                            ${renderSegmentedField({
-                                target: 's-update-channel',
-                                title: 'Applies immediately; no restart required.',
-                                options: [
-                                    { value: 'stable', label: 'Stable' },
-                                    { value: 'qa', label: 'QA' },
-                                    { value: 'development', label: 'Development' },
-                                ],
-                            })}
-                        </div>
-                    </div>
-
-                    <div class="form-section">
                         <h3>Access</h3>
                         <div class="settings-section-copy">
                             Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.
@@ -613,6 +457,32 @@ export function renderSettingsPage() {
                     <!-- Allow Mutative Subagents moved to Agents → Delegation: one
                          subagent story in one place, and two controls over one
                          setting would have carried two drafts. -->
+
+                    <div class="form-section">
+                        <h3>Safety Supervisor</h3>
+                        <div class="settings-section-copy">
+                            Coverage of the LLM safety-supervisor layer (a separate axis from Runtime Mode).
+                            <code>Full</code> &mdash; every guarded tool call gets the LLM safety check.
+                            <code>Light</code> keeps the LLM check only for integration-policy tools; conditional shell/verify fall to the deterministic guards. Light is the default for new DESKTOP setups (authored by the first-run wizard); existing installs, web and Docker keep Full.
+                            <code>Off</code> makes no LLM safety calls. In every mode the deterministic registry sandbox, protected-path policy, and light-mode guards STAY ON &mdash; the LLM supervisor is a layer, not the floor. Lowering coverage emits a durable audit event per waved-through call.
+                            <br><strong>Configuration authority:</strong> outside Cyber Pro, the agent cannot lower its own supervision. Cyber Pro also lets the agent configure Supervisor coverage. Changes apply on the next task.
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Safety Supervisor</label>
+                            <input id="s-safety-mode" type="hidden" value="full">
+                            ${renderSegmentedField({
+                                target: 's-safety-mode',
+                                title: 'Lowering coverage here prompts for confirmation.',
+                                options: [
+                                    { value: 'full', label: 'Full' },
+                                    { value: 'light', label: 'Light' },
+                                    { value: 'off', label: 'Off' },
+                                ],
+                            })}
+                            <div class="settings-inline-note" data-policy-state="supervisor" role="status" aria-live="polite"></div>
+                            <div id="s-safety-skip-counter" class="settings-section-copy"></div>
+                        </div>
+                    </div>
 
                     <div class="form-section">
                         <h3>Post-Task Self-Evolution</h3>
@@ -687,6 +557,82 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
+                        <h3>Context Mode</h3>
+                        <div class="settings-section-copy">
+                            Working-context size profile (separate axis from Runtime Mode and Review Enforcement).
+                            <code>Max</code> inlines ARCHITECTURE and DEVELOPMENT in full &mdash; for ~1M-context models (today's behavior).
+                            <code>Nano</code> is the compact owner window. <code>Low</code> fits ~250K / local models: ARCHITECTURE becomes a navigation map (read full sections on demand), DEVELOPMENT stays full for normal runnable tasks unless a structured non-development caller opts out, and memory compacts sooner. It governs Ouroboros's own working window: it never changes the model or reasoning effort, and the review panel runs in every mode.
+                            <br><strong>Human controlled:</strong> saved via the owner endpoint; saves immediately (no restart), and lowering requires Ouroboros to be idle.
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Context Mode</label>
+                            <input id="s-context-mode" type="hidden" value="max">
+                            ${renderSegmentedField({
+                                target: 's-context-mode',
+                                title: 'Saves immediately; no restart required. Lowering requires Ouroboros to be idle.',
+                                options: [
+                                    { value: 'nano', label: 'Nano' },
+                                    { value: 'low', label: 'Low' },
+                                    { value: 'max', label: 'Max' },
+                                ],
+                            })}
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Image Input</h3>
+                        <div class="settings-section-copy">Auto sends images unless the model's own metadata says it cannot see them; then a model that can see writes a caption, or a short note takes the image's place. Inline always sends images, even when metadata says no; if the provider refuses one, you see the refusal and that image becomes a note. Caption always replaces images with text captions. Off replaces images with a note and starts no caption work. The local model and GigaChat cannot carry images in any mode: they get a caption or a note that says so.</div>
+                        <div class="settings-effort-card">
+                            <label>Image Input Mode</label>
+                            <input id="s-image-input-mode" type="hidden" value="auto">
+                            ${renderSegmentedField({
+                                target: 's-image-input-mode',
+                                modifier: 'data-image-input-group',
+                                options: [
+                                    { value: 'auto', label: 'Auto' },
+                                    { value: 'caption', label: 'Caption' },
+                                    { value: 'inline', label: 'Inline' },
+                                    { value: 'off', label: 'Off' },
+                                ],
+                            })}
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Skills</h3>
+                        <div class="settings-section-copy">
+                            Closed-loop skill development can auto-grant the keys and host permissions a skill declares after a fresh executable review for the current content hash.
+                            Leave this off when every skill permission should require a separate human approval.
+                        </div>
+                        <label class="local-toggle ui-field ui-field-inline" title="Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.">
+                            <input type="checkbox" id="s-auto-grant-reviewed-skills" class="ui-checkbox" name="s-auto-grant-reviewed-skills">
+                            Auto-grant reviewed skills' keys and permissions
+                        </label>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Prompt Cache TTL</h3>
+                        <div class="settings-section-copy">
+                            How long provider prompt caches keep this agent's stable context warm (Anthropic-family routes; other providers manage caching implicitly).
+                            <code>1h</code> keeps the large stable prefix cached across long waits and review cycles &mdash; cache writes bill at 2&times; base input instead of 1.25&times;, but one wait longer than 5 minutes already pays that back on big contexts.
+                            <code>5m</code> is the provider default tier as an explicit value; <code>Default</code> sends bare markers (provider default, callers may still declare their own TTL).
+                            One honest global: it applies to every lane, including review and safety prompts.
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Prompt Cache TTL</label>
+                            <input id="s-prompt-cache-ttl" type="hidden" value="1h">
+                            ${renderSegmentedField({
+                                target: 's-prompt-cache-ttl',
+                                options: [
+                                    { value: 'default', label: 'Default' },
+                                    { value: '5m', label: '5m' },
+                                    { value: '1h', label: '1h' },
+                                ],
+                            })}
+                        </div>
+                    </div>
+
+                    <div class="form-section">
                         <h3>External Skills Repo</h3>
                         <div class="settings-section-copy">
                             Optional EXTRA discovery path on top of the in-data-plane
@@ -720,6 +666,56 @@ export function renderSettingsPage() {
                                 <input id="s-clawhub-registry-url" placeholder="https://clawhub.ai/api/v1" class="ui-control" name="s-clawhub-registry-url" type="text" aria-describedby="s-clawhub-registry-url-help">
                                 <div class="settings-inline-note ui-field-help" id="s-clawhub-registry-url-help">Override only for self-hosted mirrors. Hostname must be <code>clawhub.ai</code> or localhost.</div>
                             </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Update Channel</h3>
+                        <div class="settings-section-copy">
+                            Chooses which official branch Update checks. Your local work branch stays <code>ouroboros</code>.
+                            <code>Stable</code> follows released code on <code>main</code> (default),
+                            <code>QA</code> follows <code>ouroboros-stable</code>, and
+                            <code>Development</code> follows <code>ouroboros</code>.
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Official Update Source</label>
+                            <input id="s-update-channel" type="hidden" value="stable">
+                            ${renderSegmentedField({
+                                target: 's-update-channel',
+                                title: 'Applies immediately; no restart required.',
+                                options: [
+                                    { value: 'stable', label: 'Stable' },
+                                    { value: 'qa', label: 'QA' },
+                                    { value: 'development', label: 'Development' },
+                                ],
+                            })}
+                        </div>
+                    </div>
+
+                    <!-- Last on the tab: set once, and on a browser or Docker host it only explains
+                         why the switches cannot be used (docs/DESIGN.md §5 "Order by importance"). -->
+                    <div class="form-section" data-autostart-settings hidden>
+                        <h3>Startup &amp; background</h3>
+                        <div class="settings-section-copy">
+                            Applies immediately to the host computer running Ouroboros, including when you
+                            connect from another device. Signing in preserves Panic stops and saved pauses.
+                            In the background, tasks, schedules and Telegram keep working; an icon reopens
+                            the window or quits.
+                        </div>
+                        <div class="settings-effort-card">
+                            <label class="local-toggle ui-field ui-field-inline">
+                                <input type="checkbox" class="ui-checkbox" data-autostart-toggle>
+                                Start Ouroboros on the host computer when you sign in
+                            </label>
+                            <div class="settings-inline-status" data-autostart-status role="status" aria-live="polite"></div>
+                            <div data-background-row hidden>
+                                <label class="local-toggle ui-field ui-field-inline">
+                                    <input type="checkbox" class="ui-checkbox" data-background-toggle>
+                                    When the window is closed, keep Ouroboros running in the background
+                                </label>
+                                <div class="settings-inline-status" data-background-status role="status" aria-live="polite"></div>
+                            </div>
+                            <div class="settings-inline-note" id="settings-autostart-note" data-autostart-shared-note role="status" aria-live="polite" hidden></div>
                         </div>
                     </div>
                 </section>
@@ -799,6 +795,45 @@ export function renderSettingsPage() {
 
                 <section class="settings-panel" data-settings-panel="advanced">
                     <div class="form-section">
+                        <h3>Runtime Limits</h3>
+                        <!-- Active Subagents / Root and Subagent Depth moved to
+                             Agents → Delegation (D-10): they bound the agents,
+                             not the process pool. Max Workers stays: it is
+                             runtime worker processes, not an agent setting. -->
+                        <div class="settings-section-copy">Workers control parallel task capacity. Task liveness is governed automatically by progress, deadlines, the idle rail and the reaper; the per-task round and lifetime limits are optional — a positive number, or <code>unlimited</code> for none (the fresh-install default). A settings file from an earlier release that never set them keeps the finite limits it ran under until you change them here; startup names the values once. Budget limits control runtime cost thresholds. How many subagents a task may run, and how deep they may nest, live in <code>Agents</code>.</div>
+                        <div class="form-grid two">
+                            <div class="form-field ui-field">
+                                <label for="s-total-budget">Total Budget (USD)</label>
+                                <input id="s-total-budget" type="number" min="0.01" step="any" value="200.0" class="ui-control" name="s-total-budget">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-settings-per-task-cost">Per-Task Cost Cap (USD)</label>
+                                <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="50.0" class="ui-control" name="s-settings-per-task-cost">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-workers">Max Workers</label>
+                                <input id="s-workers" type="number" min="1" max="50" value="10" class="ui-control" name="s-workers">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-max-rounds">Max Rounds per Task</label>
+                                <input id="s-max-rounds" type="text" inputmode="numeric" value="unlimited" placeholder="unlimited" class="ui-control" name="s-max-rounds">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-task-lifetime">Task Lifetime Limit (s)</label>
+                                <input id="s-task-lifetime" type="text" inputmode="numeric" value="unlimited" placeholder="unlimited" class="ui-control" name="s-task-lifetime">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-presence-max-active">Concurrent Presence Conversations</label>
+                                <input id="s-presence-max-active" type="number" min="1" max="20" value="2" class="ui-control" name="s-presence-max-active">
+                            </div>
+                            <div class="form-field ui-field">
+                                <label for="s-tool-timeout">Tool Timeout (s)</label>
+                                <input id="s-tool-timeout" type="number" value="600" class="ui-control" name="s-tool-timeout">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
                         <div class="settings-card-head">
                             <div>
                                 <h3>MCP Servers</h3>
@@ -835,18 +870,6 @@ export function renderSettingsPage() {
                             <div class="form-field ui-field">
                                 <label for="s-gh-repo">GitHub Repo</label>
                                 <input id="s-gh-repo" placeholder="owner/repo-name" class="ui-control" name="s-gh-repo" type="text">
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Extra CA Certificates</h3>
-                        <div class="settings-section-copy">Only for a network whose TLS certificates the default bundle does not trust: a TLS-inspecting proxy, or an endpoint behind a national CA such as GigaChat's. Ouroboros adds the file to its defaults for every provider call; everything else keeps working.</div>
-                        <div class="form-row">
-                            <div class="form-field ui-field">
-                                <label for="s-extra-ca-bundle">Extra CA bundle (PEM)</label>
-                                <input id="s-extra-ca-bundle" placeholder="/path/to/extra-ca.pem" class="ui-control" name="s-extra-ca-bundle" type="text" aria-describedby="s-extra-ca-bundle-help">
-                                <div class="settings-inline-note ui-field-help" id="s-extra-ca-bundle-help">Absolute or <code>~</code>-prefixed path to a PEM file on the machine that runs Ouroboros (its own filesystem, not the device showing this page). Leave empty unless a provider fails with a certificate error.</div>
                             </div>
                         </div>
                     </div>
@@ -897,40 +920,24 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
-                        <h3>Runtime Limits</h3>
-                        <!-- Active Subagents / Root and Subagent Depth moved to
-                             Agents → Delegation (D-10): they bound the agents,
-                             not the process pool. Max Workers stays: it is
-                             runtime worker processes, not an agent setting. -->
-                        <div class="settings-section-copy">Workers control parallel task capacity. Task liveness is governed automatically by progress, deadlines, the idle rail and the reaper; the per-task round and lifetime limits are optional — a positive number, or <code>unlimited</code> for none (the fresh-install default). A settings file from an earlier release that never set them keeps the finite limits it ran under until you change them here; startup names the values once. Budget limits control runtime cost thresholds. How many subagents a task may run, and how deep they may nest, live in <code>Agents</code>.</div>
-                        <div class="form-grid two">
+                        <h3>Extension Settings</h3>
+                        <div class="settings-section-copy">
+                            Live extensions can register reviewed, host-rendered settings sections.
+                            Sections appear here after the owning skill is reviewed, enabled, and loaded.
+                        </div>
+                        <div id="extension-settings-sections" class="settings-extension-sections">
+                            <div class="muted">No extension settings registered.</div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Extra CA Certificates</h3>
+                        <div class="settings-section-copy">Only for a network whose TLS certificates the default bundle does not trust: a TLS-inspecting proxy, or an endpoint behind a national CA such as GigaChat's. Ouroboros adds the file to its defaults for every provider call; everything else keeps working.</div>
+                        <div class="form-row">
                             <div class="form-field ui-field">
-                                <label for="s-workers">Max Workers</label>
-                                <input id="s-workers" type="number" min="1" max="50" value="10" class="ui-control" name="s-workers">
-                            </div>
-                            <div class="form-field ui-field">
-                                <label for="s-max-rounds">Max Rounds per Task</label>
-                                <input id="s-max-rounds" type="text" inputmode="numeric" value="unlimited" placeholder="unlimited" class="ui-control" name="s-max-rounds">
-                            </div>
-                            <div class="form-field ui-field">
-                                <label for="s-task-lifetime">Task Lifetime Limit (s)</label>
-                                <input id="s-task-lifetime" type="text" inputmode="numeric" value="unlimited" placeholder="unlimited" class="ui-control" name="s-task-lifetime">
-                            </div>
-                            <div class="form-field ui-field">
-                                <label for="s-presence-max-active">Concurrent Presence Conversations</label>
-                                <input id="s-presence-max-active" type="number" min="1" max="20" value="2" class="ui-control" name="s-presence-max-active">
-                            </div>
-                            <div class="form-field ui-field">
-                                <label for="s-tool-timeout">Tool Timeout (s)</label>
-                                <input id="s-tool-timeout" type="number" value="600" class="ui-control" name="s-tool-timeout">
-                            </div>
-                            <div class="form-field ui-field">
-                                <label for="s-total-budget">Total Budget (USD)</label>
-                                <input id="s-total-budget" type="number" min="0.01" step="any" value="200.0" class="ui-control" name="s-total-budget">
-                            </div>
-                            <div class="form-field ui-field">
-                                <label for="s-settings-per-task-cost">Per-Task Cost Cap (USD)</label>
-                                <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="50.0" class="ui-control" name="s-settings-per-task-cost">
+                                <label for="s-extra-ca-bundle">Extra CA bundle (PEM)</label>
+                                <input id="s-extra-ca-bundle" placeholder="/path/to/extra-ca.pem" class="ui-control" name="s-extra-ca-bundle" type="text" aria-describedby="s-extra-ca-bundle-help">
+                                <div class="settings-inline-note ui-field-help" id="s-extra-ca-bundle-help">Absolute or <code>~</code>-prefixed path to a PEM file on the machine that runs Ouroboros (its own filesystem, not the device showing this page). Leave empty unless a provider fails with a certificate error.</div>
                             </div>
                         </div>
                     </div>
@@ -949,17 +956,6 @@ export function renderSettingsPage() {
                                 <label for="s-gc-retention-days">GC Retention (days)</label>
                                 <input id="s-gc-retention-days" type="number" min="1" max="365" value="7" class="ui-control" name="s-gc-retention-days">
                             </div>
-                        </div>
-                    </div>
-
-                    <div class="form-section">
-                        <h3>Extension Settings</h3>
-                        <div class="settings-section-copy">
-                            Live extensions can register reviewed, host-rendered settings sections.
-                            Sections appear here after the owning skill is reviewed, enabled, and loaded.
-                        </div>
-                        <div id="extension-settings-sections" class="settings-extension-sections">
-                            <div class="muted">No extension settings registered.</div>
                         </div>
                     </div>
 

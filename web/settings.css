@@ -900,10 +900,17 @@
     background: var(--accent-18);
 }
 
+/* The local toggle's checkbox and gap: one pair of dimensions for the toggles and for the
+   notes that line up with their label text (Startup & background). */
+:root {
+    --local-toggle-box: 14px;
+    --local-toggle-gap: 6px;
+}
+
 .local-toggle {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--local-toggle-gap);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     color: var(--text-meta);
@@ -913,14 +920,40 @@
 
 .local-toggle input[type="checkbox"] {
     accent-color: var(--accent);
-    width: 14px;
-    height: 14px;
+    width: var(--local-toggle-box);
+    height: var(--local-toggle-box);
     cursor: pointer;
 }
 
 [data-autostart-settings] .local-toggle {
     white-space: normal;
     flex-wrap: nowrap;
+}
+
+/* Startup & background: a row's note starts where its checkbox label's text starts, and a
+   status dot hangs under the checkbox, so wrapped lines and both rows share one text edge. */
+[data-autostart-settings] {
+    --autostart-dot: 6px;   /* the status dot, ui.css */
+}
+[data-autostart-settings] .settings-inline-status,
+[data-autostart-settings] .settings-inline-note {
+    padding-left: calc(var(--local-toggle-box) + var(--local-toggle-gap));
+}
+/* Both rows sit in the card's one column, so a note is as far from its own checkbox in either
+   row, and an empty note takes no room. */
+[data-autostart-settings] [data-background-row]:not([hidden]) {
+    display: contents;
+}
+[data-autostart-settings] .settings-inline-status:empty {
+    display: none;
+}
+/* A row's plain note (no tone, no dot) reads in meta ink, like the shared note. */
+[data-autostart-settings] .settings-inline-status:not([data-tone]) {
+    color: var(--text-meta);
+}
+[data-autostart-settings] .settings-inline-status[data-tone]:not(:empty)::before {
+    margin-left: calc(var(--autostart-dot) / 2 - var(--local-toggle-box) / 2 - var(--local-toggle-gap) - var(--autostart-dot));
+    margin-right: calc(var(--local-toggle-box) / 2 + var(--local-toggle-gap) - var(--autostart-dot) / 2);
 }
 
 .local-toggle[data-warning="1"] {

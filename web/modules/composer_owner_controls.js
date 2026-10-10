@@ -5,23 +5,38 @@
 // them: it is a per-message flag that never leaves the frame it rides.
 import { fmt } from './i18n.js';
 import {
-    EFFORT_OPTIONS, EFFORT_RANGE_DEFAULT, OWNER_TIERS, effortText, normalizeEffortRange, ownerLevelIndex, sameEffortRange,
+    EFFORT_OPTIONS, EFFORT_RANGE_DEFAULT, OWNER_TIERS, effortText, normalizeEffortRange, ownerLevelIndex,
 } from './effort_levels.js';
 
 const N = OWNER_TIERS.length - 1;
 const HANDLES = ['min', 'rec', 'max'];
 const HOVER_OPEN_MS = 160;
-const HOVER_CLOSE_MS = 450;
+// After the mouse leaves, the open strip waits this long before it closes, and a margin
+// around it counts as still being there (a forgiving hover zone, like a menu's).
+const HOVER_CLOSE_MS = 1000;
+const HOVER_ZONE_PX = 32;
 const HOVER_MEDIA = '(hover: hover) and (pointer: fine)';
+// The segments' side padding (`--effort-seg-pad`, px): var(--space-2) when there is room, never
+// below var(--space-1) beside the pills, down to 3 px when the strip stands alone (from 4 px down
+// the pill's corners tighten with the padding, so the word's box stays inside it: `data-tight`).
+// Below that the strip scrolls inside itself.
+const SEG_PAD = Object.freeze({ max: 8, beside: 4, alone: 3 });
 const clamp = (value, lo, hi) => Math.min(hi, Math.max(lo, value));
+const px = (value) => Number.parseFloat(value) || 0;
+// Fractional widths: whole-pixel offsets lose up to a pixel per element, enough to wrap the row.
+const widthOf = (node) => {
+    const width = node?.getBoundingClientRect?.().width;
+    return Number.isFinite(width) && width > 0 ? width : Number(node?.offsetWidth) || 0;
+};
 
-/** min and max push the recommended level along; the recommended level stays between them. */
+/** Each handle pushes the ones it meets: min and max carry the recommended level along, and
+ *  the recommended level carries a bracket past which it moves; min and max never cross. */
 export function applyHandle(base, which, value) {
     const s = { ...base };
     const v = clamp(value, 0, N);
     if (which === 'min') { s.min = Math.min(v, s.max); s.rec = Math.max(s.rec, s.min); }
     else if (which === 'max') { s.max = Math.max(v, s.min); s.rec = Math.min(s.rec, s.max); }
-    else s.rec = clamp(v, s.min, s.max);
+    else { s.rec = v; s.min = Math.min(s.min, v); s.max = Math.max(s.max, v); }
     return s;
 }
 
@@ -55,24 +70,24 @@ function ringArc(a0, a1) {
     return `M${p0.x.toFixed(2)} ${p0.y.toFixed(2)} A${RING.r} ${RING.r} 0 ${hi - a0 > 180 ? 1 : 0} 1 ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
 }
 
-const RESET_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>';
-
 function effortRangeMarkup() {
     const segments = EFFORT_OPTIONS.map((option) =>
         `<span class="chat-effort-seg" data-effort-seg="${option.value}"><span class="chat-effort-seg-text">${option.label}</span></span>`).join('');
     return `<button type="button" class="chat-effort-head" aria-expanded="false" aria-label="Effort"><span class="chat-effort-glyph" aria-hidden="true"><svg viewBox="0 0 184 184"><path class="chat-effort-glyph-rail" data-ring-rail d="${ringArc(RING.a0, RING.a0 + RING.sweep)}" fill="none" stroke-width="22" stroke-linecap="round"></path><path class="chat-effort-glyph-band" data-ring-band fill="none" stroke-width="26" stroke-linecap="round"></path><circle class="chat-effort-glyph-dot" data-ring-rec r="22"></circle></svg></span></button>`
-        + '<div class="chat-effort-body"><span class="chat-effort-label">Effort</span><i class="chat-effort-sep" aria-hidden="true"></i>'
-        + '<div class="chat-effort-strip" data-effort-strip><div class="chat-effort-band" data-effort-band aria-hidden="true"></div>'
+        + '<div class="chat-effort-body">'
+        + '<div class="chat-effort-strip" data-effort-strip data-scroll="none"><div class="chat-effort-band" data-effort-band aria-hidden="true"></div>'
         + '<div class="chat-effort-handle chat-effort-rec" data-handle="rec" role="slider" tabindex="-1" aria-label="Recommended effort"></div>'
         + segments
         + '<div class="chat-effort-handle chat-effort-cap chat-effort-min" data-handle="min" role="slider" tabindex="-1" aria-label="Minimum effort"></div>'
         + '<div class="chat-effort-handle chat-effort-cap chat-effort-max" data-handle="max" role="slider" tabindex="-1" aria-label="Maximum effort"></div></div>'
-        + `<button type="button" class="chat-effort-reset" tabindex="-1" aria-label="Reset effort range to Low, Medium, High" title="Reset to Low · Medium · High">${RESET_SVG}</button></div>`;
+        + '</div>';
 }
 
 /**
  * The effort range control (variant D): a round button with the ring glyph that opens
- * inline into a labelled strip with min/max brackets and the recommended dot.
+ * inline into the seven-level strip with min/max brackets and the recommended pill. The
+ * open strip stays on the composer's line: beside the pills when it fits, alone (the pills
+ * step aside) when it does not, scrolling inside itself only when nothing else fits.
  *
  * Hover is an accelerator only (`(hover: hover) and (pointer: fine)`): a press pins the
  * strip open and unpins it; touch and keyboard use the press. Saves happen on gesture
@@ -95,9 +110,9 @@ export function createEffortRangeControl({
     el.innerHTML = effortRangeMarkup();
     const q = (selector) => el.querySelector(selector);
     const head = q('.chat-effort-head');
+    const body = q('.chat-effort-body');
     const strip = q('[data-effort-strip]');
     const band = q('[data-effort-band]');
-    const reset = q('.chat-effort-reset');
     const ring = { band: q('[data-ring-band]'), rec: q('[data-ring-rec]') };
     const segs = Array.from(el.querySelectorAll('.chat-effort-seg'));
     const handles = { min: q('.chat-effort-min'), rec: q('.chat-effort-rec'), max: q('.chat-effort-max') };
@@ -117,6 +132,7 @@ export function createEffortRangeControl({
     for (const which of HANDLES) { handles[which].setAttribute('role', 'slider'); handles[which].tabIndex = -1; }
     let hoverTimer = 0;
     let leaveTimer = 0;
+    let lastPointer = null;
 
     /* --- geometry: segment edges in px, measured from the DOM (labels differ in width) --- */
     function edges() {
@@ -124,11 +140,10 @@ export function createEffortRangeControl({
         e.push(Number(segs[N].offsetLeft) + Number(segs[N].offsetWidth));
         return e.every(Number.isFinite) && e[N + 1] > e[0] ? e : null;
     }
-    const xAt = (b, e) => { const i = clamp(Math.floor(b), 0, N); return e[i] + (e[i + 1] - e[i]) * (clamp(b, 0, N + 1) - i); };
     function boundaryAt(event) {
         const e = edges();
         if (!e) return null;
-        const x = clamp(event.clientX - strip.getBoundingClientRect().left, e[0], e[N + 1]);
+        const x = clamp(event.clientX - strip.getBoundingClientRect().left + (Number(strip.scrollLeft) || 0), e[0], e[N + 1]);
         let i = 0;
         while (i < N && x >= e[i + 1]) i += 1;
         return i + (x - e[i]) / (e[i + 1] - e[i]);
@@ -144,54 +159,55 @@ export function createEffortRangeControl({
         return { which: nearestHandle(state.shown, segment), start: segment };
     }
 
-    /* --- rendering --- */
+    /* --- rendering: every mark sits on whole levels, a drag included (the pill always covers
+       the word it names, and a pushed bracket moves with it, never behind it) --- */
     function render() {
-        const v = state.view || state.shown;
-        const s = snapRange(v);
+        const s = snapRange(state.view || state.shown);
         const e = edges();
         if (e) {
-            const x0 = xAt(v.min, e);
-            const x1 = xAt(v.max + 1, e);
-            const r0 = xAt(v.rec, e);
-            const r1 = xAt(v.rec + 1, e);
-            band.style.left = `${x0}px`;
-            band.style.width = `${x1 - x0}px`;
-            handles.rec.style.left = `${r0 + 2}px`;
-            handles.rec.style.width = `${Math.max(0, r1 - r0 - 4)}px`;
-            handles.min.style.left = `${x0}px`;
-            handles.max.style.left = `${x1}px`;
+            band.style.left = `${e[s.min]}px`;
+            band.style.width = `${e[s.max + 1] - e[s.min]}px`;
+            handles.rec.style.left = `${e[s.rec]}px`;
+            handles.rec.style.width = `${e[s.rec + 1] - e[s.rec]}px`;
+            handles.min.style.left = `${e[s.min]}px`;
+            handles.max.style.left = `${e[s.max + 1]}px`;  // the bracket draws to the left of its edge
         }
         segs.forEach((seg, i) => { seg.dataset.in = String(i >= s.min && i <= s.max); seg.dataset.rec = String(i === s.rec); });
-        ring.band.setAttribute('d', ringArc(ringAngle(v.min), ringAngle(v.max)));
-        const dot = ringPoint(ringAngle(v.rec));
+        el.dataset.dragging = String(Boolean(state.drag?.moved));
+        ring.band.setAttribute('d', ringArc(ringAngle(s.min), ringAngle(s.max)));
+        const dot = ringPoint(ringAngle(s.rec));
         ring.rec.setAttribute('cx', dot.x.toFixed(2));
         ring.rec.setAttribute('cy', dot.y.toFixed(2));
+        // The recommended level may go anywhere (it pushes the brackets); a bracket stops at the other one.
+        const bounds = { min: [0, s.max], rec: [0, N], max: [s.min, N] };
         for (const which of HANDLES) {
-            handles[which].setAttribute('aria-valuemin', '0');
-            handles[which].setAttribute('aria-valuemax', String(N));
+            handles[which].setAttribute('aria-valuemin', String(bounds[which][0]));
+            handles[which].setAttribute('aria-valuemax', String(bounds[which][1]));
             handles[which].setAttribute('aria-valuenow', String(s[which]));
             handles[which].setAttribute('aria-valuetext', effortText(OWNER_TIERS[s[which]]));
             handles[which].dataset.dragging = String(state.drag?.which === which);
         }
-        const atDefault = sameEffortRange(state.stored, EFFORT_RANGE_DEFAULT) && sameIndices(state.shown, indicesOf(EFFORT_RANGE_DEFAULT));
-        reset.dataset.atDefault = String(atDefault);
-        reset.tabIndex = state.open && !atDefault ? 0 : -1;
         const stored = state.stored;
         head.title = fmt('Effort: {level}, range {min}–{max}. Applies to new work.', {
             level: effortText(stored.recommended), min: effortText(stored.min), max: effortText(stored.max),
         });
+        head.setAttribute('aria-label', head.title);
     }
 
     /* --- the model: drag preview, commit on gesture end, serialized saves --- */
     function beginDrag(which) { state.drag = { which }; state.view = { ...state.shown }; render(); }
-    function dragTo(which, value) { if (!state.drag) return; state.view = applyHandle(state.shown, which, value); render(); }
+    // A drag builds on its own preview: a bracket the pill pushed stays pushed when the pointer
+    // comes back; cancel restores the committed range.
+    function dragTo(which, value) { if (!state.drag) return; state.view = applyHandle(state.view || state.shown, which, value); render(); }
     function cancelDrag() { state.drag = null; state.view = null; render(); }
     function endDrag() {
         if (!state.drag) return;
+        const { which } = state.drag;
         const next = snapRange(state.view);
         state.drag = null;
         state.view = null;
         commit(next);
+        revealHandle(which);
         if (state.open && !state.pinned && hoverCapable) closeSoon();
     }
     // A handle the owner did not move keeps its tier (`minimal` shown at Low stays `minimal`).
@@ -254,18 +270,141 @@ export function createEffortRangeControl({
     }
 
     /* --- open / pin state machine --- */
+    // Focus keeps a hover-opened strip open only when the keyboard put it there: browsers report
+    // a handle focused after a mouse press as :focus-visible, so the last input decides instead.
+    let keyboardFocus = false;
     const stillHere = () => {
-        try { return Boolean(el.matches(':hover') || el.querySelector(':focus-visible')); } catch { return false; }
+        try { return Boolean(el.matches(':hover') || (keyboardFocus && el.contains(doc.activeElement))); } catch { return false; }
     };
+    // The open strip forgives a mouse that drifts a little: inside the zone (the control plus a
+    // margin) it stays; outside, it closes after the delay unless the mouse comes back first. A
+    // pinned strip, a drag and keyboard focus keep it open regardless.
+    function inZone(point) {
+        const r = point && typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+        return Boolean(r) && point.x >= r.left - HOVER_ZONE_PX && point.x <= r.right + HOVER_ZONE_PX
+            && point.y >= r.top - HOVER_ZONE_PX && point.y <= r.bottom + HOVER_ZONE_PX;
+    }
     function closeSoon() {
         clearTimeout(leaveTimer);
+        startTracking();
         leaveTimer = setTimeout(() => {
-            if (state.open && !state.pinned && !state.drag && !stillHere()) setOpen(false);
+            leaveTimer = 0;
+            if (state.open && !state.pinned && !state.drag && !stillHere() && !inZone(lastPointer)) setOpen(false);
         }, HOVER_CLOSE_MS);
+    }
+    let tracking = false;
+    const onDocMove = (event) => {
+        if (event.pointerType && event.pointerType !== 'mouse') return;
+        lastPointer = { x: event.clientX, y: event.clientY };
+        if (!state.open || state.pinned) { stopTracking(); return; }
+        if (inZone(lastPointer)) { clearTimeout(leaveTimer); leaveTimer = 0; }
+        else if (!leaveTimer) closeSoon();
+    };
+    const onDocLeave = () => { lastPointer = null; if (state.open && !state.pinned) closeSoon(); };
+    function startTracking() {
+        if (tracking || !hoverCapable) return;
+        tracking = true;
+        doc.addEventListener('pointermove', onDocMove);
+        doc.documentElement?.addEventListener?.('pointerleave', onDocLeave);
+    }
+    function stopTracking() {
+        if (!tracking) return;
+        tracking = false;
+        doc.removeEventListener('pointermove', onDocMove);
+        doc.documentElement?.removeEventListener?.('pointerleave', onDocLeave);
+    }
+
+    /* --- fit: beside the pills, alone, or scrolling — measured, no breakpoint (a translation
+       or another font needs none) --- */
+    const styleOf = (node) => { try { return win?.getComputedStyle?.(node) || null; } catch { return null; } };
+    let pillsWidth = 0;
+    function measurePills() {
+        // The wrapper stretches on a phone; its children are what has to fit.
+        if (!pills || row.dataset?.effortSolo === 'true') return pillsWidth;
+        const kids = Array.from(pills.children || []).filter((kid) => !kid.hidden);
+        const gap = px(styleOf(pills)?.columnGap);
+        pillsWidth = kids.reduce((sum, kid) => sum + widthOf(kid), 0) + gap * Math.max(0, kids.length - 1);
+        return pillsWidth;
+    }
+    // Every input is independent of the padding it decides (words, button, borders, the row),
+    // so a resize that follows a new padding finds the same answer.
+    function measure() {
+        const rowStyle = styleOf(row);
+        const room = widthOf(row) - px(rowStyle?.paddingLeft) - px(rowStyle?.paddingRight) - 1;  // 1 px of slack
+        if (!(room > 0)) return null;  // not laid out: a hidden pane, the unit-test DOM
+        const words = segs.reduce((sum, seg) => sum + widthOf(seg.firstElementChild), 0);
+        const elStyle = styleOf(el);
+        const chrome = widthOf(head) + px(elStyle?.borderLeftWidth) + px(elStyle?.borderRightWidth)
+            + px(styleOf(strip)?.marginRight);
+        const padFor = (width) => Math.floor((width - chrome - words) / (2 * segs.length));
+        const beside = pills ? padFor(room - measurePills() - px(rowStyle?.columnGap)) : padFor(room);
+        let mode = 'inline';
+        let pad = Math.min(SEG_PAD.max, beside);
+        if (pills && beside < SEG_PAD.beside) {
+            const alone = padFor(room);
+            mode = alone < SEG_PAD.alone ? 'overflow' : 'solo';
+            pad = clamp(alone, SEG_PAD.alone, SEG_PAD.max);
+        } else if (!pills && beside < SEG_PAD.alone) {
+            mode = 'overflow';
+            pad = SEG_PAD.alone;
+        }
+        return { mode, pad };
+    }
+    function fit() {
+        const fitted = state.open ? measure() : null;
+        if (!fitted) return;
+        el.style.setProperty('--effort-seg-pad', `${fitted.pad}px`);
+        el.dataset.fit = fitted.mode;
+        el.dataset.tight = String(fitted.pad <= SEG_PAD.beside);
+        if (fitted.mode === 'inline') delete row.dataset.effortSolo;
+        else row.dataset.effortSolo = 'true';
+    }
+    // A strip that scrolls shows where it continues and keeps the moved handle in view.
+    // The fade at a scrolling strip's edge (var(--space-3)): a revealed handle stays clear of it.
+    const REVEAL_MARGIN_PX = 12;
+    function revealHandle(which = 'rec') {
+        if (el.dataset.fit !== 'overflow') return;
+        const e = edges();
+        if (!e) return;
+        const s = snapRange(state.view || state.shown);
+        const cap = widthOf(handles.min);
+        const [left, right] = which === 'min' ? [e[s.min], e[s.min] + cap]
+            : which === 'max' ? [e[s.max + 1] - cap, e[s.max + 1]] : [e[s.rec], e[s.rec + 1]];
+        const width = Number(strip.clientWidth) || 0;
+        if (left - REVEAL_MARGIN_PX < strip.scrollLeft) strip.scrollLeft = Math.max(0, left - REVEAL_MARGIN_PX);
+        else if (right + REVEAL_MARGIN_PX > strip.scrollLeft + width) strip.scrollLeft = right + REVEAL_MARGIN_PX - width;
+        onStripScroll();
+    }
+    function onStripScroll() {
+        // The levels' own end, not scrollWidth: a bracket's hit area may reach past the last level.
+        const e = edges();
+        const scrollable = (e ? e[N + 1] : Number(strip.scrollWidth) || 0) - (Number(strip.clientWidth) || 0);
+        const at = Number(strip.scrollLeft) || 0;
+        strip.dataset.scroll = scrollable <= 1 ? 'none' : at <= 1 ? 'start' : at >= scrollable - 1 ? 'end' : 'middle';
+    }
+    // Alone, the strip appears and disappears at once (no width animation), so the pills never
+    // come back beside a strip that is still collapsing: the instant close is flushed before the
+    // solo flag goes. The padding stays as fitted: beside the pills the strip is still collapsing,
+    // and a wider padding now would push it onto a second line for those frames (the next open
+    // fits again).
+    function settleClosed() {
+        if (el.dataset.fit && el.dataset.fit !== 'inline') void body.offsetWidth;
+        delete el.dataset.fit;
+        if (row?.dataset) delete row.dataset.effortSolo;
+    }
+    // A layout change (opening, a resize, a new padding) moves the marks with the words at once;
+    // only an owner's gesture animates them.
+    function settle(update) {
+        el.dataset.settling = 'true';
+        update();
+        void strip.offsetWidth;
+        delete el.dataset.settling;
     }
     function setOpen(open, { focus = false } = {}) {
         if (state.open === open && !focus) return;
         state.open = open;
+        if (open) el.dataset.settling = 'true';
+        if (open) fit();
         el.dataset.open = String(open);
         head.setAttribute('aria-expanded', String(open));
         for (const which of HANDLES) handles[which].tabIndex = open ? 0 : -1;
@@ -273,9 +412,17 @@ export function createEffortRangeControl({
             state.pinned = false;
             clearTimeout(hoverTimer);
             clearTimeout(leaveTimer);
+            leaveTimer = 0;
+            stopTracking();
             if (state.drag) cancelDrag();
+            settleClosed();
         }
         render();
+        if (open) {
+            void strip.offsetWidth;  // the opening frame lands without the marks' transitions
+            delete el.dataset.settling;
+            revealHandle('rec');
+        }
         if (open && focus) handles.rec.focus({ preventScroll: true });
         onLayout();
     }
@@ -290,9 +437,11 @@ export function createEffortRangeControl({
         }
     };
     const onDocPointerDown = (event) => {
+        keyboardFocus = false;
         if (state.open && !el.contains(event.target)) { state.pinned = false; setOpen(false); }
     };
     const onDocKeyDown = (event) => {
+        keyboardFocus = true;
         if (event.key !== 'Escape' || !state.open) return;
         state.pinned = false;
         setOpen(false);
@@ -301,12 +450,28 @@ export function createEffortRangeControl({
     const onEnter = (event) => {
         if (event.pointerType !== 'mouse') return;
         clearTimeout(leaveTimer);
-        if (!state.open) { clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { if (!state.destroyed) setOpen(true); }, HOVER_OPEN_MS); }
+        leaveTimer = 0;
+        stopTracking();
+        if (!state.open) {
+            clearTimeout(hoverTimer);
+            hoverTimer = setTimeout(() => {
+                if (state.destroyed) return;
+                // Hover opens only where the round button stays under the mouse. Alone or
+                // scrolling, the pills step aside and the strip moves under a still pointer, so a
+                // click meant to pin would land on a level: there the press opens it, as on touch.
+                const fitted = measure();
+                if (fitted && fitted.mode !== 'inline') return;
+                setOpen(true);
+            }, HOVER_OPEN_MS);
+        }
     };
     const onLeave = (event) => {
         if (event.pointerType !== 'mouse') return;
         clearTimeout(hoverTimer);
-        if (state.open && !state.pinned) closeSoon();
+        lastPointer = { x: event.clientX, y: event.clientY };
+        if (!state.open || state.pinned) return;
+        startTracking();
+        if (!inZone(lastPointer)) closeSoon();
     };
 
     /* --- pointer: a press on the strip grabs a handle (or picks one) and keeps the grab offset --- */
@@ -321,11 +486,16 @@ export function createEffortRangeControl({
         beginDrag(which);
         if (!handleEl) dragTo(which, start);
         const grab = valueAt(event, which) - state.view[which];
-        handles[which].focus({ preventScroll: true });
+        handles[which].focus({ preventScroll: true, focusVisible: false });  // no keyboard ring after a mouse press
         try { strip.setPointerCapture(event.pointerId); } catch { /* a synthetic event */ }
-        const move = (ev) => { if (ev.pointerId === event.pointerId) dragTo(which, valueAt(ev, which) - grab); };
+        const move = (ev) => {
+            if (ev.pointerId !== event.pointerId || !state.drag) return;
+            state.drag.moved = true;  // a press that stays put is a tap: its marks still animate
+            dragTo(which, valueAt(ev, which) - grab);
+        };
         const release = (ev) => {
             if (ev.pointerId !== event.pointerId) return;
+            if (ev.pointerType === 'mouse' && Number.isFinite(ev.clientX)) lastPointer = { x: ev.clientX, y: ev.clientY };
             strip.removeEventListener('pointermove', move);
             strip.removeEventListener('pointerup', up);
             strip.removeEventListener('pointercancel', cancel);
@@ -346,20 +516,26 @@ export function createEffortRangeControl({
         else if (event.key === 'End') target = N;
         else return;
         event.preventDefault?.();
+        keyboardFocus = true;
         commit(snapRange(applyHandle(state.shown, which, clamp(target, 0, N))));
+        revealHandle(which);
     };
-    const onReset = () => {
-        state.shown = indicesOf(EFFORT_RANGE_DEFAULT);
-        state.draft = { ...EFFORT_RANGE_DEFAULT };
-        render();
-        enqueue({ ...EFFORT_RANGE_DEFAULT });
-        handles.rec.focus({ preventScroll: true });
-    };
+
+    // The row and the strip change size without a window resize (a Project pane's divider, a
+    // font that loads): measure again then, so the fit and the marks follow.
+    const relayout = () => settle(() => { if (state.open) fit(); render(); onStripScroll(); });
+    const onResize = () => { if (state.open) relayout(); };
+    const observer = typeof win?.ResizeObserver === 'function' ? new win.ResizeObserver(() => {
+        if (!state.destroyed) relayout();
+    }) : null;
+    observer?.observe(row);
+    observer?.observe(strip);
 
     head.addEventListener('click', onHeadClick);
     strip.addEventListener('pointerdown', onDown);
+    strip.addEventListener('scroll', onStripScroll, { passive: true });
+    win?.addEventListener?.('resize', onResize);
     for (const which of HANDLES) handles[which].addEventListener('keydown', onHandleKey);
-    reset.addEventListener('click', onReset);
     doc.addEventListener('pointerdown', onDocPointerDown, true);
     doc.addEventListener('keydown', onDocKeyDown);
     if (hoverCapable) {
@@ -393,8 +569,12 @@ export function createEffortRangeControl({
             doc.removeEventListener('keydown', onDocKeyDown);
             head.removeEventListener('click', onHeadClick);
             strip.removeEventListener('pointerdown', onDown);
+            strip.removeEventListener('scroll', onStripScroll);
+            win?.removeEventListener?.('resize', onResize);
+            observer?.disconnect();
+            stopTracking();
+            if (row?.dataset) delete row.dataset.effortSolo;
             for (const which of HANDLES) handles[which].removeEventListener('keydown', onHandleKey);
-            reset.removeEventListener('click', onReset);
             el.removeEventListener('pointerenter', onEnter);
             el.removeEventListener('pointerleave', onLeave);
             el.remove();

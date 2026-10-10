@@ -171,7 +171,7 @@ A registry of `config.SETTINGS_DEFAULTS` (defaults canonical in `settings_defaul
 | OUROBOROS_HUB_CATALOG_URL | `https://raw.githubusercontent.com/razzant/OuroborosHub/main/catalog.json` | OuroborosHub catalog URL (automatic fetch limited to catalog JSON; installs verify SHA-256) |
 | OUROBOROS_CLAWHUB_REGISTRY_URL | `https://clawhub.ai/api/v1` | ClawHub registry URL |
 | OUROBOROS_PROMPT_CACHE_TTL | 1h | Prompt-cache tier default/5m/1h for Anthropic-family cache markers, applied at the send boundary and recorded in usage |
-| OUROBOROS_EFFORT_MIN | low | Floor of the effort range (`settings_scales.effort_range`) |
+| OUROBOROS_EFFORT_MIN | low | Floor of the effort range (`settings_scales.effort_range`), which only the composer edits |
 | OUROBOROS_EFFORT_TASK | medium | The recommended level: Main's, an ordinary root's (§6), an Auto child's, the Light post-task synthesis |
 | OUROBOROS_EFFORT_MAX | high | Top of the range: caps Ouroboros's requests outside Cyber Pro; Auto reviewers, evolution tasks and wakes start here |
 | OUROBOROS_EFFORT_REVIEW | (migrated) | Retired surface default: at load it becomes the effort of each triad seat's reviewer row that had none; afterwards the row's `effort` is the only effort; env inert |
