@@ -842,11 +842,10 @@ def _wait_window(
 def _await_messages(ctx: ToolContext, timeout_sec: int | None = None, mode: str = "warm", senders: Any = None,
                     tasks: Any = None, runs: Any = None, wake_at: Any = None, wake_after_sec: Any = None,
                     services: Any = None) -> str:
-    """Hold this task's worker slot until an unread mailbox entry exists or the
-    window elapses. Delivers nothing: the round-top drain owns delivery and
-    acknowledgement, exactly as after a wait_task early return. An owner Stop
-    is a mailbox control, so it ends the wait like any message; a cancel kills
-    the worker process; the window is bounded by ``_wait_window``.
+    """Default warm event sleep selects reply sources or live direct children;
+    owner/control and typed attention always wake it. Explicit in_slot holds
+    capacity for its bounded window. Neither mode delivers or acknowledges
+    mail: the resumed round drains originals, then checkpoint persistence ACKs.
 
     Idle rail, honestly: the supervisor stamps ``last_progress_at`` on completed
     model rounds, on narration and, when a tool's typed lease closes, on the
@@ -859,9 +858,9 @@ def _await_messages(ctx: ToolContext, timeout_sec: int | None = None, mode: str 
     close of that lease is the progress stamp the next model round starts from —
     a full idle window even after a wait that spent the whole ceiling, so the
     supervisor tick between the finished wait and the next model call never
-    reaps the turn the wait was for. This tool therefore emits no lease of its
-    own and lends no slot; tests/test_await_messages.py drives the enforcer
-    through that lifecycle.
+    reaps the turn the wait was for. The in-slot path emits no separate lease
+    and lends no capacity; warm mode uses the existing owner-wait capacity
+    transfer. tests/test_await_messages.py exercises the in-slot lifecycle.
     """
     from ouroboros.owner_mailbox import OwnerMailboxPeek
 

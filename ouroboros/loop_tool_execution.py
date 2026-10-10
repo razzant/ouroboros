@@ -25,39 +25,16 @@ from ouroboros.deadline_utils import deadline_remaining_sec
 from ouroboros.model_wait import execution_deadline_scope, future_result, monotonic_now
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
-    CALL_SETTLED,
-    CALL_STARTED,
-    CALL_WAIT_ENDED,
-    append_call_row,
-    append_failed,
-    claim_settlement,
-    elapsed_ms,
-    invocation_fields,
-    new_invocation,
-    persist_dispatch_source,
-    start_log_field,
+    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement,
+    elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source,
 )
 from ouroboros.tool_capabilities import (
-    FOREGROUND_MUTATIVE_TOOLS,
-    PARALLEL_SAFE_ENQUEUE_TOOLS,
-    READ_ONLY_PARALLEL_TOOLS,
-    REVIEWED_MUTATIVE_TOOLS,
-    STATEFUL_BROWSER_TOOLS,
-    completion_control_call,
-    routing_action_for_tool,
-    substantive_tool_calls,
-)
-from ouroboros.tool_capabilities import (
+    FOREGROUND_MUTATIVE_TOOLS, PARALLEL_SAFE_ENQUEUE_TOOLS,
+    READ_ONLY_PARALLEL_TOOLS, REVIEWED_MUTATIVE_TOOLS, STATEFUL_BROWSER_TOOLS,
     UNTRUNCATED_REPO_READ_PATHS as _UNTRUNCATED_REPO_READ_PATHS,
-)
-from ouroboros.tool_capabilities import (
     UNTRUNCATED_REPO_READ_PREFIXES as _UNTRUNCATED_REPO_READ_PREFIXES,
-)
-from ouroboros.tool_capabilities import (
     UNTRUNCATED_TOOL_RESULTS as _UNTRUNCATED_TOOL_RESULTS,
-)
-from ouroboros.tool_capabilities import (
-    tool_result_limit as _tool_result_limit,
+    routing_action_for_tool, completion_control_call, substantive_tool_calls, tool_result_limit as _tool_result_limit,
 )
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tools.tool_result import (
