@@ -310,3 +310,55 @@ def test_default_wait_sleep_validation_is_a_typed_registry_error(tmp_path, monke
         raise ValueError("selected task vanished before sleep")
     monkeypatch.setattr(model_sleep, "selectors", refuse)
     assert "TOOL_ARG_ERROR (wait_tasks)" in registry.execute("wait_tasks", {"task_ids": ["one"]})
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold", "in_slot"])
+def test_zero_snapshot_observes_reply_and_owner_without_sleep_or_ack(tmp_path, monkeypatch, mode):
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.tools.registry import ToolRegistry
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id = "t-wait"  # standalone observation has no continuation owner/attempt
+    seed(tmp_path, "peer")
+    monkeypatch.setattr(model_sleep, "request_sleep", lambda *_a, **_kw: pytest.fail("snapshot must not arm"))
+    args = {"timeout_sec": 0, "mode": mode, "senders": ["peer"]}
+    before = json.loads(registry.execute("await_messages", args))
+    assert before["reason"] == "snapshot" and not before["ready"]
+    assert write_task_message(tmp_path, "complete peer reply", ctx.task_id,
+                              source_task_id="peer", provenance="peer_task", msg_id="zero-peer")
+    ready = json.loads(registry.execute("await_messages", args))
+    assert ready["ready"] and ready["woke_by"] == "mail:peer"
+    assert not json.loads(registry.execute("await_messages", {"timeout_sec": 0, "mode": mode}))["ready"]
+    assert write_owner_message(tmp_path, "owner decision", ctx.task_id, msg_id="zero-owner")
+    owner = json.loads(registry.execute("await_messages", {"timeout_sec": 0, "mode": mode}))
+    assert owner["ready"] and owner["woke_by"] == "owner_text"
+    assert acknowledged_task_message_ids(tmp_path, ctx.task_id) == set()
+    assert not getattr(ctx, "_loop_mailbox_seen_ids", set())
+    assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_owner_wait_requested", None)
+
+
+def test_zero_snapshot_retains_terminal_digest_and_does_not_consume_beacon(tmp_path):
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.task_tree import _tree_note
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id = "t-wait"
+    ctx.task_metadata = {"root_task_id": "t-wait"}
+    seed(tmp_path, "terminal", "completed", result="terminal full result")
+    terminal = json.loads(registry.execute("await_messages", {"timeout_sec": 0, "tasks": ["terminal"]}))
+    assert terminal["woke_by"] == "task:terminal:completed"
+    assert terminal["tasks"]["terminal"]["result"] == "terminal full result"
+    assert len(terminal["tasks"]["terminal"]["child_result_sha256"]) == 64
+    child = SimpleNamespace(task_id="active", drive_root=tmp_path, budget_drive_root=tmp_path,
+                            task_metadata={"root_task_id": "t-wait"})
+    seed(tmp_path, "active")
+    assert _tree_note(child, "question", "decision required").startswith("OK")
+    args = {"timeout_sec": 0, "tasks": ["active"]}
+    first = json.loads(registry.execute("await_messages", args))
+    second = json.loads(registry.execute("await_messages", args))
+    assert first["woke_by"] == second["woke_by"] == "child_attention_beacon"
+    assert first["wake_beacons"] == second["wake_beacons"]
+    assert not getattr(ctx, "_wait_attention_cursors", None)
+    assert waits._wait_attention_poll(ctx, "", ["active"])({}, {})["beacons"][0]["text"] == "decision required"
+    assert waits._wait_attention_poll(ctx, "", ["active"])({}, {}) is None
+    assert "TOOL_ARG_ERROR" in registry.execute("await_messages", {"timeout_sec": 0, "senders": ["missing"]})

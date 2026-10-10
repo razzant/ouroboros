@@ -84,7 +84,7 @@ def _wait_entries(ctx: Any) -> list[dict]:
 
     return drain_owner_entries(
         pathlib.Path(ctx.drive_root), ctx.task_id,
-        set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()), ctx.task_attempt or 1,
+        set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()), getattr(ctx, "task_attempt", None) or 1,
     )
 
 

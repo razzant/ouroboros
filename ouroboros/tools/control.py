@@ -439,7 +439,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "Wait once for the named child plus an entry snapshot of your live direct children, returning on the first terminal or actionable input; all snapshot results are compact and source-linked. Use wait_tasks([id]) for an exact dependency. The result is a compact JSON tasks envelope, not the former full single-child text. Informational mail stays queued for full delivery in the same resumed request; owner/control and typed escalations always wake. Omitted timeout parks warm when supported, otherwise holds one bounded operation; explicit 0 is a snapshot. A terminal is not success.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
-                "known_result_sha256": {"type": "string", "description": "Optional child_result_sha256 already obtained for this task. An exact match returns unchanged without repeating result/trace; current facts remain. Omit to return full text. This does not change when the wait ends."},
+                "known_result_sha256": {"type": "string", "description": "Optional child_result_sha256 already obtained. A match omits unchanged result/trace; current facts remain. Omission returns the bounded projection; get_task_result explicitly reads full text. Wait timing is unchanged."},
                 "timeout_sec": {"type": "integer", "description": f"Optional explicit wait clamped to {_WAIT_TASK_CLAMP_SEC}s; 0 is a snapshot. Omission is event-owned."},
             }},
         }, _wait_for_task, timeout_sec=_event_wait_window(None) + NESTED_SETTLEMENT_MARGIN_SEC),

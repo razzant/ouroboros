@@ -139,7 +139,8 @@ def test_the_window_is_bounded_by_the_request_and_the_per_call_ceiling(tmp_path,
     out = json.loads(_await_messages(_ctx(tmp_path), requested, mode="in_slot"))
 
     if requested == 0:
-        assert out == {"reason": "snapshot", "slept": False, "mode": "in_slot"}
+        assert out["reason"] == "snapshot" and out["slept"] is False
+        assert out["mode"] == "in_slot" and out["ready"] is False and out["woke_by"] == ""
         assert clock.sleeps == []
         return
     assert (out["requested_sec"], out["window_sec"], out["window_bound"]) == (requested, window, bound)

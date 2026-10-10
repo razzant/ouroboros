@@ -38,11 +38,9 @@ def disclosable_capability_delta(data: Dict[str, Any]) -> Dict[str, Any]:
     THE terminal parent-facing disclosure, and since v6.87.28 the only parent-facing
     one: the reduction is not known until the child is dispatched, so no scheduling
     result can carry it. It is a predicate rather than an inline test because the
-    parent absorbs a child through TWO surfaces — `get_task_result`/`wait_task` read
-    one child in full, `wait_tasks` projects a batch compactly — and the batch one
-    is the surface a fan-out parent actually uses. It had the test in neither place
-    and the disclosure in one, so a parent that scheduled five children and absorbed
-    them in a burst was told nothing about any of them.
+    parent uses full `get_task_result` reads and bounded wait projections.
+    Both retain the same capability facts, including batched absorption;
+    omitting the delta from either surface conceals a child's actual limits.
 
     A delta that took nothing away and ignored nothing is noise in every payload.
     """
@@ -73,8 +71,8 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None)
     if isinstance(data.get("execution_observation"), dict):
         summary["execution_observation"] = dict(data["execution_observation"])
     # R5: CURRENT delegated-custody reconciliation state next to the historical
-    # axes, on the full single-child handoff surfaces only (get_task_result /
-    # wait_task — wait_tasks' batch projection is a pinned compact contract).
+    # axes in the explicit full get_task_result handoff. Wait projections retain
+    # their compact custody fields and an exact full-source reference.
     # The frozen delegated_runs_* counters are a historical snapshot (owner
     # Q2=B); the envelope's trigger + open_run_ids are the liveness surface a
     # parent can trust after a refresh/backfill healed the row. One bounded
@@ -459,7 +457,7 @@ def _get_task_result(
 
 
 def _wait_attention_poll(
-    ctx: ToolContext, after_ts: str, task_ids: List[str],
+    ctx: ToolContext, after_ts: str, task_ids: List[str], *, consume: bool = True,
 ) -> Callable[..., Any]:
     """on_poll hook: break a sliced wait for the actor's mailbox or a child attention beacon
     (blocker/question/interface_contract/review_requested/delegation_constraint).
@@ -477,6 +475,9 @@ def _wait_attention_poll(
     mailbox_peek = OwnerMailboxPeek()
 
     cursor_store = getattr(ctx, "_wait_attention_cursors", None)
+    if not consume:
+        import copy
+        cursor_store = copy.deepcopy(cursor_store) if isinstance(cursor_store, dict) else {}
     if not isinstance(cursor_store, dict):
         cursor_store = {}
         try:
@@ -867,8 +868,26 @@ def _await_messages(ctx: ToolContext, timeout_sec: int | None = None, mode: str 
     if mode not in ("in_slot", "warm", "cold"):
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="⚠️ TOOL_ARG_ERROR (await_messages): mode must be in_slot, warm or cold."))
-    if timeout_sec == 0:
-        return json.dumps({"reason": "snapshot", "slept": False, "mode": mode})
+    if timeout_sec is not None:
+        try:
+            timeout_sec = int(timeout_sec)
+        except (TypeError, ValueError):
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text="⚠️ TOOL_ARG_ERROR (await_messages): timeout_sec must be an integer."))
+    if timeout_sec == 0 or (mode != "in_slot" and timeout_sec is not None and timeout_sec < 0):
+        from ouroboros import model_sleep
+        try:
+            chosen = model_sleep.selectors(ctx, senders=senders, tasks=tasks, runs=runs,
+                services=services, wake_at=wake_at, wake_after_sec=wake_after_sec, allow_empty=True)
+            ready = model_sleep.wake_reason(ctx, chosen, consume_beacons=False)
+        except (TypeError, ValueError) as exc:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text=f"⚠️ TOOL_ARG_ERROR (await_messages): {exc}"))
+        return bounded_wait_response(ctx, {"reason": "snapshot", "slept": False, "mode": mode,
+            "ready": bool(ready), "woke_by": ready, "wake_beacons": chosen.get("wake_beacons"),
+            "tasks": {tid: _compact_child_projection(tid, load_effective_task_result(
+                _status_root(ctx), tid, materialize_artifacts=False), None) for tid in chosen["tasks"]},
+            **wait_mail_preview(ctx)})
     if mode != "in_slot" or senders or tasks or runs or services or wake_at or wake_after_sec:
         if timeout_sec is not None:
             try:

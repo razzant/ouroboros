@@ -86,12 +86,13 @@ def _canonical_root(ctx: Any) -> pathlib.Path:
 
 
 def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = None, services: Any = None,
-              wake_at: Any = None, wake_after_sec: Any = None) -> Dict[str, Any]:
+              wake_at: Any = None, wake_after_sec: Any = None, allow_empty: bool = False) -> Dict[str, Any]:
     """Validate the selected sources; ``ValueError`` names the first bad one.
 
     Senders and tasks must be tasks this installation knows (a readable result);
     runs must be delegated runs THIS task owns (its custody rows); services must be
     this task's own, each pinned to the start it has NOW (``_service_pins``).
+    ``allow_empty`` is for observational snapshots, never request_sleep.
     """
     from ouroboros.task_results import validate_task_id
     from ouroboros.task_status import load_effective_task_result
@@ -130,7 +131,7 @@ def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = N
             root, parent_task_id=str(ctx.task_id), scope="direct", materialize_artifacts=False,
         ) if row.get("task_id") and str(row.get("status") or "") not in SETTLED_STATUSES]
     chosen["any_mail"] = False
-    if not (chosen["senders"] or chosen["tasks"] or chosen["runs"] or pins or chosen["wake_at"]):
+    if not allow_empty and not (chosen["senders"] or chosen["tasks"] or chosen["runs"] or pins or chosen["wake_at"]):
         raise ValueError("no live children or selected source: choose senders for a reply, tasks/runs/services, or a wake time")
     return chosen
 
@@ -189,7 +190,7 @@ def _owned_runs(ctx: Any) -> List[Tuple[str, bool]]:
             if str(getattr(run, "task_id", "") or "") == task_id]
 
 
-def wake_reason(ctx: Any, chosen: Dict[str, Any]) -> str:
+def wake_reason(ctx: Any, chosen: Dict[str, Any], *, consume_beacons: bool = True) -> str:
     """Why the sleep is ready now (``""`` = not yet). Owner input is never filtered."""
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
     from ouroboros.owner_mailbox import (
@@ -213,7 +214,7 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any]) -> str:
     if chosen.get("tasks"):
         from ouroboros.tools.control_task_results import _wait_attention_poll
 
-        attention = _wait_attention_poll(ctx, "", chosen["tasks"])({}, {})
+        attention = _wait_attention_poll(ctx, "", chosen["tasks"], consume=consume_beacons)({}, {})
         if attention and attention.get("reason") == "child_attention_beacon":
             chosen["wake_beacons"] = attention
             return "child_attention_beacon"
