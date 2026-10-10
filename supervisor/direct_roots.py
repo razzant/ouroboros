@@ -16,7 +16,7 @@ import logging
 import pathlib
 from typing import Any, Dict
 
-from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 from ouroboros.focus import compact_focus as _compact_focus
 
 log = logging.getLogger(__name__)
@@ -121,3 +121,66 @@ def take_direct_roots(drive_root: Any) -> Dict[str, Any]:
         if isinstance(row, dict) and str(row.get("task_id") or "")
     ]
     return {"task_ids": task_ids, "incomplete": incomplete}
+
+
+def adopt_orphaned_direct_results(drive_root: Any, taken: Dict[str, Any]) -> Dict[str, Any]:
+    """Backstop the roster with durable rows when a hard crash orphaned a turn.
+
+    The roster fragment is rewritten by the main loop's tick; a machine that
+    died mid-turn can therefore leave ``state/direct_roots.json`` not naming a
+    live direct turn whose durable result still says ``running``.  The pooled
+    rows have a boot sweep of their own (snapshot restore fences surviving
+    RUNNING rows); direct rows had none — the row outlived every registry that
+    named it.  This closes that class at the same seam the roster already
+    feeds: durable results with direct execution ownership and a ``running``
+    status, named by neither the taken roster nor the queue snapshot (a live
+    turn of THIS process is skipped too, so the event never names live work),
+    adopted into the restore list so ``_fence_snapshot_running_rows`` settles
+    them through the one intent-then-custody path every other interrupted row
+    takes.  The handover the roster already made is preserved untouched and
+    extended, never replaced; a failed sweep returns exactly what the roster
+    said, keeping any unadopted row UNSETTLED (unknown), never a fabricated
+    terminal. Never raises.
+    """
+    from ouroboros.task_results import STATUS_RUNNING, list_task_results
+    from supervisor.active_activity import get_direct_activity_registry
+
+    handed_over = [str(task_id) for task_id in taken.get("task_ids") or [] if str(task_id)]
+    known = set(handed_over)
+    # An in-process supervisor revival re-runs queue init while direct turns of
+    # THIS process are alive: their rows belong to the live registry, not to the
+    # crash-orphan class, and must not be named as adopted orphans.
+    live_direct = {str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()}
+    snapshot_ids: set = set()
+    adopted: list = []
+    try:
+        snap = read_json_dict(pathlib.Path(drive_root) / "state" / "queue_snapshot.json")
+        if isinstance(snap, dict):
+            for section in ("pending", "running"):
+                entries = snap.get(section)
+                if isinstance(entries, list):
+                    snapshot_ids.update(
+                        str((row.get("task") or {}).get("id") or row.get("id") or "")
+                        for row in entries if isinstance(row, dict)
+                    )
+        for row in list_task_results(drive_root, statuses=[STATUS_RUNNING]):
+            task_id = str(row.get("task_id") or "")
+            owner = row.get("execution_owner")
+            if (not task_id or task_id in known or task_id in snapshot_ids or task_id in live_direct
+                    or not isinstance(owner, dict) or str(owner.get("kind") or "") != "direct"):
+                continue
+            known.add(task_id)
+            adopted.append(task_id)
+    except Exception:
+        log.debug("direct-result adoption sweep failed", exc_info=True)
+        return {"task_ids": handed_over, "incomplete": bool(taken.get("incomplete"))}
+    if adopted:
+        try:
+            append_jsonl(
+                pathlib.Path(drive_root) / "logs" / "supervisor.jsonl",
+                {"ts": utc_now_iso(), "type": "direct_roots_adopted_orphans",
+                 "task_ids": adopted},
+            )
+        except Exception:
+            log.debug("direct-result adoption event append failed", exc_info=True)
+    return {"task_ids": handed_over + adopted, "incomplete": bool(taken.get("incomplete"))}
