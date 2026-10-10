@@ -721,11 +721,15 @@ def _wait_for_task(
     ids = [tid]
     # Do not expand waits on other roots (a plan/peer wait is not child absorption).
     named = load_effective_task_result(_status_root(ctx), tid, materialize_artifacts=False)
-    if getattr(ctx, "task_id", None) and named.get("parent_task_id") == str(ctx.task_id):
-        ids += [str(row["task_id"]) for row in find_child_tasks(
-            _status_root(ctx), parent_task_id=str(ctx.task_id), scope="direct", materialize_artifacts=False,
-        ) if row.get("task_id") and str(row.get("status") or "") not in SETTLED_STATUSES
-            and str(row["task_id"]) != tid]
+    parent_id = str(getattr(ctx, "task_id", "") or "")
+    children = find_child_tasks(
+        _status_root(ctx), parent_task_id=parent_id, scope="direct", materialize_artifacts=False,
+    ) if parent_id else []
+    if parent_id and (named.get("parent_task_id") == parent_id
+                      or any(str(row.get("task_id") or "") == tid for row in children)):
+        ids += [str(row["task_id"]) for row in children
+                if row.get("task_id") and str(row.get("status") or "") not in SETTLED_STATUSES
+                and str(row["task_id"]) != tid]
     return _wait_for_tasks(ctx, ids, timeout_sec=timeout_sec, mode="any_terminal",
                            known_result_sha256_by_task={tid: known_result_sha256} if known_result_sha256 else None,
                            _explicit_clamp=_WAIT_TASK_CLAMP_SEC)

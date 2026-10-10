@@ -444,3 +444,40 @@ def test_cold_queue_only_dependency_respects_the_tree_launch_fence(tmp_path, mon
         assert not getattr(ctx, "_model_sleep", None)
     else:
         assert json.loads(out)["reason"] == "sleep_armed"
+
+
+def test_queue_only_named_child_expands_and_wakes_for_its_live_sibling(tmp_path, monkeypatch):
+    from ouroboros.owner_wait import wait_after_tools
+    from ouroboros.tools.registry import ToolRegistry
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _, _workers = _install_queue(tmp_path, monkeypatch)
+    ctx = native_context(tmp_path)
+    named = queue.enqueue_task({"id": "queued-named", "type": "task", "chat_id": 0,
+        "parent_task_id": ctx.task_id, "root_task_id": ctx.task_id, "delegation_role": "subagent"})
+    foreign = queue.enqueue_task({"id": "queued-foreign", "type": "task", "chat_id": 0,
+        "parent_task_id": "foreign-root", "root_task_id": "foreign-root", "delegation_role": "subagent"})
+    assert not named.get("_admission_blocked") and not foreign.get("_admission_blocked")
+    assert queue.persist_queue_snapshot(reason="queue-only-sibling-regression")
+    write_task_result(tmp_path, "live-sibling", "running", parent_task_id=ctx.task_id,
+        root_task_id=ctx.task_id, delegation_role="subagent")
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    registry._ctx.__dict__.update(vars(ctx))
+    ctx = registry._ctx
+    ctx.model_wait_context.tool_context = ctx
+    foreign_view = json.loads(registry.execute("wait_task", {"task_id": "queued-foreign", "timeout_sec": 0}))
+    assert set(foreign_view["tasks"]) == {"queued-foreign"}
+    armed = json.loads(registry.execute("wait_task", {"task_id": "queued-named"}))
+    assert armed["reason"] == "sleep_armed"
+    assert set(ctx._model_sleep["tasks"]) == {"queued-named", "live-sibling"}
+    calls = []
+    def terminal(_seconds):
+        calls.append(1)
+        assert len(calls) == 1
+        write_task_result(tmp_path, "live-sibling", "completed", result="sibling first",
+            parent_task_id=ctx.task_id, root_task_id=ctx.task_id, delegation_role="subagent")
+    monkeypatch.setattr("ouroboros.owner_wait.time.sleep", terminal)
+    messages = [{"role": "tool", "tool_call_id": "single", "content": json.dumps(armed)}]
+    wait_after_tools(ctx, messages, {"tool_calls": []}, {}, 1, [], set())
+    assert len(calls) == 1
+    assert "task live-sibling reaching completed" in messages[-1]["content"]
