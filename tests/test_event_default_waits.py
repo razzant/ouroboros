@@ -394,3 +394,53 @@ def test_queue_only_peer_uses_the_admitted_project_lease(tmp_path, monkeypatch, 
         assert not getattr(ctx, "_owner_wait_requested", None)
     else:
         assert json.loads(out)["reason"] == "sleep_armed"
+
+
+@pytest.mark.parametrize("selector", ["tasks", "senders"])
+def test_exact_paused_peer_cannot_hide_its_project_lease_dependency(tmp_path, monkeypatch, selector):
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.registry import ToolRegistry
+    from tests._budget_pause_exact_helpers import _install_queue, _parked
+
+    queue, _, workers = _install_queue(tmp_path, monkeypatch)
+    _parked(tmp_path, monkeypatch, task_id="paused-peer", extra={"project_id": "lane"})
+    workers.RUNNING["sleeper"] = {"task": {"id": "sleeper", "project_id": "lane"}}
+    assert queue.persist_queue_snapshot(reason="paused-peer-lease-regression")
+    assert load_task_result(tmp_path, "paused-peer", strict=True)["status"] == "running"
+    write_task_result(tmp_path, "sleeper", "running", project_id="lane", root_task_id="sleeper")
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id = ctx.root_task_id = "sleeper"
+    ctx.task_attempt = 1
+    ctx.project_id = "lane"
+    ctx.owner_wait_callback = lambda *_a, **_kw: "unknown"
+    assert "project lease" in registry.execute("await_messages", {selector: ["paused-peer"]})
+    assert not getattr(ctx, "_model_sleep", None)
+
+
+@pytest.mark.parametrize("selector", ["tasks", "senders"])
+@pytest.mark.parametrize("same_tree", [True, False])
+def test_cold_queue_only_dependency_respects_the_tree_launch_fence(tmp_path, monkeypatch, selector, same_tree):
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.registry import ToolRegistry
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    queue, _, _workers = _install_queue(tmp_path, monkeypatch)
+    peer = queue.enqueue_task({"id": "queued-dependency", "type": "task", "chat_id": 0,
+        "root_task_id": "sleeper" if same_tree else "independent",
+        "parent_task_id": "sleeper" if same_tree else "independent", "delegation_role": "subagent"})
+    assert not peer.get("_admission_blocked"), peer
+    assert queue.persist_queue_snapshot(reason="cold-queue-dependency-regression")
+    assert load_task_result(tmp_path, "queued-dependency", strict=True) is None
+    write_task_result(tmp_path, "sleeper", "running", root_task_id="sleeper")
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id = ctx.root_task_id = "sleeper"
+    ctx.task_attempt = 1
+    ctx.owner_wait_callback = lambda *_a, **_kw: "unknown"
+    out = registry.execute("await_messages", {"mode": "cold", selector: ["queued-dependency"]})
+    if same_tree:
+        assert "queued_member queued-dependency" in out
+        assert not getattr(ctx, "_model_sleep", None)
+    else:
+        assert json.loads(out)["reason"] == "sleep_armed"

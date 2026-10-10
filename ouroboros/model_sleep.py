@@ -89,7 +89,7 @@ def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = N
               wake_at: Any = None, wake_after_sec: Any = None, allow_empty: bool = False) -> Dict[str, Any]:
     """Validate the selected sources; ``ValueError`` names the first bad one.
 
-    Senders and tasks must be tasks this installation knows (a readable result);
+    Senders and tasks must have a readable result or admitted queue authority;
     runs must be delegated runs THIS task owns (its custody rows); services must be
     this task's own, each pinned to the start it has NOW (``_service_pins``).
     ``allow_empty`` is for observational snapshots, never request_sleep.
@@ -289,7 +289,23 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None) -> List[Dic
         for row in rows:
             if str(row.get("root_task_id") or row.get("task_id") or "") == tree_id:
                 members.add(str(row.get("task_id") or tree_id))
-        for task_id, row in tree_member_results(root, tree_id).items():
+        from ouroboros.task_status import _load_queue_snapshot, _merge_queue_status
+
+        member_rows = tree_member_results(root, tree_id)
+        snapshot = _load_queue_snapshot(root)
+        for collection, status in (("running", "running"), ("pending", "scheduled")):
+            for carrier in snapshot.get(collection) or []:
+                queued = carrier.get("task") if isinstance(carrier, dict) else None
+                if not isinstance(queued, dict):
+                    continue
+                task_id = str(carrier.get("id") or queued.get("id") or "")
+                if str(queued.get("root_task_id") or (queued.get("metadata") or {}).get("root_task_id")
+                       or task_id) != tree_id:
+                    continue
+                current = member_rows.get(task_id) or {}
+                member_rows[task_id] = {**current, **queued,
+                    "status": _merge_queue_status(current.get("status"), status, queued)}
+        for task_id, row in member_rows.items():
             members.add(task_id)
             own = task_id == str(ctx.task_id)
             if not own and row.get("status") == "running":
@@ -337,21 +353,19 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
                 **({"wake_beacons": chosen["wake_beacons"]} if chosen.get("wake_beacons") else {})}
     if mode == MODE_WARM:
         from ouroboros.task_results import load_task_result
-        from ouroboros.task_status import _load_queue_snapshot, _queue_task_status
+        from ouroboros.task_status import _load_queue_snapshot, _merge_queue_status, _queue_task_status
 
         project_id = str(getattr(ctx, "project_id", "") or (getattr(ctx, "task_metadata", None) or {}).get("project_id") or "")
         tree_id = str(getattr(ctx, "root_task_id", "") or ctx.task_id)
         root = _canonical_root(ctx)
-        snapshot = None
+        snapshot = _load_queue_snapshot(root)
         for selected in set(chosen.get("tasks", []) + chosen.get("senders", [])):
-            row = load_task_result(root, selected, strict=True)
-            if row is None:
-                # Selection accepts admitted queue-only peers; their lease
-                # dependency must use that same authority before we park.
-                if snapshot is None:
-                    snapshot = _load_queue_snapshot(root)
-                status, queued = _queue_task_status(snapshot, selected)
-                row = {**queued, "status": status}
+            row = load_task_result(root, selected, strict=True) or {}
+            # Admission and exact pauses can outrank a missing/stale result.
+            # Reuse the status merger selection uses, including pause markers.
+            status, queued = _queue_task_status(snapshot, selected)
+            row = {**row, **queued, "status": _merge_queue_status(
+                row.get("status"), status if status in {"running", "scheduled", "requested"} else "", queued)}
             if (project_id and row.get("project_id") == project_id
                     and str(row.get("root_task_id") or selected) != tree_id
                     and row.get("status") in {"requested", "scheduled"}):
