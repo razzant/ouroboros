@@ -264,3 +264,49 @@ def test_explicit_zero_snapshot_and_invalid_mode_do_not_arm_sleep(tmp_path):
         assert json.loads(waits._await_messages(ctx, timeout_sec=0, mode=mode))["slept"] is False
     assert "TOOL_ARG_ERROR" in waits._await_messages(ctx, timeout_sec=0, mode="invalid")
     assert not getattr(ctx, "_model_sleep", None)
+
+
+@pytest.mark.parametrize("ids", [["one", "phantom"], ["phantom"]])
+def test_registry_default_unknown_set_returns_repair_without_holding_slot(tmp_path, monkeypatch, ids):
+    from ouroboros.tools.registry import ToolRegistry
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.task_attempt = "root-1", 1
+    ctx.owner_wait_callback = lambda *_: None
+    write_task_result(tmp_path, "one", "running", parent_task_id=ctx.task_id, root_task_id=ctx.task_id)
+    from ouroboros.utils import atomic_write_json, utc_now_iso
+    atomic_write_json(tmp_path / "state" / "queue_snapshot.json",
+                      {"ts": utc_now_iso(), "pending": [], "running": []})
+    real_wait = waits.wait_for_effective_tasks
+    windows = []
+    def snapshot(*args, **kwargs):
+        windows.append(kwargs["timeout_sec"])
+        assert kwargs["timeout_sec"] == 0, "unknown IDs must not divert a loop wait into a bounded slot hold"
+        return real_wait(*args, **kwargs)
+    monkeypatch.setattr(waits, "wait_for_effective_tasks", snapshot)
+    raw = registry.execute("wait_tasks", {"task_ids": ids})
+    assert raw.startswith("{"), raw
+    view = json.loads(raw)
+    assert windows == [0]
+    assert view["unknown_task_ids"] == ["phantom"]
+    assert view["tasks"]["phantom"]["unknown_task_id"] is True
+    assert view["wait_short_circuited"]["reason"] == "unknown_task_ids_require_repair"
+    assert not getattr(ctx, "_model_sleep", None)
+    # Repairing the set takes the surviving positive path: genuine warm sleep,
+    # with no timer, until the real child or an actionable event is ready.
+    repaired = json.loads(registry.execute("wait_tasks", {"task_ids": ["one"]}))
+    assert repaired["reason"] == "sleep_armed"
+    assert ctx._model_sleep["tasks"] == ["one"] and ctx._model_sleep["wake_at"] == ""
+
+
+def test_default_wait_sleep_validation_is_a_typed_registry_error(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+    registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.task_attempt = "root-1", 1
+    ctx.owner_wait_callback = lambda *_: None
+    write_task_result(tmp_path, "one", "running", parent_task_id=ctx.task_id)
+    def refuse(*_a, **_kw):
+        raise ValueError("selected task vanished before sleep")
+    monkeypatch.setattr(model_sleep, "selectors", refuse)
+    assert "TOOL_ARG_ERROR (wait_tasks)" in registry.execute("wait_tasks", {"task_ids": ["one"]})

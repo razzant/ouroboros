@@ -556,10 +556,9 @@ def cache_horizon_note(ctx: Any, elapsed_sec: Any) -> str:
     (batch waits, longer single windows), while "~X tokens will re-write" is a
     counterfactual — the next send may reroute, compact, or still hit a live cache.
 
-    REACHABILITY, honestly: the root waits (``wait_task``, ``wait_tasks``) feed
-    their own elapsed window, a LOWER bound on cache age, so at the shipped ``1h``
-    tier only ``wait_tasks`` (7200s ceiling) can cross inside the window and
-    ``wait_task`` sits on the 3600s horizon; at ``5m`` both cross. ``delegate_wait``
+    REACHABILITY: root waits feed their elapsed interval, a LOWER bound on
+    cache age. Default warm sleep has no periodic timer and can cross either
+    applied tier; explicit waits retain their separate 3600/7200s ceilings. ``delegate_wait``
     feeds the time since the task's last recorded model response, once per wake, so
     its line is reachable at ANY tier and no longer depends on the 3 s tick. Pinned by
     tests/test_cache_optimization.py::test_cache_horizon_reachability_matches_the_wait_clamps
@@ -1021,7 +1020,7 @@ def _unminted_wait_ids(ctx: ToolContext, status_drive_root: Path, task_ids: List
         from ouroboros.task_tree_ledger import tree_ledger_rows
         from ouroboros.tools.task_tree import tree_root_id
 
-        for row in tree_ledger_rows(tree_root_id(ctx)):
+        for row in tree_ledger_rows(tree_root_id(ctx), data_root=status_drive_root):
             for key in ("task_id", "child_task_id", "parent_task_id"):
                 value = str(row.get(key) or "").strip()
                 if value:
@@ -1197,10 +1196,9 @@ def _wait_for_tasks(
 ) -> str:
     """Wait for multiple subtasks and return a compact structural projection per child.
 
-    A wait set whose ids were ALL unminted at entry ends after the registration
-    grace instead of the full requested window (disclosed as
-    ``wait_short_circuited``); any id that turns real during the grace makes it
-    an ordinary wait again, with the remaining window intact."""
+    Loop-owned default waits return an actionable snapshot for any unminted ID,
+    never a bounded slot hold or a silently narrowed subscription. Standalone
+    all-unminted sets retain the bounded registration grace."""
     if not isinstance(task_ids, list) or not task_ids:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
@@ -1252,14 +1250,24 @@ def _wait_for_tasks(
     # hallucinated ids blocked 900s slices while the real lead went unwaited).
     entry_unknown_ids = _unminted_wait_ids(ctx, status_drive_root, normalized_ids)
     ready_attention = None
+    unknown_repair = bool(timeout_sec is None and entry_unknown_ids
+                          and callable(getattr(ctx, "owner_wait_callback", None)))
+    if unknown_repair:
+        # A phantom cannot satisfy all_terminal. Preserve the exact set and
+        # disclose repair now; the corrected known-ID set parks warm normally.
+        timeout = 0
     if timeout_sec is None and timeout > 0 and not entry_unknown_ids and callable(getattr(ctx, "owner_wait_callback", None)):
         from ouroboros import model_sleep
 
-        chosen = model_sleep.selectors(ctx, tasks=normalized_ids,
-            wake_after_sec=timeout if bound == "deadline" else None)
-        chosen["terminal_mode"] = normalized_mode
-        chosen["known_result_sha256_by_task"] = known_result_sha256_by_task or {}
-        outcome = model_sleep.request_sleep(ctx, chosen, model_sleep.MODE_WARM)
+        try:
+            chosen = model_sleep.selectors(ctx, tasks=normalized_ids,
+                wake_after_sec=timeout if bound == "deadline" else None)
+            chosen["terminal_mode"] = normalized_mode
+            chosen["known_result_sha256_by_task"] = known_result_sha256_by_task or {}
+            outcome = model_sleep.request_sleep(ctx, chosen, model_sleep.MODE_WARM)
+        except ValueError as exc:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text=f"⚠️ TOOL_ARG_ERROR (wait_tasks): {exc}"))
         if outcome.get("reason") == "sleep_armed":
             return bounded_wait_response(ctx, {**outcome, "task_ids": normalized_ids, **wait_mail_preview(ctx)})
         # Already ready: read the complete snapshot, including simultaneous
@@ -1306,6 +1314,13 @@ def _wait_for_tasks(
                 ),
             }
     tasks = waited.get("tasks")
+    if unknown_repair:
+        waited["wait_short_circuited"] = {
+            "reason": "unknown_task_ids_require_repair",
+            "requested_timeout_sec": requested_timeout,
+            "waited_sec": float(waited.get("elapsed_sec") or 0),
+            "note": "Repair unknown_task_ids from children_roster; no IDs were silently removed from the wait set.",
+        }
     if ready_attention:
         waited["early_return"] = ready_attention
     if isinstance(tasks, dict):
@@ -1322,8 +1337,8 @@ def _wait_for_tasks(
         # stays on disk in task_results/<id>.json, addressable by
         # child_result_sha256 (the join-ledger SSOT hash), and is fetched with
         # get_task_result — a DISCLOSED omission (BIBLE P1), not silent
-        # truncation. get_task_result and a SETTLED wait_task stay full; an
-        # unsettled wait_task returns this same projection.
+        # truncation. get_task_result is the explicit full terminal reader;
+        # all wait handoffs are bounded with actor-readable complete sources.
         public_tasks: Dict[str, Any] = {}
         for tid, data in tasks.items():
             if str(tid) in unknown_ids:
@@ -1369,7 +1384,7 @@ def _wait_for_tasks(
     # description the model reads BEFORE it chooses a window. An id this tree
     # never minted is disclosed as unknown, never counted as a live child.
     projected = waited.get("tasks")
-    if (waited.get("timed_out") and not waited.get("all_terminal")
+    if (not unknown_repair and waited.get("timed_out") and not waited.get("all_terminal")
             and isinstance(projected, dict) and projected):
         live_ids = [
             tid for tid in normalized_ids
@@ -1381,7 +1396,7 @@ def _wait_for_tasks(
             waited["wait_expired_with_live_children"] = {
                 "reason": "timeout_expired_before_terminal",
                 "requested_timeout_sec": requested_timeout,
-                "max_timeout_sec": float(_explicit_clamp),
+                "max_timeout_sec": float(_explicit_clamp if timeout_sec is not None else _event_wait_window(ctx)),
                 "live_task_ids": live_ids,
             }
     if bound != "requested":
