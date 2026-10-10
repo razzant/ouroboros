@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
 from ouroboros.utils import utc_now_iso
+from ouroboros.subagents import subagent_intent_fields
 from supervisor.task_admission import (
     restore_terminalization_retry,
     restore_terminalization_retry_rows,
@@ -143,13 +144,9 @@ def persist_queue_snapshot(reason: str = "") -> bool:
                 "task_contract": t.get("task_contract"),
                 "_owner_hold": t.get("_owner_hold"),
                 "_consciousness_continuation": t.get("_consciousness_continuation"),
-                # Scheduling INTENT survives a restart and is all a PENDING child has;
-                # `parent_model_lane` and the F9 admission fact `required_model_lane`
-                # above all (R2-3). Pinned to SUBAGENT_INTENT_FIELDS by test_model_slot.
-                "model_lane": t.get("model_lane"), "parent_model_lane": t.get("parent_model_lane"),
-                "requested_model_lane": t.get("requested_model_lane"),
-                "required_model_lane": t.get("required_model_lane"), "requested_executor": t.get("requested_executor"),
-                "requested_effort": t.get("requested_effort"),
+                # The same declared intent reaches workers and survives restart.
+                "model_lane": t.get("model_lane"),
+                **subagent_intent_fields(t),
                 "effective_model_lane": t.get("effective_model_lane"),
                 "model": t.get("model"), "use_local_model": t.get("use_local_model"),
                 "effective_executor": t.get("effective_executor"), "tool_profile": t.get("tool_profile"),
