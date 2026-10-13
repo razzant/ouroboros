@@ -1543,7 +1543,7 @@ def call_llm_with_retry(
                 "task_id": task_id, "execution_id": execution_id, **{key: str(getattr(scope, key)) for key in (
                     "root_task_id", "parent_task_id") if getattr(scope, key, "")},
                 "round_id": round_id, "llm_call_id": llm_call_id, "round": round_idx, "model": display_model,
-                "reasoning_effort": effort,
+                "tool_call_count": len(tool_calls), "reasoning_effort": effort,
                 **{key: usage[key] for key in ("effort", "effort_resolution", "request_wire", "claudexor") if key in usage},
                 "provider": provider, "source": "loop", "model_category": infer_model_category(display_model),
                 **event_token_counts(usage),  # each counter reported, a reported 0, or null (#1578)

@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.test_project_admission_refusal_browser import _producers
 from tests.test_project_authority_outages import _uncertain_child
 from tests.test_project_hold_recovery import worker
+from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
@@ -27,6 +27,7 @@ CHILD = '.chat-live-card[data-task-id="held"]'
 @pytest.mark.parametrize("engine,ending", [("chromium", "recovery"), ("webkit", "recovery"), ("chromium", "cancel")])
 def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_path, monkeypatch, engine, ending):  # noqa: F811
     from playwright.sync_api import sync_playwright
+
     from ouroboros import projects_registry as registry
     from ouroboros.gateway.state import _chat_activities_snapshot_safe
     from ouroboros.gateway.tasks import _tasks_list_payload
@@ -40,10 +41,12 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
     host = _producers(monkeypatch, root, server["repo_dir"])
     host.root = root
     registry.create_project(root, "target", name="Synthetic Project")
-    child, original = _uncertain_child(host, monkeypatch)
-    # Start from the accepted scheduled receipt, then lose it while the card is open.
-    result_path = root / "task_results" / "held.json"
-    result_path.write_bytes(original)
+    from tests._store_shared import result_signature
+
+    child, original, unreadable = _uncertain_child(host, monkeypatch)
+    # Recover the committed store row, then lose read access while its card is open.
+    unreadable["on"] = False
+    assert result_signature(root, "held") == original
     queue.RUNNING["parent"] = {"task": {"id": "parent", "chat_id": 1}, "started_at": time.time(), "attempt": 1}
     sent = worker(host, monkeypatch)
     assert queue.persist_queue_snapshot()
@@ -108,7 +111,7 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
             assert not child_card.locator('[data-live-typing]').is_visible()
             page.evaluate("() => window.__heldCard = document.querySelector('.chat-live-card[data-task-id=held]')")
             shot(page, "scheduled")
-            result_path.write_text("{torn", encoding="utf-8")
+            unreadable["on"] = True
             workers.assign_tasks()
             assert not sent
             page.wait_for_function("text => document.querySelector('.chat-live-card[data-task-id=held] [data-live-phase]')?.textContent === text", arg=WAIT)
@@ -147,7 +150,8 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
             assert not child_card.locator('[data-live-typing]').is_visible()
             shot(page, "previous-run-unconfirmed-narrow")
             held["_project_admission_restore_hold"] = previous_hold
-            result_path.write_bytes(original)
+            unreadable["on"] = False
+            assert result_signature(root, "held") == original
             if ending == "recovery":
                 # Same accepted receipt returns; the assignment owner dispatches exactly once.
                 workers.assign_tasks()
@@ -185,6 +189,7 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
 @pytest.mark.parametrize("engine,ending", [("chromium", "header-recovery")])
 def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_server_with_data, tmp_path, monkeypatch, engine, ending):  # noqa: F811
     from playwright.sync_api import sync_playwright
+
     from ouroboros import projects_registry as registry
     from ouroboros.gateway.state import _chat_activities_snapshot_safe
     from ouroboros.gateway.tasks import _tasks_list_payload
@@ -198,10 +203,12 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
     host = _producers(monkeypatch, root, server["repo_dir"])
     host.root = root
     registry.create_project(root, "target", name="Synthetic Project")
-    child, original = _uncertain_child(host, monkeypatch)
-    # Start from the accepted scheduled receipt, then lose it while the card is open.
-    result_path = root / "task_results" / "held.json"
-    result_path.write_bytes(original)
+    from tests._store_shared import result_signature
+
+    child, original, unreadable = _uncertain_child(host, monkeypatch)
+    # Recover the committed store row, then lose read access while its card is open.
+    unreadable["on"] = False
+    assert result_signature(root, "held") == original
     queue.RUNNING["parent"] = {"task": {"id": "parent", "chat_id": 1}, "started_at": time.time(), "attempt": 1}
     sent = worker(host, monkeypatch)
     assert queue.persist_queue_snapshot()
@@ -282,7 +289,7 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
             assert child_card.locator('[data-live-phase]').inner_text() == "Working"
             page.evaluate("() => window.__heldCard = document.querySelector('.chat-live-card[data-task-id=held]')")
             shot(page, "scheduled")
-            result_path.write_text("{torn", encoding="utf-8")
+            unreadable["on"] = True
             workers.assign_tasks()
             assert not sent
             # Both real producer rows now hold, but the child's earlier running
@@ -316,7 +323,8 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
                 state_transport(route)
             deferred_states.clear()
             # Once the child is terminal, the same held parent alone says Waiting.
-            result_path.write_bytes(original)
+            unreadable["on"] = False
+            assert result_signature(root, "held") == original
             write_task_result(root, "held", "cancelled", result="Stopped by the owner.")
             frame(page, "held", content="Stopped by the owner.", delegation_role="subagent", subagent_event="cancelled",
                   subagent_task_id="held", parent_task_id="parent", root_task_id="parent", subagent_role="researcher",status="cancelled")

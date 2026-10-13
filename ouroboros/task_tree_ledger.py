@@ -13,9 +13,13 @@ form (scope, kinds, append-only, size caps); the LLM interprets meaning (BIBLE P
 
 from __future__ import annotations
 
+import io
 import json
 import logging
+import os
 import pathlib
+import threading
+from collections import OrderedDict
 from hashlib import sha256
 from typing import Any, Dict, List
 
@@ -42,10 +46,8 @@ LEDGER_KINDS = COORDINATION_KINDS + BEACON_KINDS
 # Beacons that ask the parent to look NOW (surface an early return from a sliced wait): a child is
 # stuck (blocker), needs an answer (question), or needs the shared seam/contract changed
 # (interface_contract) — each requires the parent to reconcile before the child can safely proceed.
-ATTENTION_KINDS = (
-    "blocker", "question", "interface_contract", REVIEW_REQUESTED_KIND,
-    DELEGATION_CONSTRAINT_KIND,
-)
+from ouroboros.owner_mailbox import TASK_ATTENTION_KINDS as ATTENTION_KINDS  # noqa: E402
+
 DELEGATION_CONSTRAINT_DIRECTIVES = ("halt_fanout", "cap_children", "require_lane", "block_surface")
 CHILD_RESULT_DISPOSITION_TYPE = "child_result_disposition"
 CHILD_RESULT_DISPOSITIONS = frozenset({"integrated", "irrelevant", "deferred"})
@@ -278,7 +280,9 @@ def tree_ledger_append(
     except OSError:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
-    attention = bool(needs_parent_attention) or kind_norm in ATTENTION_KINDS
+    # Informational milestones stay informational even when an older caller
+    # supplied the former blanket override. The kind is the typed contract.
+    attention = kind_norm in ATTENTION_KINDS
     row = {
         "ts": utc_now_iso(),
         "kind": kind_norm,
@@ -616,6 +620,53 @@ def tree_ledger_tail_digest(
     return "\n".join(lines)
 
 
+_ATTENTION_MEMOS: OrderedDict = OrderedDict()
+_ATTENTION_MEMO_LOCK = threading.Lock()
+_ATTENTION_MEMO_LIMIT = 32
+
+
+def _attention_rows(path: pathlib.Path) -> List[Dict[str, Any]]:
+    """Rebuildable observation memo, independent of each consumer's delivery cursor.
+
+    Parse only appended bytes. Refold replacement, observable rewrite/truncation;
+    invalidate errors. A valid newline-less last object retains the full reader's
+    visibility, but its byte offset stays provisional until its line completes.
+    In-place changes preserving identity/size/timestamps are not detectable here.
+    """
+    with _ATTENTION_MEMO_LOCK:
+        try:
+            stat = path.stat()
+            fingerprint = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            old = _ATTENTION_MEMOS.get(path)
+            if old and old[0] == fingerprint:
+                _ATTENTION_MEMOS.move_to_end(path)
+                return old[2] + old[3]
+            with path.open('rb') as handle:
+                stat = os.fstat(handle.fileno())  # pin observed bytes BEFORE reading
+                fingerprint = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+                append = old and old[0][:2] == fingerprint[:2] and fingerprint[2] > old[0][2]
+                offset, rows = (old[1], list(old[2])) if append else (0, [])
+                handle.seek(offset)
+                raw = handle.read(max(0, stat.st_size - offset))
+            boundary = raw.rfind(b'\n') + 1
+            def parse(data):
+                return [r for r in iter_jsonl_objects(path, _handle=io.BytesIO(data))
+                        if isinstance(r, dict) and r.get('kind') in ATTENTION_KINDS]
+            rows.extend(parse(raw[:boundary]))
+            provisional = parse(raw[boundary:])
+            _ATTENTION_MEMOS[path] = (fingerprint, offset + boundary, rows, provisional)
+            _ATTENTION_MEMOS.move_to_end(path)
+            while len(_ATTENTION_MEMOS) > _ATTENTION_MEMO_LIMIT:
+                _ATTENTION_MEMOS.popitem(last=False)
+            return rows + provisional
+        except FileNotFoundError:
+            _ATTENTION_MEMOS.pop(path, None)
+            return []
+        except OSError:
+            _ATTENTION_MEMOS.pop(path, None)
+            raise
+
+
 def tree_ledger_attention_after(
     root_id: str,
     after_ts: str,
@@ -633,8 +684,12 @@ def tree_ledger_attention_after(
     out: List[Dict[str, Any]] = []
     allowed = {str(item) for item in task_ids} if task_ids is not None else None
     seen = {str(item) for item in seen_ids} if seen_ids is not None else set()
-    for r in tree_ledger_rows(root_id, data_root=data_root):
-        if not r.get("needs_parent_attention"):
+    try:
+        path = tree_ledger_path(root_id, data_root=data_root)
+    except ValueError:
+        return []
+    for r in _attention_rows(path):
+        if r.get("kind") not in ATTENTION_KINDS:
             continue
         if allowed is not None and str(r.get("task_id") or "") not in allowed:
             continue

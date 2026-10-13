@@ -2,8 +2,9 @@
 
 Each selected sleep frees pooled capacity for BRAVO without replacing ALPHA's
 identity. Warm sleep receives owner Pause; cold sleep crosses owner Restart.
-A typed Hurry makes the sleep ready, but owner holds still require explicit
-Resume. No short timer wakes the model. The second mock call is held while
+ALPHA explicitly selects BRAVO's mail (not its terminal); neither root has children.
+A typed Hurry makes sleep ready; owner holds still require explicit Resume.
+No short timer wakes the model. The second mock call is held while
 we inspect original started_at and accumulated sleep exclusion.
 """
 from __future__ import annotations
@@ -32,6 +33,7 @@ class SleepModel(b4._ScriptedModel):
         super().__init__(monkeypatch)
         self.mode = mode
         self.resumed, self.finish = threading.Event(), threading.Event()
+        self.resume_notice = ""
 
     def handle(self, handler):
         payload = json.loads(handler.rfile.read(int(handler.headers.get('Content-Length', 0))) or b'{}')
@@ -43,8 +45,11 @@ class SleepModel(b4._ScriptedModel):
         if main and marker == 'ALPHA' and ordinal == 1:
             message, reason = {'role': 'assistant', 'content': '', 'tool_calls': [{
                 'id': 'call_sleep', 'type': 'function', 'function': {
-                    'name': 'await_messages', 'arguments': json.dumps({'mode': self.mode})}}]}, 'tool_calls'
+                    'name': 'await_messages', 'arguments': json.dumps({'mode': self.mode,
+                        'senders': [b4.BRAVO]})}}]}, 'tool_calls'
         elif main and marker == 'ALPHA' and ordinal == 2:
+            self.resume_notice = "\n".join(b4._user_text(m) for m in payload.get("messages") or []
+                                          if isinstance(m, dict) and "You slept" in b4._user_text(m))
             self.resumed.set()
             self.finish.wait(90)
         b4._reply(handler, payload, message, reason)
@@ -69,6 +74,7 @@ def member(snapshot, task_id, kind):
 @pytest.mark.parametrize('mode', ['warm', 'cold'])
 def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_with_data, monkeypatch, mode):
     from playwright.sync_api import expect, sync_playwright
+
     from ouroboros.budget_pause import budget_pause_row
     from ouroboros.task_results import load_task_result
 
@@ -154,6 +160,9 @@ def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_wi
                 actions = b4._menu_action(page, trigger, 'resume')
                 assert actions == ['resume', 'stop_now']
                 assert model.resumed.wait(60), 'explicit owner Resume did not continue the same sleeper'
+                record['resume_notice'] = model.resume_notice
+                assert '"mail_acknowledged": false' in model.resume_notice
+                assert '"tasks": {}' in model.resume_notice
                 running = b4._wait(lambda: member(snapshot(root), b4.ALPHA, 'running'), 15, 'resumed task snapshot')
                 record['resumed_snapshot'] = running
                 record['resumed_queue_api'] = b4._get(page, url, '/api/tasks?queue_only=1')

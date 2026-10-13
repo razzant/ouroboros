@@ -43,11 +43,16 @@ def _readiness(q: Any, task: Dict[str, Any], row: Dict[str, Any]) -> str:
     from ouroboros.model_sleep import wake_reason
 
     root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
+    cursors = {key: {"after_ts": cursor.get("after_ts", ""),
+                     "seen_ids": set(cursor.get("seen_ids") or ())}
+               for key, cursor in (row.get("sleep_attention_cursors") or {}).items()
+               if isinstance(cursor, dict)}
     ctx = SimpleNamespace(
         task_id=str(task.get("id") or ""), root_task_id=str(task.get("root_task_id") or task.get("id") or ""),
         drive_root=str(task.get("drive_root") or task.get("child_drive_root") or root),
         budget_drive_root=str(root), task_attempt=int(task.get("_attempt") or 1),
-        _loop_mailbox_seen_ids=set(row.get("sleep_seen") or ()), task_metadata=task.get("metadata") or {})
+        _loop_mailbox_seen_ids=set(row.get("sleep_seen") or ()),
+        _wait_attention_cursors=cursors, task_metadata=task.get("metadata") or {})
     return wake_reason(ctx, row["sleep"])
 
 

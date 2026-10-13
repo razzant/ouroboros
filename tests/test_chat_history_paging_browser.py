@@ -59,9 +59,25 @@ def _write(path, rows):
 
 
 def _result(root, task_id, **fields):
-    _write(root / "task_results" / f"{task_id}.json", [{
+    from tests._store_shared import seed_result
+
+    seed_result(root, task_id, {
         "_schema_version": 1, "task_id": task_id, "status": "completed", **fields,
-    }])
+    })
+
+
+def test_history_result_fixture_is_readable_after_store_startup(tmp_path):
+    """A running server's current store must see the planted full result, not a legacy file."""
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    write_task_result(tmp_path, "parent", "running")
+    _result(tmp_path, "child", result="FULL_CHILD_TAIL", parent_task_id="parent",
+            root_task_id="parent", delegation_role="subagent")
+    row = load_task_result(tmp_path, "child", strict=True)
+    assert row["result"] == "FULL_CHILD_TAIL"
+    assert row["status"] == "completed" and row["parent_task_id"] == "parent"
+    assert row["root_task_id"] == "parent" and row["delegation_role"] == "subagent"
+    assert not (tmp_path / "task_results" / "child.json").exists()
 
 
 def _human(index, chat_id=1, **extra):

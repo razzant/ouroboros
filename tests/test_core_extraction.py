@@ -140,8 +140,9 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # numbers), explicit omitted-root semantics and ordered same-file edit_text
     # replacements; editor calls run in call order and `force` confirms only an
     # intentional shrink.
+    # Event waits add explicit attention_kind without widening sender authority.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "e1093d0a47f57a73ac033524ae3c55c365c1d6646504db0e73a8f5d2ada461eb"
+        "966c88f442b255434f0dfcb74ab670d77e21cbdaa65f019a7cb590cb8adac5d3"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

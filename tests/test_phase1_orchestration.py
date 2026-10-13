@@ -276,7 +276,7 @@ def test_review_requested_preserves_typed_concerns_and_exact_hash(monkeypatch, t
 
     # Ordinary sliced waits are branch-local: waiting for childA must not surface
     # childB's request merely because both share the same tree ledger.
-    ctx = SimpleNamespace(task_id="parentA", task_metadata={"root_task_id": "rootA"})
+    ctx = SimpleNamespace(task_id="parentA", drive_root=tmp_path, task_metadata={"root_task_id": "rootA"})
     early = _wait_attention_poll(ctx, "", ["childA"])({}, {})
     assert early is not None
     assert [row["task_id"] for row in early["beacons"]] == ["childA"]
@@ -302,7 +302,7 @@ def test_wait_attention_cursor_delivers_preexisting_same_timestamp_rows_fifo(
     # All rows predate entry into the wait.  The response stays bounded, but
     # advances only across rows it actually delivered, including a timestamp
     # shared by more rows than the five-item response bound.
-    ctx = SimpleNamespace(task_id="parentA", task_metadata={"root_task_id": "rootA"})
+    ctx = SimpleNamespace(task_id="parentA", drive_root=tmp_path, task_metadata={"root_task_id": "rootA"})
     first = _wait_attention_poll(ctx, "", ["childA"])({}, {})
     assert [row["text"] for row in first["beacons"]] == [
         f"question-{index}" for index in range(5)

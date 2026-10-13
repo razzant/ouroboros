@@ -101,6 +101,7 @@ GRACEFUL_RAILS = frozenset({RAIL_GRACEFUL_CEILING, RAIL_WRAPUP_LAST_FIT, RAIL_SO
 # it rides the SAME exact checkpoint, park and grant, under reason ``owner``,
 # and never requests a stop of work already sent.
 from ouroboros.owner_pause import RAIL_OWNER_PAUSE, REASON_OWNER  # noqa: E402
+
 # The model's own COLD sleep (``model_sleep``) rides the same park too; only its
 # selected sources, through the supervisor's sleep-wake policy, wake it.
 RAIL_MODEL_SLEEP = "model_sleep"
@@ -330,9 +331,16 @@ def pending_tool_call_ids(messages: List[Dict[str, Any]]) -> List[str]:
 # --- external custody (owner Q8): ``external_runs`` owns the one observer ------------
 
 from ouroboros.external_runs import (  # noqa: E402,F401 -- the pause's historical import surface
-    EXTERNAL_RUNNING, EXTERNAL_STOP_CONFIRMED, EXTERNAL_STOP_REQUESTED, EXTERNAL_STOP_UNKNOWN,
-    STOP_POLICIES, STOP_POLICY_ALL, STOP_POLICY_OBSERVE, STOP_POLICY_TASK_OWNED,
-    observe_task_runs, task_owned_runs_open,
+    EXTERNAL_RUNNING,
+    EXTERNAL_STOP_CONFIRMED,
+    EXTERNAL_STOP_REQUESTED,
+    EXTERNAL_STOP_UNKNOWN,
+    STOP_POLICIES,
+    STOP_POLICY_ALL,
+    STOP_POLICY_OBSERVE,
+    STOP_POLICY_TASK_OWNED,
+    observe_task_runs,
+    task_owned_runs_open,
 )
 
 
@@ -422,7 +430,8 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
     ``expected_grant_id`` means "no grant", ``None`` skips that comparison.
     """
     from ouroboros.task_results import (
-        _TRULY_TERMINAL_STATUSES, require_writable_task_result_schema,
+        _TRULY_TERMINAL_STATUSES,
+        require_writable_task_result_schema,
         stamp_task_result_schema,
     )
 
@@ -671,8 +680,9 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
     sleep = getattr(ctx, "_model_sleep", None) if reason == REASON_SLEEP else None
     if isinstance(sleep, dict):
         # What the supervisor's sleep-wake policy reads: the selected sources and
-        # the mailbox ids this loop had already seen (never a second latch).
-        settlement = {"sleep": dict(sleep), "sleep_seen": sorted(set(limit_ctx.owner_msg_seen or ()))}
+        # the mailbox and beacon ids this loop had already seen.
+        settlement = {"sleep": dict(sleep), "sleep_seen": sorted(set(limit_ctx.owner_msg_seen or ())),
+                      "sleep_attention_cursors": state["wait_attention_cursors"]}
     return {
         "pause_id": pause_id, "state": STATE_PAUSING, "reason": reason,
         **settlement,
@@ -1317,7 +1327,7 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
 
         slept = max(0.0, float(grant["consumed_at"]) - float(row.get("paused_at") or grant["consumed_at"]))
         messages.append(wake_notice({**(row.get("sleep") or {}), "mode": "cold"},
-                                    str((row.get("sleep_ready") or {}).get("reason") or ""), slept))
+                                    str((row.get("sleep_ready") or {}).get("reason") or ""), slept, ctx))
         return
     kind = "owner Pause" if str(row.get("reason") or "") == REASON_OWNER else "budget pause"
     held = ""

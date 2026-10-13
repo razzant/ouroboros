@@ -145,14 +145,14 @@ ANCHOR_ROWS: tuple[AnchorRow, ...] = (
         "(physical_attempt_id the last); earlier failed attempts are llm_api_error rows or non-anchor rows "
         "(COVERAGE_GAPS) with the same round_id. first_request_at and first_answer_at are the execution's "
         "first request and first answer, repeated on later rounds. A Claudexor operation id rides inside "
-        "`claudexor`.",
+        "`claudexor`. Optional tool_call_count is the normalized response inventory; older rows omit it.",
         _fields("ts type record_contract_version task_id execution_id round_id llm_call_id round model provider prompt_tokens "
                 "completion_tokens cached_tokens cache_write_tokens duration_ms ledger_attempt_ids "
                 "physical_attempt_id"),
         nullable=_fields("prompt_tokens completion_tokens cached_tokens cache_write_tokens duration_ms physical_attempt_id"),
         optional=_fields("root_task_id parent_task_id delegation_role reasoning_effort source model_category prompt_cache_ttl cache_hit_rate cache_cold_restart "
                          "gap_since_prev_round_sec cost_usd request_ref response_ref effort effort_resolution "
-                         "request_wire claudexor first_request_at first_answer_at " + _CONTEXT_FIT),
+                         "request_wire claudexor first_request_at first_answer_at tool_call_count " + _CONTEXT_FIT),
         content=_fields("claudexor"), natural_key=("llm_call_id",),
     ),
     AnchorRow(

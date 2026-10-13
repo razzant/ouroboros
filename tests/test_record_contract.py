@@ -154,6 +154,12 @@ def test_every_writer_literal_carries_the_guaranteed_fields(row):
         assert row.guaranteed <= keys, f"{row.type}: writer lacks {sorted(row.guaranteed - keys)}"
 
 
+def test_optional_round_inventory_is_declared_and_emitted_by_writer():
+    assert "tool_call_count" in rc.ANCHOR_BY_TYPE["llm_round"].optional
+    literals = _literal_keys((REPO / "ouroboros/loop_llm_call.py").read_text(encoding="utf-8"), "llm_round")
+    assert literals and all("tool_call_count" in keys for keys in literals)
+
+
 def test_the_literal_check_sees_a_missing_field_and_a_resolved_spread():
     source = (
         "def write():\n"

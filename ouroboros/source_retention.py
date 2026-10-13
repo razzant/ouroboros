@@ -111,14 +111,20 @@ def _source_locations(root, task_id):
 def retained_actor_source_read_target(root, task_id, relative):
     """Placement alias for an advertised immutable source read, not write authority."""
     import re
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+
+    from ouroboros.artifacts import read_actor_source_bytes, registered_task_artifact, task_artifact_dir_path
 
     rel = pathlib.PurePosixPath(relative)
     match = re.fullmatch(r".+-([0-9a-f]{64})\.[A-Za-z0-9]+", rel.name)
-    if len(rel.parts) != 3 or rel.parts[0] != "source_handles" or not match:
+    registered = len(rel.parts) == 1
+    if not match or not (registered or (len(rel.parts) == 3 and rel.parts[0] == "source_handles")):
         return None
     for source_root, owner in _source_locations(root, task_id):
         path = task_artifact_dir_path(source_root, owner, create=False) / relative
+        if registered:
+            record = registered_task_artifact(source_root, owner, relative) or {}
+            if record.get("kind") != "task_source" or not record.get("immutable") or record.get("sha256") != match[1]:
+                continue  # A digest-shaped authored file grants no source alias.
         if not (path.exists() or path.is_symlink()) and packs.materialize_handle(source_root, owner, relative) is None:
             continue  # a packed handle is written back beside its name first
         ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
@@ -341,7 +347,8 @@ class RetentionWalk:
         return dict(node.get("result", ref))
 
     def _read_source(self, node):
-        from ouroboros import artifacts, observability as obs
+        from ouroboros import artifacts
+        from ouroboros import observability as obs
 
         ref, task = node["ref"], node["task_id"]
         kind = node["kind"]
@@ -398,13 +405,15 @@ class RetentionWalk:
         ref, task = node["ref"], node["task_id"]
         rel = pathlib.PurePosixPath(ref["path"])
         suffix = f"-{ref['sha256']}."
-        if len(rel.parts) != 3 or rel.parts[0] != "source_handles" or suffix not in rel.name:
+        registered = len(rel.parts) == 1
+        if suffix not in rel.name or not (registered or (len(rel.parts) == 3 and rel.parts[0] == "source_handles")):
             raise ValueError("invalid actor source locator")
+        category = "tool_results" if registered else rel.parts[1]
         source_id, extension = rel.name.rsplit(suffix, 1)
         self.discovering = True
         try:
             preserved = promote_source_payload(raw, source_id=source_id, extension=extension,
-                category=rel.parts[1], parent_root=self.parent, child_root=self.child, task_id=task, state=self.state)
+                category=category, parent_root=self.parent, child_root=self.child, task_id=task, state=self.state)
         finally:
             self.discovering = False
         if preserved != raw:
@@ -423,8 +432,8 @@ class RetentionWalk:
                     raise
                 except (OSError, ValueError):
                     pass  # Copy the verified bytes below if no direct immutable file can be linked.
-            stored = artifacts.store_actor_source_bytes(self.parent, task, category=rel.parts[1],
-                source_id=source_id, data=raw, extension=extension)
+            stored = artifacts.store_actor_source_bytes(self.parent, task, category=category,
+                source_id=source_id, data=raw, extension=extension, register=registered)
         except PublicationClosed:
             raise
         except OSError:

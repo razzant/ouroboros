@@ -75,10 +75,11 @@ import shutil
 import uuid
 from typing import Any, Callable, ContextManager, Dict, Iterator, List, Optional, Tuple
 
+from ouroboros.owner_mailbox import _MAILBOX_DIR as _OWNER_MAILBOX_DIR
+from ouroboros.owner_mailbox import _mailbox_path
+from ouroboros.store import StoreError
 from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
 from ouroboros.utils import utc_now_iso
-from ouroboros.owner_mailbox import _mailbox_path, _MAILBOX_DIR as _OWNER_MAILBOX_DIR
-from ouroboros.store import StoreError
 
 log = logging.getLogger(__name__)
 
@@ -586,6 +587,8 @@ def store_artifact_view(canonical_root: Any, task_id: str, recorded: List[Dict[s
     free: List[Dict[str, Any]] = []
 
     def claim(row: Dict[str, Any], *, free_ok: bool) -> None:
+        if row.get("kind") == "task_source":
+            return  # retention authority is not deliverable identity
         located = next(((index, rel) for index, store in enumerate(stores)
                         if (rel := store_relpath(store, row.get("path")))), None)
         if located is None:
@@ -835,6 +838,8 @@ def _publish(canonical: pathlib.Path, task_id: str, plan: List[Dict[str, Any]]) 
     place staged files create-only (a hard link fails on an existing name where a rename
     would replace it; the name that appeared meanwhile retains the pass), each placement
     fenced by the generation, and return the canonical rows they now back."""
+    from ouroboros.artifacts import _register_task_artifact_records
+
     target = canonical / _ARTIFACTS_DIR / task_id
     rows = []
     for item in plan:
@@ -858,6 +863,12 @@ def _publish(canonical: pathlib.Path, task_id: str, plan: List[Dict[str, Any]]) 
         if item.get("staged") is not None:
             row.update(status="ready", errors=[])
         rows.append(row)
+    # Source registrations remain custody obligations without entering the result
+    # bundle. Publish them before its row lock; failed registration retains the drive.
+    sources = [row for row in rows if row.get("kind") == "task_source"]
+    if sources:
+        fence_publication()
+        _register_task_artifact_records(target, sources)
     return rows
 
 
@@ -868,8 +879,8 @@ def _custody_fields(current: Dict[str, Any], source: pathlib.Path, rows: List[Di
     from ouroboros.outcomes import artifact_bundle_from_result
 
     kept = [row for row in current.get("artifacts") or [] if isinstance(row, dict)
-            and not store_relpath(source, row.get("path"))]
-    artifacts = merge_artifact_records(kept, rows)
+            and row.get("kind") != "task_source" and not store_relpath(source, row.get("path"))]
+    artifacts = merge_artifact_records(kept, (row for row in rows if row.get("kind") != "task_source"))
     if artifacts == current.get("artifacts") or (not artifacts and not current.get("artifacts")):
         return {}
     # Re-derived from the lifecycle status and the rows, never from the superseded bundle's own status.
@@ -879,8 +890,13 @@ def _custody_fields(current: Dict[str, Any], source: pathlib.Path, rows: List[Di
 
 def _verify_readback(row: Dict[str, Any], source: pathlib.Path, rows: List[Dict[str, Any]]) -> None:
     listed = {(str(item.get("path")), item.get("sha256")) for item in row.get("artifacts") or [] if isinstance(item, dict)}
-    if any((item["path"], item.get("sha256")) not in listed for item in rows):
-        raise _Retained("canonical_listing_missing")
+    for item in rows:
+        if item.get("kind") == "task_source":
+            registered = _registrations(pathlib.Path(item["path"]).parent).get(item["name"], {})
+            if any(registered.get(key) != item.get(key) for key in ("kind", "path", "size", "sha256", "immutable")):
+                raise _Retained("canonical_source_registration_missing")
+        elif (item["path"], item.get("sha256")) not in listed:
+            raise _Retained("canonical_listing_missing")
     if any(store_relpath(source, item.get("path")) for item in row.get("artifacts") or [] if isinstance(item, dict)):
         raise _Retained("canonical_listing_references_child")
 
@@ -923,8 +939,11 @@ def _carry_row_inputs(canonical: pathlib.Path, source: pathlib.Path, task_id: st
     closure). Each member verifies against the captured identity; a canonical file with other
     bytes is never replaced and fails the store. Returns the canonical, resolvable projection;
     a closure neither store supplies whole raises."""
-    from ouroboros.artifacts import (attachment_manifest_projection, materialize_inherited_attachment_manifest,
-                                     resolve_attachment_manifest)
+    from ouroboros.artifacts import (
+        attachment_manifest_projection,
+        materialize_inherited_attachment_manifest,
+        resolve_attachment_manifest,
+    )
 
     failure: Optional[Exception] = None
     for owner in (canonical, source):

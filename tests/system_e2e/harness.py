@@ -49,8 +49,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from devtools.benchmarks.common.server_runner import (  # noqa: E402
-    IsolatedServer,
     _PROVIDER_ENV_KEYS,
+    IsolatedServer,
     _is_secret_env_key,
     supervisor_state_is_ready,  # noqa: F401 (re-export: THE readiness contract)
 )
@@ -61,8 +61,11 @@ from ouroboros.provider_models import (  # noqa: E402
 )
 from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS  # noqa: E402
 from tests.candidate_checkout import (  # noqa: E402
-    CandidateCheckout, CandidateError, assert_served_candidate,
-    require_candidate_interpreter, verify_checkout,
+    CandidateCheckout,
+    CandidateError,
+    assert_served_candidate,
+    require_candidate_interpreter,
+    verify_checkout,
 )
 
 LANE_MOCK = "mock"
@@ -1358,18 +1361,10 @@ class ArtifactOracle:
         derived swarm rollup), so lineage enumeration reads the children's rows —
         the same truth ``find_child_tasks`` derives from.
         """
-        results_dir = self.data_root / "task_results"
-        if not results_dir.is_dir():
-            return []
-        children = []
-        for path in sorted(results_dir.glob("*.json")):
-            try:
-                row = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if isinstance(row, dict) and str(row.get("parent_task_id") or "") == str(parent_task_id):
-                children.append(str(row.get("task_id") or path.stem))
-        return children
+        from ouroboros.task_results import list_task_results
+
+        return [str(row["task_id"]) for row in list_task_results(self.data_root)
+                if str(row.get("parent_task_id") or "") == str(parent_task_id)]
 
     def tree_blackboard(self, root_task_id: str) -> list:
         """Rows of the task-tree ledger (task_trees/<root>/blackboard.jsonl)."""

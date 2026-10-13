@@ -6,10 +6,10 @@ import errno
 import json
 import logging
 import os
-import stat
 import pathlib
 import re
 import shutil
+import stat
 import uuid
 import zipfile
 from contextlib import nullcontext
@@ -17,11 +17,11 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
 from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_custody import fence_publication
 from ouroboros.task_results import validate_task_id
+from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
 
 log = logging.getLogger(__name__)
 
@@ -682,6 +682,7 @@ def store_actor_source_bytes(
     source_id: str,
     data: bytes,
     extension: str,
+    register: bool = False,
 ) -> Dict[str, Any]:
     """Persist exact bytes inside this task's existing actor-readable artifact root."""
 
@@ -693,6 +694,11 @@ def store_actor_source_bytes(
     safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
     digest = sha256(data).hexdigest()
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
+    if register:
+        relative = f"{safe_id}-{digest}.{safe_extension}"
+        stored = store_task_artifact_bytes(drive_root, task_id, relative, data, kind="task_source")
+        return {**stored, "kind": "task_source", "size": len(data),
+                "read": {"tool": "read_file", "arguments": {"root": "artifact_store", "path": relative}}}
     relative = pathlib.PurePosixPath(
         _SOURCE_HANDLES_SUBDIR,
         normalized_category,
@@ -726,7 +732,8 @@ def read_actor_source_bytes(
     if ref.get("root") != "artifact_store":
         raise ValueError("actor source ref has an unexpected root")
     rel = pathlib.PurePosixPath(str(ref.get("path") or ""))
-    if not rel.parts or rel.parts[0] != _SOURCE_HANDLES_SUBDIR or rel.is_absolute():
+    # Root-level registered sources still require this actor's confinement/byte identity.
+    if not rel.parts or rel.is_absolute() or (rel.parts[0] != _SOURCE_HANDLES_SUBDIR and len(rel.parts) != 1):
         raise ValueError("actor source ref has an invalid path")
     base = task_artifact_dir_path(drive_root, task_id, create=False).resolve(strict=False)
     target = base.joinpath(*rel.parts)
@@ -855,7 +862,10 @@ def materialize_repo_diff_evidence(
     is what the packet and the actor-readable source handle carry.
     """
     from ouroboros.repo_diff_capture import (
-        capture_disclosure, capture_repo_diff, repo_diff_projection, retain_private_capture,
+        capture_disclosure,
+        capture_repo_diff,
+        repo_diff_projection,
+        retain_private_capture,
     )
     from ouroboros.utils import truncate_review_artifact
 
@@ -1291,12 +1301,7 @@ def store_task_artifact_bytes(
 
 
 def _register_task_artifact_records(artifact_dir: pathlib.Path, records: Iterable[Dict[str, Any]]) -> None:
-    """Merge only these registrations under the existing manifest-file lock.
-
-    File copying/hashing finishes before this short metadata transaction. No
-    task-result lock is acquired here, so a caller already holding one cannot
-    invert the publication path's artifact-then-result ordering.
-    """
+    """Merge registrations under the manifest lock, after copy/hash; no result lock is taken here, preserving artifact-then-result lock order."""
     additions = {pathlib.Path(str(row.get("path") or row.get("name") or "")).name: dict(row)
                  for row in records}
 
@@ -1504,9 +1509,7 @@ def collect_task_artifact_records(
     drive_root: Union[pathlib.Path, str], task_id: str, *, measure: bool = True, strict: bool = False,
     require_registered: bool = False,
 ) -> List[Dict[str, Any]]:
-    """List deliverables (nested ones carry ``relpath``), excluding metadata/inputs.
-    ``measure=False`` uses lstat/recorded identities, with ``measured: False``. Strict
-    listing raises on unreadable files; review's ``require_registered`` requires all entries."""
+    """List deliverables (nested ones carry ``relpath``), excluding metadata/inputs/task sources. ``measure=False`` uses lstat/recorded identities, with ``measured: False``. Strict listing raises on unreadable files; review's ``require_registered`` requires all entries."""
     try:
         artifact_dir = task_artifact_dir_path(pathlib.Path(drive_root), validate_task_id(task_id), create=False)
     except ValueError:
@@ -1541,6 +1544,8 @@ def collect_task_artifact_records(
         if rel_parts and rel_parts[0] in {_ATTACHMENTS_SUBDIR, _CHAT_MEDIA_SUBDIR, _SOURCE_HANDLES_SUBDIR}:
             continue
         manifest_record = manifest.get(path.name) if path.parent == artifact_dir else None
+        if manifest_record and manifest_record.get("kind") == "task_source":
+            continue  # registered for custody/readback, not an authored deliverable
         nested = {"relpath": "/".join(rel_parts)} if len(rel_parts) > 1 else {}
         try:
             if not measure:  # an immutable registration keeps its recorded identity; nothing else is claimed

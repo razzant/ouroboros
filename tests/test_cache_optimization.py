@@ -448,7 +448,7 @@ def test_wait_for_task_appends_cache_horizon_note(tmp_path, monkeypatch):
 
     monkeypatch.setattr(control_mod, "wait_for_effective_tasks", _instant_wait)
     ctx = SimpleNamespace(
-        drive_root=tmp_path,
+        drive_root=tmp_path, task_id="cache-parent",
         _accumulated_usage={"_last_prompt_cache_ttl": "5m"},
     )
     out = control_mod._wait_for_task(ctx, "child42", timeout_sec=0)
@@ -472,9 +472,9 @@ def test_cache_horizon_reachability_matches_the_wait_clamps(tmp_path, monkeypatc
     """Honest reachability of the wait disclosure, measured on BEHAVIOR.
 
     The root waits measure their own elapsed window, so their line's availability is
-    per-tool and per-TTL and follows the window each one actually hands the poller: at
-    the shipped '1h' default only wait_tasks (7200s) can genuinely emit it and
-    wait_task sits exactly on the 3600s horizon; at '5m' both do. delegate_wait no
+    per-tool and per-TTL. These probes use explicit windows, not timer-free
+    loop defaults: at '1h' wait_tasks' 7200s clamp exceeds the horizon and
+    wait_task's 3600s meets it; at '5m' both exceed it. delegate_wait no
     longer measures its 3 s tick: its wake measures the time since the task's last
     model response, so it can emit at ANY tier (pinned in the supervising-wake test
     below). Fails if a clamp, the ceiling or the tier scale moves without revisiting

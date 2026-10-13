@@ -66,7 +66,9 @@ def collect_turn_diff(
     whenever no exact source is owed, so no private spool outlives its use.
     """
     from ouroboros.repo_diff_capture import (
-        capture_disclosure, capture_repo_diff, repo_diff_projection,
+        capture_disclosure,
+        capture_repo_diff,
+        repo_diff_projection,
     )
 
     repo = None
@@ -193,12 +195,12 @@ def acceptance_packet_budget_chars(slots: Any) -> AcceptancePacketBudget:
     The historical floor applies only when calibration is absent or unusable;
     a positive narrow-route calibration must be honoured so shedding can fit it.
     """
+    from ouroboros.model_wait import current_model_wait
+    from ouroboros.review_records import apply_review_model_override
     from ouroboros.tools.review_synthesis import (
         per_slot_input_token_limits,
         quorum_input_token_limit,
     )
-    from ouroboros.review_records import apply_review_model_override
-    from ouroboros.model_wait import current_model_wait
 
     waiter = current_model_wait()
     slots = [apply_review_model_override(slot, waiter.overrides) for slot in slots] if waiter else slots
@@ -687,7 +689,11 @@ def _accept_claim_support_refs(contract: Dict[str, Any], receipts: list) -> list
 def _accept_trajectory(tool_calls: list, drive_root: Any = None, task_id: str = "",
                        *, source_ref: Any = None, indices: list | None = None) -> tuple:
     """Build the bounded acceptance trajectory and resolve partial source handles."""
-    from ouroboros.artifacts import materialize_tool_args_source, materialize_tool_result_source, read_actor_source_bytes
+    from ouroboros.artifacts import (
+        materialize_tool_args_source,
+        materialize_tool_result_source,
+        read_actor_source_bytes,
+    )
     from ouroboros.review_evidence_refs import trajectory_record_ref
     from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS
     if indices is not None:
@@ -750,8 +756,8 @@ def _accept_trajectory(tool_calls: list, drive_root: Any = None, task_id: str = 
 
 def _accept_artifact_manifest(drive_root: Any, task_id: str, protected: set) -> list:
     """Return a leak-safe manifest; protected, large and binary artifacts stay manifest-only."""
+    from ouroboros.artifacts import collect_task_artifact_records
     from ouroboros.task_results import validate_task_id
-    from ouroboros.artifacts import _ARTIFACT_MANIFEST, _SOURCE_HANDLES_SUBDIR
 
     out: list = []
     try:
@@ -759,20 +765,13 @@ def _accept_artifact_manifest(drive_root: Any, task_id: str, protected: set) -> 
         base = pathlib.Path(drive_root) / "task_results" / "artifacts" / validate_task_id(task_id)
         if not base.exists():
             return out
-        base_resolved = base.resolve()
-        for p in sorted(base.rglob("*")):
-            # rglob follows symlinked dirs, so reject symlinks and escaped paths.
+        for artifact in collect_task_artifact_records(drive_root, task_id, measure=False):
+            p = pathlib.Path(artifact["path"])
             try:
-                if p.is_symlink() or not p.is_file():
-                    continue
-                if not p.resolve().is_relative_to(base_resolved):
-                    continue
                 size = p.stat().st_size  # size BEFORE read — never load a huge file (MEDIUM-3)
             except OSError:
                 continue
             rel = str(p.relative_to(base))
-            if p.relative_to(base).parts[0] == _SOURCE_HANDLES_SUBDIR or rel in {_ARTIFACT_MANIFEST, _ARTIFACT_MANIFEST + ".lock"}:
-                continue  # host bookkeeping is available through its own review refs
             entry: Dict[str, Any] = {"name": rel, "size": size, "provenance": "artifact"}
             # Match protected paths by artifact path, prefix, or basename.
             rel_base = rel.rsplit("/", 1)[-1]

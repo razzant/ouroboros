@@ -342,6 +342,7 @@ def retain_sleep_checkpoint(root: pathlib.Path, task_id: str, attempt: int, *, d
              "task_attempt": attempt, "state": STATE_PAUSED, "reason": "sleep", "rail": RAIL_MODEL_SLEEP,
              "scope": "task", "source_ref": source, "retained_owner_wait_id": wait["wait_id"],
              "sleep": wait["sleep"], "sleep_seen": state.get("seen") or [],
+             "sleep_attention_cursors": state.get("wait_attention_cursors") or {},
              "execution_drive_root": wait.get("execution_drive_root"), "started_at": wait.get("started_at"),
              "paused_at": float(wait.get("sleep_started_at") or time.time()),
              "paused_duration_sec": float(wait.get("budget_paused_sec") or 0),

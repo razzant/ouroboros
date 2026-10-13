@@ -523,7 +523,8 @@ def test_continue_carries_an_unreadable_predecessor_plan_as_a_named_gap_through_
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.context import build_llm_messages
     from ouroboros.main_context_authority import project_helper_predecessor_authority
-    from ouroboros.task_results import load_plan_review_state, task_result_path
+    from ouroboros.task_results import load_plan_review_state
+    from ouroboros.task_store import read_document, signature
     from ouroboros.tools.control import _get_task_result
     from ouroboros.tools.plan_review_artifacts import PlanReviewSourceUnavailable
     from ouroboros.tools.registry import ToolContext
@@ -532,7 +533,8 @@ def test_continue_carries_an_unreadable_predecessor_plan_as_a_named_gap_through_
     env, memory = _make_env_and_memory(tmp_path)
     root, predecessor = env.drive_root, "plan-predecessor"
     spec = _plan_predecessor(root, predecessor, damage)
-    row_bytes = task_result_path(root, predecessor).read_bytes()
+    row_before = read_document(root, predecessor)
+    signature_before = signature(root, predecessor)
     task = {"id": "plan-successor", "type": "task", "text": "continue", "budget_drive_root": str(root),
             "predecessor_authority_source": _pull_source(predecessor)}
 
@@ -560,7 +562,8 @@ def test_continue_carries_an_unreadable_predecessor_plan_as_a_named_gap_through_
         assert payload["authority"].get("plan_review_source_gap") == gap
     with pytest.raises((PlanReviewSourceUnavailable, OSError)):
         load_plan_review_state(root, predecessor)  # deciders stay strict
-    assert task_result_path(root, predecessor).read_bytes() == row_bytes  # reading wrote nothing
+    assert read_document(root, predecessor) == row_before
+    assert signature(root, predecessor) == signature_before  # reading wrote nothing
 
 
 def test_a_named_predecessor_whose_row_reads_back_empty_refuses_the_start(tmp_path):

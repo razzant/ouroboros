@@ -73,11 +73,11 @@ def test_addressed_wakes_carry_the_peer_relation_the_drain_projected(tmp_path):
     from ouroboros.owner_mailbox import PROVENANCE_PEER_TASK, write_task_message
 
     assert write_task_message(tmp_path, "C's original", "parent-p", source_task_id="child-c",
-                              provenance=PROVENANCE_PEER_TASK, relation="parent", msg_id="c-1")
+                              provenance=PROVENANCE_PEER_TASK, relation="parent", msg_id="c-1", attention_kind="question")
     assert write_task_message(tmp_path, "across", "parent-p", source_task_id="sib-s",
-                              provenance=PROVENANCE_PEER_TASK, relation="sibling", msg_id="s-1")
+                              provenance=PROVENANCE_PEER_TASK, relation="sibling", msg_id="s-1", attention_kind="question")
     assert write_task_message(tmp_path, "steer", "parent-p", source_task_id="root-r",
-                              provenance="ancestor_task", msg_id="a-1")
+                              provenance="ancestor_task", msg_id="a-1", attention_kind="question")
     ctx = SimpleNamespace(task_id="parent-p", task_attempt=1, drive_root=tmp_path,
                           budget_drive_root=str(tmp_path), task_metadata={})
 
