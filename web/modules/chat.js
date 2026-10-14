@@ -14,6 +14,7 @@ import { createChatDecision } from './chat_decision.js';
 import { bindProjectWorkPointer } from './project_work_pointer.js';
 import { createModelWaitController, isModelWaitReference } from './model_wait.js';
 import { clientSurfaceField } from './client_surface.js';
+import { bindVoiceInput } from './voice_input.js';
 import { syncSettledItems } from './settled_card.js';
 import { createChatReadingPosition } from './chat_reading_position.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
@@ -3153,6 +3154,9 @@ export function createChatInstance({
         saveInputDraft();
     });
 
+    const disposeVoice = bindVoiceInput({ input, anchor: sendGroup, fetcher: apiFetch,
+        onWs, onChange: updateMessagesPadding, showToast });
+
     headerActions?.addEventListener('click', async (event) => {
         const button = event.target.closest('[data-chat-command]');
         if (!button) return;
@@ -3860,24 +3864,20 @@ export function createChatInstance({
         // True once a history snapshot has actually been fetched and painted;
         // app.js uses it to decide whether a reopen needs a forced repaint.
         hasPaintedHistory: () => historyLoaded && lastHistorySyncSucceeded,
-        // Unsendable client-side state (staged File objects / an in-flight
-        // upload / a sent attachment message not yet saved, whose Send again
-        // lives here). app.js must hide, not destroy, an instance holding it.
+        // Hide instead of destroying while staged files, uploads or an
+        // unsaved attachment send still need this instance.
         hasPendingWork: () => composer.count > 0 || composer.busy || unconfirmed.count > 0,
-        // app.js, when this room leaves the screen without being destroyed: the
-        // modal a file card opened (reader, file dialog) closes and its read
-        // stops; staged attachments and uploads are untouched.
-        closeTransient: () => chatMedia.closeTransient(),
-        // Full teardown (P3): release every resource this instance acquired —
-        // ws subscriptions, window/document listeners, the ResizeObserver, all
-        // timers — then drop the buffered collections and remove the DOM last.
-        // Idempotent; late rAF/async continuations no-op on `destroyed`.
+        // Close file dialogs/readers on hide without losing staged uploads.
+        closeTransient: () => { chatMedia.closeTransient(); disposeVoice.suspend(); },
+        // Release subscriptions, listeners, observers and timers before DOM removal;
+        // `destroyed` guards late callbacks and repeated teardown.
         destroy() {
             if (destroyed) return;
             destroyed = true;
             composer.destroy();
             ownerControls.destroy();
             unconfirmed.release();
+            disposeVoice();
             emptyWelcome?.dispose();
             readReceipt.cancel();
             for (const dispose of wsDisposers) {

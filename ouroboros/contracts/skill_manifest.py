@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 SKILL_MANIFEST_SCHEMA_VERSION = 1
 MAX_SKILL_CONFLICTS = 32
 MAX_SKILL_NAME_LENGTH = 64
+VOICE_INPUT_MAX_BYTES = 393216  # below the isolated extension route's 512 KiB body limit
+VOICE_INPUT_MIME_TYPES = frozenset({"audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg"})
 
 VALID_SKILL_TYPES = frozenset({"instruction", "script", "extension"})
 VALID_SKILL_RUNTIMES = frozenset({
@@ -42,6 +44,7 @@ VALID_SKILL_PERMISSIONS = frozenset(
         "subscribe_event",
         "inject_chat",
         "presence",
+        "transcribe_audio",
         # Owner notices through the Host Service (`POST /notify`): one bounded
         # sentence shown in the owner's chat as a System row signed with the
         # skill's name; never a model turn. Narrower than inject_chat, granted separately.
@@ -112,6 +115,11 @@ class SkillManifest:
     companion_processes: List[Dict[str, Any]] = field(default_factory=list)
     scheduled_tasks: List[Dict[str, Any]] = field(default_factory=list)
     ui_tab: Optional[Dict[str, Any]] = None
+    # Optional composer declaration, not execution authority: current live
+    # route and skill review/enablement gates must still agree at read time.
+    voice_input: Optional[Dict[str, Any]] = None
+    # Cross-skill exposure is opt-in, not inferred from the composer hint.
+    media_transcription: Optional[Dict[str, Any]] = None
     # ABI-1 (PluginAPI 2.0): optional declared generation, normalized to
     # {"version": "M.m", "capabilities": [...]}. Absent (None) means the
     # payload binds against the LEGACY generation by construction.
@@ -298,6 +306,34 @@ def _parse_model_experience(raw: Any) -> Optional[Dict[str, str]]:
     )
 
 
+def _parse_voice_input(
+    raw: Any, *, skill_type: str, permissions: List[str], field_name: str = "voice_input",
+) -> Optional[Dict[str, Any]]:
+    """Normalize a reviewed audio declaration; each consumer checks route liveness."""
+    if raw is None:
+        return None
+    if skill_type != "extension" or "route" not in permissions:
+        raise SkillManifestError(f"{field_name} requires an extension with the route permission")
+    if not isinstance(raw, dict) or set(raw) != {"version", "route", "mime_types", "max_bytes"}:
+        raise SkillManifestError(
+            f"{field_name} requires exactly version, route, mime_types and max_bytes",
+            fix_hint="declare a reviewed POST route, two supported audio types and a bounded byte limit",
+        )
+    if type(raw["version"]) is not int or raw["version"] != 1:
+        raise SkillManifestError(f"{field_name}.version must be 1")
+    route = raw["route"]
+    if not isinstance(route, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", route):
+        raise SkillManifestError(f"{field_name}.route must be a single lower-case route segment")
+    mimes = raw["mime_types"]
+    if (not isinstance(mimes, list) or not mimes or len(mimes) != len(set(map(str, mimes)))
+            or any(not isinstance(item, str) or item not in VOICE_INPUT_MIME_TYPES for item in mimes)):
+        raise SkillManifestError(f"{field_name}.mime_types must list unique supported audio MIME types")
+    maximum = raw["max_bytes"]
+    if type(maximum) is not int or not 1 <= maximum <= VOICE_INPUT_MAX_BYTES:
+        raise SkillManifestError(f"{field_name}.max_bytes must be 1..{VOICE_INPUT_MAX_BYTES}")
+    return {"version": 1, "route": route, "mime_types": list(mimes), "max_bytes": maximum}
+
+
 def _parse_companion_processes(companion_raw: Any) -> List[Dict[str, Any]]:
     """Companion descriptors: reviewed argv shapes only; every refusal teaches."""
     if companion_raw in (None, ""):
@@ -452,6 +488,8 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         "companion_processes",
         "scheduled_tasks",
         "ui_tab",
+        "voice_input",
+        "media_transcription",
         "plugin_api",
         "model_experience",
         "schema_version",
@@ -525,6 +563,17 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
             )
 
     model_experience = _parse_model_experience(data.get("model_experience"))
+    voice_input = _parse_voice_input(
+        data.get("voice_input"),
+        skill_type=str(data.get("type") or "instruction").strip().lower(),
+        permissions=_string_list(data.get("permissions")),
+    )
+    media_transcription = _parse_voice_input(
+        data.get("media_transcription"),
+        skill_type=str(data.get("type") or "instruction").strip().lower(),
+        permissions=_string_list(data.get("permissions")),
+        field_name="media_transcription",
+    )
 
     companion_processes = _parse_companion_processes(data.get("companion_processes", []))
 
@@ -586,6 +635,8 @@ def _manifest_from_mapping(data: Dict[str, Any], *, body: str) -> SkillManifest:
         companion_processes=companion_processes,
         scheduled_tasks=scheduled_tasks,
         ui_tab=ui_tab,
+        voice_input=voice_input,
+        media_transcription=media_transcription,
         plugin_api=plugin_api,
         model_experience=model_experience,
         body=body,
@@ -616,6 +667,8 @@ __all__ = [
     "SKILL_MANIFEST_SCHEMA_VERSION",
     "MAX_SKILL_CONFLICTS",
     "MAX_SKILL_NAME_LENGTH",
+    "VOICE_INPUT_MAX_BYTES",
+    "VOICE_INPUT_MIME_TYPES",
     "MODEL_EXPERIENCE_KEYS",
     "VALID_SKILL_TYPES",
     "VALID_SKILL_RUNTIMES",

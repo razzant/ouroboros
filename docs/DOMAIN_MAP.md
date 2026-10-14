@@ -18,8 +18,8 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D08 | Supervisor: queue, workers, events & runtime control | 62 | 0 |
 | D09 | Cancellation, owner control & process custody | 16 | 0 |
 | D10 | Git, update & release machinery | 33 | 0 |
-| D11 | Gateway, server & Web UI | 78 | 0 |
-| D12 | Settings & configuration | 20 | 0 |
+| D11 | Gateway, server & Web UI | 79 | 0 |
+| D12 | Settings & configuration | 21 | 0 |
 | D13 | Safety, guards & runtime mode | 9 | 0 |
 | D14 | Skills & extensions | 58 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 28 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 25 | 0 |
 | D19 | Frozen contracts (ABI) | 11 | 0 |
 | D20 | Presence | 12 | 0 |
-| **total** | | **725** | **0** |
+| **total** | | **727** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -702,6 +702,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/schema.py`
 - `ouroboros/gateway/settings.py`
 - `ouroboros/gateway/settings_secrets.py`
+- `ouroboros/gateway/skill_media.py`
 - `ouroboros/gateway/skill_publish.py`
 - `ouroboros/gateway/state.py`
 - `ouroboros/gateway/storage.py`
@@ -756,6 +757,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/settings_scales.py`
 - `ouroboros/settings_setup_contract.py`
 - `ouroboros/subscription_install_presets.py`
+- `ouroboros/telegram_token_separation.py`
 - `ouroboros/ui_language.py`
 - `ouroboros/ui_translation.py`
 - `ouroboros/update_channels.py`

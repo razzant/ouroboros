@@ -25,6 +25,7 @@ from ouroboros.context_mode_compat import (
 from ouroboros.platform_layer import pid_lock_acquire as _compat_pid_lock_acquire, pid_lock_release as _compat_pid_lock_release
 from ouroboros.provider_models import compute_direct_review_models_fallback, fallback_candidate_targets, local_only_review_route_env, migrate_model_value, resolve_model_target, review_model_uses_local as review_model_uses_local  # noqa: F401
 from ouroboros.secret_masking import strip_masked_secrets
+from ouroboros.telegram_token_separation import prepare_bot_tokens
 from ouroboros.runtime_mode_policy import runtime_mode_at_least
 from ouroboros.settings_defaults import (
     CLAUDEXOR_STARTUP_WAIT_SEC, CLAUDEXOR_STARTUP_POLL_SEC,  # noqa: F401
@@ -482,10 +483,9 @@ def _guard_context_mode_lowering(settings: dict, *, allow_context_lowering: bool
 
 def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str] = (),
         allow_context_lowering: bool = False, allow_safety_lowering: bool = False) -> dict:
-    """Normalize settings writes under existing ratchets. Only the actual writer
-    names authored_keys; a defaults merge preserves absent disk-owned intent,
-    forwarded environment choices and install-time provenance. The review-pool receipts THIS
-    write owes land before it replaces the pre-image (``review_pool_receipts.persist_write_receipts``)."""
+    """Normalize writes under ratchets; only the writer names authored_keys.
+    Preserve disk/forwarded intent and install provenance; persist this write's
+    review-pool receipts before replacing the pre-image (review_pool_receipts)."""
     from ouroboros.review_pool_receipts import persist_write_receipts
     persist_write_receipts(DATA_DIR, settings, SETTINGS_PATH)
     authored = set(authored_keys or ())
@@ -504,7 +504,7 @@ def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str]
     for key in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY):
         if key in prepared:
             prepared[key] = normalize_model_role_options(key, prepared[key])[1]
-    return strip_masked_secrets(prepared, known_setting_keys=SETTINGS_DEFAULTS)
+    return prepare_bot_tokens(prepared, SETTINGS_DEFAULTS)
 
 
 def _guard_safety_mode_lowering(settings: dict, *, allow_safety_lowering: bool = False) -> None:

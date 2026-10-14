@@ -868,6 +868,7 @@
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed
  * @property {boolean=} identity_collision
+ * @property {{version: 1, route: string, route_url: string, mime_types: string[], max_bytes: number}=} voice_input Present only for a reviewed/enabled live POST route; dispatch rechecks.
  * @property {string=} process
  * @property {string=} server_reconcile
  */
@@ -1576,9 +1577,8 @@ export const GATEWAY_CONTRACT_VERSION = '7.6.0';
  *   out_of_order: the bottom is not where it is (it sorts above earlier arrivals, or lies
  *   before the recent read). latest_before: with null, its bounded search ran out first and
  *   found none at or after this chat offset; the older pages of its chain carry the search on,
- *   and the one holding the message names it here, the newest below its coverage.upper;
- *   latest_absent: the one reaching the chat's start without a gap holds none, so none exists
- *   below that upper. A room an unreadable Project registry's readable rows omit is null (not Main).
+ *   and the holder names it here. latest_absent: the gap-free room start holds no message below
+ *   coverage.upper. A room omitted by an unreadable Project registry stays null (not Main).
  * @property {{v:1,view:string,upper:Object,spans:Object}=} coverage Delivered physical byte spans, after deferrals.
  * @property {string} [next_before_ts] Legacy field retained for compatibility.
  * @property {string} [error]

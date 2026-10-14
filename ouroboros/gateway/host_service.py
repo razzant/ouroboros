@@ -52,6 +52,7 @@ AUTH_TOKEN_FILENAME = "auth_token.json"
 # ``/identity`` advertises the owner-notice route (``POST /notify``, host_notify.py)
 # so a skill degrades on an older host without a side-effecting probe.
 NOTIFY_VERSION = 1
+TRANSCRIBE_VERSION = 1
 
 # The out-of-process WS progress relay (``POST /ui/ws-message``) is the one token-bucket lane: a
 # 60-message burst reserve that refills one message per second (owner decision 2026-09-06: a burst
@@ -438,9 +439,8 @@ async def _api_identity(request: Request) -> JSONResponse:
     from ouroboros.presence_continuation import CONTINUATION_VERSION
 
     return JSONResponse({"ok": True, "name": name, "description": description,
-                         "presence_delivery_version": DELIVERY_VERSION,
-                         "presence_continuation_version": CONTINUATION_VERSION,
-                         "notify_version": NOTIFY_VERSION})
+                         "presence_delivery_version": DELIVERY_VERSION, "presence_continuation_version": CONTINUATION_VERSION,
+                         "notify_version": NOTIFY_VERSION, "transcribe_version": TRANSCRIBE_VERSION})
 
 
 async def _api_tool_schemas(request: Request) -> JSONResponse:
@@ -923,7 +923,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
                 admission.origin.conversation_id != "*"
                 and conversation_id != admission.origin.conversation_id
             )
-            or (admission.origin.thread_id and thread_id != admission.origin.thread_id)
+            or ((admission.origin.conversation_id != "*" or admission.origin.thread_id)
+                and thread_id != admission.origin.thread_id)
         ):
             return _presence_error("presence event does not match its owner-created binding", 403,
                                    "presence_origin_mismatch", "rejected")
@@ -1552,6 +1553,8 @@ def create_host_service_app(
 ) -> Starlette:
     # host_notify imports this module's helpers; mounted here, imported lazily.
     from ouroboros.gateway.host_notify import _api_notify
+    from ouroboros.gateway.skill_media import api_media_transcribe
+    from ouroboros.telegram_token_separation import api_bot_token_status
 
     app = Starlette(
         routes=[
@@ -1566,6 +1569,8 @@ def create_host_service_app(
             Route("/presence/turn", _api_presence_turn, methods=["POST"]),
             Route("/presence/delivery", _api_presence_delivery, methods=["POST"]),
             Route("/presence/work/{work_ref}", _api_presence_work, methods=["GET", "POST"]),
+            Route("/media/transcribe/{target_skill}", api_media_transcribe, methods=["POST"]),
+            Route("/telegram/presence-bot-token", api_bot_token_status, methods=["GET"]),
             Route("/ui/ws-message", _api_ws_message, methods=["POST"]),
             Route("/notify", _api_notify, methods=["POST"]),
             WebSocketRoute("/events", _ws_events),

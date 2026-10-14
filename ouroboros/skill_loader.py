@@ -682,7 +682,7 @@ def requested_core_setting_keys(env_keys: List[str]) -> List[str]:
     if not env_keys:
         return []  # nothing requested, nothing to classify: no settings read
     forbidden_upper = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS}
-    requestable_when_absent = {"TELEGRAM_BOT_TOKEN"}
+    requestable_when_absent = {"TELEGRAM_BOT_TOKEN", "TELEGRAM_PRESENCE_BOT_TOKEN"}
     try:
         from ouroboros.config import SETTINGS_DEFAULTS, load_settings
         settings = load_settings()
@@ -705,6 +705,7 @@ _GRANTABLE_SKILL_PERMISSIONS = frozenset({
     "inject_chat",
     "presence",
     "notify_owner",
+    "transcribe_audio",
     "subscribe_event:chat.outbound",
     "subscribe_event:chat.typing",
     "subscribe_event:chat.photo",
@@ -719,7 +720,7 @@ def requested_skill_permissions(
     """Return manifest-requested privileged permissions needing owner grants."""
     requested: List[str] = []
     permission_set = {str(item or "").strip() for item in (permissions or [])}
-    for permission in ("inject_chat", "presence", "notify_owner"):
+    for permission in ("inject_chat", "presence", "notify_owner", "transcribe_audio"):
         if permission in permission_set:
             requested.append(permission)
     if "subscribe_event" in permission_set:

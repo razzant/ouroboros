@@ -291,6 +291,16 @@ and Send waits for a pending one so the next root starts at that level; a refuse
 save keeps the draft, says why and returns to the saved value — unsaved values are
 never shown as saved.
 
+Optional **voice input** lives alongside attachment and Send only when a
+reviewed, enabled, live extension declares its bounded recording route. The mic
+button and Ctrl+Shift+M (when the composer or mic holds focus) begin recording;
+the same action ends it. A brief status names permission, recording, local
+transcription or failure without suggesting that speech was sent. The returned
+words join the current *editable draft* even when the owner has typed during
+inference; only the ordinary Send action delivers them. Disable, cancellation,
+microphone denial and room teardown remove the recording, not the draft. With
+no available skill there is no mic control or hotkey behavior.
+
 ### `.muted`
 
 `.muted` is a **colour-only utility**: `color: var(--text-meta)`, nothing else.

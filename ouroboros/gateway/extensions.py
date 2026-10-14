@@ -239,6 +239,7 @@ def _build_extensions_index(drive_root, repo_path):
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
 
     live_snapshot = snapshot()
+    live_routes = list_routes()
     hub_catalog_files = display_catalog_files()  # one view per response, never a fetch
     # Scan data plane plus optional external checkout; bootstrap copies native refs.
     skills = discover_skills(drive_root, repo_path=repo_path)
@@ -391,6 +392,17 @@ def _build_extensions_index(drive_root, repo_path):
                 else grant_status_for_skill(drive_root, s)
             ),
         })
+        # A declaration alone cannot light the composer. This is the passive,
+        # change-relative projection of a currently executable registered POST
+        # route. The route dispatch independently repeats its live skill gate.
+        voice = getattr(s.manifest, "voice_input", None)
+        voice_route = f"/api/extensions/{s.name}/{voice['route']}" if voice else ""
+        live_route = live_routes.get(voice_route) if voice_route else None
+        if (voice and s.enabled and entry["executable_review"]
+                and entry["desired_live"] and entry["live_loaded"]
+                and live_route and "POST" in live_route.get("methods", ())
+                and live_route.get("skill") == s.name):
+            entry["voice_input"] = {**voice, "route_url": voice_route}
         presence_runtime = presence_runtime_card_projection(drive_root, s)
         if presence_runtime is not None:
             entry["presence_runtime"] = presence_runtime

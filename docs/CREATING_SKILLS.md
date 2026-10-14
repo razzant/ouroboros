@@ -318,6 +318,34 @@ the server and WebSocket stay alive. Opaque native files shipped directly in the
 payload are still review-sensitive; if such a marker exists, the runtime also
 uses child dispatch defensively, but this guide does not make native payload
 binaries broadly acceptable.
+
+An **optional composer voice input** extension may declare a single reviewed
+route without making voice a core dependency:
+
+```yaml
+type: extension
+permissions: [route, companion_process]
+voice_input:
+  version: 1
+  route: transcribe
+  mime_types: [audio/webm, audio/ogg]
+  max_bytes: 393216
+```
+
+The declaration requires exactly those keys, an extension with `route` permission,
+a one-segment lower-case route, unique supported MIME values (WebM/Ogg/MP4/MP3) and a
+positive byte limit no greater than 393216. It is only a hint; the composer
+offers its mic/hotkey when `/api/extensions` also proves the skill's current
+review/enablement/live registration and matching POST route. The route receives
+raw audio as the POST body, never base64 or multipart, and answers JSON
+`{ "text": "recognized words" }`, or `{ "text": "", "status": "no_speech" }` for decoded silence. Failures use HTTP error status;
+recommend `{ "error": {"code": "...", "message": "..."} }` so the owner sees the
+reason. The host has an independent 512 KiB isolated-route body cap and
+revalidates review/enablement at dispatch. The skill must cap *decoded duration*
+too, since compressed bytes alone do not bound inference time. Recording puts
+text into an unsent editable draft; a skill has no Send authority by declaring
+this field. A separately published skill may use this declaration; no candidate is preinstalled
+or implicitly reviewed.
 Out-of-process extensions have near full PluginAPI parity. They proxy tools, HTTP
 routes, WS handlers, UI tabs, and settings sections; `on_unload` runs at child
 teardown; `send_ws_message` relays to the browser through the Host Service
@@ -595,7 +623,10 @@ calls and runtime behaviours:
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. Chat topics require owner permission grants; `skill.lifecycle` does not. |
 | `inject_chat` | The skill may request Host Service chat injection after an explicit owner permission grant: `POST /chat/inject` carries text, an inline image, or `attachments` (`[{path, name?, mime?}]` — regular files under the skill's own state root, at most 25 per message, which the host copies without the former 50 MiB upload cap into the shared `data/uploads` chat-upload store and stages for the task; a file-only message needs no text). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — the same words AND the same ordered attachment content (inline image and files, compared by bytes and name, not by the host's stored copy) — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409); an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer, a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
+| `transcribe_audio` | A transport skill may call a separately reviewed audio extension through Host Service `/media/transcribe/{target_skill}` after an explicit content-hash-bound owner grant. Its `presence` or `inject_chat` transport grant is also required; a Presence caller names an owner-created binding matching its origin. |
 | `notify_owner` | The skill may tell the owner one thing through `POST /notify` after an explicit owner permission grant (see "Telling the owner something" below): one bounded plain sentence the host shows in the owner's chat as a System row signed with the skill's name. It wakes no model; narrower than `inject_chat`. |
+
+A transcription target opts in separately with `media_transcription: {version: 1, route: transcribe, mime_types: [audio/ogg], max_bytes: 393216}` and registers a matching POST route. The composer `voice_input` declaration alone never permits cross-skill calls. A caller posts bounded raw audio with its own `x-skill-token` to the Host Service, not the browser `/api/extensions/` URL or another skill's private companion port. The Host strips every caller header before internal dispatch except validated media type/length, checks the target's current review, enablement and route, then returns bounded `{ok, text}` (or `{ok, text: "", status: "no_speech"}`). A cancelled request need not stop inference already running; the transport must keep an ambiguous outcome distinct from an unstarted one. A media-only Presence event can carry its source bytes as `staged_files` under the calling skill's own state directory through `/presence/turn`; exact peer/topic binding and source identity remain the transport's responsibility.
 
 A missing permission causes the matching `register_*` call to raise
 `ExtensionRegistrationError`, surfaced as a skill load error in the

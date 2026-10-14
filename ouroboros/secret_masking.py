@@ -30,6 +30,7 @@ MASKED_SECRET_SETTING_KEYS = frozenset(
         "DEEPSEEK_API_KEY",
         "ZAI_API_KEY",
         "GITHUB_TOKEN",
+        "TELEGRAM_PRESENCE_BOT_TOKEN",
         "OUROBOROS_NETWORK_PASSWORD",
     }
 )

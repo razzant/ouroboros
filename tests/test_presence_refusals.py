@@ -40,6 +40,16 @@ def test_auth_block_and_origin_rejection_share_status_not_disposition(tmp_path):
     assert json.loads(origin.body)["code"] == "presence_origin_mismatch"
 
 
+def test_general_binding_never_admits_a_topic_event(tmp_path):
+    app, binding, _ctx = _presence_app(tmp_path, _answer)
+    event = _event("topic-in-general")
+    event["thread_id"] = "42"
+    response = asyncio.run(host_service._api_presence_turn(
+        _request(app, {"binding_id": binding, "event": event})))
+    assert response.status_code == 403
+    assert json.loads(response.body)["code"] == "presence_origin_mismatch"
+
+
 @pytest.mark.parametrize("code,disposition", [
     ("chat_log_unwritable", "retry"),
     ("presence_result_missing", "retry"),
@@ -845,3 +855,26 @@ def test_terminal_refusal_keys_on_provenance_not_on_the_infra_failed_axis(row, e
     from ouroboros.presence_runner import _terminal_refusal
 
     assert _terminal_refusal(row) == expected
+
+
+def test_general_and_topic_bindings_still_admit_their_matching_threads(tmp_path):
+    from ouroboros.presence_bindings import (
+        PresenceBinding, PresenceEndpoint, new_presence_binding_id, save_presence_binding,
+    )
+
+    app, topic_binding, _ctx = _presence_app(tmp_path, _answer)
+    topic = _event("matching-topic")  # fixture binds room-1 / topic-1
+    accepted_topic = asyncio.run(host_service._api_presence_turn(
+        _request(app, {"binding_id": topic_binding, "event": topic})))
+    assert accepted_topic.status_code == 200, accepted_topic.body
+
+    general_endpoint = PresenceEndpoint("telegram", "bot-1", "room-1", "")
+    general = save_presence_binding(tmp_path, PresenceBinding(
+        new_presence_binding_id(), "telegram-bot", "community-helper",
+        general_endpoint, general_endpoint,
+    ))
+    event = _event("matching-general")
+    event["thread_id"] = ""
+    accepted_general = asyncio.run(host_service._api_presence_turn(
+        _request(app, {"binding_id": general.binding_id, "event": event})))
+    assert accepted_general.status_code == 200, accepted_general.body

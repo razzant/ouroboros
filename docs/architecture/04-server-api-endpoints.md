@@ -160,6 +160,8 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/delivery` | |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/work/{work_ref}` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/work/{work_ref}` | retains transport queue observations |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/media/transcribe/{target_skill}` | grant- and binding-checked skill-to-skill audio, typed no-speech |
+| GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/telegram/presence-bot-token` | host-only equality verdict, no owner token disclosure |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/ui/ws-message` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/notify` | `notify_owner` grant: one signed `skill_notice` System row, no model turn |
 | WS | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/events` | |

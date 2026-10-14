@@ -208,6 +208,7 @@ export const SECRET_KEYS = [
     ['DEEPSEEK_API_KEY', 'DeepSeek API Key', 'sk-...'],
     ['ZAI_API_KEY', 'Z.ai API Key (GLM)', 'Z.ai key'],
     ['GITHUB_TOKEN', 'GitHub Token', 'ghp_...'],
+    ['TELEGRAM_PRESENCE_BOT_TOKEN', 'Second Telegram Presence Bot token', 'Distinct from owner bot token'],
     ['OUROBOROS_NETWORK_PASSWORD', 'Network Password', 'Required for LAN/Docker binds'],
 ];
 

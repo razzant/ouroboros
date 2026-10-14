@@ -308,6 +308,9 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_RETURN_REASONING": True,
     "OUROBOROS_REASONING_SUMMARY": "auto",
     "GITHUB_TOKEN": "",
+    # Distinct from the owner-only Telegram bridge. Only the optional second
+    # Presence bot may request this key; the host rejects equal bot tokens.
+    "TELEGRAM_PRESENCE_BOT_TOKEN": "",
     "GITHUB_REPO": "",
     # Local model (llama-cpp-python server)
     "LOCAL_MODEL_SOURCE": "",
