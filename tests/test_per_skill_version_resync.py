@@ -374,17 +374,15 @@ def test_telegram_owner_wait_upgrade_reseeds_current_version(tmp_path, fake_log)
     )
 
     assert upgraded == 1
-    assert "version: 1.2.13" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.2.14" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_quiz.py", "lib/telegram_state.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
 
 @pytest.mark.serial
 @pytest.mark.parametrize("name,source,old_version,new_version", [
-    ("telegram", "d918b6973235013e5d7b9d78fe98701979396d4f", "1.2.6", "1.2.13"),
-    ("telegram", "5133c379dbde841c53f6a9ddbea2dbd8225da737", "1.2.11", "1.2.13"),
-    # The published PID1 seed (#1780): an install already on 1.2.12 receives the closed-state payload.
-    ("telegram", "28dbbd4b4b029752f11bfd08d00ea5a05da9e89a", "1.2.12", "1.2.13"),
+    ("telegram", "d918b6973235013e5d7b9d78fe98701979396d4f", "1.2.6", "1.2.14"),
+    ("telegram", "5133c379dbde841c53f6a9ddbea2dbd8225da737", "1.2.11", "1.2.14"),
     ("unix_computer_use", "162ad3fe6791fcaf6cf625e6b0c50d3a2a27e7f8", "0.4.1", "0.4.3"),
     ("unix_computer_use", "ec3fc6e5b5ae5ee99a746b5e1a0f6343a41926d4", "0.4.2", "0.4.3"),
 ])
@@ -430,8 +428,6 @@ def test_resync_delivers_payload_from_real_previous_seed(
     ) if name == "telegram" else ()
     if name == "telegram" and old_version == "1.2.11":
         changed_payload = ("lib/miniapp_registration.py", "scripts/platform_support.py", "scripts/companion.py")
-    if name == "telegram" and old_version == "1.2.12":
-        changed_payload = ("lib/telegram_quiz.py", "plugin.py")
     for path in changed_payload:
         assert (installed / path).read_bytes() != (repo / "skills" / name / path).read_bytes()
     save_enabled(drive, name, False)

@@ -751,6 +751,7 @@ def test_cold_start_reconciles_durable_old_owner_before_new_owner(
                 _state: Path,
                 *,
                 client: Any,
+                api_root: str | None = None,
             ) -> None:
                 assert client is not None
                 observed.append(owner)
@@ -841,7 +842,7 @@ def test_shutdown_during_prior_owner_reconcile_cleans_up_prior_manager(
         monkeypatch.setattr(
             companion,
             "TelegramMenuManager",
-            lambda _token, old_owner, _state, *, client: Menu(old_owner),
+            lambda _token, old_owner, _state, *, client, api_root=None: Menu(old_owner),
         )
         monkeypatch.setattr(companion, "_reconcile_owner_change", stop_during_reconcile)
         assert await companion.run() == 0

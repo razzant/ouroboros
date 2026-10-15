@@ -433,4 +433,6 @@ def test_plugin_honours_env_proxies_only_in_a_proxy_routed_server_process(
     quiz = plugin._make_quiz(_Api(tmp_path))
     asyncio.run(quiz({"question": "q?", "options": [{"label": "a"}, {"label": "b"}]}))
 
-    assert built == [{"trust_env": expected, "proxy": None}]
+    assert built == [{"trust_env": expected, "proxy": None,
+                      "api_base_url": "https://api.telegram.org",
+                      "files_dir": None}]

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -348,3 +350,126 @@ def test_proxy_form_is_masked_preserves_empty_and_explicitly_clears(tmp_path, ho
     assert request({"clear_telegram_proxy": True, "TELEGRAM_PROXY": ""}).status_code == 200
     assert load_settings(tmp_path)["TELEGRAM_PROXY"] == ""
     assert "clear_telegram_proxy" not in load_settings(tmp_path)
+
+
+def test_api_base_validator_canonicalizes_ipv6_with_brackets():
+    plugin = _load_plugin()
+    settings = sys.modules[plugin._make_settings_save.__module__]
+    validate = settings.validate_telegram_api_base
+    # IPv6 literals keep their brackets through canonicalization so the
+    # origin round-trips settings persistence and client revalidation.
+    assert validate("http://[::1]:8081") == "http://[::1]:8081"
+    assert validate("https://[2001:db8::1]:8443") == "https://[2001:db8::1]:8443"
+    # ...and the canonical form revalidates (no drift on reload).
+    assert validate(validate("http://[::1]:8081")) == "http://[::1]:8081"
+    # Bracket-less IPv6 with a port is malformed and rejected.
+    with pytest.raises(ValueError):
+        validate("http://::1:8081")
+
+
+def test_api_base_form_saves_preserves_empty_and_explicitly_clears(tmp_path):
+    plugin = _load_plugin()
+    handler = plugin._make_settings_save(_RouteApi(tmp_path))
+    base = "http://192.168.1.48:18085"
+    def request(payload=None, method="POST"):
+        return asyncio.run(handler(_RouteRequest(payload, host="127.0.0.1", method=method)))
+    # Save a self-hosted base.
+    assert request({"TELEGRAM_API_BASE": base}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
+    # GET hydration shows the saved base in the status field.
+    hydrated = request(method="GET")
+    assert b"192.168.1.48:18085" in hydrated.body
+    # An empty field preserves the saved value (no accidental revert).
+    assert request({"TELEGRAM_API_BASE": ""}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
+    # A fragment/query/base-with-path is rejected, and the stored value stands.
+    for bad in ("https://host#", "https://host?x=1", "https://host/bot", "ftp://host"):
+        refused = request({"TELEGRAM_API_BASE": bad})
+        assert refused.status_code == 400, bad
+        assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
+    # Explicit clear checkbox reverts to the cloud default.
+    assert request({"clear_telegram_api_base": True}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == ""
+    # Canonicalization: trailing slash and :443-on-https normalize away.
+    assert request({"TELEGRAM_API_BASE": "http://192.168.1.48:18085/"}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
+    # ...including the https default port (no drift between saves).
+    assert request({"TELEGRAM_API_BASE": "https://host.example:443"}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "https://host.example"
+
+
+def test_files_dir_form_saves_preserves_empty_and_explicitly_clears(tmp_path):
+    plugin = _load_plugin()
+    handler = plugin._make_settings_save(_RouteApi(tmp_path))
+    # Native absolute path for THIS platform (a POSIX literal would be
+    # rejected at save time on Windows — see the validator tests below).
+    store = str(tmp_path / "telegram-bot-api")
+    (tmp_path / "telegram-bot-api").mkdir()
+    def request(payload=None, method="POST"):
+        return asyncio.run(handler(_RouteRequest(payload, host="127.0.0.1", method=method)))
+    assert request({"TELEGRAM_API_FILES_DIR": store}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_FILES_DIR"] == store
+    # The persisted value revalidates unchanged on reload (idempotency).
+    settings = sys.modules[plugin._make_settings_save.__module__]
+    assert settings.validate_telegram_files_dir(store) == store
+    # An empty field preserves the saved value (F3 regression guard).
+    assert request({"TELEGRAM_API_FILES_DIR": ""}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_FILES_DIR"] == store
+    # Explicit clear disables the fallback.
+    assert request({"clear_telegram_api_files_dir": True}).status_code == 200
+    assert load_settings(tmp_path)["TELEGRAM_API_FILES_DIR"] == ""
+
+
+def test_form_schema_contains_api_base_and_files_dir_controls():
+    plugin = _load_plugin()
+    source = inspect.getsource(plugin)
+    assert '"name": "TELEGRAM_API_BASE"' in source
+    assert '"name": "clear_telegram_api_base"' in source
+    assert '"name": "TELEGRAM_API_FILES_DIR"' in source
+    assert '"name": "clear_telegram_api_files_dir"' in source
+
+
+def test_files_dir_validator_accepts_native_absolute_paths():
+    plugin = _load_plugin()
+    settings = sys.modules[plugin._make_settings_save.__module__]
+    validate = settings.validate_telegram_files_dir
+    # Only spellings NATIVE to the running platform are accepted (round-6 A1):
+    # on POSIX a Windows drive/UNC spelling is a relative name to pathlib and
+    # would silently resolve against the working directory, so it is refused;
+    # on Windows a POSIX spelling normalizes to a backslash root and is
+    # refused as well.
+    if os.name == "posix":
+        assert validate("/store") == "/store"
+        assert validate("/store/") == "/store"
+        for foreign in ("C:\\store", "C:/store", "\\\\server\\share\\store"):
+            with pytest.raises(ValueError):
+                validate(foreign)
+    else:
+        assert validate("C:\\store") == "C:\\store"
+        assert validate("C:/store") == "C:\\store"
+        assert validate("\\\\server\\share\\store") == "\\\\server\\share\\store"
+        for foreign in ("/store", "/store/"):
+            with pytest.raises(ValueError):
+                validate(foreign)
+    assert validate("") is None
+    assert validate(None) is None
+    for bad in ("/", "C:\\", "//server/share", "store/path", "not a path!"):
+        if os.name == "posix" and bad == "//server/share":
+            continue  # legal double-slash POSIX path, not a foreign spelling
+        with pytest.raises(ValueError):
+            validate(bad)
+    # Root aliases that only normalize down to a root are refused too
+    # ("/tmp/.." -> "/" on POSIX, "C:/store/.." -> "C:\\" on Windows), and an
+    # accepted value revalidates to itself (reload idempotency).
+    if os.name == "posix":
+        for alias in ("/tmp/..", "/tmp/../.."):
+            with pytest.raises(ValueError):
+                validate(alias)
+        accepted = os.path.normpath("/store")
+        assert validate(accepted) == accepted
+    else:
+        for alias in ("C:/store/..", "C:\\store\\..\\.."):
+            with pytest.raises(ValueError):
+                validate(alias)
+        accepted = os.path.normpath("C:\\store")
+        assert validate(accepted) == accepted

@@ -21,7 +21,7 @@ from .telegram_state import (
     _read_json_file,
     _state_file,
 )
-from ..scripts.telegram_settings import telegram_proxy
+from ..scripts.telegram_settings import telegram_api_base, telegram_files_dir, telegram_proxy
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_project_chat_id
 from ouroboros import i18n_memory as _memory
 from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE
@@ -69,9 +69,12 @@ async def _push_notification(
     owner-visible line per episode.
     """
     protected = api.get_settings(["TELEGRAM_BOT_TOKEN"])
+    state_dir = Path(api.get_state_dir())
     client = TelegramClient(
         protected.get("TELEGRAM_BOT_TOKEN", ""), trust_env=trust_env,
-        proxy=telegram_proxy(Path(api.get_state_dir())),
+        proxy=telegram_proxy(state_dir),
+        api_base_url=telegram_api_base(state_dir),
+        files_dir=telegram_files_dir(state_dir),
     )
     try:
         await client.send_message(int(chat_id), text, parse_mode="")

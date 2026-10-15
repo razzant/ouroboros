@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.2.13
+version: 1.2.14
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -112,8 +112,32 @@ to keep a saved value, or use **Clear saved Telegram proxy** to remove it.
 Disable and re-enable the skill after changing the proxy so its poller and
 companion also pick up the change. No additional Secrets grant is needed.
 
-The Bot API stays `https://api.telegram.org` with TLS through the proxy and no
-redirects. Proxy credentials follow the selected protocol: HTTP and SOCKS do
+To route Bot API traffic through a self-hosted `telegram-bot-api` server
+instead of `https://api.telegram.org`, set `TELEGRAM_API_BASE` to its root URL
+(`scheme://host[:port]`, no path, query or fragment; e.g.
+`http://192.168.1.48:8081`). All Bot API calls — polling, sends, downloads,
+notifications, and the companion/menu egress — go to that base; transport
+security is whatever the chosen origin provides, so an `http://` base is
+unencrypted between this installation and the server (fine on a trusted LAN,
+not fine over the internet). A local server
+serves downloaded files from its own disk instead of HTTP (tdlib/
+telegram-bot-api#26): point `TELEGRAM_API_FILES_DIR` at the server's file
+store. **The store must be shared by path**: the directory is mounted (bind
+mount/volume) at the *same absolute path* for both the server and this
+installation, so the absolute `file_path` the server returns in `getFile` is
+directly readable here and stays confined to the store (not the filesystem
+root). File downloads fall back to reading from that store. Disable and
+re-enable the skill after
+changing either setting. Both settings live in this skill's Settings form;
+invalid values are rejected with an error naming the key. With neither set,
+behavior is unchanged: the default `https://api.telegram.org` and HTTP
+downloads.
+
+With the default base the Bot API stays `https://api.telegram.org` with TLS
+through the proxy and no redirects; a custom `TELEGRAM_API_BASE` origin
+replaces the target, and transport security is then whatever that origin
+provides (see above). Proxy credentials follow the selected protocol: HTTP and
+SOCKS do
 not encrypt the connection to the proxy; HTTPS does. Invalid proxy settings
 produce an error naming the key without its value. With no skill proxy, the
 bridge retains its existing direct/ambient-proxy behavior and the companion's

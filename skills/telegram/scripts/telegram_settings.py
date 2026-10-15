@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Optional
 
 import httpx
 from starlette.responses import JSONResponse
@@ -114,6 +114,115 @@ def telegram_proxy(state_dir: Path) -> str | None:
     return validate_telegram_proxy(load_settings(state_dir).get("TELEGRAM_PROXY"))
 
 
+def validate_telegram_api_base(value: Any) -> str:
+    """Parse TELEGRAM_API_BASE (self-hosted Bot API server) without credentials.
+
+    Accepts http/https scheme://host[:port] with no path beyond an optional
+    trailing slash; anything else is rejected so the token-bearing URL is
+    never silently assembled from a malformed base. The returned string is a
+    canonical origin (scheme://host[:port]) rebuilt from the parsed URL: no
+    fragment/query ever survives, not even an empty "#" delimiter that would
+    otherwise swallow the /bot<token>/... suffix during string concatenation.
+    """
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return "https://api.telegram.org"
+    if "#" in text or "?" in text:
+        raise ValueError(
+            "TELEGRAM_API_BASE must be http(s)://host[:port] with no path, "
+            "query, fragment or credentials."
+        )
+    canonical: Optional[str] = None
+    try:
+        url = httpx.URL(text)
+        valid = (
+            url.scheme in ("http", "https")
+            and bool(url.host)
+            and (url.port is None or 0 < url.port <= 65535)
+            and url.raw_path in (b"/", b"")
+            and not url.query and not url.fragment
+            and not url.username and not url.password
+        )
+        if valid:
+            host = url.host or ""
+            # httpx.URL.host returns IPv6 literals WITHOUT brackets; rebuild
+            # the origin with them so http://[::1]:8081 round-trips through
+            # settings persistence and client revalidation.
+            bracketed = f"[{host}]" if ":" in host else host
+            origin = f"{url.scheme}://{bracketed}"
+            if url.port is not None:
+                origin += f":{url.port}"
+            canonical = origin
+    except Exception:
+        valid = False
+    if not valid:
+        raise ValueError(
+            "TELEGRAM_API_BASE must be http(s)://host[:port] with no path, "
+            "query, fragment or credentials."
+        )
+    return canonical or "https://api.telegram.org"
+
+
+def telegram_api_base(state_dir: Path) -> str:
+    """The Bot API base URL setting; defaults to the cloud endpoint."""
+    return validate_telegram_api_base(load_settings(state_dir).get("TELEGRAM_API_BASE"))
+
+
+def validate_telegram_files_dir(value: Any) -> Optional[str]:
+    """Parse TELEGRAM_API_FILES_DIR: a native absolute directory path or empty.
+
+    Accepts Unix (``/store``), Windows drive (``C:\\store``) and UNC
+    (``\\\\server\\share\\store``) spellings, with optional trailing slashes.
+    Path-illegal characters are rejected by the pathlib round-trip. The
+    filesystem root of either spelling ("/" or a drive root) is rejected: it
+    would make the disk-fallback confinement vacuous (every resolvable path
+    lies under it), letting a malicious server response name any readable
+    file for exfiltration into the owner chat.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if "\x00" in text:
+        raise ValueError(
+            "TELEGRAM_API_FILES_DIR must be an absolute directory path "
+            "(Unix /path, Windows drive C:\\path, or UNC \\\\server\\share\\path) "
+            "in this platform's native spelling."
+        )
+    # Normalize FIRST and classify the normalized spelling: os.path.normpath is
+    # idempotent, so whatever passes once passes unchanged on reload. Spellings
+    # are also kept NATIVE to the running platform: on Windows a POSIX path
+    # normalizes to a single-backslash root that is neither drive nor UNC and
+    # is rejected at save time; on POSIX a Windows drive/UNC spelling would
+    # otherwise be treated by pathlib as a relative name and resolved against
+    # the working directory instead of the operator's intended absolute
+    # location, so it is rejected too (round-6 A1).
+    normalized = os.path.normpath(text)
+    if os.name == "nt":
+        allowed = PureWindowsPath(normalized).is_absolute()
+        candidate = PureWindowsPath(normalized)
+    else:
+        allowed = normalized.startswith("/")
+        candidate = PurePosixPath(normalized)
+    if not allowed:
+        raise ValueError(
+            "TELEGRAM_API_FILES_DIR must be an absolute directory path native "
+            "to this platform (Unix /path; Windows C:\\path or \\\\server\\share\\path)."
+        )
+    # Root-level stores are refused on every spelling, including aliases that
+    # only normalize down to a root ("/tmp/..", "C:/store/.."): confinement to
+    # such a store would be vacuous.
+    if len(candidate.parts) <= 1:
+        raise ValueError(
+            "TELEGRAM_API_FILES_DIR must name a concrete directory, not the filesystem root."
+        )
+    return normalized
+
+
+def telegram_files_dir(state_dir: Path) -> Optional[str]:
+    """The local server file store; None keeps HTTP-only downloads."""
+    return validate_telegram_files_dir(load_settings(state_dir).get("TELEGRAM_API_FILES_DIR"))
+
+
 def miniapp_enabled(state_dir: Path) -> bool:
     raw = str(load_settings(state_dir).get("TELEGRAM_MINIAPP_ENABLED") or "on").strip().lower()
     return raw in _TRUE
@@ -167,6 +276,7 @@ _SETTINGS_FORM_KEYS = (
     "TELEGRAM_COMMAND_MODE", "TELEGRAM_SILENT_MODE",
     "TELEGRAM_SUBAGENT_CARDS", "TELEGRAM_MIRROR_PROGRESS", "TELEGRAM_NOTIFY_TASKS",
     "TELEGRAM_NOTIFY_BUDGET", "TELEGRAM_MINIAPP_ENABLED", "TELEGRAM_PROXY",
+    "TELEGRAM_API_BASE", "TELEGRAM_API_FILES_DIR",
 )
 
 def make_settings_save(api):
@@ -183,6 +293,8 @@ def make_settings_save(api):
                       if key in stored and key != "TELEGRAM_PROXY"}
             if "TELEGRAM_PROXY" in stored:
                 values["telegram_proxy_status"] = "Configured" if stored["TELEGRAM_PROXY"] else "Not configured"
+            if stored.get("TELEGRAM_API_BASE"):
+                values["telegram_api_base_status"] = str(stored["TELEGRAM_API_BASE"])
             return JSONResponse(values)
         try:
             data = await request.json()
@@ -210,6 +322,30 @@ def make_settings_save(api):
                 payload.pop("TELEGRAM_PROXY")
             else:
                 payload["TELEGRAM_PROXY"] = proxy
+        if data.get("clear_telegram_api_base") is True:
+            payload["TELEGRAM_API_BASE"] = ""
+        elif "TELEGRAM_API_BASE" in payload:
+            raw = str(payload.get("TELEGRAM_API_BASE") or "").strip()
+            if not raw:
+                # An untouched/emptied text field preserves the saved value;
+                # removal is the separate clear checkbox above.
+                payload.pop("TELEGRAM_API_BASE", None)
+            else:
+                try:
+                    payload["TELEGRAM_API_BASE"] = validate_telegram_api_base(raw)
+                except ValueError as exc:
+                    return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
+        if data.get("clear_telegram_api_files_dir") is True:
+            payload["TELEGRAM_API_FILES_DIR"] = ""
+        elif "TELEGRAM_API_FILES_DIR" in payload:
+            try:
+                files_dir = validate_telegram_files_dir(payload["TELEGRAM_API_FILES_DIR"])
+            except ValueError as exc:
+                return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
+            if files_dir is None:
+                payload.pop("TELEGRAM_API_FILES_DIR")
+            else:
+                payload["TELEGRAM_API_FILES_DIR"] = files_dir
         owner_ignored = False
         if "TELEGRAM_CHAT_ID" in payload and not request_may_change_owner(request):
             payload.pop("TELEGRAM_CHAT_ID", None)
@@ -259,6 +395,10 @@ __all__ = [
     "miniapp_enabled",
     "owner_chat_id",
     "request_may_change_owner",
+    "telegram_api_base",
+    "telegram_files_dir",
     "telegram_proxy",
+    "validate_telegram_api_base",
+    "validate_telegram_files_dir",
     "validate_telegram_proxy",
 ]
